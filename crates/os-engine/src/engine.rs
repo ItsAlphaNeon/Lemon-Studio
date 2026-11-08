@@ -1192,6 +1192,8 @@ pub struct Engine {
     /// Live notes for instrument channels waiting for the next tick (channel, key, velocity or -1 for an end, MIDI
     /// channel).
     inst_live: Vec<(usize, u8, f32, u8)>,
+    /// Live notes due later (`notes_for`): start tick, channel, key, velocity 0..=1, end tick.
+    inst_later: Vec<(u64, usize, u8, f32, u64)>,
     /// Controller messages for instrument channels waiting for the next tick (channel, message; `Engine::midi`).
     inst_midi: Vec<(usize, [u8; 3])>,
     inst_events: Vec<notes::Event>,
@@ -1749,6 +1751,7 @@ impl Engine {
             inst_shapes: Vec::new(),
             next_voice: 0,
             inst_live: Vec::with_capacity(64),
+            inst_later: Vec::new(),
             inst_midi: Vec::with_capacity(64),
             inst_events: Vec::with_capacity(64),
             inst_tuning: Vec::new(),
@@ -1932,6 +1935,20 @@ impl Engine {
         let ticks = (frames as f64 / self.clock.samples_per_tick()).ceil().max(1.0) as u64;
         self.inst_live.push((channel, k, f32::from(velocity) / 128.0, 0));
         self.inst_offs.push((self.tick + ticks, channel, k, None, None));
+        self.tail_done = false;
+    }
+
+    /// Live notes on instrument channels that start and end by themselves (a clip's preview), replacing those still to
+    /// come: (start frame from now, length in frames, channel, key, velocity).
+    pub fn notes_for(&mut self, notes: &[(u64, u64, usize, u16, u8)]) {
+        let per_tick = self.clock.samples_per_tick();
+        let at = |frames: u64| (frames as f64 / per_tick).ceil() as u64;
+        let now = self.tick;
+        self.inst_later.clear();
+        self.inst_later.extend(notes.iter().filter(|n| self.channels.get(n.2).is_some_and(|c| c.instrument.0.is_some())).map(|&(start, len, ch, key, vel)| {
+            let from = now + at(start);
+            (from, ch, key.min(127) as u8, f32::from(vel) / 128.0, from + at(len).max(1))
+        }));
         self.tail_done = false;
     }
 
@@ -2133,6 +2150,7 @@ impl Engine {
         self.send_held_offs();
         self.relaunch_clips |= self.inst_offs.iter().any(|o| o.3.is_some());
         self.inst_offs.clear();
+        self.inst_later.clear();
         let channels = &self.channels;
         self.sounding.retain(|&(c, _, _)| channels.get(c).is_none_or(|ch| ch.instrument.0.is_none()));
         for v in &mut self.note_voices {
@@ -2308,6 +2326,7 @@ impl Engine {
                 && self.voices.is_empty()
                 && self.inst_tail == 0
                 && self.inst_live.is_empty()
+                && self.inst_later.is_empty()
                 && self.inst_midi.is_empty()
                 && !self.tap_clicks.sounding()
                 && self.pdc.drain == 0;
@@ -3676,6 +3695,15 @@ impl Engine {
     /// renders its channel (`instrument_job`) and, with `voices`, the sampler voices render into their tracks' inputs,
     /// on the pool while the generator switch is on. What the instruments put out waits for `instruments_out`.
     fn render_generators(&mut self, n: usize, song: &TransportInfo, voices: bool) {
+        let (tick, live, offs) = (self.tick, &mut self.inst_live, &mut self.inst_offs);
+        self.inst_later.retain(|&(from, ch, key, vel, end)| {
+            let due = from <= tick;
+            if due {
+                live.push((ch, key, vel, 0));
+                offs.push((end, ch, key, None, None));
+            }
+            !due
+        });
         for (ch, key, vel, midi) in self.inst_live.drain(..) {
             self.inst_events.push(if vel < 0.0 {
                 notes::Event::off(ch, 0, key)
@@ -5171,6 +5199,21 @@ fn pattern_length(project: &Project, number: u16) -> u64 {
 
 /// Note triggers plus the song's end tick: in pattern mode the pattern's length, in song mode the largest end of a
 /// clip that is not muted (clips on a switched-off playlist track count; spec: audio/timing.md, audio/song-structure.md).
+/// The notes `project` plays in `mode`, as (start tick, length in ticks, channel, key, velocity): a step counts a
+/// sixteenth; a note keeps its length past its clip's end, as in the song.
+pub fn scheduled_notes(project: &Project, mode: PlayMode) -> Vec<(u64, u64, usize, u16, u8)> {
+    let step = u64::from(project.ppq.max(4)) / 4;
+    let (notes, _) = schedule(project, mode, &mut EngineReport::default());
+    notes
+        .iter()
+        .map(|t| {
+            let len = if t.len == 0 { step } else { t.len };
+            let len = t.cut.map_or(len, |c| len.min(c.saturating_sub(t.tick)));
+            (t.tick, len, t.channel, t.key, t.velocity)
+        })
+        .collect()
+}
+
 fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Vec<Sched>, u64) {
     let pattern_notes = |n: u16| project.patterns.iter().find(|p| p.number == n).map(|p| p.notes.as_slice()).unwrap_or(&[]);
     let one_pattern = |n: u16| {
@@ -9012,6 +9055,41 @@ mod tests {
             left.fill(v);
             right.fill(v);
         }
+    }
+
+    /// A clip's preview on an instrument: each note starts and ends in its own time on an engine with no schedule, and
+    /// the engine isn't over until they have played (`notes_for`).
+    #[test]
+    fn timed_live_notes_start_and_end_by_themselves() {
+        let mut p = insert_project();
+        p.patterns[0].notes.clear();
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        e.clear_schedule();
+        let probe = Arc::new(Mutex::new(GateProbe::default()));
+        e.set_instrument(0, probe.clone());
+        // Plays 0.2 to 0.4 s from now.
+        e.notes_for(&[(8820, 8820, 0, 60, 100)]);
+        let held_at = |e: &mut Engine, frames: usize| {
+            let mut block = vec![0.0f32; 512];
+            for _ in 0..frames.div_ceil(256) {
+                e.process(&mut block);
+            }
+            probe.lock().unwrap().held
+        };
+        assert_eq!(held_at(&mut e, 4410), 0, "not yet");
+        assert_eq!(held_at(&mut e, 8820), 1, "sounding");
+        assert_eq!(held_at(&mut e, 11025), 0, "over");
+    }
+
+    /// A clip's notes come out where the song plays them, a step a sixteenth long.
+    #[test]
+    fn scheduled_notes_follow_the_clip() {
+        let mut p = song(vec![Note::step(0, 0), long_note(96, 960, 0)], vec![os_model::Clip::new(192, 384, 0, os_model::ClipSource::Pattern(1))]);
+        p.ppq = 96;
+        let notes = scheduled_notes(&p, PlayMode::Song);
+        assert_eq!(notes.iter().map(|n| (n.0, n.1)).collect::<Vec<_>>(), [(192, 24), (288, 960)]);
     }
 
     /// spec: audio/auto-bypass.md "Instruments": a plugin channel with Auto-bypass when silent on stops running its

@@ -31,10 +31,19 @@ pub const INFO_H: f32 = 84.0;
 /// (label, icon, category colour index). Only the roots with content: the other disk-folder roots (Recent files,
 /// Channel presets, Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders
 /// follow these. Plugin presets: the preset store, user and factory (spec: plugins/presets.md "Browser").
-/// Channel presets: the channel state files (`crate::channel_states`; empty until one is saved).
-const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin library", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1), (CHANNEL_PRESETS, Icon::FilePreset, 1)];
+/// Channel presets: the channel state files (`crate::channel_states`; empty until one is saved). My projects: the user's
+/// projects folder, as FL lists its own (`save_form::default_root`, where the Save as and New project forms put them
+/// and the backups go; empty until a project is saved there).
+const ROOTS: &[(&str, Icon, u8)] = &[
+    ("Current project", Icon::Page, 0),
+    ("Plugin library", Icon::Speaker, 1),
+    (PLUGIN_PRESETS, Icon::FilePreset, 1),
+    (CHANNEL_PRESETS, Icon::FilePreset, 1),
+    (MY_PROJECTS, Icon::Folder, FOLDER),
+];
 pub const PLUGIN_PRESETS: &str = "Plugin presets";
 pub const CHANNEL_PRESETS: &str = "Channel presets";
+pub const MY_PROJECTS: &str = "My projects";
 
 /// Tree key of the All tab's Channel presets root.
 pub fn channel_presets_key() -> String {
@@ -272,8 +281,13 @@ fn tree(s: &State) -> Vec<Row> {
             0 => project_rows(s, &key, cat, &mut out),
             1 => plugin_rows(s, &key, cat, &mut out),
             2 => preset_rows(s, &key, cat, &mut out),
-            _ => {
+            3 => {
                 if let Some(dir) = crate::channel_states::root().filter(|d| d.is_dir()) {
+                    disk_rows(s, &dir, &key, 1, &mut out);
+                }
+            }
+            _ => {
+                if let Some(dir) = crate::save_form::default_root().filter(|d| d.is_dir()) {
                     disk_rows(s, &dir, &key, 1, &mut out);
                 }
             }
@@ -1094,6 +1108,29 @@ fn paint_tag(ui: &mut Ui, label: &str, x: f32, y: f32, angle: f32, alpha: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// My projects lists the user's projects folder, as FL lists its own: each project's folder and the backups, which
+    /// open like any folder.
+    #[test]
+    fn my_projects_lists_the_users_projects_folder() {
+        let dir = std::env::temp_dir().join(format!("os_myprojects_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Song").join("Samples")).unwrap();
+        std::fs::write(dir.join("Song").join("Song.lemon"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("Backup")).unwrap();
+        crate::save_form::TEST_ROOT.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut app = crate::app::App::new(None);
+        let key = format!("0:{MY_PROJECTS}");
+        assert!(rows(&app.state).iter().any(|r| r.key == key), "a root of the All tab");
+        app.state.browser_open.insert(key.clone());
+        app.state.browser_open.insert(format!("{key}/Song"));
+        let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
+        for want in ["Backup", "Song", "Song.lemon"] {
+            assert!(labels.iter().any(|l| l == want), "{want} in {labels:?}");
+        }
+        crate::save_form::TEST_ROOT.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// File dates read in the local time zone on every platform (spec §6): within a day of the UTC date.
     #[test]

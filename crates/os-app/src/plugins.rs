@@ -351,19 +351,21 @@ pub struct Plugins {
 const STASH_MAX: usize = 64;
 
 /// Lemon Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
-/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio, Citrus, Lemon Slicer and Lemon Drum
-/// Sampler likewise (spec: plugins/lemon-3x-osc.md §6, plugins/citrus.md, plugins/lemon-slicer.md §6,
+/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio, Citrus, Smith, Lemon Slicer and Lemon Drum
+/// Sampler likewise (spec: plugins/lemon-3x-osc.md §6, plugins/citrus.md, plugins/smith.md, plugins/lemon-slicer.md §6,
 /// plugins/lemon-drum-sampler.md §4).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static CITRUS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static SMITH: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static DRUMS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static ZEST: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v.extend(linked(&CITRUS, &citrus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::citrus::CITRUS));
+    v.extend(linked(&SMITH, &smith::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::smith::SMITH));
     v.extend(linked(&SLICER, &lemon_slicer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::slicer::LEMON_SLICER));
     v.extend(linked(&DRUMS, &lemon_drum_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::drums::LEMON_DRUMS));
     v.extend(linked(&ZEST, &zest_plugin::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, ZEST_NAME));
@@ -630,6 +632,9 @@ impl Plugins {
             }
             if [LEMON_SAMPLER, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS].contains(&a.desc.name.as_str()) {
                 p.use_channel_levels();
+            }
+            if a.desc.name == crate::citrus::CITRUS {
+                p.use_param_aliases(crate::citrus::SYTRUS_PARAMS);
             }
         }
         drop(p);
@@ -1428,6 +1433,7 @@ impl Plugins {
                 if let Some(m) = &h.meter {
                     m.note_hold(t0.elapsed());
                 }
+                #[cfg(target_os = "linux")]
                 crate::dropout_log::held(&p.desc().name, "the UI's tick", t0.elapsed());
             }
             #[cfg(plugin_windows)]
@@ -2561,6 +2567,46 @@ mod tests {
         let st = citrus::state::State::from_bytes(&pl.sytrus_file_state(0).expect("a Sytrus state")).expect("an edited state");
         assert_eq!(st.soften, 12, "three wheel notches of 4");
         assert_eq!(st.cell_off[citrus::state::COL_OUT], 1, "the output cell turned off");
+        assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
+    }
+
+    /// The built-in Smith's editor in its window: the wheel on LEVEL and a click on the filter's HP edit the Ogun state
+    /// the channel saves (spec: plugins/smith.md).
+    /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio smith_window_edits -- --ignored`
+    #[test]
+    #[ignore]
+    fn smith_window_edits() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(crate::smith::SMITH).expect("built-in Smith");
+        pl.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: crate::smith::SMITH.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 400);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
+        assert!(editor != 0, "the editor is a child of the frame");
+        let mut er: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(editor as HWND, &mut er) };
+        assert_eq!((er.right - er.left, er.bottom - er.top), (smith::view::W as i32, smith::view::H as i32));
+        let (a, b) = (dir.join("smith_before.bmp"), dir.join("smith_after.bmp"));
+        capture(frame, &a);
+        // The default patch saves no state until it is edited.
+        assert_eq!(pl.ogun_file_state(0), Some(Vec::new()));
+        for _ in 0..3 {
+            let (sx, sy) = (er.left + 21, er.top + 38);
+            unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
+            pump(&mut pl, 60);
+        }
+        let (cx, cy) = (541isize, 109isize);
+        unsafe { SendMessageW(editor as HWND, WM_LBUTTONDOWN, 0, cx | (cy << 16)) };
+        unsafe { SendMessageW(editor as HWND, WM_LBUTTONUP, 0, cx | (cy << 16)) };
+        pump(&mut pl, 300);
+        capture(frame, &b);
+        let st = smith::state::State::from_bytes(&pl.ogun_file_state(0).expect("an Ogun state")).expect("an edited state");
+        assert_eq!(st.ints[smith::state::LEVEL], 160 + 3 * 8, "three wheel notches of 8");
+        assert_eq!(st.ints[smith::state::F_TYPE], 3, "the high pass");
         assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
     }
 

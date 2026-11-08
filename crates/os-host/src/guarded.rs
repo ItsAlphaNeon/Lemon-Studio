@@ -273,6 +273,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn use_channel_levels(&mut self) -> bool {
         self.run(false, |p| p.use_channel_levels())
     }
+    fn use_param_aliases(&mut self, aliases: &'static [(u32, u32)]) {
+        self.run((), |p| p.use_param_aliases(aliases))
+    }
     fn set_offline(&mut self, offline: bool) {
         self.run((), |p| p.set_offline(offline))
     }

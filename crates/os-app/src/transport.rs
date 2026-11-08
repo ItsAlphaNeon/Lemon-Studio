@@ -1954,7 +1954,7 @@ impl Audio {
                 }
             }
             Cmd::PreviewFor(project, limit) => self.preview(&project, PlayMode::Pattern(1), limit),
-            Cmd::PreviewSong(project) => self.preview(&project, PlayMode::Song, None),
+            Cmd::PreviewSong(project) => self.preview_clip(*project),
             Cmd::Preview(project) => {
                 // A plugin channel's preview plays as a timed live note on the engine that hosts the instrument.
                 let note = project.patterns.first().and_then(|p| p.notes.first()).copied();
@@ -2017,6 +2017,35 @@ impl Audio {
         if let Some(s) = &self.pre {
             drop(s.swap(Some(e), false, 0, false));
         }
+    }
+
+    /// A clip's Preview (spec: ui/playlist.md §10). The previews' stream hosts no plugins, so a pattern's notes on hosted
+    /// instruments play as timed live notes on the engine that hosts them, and the rest on the previews' stream.
+    fn preview_clip(&mut self, mut project: Project) {
+        let hosted: Vec<usize> = self.inst.lock().map(|l| l.inst.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+        let is_pattern = project.arrangement().is_some_and(|a| a.clips.iter().all(|c| matches!(c.source, os_model::ClipSource::Pattern(_))));
+        let notes: Vec<_> = if is_pattern {
+            os_engine::scheduled_notes(&project, PlayMode::Song).into_iter().filter(|n| hosted.contains(&n.2)).collect()
+        } else {
+            Vec::new()
+        };
+        if !notes.is_empty() {
+            let ready = self.playing() || self.holds() || {
+                let p = self.live_project.clone().unwrap_or_else(|| project.clone());
+                self.go_live(Some(&p))
+            };
+            if let (true, Some(s)) = (ready, &self.main) {
+                let tempo = project.tick_tempo(project.tempo.unwrap_or(140.0));
+                let frames = |ticks: u64| os_engine::laws::tick_to_frame(ticks as f64, project.ppq.max(1), tempo, s.rate);
+                let timed: Vec<_> = notes.iter().map(|&(at, len, ch, key, vel)| (frames(at), frames(len), ch, key, vel)).collect();
+                s.with(|e| e.notes_for(&timed));
+            }
+            let rows: Vec<u16> = hosted.iter().filter_map(|&r| project.channels.get(r).map(|c| c.index)).collect();
+            for p in &mut project.patterns {
+                p.notes.retain(|n| !rows.contains(&n.channel));
+            }
+        }
+        self.preview(&project, PlayMode::Song, None);
     }
 
     fn play(&mut self, project: Project, mode: PlayMode, start: f64, generation: u64, starts: Starts) {

@@ -1509,6 +1509,12 @@ pub struct App {
     pub journal: crate::journal::Journal,
     pub theme: Theme,
     pub transport: Transport,
+    /// The dropout log's watch (`crate::dropout_log`), and whether the transport played at the last tick: a start is
+    /// logged.
+    #[cfg(target_os = "linux")]
+    audio_watch: crate::dropout_log::Watch,
+    #[cfg(target_os = "linux")]
+    audio_playing: bool,
     pub hits: Vec<Hit>,
     keep: Keep,
     /// Live regions from the last paint.
@@ -1571,8 +1577,10 @@ pub struct App {
     perf_typed: Vec<(KeyCode, u8)>,
     pub typing_octave: i32,
     typing_synced: bool,
-    /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key).
-    mouse_note: Option<(usize, u16)>,
+    /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key, velocity).
+    mouse_note: Option<(usize, u16, u8)>,
+    /// The notes the Playback tool's line holds sounding: (rack row, key, velocity).
+    scrub_notes: Vec<(usize, u16, u8)>,
     /// When the mixer's cables were last stepped (`None` while they are still).
     cables_at: Option<std::time::Instant>,
     /// Velocity of the next key the mouse sounds (a keyboard click sets it from the click's x; back to the default
@@ -1716,12 +1724,6 @@ pub struct App {
     /// Session restore (`crate::session`): the kept plugin windows still to open, and since when they wait.
     pub(crate) session_plugins: Vec<usize>,
     pub(crate) session_since: Option<std::time::Instant>,
-    /// The audio log's dropout watch (`crate::audio_log`).
-    #[cfg(target_os = "linux")]
-    audio_watch: crate::dropout_log::Watch,
-    /// Whether the transport played at the last tick: a start is logged.
-    #[cfg(target_os = "linux")]
-    audio_playing: bool,
     /// The media player the desktop sees (`crate::mpris`; none in tests or without a session bus).
     #[cfg(target_os = "linux")]
     mpris: Option<crate::mpris::Mpris>,
@@ -1740,6 +1742,10 @@ impl App {
         #[cfg(not(test))]
         let project = default_project();
         let mut app = App {
+            #[cfg(target_os = "linux")]
+            audio_watch: Default::default(),
+            #[cfg(target_os = "linux")]
+            audio_playing: false,
             plugins: crate::plugins::Plugins::default(),
             journal: crate::journal::Journal::start(),
             state: State {
@@ -1906,6 +1912,7 @@ impl App {
             typing_octave: 0,
             typing_synced: false,
             mouse_note: None,
+            scrub_notes: Vec::new(),
             cables_at: None,
             key_velocity: TYPING_VELOCITY,
             midi: crate::midi_in::MidiIn::none(),
@@ -1984,10 +1991,6 @@ impl App {
             session_plugins: Vec::new(),
             session_since: None,
             #[cfg(target_os = "linux")]
-            audio_watch: Default::default(),
-            #[cfg(target_os = "linux")]
-            audio_playing: false,
-            #[cfg(target_os = "linux")]
             mpris: if cfg!(test) { None } else { crate::mpris::Mpris::start() },
         };
         // The snap settings are program settings, kept in the user folder (spec: ui/global-snap.md §6).
@@ -2004,6 +2007,25 @@ impl App {
             app.open(p);
         }
         app
+    }
+
+    /// The dropout log (`crate::dropout_log`): a playback starting, and dropouts with what the audio threads were then.
+    #[cfg(target_os = "linux")]
+    fn audio_log_tick(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let playing = self.transport.playing();
+        let context = |a: &App| format!("{} ({})", a.title(), crate::audio_cfg::AudioCfg::current().text().replace('\n', " ").trim());
+        if playing && !self.audio_playing {
+            crate::dropout_log::write(&format!("play: {}", context(self)));
+        }
+        self.audio_playing = playing;
+        let (_, demoted) = crate::rt::counts();
+        let drops = self.transport.drops().into();
+        if let Some(line) = self.audio_watch.check(drops, demoted, crate::rt::roles(), "") {
+            crate::dropout_log::write(&format!("{line}{}", context(self)));
+        }
     }
 
     pub fn title(&self) -> String {
@@ -2110,6 +2132,11 @@ impl App {
                 self.state.control.settle(&mut self.state.project);
                 if let Some(f) = self.state.file.take() {
                     crate::lemon_state::apply(&mut self.state, &mut self.plugins, &f);
+                    // Saved by a version that has features this one does not: those parts do not play.
+                    let unknown = crate::lemon_state::unknown_features(&f);
+                    if !unknown.is_empty() {
+                        self.state.message = Some(format!("{}. This version doesn't play: {}", self.state.message.take().unwrap_or_default(), unknown.join(", ")));
+                    }
                     self.state.file = Some(f);
                 }
                 // The original's Patcher slots that are a plain serial chain open as containers (README.md slice 5).
@@ -2319,7 +2346,7 @@ impl App {
             .map_err(|e| e.to_string())
             .and_then(|()| lemon_or_flp(&mut file, &target, extra))
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
-            .and_then(|b| std::fs::write(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
+            .and_then(|b| crate::replace_file::replace(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
         s.message = Some(match &result {
             Ok(_) if lost.is_empty() => format!("Saved {}", target.display()),
             Ok(_) => format!("Saved {} without {}", target.display(), lost.join(", ")),
@@ -2819,6 +2846,7 @@ impl App {
         }
         crate::osc3::store(&mut self.state.project, &self.plugins);
         crate::citrus::store(&mut self.state.project, &self.plugins);
+        crate::smith::store(&mut self.state.project, &self.plugins);
         crate::slicer::store(&mut self.state.project, &self.plugins);
         crate::drums::store(&mut self.state.project, &self.plugins);
     }
@@ -2912,6 +2940,7 @@ impl App {
         self.sync_wrapped();
         self.sync_osc3();
         self.sync_citrus();
+        self.sync_smith();
         self.sync_slicer();
         self.sync_drums();
         self.sync_native();
@@ -3055,6 +3084,7 @@ impl App {
             self.sync_osc3();
             self.follow_osc3_samples();
             self.sync_citrus();
+            self.sync_smith();
             self.sync_slicer();
             self.sync_drums();
             self.sync_native();
@@ -5803,25 +5833,6 @@ impl App {
         }
     }
 
-    /// The audio log (`crate::audio_log`): a playback starting, and dropouts with what the audio threads were then.
-    #[cfg(target_os = "linux")]
-    fn audio_log_tick(&mut self) {
-        if cfg!(test) {
-            return;
-        }
-        let playing = self.transport.playing();
-        let context = |a: &App| format!("{} ({})", a.title(), crate::audio_cfg::AudioCfg::current().text().replace('\n', " ").trim());
-        if playing && !self.audio_playing {
-            crate::dropout_log::write(&format!("play: {}", context(self)));
-        }
-        self.audio_playing = playing;
-        let (_, demoted) = crate::rt::counts();
-        let drops = self.transport.drops().into();
-        if let Some(line) = self.audio_watch.check(drops, demoted, crate::rt::roles(), "") {
-            crate::dropout_log::write(&format!("{line}{}", context(self)));
-        }
-    }
-
     /// Follow Omarchy (`crate::omarchy`): once a second, the system theme applied when it changed.
     pub(crate) fn omarchy_tick(&mut self, now: std::time::Instant) {
         if now < self.omarchy.1 {
@@ -8158,7 +8169,22 @@ impl App {
         }
         if let Some(a @ (Action::PianoNote(_) | Action::PianoGrid)) = action {
             // Select: same as the left button; Zoom: toggle zoomed out / last zoom; the other
-            // tools delete while the right button is held (spec: ui/piano-roll.md §9).
+            // tools delete while the right button is held (spec: ui/piano-roll.md §9). In any tool, Ctrl zooms to a box and
+            // Alt plays what is under the mouse, as the Playback tool does (§8).
+            if self.ctrl {
+                self.drag = Some(Drag::ZoomBox { x0: x, y0: y });
+                return;
+            }
+            if self.alt {
+                if let Some(g) = self.piano_geom() {
+                    let t = g.tick_at(x).max(0.0);
+                    self.drag = Some(Drag::Scrub { tick: t });
+                    self.scrub(t, t);
+                    self.state.piano.overlay = Some(Overlay::Scrub(t));
+                    self.damage_piano();
+                }
+                return;
+            }
             match self.state.piano.tool {
                 Tool::Select => self.piano_click(&a),
                 Tool::Zoom => self.zoom_toggle(),
@@ -8184,6 +8210,7 @@ impl App {
     }
 
     fn release(&mut self) {
+        self.scrub_release();
         // A held nudge ends with the button (spec: ui/tempo-tapper.md §6).
         if crate::tapper::nudge_flag().swap(0, std::sync::atomic::Ordering::Relaxed) != 0 {
             self.damage_win(Win::Tapper);
@@ -8341,6 +8368,9 @@ impl App {
         dirty.extend(rects(&self.state));
         self.damage_notes(&dirty);
         if held.is_some() {
+            if let Some(&(_, o)) = orig.first() {
+                self.key_velocity = o.velocity;
+            }
             let play = self.audition();
             self.hold_key(held, play);
         }
@@ -8365,15 +8395,16 @@ impl App {
             return;
         }
         self.state.piano.held = key;
-        if let Some((row, k)) = self.mouse_note.take() {
+        if let Some((row, k, _)) = self.mouse_note.take() {
             self.transport.note_off(row, k);
         }
         let row = piano::channel(&self.state).and_then(|ch| self.state.project.channels.iter().position(|c| c.index == ch));
         if let (Some(k), true, Some(row)) = (key, play, row) {
             let k = k.clamp(0, views::piano::TOP_KEY) as u16;
             self.sync_live();
-            self.transport.note_on(row, k, std::mem::replace(&mut self.key_velocity, TYPING_VELOCITY));
-            self.mouse_note = Some((row, k));
+            let velocity = std::mem::replace(&mut self.key_velocity, TYPING_VELOCITY);
+            self.transport.note_on(row, k, velocity);
+            self.mouse_note = Some((row, k, velocity));
         }
         // The keyboard column.
         match self.piano_grid {
@@ -8469,30 +8500,35 @@ impl App {
         }
     }
 
-    /// Playback tool: sound the notes the scrub line enters between ticks `from` and `to`.
+    /// Playback tool: the line moved from tick `from` to `to` (the same tick for a press). The notes it touches sound at
+    /// their velocities for as long as it stays on them with the button held; a note it passes in one jump sounds until
+    /// the next move (spec: ui/piano-roll.md §9).
     fn scrub(&mut self, from: f32, to: f32) {
         let Some(ch) = piano::channel(&self.state) else { return };
-        let (a, b) = (from.min(to), from.max(to));
-        let mut keys: Vec<i32> = piano::notes(&self.state)
-            .iter()
-            .filter(|n| n.channel == ch && !n.muted())
-            .filter(|n| {
-                let p = n.position as f32;
-                let end = p + piano::shown_len(&self.state, n) as f32;
-                if from == to {
-                    // Press: every note the line touches sounds.
-                    p <= to && to < end
-                } else {
-                    // Drag: notes whose start the line just passed.
-                    p > a && p <= b
-                }
-            })
-            .map(|n| i32::from(n.key))
-            .collect();
-        keys.sort_unstable();
-        keys.dedup();
-        for k in keys {
-            self.preview(ch, k);
+        let Some(row) = self.state.project.channels.iter().position(|c| c.index == ch) else { return };
+        let want = piano::scrub_keys(&self.state, ch, from, to);
+        let transport = &self.transport;
+        self.scrub_notes.retain(|&(r, k, _)| {
+            let keep = r == row && want.iter().any(|&(w, _)| w == k);
+            if !keep {
+                transport.note_off(r, k);
+            }
+            keep
+        });
+        let new: Vec<(u16, u8)> = want.into_iter().filter(|&(k, _)| !self.scrub_notes.iter().any(|n| n.1 == k)).collect();
+        if !new.is_empty() {
+            self.sync_live();
+        }
+        for (k, velocity) in new {
+            self.transport.note_on(row, k, velocity);
+            self.scrub_notes.push((row, k, velocity));
+        }
+    }
+
+    /// The Playback tool's notes stop with the button.
+    fn scrub_release(&mut self) {
+        for (row, key, _) in std::mem::take(&mut self.scrub_notes) {
+            self.transport.note_off(row, key);
         }
     }
 
@@ -9467,9 +9503,10 @@ impl App {
     /// rows renumbered): no hanging notes.
     pub fn typing_release_all(&mut self) {
         self.step_chord.clear();
-        if let Some((row, key)) = self.mouse_note.take() {
+        if let Some((row, key, _)) = self.mouse_note.take() {
             self.transport.note_off(row, key);
         }
+        self.scrub_release();
         for (_, note) in std::mem::take(&mut self.perf_typed) {
             self.perform_note(note, TYPING_VELOCITY, false);
         }
@@ -9501,15 +9538,6 @@ impl App {
             Some(g) => self.damage_rect(Rect::new(g.x - 73.0, g.y, 73.0, g.h)),
             None => self.invalidate(),
         }
-    }
-
-    fn preview(&self, channel: u16, key: i32) {
-        let mut p = self.state.project.clone();
-        p.tempo = Some(self.state.tempo);
-        let note = Note { key: key.clamp(0, views::piano::TOP_KEY) as u16, length: u32::from(p.ppq.max(4)), ..Note::step(channel, 0) };
-        p.patterns = vec![Pattern { number: 1, notes: vec![note], ..Pattern::default() }];
-        p.arrangements.clear();
-        self.transport.preview(p);
     }
 
     /// Arrow keys in the piano roll (§9): Left/Right scroll; Shift+arrows move the selection (or
@@ -9610,9 +9638,11 @@ impl App {
                     let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
                     let i = piano::add_note(s, ch, start, key);
                     let i = piano::paint_mono(s, i);
-                    let len = piano::notes(s)[i].length;
+                    let n = piano::notes(s)[i];
+                    let len = n.length;
                     s.piano.dirty = true;
                     self.drag = Some(Drag::NotePaint { key, start, len });
+                    self.key_velocity = n.velocity;
                     let play = self.audition();
                     self.hold_key(Some(key), play);
                     self.damage_piano();
@@ -9669,6 +9699,7 @@ impl App {
                 let n = piano::notes(s)[i];
                 s.piano.last_len = n.length;
                 self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig: vec![(i, n)] });
+                self.key_velocity = n.velocity;
                 let play = self.audition();
                 self.hold_key(Some(i32::from(n.key)), play);
                 // Held without a move, the new note's type cycles (Click-and-hold & special gesture functions).
@@ -9695,6 +9726,7 @@ impl App {
                     self.resize_cursor = true;
                     Drag::NoteResize { x0: x, orig }
                 } else {
+                    self.key_velocity = n.velocity;
                     let play = self.audition();
                     self.hold_key(Some(i32::from(n.key)), play);
                     Drag::NoteMove { x0: x, y0: y, orig }
@@ -11267,7 +11299,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
     let ch = &mut p.channels[row];
     ch.kind = ChannelKind::Plugin;
-    // The built-in Lemon Trio is stored as the file's own 3x Osc, Citrus as its Sytrus.
+    // The built-in Lemon Trio is stored as the file's own 3x Osc, Citrus as its Sytrus, Smith as its Ogun.
     ch.plugin = Some(crate::osc3::file_name(name).to_string());
     ch.name = Some(name.to_string());
     row
@@ -17454,9 +17486,10 @@ mod tests {
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The all tab lists the roots with content, the preset store and the channel states, all closed.
+        // The all tab lists the roots with content, the preset store, the channel states and the user's projects, all
+        // closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets"]);
+        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets", "My projects"]);
         // Project tab: Current project opened with its patterns by default, History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
@@ -18170,6 +18203,100 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+    /// A piano roll with one note of `velocity` under the mouse, the button up.
+    fn piano_with_note(velocity: u8) -> (App, Canvas) {
+        let mut c = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll, Win::ChannelRack];
+        app.state.wins[2].maxed = true;
+        app.state.selected_channel = 4;
+        app.state.rack_pos = (900.0, 300.0);
+        frame(&mut app, &mut c, None);
+        app.mouse_move(500.0, 500.0);
+        app.mouse_down();
+        app.mouse_up();
+        piano::pattern_mut(&mut app.state).notes[0].velocity = velocity;
+        frame(&mut app, &mut c, None);
+        (app, c)
+    }
+
+    /// A clicked note sounds at its own velocity, and keeps it when dragged to other keys (issue #384).
+    #[test]
+    fn a_clicked_note_sounds_at_its_velocity() {
+        let (mut app, mut c) = piano_with_note(37);
+        let key = piano::notes(&app.state)[0].key;
+        app.mouse_down();
+        assert_eq!(app.mouse_note.map(|n| (n.1, n.2)), Some((key, 37)));
+        app.mouse_move(500.0, 400.0);
+        frame(&mut app, &mut c, None);
+        let moved = app.mouse_note.unwrap();
+        assert_ne!(moved.1, key, "dragged to another key");
+        assert_eq!(moved.2, 37, "the dragged note keeps its velocity");
+        app.mouse_up();
+        assert_eq!(app.mouse_note, None);
+    }
+
+    /// The Playback tool holds the notes under its line, at their velocities, until they are left or the button goes up;
+    /// moving up or down starts nothing new (issues #349, #305).
+    #[test]
+    fn the_playback_tool_holds_what_its_line_is_on() {
+        let (mut app, mut c) = piano_with_note(37);
+        let n = piano::notes(&app.state)[0];
+        let mut other = n;
+        other.key += 3;
+        other.velocity = 90;
+        piano::pattern_mut(&mut app.state).notes.push(other);
+        app.state.piano.tool = Tool::Playback;
+        frame(&mut app, &mut c, None);
+        let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        let mut held: Vec<(u16, u8)> = app.scrub_notes.iter().map(|&(_, k, v)| (k, v)).collect();
+        held.sort_unstable();
+        assert_eq!(held, [(n.key, 37), (other.key, 90)], "the whole chord sounds, each at its velocity");
+        app.mouse_move(r.cx(), r.cy() - 100.0);
+        assert_eq!(app.scrub_notes.len(), 2, "moving up keeps them held");
+        app.mouse_move(r.right() + 200.0, r.cy());
+        assert!(app.scrub_notes.is_empty(), "the line left them");
+        app.mouse_move(r.cx(), r.cy());
+        assert_eq!(app.scrub_notes.len(), 2, "back on them");
+        app.mouse_up();
+        assert!(app.scrub_notes.is_empty(), "they stop with the button");
+    }
+
+    /// Ctrl and Alt with the right button don't delete: Ctrl zooms to a box, Alt plays what is under the mouse (#305).
+    #[test]
+    fn right_modifiers_in_the_piano_roll_keep_the_notes() {
+        let (mut app, mut c) = piano_with_note(37);
+        let n = piano::notes(&app.state)[0];
+        let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.alt = true;
+        app.mouse_down_right();
+        assert_eq!(app.scrub_notes.iter().map(|m| m.1).collect::<Vec<_>>(), [n.key]);
+        app.mouse_up();
+        app.alt = false;
+        assert!(app.scrub_notes.is_empty());
+        assert_eq!(piano::notes(&app.state).len(), 1, "Alt+right kept the note");
+        frame(&mut app, &mut c, None);
+        let zoom = app.state.piano.px_per_beat;
+        app.mouse_move(r.cx(), r.cy());
+        app.ctrl = true;
+        app.mouse_down_right();
+        app.mouse_move(r.cx() + 100.0, r.cy() + 60.0);
+        app.mouse_up();
+        app.ctrl = false;
+        assert_eq!(piano::notes(&app.state).len(), 1, "Ctrl+right kept the note");
+        assert_ne!(app.state.piano.px_per_beat, zoom, "Ctrl+right-drag zoomed");
+        let (mut app, _c) = piano_with_note(37);
+        let r = app.piano_geom().unwrap().note_rect(&piano::notes(&app.state)[0]).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        assert!(piano::notes(&app.state).is_empty(), "a plain right-click still deletes");
+    }
+
     /// Ctrl+H is TOOLS > Stop sound, the key its menu entry shows; Shift+Ctrl+H stays Realign.
     #[test]
     fn ctrl_h_stops_the_sound() {
@@ -18815,7 +18942,7 @@ mod tests {
         // Esc clears the search and leaves the box.
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
-        assert_eq!(rows(&app.state).len(), 4);
+        assert_eq!(rows(&app.state).len(), 5);
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);
@@ -21429,6 +21556,34 @@ mod tests {
         let ruler = hit_rect(&app, &Action::PlRuler);
         let bar = 4 * u32::from(app.state.project.ppq);
         (app, ruler, g, bar)
+    }
+
+    /// Alt + the right button plays a clip, it doesn't delete it; the plain right button still does (#305).
+    #[test]
+    fn alt_right_on_a_clip_keeps_it() {
+        let mut c = Canvas::new(1920, 1080, 1.0).unwrap();
+        let (mut app, _, g, bar) = ruler_app(&mut c);
+        app.state.playlist.tool = crate::playlist::PlTool::Draw;
+        app.mouse_move(g.x_of(bar as f32) + 10.0, g.y_of(1) + 30.0);
+        app.mouse_down();
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let n = crate::playlist::clips(&app.state).len();
+        assert!(n > 0, "a clip was drawn");
+        let clip = crate::playlist::clips(&app.state)[0];
+        let body = g.body(&clip);
+        let (x, y) = (body.x + body.w / 2.0, body.y + body.h / 2.0);
+        app.mouse_move(x, y);
+        app.alt = true;
+        app.mouse_down_right();
+        app.mouse_up();
+        app.alt = false;
+        assert_eq!(crate::playlist::clips(&app.state).len(), n, "Alt+right kept the clip");
+        frame(&mut app, &mut c, None);
+        app.mouse_move(x, y);
+        app.mouse_down_right();
+        app.mouse_up();
+        assert_eq!(crate::playlist::clips(&app.state).len(), n - 1, "the plain right button deletes it");
     }
 
     fn ruler_press(app: &mut App, c: &mut Canvas, x0: f32, x1: f32, y: f32, right: bool) {

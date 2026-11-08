@@ -313,6 +313,25 @@ pub fn song_tick_of(s: &State, t: u32, near: u32) -> Option<u32> {
         .map(place)
 }
 
+/// What the Playback tool's line sounds on channel `ch` moving from tick `from` to `to` (the same tick for a press): the
+/// notes it is on now and those whose start it just passed, as (key, velocity), a key once at its loudest note's velocity.
+pub fn scrub_keys(s: &State, ch: u16, from: f32, to: f32) -> Vec<(u16, u8)> {
+    let (a, b) = (from.min(to), from.max(to));
+    let mut keys: Vec<(u16, u8)> = notes(s)
+        .iter()
+        .filter(|n| n.channel == ch && !n.muted())
+        .filter(|n| {
+            let p = n.position as f32;
+            let on = p <= to && to < p + shown_len(s, n) as f32;
+            on || (p > a && p <= b)
+        })
+        .map(|n| (n.key, n.velocity))
+        .collect();
+    keys.sort_unstable_by_key(|&(k, v)| (k, std::cmp::Reverse(v)));
+    keys.dedup_by_key(|n| n.0);
+    keys
+}
+
 /// Length used for drawing: a plain step (length 0) is shown one step long (Lemon Studio choice).
 pub fn shown_len(s: &State, n: &Note) -> u32 {
     if n.length == 0 { u32::from(s.project.ppq.max(4)) / 4 } else { n.length }

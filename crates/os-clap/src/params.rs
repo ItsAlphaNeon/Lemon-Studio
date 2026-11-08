@@ -69,6 +69,7 @@ impl Plugin {
     /// Automation (audio thread): parameter `index` of the list to normalized `value`, `offset` frames into the next
     /// process call. A stepped parameter gets its nearest step. Unknown indexes are ignored.
     pub(crate) fn automate(&mut self, offset: u32, index: u32, value: f64) {
+        let index = self.param_aliases.iter().find(|a| a.0 == index).map_or(index, |a| a.1);
         let Some(&(id, lo, hi, stepped)) = self.ranges.get(index as usize) else { return };
         if id == u32::MAX || self.auto.len() >= MAX_AUTO {
             return;

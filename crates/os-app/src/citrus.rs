@@ -17,6 +17,11 @@ use crate::plugins::{Plugins, FX_KEY};
 
 /// The built-in plugin's name (picker, window title).
 pub const CITRUS: &str = "Citrus";
+
+/// A Sytrus channel's automation clips target its Modulation X and Y as parameters 18 and 19; they are Citrus's parameters 0
+/// and 1 (spec: plugins/plugin-parameters.md section 3).
+pub const SYTRUS_PARAMS: &[(u32, u32)] = &[(18, 0), (19, 1)];
+
 /// The plugin id project files store for it (event 201).
 pub const FILE_NAME: &str = "Sytrus";
 
