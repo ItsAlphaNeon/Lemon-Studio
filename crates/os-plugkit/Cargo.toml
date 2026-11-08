@@ -25,7 +25,7 @@ libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSArray", "NSData", "NSEnumerator", "NSObject", "NSURL"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "NSResponder", "NSView", "NSEvent", "NSWindow", "NSPanel", "NSScreen", "NSTrackingArea", "NSCursor", "NSGraphics", "NSPasteboard", "NSDragging"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-quartz-core", "NSApplication", "NSColor", "NSResponder", "NSView", "NSEvent", "NSWindow", "NSPanel", "NSScreen", "NSTrackingArea", "NSCursor", "NSGraphics", "NSPasteboard", "NSDragging"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "CFRunLoop", "CFString", "CFCGTypes"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGImage", "CGDataProvider", "CGColorSpace", "CGRemoteOperation", "CGDirectDisplay", "CGError", "libc"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "objc2", "CGEvent", "CGEventTypes", "CGImage", "CGDataProvider", "CGColorSpace", "CGRemoteOperation", "CGDirectDisplay", "CGError", "libc"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CATransaction"] }

@@ -463,9 +463,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Lemon Drop (Wave Candy: an audio visualizer) as a VST3 and CLAP plugin: an oscilloscope, a scrolling spectrum, a
   level meter with six ballistics and a vectorscope, drawn in the original's 28 colours with its glass frame; a
   project's Wave Candy slots open in it and are saved back as Wave Candy with their state. The original's 38 presets
-  and eleven lemon ones are factory presets. On Windows the display also floats in its own see-through window like
-  the original's (drag to move, corner to size; keep in front, on desktop, mini view, solid), once the editor has
-  been opened
+  and eleven lemon ones are factory presets. On Windows and macOS the display also floats in its own see-through
+  window like the original's (drag to move, corner to size; keep in front, on desktop, mini view, solid), once the
+  editor has been opened
 - Lemon Flanger and Lemon Phaser as VST3 and CLAP plugins, each with the original's 27 presets as factory presets; a
   project's Fruity Flanger and Fruity Phaser play through the same sound in the mixer. Their sine waves use the true
   pi, where the original's is a hair off: the flanger still matches FL Studio 2026's exports sample for sample in the

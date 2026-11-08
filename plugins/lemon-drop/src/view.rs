@@ -273,11 +273,11 @@ pub fn hint(st: &State, c: Ctl, target: usize) -> String {
         Ctl::Hold => "Hold: freeze the display (or middle-click it)".into(),
         Ctl::Title => format!("Title: {}", st.title_text()),
         Ctl::Visible => "Show the display".into(),
-        Ctl::Mini => "Mini view (kept for the original's floating display)".into(),
+        Ctl::Mini => "Mini view: the floating display at its small size".into(),
         Ctl::Background => "Draw the display's background and frame".into(),
-        Ctl::Solid => "Solid (kept for the original's floating display)".into(),
-        Ctl::Front => "Keep in front (kept for the original's floating display)".into(),
-        Ctl::Desktop => "On desktop (kept for the original's floating display)".into(),
+        Ctl::Solid => "Solid: the floating display takes the mouse (off: clicks go through it)".into(),
+        Ctl::Front => "Keep in front: the floating display stays above every window".into(),
+        Ctl::Desktop => "On desktop: the floating display stays when the host is hidden or minimised".into(),
         Ctl::Bevel => {
             if v >= 0 {
                 format!("Bevel / reflection: {} reflection", pct(v, 256))
@@ -520,7 +520,7 @@ pub fn paint_panel(c: &mut Canvas, st: &State, ui: &Ui) {
                     _ => String::new(),
                 };
                 c.text_clip(SMALL, r.x + 6.0, r.y + 2.0, r.w - 18.0, brand::TEXT, &text);
-                c.text(SMALL, r.right() - 11.0, r.y + 2.0, plug::DIM, "\u{25be}");
+                os_ui::kit::triangle(c, r.right() - 8.0, r.cy(), 3.5, os_ui::kit::Dir::Down, plug::DIM);
                 if ctl != Ctl::Target {
                     c.text_right(LABEL, r.x - 6.0, r.cy() - 7.0, plug::DIM, caption(ctl));
                 } else {

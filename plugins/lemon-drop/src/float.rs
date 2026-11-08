@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use os_plugkit::win as pw;
 use os_theme::Palette;
-use os_ui::{Canvas, Color, Rect};
+use os_ui::{Canvas, Rect};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC,
@@ -33,7 +33,7 @@ use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::editor::{Logic, MenuReq, TIMER_MS};
+use crate::editor::{Logic, MenuReq, SeeThrough, TIMER_MS};
 use crate::state::Rect4;
 use crate::{DropParams, Shared};
 
@@ -98,9 +98,8 @@ struct Float {
     tracking: bool,
     last: Instant,
     palette: Palette,
-    /// The frame painted over black and over white (see `render`).
-    over_black: Vec<u32>,
-    over_white: Vec<u32>,
+    /// The two paintings of a frame.
+    buffers: SeeThrough,
 }
 
 impl Drop for Float {
@@ -174,8 +173,7 @@ unsafe fn open(params: Arc<DropParams>, shared: Arc<Shared>, scale: f32, editor:
             tracking: false,
             last: Instant::now(),
             palette: os_plugkit::palette(),
-            over_black: Vec::new(),
-            over_white: Vec::new(),
+            buffers: SeeThrough::default(),
         });
         if f.dc.is_null() || !f.set_size(size) {
             return;
@@ -409,35 +407,15 @@ impl Float {
         true
     }
 
-    /// Paints the display and puts it on the screen with its alpha. Text is drawn with ClearType, which blends with
-    /// the pixels under it and leaves them opaque, so the frame is painted twice, over black and over white: where
-    /// the two differ the display let the backdrop through, and by how much is the pixel's transparency.
+    /// Paints the display and puts it on the screen with its alpha.
     fn render(&mut self) {
         let (w, h) = self.size;
         let n = (w * h) as usize;
         let area = Rect::new(0.0, 0.0, w as f32 / self.scale, h as f32 / self.scale);
-        let solid = self.logic.st.solid;
-        for (back, out) in [(Color::rgb(0x000000), &mut self.over_black), (Color::rgb(0xffffff), &mut self.over_white)] {
-            self.canvas.clear(back);
-            if solid {
-                // All but invisible, so the whole window takes the mouse (a fully clear pixel lets clicks through).
-                self.canvas.fill_rect(area, Color { r: 0, g: 0, b: 0, a: 1 });
-            }
-            self.logic.paint_float(&mut self.canvas, area);
-            out.resize(n, 0);
-            self.canvas.copy_to_xrgb(out);
-        }
         // SAFETY: the DIB section's pixels, `w * h` of them, live as long as the bitmap; our window and DC.
         unsafe {
             let out = std::slice::from_raw_parts_mut(self.bits, n);
-            for ((o, &b), &wt) in out.iter_mut().zip(&self.over_black).zip(&self.over_white) {
-                let ch = |v: u32, s: u32| ((v >> s) & 0xff) as i32;
-                // Over black the pixel is its colour premultiplied; the backdrop's share is white minus black.
-                let through: i32 = [16, 8, 0].iter().map(|&s| (ch(wt, s) - ch(b, s)).clamp(0, 255)).sum::<i32>() / 3;
-                let a = (255 - through) as u32;
-                let c = |s: u32| (ch(b, s) as u32).min(a);
-                *o = (a << 24) | (c(16) << 16) | (c(8) << 8) | c(0);
-            }
+            self.logic.paint_see_through(&mut self.canvas, area, &mut self.buffers, out);
             let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
             let size = SIZE { cx: w, cy: h };
             let from = POINT { x: 0, y: 0 };

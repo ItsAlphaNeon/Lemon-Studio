@@ -15,6 +15,9 @@ pub mod display;
 pub mod editor;
 #[cfg(windows)]
 pub mod float;
+#[cfg(target_os = "macos")]
+#[path = "float_mac.rs"]
+pub mod float;
 pub mod state;
 pub mod view;
 
@@ -113,6 +116,9 @@ pub struct Shared {
     pub viewers: AtomicUsize,
     /// The floating display window (Win32 HWND; 0 = none).
     pub float: AtomicIsize,
+    /// The floating display's GUI thread; dropping it closes the window (macOS).
+    #[cfg(target_os = "macos")]
+    pub float_thread: Mutex<Option<os_plugkit::gui::EditorThread>>,
 }
 
 impl Default for Shared {
@@ -122,6 +128,8 @@ impl Default for Shared {
             rate: AtomicU32::new(44100),
             viewers: AtomicUsize::new(0),
             float: AtomicIsize::new(0),
+            #[cfg(target_os = "macos")]
+            float_thread: Mutex::new(None),
         }
     }
 }
@@ -206,7 +214,7 @@ impl LemonDrop {
 impl Drop for LemonDrop {
     fn drop(&mut self) {
         // The floating display outlives the editor, not the plugin.
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         float::close(&self.shared);
     }
 }

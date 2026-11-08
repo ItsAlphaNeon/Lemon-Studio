@@ -95,7 +95,7 @@ const WHEEL_PART: f32 = 1.0 / 32.0;
 /// The editor's tick, seconds.
 pub const TICK: f32 = 0.03;
 /// The windows' timer, ms (Windows rounds it to its 15.6 ms clock).
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub const TIMER_MS: u32 = 15;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +158,24 @@ struct Drag {
     ctl: Ctl,
     /// The value as dragged, unrounded.
     at: f32,
+}
+
+/// The two paintings a see-through frame is worked out from (`Logic::paint_see_through`).
+#[derive(Default)]
+pub struct SeeThrough {
+    over_black: Vec<u32>,
+    over_white: Vec<u32>,
+}
+
+/// A frame as premultiplied ARGB from the same frame in XRGB painted over black and over white: over black a pixel is
+/// its colour premultiplied, and the backdrop's share of it is white minus black.
+pub fn see_through(over_black: &[u32], over_white: &[u32], out: &mut [u32]) {
+    let ch = |v: u32, s: u32| (v >> s) & 0xff;
+    for ((o, &b), &w) in out.iter_mut().zip(over_black).zip(over_white) {
+        let through = (ch(w, 16).saturating_sub(ch(b, 16)) + ch(w, 8).saturating_sub(ch(b, 8)) + ch(w, 0).saturating_sub(ch(b, 0))) / 3;
+        let a = 255 - through;
+        *o = (a << 24) | (ch(b, 16).min(a) << 16) | (ch(b, 8).min(a) << 8) | ch(b, 0).min(a);
+    }
 }
 
 pub struct Logic {
@@ -554,10 +572,24 @@ impl Logic {
         self.commit();
     }
 
-    /// The floating window's picture: the display filling `area` over transparency.
-    pub fn paint_float(&mut self, c: &mut os_ui::Canvas, area: os_ui::Rect) {
+    /// The floating window's picture: the display filling `area`, as premultiplied ARGB words in `out` (the canvas's
+    /// `w * h` of them). Drawn text blends with the pixels under it and leaves them opaque, so the frame is painted
+    /// twice, over black and over white: where the two differ the display let the backdrop through, and by how much is
+    /// the pixel's transparency.
+    pub fn paint_see_through(&mut self, c: &mut os_ui::Canvas, area: os_ui::Rect, buffers: &mut SeeThrough, out: &mut [u32]) {
         let held = self.held();
-        display::paint(c, &self.st, &self.an, area, Pointer { at: self.ptr, held });
+        let solid = self.st.solid;
+        for (back, buf) in [(os_ui::Color::rgb(0x000000), &mut buffers.over_black), (os_ui::Color::rgb(0xffffff), &mut buffers.over_white)] {
+            c.clear(back);
+            if solid {
+                // All but invisible, so the whole window takes the mouse (a fully clear pixel lets clicks through).
+                c.fill_rect(area, os_ui::Color { r: 0, g: 0, b: 0, a: 1 });
+            }
+            display::paint(c, &self.st, &self.an, area, Pointer { at: self.ptr, held });
+            buf.resize(out.len(), 0);
+            c.copy_to_xrgb(buf);
+        }
+        see_through(&buffers.over_black, &buffers.over_white, out);
     }
 
     pub fn paint(&mut self, c: &mut os_ui::Canvas) {
@@ -919,6 +951,8 @@ mod gui {
         last_hint: String,
         dirty: bool,
         link: Arc<Peer>,
+        /// When the last tick ran.
+        last: std::time::Instant,
     }
 
     impl Drop for Ed {
@@ -952,6 +986,7 @@ mod gui {
                 last_hint: String::new(),
                 dirty: true,
                 link: peer,
+                last: std::time::Instant::now(),
             };
             ed.run();
         });
@@ -971,10 +1006,18 @@ mod gui {
 
     impl Ed {
         fn run(mut self) {
+            #[cfg(target_os = "macos")]
+            self.win.set_tick(std::time::Duration::from_millis(u64::from(super::TIMER_MS)));
             while let Some(input) = self.win.next() {
                 match input {
                     Input::Expose => self.dirty = true,
-                    Input::Tick => self.poll(),
+                    // Input only changes the state; the tick draws it, so a moving mouse never starves the animation.
+                    Input::Tick => {
+                        self.poll();
+                        if self.dirty {
+                            self.paint();
+                        }
+                    }
                     Input::Down { x, y, btn: b, dbl } => {
                         let (x, y) = (x / self.scale, y / self.scale);
                         let acts = self.logic.down(x, y, btn(b), self.mods(), dbl && b == Button::Left);
@@ -1005,9 +1048,6 @@ mod gui {
                     }
                     Input::Key { .. } | Input::Drop { .. } => {}
                 }
-                if self.dirty && self.win.idle() {
-                    self.paint();
-                }
             }
         }
 
@@ -1021,9 +1061,15 @@ mod gui {
         }
 
         fn poll(&mut self) {
-            if self.logic.poll() {
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(self.last).as_secs_f32();
+            self.last = now;
+            if self.logic.tick(dt) {
                 self.dirty = true;
             }
+            // The floating display opens when it should be visible.
+            #[cfg(target_os = "macos")]
+            crate::float::ensure(&self.logic.params, &self.logic.shared, &self.win);
             if self.logic.hint != self.last_hint {
                 self.last_hint.clone_from(&self.logic.hint);
                 self.link.set_hint(&self.logic.hint);
@@ -1181,6 +1227,45 @@ mod tests {
         assert_eq!(shared.viewers.load(Ordering::Relaxed), 1);
         drop(l);
         assert_eq!(shared.viewers.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn see_through_frames_take_their_alpha_from_the_two_paintings() {
+        // Clear, half white, half black, opaque red, and a pixel whose colours round past its alpha.
+        let black = [0x000000, 0x808080, 0x000000, 0xff0000, 0x105010];
+        let white = [0xffffff, 0xffffff, 0x7f7f7f, 0xff0000, 0xefefef];
+        let mut out = [0; 5];
+        see_through(&black, &white, &mut out);
+        assert_eq!(out[0], 0x0000_0000, "clear");
+        assert_eq!(out[1], 0x8080_8080, "half white");
+        assert_eq!(out[2], 0x8000_0000, "half black");
+        assert_eq!(out[3], 0xffff_0000, "opaque");
+        let a = out[4] >> 24;
+        assert!([16, 8, 0].iter().all(|s| (out[4] >> s) & 0xff <= a), "colours stay premultiplied: {:08x}", out[4]);
+    }
+
+    /// The floating display's frame: clear where the display paints nothing, the picture's colours where it does, with
+    /// Solid's all but invisible fill only while Solid is on.
+    #[test]
+    fn the_floating_picture_is_see_through_without_a_background() {
+        let mut l = logic();
+        l.st.background = false;
+        l.st.bevel = 0;
+        l.st.mode = Mode::Oscilloscope;
+        l.st.title.clear();
+        l.commit();
+        let (mut c, area, mut buffers) = (os_ui::Canvas::new(200, 100, 1.0).unwrap(), os_ui::Rect::new(0.0, 0.0, 200.0, 100.0), SeeThrough::default());
+        let mut frame = vec![0u32; 200 * 100];
+        l.st.solid = false;
+        l.paint_see_through(&mut c, area, &mut buffers, &mut frame);
+        assert_eq!(frame[0], 0, "a corner is clear with Solid off");
+        l.st.solid = true;
+        l.paint_see_through(&mut c, area, &mut buffers, &mut frame);
+        assert_eq!(frame[0] >> 24, 1, "with Solid on it holds the all but invisible fill");
+        l.st.background = true;
+        l.paint_see_through(&mut c, area, &mut buffers, &mut frame);
+        // The glass is translucent itself: it lets some of the desktop through, but far more paint than Solid's fill.
+        assert!(frame[100 * 50 + 100] >> 24 > 100, "the background shows: {:08x}", frame[100 * 50 + 100]);
     }
 
     fn render(l: &mut Logic, path: &std::path::Path) {
