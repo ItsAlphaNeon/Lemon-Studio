@@ -21,7 +21,7 @@
 //! ```
 //! `equiv_shrink` and `equiv_show` run in the test's own process: give them `HOME=<OS_EQUIV_DIR>/home`.
 //! `equiv_replay` replays every trace in `OS_EQUIV_DIR`; `equiv_twice` records and replays on the same build (what
-//! isn't deterministic yet). `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (150) steps each,
+//! isn't deterministic yet). `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (300) steps each,
 //! `OS_EQUIV_ONLY=<name part>` limits the projects, `OS_EQUIV_SEED_FROM` (1) the first seed, `OS_EQUIV_FIRST=<n>` takes the first n of the corpus.
 
 use std::fmt::{self, Write as _};
@@ -794,7 +794,7 @@ fn equiv_record() {
     let (root, projects) = corpus();
     let dir = traces_dir();
     std::fs::create_dir_all(&dir).expect("traces folder");
-    let (seeds, steps) = (var("OS_EQUIV_SEEDS", 2u64), var("OS_EQUIV_STEPS", 150usize));
+    let (seeds, steps) = (var("OS_EQUIV_SEEDS", 2u64), var("OS_EQUIV_STEPS", 300usize));
     let _ = root;
     for p in &projects {
         for seed in var("OS_EQUIV_SEED_FROM", 1u64)..=seeds {
@@ -831,7 +831,7 @@ fn equiv_replay() {
 fn equiv_twice() {
     let (root, projects) = corpus();
     eprintln!("corpus {}: {} projects", root.display(), projects.len());
-    let (seeds, steps) = (var("OS_EQUIV_SEEDS", 2u64), var("OS_EQUIV_STEPS", 150usize));
+    let (seeds, steps) = (var("OS_EQUIV_SEEDS", 2u64), var("OS_EQUIV_STEPS", 300usize));
     let mut failed = 0;
     for p in &projects {
         for seed in var("OS_EQUIV_SEED_FROM", 1u64)..=seeds {
