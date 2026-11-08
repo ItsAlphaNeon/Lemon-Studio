@@ -5,3 +5,7 @@ undo-to-start(patterns[].length	The pattern length box makes no undo step, as in
 undo-to-start(patterns:	The first edit of a project without patterns makes pattern 1, which no step takes back.
 roundtrip(mixer[].slots[][].name	A plugin Lemon Studio hosts is saved as a wrapped plugin (specs: flp/events/plugins.md).
 roundtrip(playlist_view	The playlist's view (scroll, zoom) is written from the interface at save, not kept in the project.
+undo-to-start(mixer[].armed	Arming a track makes no undo step and is not saved, as in FL (measured on FL 24.1.1, 2026-11-08).
+roundtrip(mixer[].armed	Arming a track is not saved, as in FL (measured on FL 24.1.1, 2026-11-08: a save differs only in its time).
+undo-to-start(performance	Performance mode on or off makes no undo step, as in FL (measured on FL 24.1.1, 2026-11-08).
+resave(tempo	A tempo with an initial value opens at that value, not the saved tempo, as in FL (measured on FL 24.1.1).

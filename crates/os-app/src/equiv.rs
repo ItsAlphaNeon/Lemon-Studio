@@ -758,7 +758,7 @@ fn unaccepted(inv: &[String]) -> Vec<&String> {
 fn findings_are_matched_against_the_accepted_list() {
     assert_eq!(normalized("undo-to-start(25:mixer[6].enabled:true->false(+1))"), "undo-to-start(mixer[].enabled:true->false(+1))");
     assert_eq!(normalized("roundtrip(mixer[0].slots[4][0].name:x)"), "roundtrip(mixer[].slots[][].name:x)");
-    let inv = ["undo-to-start(3:mixer[2].enabled:true->false(+0))".to_string(), "resave(tempo[0]:1->2(+0))".to_string()];
+    let inv = ["undo-to-start(3:mixer[2].enabled:true->false(+0))".to_string(), "roundtrip(mixer[1].eq[0][1]:1->2(+0))".to_string()];
     assert_eq!(unaccepted(&inv), [&inv[1]]);
 }
 
