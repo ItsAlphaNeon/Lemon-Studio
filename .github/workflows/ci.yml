@@ -60,3 +60,20 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+      # What only the release workflow builds: a nightly's and a tagged release's settings still compile.
+      - name: Check a nightly
+        run: cargo check --locked -p os-app --bin lemonstudio
+        env:
+          LEMON_CHANNEL: nightly
+          LEMON_VERSION: 2026.1.1.1
+
+      - name: Check a tagged release
+        run: cargo check --locked -p os-app --bin lemonstudio
+        env:
+          LEMON_CHANNEL: stable
+          LEMON_VERSION: 0.1.0
+
+      - name: Test the release scripts
+        if: runner.os == 'Linux'
+        run: bash tools/package/test.sh

@@ -951,7 +951,6 @@ impl Transport {
     }
 
     /// The dropouts by kind since the program started (the playback checks read them: `crate::checks`).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn drops(&self) -> Drops {
         let s = &self.shared;
         let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
@@ -1343,7 +1342,7 @@ impl FeedThread {
             .spawn({
                 let stop = stop.clone();
                 move || {
-                    raise_priority();
+                    raise_feeder_priority();
                     while !stop.load(Ordering::Acquire) {
                         feeder.fill(0);
                         std::thread::park_timeout(Duration::from_millis(5));
@@ -1399,12 +1398,31 @@ pub(crate) fn raise_priority() {
 #[cfg(target_os = "linux")]
 pub(crate) fn raise_priority() {
     if let Err(e) = crate::rt::promote(crate::rt::tid()) {
-        eprintln!("Audio: a rendering thread runs at normal priority ({e})");
+        crate::dropout_log::write(&format!("mixing thread: normal priority ({e})"));
     }
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub(crate) fn raise_priority() {}
+
+/// The feeder's priority; on Linux it is also named the feeder for the dropout log (`crate::rt::Role`).
+#[cfg(target_os = "linux")]
+fn raise_feeder_priority() {
+    let tid = crate::rt::tid();
+    crate::rt::set_role(crate::rt::Role::Feeder, tid);
+    match crate::rt::promote(tid) {
+        Ok(()) => crate::dropout_log::write("feeder: real-time priority"),
+        Err(e) => {
+            eprintln!("Audio: the feeder runs at normal priority ({e})");
+            crate::dropout_log::write(&format!("feeder: normal priority ({e})"));
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn raise_feeder_priority() {
+    raise_priority();
+}
 
 /// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
 /// (spec: audio/time-stretch.md), and of a sample one of them plays the engine keeps only the length and rate Lemon
@@ -1722,9 +1740,9 @@ impl Audio {
         matches!(self.role, Role::Song(_)) && self.main.as_ref().is_some_and(|s| !s.ctl.held.load(Ordering::Relaxed))
     }
 
-    /// The live engine plays on the stream, built from `project` if another plays there (a paused playback is parked,
-    /// letting go of what it held at the instruments; tails still ringing after Stop ring on there). False
-    /// with no project to build it from or no device.
+    /// The live engine plays on the stream, built from `project`, when nothing holds it (`holds`): before any playback,
+    /// and once a stopped one's tails are over. A playback parked lets go of what it held at the instruments. False with
+    /// no project to build it from or no device.
     fn go_live(&mut self, project: Option<&Project>) -> bool {
         if matches!(self.role, Role::Live) {
             return true;
@@ -1741,22 +1759,24 @@ impl Audio {
         if let Some((p, _)) = self.parked.as_mut() {
             p.release_instruments();
         }
-        match std::mem::replace(&mut self.role, Role::Live) {
-            Role::Song(p) => {
-                let s = self.main.as_ref().expect("opened");
-                s.with(|e| e.release_instruments());
-                let old = s.swap(Some(e), false, std::mem::take(&mut self.pend), false);
-                self.parked = old.map(|e| (e, p));
-            }
-            _ => self.hand(Some(e), false, 0, false),
-        }
+        self.hand(Some(e), false, 0, false);
+        self.role = Role::Live;
         self.dirty = true;
         true
     }
 
-    /// The engine a live note goes to plays now: the playback while it plays, else the live engine.
+    /// A playback paused, or stopped and ringing out its tails, holds the stream: it plays what is played live and the
+    /// instruments an open editor plays (`Engine::render_held`), so no other engine takes its plugins over. They have
+    /// been played since they were last reset.
+    fn holds(&mut self) -> bool {
+        let holds = self.main.is_some() && matches!(self.role, Role::Song(_) | Role::Ringing(..));
+        self.dirty |= holds;
+        holds
+    }
+
+    /// The engine a live note goes to plays now: the playback while it plays or holds the stream, else the live engine.
     fn live_target(&mut self, tap: bool) -> bool {
-        if self.playing() {
+        if self.playing() || self.holds() {
             return true;
         }
         // A click needs no channel: it also starts the live engine before any project was sent.
@@ -1794,12 +1814,23 @@ impl Audio {
     }
 
     /// Starts playback `project` at `at` on the stream (paused: parked there until Resume).
-    fn start(&mut self, project: Project, mode: PlayMode, generation: u64, at: At) -> Result<(), String> {
+    /// `carry`: the engine on the stream rings out tails that go on into this playback (`Engine::carry_on`).
+    fn start(&mut self, project: Project, mode: PlayMode, generation: u64, at: At, carry: bool) -> Result<(), String> {
         let (rate, pairs) = self.stream().map(|s| (s.rate, s.pairs))?;
-        let e = self.build(&project, mode, Kind::Song, at, rate, pairs);
+        let mut e = self.build(&project, mode, Kind::Song, at, rate, pairs);
         let p = Play { generation, project, mode, truncated: at.truncated };
         if at.paused {
             self.parked = Some((e, p));
+        } else if carry {
+            let s = self.main.as_ref().expect("opened");
+            s.ctl.held.store(false, Ordering::Relaxed);
+            s.with(|old| e.carry_on(old));
+            // Started in the middle of the song, its channels come in from silence; the tails go on as they were.
+            if at.tick > 0.0 {
+                e.fade_in_channels();
+            }
+            drop(s.follow(e, std::mem::take(&mut self.pend), true));
+            self.role = Role::Song(p);
         } else {
             self.main.as_ref().expect("opened").ctl.held.store(false, Ordering::Relaxed);
             // Started in the middle of the song, it comes in from silence.
@@ -1896,7 +1927,7 @@ impl Audio {
                 }
             }
             Cmd::PreviewFor(project, limit) => self.preview(&project, PlayMode::Pattern(1), limit),
-            Cmd::PreviewSong(project) => self.preview(&project, PlayMode::Song, None),
+            Cmd::PreviewSong(project) => self.preview_clip(*project),
             Cmd::Preview(project) => {
                 // A plugin channel's preview plays as a timed live note on the engine that hosts the instrument.
                 let note = project.patterns.first().and_then(|p| p.notes.first()).copied();
@@ -1904,7 +1935,7 @@ impl Audio {
                 let hosted = row.is_some_and(|r| self.inst.lock().is_ok_and(|l| l.inst.iter().any(|(i, _)| *i == r)));
                 match (hosted, note, row) {
                     (true, Some(n), Some(r)) => {
-                        let ready = self.playing() || {
+                        let ready = self.playing() || self.holds() || {
                             let p = self.live_project.clone().unwrap_or_else(|| (*project).clone());
                             self.go_live(Some(&p))
                         };
@@ -1961,6 +1992,35 @@ impl Audio {
         }
     }
 
+    /// A clip's Preview (spec: ui/playlist.md §10). The previews' stream hosts no plugins, so a pattern's notes on hosted
+    /// instruments play as timed live notes on the engine that hosts them, and the rest on the previews' stream.
+    fn preview_clip(&mut self, mut project: Project) {
+        let hosted: Vec<usize> = self.inst.lock().map(|l| l.inst.iter().map(|(i, _)| *i).collect()).unwrap_or_default();
+        let is_pattern = project.arrangement().is_some_and(|a| a.clips.iter().all(|c| matches!(c.source, os_model::ClipSource::Pattern(_))));
+        let notes: Vec<_> = if is_pattern {
+            os_engine::scheduled_notes(&project, PlayMode::Song).into_iter().filter(|n| hosted.contains(&n.2)).collect()
+        } else {
+            Vec::new()
+        };
+        if !notes.is_empty() {
+            let ready = self.playing() || self.holds() || {
+                let p = self.live_project.clone().unwrap_or_else(|| project.clone());
+                self.go_live(Some(&p))
+            };
+            if let (true, Some(s)) = (ready, &self.main) {
+                let tempo = project.tick_tempo(project.tempo.unwrap_or(140.0));
+                let frames = |ticks: u64| os_engine::laws::tick_to_frame(ticks as f64, project.ppq.max(1), tempo, s.rate);
+                let timed: Vec<_> = notes.iter().map(|&(at, len, ch, key, vel)| (frames(at), frames(len), ch, key, vel)).collect();
+                s.with(|e| e.notes_for(&timed));
+            }
+            let rows: Vec<u16> = hosted.iter().filter_map(|&r| project.channels.get(r).map(|c| c.index)).collect();
+            for p in &mut project.patterns {
+                p.notes.retain(|n| !rows.contains(&n.channel));
+            }
+        }
+        self.preview(&project, PlayMode::Song, None);
+    }
+
     fn play(&mut self, project: Project, mode: PlayMode, start: f64, generation: u64, starts: Starts) {
         // A newer request (stop, another play) already superseded this one.
         if generation != self.shared.generation.load(Ordering::Acquire) {
@@ -1973,8 +2033,8 @@ impl Audio {
         self.held = None;
         self.lost = None;
         // The engine before fades out from what it has queued while the new one starts: the playback, the live
-        // engine, tails ringing after Stop (with "Reset plugins on transport" off their hosted plugins ring on through
-        // the start, `reset_hosts`). Typed notes go into the playing engine.
+        // engine. Tails ringing after Stop go on into the new one unbroken (with "Reset plugins on transport" off their
+        // hosted plugins ring on through the start, `reset_hosts`). Typed notes go into the playing engine.
         self.keep_gate();
         self.parked = None;
         let ringing = matches!(std::mem::replace(&mut self.role, Role::Idle), Role::Ringing(..));
@@ -1985,7 +2045,8 @@ impl Audio {
         // before let go of (`reset_hosts`).
         let inst = self.dirty && !ringing;
         self.pend |= if inst { RESET_INST } else { 0 } | if starts.reset { RESET_INST | RESET_FX } else { 0 };
-        if let Err(e) = self.start(project, mode, generation, at) {
+        let carry = ringing && self.pend & (RESET_INST | RESET_FX) == 0;
+        if let Err(e) = self.start(project, mode, generation, at, carry) {
             self.report(e);
             let _ = self.shared.state.compare_exchange(PLAYING, STOPPED, Ordering::AcqRel, Ordering::Acquire);
             self.shared.rewind(0.0);
@@ -2073,7 +2134,7 @@ impl Audio {
         }
         if let Some((p, at)) = playback {
             let generation = p.generation;
-            if let Err(e) = self.start(p.project, p.mode, generation, at) {
+            if let Err(e) = self.start(p.project, p.mode, generation, at, false) {
                 self.report(e);
                 if generation == self.shared.generation.load(Ordering::Acquire) {
                     self.shared.state.store(STOPPED, Ordering::Release);
@@ -2119,7 +2180,7 @@ impl Audio {
         // was resumed meanwhile, else paused (`resume` follows).
         if let Some((project, mode, generation, mut at)) = self.held.take().filter(|h| h.2 == self.shared.generation.load(Ordering::Acquire)) {
             at.paused = self.shared.state.load(Ordering::Acquire) != PLAYING;
-            if let Err(e) = self.start(project, mode, generation, at) {
+            if let Err(e) = self.start(project, mode, generation, at, false) {
                 self.report(e);
                 self.shared.state.store(STOPPED, Ordering::Release);
                 self.shared.rewind(0.0);
@@ -2214,13 +2275,9 @@ impl Audio {
                 }
             }
         }
-        // While an editor is open and nothing plays, the live engine processes the instruments. Tails ringing after
-        // Stop give way to it.
-        let still = match &self.role {
-            Role::Idle | Role::Ringing(..) => true,
-            Role::Song(_) => !self.playing(),
-            Role::Live => false,
-        };
+        // While an editor is open and nothing holds the stream, the live engine processes the instruments (a paused
+        // playback, or tails ringing after Stop, process them themselves).
+        let still = matches!(self.role, Role::Idle);
         if self.listen && self.listen_retry && !self.closed && self.closing.is_none() && self.lost.is_none() && still {
             self.listen_retry = false;
             let p = self.live_project.clone();
@@ -2249,12 +2306,18 @@ impl Audio {
     fn ring(&mut self) {
         let Role::Ringing(_, r) = &mut self.role else { return };
         let Some(s) = &self.main else { return };
+        // A key held down (a typed note, an editor's) keeps them going: they are not over until it is let go of.
+        if s.with(|e| e.live_notes_held()).unwrap_or(false) {
+            (r.since, r.quiet) = (Instant::now(), None);
+        }
         let since = r.since;
         let rung = r.over(f32::from_bits(s.ctl.level.swap(0, Ordering::Relaxed)), Instant::now());
         if rung {
             self.role = Role::Idle;
             self.hand(None, false, RESET_INST | RESET_FX, false);
             self.dirty = false;
+            // An open editor's instruments go on with the live engine.
+            self.listen_retry = true;
             if self.shared.state.load(Ordering::Acquire) == STOPPED {
                 self.shared.rewind(0.0);
             }
@@ -2319,7 +2382,7 @@ impl Audio {
                     }
                     if let Some((project, mode, generation, mut at)) = self.held.take().filter(|h| h.2 == self.shared.generation.load(Ordering::Acquire)) {
                         at.paused = self.shared.state.load(Ordering::Acquire) != PLAYING;
-                        if let Err(e) = self.start(project, mode, generation, at) {
+                        if let Err(e) = self.start(project, mode, generation, at, false) {
                             self.report(e);
                             self.shared.state.store(STOPPED, Ordering::Release);
                             self.shared.rewind(0.0);
@@ -2442,6 +2505,9 @@ struct Ctl {
     level: AtomicU32,
     /// The engine handed in last (`Slot::epoch`): the callback fades out what it plays and goes on with it.
     want: AtomicU64,
+    /// An engine handed in that carries on from the one before (`Stream::follow`): the callback plays that one's
+    /// queue to its end, unfaded, and this one's from the next frame.
+    follow: AtomicU64,
     /// The engine the callback played to its end, + 1 (0: none): everything it rendered has been heard.
     done: AtomicU64,
 }
@@ -2551,6 +2617,23 @@ impl Stream {
         old.flatten()
     }
 
+    /// `swap` to `engine`, which carries on with the hosted plugins where the one before left them (a Play while a
+    /// Stop's tails ring, `Engine::carry_on`): the callback plays what that one queued to its end, unfaded, and this
+    /// one's first frame right after it. The plugins' output goes on unbroken; a fade and the gap after it would cut a
+    /// ringing tail and bring it back at once, a click.
+    fn follow(&self, engine: Engine, reset: u8, report: bool) -> Option<Engine> {
+        let old = self.slot.lock().ok().map(|mut s| {
+            s.epoch += 1;
+            (s.fade_in, s.reset) = (false, s.reset | reset);
+            self.ctl.report.store(report, Ordering::Relaxed);
+            self.ctl.follow.store(s.epoch, Ordering::Release);
+            self.ctl.want.store(s.epoch, Ordering::Release);
+            std::mem::replace(&mut s.engine, Some(engine))
+        });
+        self.feed.wake();
+        old.flatten()
+    }
+
     /// `swap` to nothing, at once: once it returns, the feeder processes no hosted plugin and resets none (an export).
     fn quiet(&self) -> Option<Engine> {
         let old = self.slot.lock().ok().and_then(|mut s| {
@@ -2648,7 +2731,9 @@ impl Renderer {
             f.fill(0);
         }
         let want = self.ctl.want.load(Ordering::Acquire);
-        if want != self.epoch && self.gain == 0.0 && !self.take_epoch(want, stereo.len()) {
+        // The engine handed in carries on from this one (`Stream::follow`): no fade, the queue read on into it.
+        let follow = want != self.epoch && self.ctl.follow.load(Ordering::Acquire) == want;
+        if want != self.epoch && !follow && self.gain == 0.0 && !self.take_epoch(want, stereo.len()) {
             stereo.fill(0.0);
             self.peak = 0.0;
             if let Some(t) = &self.wake {
@@ -2657,7 +2742,7 @@ impl Renderer {
             return false;
         }
         let switching = want != self.epoch;
-        let target = if switching { 0.0 } else { 1.0 };
+        let target = if switching && !follow { 0.0 } else { 1.0 };
         if self.tap {
             self.shared.block.store((stereo.len() / w) as u32, Ordering::Relaxed);
         }
@@ -2670,14 +2755,18 @@ impl Renderer {
         // Where the block starts (the playback's position moves from here to its end while the device plays it).
         let from = self.queue.heard();
         let read = self.queue.read.load(Ordering::Relaxed) / w as u64;
-        // Fading out, it stops where the next engine's ticks start.
-        let until = if switching { self.queue.start_of(want) } else { None };
+        // Fading out, it stops where the next engine's ticks start; carried on, it reads on into them.
+        let until = if switching && !follow { self.queue.start_of(want) } else { None };
         let got = self.queue.pop(stereo, until);
+        if follow && self.queue.start_of(want).is_some_and(|at| self.queue.read.load(Ordering::Acquire) >= at) {
+            self.queue.playing.store(want, Ordering::Release);
+            self.epoch = want;
+        }
         let ended = self.queue.ended.load(Ordering::Acquire);
         let peak = stereo[..got].iter().fold(0.0f32, |m, x| m.max(x.abs()));
         if got < stereo.len() {
             stereo[got..].fill(0.0);
-            if switching {
+            if switching && !follow {
                 self.gain = 0.0;
             } else if !ended {
                 self.shared.underruns.fetch_add(1, Ordering::Relaxed);
@@ -2801,6 +2890,16 @@ mod tests {
         let mut s = slot.lock().unwrap();
         s.epoch += 1;
         (s.fade_in, s.reset, s.engine) = (fade_in, s.reset | reset, e);
+        r.ctl.want.store(s.epoch, Ordering::Release);
+    }
+
+    /// `Stream::follow` on a test renderer's slot.
+    fn hand_on(r: &Renderer, e: Engine) {
+        let slot = r.inline.as_ref().unwrap().slot.clone();
+        let mut s = slot.lock().unwrap();
+        s.epoch += 1;
+        (s.fade_in, s.engine) = (false, Some(e));
+        r.ctl.follow.store(s.epoch, Ordering::Release);
         r.ctl.want.store(s.epoch, Ordering::Release);
     }
 
@@ -3154,6 +3253,40 @@ mod tests {
             r.render(&mut block);
         }
         assert_eq!(r.gain, 1.0, "faded in");
+    }
+
+    /// An engine that carries on from the one before (a Play while a Stop's tails ring): everything the
+    /// one before queued plays as it was, unfaded, and the new one's first frame comes right after its last, with no
+    /// silence between (a fade and a gap there cut a ringing tail and bring it back: a click).
+    #[test]
+    fn an_engine_carried_on_plays_right_after_the_one_before() {
+        let (e, _) = looping_engine();
+        let (mut r, _, shared) = renderer(e);
+        let (twin, _) = looping_engine();
+        let (mut before, _, _) = renderer(twin);
+        let (fresh, _) = looping_engine();
+        let (mut alone, _, _) = renderer(fresh);
+        let mut block = vec![0.0f32; 512 * 2];
+        for _ in 0..20 {
+            r.render(&mut block);
+            before.render(&mut block);
+        }
+        let (next, _) = looping_engine();
+        hand_on(&r, next);
+        let (mut got, mut old, mut want) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..12 {
+            r.render(&mut block);
+            got.extend_from_slice(&block);
+            before.render(&mut block);
+            old.extend_from_slice(&block);
+            alone.render(&mut block);
+            want.extend_from_slice(&block);
+        }
+        // Where the new engine starts: the frames before are the old one's as it would have played them.
+        let at = (2..got.len() / 2).step_by(2).find(|&k| got[..k] == old[..k] && got[k..] == want[..got.len() - k]).expect("the old engine's frames, then the new one's");
+        assert!(old[..at].iter().any(|v| v.abs() > 0.0), "what was queued plays out");
+        assert_eq!(r.gain, 1.0, "never faded");
+        assert_eq!(shared.underruns.load(Ordering::Relaxed), 0, "no dropout");
     }
 
     /// A stream that has just opened (silent, nothing played yet) starts its first engine at a device block longer
@@ -3818,6 +3951,92 @@ mod tests {
         }
         assert_eq!(resets.load(Ordering::Relaxed), before + 1, "reset once rung out");
         assert!(!inst.lock().unwrap().active(), "no tail left to come back");
+    }
+
+    /// With an editor open, the stopped playback keeps the stream while its tails ring (no live engine takes its
+    /// plugins over): the release goes on unbroken, with no fade and no silent gap. A key typed then plays on it, and
+    /// held, it keeps the plugins from being reset as quiet; let go of, they are, once quiet (on the simulated device).
+    #[test]
+    fn the_stopped_playback_keeps_the_stream_while_its_tails_ring() {
+        let _sim = Sim::new();
+        use crate::prefs::{set_check, RESET_PLUGINS_ON_TRANSPORT};
+        use os_engine::Instrument;
+        /// A release that falls by half every 50 ms or so; any key but the song's makes no sound (a slow attack).
+        struct Releaser {
+            level: f32,
+            on: bool,
+            keys: Arc<AtomicU32>,
+            resets: Arc<AtomicU32>,
+        }
+        impl Instrument for Releaser {
+            fn note_on(&mut self, _o: u32, key: u8, _v: f32) {
+                self.keys.fetch_add(1, Ordering::Relaxed);
+                if key == 60 {
+                    (self.level, self.on) = (0.3, true);
+                }
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {
+                self.on = false;
+            }
+            fn process(&mut self, _r: u32, l: &mut [f32], r: &mut [f32]) {
+                for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                    if !self.on {
+                        self.level *= 0.5f32.powf(1.0 / 2400.0);
+                        if self.level < 1e-7 {
+                            self.level = 0.0;
+                        }
+                    }
+                    (*a, *b) = (self.level, self.level);
+                }
+            }
+            fn active(&self) -> bool {
+                self.level > 0.0
+            }
+            fn reset(&mut self) {
+                (self.level, self.on) = (0.0, false);
+                self.resets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
+        let mut project = crate::app::test_project();
+        let ch = project.channels[0].index;
+        project.channels[0].kind = os_model::ChannelKind::Plugin;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96 * 8, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
+        let (keys, resets) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let inst = Arc::new(Mutex::new(Releaser { level: 0.0, on: false, keys: keys.clone(), resets: resets.clone() }));
+        let t = Transport::new(None);
+        t.set_instruments(vec![(0, inst.clone() as SharedInstrument)]);
+        // An editor is open: the live engine would take the instruments over whenever nothing holds the stream.
+        t.listen(true);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        wait_for(|| t.peaks().0 > 0.05);
+        let before = resets.load(Ordering::Relaxed);
+        crate::device::sim::capture_audio(true);
+        t.stop();
+        std::thread::sleep(Duration::from_millis(400));
+        let heard = crate::device::sim::take_audio();
+        crate::device::sim::capture_audio(false);
+        // From the release's start: every frame sounds, and none jumps (it only falls, a little at a time).
+        let left: Vec<f32> = heard.chunks_exact(2).map(|f| f[0]).collect();
+        let from = left.iter().position(|&v| v > 0.0 && v < 0.29).expect("the release");
+        let rest = &left[from..left.len() - 256];
+        assert!(rest.iter().all(|&v| v > 0.0), "no silent frame while it rings");
+        let jump = rest.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+        assert!(jump < 1e-3, "no fade or gap: a jump of {jump}");
+        // A key typed now plays on the stopped playback; held, the plugins are not reset, however long it is quiet.
+        let k0 = keys.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(3000));
+        t.note_on(0, 64, 100);
+        wait_for(|| keys.load(Ordering::Relaxed) > k0);
+        std::thread::sleep(RING_QUIET + Duration::from_millis(1500));
+        assert_eq!(resets.load(Ordering::Relaxed), before, "not reset while a key is held");
+        t.note_off(0, 64);
+        let t0 = Instant::now();
+        while resets.load(Ordering::Relaxed) == before && t0.elapsed() < Duration::from_secs(8) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(resets.load(Ordering::Relaxed), before + 1, "reset once let go of and quiet");
+        t.listen(false);
     }
 
     /// The CPU panel's voices while a pattern plays and after Stop (spec: audio/voices.md §4-§5): the engine's own

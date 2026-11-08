@@ -678,6 +678,8 @@ pub struct Plugin {
     chan_mods: [f32; 2],
     /// Voices started with note levels, until the plugin reports their end.
     level_voices: Vec<LevelVoice>,
+    /// Automation indexes that stand for others of the list (`use_param_aliases`).
+    param_aliases: &'static [(u32, u32)],
     /// Mod amounts of sounding voices to send at the start of the next block (note id, key, parameter, amount).
     mod_resend: Vec<(i32, u8, u32, f64)>,
     /// Voices get their gains as volume note expressions (`use_voice_gains`).
@@ -966,6 +968,7 @@ impl Plugin {
                 note_levels: None,
                 chan_mods: [0.0; 2],
                 level_voices: Vec::new(),
+                param_aliases: &[],
                 mod_resend: Vec::new(),
                 voice_gains: false,
                 channel_levels: false,
@@ -1340,6 +1343,12 @@ impl Plugin {
     pub fn use_voice_gains(&mut self) -> bool {
         self.voice_gains = true;
         true
+    }
+
+    /// Automation of index `.0` of each pair reaches parameter `.1` of the list: a project file's indexes for the plugin
+    /// this one stands in for (spec: plugins/citrus.md).
+    pub fn use_param_aliases(&mut self, aliases: &'static [(u32, u32)]) {
+        self.param_aliases = aliases;
     }
 
     /// Sends the channel's volume and pan (`Instrument::channel_levels`) as the SysEx message of
@@ -1935,6 +1944,10 @@ impl os_host::Plugin for Plugin {
 
     fn use_channel_levels(&mut self) -> bool {
         Plugin::use_channel_levels(self)
+    }
+
+    fn use_param_aliases(&mut self, aliases: &'static [(u32, u32)]) {
+        Plugin::use_param_aliases(self, aliases);
     }
 
     fn set_offline(&mut self, offline: bool) {
@@ -3424,6 +3437,20 @@ mod tests {
             assert_eq!(l[1500..].iter().all(|v| *v == 0.0), linked, "linked {linked}: {}", l[1500]);
         }
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// An index past the plugin's list is dropped, unless an alias (`use_param_aliases`) gives it a parameter.
+    #[test]
+    fn automation_follows_the_param_aliases() {
+        let wav = dc_wav("aliases");
+        let mut p = sampler_of(&wav);
+        const FAR: u32 = 1_000_000;
+        p.automate(0, FAR, 0.5);
+        assert!(p.auto.is_empty(), "unknown index");
+        p.use_param_aliases(&[(FAR, 0)]);
+        p.automate(0, FAR, 0.5);
+        assert_eq!(p.auto.len(), 1, "reaches parameter 0");
+        assert_eq!(p.auto[0].1, p.ranges[0].0);
     }
 
     /// The channel's levels (`use_channel_levels`): Lemon Sampler is sent the volume and pan as the host-link message,

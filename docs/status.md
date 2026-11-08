@@ -435,6 +435,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   and CLAP bundles for other hosts
 - Citrus, a six-operator synthesizer (a recreation of Sytrus) with its editor: it plays every Sytrus channel of a
   project and Sytrus patches, keeping their state byte for byte; also a VST3 and CLAP plugin
+- Smith, an additive synthesizer (a recreation of Ogun) with a Pith editor: it plays every Ogun channel of a project
+  and Ogun patches, keeping their state byte for byte; also a VST3 and CLAP plugin. Its timbre seeds make their own
+  random patterns rather than Ogun's, so a patch built on a few surviving harmonics can sound different
 - Lemon Slicer (Fruity Slicer) as a VST3 and CLAP plugin with a Pith editor: it loads a loop and slices it by the
   file's markers, by beats or by transients, plays slice n on C5 + n (pitch, attack, decay, declick, reverse, play to
   end), and dumps the slices to the piano roll as notes. A project's Fruity Slicer channels play and open in it and
@@ -457,6 +460,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Pulp Filter (Fruity Love Philter: a pattern-controlled multi-filter) and Press (Maximus: a multiband maximiser) as
   VST3 and CLAP plugins; a project's Fruity Love Philter and Maximus slots play and open in them, and are saved back
   as the original effects with their state
+- Lemon Drop (Wave Candy: an audio visualizer) as a VST3 and CLAP plugin: an oscilloscope, a scrolling spectrum, a
+  level meter with six ballistics and a vectorscope, drawn in the original's 28 colours with its glass frame; a
+  project's Wave Candy slots open in it and are saved back as Wave Candy with their state. The original's 38 presets
+  and eleven lemon ones are factory presets. On Windows, macOS and Linux the display also floats in its own see-through
+  window like the original's (drag to move, corner to size; keep in front, on desktop, mini view, solid), once the
+  editor has been opened
 - Lemon Flanger and Lemon Phaser as VST3 and CLAP plugins, each with the original's 27 presets as factory presets; a
   project's Fruity Flanger and Fruity Phaser play through the same sound in the mixer. Their sine waves use the true
   pi, where the original's is a hair off: the flanger still matches FL Studio 2026's exports sample for sample in the

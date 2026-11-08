@@ -1,0 +1,28 @@
+[package]
+name = "updater"
+description = "Lemon Studio's updater: checks a release channel for a newer build, downloads it and puts it in place"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lemonstudio-updater"
+path = "src/main.rs"
+
+[dependencies]
+# HTTPS through rustls with ring (no C toolchain beyond what ring builds itself, no CMake), checked against the system's
+# own certificate store (read with rustls-native-certs) rather than a bundled list.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "gzip"] }
+rustls-native-certs = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+minisign-verify = "0.2"
+sha2 = "0.10"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

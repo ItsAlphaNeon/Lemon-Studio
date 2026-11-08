@@ -31,10 +31,19 @@ pub const INFO_H: f32 = 84.0;
 /// (label, icon, category colour index). Only the roots with content: FL's other disk-folder roots (Recent files,
 /// Channel presets, Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders
 /// follow these. Plugin presets: the preset store, user and factory (spec: plugins/presets.md "Browser").
-/// Channel presets: the channel state files (`crate::channel_states`; empty until one is saved).
-const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin library", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1), (CHANNEL_PRESETS, Icon::FilePreset, 1)];
+/// Channel presets: the channel state files (`crate::channel_states`; empty until one is saved). My projects: the user's
+/// projects folder, as FL lists its own (`save_form::default_root`, where the Save as and New project forms put them
+/// and the backups go; empty until a project is saved there).
+const ROOTS: &[(&str, Icon, u8)] = &[
+    ("Current project", Icon::Page, 0),
+    ("Plugin library", Icon::Speaker, 1),
+    (PLUGIN_PRESETS, Icon::FilePreset, 1),
+    (CHANNEL_PRESETS, Icon::FilePreset, 1),
+    (MY_PROJECTS, Icon::Folder, FOLDER),
+];
 pub const PLUGIN_PRESETS: &str = "Plugin presets";
 pub const CHANNEL_PRESETS: &str = "Channel presets";
+pub const MY_PROJECTS: &str = "My projects";
 
 /// Tree key of the All tab's Channel presets root.
 pub fn channel_presets_key() -> String {
@@ -272,8 +281,13 @@ fn tree(s: &State) -> Vec<Row> {
             0 => project_rows(s, &key, cat, &mut out),
             1 => plugin_rows(s, &key, cat, &mut out),
             2 => preset_rows(s, &key, cat, &mut out),
-            _ => {
+            3 => {
                 if let Some(dir) = crate::channel_states::root().filter(|d| d.is_dir()) {
+                    disk_rows(s, &dir, &key, 1, &mut out);
+                }
+            }
+            _ => {
+                if let Some(dir) = crate::save_form::default_root().filter(|d| d.is_dir()) {
                     disk_rows(s, &dir, &key, 1, &mut out);
                 }
             }
@@ -814,7 +828,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
         icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0 + dy, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
     }
-    ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
+    // Level with the arrows before it (their middle is y 94).
+    ui.c.text_mid(os_ui::Font::new(14), 52.0, 94.0 + dy, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
     const TIPS: [&str; 4] = ["All", "Current project", "Plugin library", "Favorites"];
@@ -892,6 +907,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             icons::draw(ui.c, Icon::Star, Rect::new(bw - 19.0, y + 5.0, 13.0, 13.0), sc);
         }
         let (f, w) = (os_ui::Font::new(17), bw - 1.0 - x - 27.0 - if fav { 16.0 } else { 0.0 });
+        // The label level with the icon (both are centred on the row).
+        let ty = y + ROW_H / 2.0 - ui.c.cap_mid(f);
         let over = ui.c.text_width(f, &row.label) - w;
         // Hovered, a label that does not fit scrolls (§9) rather than being cut.
         if hov && over > 0.0 {
@@ -900,13 +917,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             let off = marquee_offset(now.duration_since(since).as_secs_f32(), over);
             let lr = Rect::new(x + 25.0, y, w, ROW_H);
             ui.c.push_clip(lr);
-            ui.c.text(f, lr.x - off, y, c, &row.label);
+            ui.c.text(f, lr.x - off, ty, c, &row.label);
             ui.c.pop_clip();
             marquee = Some(Marquee { key: row.key.clone(), since, rect: lr, over, off });
             continue;
         }
         let label = if row.path.is_some() { middle_cut(ui, f, &row.label, w) } else { row.label.clone() };
-        ui.c.text_clip(f, x + 25.0, y, w, c, &label);
+        ui.c.text_clip(f, x + 25.0, ty, w, c, &label);
     }
     *s.browser_marquee.borrow_mut() = marquee;
     let indexing = opt(s, OPT_INDEX) && s.browser_index.building();
@@ -1070,6 +1087,29 @@ fn paint_tag(ui: &mut Ui, label: &str, x: f32, y: f32, angle: f32, alpha: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// My projects lists the user's projects folder, as FL lists its own: each project's folder and the backups, which
+    /// open like any folder.
+    #[test]
+    fn my_projects_lists_the_users_projects_folder() {
+        let dir = std::env::temp_dir().join(format!("os_myprojects_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Song").join("Samples")).unwrap();
+        std::fs::write(dir.join("Song").join("Song.lemon"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("Backup")).unwrap();
+        crate::save_form::TEST_ROOT.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut app = crate::app::App::new(None);
+        let key = format!("0:{MY_PROJECTS}");
+        assert!(rows(&app.state).iter().any(|r| r.key == key), "a root of the All tab");
+        app.state.browser_open.insert(key.clone());
+        app.state.browser_open.insert(format!("{key}/Song"));
+        let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
+        for want in ["Backup", "Song", "Song.lemon"] {
+            assert!(labels.iter().any(|l| l == want), "{want} in {labels:?}");
+        }
+        crate::save_form::TEST_ROOT.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// File dates read in the local time zone on every platform (spec §6): within a day of the UTC date.
     #[test]

@@ -24,6 +24,8 @@ mod autoscroll;
 mod backup;
 #[cfg(test)]
 mod audio_bench;
+#[cfg(target_os = "linux")]
+mod dropout_log;
 #[cfg(test)]
 mod checks;
 #[cfg(test)]
@@ -33,6 +35,8 @@ mod browser_index;
 mod burn_midi;
 mod cable;
 mod capture;
+mod replace_file;
+mod panic_log;
 #[cfg(target_os = "linux")]
 mod rt;
 mod one_click;
@@ -85,6 +89,7 @@ mod mixer;
 mod mixer_state;
 mod osc3;
 mod citrus;
+mod smith;
 mod chord_tool;
 mod slicer;
 mod drums;
@@ -129,6 +134,8 @@ mod save_form;
 mod scroll_speed;
 mod search_folders;
 mod settings_file;
+mod update;
+mod version;
 mod shortcuts;
 mod smooth;
 mod snap;
@@ -827,6 +834,8 @@ impl ApplicationHandler for Shell {
     /// (`macos::answer_quit`) ends the process from AppKit, after this: the plugin windows close and the instances go as
     /// they do when `run_app` returns.
     fn exiting(&mut self, _el: &ActiveEventLoop) {
+        // An update to install: the updater waits for this process to end (`update`).
+        self.app.updates.on_exit();
         if let Some(window) = self.window.clone() {
             self.follow_frame(&window);
         }
@@ -1855,7 +1864,25 @@ fn attach_console() {
     }
 }
 
+/// Linux: the sound server lists Lemon Studio's audio streams by its name and icon, not as an "ALSA plug-in":
+/// PipeWire's ALSA plugin reads `PIPEWIRE_ALSA`, PulseAudio's `PULSE_PROP`. A value the user set is kept.
+#[cfg(target_os = "linux")]
+fn name_audio_streams() {
+    let names = [
+        ("PIPEWIRE_ALSA", "{ application.name = \"Lemon Studio\" node.description = \"Lemon Studio\" application.icon-name = \"lemonstudio\" }"),
+        ("PULSE_PROP", "application.name='Lemon Studio' application.icon_name=lemonstudio"),
+    ];
+    for (var, value) in names {
+        if std::env::var_os(var).is_none() {
+            // SAFETY: called first in `main`, before any other thread exists.
+            unsafe { std::env::set_var(var, value) };
+        }
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    name_audio_streams();
     #[cfg(windows)]
     attach_console();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -1878,6 +1905,8 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
+    // From here on a panic is kept in the user folder's Logs (`panic_log`).
+    panic_log::install();
     // The mixing threads every engine renders on, from here on (spec: audio/multicore.md).
     mix_threads::start();
     // A render without a window (FILE > Export audio from the command line, `render`).
@@ -1954,6 +1983,8 @@ fn main() {
     }
     // The windows where the last run left them.
     layout::restore(&mut app.state);
+    // How the last update went, and the check for a newer build (release builds; `update`).
+    app.update_startup();
     // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
     splash::step(&splash, splash::MIDI, "Opening MIDI devices");
     app.midi = midi_in::MidiIn::open(wake_ui);

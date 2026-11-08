@@ -1,0 +1,285 @@
+# Builds and publishes Lemon Studio's releases, which install and update themselves (docs/releasing.md):
+#
+# - Nightly: every night from main (or by hand, Run workflow), unless main has not moved since the last nightly. Its
+#   version is dated, YEAR.MONTH.DAY.N (UTC; N counts that day's nightlies from 1), its release the pre-release
+#   nightly-<version>. The pre-release "nightly" only holds nightly.json, which points the updater at the newest one;
+#   the oldest nightlies beyond KEEP_NIGHTLIES are deleted. The schedule only runs with the repository variable
+#   NIGHTLIES set to "on".
+# - Tagged: a pushed tag vMAJOR.MINOR.PATCH, on main and matching the workspace's version in Cargo.toml. Its release
+#   holds stable.json; GitHub's "latest" release is the newest one. A 0.x version is an alpha.
+#
+# Run workflow with "dry run" builds and packages everything and signs the manifest, then keeps the lot as the run's
+# artifacts instead of publishing it.
+#
+# Each release has Lemon Studio for Windows (.exe), Linux (.AppImage) and macOS (Apple silicon .app, zipped), each
+# carrying its updater, and Lemon Studio's plugins for other DAWs (VST3 and CLAP, a zip per platform). The manifest
+# (nightly.json or stable.json) is signed with minisign: the repository secret MINISIGN_SECRET_KEY signs it, and the
+# repository variable MINISIGN_PUBLIC_KEY, built into the updater, checks it.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build a nightly even if main has not changed since the last one
+        type: boolean
+        default: false
+      dry_run:
+        description: "Dry run: build, package and sign, but publish nothing (the files are the run's artifacts)"
+        type: boolean
+        default: false
+      rehearse_tag:
+        description: "With dry run: rehearse this release tag (e.g. v0.1.0) instead of a nightly"
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  KEEP_NIGHTLIES: 14
+
+jobs:
+  plan:
+    name: Plan
+    # The schedule stays off until nightlies are turned on (docs/releasing.md), so merging this workflow publishes nothing.
+    if: github.event_name != 'schedule' || vars.NIGHTLIES == 'on'
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.plan.outputs.channel }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      previous: ${{ steps.plan.outputs.previous }}
+      sha: ${{ steps.plan.outputs.sha }}
+      skip: ${{ steps.plan.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the signing key is set up
+        env:
+          SECRET: ${{ secrets.MINISIGN_SECRET_KEY }}
+          PUBLIC: ${{ vars.MINISIGN_PUBLIC_KEY }}
+        run: |
+          if [ -z "$SECRET" ] || [ -z "$PUBLIC" ]; then
+            echo "::error::Set the repository secret MINISIGN_SECRET_KEY and the variable MINISIGN_PUBLIC_KEY (docs/releasing.md)"
+            exit 1
+          fi
+
+      - name: Version
+        id: plan
+        env:
+          FORCE: ${{ inputs.force }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REHEARSE_TAG: ${{ inputs.rehearse_tag }}
+        run: bash tools/package/plan.sh
+
+  build:
+    name: ${{ matrix.name }}
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            platform: windows-x86_64
+          # An older Ubuntu than CI's: the AppImage runs where its C and C++ runtimes are at least this old.
+          - name: Linux
+            os: ubuntu-22.04
+            platform: linux-x86_64
+          - name: macOS
+            os: macos-latest
+            platform: macos-aarch64
+    env:
+      LEMON_CHANNEL: ${{ needs.plan.outputs.channel }}
+      LEMON_VERSION: ${{ needs.plan.outputs.version }}
+      LEMON_UPDATE_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+      PLATFORM: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libjack-jackd2-dev libwayland-dev libclang-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      # First, so that Lemon Studio is built carrying it (crates/os-app/build.rs reads LEMON_UPDATER).
+      - name: Build the updater
+        run: cargo build --release --locked -p updater
+
+      - name: Build Lemon Studio
+        run: |
+          set -euo pipefail
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
+          export LEMON_UPDATER="$GITHUB_WORKSPACE/target/release/lemonstudio-updater$ext"
+          if [ "$RUNNER_OS" = macOS ]; then
+            cargo run --release --locked -p bundle-app
+          else
+            cargo build --release --locked -p os-app --bin lemonstudio
+          fi
+
+      - name: Build the plugins
+        run: cargo run --release --locked -p bundle-plugins
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          v=$LEMON_VERSION
+          mkdir -p dist "plugins/LemonStudio-Plugins-$v/VST3" "plugins/LemonStudio-Plugins-$v/CLAP"
+          case "$RUNNER_OS" in
+            Windows)
+              cp target/release/lemonstudio.exe "dist/LemonStudio-$v-$PLATFORM.exe"
+              ;;
+            Linux)
+              # A fixed version with its checksum: this goes into a release that installed copies trust.
+              curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+                https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+              echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $RUNNER_TEMP/appimagetool" | sha256sum -c -
+              chmod +x "$RUNNER_TEMP/appimagetool"
+              APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
+                bash tools/package/appimage.sh target/release/lemonstudio "$v" "dist/LemonStudio-$v-$PLATFORM.AppImage"
+              ;;
+            macOS)
+              ditto -c -k --keepParent "target/bundled/Lemon Studio.app" "dist/LemonStudio-$v-$PLATFORM.zip"
+              ;;
+          esac
+          p="plugins/LemonStudio-Plugins-$v"
+          for b in target/bundled/*.vst3; do cp -R "$b" "$p/VST3/"; done
+          for b in target/bundled/*.clap; do cp -R "$b" "$p/CLAP/"; done
+          cp tools/package/plugins-readme.txt "$p/README.txt"
+          cp LICENSE THIRD-PARTY-NOTICES.txt "$p/"
+          case "$RUNNER_OS" in
+            Windows) (cd plugins && 7z a -tzip -r "../dist/LemonStudio-Plugins-$v-$PLATFORM.zip" "LemonStudio-Plugins-$v" >/dev/null) ;;
+            macOS) ditto -c -k --keepParent "$p" "dist/LemonStudio-Plugins-$v-$PLATFORM.zip" ;;
+            *) (cd plugins && zip -qry "../dist/LemonStudio-Plugins-$v-$PLATFORM.zip" "LemonStudio-Plugins-$v") ;;
+          esac
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHANNEL: ${{ needs.plan.outputs.channel }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      PREVIOUS: ${{ needs.plan.outputs.previous }}
+      SHA: ${{ needs.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          # The first build on a channel has nothing to compare with: GitHub would list every pull request there has been.
+          if [ -n "$PREVIOUS" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f "tag_name=$TAG" -f "target_commitish=$SHA" \
+              -f "previous_tag_name=$PREVIOUS" --jq .body >"$RUNNER_TEMP/changes.md"
+          else
+            echo "The first build on this channel." >"$RUNNER_TEMP/changes.md"
+          fi
+          case "$CHANNEL:$VERSION" in
+            nightly:*) intro="A nightly build of main at ${SHA:0:8}: the newest changes, and the least tested." ;;
+            stable:0.*) intro="Lemon Studio $VERSION, an alpha." ;;
+            *) intro="Lemon Studio $VERSION." ;;
+          esac
+          python3 - "$RUNNER_TEMP/changes.md" "$intro" >"$RUNNER_TEMP/notes.md" <<'PY'
+          import os, sys
+          changes = open(sys.argv[1], encoding="utf-8").read().strip()
+          text = open("tools/package/release-notes.md", encoding="utf-8").read()
+          print(text.replace("{INTRO}", sys.argv[2]).replace("{VERSION}", os.environ["VERSION"]).replace("{CHANGES}", changes))
+          PY
+          cp LICENSE THIRD-PARTY-NOTICES.txt dist/
+
+      - name: Manifest
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PUBLIC_KEY: ${{ vars.MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          python3 tools/package/manifest.py --channel "$CHANNEL" --version "$VERSION" --commit "$SHA" \
+            --repo "$GITHUB_REPOSITORY" --tag "$TAG" --notes "$RUNNER_TEMP/changes.md" --dist dist --out "dist/$CHANNEL.json"
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          key="$RUNNER_TEMP/minisign.key"
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" >"$key"
+          minisign -S -s "$key" -m "dist/$CHANNEL.json" -t "lemonstudio $CHANNEL $VERSION"
+          rm -f "$key"
+          # The signature must check out against the key the updater was built with, or no installed copy could update.
+          public=$(printf '%s\n' "$MINISIGN_PUBLIC_KEY" | grep -v '^untrusted comment' | grep . | tail -n1)
+          minisign -V -P "$public" -m "dist/$CHANNEL.json"
+          cat "dist/$CHANNEL.json"
+
+      - name: Keep the dry run's files
+        if: inputs.dry_run
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-${{ needs.plan.outputs.version }}
+          path: |
+            dist/*
+            ${{ runner.temp }}/notes.md
+
+      - name: Publish the release
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = stable ]; then
+            title="Lemon Studio $VERSION"
+            case "$VERSION" in 0.*) title="$title (alpha)" ;; esac
+            # Not a GitHub pre-release, alpha or not: the updater finds it as GitHub's "latest" release.
+            gh release create "$TAG" dist/* --verify-tag --latest --title "$title" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$TAG" dist/* --target "$SHA" --prerelease --latest=false \
+              --title "Lemon Studio nightly $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+            # The fixed place the updater reads: moved on to this nightly once its downloads are all there.
+            if ! gh release view nightly >/dev/null 2>&1; then
+              gh release create nightly --target "$SHA" --prerelease --latest=false --title "Nightly (newest)" \
+                --notes "Holds nightly.json, which points Lemon Studio's updater at the newest nightly. The downloads are in the dated nightly-YEAR.MONTH.DAY.N releases."
+            fi
+            gh release upload nightly dist/nightly.json dist/nightly.json.minisig --clobber
+          fi
+
+      - name: Delete old nightlies
+        if: needs.plan.outputs.channel == 'nightly' && !inputs.dry_run
+        run: |
+          set -euo pipefail
+          gh release list --limit 1000 --json tagName --jq '.[].tagName' \
+            | { grep -E '^nightly-[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | head -n "-$KEEP_NIGHTLIES" \
+            | while read -r t; do echo "deleting $t"; gh release delete "$t" --cleanup-tag --yes; done

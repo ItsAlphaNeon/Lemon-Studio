@@ -48,10 +48,10 @@ pub fn native_first() -> bool {
     os_native::prefer_native()
 }
 
-/// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, Fruity Slicer, the
+/// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, Ogun, Fruity Slicer, the
 /// parametric EQ, Edison, Love Philter, Maximus, FPC, and the effects of `plugins::FL_RECREATIONS`).
 pub fn has_recreation(id: &str) -> bool {
-    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::slicer::FILE_NAME, crate::plugins::EQ_FILE_NAME, crate::plugins::EDISON_FILE_NAME, crate::plugins::LOVE_PHILTER_FILE_NAME, crate::plugins::MAXIMUS_FILE_NAME, crate::drums::FILE_NAME]
+    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::smith::FILE_NAME, crate::slicer::FILE_NAME, crate::plugins::EQ_FILE_NAME, crate::plugins::EDISON_FILE_NAME, crate::plugins::LOVE_PHILTER_FILE_NAME, crate::plugins::MAXIMUS_FILE_NAME, crate::drums::FILE_NAME]
         .iter()
         .any(|n| id.eq_ignore_ascii_case(n))
         || crate::plugins::recreation_of(id).is_some()
@@ -700,7 +700,7 @@ mod tests {
 
     /// Lemon Studio's other effects are compiled in like the EQ but have no file plugin of their own to be saved as: a
     /// slot hosting one is saved wrapped with its state, and the reopened project hosts the built-in copy again with
-    /// that state (Tesla's is its sample: its parameters are only its transport).
+    /// that state (Tesla's is its sample: its parameters are only its transport; Lemon Drop's is its display state).
     #[test]
     fn linked_effects_save_wrapped_and_reopen() {
         use crate::plugins::LINKED_EFFECTS;
@@ -719,14 +719,24 @@ mod tests {
             ..Default::default()
         });
         let tesla_frames_of = |st: Option<Vec<u8>>| st.and_then(|b| tesla::state::from_plugin_state(&b)).map(|s| s.sample.frames());
+        // Lemon Drop's settings are its saved state (its one parameter is the display's hold switch).
+        let drop_state = lemon_drop::plugin_state_from_fl(&lemon_drop::state::State { gain: 42, ..Default::default() }.to_bytes());
+        let drop_gain_of = |st: Option<Vec<u8>>| st.and_then(|b| lemon_drop::fl_from_plugin_state(&b)).map(|f| lemon_drop::state_of(&f).gain);
         let mut set = Vec::new();
         for (k, name) in LINKED_EFFECTS.iter().enumerate() {
             let (t, slot) = at(k);
             a.state.project.mixer[usize::from(t)].slots[usize::from(slot)] = Some(crate::plugins::new_slot(name));
             let tesla = *name == crate::plugins::TESLA;
-            a.plugins.create_effect(t, slot, a.plugins.effect_index(name).unwrap(), tesla.then_some(tesla_state.as_slice())).unwrap();
+            let drop = *name == crate::plugins::LEMON_DROP;
+            let start = if tesla { Some(tesla_state.as_slice()) } else if drop { Some(drop_state.as_slice()) } else { None };
+            a.plugins.create_effect(t, slot, a.plugins.effect_index(name).unwrap(), start).unwrap();
             if tesla {
                 assert_eq!(tesla_frames_of(a.plugins.state(key(k))), Some(tesla_frames));
+                set.push((u32::MAX, 0.0));
+                continue;
+            }
+            if drop {
+                assert_eq!(drop_gain_of(a.plugins.state(key(k))), Some(42));
                 set.push((u32::MAX, 0.0));
                 continue;
             }
@@ -762,6 +772,10 @@ mod tests {
             assert!(b.plugins.descriptor(key(k)).is_some_and(|d| is_builtin(&d)), "{name} hosted, built in");
             if *name == crate::plugins::TESLA {
                 assert_eq!(tesla_frames_of(b.plugins.state(key(k))), Some(tesla_frames), "Tesla kept its sample");
+                continue;
+            }
+            if *name == crate::plugins::LEMON_DROP {
+                assert_eq!(drop_gain_of(b.plugins.state(key(k))), Some(42), "Lemon Drop kept its state");
                 continue;
             }
             assert_eq!(b.plugins.param_value(key(k), set[k].0), Some(set[k].1), "{name} kept its setting");

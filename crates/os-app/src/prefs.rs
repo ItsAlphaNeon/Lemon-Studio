@@ -255,6 +255,15 @@ pub const SHOW_SPLASH: Check = Check { key: "show_startup_splash", label: "Show 
 /// gets one, this check silences it. Spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
 pub const SILENT_STARTUP: Check = Check { key: "silent_startup", label: "Silent startup", default: false };
 
+/// General ▸ Updates: at start, a release build checks its channel (nightly or stable) for a newer build
+/// (`crate::update`). A build from source never checks.
+pub const AUTO_CHECK_UPDATES: Check = Check { key: "auto_check_updates", label: "Automatically check for updates", default: true };
+
+/// General ▸ Updates: a newer build found is downloaded right away, so Install and restart has nothing to wait
+/// for; off, it is downloaded once Install is chosen.
+pub const AUTO_DOWNLOAD_UPDATES: Check =
+    Check { key: "auto_download_updates", label: "Automatically download program updates", default: true };
+
 /// General ▸ Input: off, a left or a right click on a step of the step sequencer toggles it; on, the left button only
 /// sets steps and the right one only clears them. A drag sets (left) or clears (right) the steps it crosses either way
 /// (`App::rack_step`). Spec: ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)".
@@ -588,6 +597,8 @@ pub const CHECKS: &[&Check] = &[
     &LIMIT_EDITORS,
     &SHOW_SPLASH,
     &SILENT_STARTUP,
+    &AUTO_CHECK_UPDATES,
+    &AUTO_DOWNLOAD_UPDATES,
     &BOTH_MOUSE_BUTTONS,
     &CLICK_AND_HOLD,
     &UNDO_KNOB_TWEAKS,
@@ -699,10 +710,10 @@ fn slider_in(st: &Store, s: &Slider) -> u16 {
     st.get(s.key).and_then(|v| v.parse::<u16>().ok()).map_or(s.default, |v| v.min(s.max))
 }
 
-/// Tests only: a check that exercises the settings page. It stays greyed for real until Lemon Studio can update itself
-/// (ui/options-coverage.md §4).
+/// Tests only: a check that exercises the settings page, on a control that stays greyed for real (General ▸ Advanced;
+/// ui/options-coverage.md §4).
 #[cfg(test)]
-pub const TEST_CHECK: Check = Check { key: "test_check", label: "Automatically check for updates", default: true };
+pub const TEST_CHECK: Check = Check { key: "test_check", label: "Use the high-performance power plan", default: true };
 
 fn checks() -> impl Iterator<Item = &'static Check> {
     #[cfg(test)]
@@ -911,7 +922,7 @@ main_gui_scaling = 200%
         set_choice(&MAIN_GUI_SCALING, 99);
         assert_eq!(choice(&MAIN_GUI_SCALING), "125%");
         assert_eq!(find_combo("Main GUI scaling"), Some(&MAIN_GUI_SCALING));
-        assert_eq!(find_check("Automatically check for updates"), Some(&TEST_CHECK));
+        assert_eq!(find_check("Use the high-performance power plan"), Some(&TEST_CHECK));
         assert_eq!((find_check("Main GUI scaling"), find_combo("Language"), find_check("")), (None, None, None));
     }
 
@@ -1019,21 +1030,23 @@ main_gui_scaling = 200%
         click(&mut app, &mut c, r);
         assert_eq!(app.state.playlist.popup.as_ref().unwrap().items[2].mark, crate::playlist::Mark::Radio(true));
         app.state.playlist.popup = None;
-        // The test check (Updates, further down the page: the groups above it folded) toggles.
-        app.state.settings.folded.extend(["Display", "Language", "Input", "Undo history"]);
+        // The test check (Advanced, further down the page: the groups above it folded) toggles.
+        app.state.settings.folded.extend(["Display", "Language", "Input", "Undo history", "Hints and warnings", "System", "Updates", "Miscellaneous"]);
         app.paint(&mut c, None);
         let key = Action::Settings(SAct::Check(TEST_CHECK.label));
         let r = hit_rect(&app, &key);
         click(&mut app, &mut c, r);
         assert!(!check(&TEST_CHECK));
-        assert_eq!(app.state.message.as_deref(), Some("Automatically check for updates: off"));
+        assert_eq!(app.state.message.as_deref(), Some("Use the high-performance power plan: off"));
         let r = hit_rect(&app, &key);
         click(&mut app, &mut c, r);
         assert!(check(&TEST_CHECK));
-        // Its neighbours are not declared: greyed out.
-        let download = "Automatically download program updates";
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder(download)));
-        assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check(download))));
+        // The update checks above it are real settings (`crate::update`), not greyed out.
+        app.state.settings.folded.retain(|g| *g != "Updates");
+        app.paint(&mut c, None);
+        let download = AUTO_DOWNLOAD_UPDATES.label;
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check(download))));
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(download)));
         // Nothing about usage data.
         assert!(!app.hits.iter().any(|h| matches!(h.action, Action::Placeholder(l) if l.contains("usage"))));
     }

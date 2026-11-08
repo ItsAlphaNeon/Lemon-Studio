@@ -81,7 +81,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
 | Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape, their range and their LFO; channel volume and pan moves record into a pattern; not yet recording into automation clips |
 | Project files | 🚧 | Opens and saves projects from FL Studio 10 and later (older layouts are converted as they open). Keep backups |
-| Built-in instruments and effects | 🚧 | Instruments: Lemon Sampler (long samples can play straight from disk), Lemon Trio (three oscillators), Citrus (a six-operator synth that plays Sytrus patches), Lemon Slicer (a loop cut into slices that plays Fruity Slicer channels) and Lemon Drum Sampler (32 pads of velocity-layered samples that plays FPC kits). Effects: Lemon Parametric EQ (all of FL's quality modes: HQ+, HQ Enhanced, linear phase), Limiter, Reverb, Delay, Chorus, Stereo Shaper, Stereo Enhancer, Balance, Soft Clipper, Fast Distortion, Transient Processor, Filter, Flanger and Phaser, plus Pulp Filter (a pattern-controlled multi-filter) and Press (a multiband maximiser). All built in, and also VST3 and CLAP plugins for other DAWs; a project's Fruity Limiter slots play Lemon Limiter's sound, sidechain included |
+| Built-in instruments and effects | 🚧 | Instruments: Lemon Sampler (long samples can play straight from disk), Lemon Trio (three oscillators), Citrus (a six-operator synth that plays Sytrus patches), Smith (an additive synth that plays Ogun patches), Lemon Slicer (a loop cut into slices that plays Fruity Slicer channels) and Lemon Drum Sampler (32 pads of velocity-layered samples that plays FPC kits). Effects: Lemon Parametric EQ (all of FL's quality modes: HQ+, HQ Enhanced, linear phase), Limiter, Reverb, Delay, Chorus, Stereo Shaper, Stereo Enhancer, Balance, Soft Clipper, Fast Distortion, Transient Processor, Filter, Flanger and Phaser, plus Pulp Filter (a pattern-controlled multi-filter), Press (a multiband maximiser) and Lemon Drop (an oscilloscope, spectrum, meter and vectorscope that shows Wave Candy slots). All built in, and also VST3 and CLAP plugins for other DAWs; a project's Fruity Limiter slots play Lemon Limiter's sound, sidechain included |
 | Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers; a pattern rendered as an audio clip (Quick render, Render and replace) |
 | MIDI file import / export | ✅ | Import into a new project, the open one or a piano roll channel (tracks, channels, tempo changes, time signatures, markers); export a pattern or the song's patterns |
 | Note input | 🚧 | Mouse, computer keyboard, MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch) and the touch controller; note recording into patterns with loop record, precount and Start on input; step edit |
@@ -118,7 +118,14 @@ Per-area details are in [docs/status.md](docs/status.md). The full, item-by-item
 
 ## Getting started
 
-No prebuilt binaries are provided at this stage: Lemon Studio is built from source. Each platform below goes from a fresh
+**Nightly builds** for Windows, Linux (AppImage) and macOS (Apple silicon) are on the
+[releases page](https://github.com/ItsAlphaNeon/Lemon-Studio/releases): the newest changes on main, built every night,
+with Lemon Studio's plugins for other DAWs as a separate zip. They are pre-alpha and not signed: the release notes say
+how to open them on each system (on macOS, past Gatekeeper). Once installed, a nightly checks for a newer nightly when
+it starts and installs it when you agree (Settings ▸ General ▸ Updates); stable releases will do the same with stable
+releases. How releases are made: [docs/releasing.md](docs/releasing.md).
+
+Or build Lemon Studio from source, which never updates itself. Each platform below goes from a fresh
 machine to Lemon Studio installed with its icon, and Lemon Studio's own plugins installed for any DAW. All three need
 **Rust**, stable toolchain 1.89 or newer, installed through [rustup](https://rustup.rs/), and a clone of this repository:
 
@@ -130,7 +137,7 @@ cd Lemon-Studio
 `cargo run -p os-app --release` builds and runs Lemon Studio. Before Lemon Studio starts, it also rebuilds Lemon
 Studio's own plugins (Lemon Sampler, Lemon Trio, Lemon Parametric EQ, Lemon Limiter, Lemon Reverb, Lemon Delay, Lemon
 Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus,
-Lemon Stereo Shaper, Lemon Filter, Lemon Flanger, Lemon Phaser, Pulp Filter, Press, Tesla and Citrus) and
+Lemon Stereo Shaper, Lemon Filter, Lemon Flanger, Lemon Phaser, Pulp Filter, Press, Lemon Drop, Tesla, Citrus and Smith) and
 installs the ones that changed as VST3 and CLAP plugins, in the folders where other DAWs find them. Lemon Studio itself
 has every one of them built in and needs no plugin files. A plugin that is new or updated in the repository shows up
 in other DAWs at the next run. The first run builds every plugin, which takes
@@ -356,6 +363,7 @@ cargo run -p os-app --release -- --control /tmp/lemon.sock path/to/project.flp
 | `os-play` | Play a project through the default audio output |
 | `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them (`cargo run -p os-app --release` runs it with `--install`) |
 | `bundle-app` | Build Lemon Studio as a macOS app, and optionally install it |
+| `updater` | `lemonstudio-updater`, which release builds carry to update themselves (built by the release workflow only; [docs/releasing.md](docs/releasing.md)) |
 
 ## Architecture
 
@@ -400,8 +408,10 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-vocoder`](plugins/lemon-vocoder) | Lemon Vocoder: a band vocoder with a sidechain input for the carrier (VST3 + CLAP) |
 | [`pulp-filter`](plugins/pulp-filter) | Pulp Filter effect, a pattern-controlled multi-filter (VST3 + CLAP) |
 | [`press`](plugins/press) | Press effect, a multiband maximiser (VST3 + CLAP) |
+| [`lemon-drop`](plugins/lemon-drop) | Lemon Drop, an audio visualizer: oscilloscope, spectrum, meter and vectorscope (VST3 + CLAP) |
 | [`tesla`](plugins/tesla) | Tesla, the audio editor and recorder (VST3 + CLAP) |
 | [`citrus`](plugins/citrus) | Citrus instrument, a six-operator synthesizer (VST3 + CLAP) |
+| [`smith`](plugins/smith) | Smith instrument, an additive synthesizer (VST3 + CLAP) |
 | [`lemon-slicer`](plugins/lemon-slicer) | Lemon Slicer instrument, a loop cut into slices (VST3 + CLAP) |
 
 ## Roadmap

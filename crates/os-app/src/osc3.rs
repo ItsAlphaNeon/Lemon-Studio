@@ -43,6 +43,7 @@ pub fn file_name(name: &str) -> &str {
     match name {
         LEMON_TRIO => FILE_NAME,
         crate::citrus::CITRUS => crate::citrus::FILE_NAME,
+        crate::smith::SMITH => crate::smith::FILE_NAME,
         crate::slicer::LEMON_SLICER => crate::slicer::FILE_NAME,
         crate::drums::LEMON_DRUMS => crate::drums::FILE_NAME,
         _ => name,
@@ -54,6 +55,7 @@ pub fn label(name: &str) -> &str {
     match name {
         FILE_NAME => LEMON_TRIO,
         crate::citrus::FILE_NAME => crate::citrus::CITRUS,
+        crate::smith::FILE_NAME => crate::smith::SMITH,
         n if crate::slicer::is_file_name(n) => crate::slicer::LEMON_SLICER,
         crate::drums::FILE_NAME => crate::drums::LEMON_DRUMS,
         n if n.eq_ignore_ascii_case(crate::lemon_midi_out::FILE_NAME) => "Lemon MIDI Out",
@@ -206,6 +208,7 @@ mod tests {
     fn builtin_lemon_3x_osc_takes_and_gives_the_file_state() {
         let mut pl = Plugins::default();
         pl.available = crate::plugins::builtin();
+        pl.set_rate(48000);
         let index = pl.index_of(LEMON_TRIO).expect("built-in Lemon Trio");
         assert!(crate::project_plugins::is_builtin(&pl.available[index].desc));
         let mut fl = default_state();
@@ -215,8 +218,7 @@ mod tests {
         set_field(&mut fl, 109, 77); // a field nothing uses: kept
         pl.create_with(2, index, Some(&op::plugin_state_from_fl(&fl))).unwrap();
         assert_eq!(pl.osc3_file_state(2), Some(fl.clone()));
-        // It sounds: a saw at 880 Hz (pitch formula of 3x-osc.md: key 69 with coarse 0), counted at the device rate
-        // the instance runs at (44.1 or 48 kHz).
+        // It sounds: a saw at 880 Hz (pitch formula of 3x-osc.md: key 69 with coarse 0), counted at 48 kHz.
         let inst = instance(&pl, 2);
         let mut i = inst.lock().unwrap();
         i.note_on(0, 69, 100.0 / 127.0);
@@ -327,6 +329,7 @@ mod tests {
         a.state.file = None;
         a.state.path = None;
         a.plugins.available = crate::plugins::builtin();
+        a.plugins.set_rate(48000);
         let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_TRIO);
         let mut fl = default_state();
         set_field(&mut fl, op::osc(0) + op::SHAPE + 1, 6); // osc 1: custom

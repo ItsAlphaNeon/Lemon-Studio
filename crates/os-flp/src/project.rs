@@ -705,7 +705,7 @@ fn scan_channel(events: &[Event], start: usize, end: usize) -> ChannelLoc {
     let mut c = ChannelLoc { start, end, ..Default::default() };
     for k in start + 1..end {
         match events[k].id {
-            id::DISPLAY_NAME => c.name = Some(k),
+            id::DISPLAY_NAME if c.name.is_none() => c.name = Some(k),
             id::PLUGIN_REC => c.plugin_rec = Some(k),
             id::CH_TYPE if c.kind.is_none() => c.kind = Some(k),
             id::PLUGIN_NAME => c.plugin_name = Some(k),
