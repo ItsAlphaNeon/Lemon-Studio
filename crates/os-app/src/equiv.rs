@@ -376,15 +376,19 @@ impl Rig {
         fp
     }
 
-    /// Where the generator may aim: the centres of the hits the last frame registered, on the frame.
-    fn targets(&self) -> Vec<(f32, f32, String)> {
+    /// Where the generator may aim: the centres of the hits the last frame registered, on the frame, with each one's
+    /// kind and whether it holds a value (a knob, fader, slider or anything automatable: the tempo, a value box).
+    fn targets(&self) -> Vec<(f32, f32, String, bool)> {
         let (w, h) = (FRAME.0 as f32, FRAME.1 as f32);
         self.app
             .hits
             .iter()
             .filter(|h| h.rect.w >= 1.0 && h.rect.h >= 1.0)
-            .map(|h| (h.rect.x + h.rect.w / 2.0, h.rect.y + h.rect.h / 2.0, kind(&h.action)))
-            .filter(|&(x, y, _)| (0.0..w).contains(&x) && (0.0..h).contains(&y))
+            .map(|h| {
+                let valued = crate::knobs::Control::of(&h.action).is_some() || self.app.automation_target(&h.action).is_some();
+                (h.rect.x + h.rect.w / 2.0, h.rect.y + h.rect.h / 2.0, kind(&h.action), valued)
+            })
+            .filter(|&(x, y, ..)| (0.0..w).contains(&x) && (0.0..h).contains(&y))
             .collect()
     }
 
@@ -404,7 +408,7 @@ impl Rig {
             return vec![Input::Key("Escape".into(), false, false)];
         }
         let mut at = rng.next() % total;
-        let Some((x, y, k)) = targets.iter().find(|t| {
+        let Some((x, y, k, valued)) = targets.iter().find(|t| {
             let w = weight(&t.2);
             if at < w {
                 return true;
@@ -420,7 +424,8 @@ impl Rig {
         let (shift, ctrl, alt) = (rng.chance(12), rng.chance(12), rng.chance(5));
         let mods = Input::Mods(shift, ctrl, alt);
         let none = Input::Mods(false, false, false);
-        let roll = rng.below(100);
+        // A control holding a value is mostly dragged or wheeled: a click alone rarely changes it.
+        let roll = if valued && rng.chance(70) { 58 + rng.below(27) } else { rng.below(100) };
         match roll {
             0..40 => vec![mods, Input::Move(x, y), Input::Down, Input::Up, none],
             40..48 => vec![Input::Move(x, y), Input::Down, Input::Up, Input::Down, Input::Up],
