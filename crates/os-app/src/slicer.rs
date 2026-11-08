@@ -204,6 +204,7 @@ mod tests {
         let path = loop_file("plays");
         let mut pl = Plugins::default();
         pl.available = crate::plugins::builtin();
+        pl.set_rate(48000);
         let index = pl.index_of(LEMON_SLICER).expect("built-in Lemon Slicer");
         assert!(crate::project_plugins::is_builtin(&pl.available[index].desc));
         let fl = state_for(&path);

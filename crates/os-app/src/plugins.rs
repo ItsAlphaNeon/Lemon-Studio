@@ -323,6 +323,9 @@ pub struct Plugins {
     /// The file and stamp each found plugin was listed from (uid -> path, size, time): an unchanged file keeps its
     /// library (and a library loaded for use stays loaded).
     stamps: HashMap<String, (String, u64, u64)>,
+    /// The rate new instances start at; 0 until the first one asks the output device. An instance handed a block at any
+    /// other rate stays silent until the UI moves it, and the device's rate depends on the machine: a test that
+    /// processes at a literal rate pins it first (`set_rate`).
     rate: u32,
     /// Verdicts of the one-time child-process check a native plugin passes before its first load here (spec:
     /// plugins/fruity-abi.md "Crash containment"). `None`: no check (tests, where this program is the test harness).

@@ -1961,6 +1961,7 @@ mod tests {
         a.plugins = crate::plugins::Plugins::default();
         a.plugins.available = crate::plugins::builtin();
         a.plugins.effects = crate::plugins::builtin_effects();
+        a.plugins.set_rate(48000);
         a.state.plugdb.rebuild(&a.plugins);
         a.plugin_tick();
         a.plugin_tick();
