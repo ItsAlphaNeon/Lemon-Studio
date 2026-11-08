@@ -1045,7 +1045,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
     }
     ui.c.icon(&os_ui::tabler::SETTINGS, Rect::new(r.x + 7.0, r.y + 7.0, 16.0, 16.0), t.text_dim);
     let (_, title, _) = TABS[st.tab.min(TABS.len() - 1)];
-    ui.c.text(Font::new(13), r.x + 28.0, r.y + 7.0, t.text, &format!("Settings - {title}"));
+    ui.c.text_mid(Font::new(13), r.x + 28.0, r.y + 15.0, t.text, &format!("Settings - {title}"));
     let x = Rect::new(r.right() - 26.0, r.y + 5.0, 20.0, 20.0);
     let hov = super::close_button(ui, x, x, Action::Settings(SAct::Close), "Close");
     ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.tx(0xffffff) } else { t.text });
