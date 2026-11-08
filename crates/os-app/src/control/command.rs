@@ -1231,6 +1231,8 @@ fn restore(s: &mut State, side: Side) {
     crate::rack::remap_ui(s, &map);
     let r = &mut s.rack;
     (r.groups, r.unsorted_at, r.filter, r.zipped, r.locked, r.loop_len, r.loop_unit) = (groups, unsorted_at, filter, zipped, locked, loop_len, loop_unit);
+    // The loop lengths put back are the pattern's put back with them.
+    r.loops_of = s.pattern;
     let tracks = crate::mixer::inserts(s);
     s.selected_mixer = s.selected_mixer.min(tracks);
     s.mixer.sel.retain(|&t| t <= tracks);

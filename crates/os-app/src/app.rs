@@ -4274,6 +4274,9 @@ impl App {
     pub fn tick(&mut self) -> bool {
         // Things the interface added get their ids before anything looks them up (`control::ids`).
         let s = &mut self.state;
+        // The rack's loops follow the pattern shown: a file holds them per pattern (spec: flp/events/patterns.md "Loop
+        // lengths").
+        crate::rack::follow_pattern(s);
         s.control.settle_tick(&mut s.project, s.piano.dirty);
         self.control_tick();
         self.plugin_tick();

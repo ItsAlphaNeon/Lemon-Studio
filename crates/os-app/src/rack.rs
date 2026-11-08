@@ -237,6 +237,9 @@ pub struct RackUi {
     /// Advanced looping's loop points (§15, loop type 2): a row with one loops at the end of its last used step, beat
     /// or bar; a row without one does not loop.
     pub loop_unit: BTreeMap<usize, LoopUnit>,
+    /// The pattern `loop_len`, `loop_mode` and `loop_type` belong to: the one shown when they were last loaded.
+    /// [`follow_pattern`] stores them into it and loads the shown one's when another is shown.
+    pub loops_of: u16,
     pub loop_type: u8,
     /// Position of "Unsorted" in the file's group list (`None` = last; see [`to_model`]).
     pub unsorted_at: Option<usize>,
@@ -313,6 +316,8 @@ impl Default for RackUi {
             loop_mode: false,
             loop_len: BTreeMap::new(),
             loop_unit: BTreeMap::new(),
+            // The pattern a new project shows (`State`'s `pattern`).
+            loops_of: 1,
             loop_type: 0,
             unsorted_at: None,
             clipboard: None,
@@ -2952,6 +2957,14 @@ pub fn from_model(s: &mut State) {
             None => Filter::All,
         },
     };
+    load_loops(s);
+}
+
+/// The shown pattern's loop lengths, loop type and loop mode into the rack (they are the pattern's, in the file).
+fn load_loops(s: &mut State) {
+    let p = &s.project;
+    let rack = &mut s.rack;
+    rack.loops_of = s.pattern;
     let pat = p.pattern(s.pattern);
     let loops = pat.map(|p| p.loops.clone()).unwrap_or_default();
     rack.loop_len = loops
@@ -2985,10 +2998,7 @@ fn loop_state(loops: &[(u16, u32)], off: Option<u32>) -> (BTreeSet<(u16, u32)>, 
 
 /// Writes the rack state into the project before a save (the inverse of [`from_model`]).
 pub fn to_model(s: &mut State) {
-    // Advanced looping's loop points are saved as the lengths they give in the current pattern (Lemon Studio's choice:
-    // the file's own form for them is not known); a row with no notes there has none.
-    let lens: BTreeMap<usize, u32> =
-        if advanced(s) { s.rack.loop_unit.keys().filter_map(|&r| unit_len(s, r).map(|l| (r, l))).collect() } else { s.rack.loop_len.clone() };
+    follow_pattern(s);
     let rack = &s.rack;
     let p = &mut s.project;
     // Groups in file order: the user groups, with "Unsorted" where the file had it (else last, like FL's Alt+G).
@@ -3014,7 +3024,36 @@ pub fn to_model(s: &mut State) {
     if p.groups.is_empty() {
         p.current_group = None;
     }
-    // Loop lengths belong to the current pattern.
+    store_loops(s);
+}
+
+/// When another pattern is shown than the one the rack's loops belong to: they go into theirs (unless it is gone),
+/// and the shown pattern's are loaded. Before, a save wrote them into whichever pattern was shown, over its own.
+pub(crate) fn follow_pattern(s: &mut State) {
+    let (shown, of) = (s.pattern, s.rack.loops_of);
+    if shown == of {
+        return;
+    }
+    if s.project.pattern(of).is_some() {
+        s.pattern = of;
+        store_loops(s);
+        s.pattern = shown;
+    }
+    let before = (s.rack.loop_len.clone(), s.rack.loop_mode, s.rack.loop_type);
+    load_loops(s);
+    if (s.rack.loop_len.clone(), s.rack.loop_mode, s.rack.loop_type) != before {
+        s.piano.dirty = true;
+    }
+}
+
+/// The rack's loop lengths, type and mode into the pattern they belong to (the shown one: `follow_pattern` first).
+fn store_loops(s: &mut State) {
+    // Advanced looping's loop points are saved as the lengths they give in the pattern (Lemon Studio's choice: the
+    // file's own form for them is not known); a row with no notes there has none.
+    let lens: BTreeMap<usize, u32> =
+        if advanced(s) { s.rack.loop_unit.keys().filter_map(|&r| unit_len(s, r).map(|l| (r, l))).collect() } else { s.rack.loop_len.clone() };
+    let rack = &s.rack;
+    let p = &mut s.project;
     let mut loops: Vec<(u16, u32)> = lens.iter().filter_map(|(&r, &l)| p.channels.get(r).map(|c| (c.index, l))).collect();
     // Loop mode on with every channel following the pattern and none of its own length: FL's file says so with a
     // follow entry for each channel (and no loop_off), which is what `from_model` reads back as loop mode on.
@@ -3064,6 +3103,33 @@ mod tests {
         assert!(a.state.rack.loop_mode && a.state.rack.loop_type == 1);
     }
 
+    /// Each pattern keeps its own loop lengths: showing another pattern loads its lengths, and a save there no longer
+    /// writes the first one's over them (equivalence harness, Electroconductor - Inner Days - Original.flp).
+    #[test]
+    fn loop_lengths_follow_the_pattern_shown() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        let ch = a.state.project.channels[0].index;
+        for (n, len) in [(1, 3), (2, 5)] {
+            let pat = crate::patterns::pat_mut(&mut a.state, n);
+            (pat.loops, pat.loop_off) = (vec![(ch, len)], None);
+        }
+        a.state.pattern = 1;
+        from_model(&mut a.state);
+        assert_eq!(a.state.rack.loop_len, [(0, 3)].into());
+        a.state.rack.loop_len.insert(0, 4);
+        a.state.pattern = 2;
+        follow_pattern(&mut a.state);
+        assert_eq!(a.state.rack.loop_len, [(0, 5)].into(), "pattern 2's own");
+        to_model(&mut a.state);
+        let loops = |a: &crate::app::App, n| a.state.project.pattern(n).map(|p| p.loops.clone());
+        assert_eq!(loops(&a, 2), Some(vec![(ch, 5)]), "pattern 2 keeps its lengths");
+        assert_eq!(loops(&a, 1), Some(vec![(ch, 4)]), "pattern 1 keeps the length set while it was shown");
+        a.state.pattern = 1;
+        follow_pattern(&mut a.state);
+        assert_eq!(a.state.rack.loop_len, [(0, 4)].into());
+    }
+
     /// A project opens on the pattern it was saved on, with the loop lengths saved into that pattern.
     #[test]
     fn the_current_pattern_and_its_loops_reopen() {
@@ -3077,6 +3143,7 @@ mod tests {
         let note = os_model::Note { position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
         crate::patterns::pat_mut(&mut a.state, 2).notes.push(note);
         a.state.pattern = 2;
+        follow_pattern(&mut a.state);
         a.state.rack.loop_len.insert(0, 8);
         a.save_to(file.clone());
         let mut b = crate::app::App::new(None);
