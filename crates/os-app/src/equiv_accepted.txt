@@ -13,3 +13,8 @@ undo-to-start(tempo	Save writes the interface's tempo into the project, and no u
 undo-to-start(song_mode	Save writes the interface's song mode into the project, and no undo step takes a save back (control-plane step 5).
 undo-to-start(playlist_view	Save writes the playlist's view (scroll, zoom) into the project, and no undo step takes a save back.
 undo-to-start(work_time	The time spent on the project counts on while it is open; no undo step takes it back.
+roundtrip(channels[].rack.group	The rack's groups, locks and zips live in the interface until a save writes them, and a copy saved for the check leaves the project as it was (control-plane step 5 moves them into the project).
+roundtrip(channels[].rack.locked	The rack's groups, locks and zips live in the interface until a save writes them, and a copy saved for the check leaves the project as it was (control-plane step 5 moves them into the project).
+roundtrip(channels[].rack.zipped	The rack's groups, locks and zips live in the interface until a save writes them, and a copy saved for the check leaves the project as it was (control-plane step 5 moves them into the project).
+roundtrip(groups	The rack's groups, locks and zips live in the interface until a save writes them, and a copy saved for the check leaves the project as it was (control-plane step 5 moves them into the project).
+roundtrip(current_group	The rack's groups, locks and zips live in the interface until a save writes them, and a copy saved for the check leaves the project as it was (control-plane step 5 moves them into the project).

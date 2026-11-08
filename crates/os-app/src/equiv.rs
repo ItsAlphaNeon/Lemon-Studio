@@ -466,6 +466,15 @@ impl Rig {
     /// The checks that need no other build, at the end of a trace: each a name when it fails.
     fn invariants(&mut self, opened: &os_model::Project, work: &Path) -> Vec<String> {
         let mut bad = Vec::new();
+        // The checks run as a user would get to them: with no dialog open. A piano roll tool's preview goes as its ×
+        // does (no undo step was made for it), a message box or form as Escape closes it.
+        crate::piano_dlg::cancel(&mut self.app.state);
+        for _ in 0..8 {
+            if !self.app.modal_open() {
+                break;
+            }
+            self.run(&[Input::Key("Escape".into(), false, false)]);
+        }
         // The engine holds what the project says (an edit that never reached it shows here).
         if let Some(sent) = self.app.transport.sent_for_tests() {
             if sent != crate::rack::play_project(&self.app.state) {
@@ -513,6 +522,18 @@ impl Rig {
                 let mut back = again.state.project.clone();
                 for p in [&mut written, &mut back] {
                     (p.tempo, p.song_mode, p.current_pattern) = (None, None, None);
+                    // The file holds the clips in position order; their order in the list means nothing.
+                    for a in &mut p.arrangements {
+                        a.clips.sort_by_cached_key(|c| format!("{:012}:{:06}:{c:?}", c.position, c.track));
+                    }
+                    // A pattern with nothing in it (no notes, name, colour, length, loops or markers) has nothing to
+                    // write: the file holds it as an absent one.
+                    p.patterns.retain(|q| {
+                        !(q.notes.is_empty() && q.controls.is_empty() && q.name.is_none() && q.color.is_none() && q.length.is_none())
+                            || !q.loops.is_empty()
+                            || q.loop_off.is_some()
+                            || !q.markers.is_empty()
+                    });
                 }
                 if let Some(d) = difference(&written, &back, true) {
                     bad.push(format!("roundtrip({d})"));
