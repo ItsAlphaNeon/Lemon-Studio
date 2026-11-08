@@ -837,6 +837,8 @@ fn isolated(name: &str, job: &str) -> String {
         .args(["equiv::equiv_one", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
         .env("OS_EQUIV_ONE", job)
         .env("HOME", &home)
+        // No audio device at all: a null device keeps no time, so its stream would spin a core for the whole trace.
+        .env("ALSA_CONFIG_PATH", home.join("no-alsa.conf"))
         .output();
     let _ = std::fs::remove_dir_all(&home);
     let Ok(out) = out else { return "did not start".into() };
