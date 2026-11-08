@@ -538,21 +538,21 @@ fn meter(c: &mut Canvas, st: &State, a: &Analyzer, r: Rect, fade: f32) {
     let labels_w = (r.w * 0.4).min(44.0);
     let plot = Rect::new(r.x + labels_w, r.y, r.w - labels_w - 6.0, r.h - 4.0);
     let y_of = |db: f32| plot.y + meter_place(db, st.meter_scale) * plot.h;
-    // dB labels: every dB from +15 down, kept 12 px apart.
-    let mut last = f32::MIN;
-    let mut d = 15.0;
-    while d >= -96.0 {
+    // dB labels: 0 dB always, then every dB outward from it (up, then down), kept 12 px from those already placed.
+    let mut placed: Vec<f32> = Vec::new();
+    let order = std::iter::once(0.0).chain((1..=15).map(|d| d as f32)).chain((1..=96).map(|d| -(d as f32)));
+    for d in order {
         let y = y_of(d);
-        if y >= r.y + 2.0 && y - last >= 12.0 && y < plot.bottom() - 6.0 {
-            last = y;
-            let s = if d > 0.0 { format!("+{d}") } else { format!("{d}") };
-            let unit = "dB";
-            let uw = c.text_width(Font::new(8), unit);
-            c.text_right(Font::new(9), plot.x - 6.0 - uw - 2.0, y - 6.0, lab, &s);
-            c.text(Font::new(8), plot.x - 6.0 - uw, y - 5.0, lab.with_alpha(lab.a / 2), unit);
-            c.fill_rect(Rect::new(plot.x - 4.0, y.round(), 3.0, 1.0), ruler);
+        if y < r.y + 2.0 || y >= plot.bottom() - 6.0 || placed.iter().any(|&p| (p - y).abs() < 12.0) {
+            continue;
         }
-        d -= 1.0;
+        placed.push(y);
+        let s = if d > 0.0 { format!("+{d}") } else { format!("{d}") };
+        let unit = "dB";
+        let uw = c.text_width(Font::new(8), unit);
+        c.text_right(Font::new(9), plot.x - 6.0 - uw - 2.0, y - 6.0, lab, &s);
+        c.text(Font::new(8), plot.x - 6.0 - uw, y - 5.0, lab.with_alpha(lab.a / 2), unit);
+        c.fill_rect(Rect::new(plot.x - 4.0, y.round(), 3.0, 1.0), ruler);
     }
     c.fill_rect(Rect::new(plot.x - 2.0, r.y + 4.0, 1.0, r.h - 8.0), ruler);
     let gap = 4.0;
