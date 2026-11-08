@@ -460,6 +460,11 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Pulp Filter (Fruity Love Philter: a pattern-controlled multi-filter) and Press (Maximus: a multiband maximiser) as
   VST3 and CLAP plugins; a project's Fruity Love Philter and Maximus slots play and open in them, and are saved back
   as the original effects with their state
+- Lemon Drop (Wave Candy: an audio visualizer) as a VST3 and CLAP plugin: an oscilloscope, a scrolling spectrum, a
+  level meter with six ballistics and a vectorscope, drawn in the original's 28 colours with its glass frame; a
+  project's Wave Candy slots open in it and are saved back as Wave Candy with their state. The original's 38 presets
+  and eleven lemon ones are factory presets. The original's floating window (on desktop, keep in front, mini view)
+  is not recreated: the display sits in the editor
 - Lemon Flanger and Lemon Phaser as VST3 and CLAP plugins, each with the original's 27 presets as factory presets; a
   project's Fruity Flanger and Fruity Phaser play through the same sound in the mixer. Their sine waves use the true
   pi, where the original's is a hair off: the flanger still matches FL Studio 2026's exports sample for sample in the

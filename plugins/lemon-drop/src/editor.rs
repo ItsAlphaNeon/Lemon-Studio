@@ -10,8 +10,8 @@
 // spec: plugins/lemon-drop.md "Editor", plugins/host-link.md
 
 use std::any::Any;
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 
 use nih_plug::prelude::*;
 use os_plugkit::MenuDef;
@@ -257,7 +257,9 @@ impl Logic {
     }
 
     pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, dbl: bool) -> Vec<Act> {
-        let Some(c) = view::hit(&self.st, x, y) else { return vec![] };
+        let Some(c) = view::hit(&self.st, x, y) else {
+            return vec![];
+        };
         self.pressed = Some(c);
         match (kind(c), btn) {
             (Kind::Area, Btn::Middle) | (Kind::Button, Btn::Left) => {
@@ -276,7 +278,9 @@ impl Logic {
                 self.drag = Some(Drag { ctl: c, at: view::value(&self.st, c, self.target) as f32 });
                 vec![Act::Lock, Act::Capture, Act::Repaint]
             }
-            (Kind::Knob { .. } | Kind::Fader { .. }, Btn::Right) => vec![Act::TypeIn(TypeTarget::Value(c), x, y)],
+            (Kind::Knob { .. } | Kind::Fader { .. }, Btn::Right) => {
+                vec![Act::TypeIn(TypeTarget::Value(c), x, y)]
+            }
             (Kind::Toggle | Kind::Tab, Btn::Left) => {
                 view::toggle(&mut self.st, c);
                 self.commit();
@@ -297,7 +301,9 @@ impl Logic {
     }
 
     pub fn delta(&mut self, _dx: f32, dy: f32, m: Mods) -> Vec<Act> {
-        let Some(d) = self.drag.as_mut() else { return vec![] };
+        let Some(d) = self.drag.as_mut() else {
+            return vec![];
+        };
         let (min, max) = match kind(d.ctl) {
             Kind::Knob { min, max, .. } | Kind::Fader { min, max, .. } => (min, max),
             _ => return vec![],
@@ -340,7 +346,9 @@ impl Logic {
     }
 
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, _m: Mods) -> Vec<Act> {
-        let Some(c) = view::hit(&self.st, x, y) else { return vec![] };
+        let Some(c) = view::hit(&self.st, x, y) else {
+            return vec![];
+        };
         let (min, max, wrap) = match kind(c) {
             Kind::Knob { min, max, wrap, .. } => (min, max, wrap),
             Kind::Fader { min, max, .. } => (min, max, false),
@@ -462,7 +470,9 @@ impl Logic {
                 self.st.title = text.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).take(255).collect();
             }
             TypeTarget::Value(c) => {
-                let Ok(v) = text.trim().parse::<f32>() else { return };
+                let Ok(v) = text.trim().parse::<f32>() else {
+                    return;
+                };
                 let (min, max) = match kind(*c) {
                     Kind::Knob { min, max, .. } | Kind::Fader { min, max, .. } => (min, max),
                     _ => return,
@@ -489,8 +499,8 @@ use view::kind;
 #[cfg(windows)]
 mod win32 {
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicIsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicIsize, Ordering};
 
     use nih_plug::prelude::GuiContext;
     use os_plugkit::win::{self as pw, CursorLock};
@@ -500,7 +510,7 @@ mod win32 {
     use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     use super::{Act, Btn, Logic, Mods};
@@ -541,7 +551,14 @@ mod win32 {
         Mods { ctrl, shift, alt }
     }
 
-    pub fn open(parent: *mut c_void, scale: f32, params: Arc<DropParams>, shared: Arc<Shared>, _ctx: Arc<dyn GuiContext>, slot: Arc<AtomicIsize>) -> Handle {
+    pub fn open(
+        parent: *mut c_void,
+        scale: f32,
+        params: Arc<DropParams>,
+        shared: Arc<Shared>,
+        _ctx: Arc<dyn GuiContext>,
+        slot: Arc<AtomicIsize>,
+    ) -> Handle {
         let scale = if scale > 0.0 { scale } else { 1.0 };
         let logic = Logic::new(params, shared);
         let px = |v: u32| (v as f32 * scale).round() as u32;
@@ -605,7 +622,9 @@ mod win32 {
                 }
                 return DefWindowProcW(hwnd, msg, wp, lp);
             }
-            let Some(w) = state(hwnd) else { return DefWindowProcW(hwnd, msg, wp, lp) };
+            let Some(w) = state(hwnd) else {
+                return DefWindowProcW(hwnd, msg, wp, lp);
+            };
             if msg == os_hostlink::message() {
                 return w.host_link(wp, lp);
             }
@@ -633,7 +652,12 @@ mod win32 {
                 }
                 WM_MOUSEMOVE => {
                     if !w.tracking {
-                        let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                        let mut tme = TRACKMOUSEEVENT {
+                            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                            dwFlags: TME_LEAVE,
+                            hwndTrack: hwnd,
+                            dwHoverTime: 0,
+                        };
                         TrackMouseEvent(&mut tme);
                         w.tracking = true;
                     }
@@ -754,7 +778,9 @@ mod win32 {
         /// Answers the host (spec `plugins/host-link.md`): one page, the hint line.
         unsafe fn host_link(&mut self, wp: WPARAM, lp: LPARAM) -> LRESULT {
             use os_hostlink::{Cmd, PageIcon};
-            let Some(cmd) = Cmd::from_usize(wp) else { return 0 };
+            let Some(cmd) = Cmd::from_usize(wp) else {
+                return 0;
+            };
             match cmd {
                 Cmd::Hello => {
                     self.logic.hosted = true;
@@ -830,9 +856,22 @@ mod gui {
         let link = Peer::register(parent as u64, vec![PageIcon::Plugin], (view::W, view::H), move || px::notify(&wake));
         let peer = link.clone();
         let thread = px::spawn(parent, size, slot, move |win| {
-            let Ok(canvas) = Canvas::new(size.0, size.1, scale) else { return };
+            let Ok(canvas) = Canvas::new(size.0, size.1, scale) else {
+                return;
+            };
             let logic = Logic::new(params, shared);
-            let ed = Ed { win, canvas, buf: Vec::new(), scale, size, logic, palette: os_plugkit::palette(), last_hint: String::new(), dirty: true, link: peer };
+            let ed = Ed {
+                win,
+                canvas,
+                buf: Vec::new(),
+                scale,
+                size,
+                logic,
+                palette: os_plugkit::palette(),
+                last_hint: String::new(),
+                dirty: true,
+                link: peer,
+            };
             ed.run();
         });
         if thread.is_none() {
@@ -992,7 +1031,7 @@ mod tests {
         assert_eq!(acts, vec![Act::Menu(MenuReq::MeterMode, x, y)]);
         let cmd = l.menu(&MenuReq::MeterMode).find("RMS").unwrap();
         l.pick(&MenuReq::MeterMode, cmd, x, y);
-        assert_eq!(saved(&l).meter_mode, 4);
+        assert_eq!(saved(&l).meter_mode, 2);
         let (x, y) = centre(&l, Ctl::Background);
         l.down(x, y, Btn::Left, Mods::default(), false);
         assert!(!saved(&l).background);
@@ -1057,11 +1096,66 @@ mod tests {
         pm.save_png(path).unwrap();
     }
 
+    /// Every factory preset's display, rendered with a signal for its mode, for looking at:
+    /// `DROP_PNG=<dir> cargo test -p lemon-drop -- --ignored render_presets` (one PNG per preset).
+    #[test]
+    #[ignore]
+    fn render_presets() {
+        let Ok(dir) = std::env::var("DROP_PNG") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets/Lemon Drop");
+        let mut walk = vec![root.clone()];
+        let rate = 44100.0f32;
+        while let Some(d) = walk.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk.push(p);
+                    continue;
+                }
+                let b = std::fs::read(&p).unwrap();
+                let blob = b.splitn(3, |&c| c == b'\n').nth(2).unwrap().to_vec();
+                let fl = crate::fl_from_plugin_state(&blob).unwrap();
+                let mut l = logic();
+                l.params.set_state(fl);
+                l.poll();
+                let mode = display::shown_mode(&l.st, display::box_rect(&l.st, view::DISPLAY));
+                for block in 0..120usize {
+                    let (a, b): (Vec<f32>, Vec<f32>) = (0..1323)
+                        .map(|i| {
+                            let t = (block * 1323 + i) as f32 / rate;
+                            let s = |f: f32| (2.0 * std::f32::consts::PI * f * t).sin();
+                            match mode {
+                                Mode::Vectorscope => (0.4 * s(220.0) + 0.1 * s(330.0), 0.4 * (2.0 * std::f32::consts::PI * 220.0 * t).cos()),
+                                Mode::Spectrum => {
+                                    let n = ((block * 1323 + i) as f32 * 12.9898).sin() * 43758.547;
+                                    let noise = (n - n.floor() - 0.5) * 0.2;
+                                    let v = 0.3 * s(110.0) + 0.15 * s(880.0) + 0.08 * s(3520.0) + noise;
+                                    (v, v)
+                                }
+                                Mode::Meter => (0.45 * s(220.0), 0.3 * s(220.0)),
+                                Mode::Oscilloscope => (0.35 * s(220.0) + 0.12 * s(660.0), 0.35 * s(220.0) + 0.12 * s(660.0)),
+                            }
+                        })
+                        .unzip();
+                    l.an.push(&l.st.clone(), &a, &b, TICK);
+                }
+                let rel = p.strip_prefix(&root).unwrap().with_extension("png");
+                let name = rel.to_string_lossy().replace(['/', '\\'], "_");
+                render(&mut l, &dir.join(name));
+            }
+        }
+    }
+
     /// Editor renders for looking at: `DROP_PNG=<dir> cargo test -p lemon-drop -- --ignored render_editor`.
     #[test]
     #[ignore]
     fn render_editor() {
-        let Ok(dir) = std::env::var("DROP_PNG") else { return };
+        let Ok(dir) = std::env::var("DROP_PNG") else {
+            return;
+        };
         let dir = std::path::PathBuf::from(dir);
         let rate = 44100.0;
         let sig = |k: usize, i: usize| -> (f32, f32) {
@@ -1079,7 +1173,9 @@ mod tests {
                 }
             }
         };
-        for (name, mode, k) in [("scope", Mode::Oscilloscope, 0), ("spectrum", Mode::Spectrum, 3), ("meter", Mode::Meter, 1), ("vector", Mode::Vectorscope, 2)] {
+        for (name, mode, k) in
+            [("scope", Mode::Oscilloscope, 0), ("spectrum", Mode::Spectrum, 3), ("meter", Mode::Meter, 1), ("vector", Mode::Vectorscope, 2)]
+        {
             let mut l = logic();
             l.st.mode = mode;
             l.commit();

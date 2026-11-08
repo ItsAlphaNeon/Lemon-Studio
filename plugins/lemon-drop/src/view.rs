@@ -9,8 +9,8 @@
 // spec: plugins/lemon-drop.md "Editor", ui/lemon-design.md §11.1
 
 use os_theme::design::lemon as brand;
-use os_ui::kit::lemon::{self, plug};
 use os_ui::kit::State as Look;
+use os_ui::kit::lemon::{self, plug};
 use os_ui::{Canvas, Color, Font, Rect};
 
 use crate::state::*;
@@ -88,9 +88,19 @@ pub enum Ctl {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
     /// A knob over min ..= max (a wheel when `wrap`), with its default and whether it is drawn from its centre.
-    Knob { min: i32, max: i32, def: i32, bipolar: bool, wrap: bool },
+    Knob {
+        min: i32,
+        max: i32,
+        def: i32,
+        bipolar: bool,
+        wrap: bool,
+    },
     /// The vertical gain fader.
-    Fader { min: i32, max: i32, def: i32 },
+    Fader {
+        min: i32,
+        max: i32,
+        def: i32,
+    },
     Toggle,
     /// A list box (opens a menu).
     List,
@@ -120,7 +130,7 @@ pub fn kind(c: Ctl) -> Kind {
         Ctl::SpecRange => k(48, 144, 96),
         Ctl::MeterScale => k(0, 256, 128),
         Ctl::MeterHold => k(0, NEVER, 2500),
-        Ctl::MeterDecay => k(0, 5000, 750),
+        Ctl::MeterDecay => k(1, 5000, 750),
         Ctl::VecThick => k(100, 600, 350),
         Ctl::Title => Kind::Text,
         Ctl::Target | Ctl::SpecRes | Ctl::MeterMode | Ctl::VecMode => Kind::List,
@@ -290,7 +300,9 @@ pub fn hint(st: &State, c: Ctl, target: usize) -> String {
         Ctl::Opacity => format!("Colour opacity: {v}"),
         Ctl::Tab(m) => format!("{} settings", m.name()),
         Ctl::Auto => "Auto visual mode: the meter when the display is tall, the oscilloscope when it is wide".into(),
-        Ctl::ScopeLength | Ctl::SpecLength | Ctl::VecLength => format!("Update (block length): {}", ms(v)),
+        Ctl::ScopeLength | Ctl::SpecLength | Ctl::VecLength => {
+            format!("Update (block length): {}", ms(v))
+        }
         Ctl::ScopeRepeat => format!("Window (block repeat): {}, {:.1} ms shown", ms(v), crate::analysis::scope_span(st) * 1000.0),
         Ctl::Separation => format!("Stereo separation: {}", v.max(0) / 10),
         Ctl::Pinch => "Pinch the trace's ends".into(),
@@ -555,9 +567,9 @@ mod tests {
             let st = State { mode: m, ..State::new_default() };
             let l = layout(&st);
             for (i, (a, ra)) in l.iter().enumerate() {
-                let inside = [INPUT_CARD, LOOK_CARD, COLOR_CARD, MODE_CARD, DISPLAY].iter().any(|c| {
-                    ra.x >= c.x - 0.5 && ra.y >= c.y - 0.5 && ra.right() <= c.right() + 0.5 && ra.bottom() <= c.bottom() + 0.5
-                });
+                let inside = [INPUT_CARD, LOOK_CARD, COLOR_CARD, MODE_CARD, DISPLAY]
+                    .iter()
+                    .any(|c| ra.x >= c.x - 0.5 && ra.y >= c.y - 0.5 && ra.right() <= c.right() + 0.5 && ra.bottom() <= c.bottom() + 0.5);
                 assert!(inside, "{a:?} {ra:?}");
                 for (b, rb) in &l[i + 1..] {
                     if *a == Ctl::Display || *b == Ctl::Display {

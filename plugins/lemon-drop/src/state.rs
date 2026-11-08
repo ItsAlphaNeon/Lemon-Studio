@@ -154,7 +154,7 @@ impl Mode {
 }
 
 /// The meter's ballistics, by their stored value.
-pub const METER_MODES: [(i32, &str); 6] = [(0, "Peak"), (1, "PPM"), (4, "RMS"), (2, "Vu"), (3, "Leq(A)"), (5, "ITU-R BS.1770")];
+pub const METER_MODES: [(i32, &str); 6] = [(0, "Peak"), (1, "PPM"), (2, "RMS"), (3, "Vu"), (4, "Leq(A)"), (5, "ITU-R BS.1770")];
 /// The vectorscope's drawing, by its stored value.
 pub const VECTOR_MODES: [&str; 4] = ["String", "Spaghetti", "Tube", "Glowstick"];
 
@@ -326,6 +326,11 @@ impl State {
             window: [600, 200, 901, 325],
             mini_window: [1189, 933, 1236, 980],
         }
+    }
+
+    /// A new Lemon Drop: the original's fresh instance, titled with Lemon Drop's name.
+    pub fn lemon_default() -> State {
+        State { title: crate::NAME.as_bytes().to_vec(), ..State::new_default() }
     }
 
     /// Reads a version 9 state; None for any other version or a short one.

@@ -71,9 +71,9 @@ pub fn fl_from_plugin_state(blob: &[u8]) -> Option<Vec<u8>> {
     serde_json::from_str::<StateBytes>(field).ok().map(|s| s.0)
 }
 
-/// The state a stored blob stands for: a fresh instance's for none, or for one that does not read.
+/// The state a stored blob stands for: a new Lemon Drop's for none, or for one that does not read.
 pub fn state_of(bytes: &[u8]) -> State {
-    (!bytes.is_empty()).then(|| State::from_bytes(bytes)).flatten().unwrap_or_else(State::new_default)
+    (!bytes.is_empty()).then(|| State::from_bytes(bytes)).flatten().unwrap_or_else(State::lemon_default)
 }
 
 /// Samples kept for the editor (per channel): enough for the largest analysis (8192 bands) and the longest block.
@@ -155,7 +155,9 @@ impl DropParams {
     /// An edit from the editor: `st` becomes the state the host saves. False, and nothing changes, when the state was
     /// replaced since version `version` was read.
     pub fn edited(&self, version: u64, st: &State) -> bool {
-        let Ok(mut s) = self.state.write() else { return false };
+        let Ok(mut s) = self.state.write() else {
+            return false;
+        };
         if self.state_version.load(Ordering::Acquire) != version {
             return false;
         }
@@ -263,8 +265,8 @@ mod tests {
         assert_eq!(fl_from_plugin_state(&blob), Some(fl.clone()));
         assert_eq!(fl_from_plugin_state(&blob[8..]), Some(fl.clone()));
         assert_eq!(state_of(&fl), State::new_default());
-        assert_eq!(state_of(&[]), State::new_default());
-        assert_eq!(state_of(&[1, 2, 3]), State::new_default());
+        assert_eq!(state_of(&[]), State::lemon_default());
+        assert_eq!(state_of(&[1, 2, 3]), State::lemon_default());
     }
 
     #[test]
@@ -277,6 +279,36 @@ mod tests {
         p.set_state(State::new_default().to_bytes());
         assert!(!p.edited(v, &st));
         assert_eq!(p.current().1.gain, 0);
+    }
+
+    /// Every factory preset (`crates/os-app/factory-presets/Lemon Drop/`, spec: plugins/lemon-drop.md "Presets") holds
+    /// the plugin's saved state with a version 9 state that reads and writes back as it is; Default is a new Lemon Drop.
+    #[test]
+    fn factory_presets_hold_readable_states() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets/Lemon Drop");
+        let (mut n, mut walk) = (0, vec![root.clone()]);
+        while let Some(d) = walk.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk.push(p);
+                    continue;
+                }
+                let b = std::fs::read(&p).unwrap();
+                let mut part = b.splitn(3, |&c| c == b'\n');
+                assert_eq!(part.next(), Some(&b"OSPRESET 1"[..]), "{p:?}");
+                let head = std::str::from_utf8(part.next().unwrap()).unwrap();
+                assert!(head.starts_with("plugin=Lemon Drop\tid=clap:org.openstudio.lemon-drop\t") && !head.contains("body="), "{p:?}");
+                let fl = fl_from_plugin_state(part.next().unwrap()).unwrap_or_else(|| panic!("{p:?}"));
+                let st = State::from_bytes(&fl).unwrap_or_else(|| panic!("{p:?}"));
+                assert_eq!(st.to_bytes(), fl, "{p:?}");
+                if p == root.join("Default.ospreset") {
+                    assert_eq!(st, State::lemon_default());
+                }
+                n += 1;
+            }
+        }
+        assert_eq!(n, 49);
     }
 
     #[test]

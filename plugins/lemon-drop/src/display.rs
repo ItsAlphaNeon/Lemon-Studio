@@ -40,18 +40,35 @@ pub struct Pointer {
     pub held: bool,
 }
 
-/// The box inside `area`: the area less the room the mirror image takes under it.
-pub fn box_rect(st: &State, area: Rect) -> Rect {
-    let mirror = if st.bevel > 0 { 0.2 } else { 0.0 };
-    let h = area.h / (1.0 + mirror);
-    Rect::new(area.x, area.y, area.w, h.floor())
+/// The stored display window's width over its height (the default's when the stored one makes no sense).
+pub fn window_aspect(st: &State) -> f32 {
+    let [l, t, r, b] = st.window;
+    let (w, h) = ((r - l) as f32, (b - t) as f32);
+    if w >= 8.0 && h >= 8.0 { w / h } else { 301.0 / 125.0 }
 }
 
-/// The mode shown: the state's, or with auto visual mode, the box's shape's (tall and narrow: the meter; short and
-/// wide: the oscilloscope).
-pub fn shown_mode(st: &State, b: Rect) -> Mode {
-    if st.auto_mode {
-        if b.h > b.w * 1.2 { Mode::Meter } else { Mode::Oscilloscope }
+/// The box inside `area`: the stored window's shape, as large as fits over the room the mirror image takes under it,
+/// centred; never narrower than 72 px.
+pub fn box_rect(st: &State, area: Rect) -> Rect {
+    let mirror = if st.bevel > 0 { 0.2 } else { 0.0 };
+    let room_h = (area.h / (1.0 + mirror)).floor();
+    let aspect = window_aspect(st);
+    let (mut w, mut h) = (area.w, area.w / aspect);
+    if h > room_h {
+        h = room_h;
+        w = (h * aspect).max(72.0).min(area.w);
+    }
+    Rect::new((area.x + (area.w - w) / 2.0).round(), area.y, w.round(), h.round())
+}
+
+/// The mode shown: the state's, or with auto visual mode, by the stored window's shape: tall and narrow (1.5 times
+/// as tall as wide), the meter; short and wide (1.5 times as wide), the oscilloscope; otherwise the state's mode.
+pub fn shown_mode(st: &State, _b: Rect) -> Mode {
+    let a = window_aspect(st);
+    if st.auto_mode && a < 1.0 / 1.5 {
+        Mode::Meter
+    } else if st.auto_mode && a > 1.5 {
+        Mode::Oscilloscope
     } else {
         st.mode
     }
@@ -341,6 +358,7 @@ fn spectrum(c: &mut Canvas, st: &State, a: &Analyzer, r: Rect, fade: f32) {
     let range = st.spectrum_range.clamp(48, 144) as f32;
     let have = a.columns.len().min(cols);
     if have == 0 {
+        keyboard(c, st, plot, lab);
         return;
     }
     let mut px = vec![0u32; have * rows];
@@ -370,6 +388,31 @@ fn spectrum(c: &mut Canvas, st: &State, a: &Analyzer, r: Rect, fade: f32) {
     }
     let w = have as f32;
     c.image(Rect::new(plot.right() - w, plot.y, w, plot.h), have, rows, &px);
+    keyboard(c, st, plot, lab);
+}
+
+/// Spectrum scale fully right: a piano keyboard along the axis at the plot's left edge, keys at their notes.
+fn keyboard(c: &mut Canvas, st: &State, plot: Rect, lab: Color) {
+    if st.spectrum_curve < 256 {
+        return;
+    }
+    let y_of = |f: f32| plot.bottom() - analysis::freq_pos(f, st.spectrum_curve) * plot.h;
+    // Scale fully right: a piano keyboard along the axis, its keys at their notes' frequencies.
+    let kb = Rect::new(plot.x, plot.y, 8.0, plot.h);
+    c.fill_rect(kb, Color::rgb(0xe8e8e8).with_alpha(lab.a.max(90)));
+    for n in 12..=132 {
+        let f = 440.0 * 2f32.powf((n as f32 - 69.0) / 12.0);
+        if !(F_LOW..=F_HIGH).contains(&f) {
+            continue;
+        }
+        let y = y_of(f);
+        let h = (y_of(f / 2f32.powf(1.0 / 24.0)) - y_of(f * 2f32.powf(1.0 / 24.0))).max(1.0);
+        if matches!(n % 12, 1 | 3 | 6 | 8 | 10) {
+            c.fill_rect(Rect::new(kb.x, y - h / 2.0, kb.w * 0.6, h), Color::rgb(0x202020));
+        } else if h > 2.5 {
+            c.fill_rect(Rect::new(kb.x, (y + h / 2.0).round(), kb.w, 1.0), Color::rgb(0x8a8a8a));
+        }
+    }
 }
 
 // ---- Meter
@@ -489,7 +532,8 @@ fn meter_color(st: &State, db: f32) -> Color {
 fn meter(c: &mut Canvas, st: &State, a: &Analyzer, r: Rect, fade: f32) {
     let lab = color(st, LABELS, 1.0);
     let ruler = color(st, SCOPE_RULER, 1.0);
-    let labels_w = 44.0;
+    // The labels take at most 40 % of a narrow box (their text shrinks with it).
+    let labels_w = (r.w * 0.4).min(44.0);
     let plot = Rect::new(r.x + labels_w, r.y, r.w - labels_w - 6.0, r.h - 4.0);
     let y_of = |db: f32| plot.y + meter_place(db, st.meter_scale) * plot.h;
     // dB labels: every dB from +15 down, kept 12 px apart.
@@ -681,9 +725,16 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_follows_the_shape() {
-        let st = State { auto_mode: true, ..State::new_default() };
-        assert_eq!(shown_mode(&st, Rect::new(0.0, 0.0, 100.0, 300.0)), Mode::Meter);
-        assert_eq!(shown_mode(&st, Rect::new(0.0, 0.0, 300.0, 100.0)), Mode::Oscilloscope);
+    fn auto_mode_follows_the_stored_window() {
+        let area = Rect::new(0.0, 0.0, 600.0, 200.0);
+        let st = |window, mode| State { auto_mode: true, window, mode, ..State::new_default() };
+        assert_eq!(shown_mode(&st([0, 0, 40, 700], Mode::Spectrum), area), Mode::Meter);
+        assert_eq!(shown_mode(&st([0, 0, 300, 120], Mode::Spectrum), area), Mode::Oscilloscope);
+        assert_eq!(shown_mode(&st([0, 0, 195, 195], Mode::Vectorscope), area), Mode::Vectorscope);
+        // The box keeps the window's shape inside the area, centred.
+        let b = box_rect(&st([0, 0, 200, 400], Mode::Meter), area);
+        assert!((b.w / b.h - 0.5).abs() < 0.01 && (b.cx() - 300.0).abs() < 1.0, "{b:?}");
+        // Never narrower than 72 px.
+        assert_eq!(box_rect(&st([0, 0, 20, 800], Mode::Meter), area).w, 72.0);
     }
 }

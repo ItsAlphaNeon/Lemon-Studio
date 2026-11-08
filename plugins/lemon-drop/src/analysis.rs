@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-use crate::state::{State, NEVER};
+use crate::state::{NEVER, State};
 
 /// Samples of history kept (per channel).
 pub const HISTORY: usize = 1 << 16;
@@ -311,7 +311,7 @@ impl Analyzer {
                     peak
                 }
                 // Vu: a slow (300 ms) average of the rectified signal, read as a sine's peak.
-                2 => {
+                3 => {
                     let a = (-1.0 / (0.3 * rate)).exp();
                     for i in n - new..n {
                         b.env = a * b.env + (1.0 - a) * f64::from(h[i]).abs();
@@ -319,10 +319,10 @@ impl Analyzer {
                     b.env * std::f64::consts::FRAC_PI_2
                 }
                 // RMS over 300 ms; Leq(A) over 1 s, A-weighted; ITU-R BS.1770 over 3 s, K-weighted.
-                3 | 4 | 5 => {
+                2 | 4 | 5 => {
                     let (secs, weight) = match st.meter_mode {
-                        4 => (0.3, 0),
-                        3 => (1.0, 1),
+                        2 => (0.3, 0),
+                        4 => (1.0, 1),
                         _ => (3.0, 2),
                     };
                     let w = (secs * rate) as usize;
@@ -387,7 +387,7 @@ impl Analyzer {
     }
 }
 
-/// The meter's fall in dB per second for a decay speed setting (0 .. 5000, shown as 0 .. 100 %).
+/// The meter's fall in dB per second for a decay speed setting (1 .. 5000, shown as 0 .. 100 %).
 pub fn decay_db_per_s(v: i32) -> f32 {
     let p = v.clamp(0, 5000) as f32 / 5000.0;
     6.0 * 50f32.powf(p)
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn rms_of_a_sine_reads_its_peak() {
-        let st = State { meter_mode: 4, ..State::new_default() };
+        let st = State { meter_mode: 2, ..State::new_default() };
         let mut a = Analyzer::new(44100.0);
         let x = sine(441.0, 0.5, 44100, 44100.0);
         a.push(&st, &x, &x, 1.0);
