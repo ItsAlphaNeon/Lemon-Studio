@@ -1,2 +1,5 @@
 # Preset files are read byte for byte (a saved state is binary): no line-end conversion on checkout.
 *.ospreset -text
+
+# Shell scripts run as they are, on Windows too (Git Bash): a CR at each line's end would break them.
+*.sh text eol=lf

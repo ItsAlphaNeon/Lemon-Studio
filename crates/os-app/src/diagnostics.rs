@@ -29,7 +29,7 @@ impl App {
         let cfg = crate::audio_cfg::AudioCfg::current();
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         let out = [
-            format!("Lemon Studio {} (pre-alpha)", crate::version::text()),
+            format!("Lemon Studio {}", crate::version::staged()),
             format!("System: {} {}, {cpus} logical processors", std::env::consts::OS, std::env::consts::ARCH),
             format!("User folder: {}", os_paths::user_dir().map_or_else(|| "none".into(), |d| d.display().to_string())),
             String::new(),
@@ -84,7 +84,7 @@ mod tests {
         let path = super::report_path().unwrap();
         assert_eq!(app.state.message, Some(format!("Saved {}", path.display())));
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with(&format!("Lemon Studio {} (pre-alpha)\n", crate::version::text())), "{text}");
+        assert!(text.starts_with(&format!("Lemon Studio {}\n", crate::version::staged())), "{text}");
         assert!(text.contains(&format!("System: {} {}", std::env::consts::OS, std::env::consts::ARCH)), "{text}");
         assert!(text.contains("Project: not saved\n  Channels: 5, patterns: 1, mixer tracks: 18"), "{text}");
         let _ = std::fs::remove_file(path);

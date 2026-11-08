@@ -304,11 +304,11 @@ pub const CHECK_UPDATES: &str = "Check for updates";
 /// About: which build this is and how it is kept up to date (`crate::update`).
 fn update_lines() -> Vec<Row> {
     let how = match (crate::version::CHANNEL, crate::update::enabled()) {
-        (Some("nightly"), true) => "A nightly build of main. It updates itself from the nightly releases.",
-        (Some(_), true) => "It updates itself from the stable releases.",
-        _ => "Built from its source code: it doesn't update itself (git pull, then build it again).",
+        (Some("nightly"), true) => "A nightly build of main. It updates itself from the nightly releases.".to_string(),
+        (Some(_), true) => format!("It updates itself from the {} releases.", crate::version::releases()),
+        _ => "Built from its source code: it doesn't update itself (git pull, then build it again).".to_string(),
     };
-    vec![txt(how), Row::Buttons(vec![(CHECK_UPDATES, 130.0)])]
+    vec![txt(&how), Row::Buttons(vec![(CHECK_UPDATES, 130.0)])]
 }
 
 /// MIDI: lists the devices again (`App::midi_refresh`); Update MIDI scripts stays greyed with its reason.
@@ -957,7 +957,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("", [
                 vec![
                     Gap(20.0),
-                    Big(format!("Lemon Studio {}", crate::version::text())),
+                    Big(format!("Lemon Studio {}", crate::version::staged())),
                     txt("A digital audio workstation written in Rust."),
                     txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
                     Gap(10.0),

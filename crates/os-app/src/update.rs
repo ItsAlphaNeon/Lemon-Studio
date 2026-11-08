@@ -50,9 +50,11 @@ pub fn enabled() -> bool {
     CHANNEL.is_some() && UPDATER.is_some()
 }
 
-/// `<user folder>/Updates`: the updater, the download, the outcome of the last update.
+/// `<user folder>/Updates/<channel>`: the updater, the download, the outcome of the last update. A folder per channel:
+/// a nightly and an alpha on one computer share the user folder, and must not take each other's download or report
+/// each other's update.
 fn folder() -> Option<PathBuf> {
-    os_paths::user_file("Updates")
+    Some(os_paths::user_file("Updates")?.join(CHANNEL?))
 }
 
 /// What the update replaces: the program file on Windows, the AppImage on Linux, the `.app` on macOS. An error says
@@ -443,7 +445,7 @@ impl crate::app::App {
                 other => {
                     self.updates.install_when_staged = false;
                     self.updates.asked = false;
-                    let channel = CHANNEL.unwrap_or("");
+                    let channel = crate::version::releases();
                     let text = match other {
                         Event::Current => format!("You have the newest version of Lemon Studio, {}.", crate::version::text()),
                         Event::NoRelease => format!("There is no {channel} release of Lemon Studio yet."),
