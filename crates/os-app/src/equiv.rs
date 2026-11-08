@@ -396,11 +396,11 @@ impl Rig {
     fn generate(&mut self, rng: &mut Rng) -> Vec<Input> {
         let targets = self.targets();
         // Weighted by novelty: a kind of control aimed at n times weighs 1/(n+1), so the many step buttons or grid
-        // cells of one kind don't crowd out the few knobs, boxes and menus. A kind that has edited, or a control
-        // holding a value, weighs four times as much: its drags, wheels and modifiers are where edits go wrong. The
-        // Settings window's controls weigh a quarter: they change preferences, not the project.
-        let weight = |k: &str, valued: bool| {
-            let edit = if self.edits.contains(k) || valued { 16 } else { 4 };
+        // cells of one kind don't crowd out the few knobs, boxes and menus. A kind that has edited weighs four times
+        // as much: its drags, wheels and modifiers are where edits go wrong. The Settings window's controls weigh a
+        // quarter: they change preferences, not the project.
+        let weight = |k: &str, _valued: bool| {
+            let edit = if self.edits.contains(k) { 16 } else { 4 };
             let edit = if k.starts_with("Settings") { edit / 4 } else { edit };
             edit * 1_000_000 / (1 + u64::from(self.used.get(k).copied().unwrap_or(0)))
         };
