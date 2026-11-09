@@ -19,7 +19,8 @@
 //! OS_EQUIV_DIR=<traces> OS_EQUIV_CORPUS=<folder of .flp> \
 //!   cargo test -p os-app --bin lemonstudio equiv_record -- --ignored --nocapture
 //! ```
-//! `equiv_shrink` and `equiv_show` run in the test's own process: give them `HOME=<OS_EQUIV_DIR>/home`.
+//! `equiv_show` runs in the test's own process: give it `HOME=<OS_EQUIV_DIR>/home` (`equiv_shrink` runs each candidate
+//! in a process of its own, as a recording does).
 //! `equiv_replay` replays every trace in `OS_EQUIV_DIR`; `equiv_twice` records and replays on the same build (what
 //! isn't deterministic yet). `equiv_coverage` adds up what the recordings in `OS_EQUIV_DIR` reached: each kind of
 //! control, how many frames showed it, how often a step aimed at it, and whether it ever changed something. `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (300) steps each,
@@ -972,7 +973,8 @@ fn equiv_twice() {
     assert_eq!(failed, 0);
 }
 
-/// Runs one recording or replay (`job`: "record\t<project>\t<seed>\t<steps>" or "replay\t<trace>") in a process of
+/// Runs one recording, replay or shrink candidate (`job`: "record\t<project>\t<seed>\t<steps>", "replay\t<trace>" or
+/// "check\t<project>\t<invariant>\t<file of steps>") in a process of
 /// its own with a home folder of its own, so no trace sees what another left behind (settings, clipboards, the
 /// process-wide switches): what it reports.
 fn isolated(name: &str, job: &str) -> String {
@@ -1027,7 +1029,7 @@ fn no_programs(home: &std::path::Path) -> std::path::PathBuf {
     bin
 }
 
-/// The child of `isolated`: one recording (written to the traces folder) or one replay.
+/// The child of `isolated`: one recording (written to the traces folder), one replay or one shrink candidate.
 #[test]
 #[ignore = "the equivalence harness: one job of equiv_record or equiv_replay, in a process of its own"]
 fn equiv_one() {
@@ -1042,6 +1044,11 @@ fn equiv_one() {
             let new = unaccepted(&t.invariants);
             format!("{} steps, findings {new:?} ({} accepted)", t.steps.len(), t.invariants.len() - new.len())
         }
+        ["check", project, kind, path] => {
+            let steps: Option<Vec<Vec<Input>>> =
+                std::fs::read_to_string(path).expect("read").lines().map(|l| l.split("; ").map(Input::parse).collect()).collect();
+            fails_here(&root, project, &steps.expect("a candidate"), kind).map_or_else(|| "holds".into(), |f| format!("fails: {f}"))
+        }
         ["replay", path] => {
             let t = Trace::read(&std::fs::read_to_string(path).expect("read")).expect("a trace");
             replay(&root, &t).unwrap_or_else(|| "same".into())
@@ -1051,8 +1058,18 @@ fn equiv_one() {
     eprintln!("EQUIV-RESULT {}", result.replace('\n', " "));
 }
 
-/// Whether running `steps` on `project` breaks an invariant whose name starts with `kind`.
-fn fails(root: &Path, project: &str, steps: &[Vec<Input>], kind: &str) -> Option<String> {
+/// Whether running `steps` on `project` breaks an invariant whose name starts with `kind`, in a process of its own as
+/// a recording runs (settings and process-wide switches one candidate changes must not reach the next).
+fn fails(_root: &Path, project: &str, steps: &[Vec<Input>], kind: &str) -> Option<String> {
+    let file = traces_dir().join("shrink-candidate.txt");
+    let text: String = steps.iter().map(|s| s.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ") + "\n").collect();
+    std::fs::write(&file, text).expect("write the candidate");
+    let r = isolated("shrink", &format!("check\t{project}\t{kind}\t{}", file.display()));
+    r.strip_prefix("fails: ").map(String::from)
+}
+
+/// `fails` in this process.
+fn fails_here(root: &Path, project: &str, steps: &[Vec<Input>], kind: &str) -> Option<String> {
     let work = work_dir("shrink");
     let mut rig = Rig::open(&root.join(project), &work);
     let mut start = rig.app.state.project.clone();
