@@ -16,13 +16,16 @@ GitHub's *latest* release. In the workflow and the manifest the channel is calle
 
 Each release has:
 
-- `LemonStudio-<version>-windows-x86_64.exe`
-- `LemonStudio-<version>-linux-x86_64.AppImage`, built on Ubuntu 22.04 by [tools/package/appimage.sh](../tools/package/appimage.sh)
+- `LemonStudio.exe` (a nightly: `LemonStudioNightly.exe`)
+- `LemonStudio.AppImage` (a nightly: `LemonStudioNightly.AppImage`), built on Ubuntu 22.04 by [tools/package/appimage.sh](../tools/package/appimage.sh)
 - `LemonStudio-<version>-macos-aarch64.zip`, holding `Lemon Studio.app` (a nightly: `Lemon Studio Nightly.app`), signed
   ad hoc and not notarized
 - `LemonStudio-Plugins-<version>-<platform>.zip`: the VST3 and CLAP plugins for other DAWs, with a `README.txt` on where they go
 - `nightly.json` or `stable.json`, and its minisign signature (`.minisig`)
 - `LICENSE` and `THIRD-PARTY-NOTICES.txt`
+
+The `.exe` and the AppImage have no version in their names: an update replaces the file in place, keeping its name, so
+shortcuts to it never break. The release's title and Lemon Studio itself say which version it is.
 
 The release notes come from [tools/package/release-notes.md](../tools/package/release-notes.md) (how to install and
 open the builds, including the macOS steps past Gatekeeper), followed by GitHub's list of the pull requests since the
@@ -36,8 +39,8 @@ apart.
 
 | Where | What changes | Made from |
 |---|---|---|
-| Windows | The `.exe`'s icon and version resource, the window's title | `assets/lemonstudio-nightly.ico` |
-| Linux | The AppImage's desktop entry and icon, the window's app id and icon | `assets/lemonstudio-nightly.png` |
+| Windows | The `.exe`'s file name, icon and version resource, the window's title | `assets/lemonstudio-nightly.ico` |
+| Linux | The AppImage's file name, desktop entry and icon, the window's app id and icon | `assets/lemonstudio-nightly.png` |
 | macOS | The app's name, identifier and icon | `assets/lemonstudio-nightly.car` and `.icns` |
 | Startup splash | The moon, its craters, the night sky and the stars | `crate::logo`'s `NIGHTLY_*`, [splash.rs](../crates/os-app/src/splash.rs) |
 

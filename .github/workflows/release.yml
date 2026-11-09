@@ -148,10 +148,12 @@ jobs:
         run: |
           set -euo pipefail
           v=$LEMON_VERSION
+          # No version in the program's name: an update replaces the file in place, so shortcuts to it never break.
+          program=LemonStudio; [ "$LEMON_CHANNEL" = nightly ] && program=LemonStudioNightly
           mkdir -p dist "plugins/LemonStudio-Plugins-$v/VST3" "plugins/LemonStudio-Plugins-$v/CLAP"
           case "$RUNNER_OS" in
             Windows)
-              cp target/release/lemonstudio.exe "dist/LemonStudio-$v-$PLATFORM.exe"
+              cp target/release/lemonstudio.exe "dist/$program.exe"
               ;;
             Linux)
               # A fixed version with its checksum: this goes into a release that installed copies trust.
@@ -160,7 +162,7 @@ jobs:
               echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $RUNNER_TEMP/appimagetool" | sha256sum -c -
               chmod +x "$RUNNER_TEMP/appimagetool"
               APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
-                bash tools/package/appimage.sh target/release/lemonstudio "$v" "dist/LemonStudio-$v-$PLATFORM.AppImage" "$LEMON_CHANNEL"
+                bash tools/package/appimage.sh target/release/lemonstudio "$v" "dist/$program.AppImage" "$LEMON_CHANNEL"
               ;;
             macOS)
               app="Lemon Studio"; [ "$LEMON_CHANNEL" = nightly ] && app="Lemon Studio Nightly"
@@ -226,7 +228,8 @@ jobs:
           changes = open(sys.argv[1], encoding="utf-8").read().strip()
           text = open("tools/package/release-notes.md", encoding="utf-8").read()
           app = "Lemon Studio Nightly" if os.environ["CHANNEL"] == "nightly" else "Lemon Studio"
-          print(text.replace("{INTRO}", sys.argv[2]).replace("{VERSION}", os.environ["VERSION"]).replace("{APP}", app).replace("{CHANGES}", changes))
+          program = "LemonStudioNightly" if os.environ["CHANNEL"] == "nightly" else "LemonStudio"
+          print(text.replace("{INTRO}", sys.argv[2]).replace("{VERSION}", os.environ["VERSION"]).replace("{APP}", app).replace("{PROGRAM}", program).replace("{CHANGES}", changes))
           PY
           cp LICENSE THIRD-PARTY-NOTICES.txt dist/
 
