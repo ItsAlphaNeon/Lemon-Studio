@@ -59,8 +59,7 @@ young, so read the warning below before trying it on real work.
 > - **Greyed-out controls are not implemented yet.** Many menus and buttons are already laid out but do
 >   nothing so far; they are drawn dim and say "not available yet". Other features of a full DAW have no control
 >   at all yet, so a menu with nothing greyed in it is not necessarily complete.
-> - **No prebuilt binaries** will be published until Lemon Studio reaches a usable state. Until then it
->   can only be built from source.
+> - **Builds are not signed.** Your system may stop them the first time; the release notes say how to open them.
 > - **Projects saved by FL Studio 10 or later open** (25 and 26 included). Projects older than 24.2 are
 >   converted to the current layout as they open and are saved in it, so the version that wrote them may not
 >   read the saved copy.
@@ -120,7 +119,14 @@ Per-area details are in [docs/status.md](docs/status.md). The full, item-by-item
 
 ## Getting started
 
-No prebuilt binaries are provided at this stage: Lemon Studio is built from source. Each platform below goes from a fresh
+**Builds** for Windows, Linux (AppImage) and macOS (Apple silicon) are on the
+[releases page](https://github.com/ItsAlphaNeon/Lemon-Studio/releases), with Lemon Studio's plugins for other DAWs as a
+separate zip: **alphas**, the tagged `0.x` releases, and **nightlies**, the newest changes on main, built every night.
+They are not signed: the release notes say how to open them on each system (on macOS, past Gatekeeper). Once installed,
+a build checks for a newer one of its own kind when it starts and installs it when you agree (Settings ▸ General ▸
+Updates). How releases are made: [docs/releasing.md](docs/releasing.md).
+
+Or build Lemon Studio from source, which never updates itself. Each platform below goes from a fresh
 machine to Lemon Studio installed with its icon, and Lemon Studio's own plugins installed for any DAW. All three need
 **Rust**, stable toolchain 1.89 or newer, installed through [rustup](https://rustup.rs/), and a clone of this repository:
 
@@ -358,6 +364,7 @@ cargo run -p os-app --release -- --control /tmp/lemon.sock path/to/project.flp
 | `os-play` | Play a project through the default audio output |
 | `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them (`cargo run -p os-app --release` runs it with `--install`) |
 | `bundle-app` | Build Lemon Studio as a macOS app, and optionally install it |
+| `updater` | `lemonstudio-updater`, which release builds carry to update themselves (built by the release workflow only; [docs/releasing.md](docs/releasing.md)) |
 
 ## Architecture
 

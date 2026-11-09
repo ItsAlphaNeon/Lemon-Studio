@@ -295,7 +295,21 @@ pub const LIVE: &[&str] = &[
     "Reset",
     ASSOCIATE_CHECK,
     SHOW_ASIO_PANEL,
+    CHECK_UPDATES,
 ];
+
+/// About: checks the build's channel for a newer build (`App::check_updates_now`, as HELP ▸ Check for updates).
+pub const CHECK_UPDATES: &str = "Check for updates";
+
+/// About: which build this is and how it is kept up to date (`crate::update`).
+fn update_lines() -> Vec<Row> {
+    let how = match (crate::version::CHANNEL, crate::update::enabled()) {
+        (Some("nightly"), true) => "A nightly build of main. It updates itself from the nightly releases.".to_string(),
+        (Some(_), true) => format!("It updates itself from the {} releases.", crate::version::releases()),
+        _ => "Built from its source code: it doesn't update itself (git pull, then build it again).".to_string(),
+    };
+    vec![txt(&how), Row::Buttons(vec![(CHECK_UPDATES, 130.0)])]
+}
 
 /// MIDI: lists the devices again (`App::midi_refresh`); Update MIDI scripts stays greyed with its reason.
 pub const REFRESH_MIDI: &str = "Refresh device list";
@@ -748,8 +762,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]),
             gf("System", false, vec![Check(ASSOCIATE_CHECK, s.settings.assoc)]),
             // FL's "Updates and privacy" without Send usage data and its More information button: Lemon Studio collects
-            // nothing. The update checks stay greyed until Lemon Studio can update itself (spec: ui/settings.md
-            // "General").
+            // nothing. The checks are `prefs::AUTO_CHECK_UPDATES` and `AUTO_DOWNLOAD_UPDATES` (`crate::update`; a
+            // build from source does not update itself) (spec: ui/settings.md "General").
             gf("Updates", false, vec![
                 Check("Automatically check for updates", true),
                 Check("Automatically download program updates", true),
@@ -921,7 +935,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         }
         DEBUG => {
             let mut lines = vec![
-                format!("Lemon Studio {}", env!("CARGO_PKG_VERSION")),
+                format!("Lemon Studio {}", crate::version::text()),
                 format!("Project: {}", s.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
                 format!("Saved by: {}", s.project.saved_by),
                 format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo),
@@ -943,11 +957,13 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("", [
                 vec![
                     Gap(20.0),
-                    Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
+                    Big(format!("Lemon Studio {}", crate::version::staged())),
                     txt("A digital audio workstation written in Rust."),
                     txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
                     Gap(10.0),
                 ],
+                update_lines(),
+                vec![Gap(6.0)],
                 if cfg!(windows) {
                     vec![txt("Licence: GNU General Public License, version 3 (the ASIO SDK it includes is version 3 only).")]
                 } else {
@@ -968,7 +984,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 txt("It is free software: you can redistribute it and/or modify it under the terms"),
                 txt("of the GNU General Public License, version 3 or (at your option) any later version."),
                 txt("It comes with ABSOLUTELY NO WARRANTY. Licence: https://www.gnu.org/licenses/"),
-                txt("No registration, no online services, no usage data."),
+                txt("No registration and no usage data. Release builds ask GitHub for updates"),
+                txt("(Settings > General > Updates); a build from source never goes online."),
             ]),
         ],
     }

@@ -121,7 +121,7 @@ impl App {
                 if let Some(n) = params.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) {
                     c.name = n.chars().take(40).collect();
                 }
-                Ok(json!({ "app": "Lemon Studio", "version": env!("CARGO_PKG_VERSION"), "protocol": PROTOCOL, "name": c.name, "level": c.level }))
+                Ok(json!({ "app": "Lemon Studio", "version": crate::version::VERSION, "protocol": PROTOCOL, "name": c.name, "level": c.level }))
             }
             "state" => Ok(super::query::project(&self.state)),
             "notes" => super::query::notes(&self.state, uint(params, "pattern")? as u32).map_err(bad),

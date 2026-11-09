@@ -1432,6 +1432,8 @@ pub struct App {
     pub(crate) track_rec: Option<crate::track_rec::TrackRec>,
     /// TOOLS > Retro audio capture: the last minutes the device played (spec: ui/audio-logger.md).
     pub(crate) audio_log: crate::audio_log::Log,
+    /// Checking for, downloading and installing a newer build (`crate::update`).
+    pub(crate) updates: crate::update::Updates,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
     /// A Shift+press grabbed piano-roll notes: the drag's first move picks up copies of them (`App::pick_up_notes`).
@@ -1698,6 +1700,7 @@ impl App {
             audio_rec: None,
             track_rec: None,
             audio_log: Default::default(),
+            updates: Default::default(),
             menu_notch: 0.0,
             shift_clone: false,
             auto_close: Default::default(),
@@ -2208,6 +2211,9 @@ impl App {
         if n == crate::dialog::Next::Quit {
             self.quit_answer = Some(false);
         }
+        if matches!(n, crate::dialog::Next::Quit | crate::dialog::Next::Close) {
+            self.update_put_off();
+        }
     }
 
     /// A dialog was answered: what waited for it (spec: ui/dialogs.md §5).
@@ -2381,6 +2387,11 @@ impl App {
             Then::PerfConfirm => {
                 if reply == Reply::Button(Answer::Ok) {
                     self.open_marker_settings();
+                }
+            }
+            Then::Update(found) => {
+                if let Reply::Button(a) = reply {
+                    self.update_answer(found, a);
                 }
             }
             Then::MidiExportConfirm => {
@@ -4286,6 +4297,7 @@ impl App {
         }
         self.record_tick();
         self.audio_log.tick();
+        self.update_tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
@@ -5756,6 +5768,7 @@ impl App {
             }
             SAct::Button("Load theme...") => self.theme_dialog(),
             SAct::Button(views::settings::SHOW_ASIO_PANEL) => self.transport.asio_panel(),
+            SAct::Button(views::settings::CHECK_UPDATES) => self.check_updates_now(),
             SAct::Button("Manage plugins") => self.open_settings(views::settings::PLUGINS),
             SAct::Button("Manage messages") => return self.messages_menu(),
             SAct::Button("Scan for new plugins") => self.start_scan(crate::plugin_db::Mode::Changed),
@@ -9523,7 +9536,7 @@ impl App {
             (HELP_MENU, HELP_ABOUT) => {
                 // The Windows build includes the ASIO SDK, which is under version 3 only (THIRD-PARTY-NOTICES.txt §9).
                 let licence = if cfg!(windows) { "the GNU GPL v3" } else { "the GNU GPL v3 or later" };
-                self.state.message = Some(format!("Lemon Studio {} (pre-alpha), free software under {licence}", env!("CARGO_PKG_VERSION")));
+                self.state.message = Some(format!("Lemon Studio {} (pre-alpha), free software under {licence}", crate::version::text()));
                 return;
             }
             (PATTERNS, i) if i >= PATTERN_PICK => return crate::patterns::select(&mut self.state, (i - PATTERN_PICK) as u16),
@@ -9566,6 +9579,7 @@ impl App {
             MenuCmd::SaveMidiClip => self.save_midi_clipboard(),
             MenuCmd::SaveAudioClip => self.save_audio_clipboard(),
             MenuCmd::Diagnostics => self.save_diagnostics(),
+            MenuCmd::CheckUpdates => self.check_updates_now(),
             MenuCmd::NewPattern => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {
@@ -9929,7 +9943,7 @@ fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra:
         os_flp::lemon::to_flp(file);
         return Ok(());
     }
-    extra.insert(0, os_flp::lemon::saved_by(&format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))));
+    extra.insert(0, os_flp::lemon::saved_by(&format!("Lemon Studio {}", crate::version::VERSION)));
     os_flp::lemon::to_lemon(file, &extra).map_err(|e| e.to_string())
 }
 
@@ -16162,7 +16176,7 @@ mod tests {
         assert_eq!(std::fs::read(&flp).unwrap(), before, "the FLP is still not written");
         let file = os_flp::FlpFile::parse(&std::fs::read(&lemon).unwrap()).unwrap();
         assert_eq!(os_flp::lemon::version(&file), Some(os_flp::lemon::VERSION));
-        assert_eq!(os_flp::lemon::saved_by_text(&file), Some(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(os_flp::lemon::saved_by_text(&file), Some(format!("Lemon Studio {}", crate::version::VERSION)));
         // Save again: in place, no dialog.
         app.state.tempo = 125.0;
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
