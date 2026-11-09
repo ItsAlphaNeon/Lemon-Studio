@@ -1,6 +1,6 @@
 # Feature status
 
-The details behind the [Capabilities](../README.md#capabilities) table, area by area. Controls for anything
+The details behind the [Status](../README.md#status) table, area by area. Controls for anything
 that is not implemented yet are greyed out in the application: hovering one says "not available yet", and
 clicking it does nothing. Not everything missing has a control: many features of FL Studio are simply absent from the
 menus, and a few controls look live but change nothing heard (the Release lanes of the piano roll and the graph
@@ -745,8 +745,8 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 ## 🚧 Platforms
 
 - Windows 10 / 11
-- Linux: X11, and Wayland through XWayland (see the [Linux notes](../README.md#linux))
-- macOS 11 or newer, supported at the same level as Linux (see the [macOS notes](../README.md#macos))
+- Linux: X11, and Wayland through XWayland (see [Troubleshooting](https://getlemonstudio.app/wiki/reference/troubleshooting/))
+- macOS 11 or newer, supported at the same level as Linux (see [Troubleshooting](https://getlemonstudio.app/wiki/reference/troubleshooting/))
 
 ## 🚧 Look and themes
 
