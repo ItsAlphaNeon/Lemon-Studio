@@ -2,13 +2,19 @@
 
 The details behind the [Capabilities](../README.md#capabilities) table, area by area. Controls for anything
 that is not implemented yet are greyed out in the application: hovering one says "not available yet", and
-clicking it does nothing. The full, item-by-item roadmap lives on the
+clicking it does nothing. Not everything missing has a control: many features of FL Studio are simply absent from the
+menus, and a few controls look live but change nothing heard (the Release lanes of the piano roll and the graph
+editor, the rack's Loop step channels / Loop all channels). The full, item-by-item roadmap lives on the
 [Discord server](https://discord.gg/yC2uCuGs3M).
 
 ✅ usable · 🚧 partial · ❌ not available yet
 
-## ✅ Step sequencing and patterns
+## 🚧 Step sequencing and patterns
 
+- Not yet: a layer channel's settings beyond volume and pan (Set and Show children, Random, Crossfade, Sequential); the
+  Misc tab's arpeggiator, echo delay, gate, time shift, tracking and Full porta (greyed); the graph editor's Ctrl, right
+  and Alt gestures and its undo step; filter groups for patterns. A new or cloned channel joins no group, so it is hidden
+  while a group filter is on
 - Channel rack with steps and mini piano rolls
 - Swing and per-channel loops
 - ADD ▸ Layer: a layer channel whose children are the channels selected in the rack; the rack's Create layer with
@@ -57,9 +63,12 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   pattern clips. One undo step each. Render as audio clip... opens the Export form on the pattern first (folder,
   name, format and the other choices), then makes the channel the same way
 
-## ✅ Piano roll
+## 🚧 Piano roll
 
-- Full tool set, with velocity and event lanes
+- Not yet: the ▸ options menu, Note properties, Scale and chord helpers and Paint drum (greyed on the toolbar); note
+  colours (the tab is greyed); toggles for slide and portamento notes (an opt-in hold gesture makes them); Riff machine,
+  Articulate and scripts; selecting by note group; a sound for the Release lane (the engine reads no release velocity)
+- All eight tools, with velocity and event lanes
 - Quantize (FL's templates and Snap grids, sensitivity, four duration modes, levels), chop (FL's patterns, tied rows, levels, groups), glue, legato, strum,
   arpeggiate, flam, claw machine (trash, stretch, time distribution), flip, scale levels, limit (key / scale, range,
   transpose), LFO (sine, triangle or square into any event lane, Start to End ramps, a channel lane's control points)
@@ -71,8 +80,13 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   written at the song position a chord at a time, one main-snap step long, and the position moves on a step; in
   SONG mode they go where the current pattern plays at the song position
 
-## ✅ Song arrangement
+## 🚧 Song arrangement
 
+- Not yet: a clip properties window, per-clip pitch, pan and reverse, chop and merge, Make unique for audio and
+  automation clips, fade and gain right-click menus, per-track height. The playlist's bars, ruler and Bar snap are
+  always 4 beats, whatever the time signature or time signature markers say. Consolidate and Export all playlist tracks
+  render without hosted instruments and effects, so plugin channels come out silent (Consolidate still mutes the source
+  clips)
 - Playlist with pattern, audio and automation clips
 - Clip groups, markers and several arrangements
 - Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause
@@ -174,7 +188,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   the slot's own switch and mix stay the slot's (a slot whose mix a clip drives keeps it, its effect starting at wet
   100 %). A member window's menu sets the effect's own name, colour, icon and CPU switches (Auto-bypass when silent
   passes a silent effect by), one undo step each, shown in the container's window and the effect's window title and
-  saved with the container. Not yet: the original's Patcher slots in imported projects
+  saved with the container. A project's Patcher slots open as containers when the patch is one plain serial chain of
+  effects; other patches are kept and pass dry
 - Instrument containers: the channel rack menu's Wrap in container (the original's Patcherize) moves a plugin
   channel's instrument, with its state, into a container on the channel, one undo step. The channel stays a channel
   (its name, steps, piano roll, mixer track, volume and pan); the container plays its notes through its plugins in
@@ -225,7 +240,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Favourites and hidden plugins
 - The browser's Favorites: right-click a file or a plugin ▸ Favorite; favorite rows show a star, and the Favorites
   tab lists favorite plugins, then files. A plugin's favorite is its plugin-manager star, also toggled by "Add to
-  plugin database (flag as favorite)" in plugin windows and mixer slots
+  favourites" in plugin windows and mixer slots
 - The browser's Plugin database: plugins by category, and by format under Installed; ADD ▸ Browse all installed
   plugins / Browse presets and the mixer's Plugin database entry open it
 - Browser find (Ctrl+F): search finds files anywhere below the dropped folders and the data folder through a
@@ -238,8 +253,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   own plugins), stepped with the arrows or the wheel; Save preset as..., Rename, Delete and Browse presets
 - The mixer's slot menu lists the effect's presets and has Browse presets and Save preset as..., as its window
   menu does
-- Spare state in plugin windows and mixer slots: Store in spare state, then Flip with spare state swaps the two to
-  compare them (one undo step; the spare state is kept while the plugin is open, not in the project). Display preset
+- A/B compare in plugin windows and mixer slots: Copy to B, then Swap A / B swaps the two to
+  compare them (one undo step; B is kept while the plugin is open, not in the project). Display preset
   name in preset selector hides or shows the preset's name in the window
 - The plugin window's menu acts on its own channel (Piano roll, Delete..., Rename, color and icon..., Change color...,
   Random color) or effect slot (Replace ▸, Delete..., Rename, color and icon..., Change color..., Random color); an
@@ -320,7 +335,6 @@ until let go (the tempo stays). Not yet: Sync, Mute and now (drawn greyed out), 
 
 **Closing windows.** VIEW > Close all windows (F12), Close all unfocused windows (Ctrl+F12: all but the one
 in front) and Close all plugin windows (Alt+F12: channel settings and plugin editors); the browser stays.
-Not yet: Align all channel editors.
 
 **Arranging windows.** VIEW > Arrange windows: Realign (Shift+Ctrl+H) and Desktop (default) put the Playlist, Mixer,
 Piano roll and Channel rack back as a new install has them; Desktop (alternate) floats the Playlist over the top of
@@ -364,15 +378,16 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   that tick; a channel switched off ends its sounding notes and starts no new ones until it is on again
 - A pattern's control points drive mixer volumes, pans, separation, equalisers, slot switches and mix levels, the
   tempo, the main swing and plugin parameters, besides the channel's own settings, its mixer track and switch
-  included (sends and the main pitch not yet)
+  included (sends not yet)
 - All thirteen curve shapes are walked exactly; values are taken one tick ahead and passed on only when
   they change
 - A clip's range (its channel's MIN and MAX knobs, minimum above maximum turning the curve upside down) and its
   LFO (on / off, multiply or add, amount, speed, tension, skew, pulse width, and its own envelope) shape what it
   hands on, in the original's arithmetic; the clip's channel window sets them, each change an undo step, and
   projects keep every LFO field
-- The event editor (Edit events on a control's menu: channel volume, pan and pitch, the rack's swing knob, mixer box
-  and LED, mixer controls, the tempo, plugin parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
+- The event editor (Edit automation on a control's menu: channel volume and pan, the rack's swing knob, mixer box
+  and LED, a mixer track's fader, pan and equaliser, the tempo, plugin parameters; not stereo separation, slot mix, sends
+  or the main knobs) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
   drag draws freehand on the global snap, right drag a straight line, Paint (drawing off the snap), Erase,
   Interpolate (a drag lays the events under it on a straight line, right drag a smooth one), Select and Zoom (Z:
   a click zooms in about it, a drag on the stretch dragged over, a right click out) tools, the wheel scrolls and Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Select previous / next
@@ -386,10 +401,13 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Edit automation in a window, on the same menus, opens a second event editor window on that control, in front of
   the first, which keeps its control; a click on the one behind brings it in front, the editors share a clipboard, and
   closing one leaves the other (Lemon Studio's design)
-- A knob's menu (channel volume and pan, mixer and main knobs): Edit automation clip... shows the clip that drives it,
+- The channel rack's knob menus: Edit automation clip... shows the clip that drives it,
   as on a plugin parameter, and Set... puts it at its default, the minimum, 25, 50 or 75% or the maximum, each listed
-  with the knob's value there (one undo step)
-- Not yet in the event editor: Auto smoothing, Center
+  with the knob's value there (one undo step). Mixer and toolbar knobs have a shorter menu without them
+- Not yet in the event editor: Auto smoothing, Center, its File, View, Helpers, Snap, Target and Time markers menus,
+  Trim selection, Turn into automation clip's Sensitivity box, a detached window
+- Not yet for clips: editing an automation clip's targets (ADD ▸ Automation clip makes a clip that can't be linked to
+  anything), and an automation entry on stereo separation, slot mix, sends, main volume and main pitch
 
 ## 🚧 Project files
 
@@ -398,7 +416,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   mixer's Plugin delay compensation ▸ Automatic and View ▸ checks, plugin windows' Scaling ▸, the channels' waveform
   preview and MIDI channel through checks, the plugins' keyboard focus, the playlist tracks' locks and the channels'
   Receive notes from ▸ locks; saving to a `.flp` name leaves them out). The original is not expected to open them
-- Opens `.lemon` files and `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included. A project opened
+- Opens `.lemon` files and `.flp` projects saved by FL Studio 10 and later, 25 and 26 included (older than 24.2:
+  converted to the current layout as they open). A project opened
   from an FLP is never saved over: Save asks for a name, offering the FLP's name with `.lemon`. Backups, new versions,
   templates and zipped projects are `.lemon` too; FLP backups and templates still open. General ▸ System ▸
   Associate project files covers `.lemon` along with `.flp`. An opened FLP shows its channels' and mixer tracks' icons
@@ -589,7 +608,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Several formats at once: WAV (16 or 24-bit, 32-bit float), FLAC (16 or 24-bit, levels 0-8), MP3 and OGG Vorbis
   (64-320 kbps)
 - Sample rate (the device's, or 44.1-192 kHz by resampling the mix), stereo or mono (merged, left, right),
-  interpolation from 2-point linear to 512-point sinc, triangular dither on integer formats, plugins' HQ mode
+  interpolation from 2-point linear to 512-point sinc (for the engine's own voices and the converter after the mix; Lemon
+  Sampler channels keep their own), triangular dither on integer formats, plugins' HQ mode
 - Split mixer tracks into a stems folder (WAV and FLAC), with or without the master; insert and master effects can be
   left out
 - WAV files can carry markers, loop points, note markers and the tempo (`cue `, `smpl`, `acid` chunks)
@@ -701,11 +721,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - WASAPI on Windows, in shared mode (with the shorter periods a device offers there, where Windows says) or
   exclusive mode (Settings > Audio ▸ Mode: Lemon Studio alone on the device, at its own rate and down to its smallest
   period); a device that refuses exclusive mode plays in shared mode, and the page says why
-- ASIO® on Windows, output only: the installed drivers are in Settings > Audio's Output device list; the master plays
-  to the driver's first two outputs, and Show ASIO panel opens the driver's own settings
+- ASIO® on Windows: the installed drivers are in Settings > Audio's Output device list; every track has an output menu
+  with the pairs of the driver's first 16 outputs, the master plays on the pair chosen for it, and Show ASIO panel opens
+  the driver's own settings
 - On Linux: the sound server (PulseAudio, or PipeWire through pipewire-pulse), ALSA directly, or JACK (Settings > Audio
   ▸ Mode ▸ JACK: a JACK client at the server's rate and buffer length, its ports connected to the system's; with no
-  JACK server running it plays as in shared mode)
+  JACK server running it plays as in shared mode; one stereo pair, not yet tried against a running server)
 - Core Audio on macOS
 - Output device, sample rate and buffer length in Settings > Audio
 - Auto close (Settings > Audio): the output closes while another program is in front, and a playing song pauses
@@ -713,7 +734,6 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - A device that fails (unplugged, or a driver asking to be reset) is opened again; an ASIO driver that does not
   open gives way to the default device
 - An ASIO driver's first 8 inputs open with its outputs (full duplex) for audio recording
-- Not yet: ASIO output pairs, JACK
 
 <img alt="ASIO Compatible logo" src="../crates/os-app/asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png" width="96">
 
@@ -739,9 +759,10 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## 🚧 Settings
 
-- Every page works: MIDI, Audio, Recording, General, File, Plugins, Theme, Project and Info. The controls that are not greyed out act, but for
-  a few that are only kept for now (Resampling quality and others Lemon Studio has nothing to change
-  with yet); the program's choices are kept in `settings.txt` in the user folder
+- Every page is there: MIDI, Audio, Recording, General, File, Plugins, Theme, Project and Info. About 14 controls are
+  still greyed (Mix in buffer switch, Triple buffer, Priority, Safe overloads, Playback tracking, Language, External
+  tools, Troubleshooting and others), and 11 are only kept for now, with nothing reading them (Resampling quality, Align
+  tick lengths and others); the program's choices are kept in `settings.txt` in the user folder
 - General ▸ Input ▸ Manage shortcuts: the F8 keys (browser, plugin picker, plugin database) and the audio clip
   double-click can be swapped
 - File ▸ Browser extra search folders: the folders added to the browser, renamed or replaced from here
