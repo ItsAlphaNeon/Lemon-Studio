@@ -432,10 +432,14 @@ impl Rig {
         // cells of one kind don't crowd out the few knobs, boxes and menus. A kind that has edited weighs four times
         // as much: its drags, wheels and modifiers are where edits go wrong. The Settings window's controls weigh a
         // quarter: they change preferences, not the project.
+        // A kind never aimed at yet weighs 64 times more, per control: a dialog's or a name box's buttons, shown for a
+        // few frames, are tried while they are there, not crowded out by the hundreds of step buttons and grid cells.
         let weight = |k: &str, _valued: bool| {
             let edit = if self.edits.contains(k) { 16 } else { 4 };
             let edit = if k.starts_with("Settings") { edit / 4 } else { edit };
-            edit * 1_000_000 / (1 + u64::from(self.used.get(k).copied().unwrap_or(0)))
+            let used = u64::from(self.used.get(k).copied().unwrap_or(0));
+            let fresh = if used == 0 { 64 } else { 1 };
+            fresh * edit * 1_000_000 / (1 + used)
         };
         let total: u64 = targets.iter().map(|t| weight(&t.2, t.3)).sum();
         if total == 0 {
