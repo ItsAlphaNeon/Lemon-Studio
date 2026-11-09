@@ -1076,7 +1076,8 @@ fn equiv_show() {
     let (root, _) = corpus();
     let path = std::env::var("OS_EQUIV_TRACE").expect("OS_EQUIV_TRACE: a trace file");
     let t = Trace::read(&std::fs::read_to_string(&path).expect("read")).expect("a trace");
-    let mut rig = Rig::open(&root.join(&t.project), &work_dir("show"));
+    let work = work_dir("show");
+    let mut rig = Rig::open(&root.join(&t.project), &work);
     for (i, (inputs, _)) in t.steps.iter().enumerate() {
         let line: Vec<String> = inputs.iter().map(ToString::to_string).collect();
         eprintln!("step {i}: {}", line.join("; "));
@@ -1091,7 +1092,7 @@ fn equiv_show() {
     // OS_EQUIV_SHOW=save: then a saved copy, opened again, against the project (as the roundtrip check compares them,
     // every difference).
     if std::env::var("OS_EQUIV_SHOW").as_deref() == Ok("save") {
-        let copy = work_dir("show").join("roundtrip.flp");
+        let copy = work.join("roundtrip.flp");
         let written = rig.app.state.project.clone();
         match rig.app.save_copy_with(copy.clone(), &mut |_| {}) {
             Some(Ok(())) => {
