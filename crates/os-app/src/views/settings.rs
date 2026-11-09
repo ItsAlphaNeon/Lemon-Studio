@@ -296,10 +296,17 @@ pub const LIVE: &[&str] = &[
     ASSOCIATE_CHECK,
     SHOW_ASIO_PANEL,
     CHECK_UPDATES,
+    WEBSITE,
+    WIKI,
+    SOURCE_CODE,
 ];
 
 /// About: checks the build's channel for a newer build (`App::check_updates_now`, as HELP ▸ Check for updates).
 pub const CHECK_UPDATES: &str = "Check for updates";
+/// About: open the project's pages (`crate::help_links`).
+pub const WEBSITE: &str = "Website";
+pub const WIKI: &str = "Wiki";
+pub const SOURCE_CODE: &str = "Source code";
 
 /// About: which build this is and how it is kept up to date (`crate::update`).
 fn update_lines() -> Vec<Row> {
@@ -426,6 +433,7 @@ pub const THEME: usize = 6;
 pub const PROJECT: usize = 7;
 pub const INFO: usize = 8;
 pub const DEBUG: usize = 9;
+pub const ABOUT: usize = 10;
 
 /// Plugin table rows shown at once (spec: ui/plugin-manager.md §2).
 pub const TABLE_ROWS: usize = 18;
@@ -960,6 +968,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Big(format!("Lemon Studio {}", crate::version::staged())),
                     txt("A digital audio workstation written in Rust."),
                     txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
+                    Buttons(vec![(WEBSITE, 80.0), (WIKI, 64.0), (SOURCE_CODE, 100.0)]),
                     Gap(10.0),
                 ],
                 update_lines(),

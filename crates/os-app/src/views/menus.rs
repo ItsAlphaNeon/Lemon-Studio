@@ -223,9 +223,9 @@ pub const ALIGN_LABEL: &str = "Align all channel editors";
 pub const OPTIONS_MENU: usize = 5;
 /// OPTIONS > Project info (the toolbar's info button).
 pub const OPT_INFO: usize = 9;
-/// HELP > About (the toolbar logo).
+/// HELP > About (the toolbar logo, the Help button's right click, the macOS application menu).
 pub const HELP_MENU: usize = 7;
-pub const HELP_ABOUT: usize = 7;
+pub const HELP_ABOUT: usize = 11;
 /// Index of the ADD and TOOLS menus.
 pub const ADD_MENU: usize = 2;
 pub const TOOLS_MENU: usize = 6;
@@ -433,12 +433,16 @@ const TOOLS_B: &[Item] = &[
 const HELP: &[Item] = &[
     it("Help index", "").on().cmd(MenuCmd::Web(crate::help_links::HELP_INDEX_URL)),
     it("Tutorials", "").sub().cmd(MenuCmd::Sub(Sub::Tutorials)),
+    it("Keyboard shortcuts", "").on().cmd(MenuCmd::Web(crate::help_links::SHORTCUTS_URL)),
     head("Support"),
+    it("Troubleshooting", "").on().cmd(MenuCmd::Web(crate::help_links::TROUBLESHOOTING_URL)),
+    it("Report a bug", "").on().cmd(MenuCmd::Web(crate::help_links::REPORT_BUG_URL)),
     it("Diagnostics", "").on().cmd(MenuCmd::Diagnostics),
     it("What's new", "").on().cmd(MenuCmd::Web(crate::help_links::WHATS_NEW_URL)),
     it("Check for updates", "").on().cmd(MenuCmd::CheckUpdates),
     SEP,
-    it("About...", "").on(),
+    it("Lemon Studio website", "").on().cmd(MenuCmd::Web(crate::help_links::WEBSITE_URL)),
+    it("About...", "").cmd(MenuCmd::Settings(crate::views::settings::ABOUT)),
 ];
 
 pub const MENUS: &[Menu] = &[
@@ -1134,10 +1138,10 @@ mod tests {
     }
 
     /// Every entry that works says what it does (`MenuCmd`), but for those dispatched by their place (FILE's first
-    /// entries, About): none falls through to "not available yet", whatever its label.
+    /// entries): none falls through to "not available yet", whatever its label.
     #[test]
     fn working_entries_have_their_command() {
-        let by_place = [(0, FILE_NEW), (0, FILE_OPEN), (0, FILE_SAVE), (0, FILE_SAVE_AS), (0, FILE_SAVE_VERSION), (0, FILE_EXPORT), (0, FILE_EXPORT_MP3), (0, FILE_EXPORT_MIDI), (0, FILE_EXIT), (HELP_MENU, HELP_ABOUT)];
+        let by_place = [(0, FILE_NEW), (0, FILE_OPEN), (0, FILE_SAVE), (0, FILE_SAVE_AS), (0, FILE_SAVE_VERSION), (0, FILE_EXPORT), (0, FILE_EXPORT_MP3), (0, FILE_EXPORT_MIDI), (0, FILE_EXIT)];
         for (mi, m) in MENUS.iter().enumerate() {
             for (i, it) in m.cols.iter().flat_map(|(_, items)| items.iter()).enumerate().filter(|(_, it)| it.kind == Kind::Item) {
                 if works(mi, it) && !by_place.contains(&(mi, i)) {
