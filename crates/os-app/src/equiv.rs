@@ -272,7 +272,7 @@ struct Rig {
 /// A control's kind for the generator's novelty: its action's variant, and the variant inside it.
 fn kind(a: &Action) -> String {
     let d = format!("{a:?}");
-    let mut parts = d.split(['(', ' ', '{', ',']).filter(|p| p.chars().next().is_some_and(char::is_uppercase));
+    let mut parts = d.split(['(', ')', ' ', '{', ',']).filter(|p| p.chars().next().is_some_and(char::is_uppercase));
     match (parts.next(), parts.next()) {
         (Some(a), Some(b)) => format!("{a}.{b}"),
         (Some(a), None) => a.to_string(),
@@ -388,6 +388,9 @@ impl Rig {
             .hits
             .iter()
             .filter(|h| h.rect.w >= 1.0 && h.rect.h >= 1.0)
+            // Only what a click there reaches: a control under a dialog, a menu or another window is covered (a
+            // click lands on what covers it), and aiming at it would leave the dialog's own buttons rarely tried.
+            .filter(|h| self.app.top_hit(h.rect.x + h.rect.w / 2.0, h.rect.y + h.rect.h / 2.0).is_some_and(|t| t.action == h.action))
             .map(|h| {
                 let valued = crate::knobs::Control::of(&h.action).is_some() || self.app.automation_target(&h.action).is_some();
                 (h.rect.x + h.rect.w / 2.0, h.rect.y + h.rect.h / 2.0, kind(&h.action), valued)
