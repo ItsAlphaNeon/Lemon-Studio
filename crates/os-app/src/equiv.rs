@@ -19,8 +19,8 @@
 //! OS_EQUIV_DIR=<traces> OS_EQUIV_CORPUS=<folder of .flp> \
 //!   cargo test -p os-app --bin lemonstudio equiv_record -- --ignored --nocapture
 //! ```
-//! `equiv_show` runs in the test's own process: give it `HOME=<OS_EQUIV_DIR>/home` (`equiv_shrink` runs each candidate
-//! in a process of its own, as a recording does).
+//! `equiv_show` runs in the test's own process: give it `HOME=<OS_EQUIV_DIR>/home` and no `DISPLAY` (`equiv_shrink`
+//! runs each candidate in a process of its own, as a recording does).
 //! `equiv_replay` replays every trace in `OS_EQUIV_DIR`; `equiv_twice` records and replays on the same build (what
 //! isn't deterministic yet). `equiv_coverage` adds up what the recordings in `OS_EQUIV_DIR` reached: each kind of
 //! control, how many frames showed it, how often a step aimed at it, and whether it ever changed something. `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (300) steps each,
@@ -998,6 +998,9 @@ fn isolated(name: &str, job: &str) -> String {
         .env("PATH", &bin)
         .env("XDG_RUNTIME_DIR", home.join("run"))
         .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        // No display either: whether a plugin window opens (and what the plugin's state then holds) must not depend on
+        // whether a hidden X server happened to be running.
+        .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("CARGO")
         .output();
