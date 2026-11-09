@@ -19243,6 +19243,34 @@ mod tests {
         }
         frame(&mut app, &mut c, None);
 
+        // Another pattern shown while a dialog previews (New pattern, the pattern selector): the pattern previewed on
+        // gets its notes back on ×, on Accept and when the preview starts again on the new pattern, as no undo step
+        // holds the preview.
+        {
+            use crate::piano_dlg::Act as DAct;
+            let pat = app.state.pattern;
+            let notes_of = |app: &App, n: u16| app.state.project.patterns.iter().find(|p| p.number == n).map(|p| p.notes.clone()).unwrap_or_default();
+            put(&mut app, &[(0, 96, 60), (96, 48, 62)]);
+            let before = notes_of(&app, pat);
+            for close in [Action::CloseWin(Win::PianoDlg), Action::PianoDlg(DAct::Accept)] {
+                key(&mut app, "u", false, true, false);
+                assert_ne!(notes_of(&app, pat), before, "previewed");
+                app.state.pattern = pat + 1;
+                app.act(close.clone());
+                assert_eq!(notes_of(&app, pat), before, "{close:?} puts back the pattern previewed on");
+                assert!(!app.state.shown(Win::PianoDlg));
+                app.state.pattern = pat;
+            }
+            key(&mut app, "u", false, true, false);
+            app.state.pattern = pat + 1;
+            app.act(Action::PianoDlg(DAct::Group));
+            assert_eq!(notes_of(&app, pat), before, "a preview on the new pattern puts the old one back");
+            app.act(Action::CloseWin(Win::PianoDlg));
+            app.state.pattern = pat;
+            assert_eq!(notes_of(&app, pat), before);
+        }
+        frame(&mut app, &mut c, None);
+
         // The toolbar's tools button opens the Tools menu.
         let r = hit_rect(&app, &Action::PianoToolsMenu);
         app.mouse_move(r.cx(), r.cy());
