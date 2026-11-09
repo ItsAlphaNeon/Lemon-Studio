@@ -218,11 +218,11 @@ impl Snap {
         }
     }
 
-    /// Puts this into the project. A pattern's step also shows that pattern, as the piano roll's undo always did.
+    /// Puts this into the project. A pattern's step leaves the pattern shown as it is, as in FL (24.1.1, 2026-11-09: a
+    /// step sequencer and a piano roll edit in one pattern, undone and redone while another was shown, kept that one).
     fn put(self, s: &mut State) {
         match self {
             Snap::Pattern { number, notes, controls, length } => {
-                s.pattern = number;
                 let p = crate::patterns::pat_mut(s, number);
                 (p.notes, p.controls, p.length) = (notes, controls, length);
                 s.piano.clear_selection();
@@ -993,6 +993,23 @@ mod tests {
         assert_eq!(s.project.mixer[t].send_levels, vec![], "no record left behind");
         assert!(redo(s).is_some());
         assert_eq!(s.project.mixer[t].send_levels, vec![(0, 0.5)]);
+    }
+
+    #[test]
+    fn undo_and_redo_of_a_pattern_edit_leave_the_pattern_shown() {
+        // As in FL 24.1.1 (2026-11-09): a note added in pattern 1, pattern 2 shown, undo and redo change pattern 1's
+        // notes and leave pattern 2 shown (equivalence harness, redo to the end showed the pattern edited).
+        let mut app = App::new(None);
+        let s = &mut app.state;
+        s.pattern = 1;
+        crate::piano::snapshot_as(s, "Piano roll edit");
+        crate::patterns::pat_mut(s, 1).notes.push(os_model::Note::step(0, 0));
+        let edited = s.project.pattern(1).map(|p| p.notes.clone());
+        s.pattern = 2;
+        assert!(undo(s).is_some());
+        assert_eq!((s.pattern, s.project.pattern(1).map(|p| p.notes.len())), (2, Some(0)));
+        assert!(redo(s).is_some());
+        assert_eq!((s.pattern, s.project.pattern(1).map(|p| p.notes.clone())), (2, edited));
     }
 
     /// Undo knob tweaks: on, a turn of a channel knob is a step and Ctrl+Z puts the knob back, the click before it
