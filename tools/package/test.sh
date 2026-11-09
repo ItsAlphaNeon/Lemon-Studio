@@ -99,7 +99,8 @@ tag() { echo "GITHUB_REF=refs/tags/$1 GITHUB_REF_NAME=$1"; }
 # The manifest: the app's three programs, not the plugin zips or anything else.
 mkdir "$work/dist"
 v=0.1.0
-for f in "LemonStudio-$v-windows-x86_64.exe" "LemonStudio-$v-linux-x86_64.AppImage" "LemonStudio-$v-macos-aarch64.zip" \
+for f in LemonStudio.exe LemonStudio.AppImage "LemonStudio-$v-macos-aarch64.zip" \
+    LemonStudioNightly.exe LemonStudioNightly.AppImage "LemonStudio-2026.1.1.1-macos-aarch64.zip" \
     "LemonStudio-Plugins-$v-windows-x86_64.zip" LICENSE; do
     : >"$work/dist/$f"
 done
@@ -110,13 +111,30 @@ import json, sys
 m = json.load(open(sys.argv[1]))
 assert sorted(m["assets"]) == ["linux-x86_64", "macos-aarch64", "windows-x86_64"], m["assets"]
 assert m["notes"] == ["Mixer: a fix", "Another"], m["notes"]
-assert m["assets"]["linux-x86_64"]["url"] == "https://github.com/o/r/releases/download/v0.1.0/LemonStudio-0.1.0-linux-x86_64.AppImage"
+assert m["assets"]["linux-x86_64"]["url"] == "https://github.com/o/r/releases/download/v0.1.0/LemonStudio.AppImage"
+assert m["assets"]["windows-x86_64"]["url"] == "https://github.com/o/r/releases/download/v0.1.0/LemonStudio.exe"
+assert m["assets"]["macos-aarch64"]["url"] == "https://github.com/o/r/releases/download/v0.1.0/LemonStudio-0.1.0-macos-aarch64.zip"
 assert m["page"] == "https://github.com/o/r/releases/tag/v0.1.0"
 PY
 then
     echo "ok    the manifest"
 else
     echo "FAIL  the manifest"
+    fails=$((fails + 1))
+fi
+"$python" "$manifest" --channel nightly --version 2026.1.1.1 --commit abc --repo o/r --tag nightly-2026.1.1.1 --notes "$work/changes.md" --dist "$work/dist" --out "$work/nightly.json" >/dev/null
+if "$python" - "$work/nightly.json" <<'PY'
+import json, sys
+a = json.load(open(sys.argv[1]))["assets"]
+base = "https://github.com/o/r/releases/download/nightly-2026.1.1.1/"
+assert a["windows-x86_64"]["url"] == base + "LemonStudioNightly.exe", a
+assert a["linux-x86_64"]["url"] == base + "LemonStudioNightly.AppImage", a
+assert a["macos-aarch64"]["url"] == base + "LemonStudio-2026.1.1.1-macos-aarch64.zip", a
+PY
+then
+    echo "ok    a nightly's programs have their own names"
+else
+    echo "FAIL  a nightly's programs have their own names"
     fails=$((fails + 1))
 fi
 echo "The first build on this channel." >"$work/first.md"

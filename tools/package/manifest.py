@@ -10,9 +10,9 @@ program to download, with its size and SHA-256. The release workflow signs it wi
     manifest.py --channel nightly --version 2026.11.7.1 --commit <sha> --repo owner/name --tag nightly-2026.11.7.1 \\
         --notes generated-notes.md --dist dist --out dist/nightly.json
 
-The programs are found in `dist` by name: `LemonStudio-<version>-<platform>.<exe|AppImage|zip>`, `<platform>` as
-Rust names it (`windows-x86_64`, `linux-x86_64`, `macos-aarch64`). The plugin downloads (`LemonStudio-Plugins-...`)
-are not programs to update and are left out. The notes are GitHub's generated release notes, one pull request a line.
+The programs are found in `dist` by name (`programs`), per platform as Rust names it. The plugin downloads
+(`LemonStudio-Plugins-...`) are not programs to update and are left out. The notes are GitHub's generated release
+notes, one pull request a line.
 """
 
 import argparse
@@ -39,19 +39,29 @@ def notes(markdown):
     return out
 
 
-def assets(dist, version, base):
-    pattern = re.compile(r"^LemonStudio-" + re.escape(version) + r"-(?P<platform>[a-z0-9]+-[a-z0-9_]+)\.(exe|AppImage|zip)$")
+def programs(channel, version):
+    """The file holding the program, per platform. The `.exe` and the AppImage carry no version: an update replaces the
+    file in place, so a shortcut to it never breaks. A nightly's have a name of their own, so that a nightly and a
+    tagged release can sit in one folder. macOS's zip is only unpacked; the `.app` inside has a fixed name."""
+    stem = "LemonStudioNightly" if channel == "nightly" else "LemonStudio"
+    return {
+        "windows-x86_64": f"{stem}.exe",
+        "linux-x86_64": f"{stem}.AppImage",
+        "macos-aarch64": f"LemonStudio-{version}-macos-aarch64.zip",
+    }
+
+
+def assets(dist, channel, version, base):
     found = {}
-    for name in sorted(os.listdir(dist)):
-        m = pattern.match(name)
-        if not m:
-            continue
+    for platform, name in programs(channel, version).items():
         path = os.path.join(dist, name)
+        if not os.path.isfile(path):
+            continue
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk)
-        found[m.group("platform")] = {"url": f"{base}/{name}", "size": os.path.getsize(path), "sha256": h.hexdigest()}
+        found[platform] = {"url": f"{base}/{name}", "size": os.path.getsize(path), "sha256": h.hexdigest()}
     return found
 
 
@@ -65,9 +75,9 @@ def main():
     with open(a.notes, encoding="utf-8") as f:
         changes = notes(f.read())
     page = f"https://github.com/{a.repo}/releases/tag/{a.tag}"
-    found = assets(a.dist, a.version, f"https://github.com/{a.repo}/releases/download/{a.tag}")
+    found = assets(a.dist, a.channel, a.version, f"https://github.com/{a.repo}/releases/download/{a.tag}")
     if not found:
-        sys.exit(f"no LemonStudio-{a.version}-<platform> programs in {a.dist}")
+        sys.exit(f"none of the programs in {a.dist}: {', '.join(programs(a.channel, a.version).values())}")
     manifest = {
         "channel": a.channel,
         "version": a.version,
