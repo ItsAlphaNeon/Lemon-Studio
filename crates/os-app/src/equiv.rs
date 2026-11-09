@@ -606,6 +606,10 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
             || !q.markers.is_empty()
     });
     p.patterns.sort_by_key(|q| q.number);
+    // A mixer track's origin is bookkeeping (os-model: tracks that differ only there are equal).
+    for m in &mut p.mixer {
+        m.origin = None;
+    }
     // A route with no level record plays at unity (0.8 on the fader scale), as one with a record at 0.8 does.
     for m in &mut p.mixer {
         m.send_levels.retain(|&(_, l)| (l - 0.8).abs() > 1e-9);
@@ -1079,15 +1083,23 @@ fn equiv_show() {
     let t = Trace::read(&std::fs::read_to_string(&path).expect("read")).expect("a trace");
     let work = work_dir("show");
     let mut rig = Rig::open(&root.join(&t.project), &work);
+    let mut start = rig.app.state.project.clone();
     for (i, (inputs, _)) in t.steps.iter().enumerate() {
         let line: Vec<String> = inputs.iter().map(ToString::to_string).collect();
         eprintln!("step {i}: {}", line.join("; "));
         let before = rig.app.state.project.clone();
         rig.run(inputs);
+        rig.undo_start(&mut start);
         let s = &rig.app.state;
         eprintln!("  undo: {:?} ({} steps), message: {:?}", s.history.newest_done(), s.history.done(), s.message);
         if let Some(d) = difference(&before, &s.project, false) {
             eprintln!("  changed: {d}");
+        }
+    }
+    // OS_EQUIV_SHOW=checks: then the end checks, as a recording runs them.
+    if std::env::var("OS_EQUIV_SHOW").as_deref() == Ok("checks") {
+        for f in rig.invariants(&start, &work) {
+            eprintln!("check: {f}");
         }
     }
     // OS_EQUIV_SHOW=save: then a saved copy, opened again, against the project (as the roundtrip check compares them,
