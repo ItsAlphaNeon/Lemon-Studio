@@ -9402,6 +9402,7 @@ impl App {
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
             Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state, i) }),
             Action::RackGraphArea => {
+                crate::rack::graph_step(&mut self.state);
                 self.rack_graph_at(mouse);
                 self.drag = Some(Drag::RackGraph);
             }
@@ -9439,6 +9440,7 @@ impl App {
                 return true;
             }
             Action::RackGraphArea => {
+                crate::rack::graph_step(&mut self.state);
                 self.rack_graph_at((x, y));
                 self.drag = Some(Drag::RackGraph);
                 return true;
@@ -13264,6 +13266,41 @@ mod tests {
         }
         // Bars without rows (channel rack, picker) only scroll.
         assert_eq!(app.rows_get(Scroll::RackY), None);
+    }
+
+    /// A drag in the channel rack's graph editor is one undo step, "Graph editor change velocity" on the velocity tab;
+    /// a press that changes nothing leaves none (spec: ui/undo-steps.md; FL parity audit 2026-11-08 found it missing).
+    #[test]
+    fn a_graph_editor_drag_is_one_undo_step() {
+        let mut app = App::new(None);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        app.state.raise(Win::ChannelRack);
+        app.state.rack.graph_open = true;
+        app.state.selected_channel = 0;
+        let ch = app.state.project.channels[0].index;
+        let n = app.state.pattern.max(1);
+        crate::patterns::pat_mut(&mut app.state, n).notes.push(os_model::Note::step(ch, 0));
+        frame(&mut app, &mut c, None);
+        let area = hit_rect(&app, &Action::RackGraphArea);
+        let x = hit_rect(&app, &Action::Step(0, 0)).cx();
+        let vel = |app: &App| app.state.project.pattern(n).map(|p| p.notes[0].velocity);
+        let (before, steps) = (vel(&app), app.state.history.done());
+        app.mouse_move(x, area.y + area.h * 0.9);
+        app.mouse_down();
+        app.mouse_move(x, area.y + area.h * 0.6);
+        app.mouse_move(x, area.y + area.h * 0.4);
+        app.mouse_up();
+        assert_ne!(vel(&app), before);
+        assert_eq!((app.state.history.done(), app.state.history.newest_done()), (steps + 1, Some("Graph editor change velocity")));
+        assert!(crate::history::undo(&mut app.state).is_some());
+        assert_eq!(vel(&app), before, "one step takes the whole drag back");
+        app.state.pattern = n + 1;
+        frame(&mut app, &mut c, None);
+        let steps = app.state.history.done();
+        app.mouse_move(x, area.y + area.h * 0.5);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!((app.state.history.done(), vel(&app)), (steps, before), "a press in a pattern without steps changes nothing");
     }
 
     fn hit_rect(app: &App, a: &Action) -> Rect {

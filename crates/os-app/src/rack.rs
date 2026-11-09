@@ -2896,6 +2896,14 @@ pub fn fill_hit(s: &mut State, h: FillHit) {
     f.rebuild();
 }
 
+/// A press in the graph editor (§14): one undo step for the drag, dropped on release when it changed nothing (spec:
+/// ui/undo-steps.md, "Graph editor change velocity", one per drag). Only the velocity tab's name was measured.
+pub fn graph_step(s: &mut State) {
+    let name = if s.rack.graph_tab == Tab::Vel { "Graph editor change velocity" } else { "Graph editor change" };
+    let snap = crate::history::Snap::pattern(s, s.pattern.max(1));
+    crate::history::record(s, name, snap);
+}
+
 /// Graph editor (§14): set step `k`'s value of the focused channel from 0..1; a column without a step edits the
 /// nearest step note to its left.
 pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
