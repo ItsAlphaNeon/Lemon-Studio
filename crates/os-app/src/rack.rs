@@ -2661,6 +2661,8 @@ fn tempo_fitted(c: &os_model::Channel) -> bool {
 pub fn play_project(s: &State) -> Project {
     let mut p = s.project.clone();
     p.tempo = Some(s.tempo);
+    // The pattern shown: a song with no clips plays it (os-engine), not the one the project was opened or saved on.
+    p.current_pattern = Some(s.pattern.max(1));
     let rows = loop_rows(s);
     if s.rack.loop_mode && !rows.is_empty() {
         expand_loops(&mut p, s, &rows);
@@ -3047,11 +3049,9 @@ pub(crate) fn follow_pattern(s: &mut State) {
         store_loops(s);
         s.pattern = shown;
     }
-    let before = (s.rack.loop_len.clone(), s.rack.loop_mode, s.rack.loop_type);
     load_loops(s);
-    if (s.rack.loop_len.clone(), s.rack.loop_mode, s.rack.loop_type) != before {
-        s.piano.dirty = true;
-    }
+    // Playback follows: the pattern's loops, and a song with no clips plays the pattern shown (`play_project`).
+    s.piano.dirty = true;
 }
 
 /// The rack's loop lengths, type and mode into the pattern they belong to (the shown one: `follow_pattern` first).
@@ -3164,6 +3164,21 @@ mod tests {
         a.state.pattern = 3;
         follow_pattern(&mut a.state);
         assert_eq!(a.state.project.pattern(1).cloned(), before, "pattern 1's loops as they were");
+    }
+
+    /// A song with no clips plays the pattern shown: the engine is handed it, and a switch reaches playback
+    /// (equivalence harness, I'll Be Your Madonna: the engine held the pattern the project was opened on).
+    #[test]
+    fn the_engine_gets_the_pattern_shown() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.pattern = 1;
+        from_model(&mut a.state);
+        a.state.piano.dirty = false;
+        a.state.pattern = 2;
+        follow_pattern(&mut a.state);
+        assert!(a.state.piano.dirty, "playback follows the switch");
+        assert_eq!(play_project(&a.state).current_pattern, Some(2));
     }
 
     /// A project opens on the pattern it was saved on, with the loop lengths saved into that pattern.
