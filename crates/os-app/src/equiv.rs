@@ -570,6 +570,11 @@ impl Rig {
 fn canonical(p: &os_model::Project) -> os_model::Project {
     let mut p = p.clone();
     for a in &mut p.arrangements {
+        // A clip's position, kind, item, length and track are written from its fields on every save (os-flp
+        // encode_clip): the stored record's copy of them is left as it was read, so a clip made here holds zeros.
+        for c in &mut a.clips {
+            c.raw[..14].fill(0);
+        }
         a.clips.sort_by_cached_key(|c| format!("{:012}:{:06}:{c:?}", c.position, c.track));
     }
     p.patterns.retain(|q| {
