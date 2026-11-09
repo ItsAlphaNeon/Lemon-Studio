@@ -589,17 +589,20 @@ impl Rig {
 fn canonical(p: &os_model::Project) -> os_model::Project {
     let mut p = p.clone();
     for a in &mut p.arrangements {
-        // A clip's position, kind, item, length and track are written from its fields on every save (os-flp
-        // encode_clip): the stored record's copy of them is left as it was read, so a clip made here holds zeros.
+        // A clip's position, kind, item, length, track, mute bit and id are written from its fields on every save
+        // (os-flp encode_clip, encode_clips): the stored record's copy of them is left as it was read, so a clip made
+        // here holds zeros.
         for c in &mut a.clips {
             c.raw[..14].fill(0);
+            c.raw[19] &= !0x20;
+            c.raw[32..36].fill(0);
         }
         a.clips.sort_by_cached_key(|c| format!("{:012}:{:06}:{c:?}", c.position, c.track));
     }
+    // A pattern with nothing in it, loop lengths and loop mode alone included, is not stored: FL keeps no loop lengths
+    // for a pattern without notes (flp/events/patterns.md "Loop lengths").
     p.patterns.retain(|q| {
         !(q.notes.is_empty() && q.controls.is_empty() && q.name.is_none() && q.color.is_none() && q.length.is_none())
-            || !q.loops.is_empty()
-            || q.loop_off.is_some()
             || !q.markers.is_empty()
     });
     p.patterns.sort_by_key(|q| q.number);
