@@ -541,16 +541,14 @@ impl Rig {
         // A saved copy opens as the same project, and the interface's part of it (tempo, current pattern, rack state)
         // as the interface held it.
         let copy = work.join("roundtrip.flp");
-        match self.app.save_copy_with(copy.clone(), &mut |_| {}) {
+        // The project as the save wrote it: with what the interface holds written in (the tempo, the pattern shown,
+        // the rack's loops and groups, the playlist's view) and the plugins' states; the interface's part is compared
+        // on its own below.
+        let mut written = self.app.state.project.clone();
+        match self.app.save_copy_with(copy.clone(), &mut |p| written = p.clone()) {
             Some(Ok(())) => {
                 let mut again = open_app(&copy);
-                // The tempo, song mode and current pattern the project holds are what was opened or last saved: the
-                // interface holds them meanwhile, and its part is compared below.
-                let mut written = self.app.state.project.clone();
-                let mut back = again.state.project.clone();
-                for p in [&mut written, &mut back] {
-                    (p.tempo, p.song_mode, p.current_pattern) = (None, None, None);
-                }
+                let back = again.state.project.clone();
                 if let Some(d) = difference(&canonical(&written), &canonical(&back), true) {
                     bad.push(format!("roundtrip({d})"));
                 }
@@ -1093,8 +1091,8 @@ fn equiv_show() {
     // every difference).
     if std::env::var("OS_EQUIV_SHOW").as_deref() == Ok("save") {
         let copy = work.join("roundtrip.flp");
-        let written = rig.app.state.project.clone();
-        match rig.app.save_copy_with(copy.clone(), &mut |_| {}) {
+        let mut written = rig.app.state.project.clone();
+        match rig.app.save_copy_with(copy.clone(), &mut |p| written = p.clone()) {
             Some(Ok(())) => {
                 let again = open_app(&copy);
                 for d in differences(&canonical(&written), &canonical(&again.state.project), true).iter().take(60) {
