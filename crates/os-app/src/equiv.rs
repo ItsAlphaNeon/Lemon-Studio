@@ -668,6 +668,12 @@ fn leaves(text: &str) -> Vec<(String, String)> {
 /// left out (they are not saved yet and are handed out again after an undo: specs control-plane.md part 2, step 12);
 /// `rounding` takes numbers within 1e-4 as equal (what the file format keeps of them).
 fn difference(a: &impl fmt::Debug, b: &impl fmt::Debug, rounding: bool) -> Option<String> {
+    let diff = differences(a, b, rounding);
+    diff.first().map(|d| format!("{d}(+{})", diff.len() - 1))
+}
+
+/// Every leaf where `a` and `b` differ, as `path:a->b`.
+fn differences(a: &impl fmt::Debug, b: &impl fmt::Debug, rounding: bool) -> Vec<String> {
     let kept = |l: Vec<(String, String)>| -> Vec<(String, String)> { l.into_iter().filter(|(k, _)| !(k.ends_with(".id") || k.contains(".id["))).collect() };
     let (a, b) = (kept(leaves(&format!("{a:#?}"))), kept(leaves(&format!("{b:#?}"))));
     let same = |x: &str, y: &str| {
@@ -681,7 +687,7 @@ fn difference(a: &impl fmt::Debug, b: &impl fmt::Debug, rounding: bool) -> Optio
         .map(|(k, v)| format!("{k}:{}->{}", short(v), bm.get(k.as_str()).map_or("absent".into(), |w| short(w))))
         .collect();
     diff.extend(b.iter().filter(|(k, _)| !am.contains_key(k.as_str())).map(|(k, v)| format!("{k}:absent->{}", short(v))));
-    diff.first().map(|d| format!("{d}(+{})", diff.len() - 1))
+    diff
 }
 
 fn short(v: &str) -> String {
@@ -1080,6 +1086,25 @@ fn equiv_show() {
         eprintln!("  undo: {:?} ({} steps), message: {:?}", s.history.newest_done(), s.history.done(), s.message);
         if let Some(d) = difference(&before, &s.project, false) {
             eprintln!("  changed: {d}");
+        }
+    }
+    // OS_EQUIV_SHOW=save: then a saved copy, opened again, against the project (as the roundtrip check compares them,
+    // every difference).
+    if std::env::var("OS_EQUIV_SHOW").as_deref() == Ok("save") {
+        let copy = work_dir("show").join("roundtrip.flp");
+        let written = rig.app.state.project.clone();
+        match rig.app.save_copy_with(copy.clone(), &mut |_| {}) {
+            Some(Ok(())) => {
+                let again = open_app(&copy);
+                for d in differences(&canonical(&written), &canonical(&again.state.project), true).iter().take(60) {
+                    eprintln!("saved and opened: {d}");
+                }
+                let (a, b) = (leaves(&side(&rig.app)), leaves(&side(&again)));
+                for (x, y) in a.iter().zip(&b).filter(|(x, y)| x != y).take(20) {
+                    eprintln!("saved and opened, interface: {}:{}->{}", x.0, short(&x.1), short(&y.1));
+                }
+            }
+            other => eprintln!("save failed: {other:?}"),
         }
     }
 }
