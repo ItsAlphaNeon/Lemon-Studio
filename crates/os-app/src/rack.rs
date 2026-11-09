@@ -3181,6 +3181,25 @@ mod tests {
         assert_eq!(play_project(&a.state).current_pattern, Some(2));
     }
 
+    /// What a save writes into the project from the interface (the tempo, the pattern shown) reaches playback: the
+    /// engine holds the project as it is after the save (equivalence harness, I'll Be Your Madonna and Electro).
+    #[test]
+    fn a_save_hands_what_it_writes_in_to_playback() {
+        let file = std::env::temp_dir().join(format!("openstudio-save-dirty-{}.flp", std::process::id()));
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        (a.state.file, a.state.path) = (None, None);
+        a.state.pattern = 3;
+        a.state.piano.dirty = false;
+        a.save_to(file.clone());
+        assert_eq!(a.state.project.current_pattern, Some(3));
+        assert!(a.state.piano.dirty, "playback gets the project as saved");
+        a.state.piano.dirty = false;
+        a.save_to(file.clone());
+        assert!(!a.state.piano.dirty, "a save that writes nothing new changes nothing");
+        let _ = std::fs::remove_file(file);
+    }
+
     /// A project opens on the pattern it was saved on, with the loop lengths saved into that pattern.
     #[test]
     fn the_current_pattern_and_its_loops_reopen() {

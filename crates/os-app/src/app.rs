@@ -2028,6 +2028,9 @@ impl App {
                 }
             }
         }
+        // What the save writes into the project from the interface (below) reaches playback like any edit: the engine
+        // holds the project as it is.
+        let before = self.state.project.clone();
         self.store_builtin_states();
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
@@ -2039,6 +2042,9 @@ impl App {
         crate::rack::to_model(s);
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
         crate::playlist::store_view(s);
+        if s.project != before {
+            s.piano.dirty = true;
+        }
         // A file Lemon Studio made before the project had a playlist has no arrangement block (FL's files always have
         // one): build it again from the model, which holds everything that file stored.
         let lacks_playlist = s.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_some_and(|p| p.arrangements.is_empty())
