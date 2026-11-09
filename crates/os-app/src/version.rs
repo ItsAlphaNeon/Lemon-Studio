@@ -17,6 +17,12 @@ pub const VERSION: &str = match option_env!("LEMON_VERSION") {
 /// The release channel this build came from: `nightly` or `stable`; None for a build from source.
 pub const CHANNEL: Option<&str> = option_env!("LEMON_CHANNEL");
 
+/// Whether this is a nightly build, which has its own name, icon and splash.
+pub const NIGHTLY: bool = cfg!(lemon_nightly);
+
+/// The program's name, where the system shows it (the window's title, the file association).
+pub const NAME: &str = if NIGHTLY { "Lemon Studio Nightly" } else { "Lemon Studio" };
+
 /// The version as Lemon Studio shows it: "2026.11.7.1 nightly", "1.0.0", or "0.0.1" for a build from source.
 pub fn text() -> &'static str {
     static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();

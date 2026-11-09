@@ -162,10 +162,11 @@ jobs:
               echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $RUNNER_TEMP/appimagetool" | sha256sum -c -
               chmod +x "$RUNNER_TEMP/appimagetool"
               APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
-                bash tools/package/appimage.sh target/release/lemonstudio "$v" "dist/$program.AppImage"
+                bash tools/package/appimage.sh target/release/lemonstudio "$v" "dist/$program.AppImage" "$LEMON_CHANNEL"
               ;;
             macOS)
-              ditto -c -k --keepParent "target/bundled/Lemon Studio.app" "dist/LemonStudio-$v-$PLATFORM.zip"
+              app="Lemon Studio"; [ "$LEMON_CHANNEL" = nightly ] && app="Lemon Studio Nightly"
+              ditto -c -k --keepParent "target/bundled/$app.app" "dist/LemonStudio-$v-$PLATFORM.zip"
               ;;
           esac
           p="plugins/LemonStudio-Plugins-$v"
@@ -218,7 +219,7 @@ jobs:
             echo "The first build on this channel." >"$RUNNER_TEMP/changes.md"
           fi
           case "$CHANNEL:$VERSION" in
-            nightly:*) intro="A nightly build of main at ${SHA:0:8}: the newest changes, and the least tested." ;;
+            nightly:*) intro="A nightly build of main at ${SHA:0:8}: the newest changes, and the least tested. It has its own name and icon, and sits beside Lemon Studio if you have both." ;;
             stable:0.*) intro="Lemon Studio $VERSION, an alpha." ;;
             *) intro="Lemon Studio $VERSION." ;;
           esac
@@ -226,8 +227,9 @@ jobs:
           import os, sys
           changes = open(sys.argv[1], encoding="utf-8").read().strip()
           text = open("tools/package/release-notes.md", encoding="utf-8").read()
+          app = "Lemon Studio Nightly" if os.environ["CHANNEL"] == "nightly" else "Lemon Studio"
           program = "LemonStudioNightly" if os.environ["CHANNEL"] == "nightly" else "LemonStudio"
-          print(text.replace("{INTRO}", sys.argv[2]).replace("{VERSION}", os.environ["VERSION"]).replace("{PROGRAM}", program).replace("{CHANGES}", changes))
+          print(text.replace("{INTRO}", sys.argv[2]).replace("{VERSION}", os.environ["VERSION"]).replace("{APP}", app).replace("{PROGRAM}", program).replace("{CHANGES}", changes))
           PY
           cp LICENSE THIRD-PARTY-NOTICES.txt dist/
 

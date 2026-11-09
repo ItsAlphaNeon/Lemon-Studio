@@ -16,10 +16,10 @@ name, so shortcuts to it keep working.
   **Run anyway**.
 - **Linux:** make the AppImage executable (`chmod +x {PROGRAM}.AppImage`, or in its file properties) and run it.
 - **macOS:** Lemon Studio is not notarized by Apple (that needs a paid Apple Developer account the project doesn't have),
-  so macOS stops it the first time. Unzip it and move **Lemon Studio.app** to Applications. Then open it once, go to
+  so macOS stops it the first time. Unzip it and move **{APP}.app** to Applications. Then open it once, go to
   **System Settings ▸ Privacy & Security** and choose **Open Anyway** (on macOS 14 and earlier, right-click the app ▸
   **Open** ▸ **Open** also works). Or, in Terminal:
-  `xattr -dr com.apple.quarantine "/Applications/Lemon Studio.app"`. Updates Lemon Studio installs itself don't ask
+  `xattr -dr com.apple.quarantine "/Applications/{APP}.app"`. Updates Lemon Studio installs itself don't ask
   again.
 - **Plugins:** unzip and copy the `VST3` folder's contents to your VST3 folder and the `CLAP` folder's to your CLAP
   folder (the zip's `README.txt` lists where those are). On macOS, also run

@@ -18,7 +18,8 @@ Each release has:
 
 - `LemonStudio.exe` (a nightly: `LemonStudioNightly.exe`)
 - `LemonStudio.AppImage` (a nightly: `LemonStudioNightly.AppImage`), built on Ubuntu 22.04 by [tools/package/appimage.sh](../tools/package/appimage.sh)
-- `LemonStudio-<version>-macos-aarch64.zip`, holding `Lemon Studio.app`, signed ad hoc and not notarized
+- `LemonStudio-<version>-macos-aarch64.zip`, holding `Lemon Studio.app` (a nightly: `Lemon Studio Nightly.app`), signed
+  ad hoc and not notarized
 - `LemonStudio-Plugins-<version>-<platform>.zip`: the VST3 and CLAP plugins for other DAWs, with a `README.txt` on where they go
 - `nightly.json` or `stable.json`, and its minisign signature (`.minisig`)
 - `LICENSE` and `THIRD-PARTY-NOTICES.txt`
@@ -29,6 +30,26 @@ shortcuts to it never break. The release's title and Lemon Studio itself say whi
 The release notes come from [tools/package/release-notes.md](../tools/package/release-notes.md) (how to install and
 open the builds, including the macOS steps past Gatekeeper), followed by GitHub's list of the pull requests since the
 previous release on that channel. The first release on a channel has no such list.
+
+## What makes a nightly look like one
+
+With `LEMON_CHANNEL=nightly`, a build has the Nightly logo and its own name, Lemon Studio Nightly, so that it can sit
+beside a tagged release on one computer: the two share the user folder (settings, projects), but keep their updates
+apart.
+
+| Where | What changes | Made from |
+|---|---|---|
+| Windows | The `.exe`'s file name, icon and version resource, the window's title | `assets/lemonstudio-nightly.ico` |
+| Linux | The AppImage's file name, desktop entry and icon, the window's app id and icon | `assets/lemonstudio-nightly.png` |
+| macOS | The app's name, identifier and icon | `assets/lemonstudio-nightly.car` and `.icns` |
+| Startup splash | The moon, its craters, the night sky and the stars | `crate::logo`'s `NIGHTLY_*`, [splash.rs](../crates/os-app/src/splash.rs) |
+
+All of these are in `crates/os-app/assets` and are committed, so a build needs no tools to make them. To change them,
+edit the sources in `assets/logo`, then regenerate:
+
+- `icon-lemon-nightly.png` (edited in `icon-lemon-nightly.pdn`, Paint.NET) and `logo-colored-lemon-nightly.svg`:
+  `python tools/logo/gen.py`, which needs Pillow.
+- `macOS-nightly.icon`, which has its own copy of the SVG: `tools/logo/macos-icon.sh nightly`, on macOS with Xcode 26.
 
 ## How a build updates itself
 

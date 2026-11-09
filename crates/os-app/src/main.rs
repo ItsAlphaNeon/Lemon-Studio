@@ -714,7 +714,7 @@ impl ApplicationHandler for Shell {
         }
         splash::step(&self.splash, splash::WINDOW, "Opening the main window");
         let attrs = Window::default_attributes()
-            .with_title("Lemon Studio")
+            .with_title(version::NAME)
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1920.0, 1080.0))
             // Layouts are measured at 1920x1080 and are not responsive yet; below this they break.
@@ -747,7 +747,7 @@ impl ApplicationHandler for Shell {
                 .with_maximized(m.max),
             None => attrs,
         };
-        // App icon: resource 1, embedded by build.rs from assets/lemonstudio.ico.
+        // App icon: resource 1, embedded by build.rs from assets/lemonstudio.ico (a nightly's: lemonstudio-nightly.ico).
         #[cfg(windows)]
         let attrs = {
             use winit::dpi::PhysicalSize;
@@ -1342,15 +1342,17 @@ impl ApplicationHandler for Shell {
     }
 }
 
-/// The application id on Linux: Wayland's app id and X11's WM_CLASS, matching `assets/lemonstudio.desktop`.
+/// The application id on Linux: Wayland's app id and X11's WM_CLASS, matching `assets/lemonstudio.desktop` (a nightly's
+/// AppImage: `lemonstudio-nightly.desktop`, `tools/package/appimage.sh`).
 #[cfg(all(unix, not(target_os = "macos")))]
-const APP_ID: &str = "lemonstudio";
+const APP_ID: &str = if version::NIGHTLY { "lemonstudio-nightly" } else { "lemonstudio" };
 
-/// The app icon as RGBA bytes, width and height: `assets/lemonstudio.png`, 256 px (X11 windows show it; Wayland takes the
-/// desktop entry's).
+/// The app icon as RGBA bytes, width and height: `assets/lemonstudio.png` (a nightly's: `lemonstudio-nightly.png`), 256 px
+/// (X11 windows show it; Wayland takes the desktop entry's).
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
-    let png = tiny_skia::Pixmap::decode_png(include_bytes!("../assets/lemonstudio.png")).ok()?;
+    let file: &[u8] = if version::NIGHTLY { include_bytes!("../assets/lemonstudio-nightly.png") } else { include_bytes!("../assets/lemonstudio.png") };
+    let png = tiny_skia::Pixmap::decode_png(file).ok()?;
     let rgba = png.pixels().iter().flat_map(|p| {
         let c = p.demultiply();
         [c.red(), c.green(), c.blue(), c.alpha()]
