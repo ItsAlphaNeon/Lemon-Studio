@@ -3651,7 +3651,7 @@ impl App {
             PerfAct::List => {}
             PerfAct::Row(i) => {
                 let Some(key) = p.shown().get(i).map(|r| r.key) else { return };
-                let now = std::time::Instant::now();
+                let now = crate::anim::now();
                 let double = p.last_click.is_some_and(|(k, t)| k == key && now.duration_since(t).as_millis() < 400);
                 p.last_click = if double { None } else { Some((key, now)) };
                 if double {
@@ -3953,7 +3953,7 @@ impl App {
     fn tap(&mut self, t: f64) {
         let tp = &mut self.state.tapper;
         let bpm = tp.count.tap(t);
-        tp.flash_at = Some(std::time::Instant::now());
+        tp.flash_at = Some(crate::anim::now());
         tp.flash = 1.0;
         let accent = tp.count.bar().is_some_and(|(_, accent)| accent);
         #[cfg(test)]
@@ -4300,7 +4300,7 @@ impl App {
         self.update_tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
-        let now = std::time::Instant::now();
+        let now = crate::anim::now();
         self.song_pos_tick(now);
         self.hold_tick(now);
         self.ease_tick(now);
@@ -4777,7 +4777,7 @@ impl App {
     /// A press on the piano roll's splitter: drags it; a double click hides / brings back the event panel (spec:
     /// ui/event-panel-splitter.md §2).
     fn piano_split_press(&mut self) {
-        let now = std::time::Instant::now();
+        let now = crate::anim::now();
         let p = &mut self.state.piano;
         let double = p.split_click.is_some_and(|t| now.duration_since(t).as_millis() < 400);
         p.split_click = if double { None } else { Some(now) };
@@ -8769,7 +8769,7 @@ impl App {
             Action::StepEdit => self.toggle_step_edit(),
             // spec: ui/main-window.md §13: a double click opens the Plugin performance monitor; one click does nothing.
             Action::CpuPanel => {
-                let now = std::time::Instant::now();
+                let now = crate::anim::now();
                 let double = self.cpu_click.is_some_and(|t| now.duration_since(t).as_millis() < 400);
                 self.cpu_click = if double { None } else { Some(now) };
                 if double {
@@ -9067,7 +9067,7 @@ impl App {
             | Action::RackFill(_) => {}
             Action::WinDrag(win) => {
                 // Double-click on the title bar toggles maximized / floating (like the max button).
-                let now = std::time::Instant::now();
+                let now = crate::anim::now();
                 let m = self.mouse;
                 let double = matches!(self.title_click, Some((w, t, p)) if w == win
                     && now.duration_since(t).as_millis() < 500
@@ -9323,7 +9323,7 @@ impl App {
     fn rack_act(&mut self, a: &Action) -> bool {
         use crate::rack as rk;
         let (shift, ctrl, alt) = (self.shift, self.ctrl, self.alt);
-        let now = std::time::Instant::now();
+        let now = crate::anim::now();
         let double = matches!(&self.rack_click, Some((p, t)) if p == a && now.duration_since(*t).as_millis() < 400);
         if matches!(a, Action::RackSelect(_) | Action::RackMixer(_)) {
             self.rack_click = if double { None } else { Some((a.clone(), now)) };

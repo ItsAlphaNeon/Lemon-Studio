@@ -142,7 +142,7 @@ impl Default for PianoState {
             range: None,
             row_h: ROW,
             ghosts: true,
-            rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
+            rng: crate::clip_colors::clock() | 1,
             split: crate::piano_split::load(),
             split_click: None,
             was_shown: None,
