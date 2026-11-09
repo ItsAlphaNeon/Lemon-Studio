@@ -25,3 +25,4 @@ roundtrip(saved_by:	A save writes the version FL 26 opens without a warning (flp
 resave(mixer[].volume	A mixer volume with an initial value (event 216) opens at that value in song mode, and moving the fader leaves the initial value as it was (flp/engine-events.md, measured on FL 24.1.1 and 26).
 roundtrip(side:loop_mode:true->false	Open (specs REQUESTS 13): loop mode switched on in a pattern with no loop lengths is stored nowhere, and reads back off; whether FL keeps it is not measured.
 redo-to-end(side:loop_mode:true->false	Open (specs REQUESTS 13): loop mode with no loop lengths is not part of the pattern undo puts back, so it reads back off; whether FL keeps it is not measured.
+roundtrip(side:tempo:	A song-mode project with an initial tempo (event 216) opens at it, not at the saved tempo, as in FL (flp/engine-events.md "Event 216"; the resave entry above).
