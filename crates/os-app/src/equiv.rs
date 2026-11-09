@@ -106,10 +106,15 @@ impl Fp {
             ("history", history),
             // Whether the engine holds the project as it is: 0 nothing sent yet, 1 in step, 2 behind. Not the copy
             // itself: what it was last handed while playing starts or pauses follows the audio thread's timing.
+            // The playlist's view (scroll, zoom), which a save writes into the project, is not handed on: the engine
+            // plays nothing from it.
             ("engine", match app.transport.sent_for_tests() {
                 None => 0,
-                Some(p) if p == crate::rack::play_project(s) => 1,
-                Some(_) => 2,
+                Some(mut p) => {
+                    let mut now = crate::rack::play_project(s);
+                    (p.playlist_view, now.playlist_view) = (None, None);
+                    if p == now { 1 } else { 2 }
+                }
             }),
             ("unsaved", u64::from(app.unsaved())),
         ])
