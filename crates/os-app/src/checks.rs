@@ -6,7 +6,7 @@
 //! script drives the app as a user would, and a short report says which dropouts happened, of what kind, whether they
 //! cut into sound, how soon after a key press, and which plugin took the most time in the worst blocks.
 //!
-//! `OS_CHECK_PROJECT=<project.flp> cargo test -p os-app --bin lemonstudio space_play_stop -- --ignored --nocapture`
+//! `OS_CHECK_PROJECT=<project.flp> cargo test -p os-app --lib space_play_stop -- --ignored --nocapture`
 //! (`OS_CHECK_BLOCK=256`, `OS_CHECK_RATE=48000`: the device; `OS_CHECK_ROUNDS=20`; `OS_CHECK_PAUSE=1` pauses instead of
 //! stopping; `OS_CHECK_REPLACE=<plugin>=<plugin>` gives the channels of one plugin another; `OS_CHECK_WAV=<file>`
 //! keeps what was played, with the presses' times next to it; `OS_CHECK_RT=0` leaves the audio

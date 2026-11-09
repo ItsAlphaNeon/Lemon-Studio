@@ -207,7 +207,7 @@ mod tests {
     use super::*;
 
     /// Renders `OS_RENDER_FLP` into `OS_RENDER_OUT`:
-    /// `OS_RENDER_FLP=<project.flp> OS_RENDER_OUT=<out.wav> cargo test -p os-app --bin lemonstudio render_project -- --ignored --nocapture`.
+    /// `OS_RENDER_FLP=<project.flp> OS_RENDER_OUT=<out.wav> cargo test -p os-app --lib render_project -- --ignored --nocapture`.
     /// With `OS_RENDER_SCAN=1` it scans and loads plugin files in-process: run it alone, in its own process.
     #[test]
     #[ignore]

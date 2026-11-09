@@ -23433,7 +23433,7 @@ mod tests {
     ///   automated the EQ's; once the user edits Kars' copy (the parameter menu's Paste value), it is saved as that copy.
     ///
     /// Loads the plugins in this process, so ignored:
-    /// `OS_VST2_DIR=<dir> cargo test -p os-app --bin lemonstudio vst2_plugins_through_the_app -- --ignored --nocapture`
+    /// `OS_VST2_DIR=<dir> cargo test -p os-app --lib vst2_plugins_through_the_app -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn vst2_plugins_through_the_app() {

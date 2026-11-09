@@ -3494,7 +3494,7 @@ mod tests {
     }
 
     /// Linux: while a project plays, the feeder and the device callback run at real-time priority (`crate::rt`; needs an
-    /// audio device and rtkit or an rtprio limit): `hidden-tests cargo test -p os-app --bin lemonstudio
+    /// audio device and rtkit or an rtprio limit): `hidden-tests cargo test -p os-app --lib
     /// transport::tests::audio_threads_run_realtime -- --ignored --exact --nocapture`.
     #[cfg(target_os = "linux")]
     #[test]

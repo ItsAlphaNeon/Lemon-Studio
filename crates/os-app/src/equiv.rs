@@ -17,7 +17,7 @@
 //! hidden display (`hidden-tests`):
 //! ```text
 //! OS_EQUIV_DIR=<traces> OS_EQUIV_CORPUS=<folder of .flp> \
-//!   cargo test -p os-app --bin lemonstudio equiv_record -- --ignored --nocapture
+//!   cargo test -p os-app --lib equiv_record -- --ignored --nocapture
 //! ```
 //! `equiv_show` runs in the test's own process: give it `HOME=<OS_EQUIV_DIR>/home` and no `DISPLAY` (`equiv_shrink`
 //! runs each candidate in a process of its own, as a recording does). Both work in the folder the trace's recording
