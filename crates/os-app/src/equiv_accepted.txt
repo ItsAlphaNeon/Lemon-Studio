@@ -27,3 +27,4 @@ roundtrip(side:loop_mode:true->false	Open (specs REQUESTS 13): loop mode switche
 redo-to-end(side:loop_mode:true->false	Open (specs REQUESTS 13): loop mode with no loop lengths is not part of the pattern undo puts back, so it reads back off; whether FL keeps it is not measured.
 roundtrip(side:tempo:	A song-mode project with an initial tempo (event 216) opens at it, not at the saved tempo, as in FL (flp/engine-events.md "Event 216"; the resave entry above).
 roundtrip(mixer[].armed	Arming a track is not saved, as in FL (measured on FL 24.1.1, 2026-11-08; the undo entry above).
+undo-to-start(show_info	Show info on opening makes no undo step, as in FL (measured on FL 24.1.1, 2026-11-09: the box switched on, EDIT still offered no Undo).
