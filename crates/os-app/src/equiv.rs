@@ -21,7 +21,8 @@
 //! ```
 //! `equiv_shrink` and `equiv_show` run in the test's own process: give them `HOME=<OS_EQUIV_DIR>/home`.
 //! `equiv_replay` replays every trace in `OS_EQUIV_DIR`; `equiv_twice` records and replays on the same build (what
-//! isn't deterministic yet). `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (300) steps each,
+//! isn't deterministic yet). `equiv_coverage` adds up what the recordings in `OS_EQUIV_DIR` reached: each kind of
+//! control, how many frames showed it, how often a step aimed at it, and whether it ever changed something. `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (300) steps each,
 //! `OS_EQUIV_ONLY=<name part>` limits the projects, `OS_EQUIV_SEED_FROM` (1) the first seed, `OS_EQUIV_FIRST=<n>` takes the first n of the corpus.
 
 use std::fmt::{self, Write as _};
@@ -263,6 +264,9 @@ struct Rig {
     edits: std::collections::BTreeSet<String>,
     /// The kind the last generated step aimed at.
     aimed: Option<String>,
+    /// How many frames showed each kind of control: with `used` and `edits`, what a recording reports as its
+    /// coverage (`<trace>.kinds`).
+    seen: std::collections::BTreeMap<String, u32>,
 }
 
 /// A control's kind for the generator's novelty: its action's variant, and the variant inside it.
@@ -298,7 +302,7 @@ impl Rig {
         app.plugins.available = crate::plugins::builtin();
         app.plugins.effects = crate::plugins::builtin_effects();
         app.open(copy);
-        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0, used: Default::default(), edits: Default::default(), aimed: None };
+        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0, used: Default::default(), edits: Default::default(), aimed: None, seen: Default::default() };
         rig.settle();
         // Mixer effects are hosted a few ticks after loading.
         for _ in 0..20 {
@@ -395,6 +399,9 @@ impl Rig {
     /// The next step's inputs, aimed at what the frame shows.
     fn generate(&mut self, rng: &mut Rng) -> Vec<Input> {
         let targets = self.targets();
+        for k in targets.iter().map(|t| &t.2).collect::<std::collections::BTreeSet<_>>() {
+            *self.seen.entry(k.clone()).or_default() += 1;
+        }
         // Weighted by novelty: a kind of control aimed at n times weighs 1/(n+1), so the many step buttons or grid
         // cells of one kind don't crowd out the few knobs, boxes and menus. A kind that has edited weighs four times
         // as much: its drags, wheels and modifiers are where edits go wrong. The Settings window's controls weigh a
@@ -753,6 +760,8 @@ fn record(root: &Path, project: &str, seed: u64, steps: usize) -> Trace {
         out.push((inputs, fp));
     }
     let invariants = rig.invariants(&opened_project, &work);
+    let kinds: String = rig.seen.iter().map(|(k, n)| format!("{k}\t{n}\t{}\t{}\n", rig.used.get(k).copied().unwrap_or(0), u8::from(rig.edits.contains(k)))).collect();
+    let _ = std::fs::write(traces_dir().join(format!("{}.kinds", trace_name(project, seed))), kinds);
     Trace { project: project.into(), seed, opened, steps: out, invariants }
 }
 
@@ -1043,6 +1052,42 @@ fn equiv_show() {
         eprintln!("  undo: {:?} ({} steps), message: {:?}", s.history.newest_done(), s.history.done(), s.message);
         if let Some(d) = difference(&before, &s.project, false) {
             eprintln!("  changed: {d}");
+        }
+    }
+}
+
+/// What the recordings in `OS_EQUIV_DIR` reached (their `.kinds` files): the kinds of control shown but never aimed
+/// at, aimed at but never changing the project, the interface's part of it or Lemon Studio's state, and those that did.
+#[test]
+#[ignore = "the equivalence harness: what the recordings reached (see the module's doc)"]
+fn equiv_coverage() {
+    let mut all: std::collections::BTreeMap<String, (u64, u64, u64, u64)> = Default::default();
+    let mut traces = 0;
+    for e in std::fs::read_dir(traces_dir()).expect("traces folder").flatten() {
+        if e.path().extension().is_none_or(|x| x != "kinds") {
+            continue;
+        }
+        traces += 1;
+        for l in std::fs::read_to_string(e.path()).unwrap_or_default().lines() {
+            let f: Vec<&str> = l.split('\t').collect();
+            let [k, seen, used, edited] = f[..] else { continue };
+            let a = all.entry(k.to_string()).or_default();
+            a.0 += seen.parse::<u64>().unwrap_or(0);
+            a.1 += used.parse::<u64>().unwrap_or(0);
+            a.2 += u64::from(edited == "1");
+            a.3 += 1;
+        }
+    }
+    eprintln!("{traces} recordings, {} kinds of control shown", all.len());
+    for (title, pick) in [
+        ("shown, never aimed at", &(|a: &(u64, u64, u64, u64)| a.1 == 0) as &dyn Fn(&(u64, u64, u64, u64)) -> bool),
+        ("aimed at, never changed anything", &|a| a.1 > 0 && a.2 == 0),
+        ("changed something", &|a| a.2 > 0),
+    ] {
+        let rows: Vec<_> = all.iter().filter(|(_, a)| pick(a)).collect();
+        eprintln!("\n{title}: {}", rows.len());
+        for (k, (seen, used, edited, traces)) in rows {
+            eprintln!("  {k}: shown in {seen} frames of {traces} recordings, aimed at {used} times, changed in {edited}");
         }
     }
 }
