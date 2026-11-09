@@ -512,6 +512,12 @@ impl Rig {
             }
             self.run(&[Input::Key("Escape".into(), false, false)]);
         }
+        // And stopped: a take still recording (a Touch controller note with Start on input on) would keep changing the
+        // project, by the clock of a device that is not there, while the checks undo, redo and save.
+        if self.app.transport.playing() || self.app.state.rec.recording() {
+            self.app.act(crate::app::Action::Stop);
+            self.run(&[]);
+        }
         // The engine holds what the project says (an edit that never reached it shows here).
         if let Some(sent) = self.app.transport.sent_for_tests() {
             if sent != crate::rack::play_project(&self.app.state) {
