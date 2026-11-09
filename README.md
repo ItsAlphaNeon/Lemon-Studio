@@ -175,16 +175,6 @@ Start with the [getting started guide](https://getlemonstudio.app/wiki/getting-s
 Nightly builds come first. Tagged releases follow once the [alpha checklist](docs/alpha-checklist.md) is done. Every
 `0.x` release is an alpha, and `v1.0.0` will be the first stable release.
 
-### In development
-
-These are draft pull requests, not promises.
-
-- [Zest](https://github.com/ItsAlphaNeon/Lemon-Studio/pull/328), an analog-style synthesizer.
-- [Resizable editors](https://github.com/ItsAlphaNeon/Lemon-Studio/pull/203) for CLAP and VST3 plugins.
-- [Etched](https://github.com/ItsAlphaNeon/Lemon-Studio/pull/73), an experimental frosted glass skin.
-- [Computer keyboard playing on Linux](https://github.com/ItsAlphaNeon/Lemon-Studio/pull/307) while a docked plugin editor
-  has the keyboard.
-
 ### After the alpha
 
 - The arpeggiator, echo delay, gate, time shift and tracking.
