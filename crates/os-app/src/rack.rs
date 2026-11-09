@@ -3138,6 +3138,34 @@ mod tests {
         assert_eq!(a.state.rack.loop_len, [(0, 4)].into());
     }
 
+    /// Undo of a whole-project step leaves the pattern shown as it is (as in FL) and puts the loop mode back with the
+    /// lengths: a pattern whose loops say "no length, mode off" keeps them when patterns are switched afterwards
+    /// (equivalence harness, DEDZII - NIGHT TERROR: they were rewritten with another pattern's mode, without a step).
+    #[test]
+    fn undo_of_a_project_step_keeps_the_pattern_shown_and_its_loops() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        let ch = a.state.project.channels[0].index;
+        let pat = crate::patterns::pat_mut(&mut a.state, 1);
+        pat.notes.push(os_model::Note::step(ch, 0));
+        (pat.loops, pat.loop_off) = (vec![(ch, 0)], Some(LOOP_TYPE_CODES[0]));
+        let before = a.state.project.pattern(1).cloned();
+        a.state.pattern = 1;
+        from_model(&mut a.state);
+        let p2 = crate::patterns::pat_mut(&mut a.state, 2);
+        p2.notes.push(os_model::Note::step(ch, 0));
+        (p2.loops, p2.loop_off) = (vec![(ch, 4)], None);
+        crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.project.main_volume = Some(50));
+        a.state.pattern = 2;
+        follow_pattern(&mut a.state);
+        assert!(crate::history::undo(&mut a.state).is_some());
+        assert_eq!(a.state.pattern, 2, "the pattern shown stays");
+        assert_eq!((a.state.rack.loop_len.clone(), a.state.rack.loop_mode), ([(0, 4)].into(), true), "pattern 2's own loops");
+        a.state.pattern = 3;
+        follow_pattern(&mut a.state);
+        assert_eq!(a.state.project.pattern(1).cloned(), before, "pattern 1's loops as they were");
+    }
+
     /// A project opens on the pattern it was saved on, with the loop lengths saved into that pattern.
     #[test]
     fn the_current_pattern_and_its_loops_reopen() {
