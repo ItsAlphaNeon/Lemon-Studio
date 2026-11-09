@@ -68,7 +68,9 @@ fn hash(v: &impl fmt::Debug) -> u64 {
 /// Project state the interface holds until save (specs: control-plane.md part 2, "Where main is"), as one value.
 fn side(app: &App) -> String {
     let (s, r) = (&app.state, &app.state.rack);
-    let v = (s.tempo.to_bits(), s.pattern, s.song_mode, &r.filter, &r.groups, &r.zipped, &r.locked, r.loop_mode, &r.loop_len, &r.loop_unit, r.loop_type, r.unsorted_at);
+    // "Unsorted" at the end of the group list reads as None (last) or as its place there: the same thing.
+    let unsorted = r.unsorted_at.filter(|&u| u < r.groups.len());
+    let v = (s.tempo.to_bits(), s.pattern, s.song_mode, &r.filter, &r.groups, &r.zipped, &r.locked, r.loop_mode, &r.loop_len, &r.loop_unit, r.loop_type, unsorted);
     format!("{v:#?}")
 }
 
@@ -590,6 +592,8 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
     // A route with no level record plays at unity (0.8 on the fader scale), as one with a record at 0.8 does.
     for m in &mut p.mixer {
         m.send_levels.retain(|&(_, l)| (l - 0.8).abs() > 1e-9);
+        // A save writes them by destination (os-flp mixer records), whatever order they were set in.
+        m.send_levels.sort_by_key(|&(d, _)| d);
     }
     p
 }
