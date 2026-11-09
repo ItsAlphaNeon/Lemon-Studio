@@ -65,13 +65,29 @@ fn hash(v: &impl fmt::Debug) -> u64 {
     h.0
 }
 
-/// Project state the interface holds until save (specs: control-plane.md part 2, "Where main is"), as one value.
+/// Project state the interface holds until save (specs: control-plane.md part 2, "Where main is"), as one value: a
+/// field per line, so a difference names its field.
 fn side(app: &App) -> String {
     let (s, r) = (&app.state, &app.state.rack);
     // "Unsorted" at the end of the group list reads as None (last) or as its place there: the same thing.
     let unsorted = r.unsorted_at.filter(|&u| u < r.groups.len());
-    let v = (s.tempo.to_bits(), s.pattern, s.song_mode, &r.filter, &r.groups, &r.zipped, &r.locked, r.loop_mode, &r.loop_len, &r.loop_unit, r.loop_type, unsorted);
-    format!("{v:#?}")
+    let mut out = String::new();
+    let mut f = |name: &str, v: &dyn fmt::Debug| {
+        let _ = writeln!(out, "{name}: {v:#?}");
+    };
+    f("tempo", &s.tempo.to_bits());
+    f("pattern", &s.pattern);
+    f("song_mode", &s.song_mode);
+    f("filter", &r.filter);
+    f("groups", &r.groups);
+    f("zipped", &r.zipped);
+    f("locked", &r.locked);
+    f("loop_mode", &r.loop_mode);
+    f("loop_len", &r.loop_len);
+    f("loop_unit", &r.loop_unit);
+    f("loop_type", &r.loop_type);
+    f("unsorted_at", &unsorted);
+    out
 }
 
 /// What a step may change, each part hashed. Parts are named so a difference says where it is.
