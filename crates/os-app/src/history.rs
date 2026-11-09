@@ -1012,6 +1012,23 @@ mod tests {
         assert_eq!((s.pattern, s.project.pattern(1).map(|p| p.notes.clone())), (2, edited));
     }
 
+    #[test]
+    fn a_knob_turn_stays_a_step_when_a_track_before_it_is_deleted() {
+        // Track 3's separation wheeled, then track 2 deleted: track 3's place now holds track 4's separation, the
+        // value track 3 had before the wheel. The wheel's step was judged on that and dropped as a no-op; both steps
+        // stay, and undoing them gives the project back (equivalence harness, nucleon - Fruity Delay 3).
+        let mut app = App::new(None);
+        let id = KnobId::MixSep(3);
+        let start = app.state.project.clone();
+        knob(&mut app.state, id, true);
+        app.state.set_knob(id, 0.25);
+        let steps = app.state.history.len();
+        crate::mixer::run(&mut app, crate::mixer::MCmd::Delete(2));
+        assert_eq!(app.state.history.len(), steps + 1, "the wheel's step stays");
+        while undo(&mut app.state).is_some() {}
+        assert_eq!(app.state.project.mixer, start.mixer);
+    }
+
     /// Undo knob tweaks: on, a turn of a channel knob is a step and Ctrl+Z puts the knob back, the click before it
     /// staying; off, the turn makes no step and Ctrl+Z leaves the knob, undoing the click made before it (spec:
     /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)", Undo knob tweaks).
