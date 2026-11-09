@@ -1,6 +1,6 @@
 # What the equivalence harness's invariants report and Lemon Studio does on purpose, with why. A finding whose
 # normalized form (indices as [], an undo count dropped) starts with an entry's first field is reported as accepted.
-undo-to-start(mixer[].enabled	A mixer track's mute and solo make no undo step, as in FL (specs: ui/undo-steps.md).
+undo-to-start(mixer[].enabled	A mixer track's mute and solo make no undo step, as in FL 24.1.1 (specs: ui/undo-steps.md); FL's change log says 24.2.99 added one, not measured here.
 undo-to-start(patterns[].length	The pattern length box makes no undo step, as in FL (specs: ui/undo-steps.md).
 undo-to-start(patterns:	The first edit of a project without patterns makes pattern 1, which no step takes back.
 roundtrip(mixer[].slots[][].name	A plugin Lemon Studio hosts is saved as a wrapped plugin (specs: flp/events/plugins.md).
