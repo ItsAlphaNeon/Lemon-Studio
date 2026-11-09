@@ -20,8 +20,9 @@ Systems a fully functional DAW can't ship without.
   mixer menu's Arm and Disarm selected track(s) and Disk recording ▸ Auto-create audio clips work
 - [x] **Input monitoring.** A track's input plays through it while it is armed, or always, per its Monitor external
   input setting (Off / When armed / On), also while stopped (#182)
-- [x] **Automation recording into clips.** Every automatable control records into the pattern, as in the original,
-  and patterns play those points; the event editor's Turn into automation clip makes a clip of them
+- [x] **Automation recording.** Channel, mixer, tempo and plugin controls record into the pattern, as in the original,
+  which records nothing into clips either, and patterns play those points; the event editor's Turn into automation clip
+  makes a clip of them. Not recorded yet: send levels, the swing knob, the rack's mixer box and LED, the pitch knobs
 - [x] **Automation clip LFO and min / range.** The clip channel's MIN / MAX knobs set its range and its LFO
   (switch, mode, amount, speed, tension, skew, pulse width, its own envelope) plays as the original's, in the clip's
   channel window; files keep every LFO field
@@ -100,7 +101,8 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [x] **Undo for a plugin editor's own changes.** Parameters moved in a plugin's window and presets loaded from its
   title bar or dropped on it are one step each; a preset's undo brings back the state, the preset and the name
 - [x] **Undo for mixer track commands.** Routing, names, colours, resets, effect slots, audio input / output and
-  latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
+  latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step (FL Studio's change log
+  says it gave them undo in 24.2; not measured)
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
 - [x] **Mixer right-click menus.** None greyed out but Compensate for master latency, greyed in the original too
@@ -112,10 +114,13 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   native window of its own), and last Assign to new / Unassign from Audio track(s) and Select ▸ Channels and playlist
   tracks routed to this track (audio tracks, [track_links.rs](../crates/os-app/src/track_links.rs)) were enabled.
   Scaling ▸ is greyed for a slot without a hosted plugin, "(no saved states)" when none is saved. Not counted: the
-  layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
+  layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs)). Still greyed as of 2026-11-08: the
+  latency menus' Adjust position of recorded audio, Set from, Delay audio output and Bypass track latency compensation,
+  and Override global mapping... on the mixer knobs
 - [x] **Playlist right-click menus.** None greyed out since 2026-10-30: the last five, the picker's Change icon and
   the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
-  as Lemon Studio's design (Change icon is kept for the session only)
+  as Lemon Studio's design (Change icon is kept for the session only). This counts greyed entries only: entries of the
+  original that Lemon Studio does not have are left out of these menus
   ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
 - [x] **Channel rack right-click menus.** 6 of the rack's own entries greyed out on 2026-11-02, counted entry by
   entry after 29 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
@@ -189,6 +194,26 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   (2026-10-30)
 - [x] **ASIO output pairs.** Every track has an output menu with the pairs of the driver's first 16 outputs, and the
   master plays on the pair chosen for it (#182)
+
+## Found by the parity audit
+
+Found on 2026-11-08 by an audit of the code against FL Studio 26.1.7. They wait on a decision about whether they hold up
+the alpha; the larger gaps it found are on the roadmap.
+
+- [ ] **Consolidate and Export all playlist tracks leave out plugins.** Both render without hosted instruments and
+  effects, so plugin channels come out silent; Consolidate still mutes the source clips
+  ([playlist.rs](../crates/os-app/src/playlist.rs))
+- [ ] **The playlist's bars are always 4 beats.** Its bars, ruler and Bar snap ignore the project's time signature and
+  time signature markers
+- [ ] **Menus show keys that do something else.** The playlist's ▸ Select menu (Ctrl+Enter, Shift+C), the mixer track
+  menu (Ctrl+E, Shift+E) and PATTERNS Clone (Shift+Ctrl+C, which has no handler)
+- [ ] **New or cloned channels vanish under a group filter.** They join no group, so they stay hidden until the filter
+  changes
+- [ ] **ADD ▸ Automation clip can't be linked.** Nothing in the app can give the new clip a target, so it drives nothing
+- [ ] **FL plugins with no Lemon version aren't reported.** Their channels play silent and their slots pass dry, but the
+  missing-files box doesn't list them
+- [ ] **Export's Resampling choice doesn't reach Lemon Sampler channels.** Only the engine's own voices and the
+  converter after the mix use it
 
 ## After the alpha
 

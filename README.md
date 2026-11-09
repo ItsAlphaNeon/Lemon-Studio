@@ -46,7 +46,8 @@ CLAP, VST3 and VST2 plugins.
 Lemon Studio runs on Windows, Linux and macOS, and every change is built and tested on all three. macOS is supported
 at the same level as Linux; the few differences are listed in the [macOS notes](#macos).
 
-A central goal is **interoperability**: Lemon Studio opens and saves FL Studio projects (`.flp`). The
+A central goal is **interoperability**: Lemon Studio opens FL Studio projects (`.flp`) and saves them as `.lemon`
+files, its own format laid out like an FLP (a `.flp` is written only if you pick "All files" and type the name). The
 project reader is built to round-trip: anything in a file that Lemon Studio does not understand yet is
 kept and written back unchanged, so a project survives being opened and saved. This support is still
 young, so read the warning below before trying it on real work.
@@ -56,7 +57,8 @@ young, so read the warning below before trying it on real work.
 > expect missing features, rough edges and breaking changes.
 >
 > - **Greyed-out controls are not implemented yet.** Many menus and buttons are already laid out but do
->   nothing so far; they are drawn dim and say "not available yet".
+>   nothing so far; they are drawn dim and say "not available yet". Other features of a full DAW have no control
+>   at all yet, so a menu with nothing greyed in it is not necessarily complete.
 > - **Builds are not signed.** Your system may stop them the first time; the release notes say how to open them.
 > - **Projects saved by FL Studio 10 or later open** (25 and 26 included). Projects older than 24.2 are
 >   converted to the current layout as they open and are saved in it, so the version that wrote them may not
@@ -70,28 +72,28 @@ Where Lemon Studio stands against what a complete DAW offers:
 
 | Area | Status | Notes |
 |---|:---:|---|
-| Step sequencing and patterns | ✅ | Channel rack with steps, mini piano rolls, swing and per-channel loops |
-| Piano roll | ✅ | Full tool set, velocity and event lanes, quantize (FL's templates), chop (FL's patterns), randomize (melodies and levels), strum, arpeggiate, flam, claw machine, flip, level scaling, limit, LFO and more |
-| Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers and several arrangements |
-| Mixing and routing | ✅ | Mixer tracks, sends, effect slots and meters; sidechain inputs for a project's Fruity Limiter slots and for CLAP and VST3 effects |
-| Plugin hosting | ✅ | CLAP, VST3 and VST2 instruments and effects with their editors; "Create automation clip" in CLAP and VST3 plugins' own parameter menus; a parameter menu for every plugin parameter (automation clips, controller links, typed and set values); on Windows a crashing plugin is stopped instead of closing Lemon Studio; no 32-bit plugins |
+| Step sequencing and patterns | 🚧 | Channel rack with steps, mini piano rolls, swing and per-channel loops. Not yet: a layer channel's settings (it plays, with volume and pan), the Misc tab's arpeggiator, echo delay, gate, time shift and tracking (drawn greyed) |
+| Piano roll | 🚧 | All eight tools, velocity and event lanes, quantize (FL's templates), chop (FL's patterns), randomize (melodies and levels), strum, arpeggiate, flam, claw machine, flip, level scaling, limit, LFO and more. Not yet: note colours, slide and portamento toggles, Note Properties, scale and chord helpers, the piano roll's ▸ menu, release velocity (its lane edits a value nothing plays) |
+| Song arrangement | 🚧 | Playlist with pattern, audio and automation clips, clip groups, markers and several arrangements. Not yet: a clip properties window with per-clip pitch, pan and reverse, audio clip chop and merge. The playlist's bars are always 4 beats, and Consolidate and Export all playlist tracks leave plugin instruments out |
+| Mixing and routing | ✅ | Mixer tracks, sends, effect slots and meters; sidechain inputs for a project's Fruity Limiter and Vocodex slots and for CLAP and VST3 effects (not VST2). Not yet: the seven other mixer layouts, the track inspector |
+| Plugin hosting | ✅ | CLAP, VST3 and VST2 instruments and effects with their editors; "Create automation clip" in CLAP and VST3 plugins' own parameter menus; a parameter menu for every plugin parameter (automation clips, controller links, typed and set values); a crashing plugin is stopped instead of closing Lemon Studio (on macOS, all but its editor); no 32-bit plugins; outputs past a plugin's main stereo pair are dropped |
 | Plugin management | ✅ | Plugin manager with your own search folders, a crash-safe background scan, favourites and hidden plugins; presets of your own and factory presets, import of `.vstpreset`, `.fxp` and `.fxb` files, and preset files dropped onto a plugin |
 | Time-stretching | ✅ | All twelve stretch methods for samples and audio clips, played by one open-source stretcher |
-| Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
-| Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape, their range and their LFO; channel volume and pan moves record into a pattern; not yet recording into automation clips |
-| Project files | 🚧 | Opens and saves projects from FL Studio 10 and later (older layouts are converted as they open). Keep backups |
+| Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; multi-core mixing |
+| Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape, their range and their LFO; channel, mixer, tempo and plugin controls record into a pattern, as in FL Studio, and Turn into automation clip makes a clip of them. Not yet: editing a clip's targets (a clip from ADD can't be linked to anything), making internal controller links in the app |
+| Project files | 🚧 | Opens projects from FL Studio 10 and later (older layouts are converted as they open) and saves `.lemon` files. Keep backups |
 | Built-in instruments and effects | 🚧 | Instruments: Lemon Sampler (long samples can play straight from disk), Lemon Trio (three oscillators), Citrus (a six-operator synth that plays Sytrus patches), Smith (an additive synth that plays Ogun patches), Lemon Slicer (a loop cut into slices that plays Fruity Slicer channels) and Lemon Drum Sampler (32 pads of velocity-layered samples that plays FPC kits). Effects: Lemon Parametric EQ (all of FL's quality modes: HQ+, HQ Enhanced, linear phase), Limiter, Reverb, Delay, Chorus, Stereo Shaper, Stereo Enhancer, Balance, Soft Clipper, Fast Distortion, Transient Processor, Filter, Flanger and Phaser, plus Pulp Filter (a pattern-controlled multi-filter), Press (a multiband maximiser) and Lemon Drop (an oscilloscope, spectrum, meter and vectorscope that shows Wave Candy slots). All built in, and also VST3 and CLAP plugins for other DAWs; a project's Fruity Limiter slots play Lemon Limiter's sound, sidechain included |
-| Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers; a pattern rendered as an audio clip (Quick render, Render and replace) |
-| MIDI file import / export | ✅ | Import into a new project, the open one or a piano roll channel (tracks, channels, tempo changes, time signatures, markers); export a pattern or the song's patterns |
+| Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation (not for Lemon Sampler channels, which keep their own), dither, mono, tails, stems and WAV markers; a pattern rendered as an audio clip (Quick render, Render and replace) |
+| MIDI file import / export | ✅ | Import into a new project or the open one (tracks, channels, tempo changes, time signatures, markers) or a piano roll channel (notes and time signatures); export a pattern or the song's patterns |
 | Note input | 🚧 | Mouse, computer keyboard, MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch) and the touch controller; note recording into patterns with loop record, precount and Start on input; step edit |
-| MIDI controllers and sync | ✅ | Link any knob, fader or plugin parameter to a controller (or many at once with Multilink); MIDI clock and time code out, external clock in |
-| Undo | 🚧 | One history for the whole project, with redo and the browser's History: edits, knobs and faders, the mixer, channels added and deleted, the tempo and project settings, and plugin parameters, those changed in their own windows too |
+| MIDI controllers and sync | ✅ | Link knobs, faders and plugin parameters to a controller (or many at once with Multilink), kept for the whole program rather than per project; no device scripts or typed mapping formulas yet; MIDI clock and time code out, external clock in |
+| Undo | 🚧 | One history for the whole project, with redo and the browser's History: edits, knobs and faders, the mixer, channels added and deleted, the tempo and project settings, and plugin parameters, those changed in their own windows too. Not yet: the channel rack's graph editor |
 | Scripting and assistants | 🚧 | Scripts, tests and AI assistants read and edit projects over a local socket, every change undoable; see [docs/control-plane.md](docs/control-plane.md) |
-| Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output, and inputs for audio recording) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
+| Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output pairs, and inputs for audio recording) on Windows; the sound server (PulseAudio, or PipeWire through it), ALSA or JACK (written, not yet tried against a running server) on Linux; Core Audio on macOS |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Citrus (formerly Classic) skins; 25 built-in themes, your own themes and `.flstheme` files colour either skin, with live adjustments and a colour picker; Lemon plugin editors in the Lemon design only |
-| Settings | 🚧 | Every page works: MIDI, Audio, Recording, General, File, Plugins, Theme, Project and Info |
-| Audio recording | 🚧 | Armed mixer tracks record into the playlist at their record source; one-click audio recording into the playlist or the audio editor, from ASIO or system inputs; Tesla records what reaches its mixer slot |
+| Settings | 🚧 | Every page is there: MIDI, Audio, Recording, General, File, Plugins, Theme, Project and Info. About 14 controls are still greyed, and 11 are saved but nothing reads them yet |
+| Audio recording | 🚧 | Armed mixer tracks record into the playlist at their record source; one-click audio recording into the playlist or the audio editor, from ASIO or system inputs; Tesla records what reaches its mixer slot. Not yet: loop-record passes for audio, take lanes |
 | Audio editing | ✅ | Tesla, the audio editor and recorder after FL's Edison: a mixer effect (and VST3 / CLAP plugin) with markers, regions, destructive edits and tools; a project's Edison slots open in it |
 | Plugin delay compensation | 🚧 | Plugins' reported delays and the mixer tracks' latency settings, in playback and exports; the settings are edited from the mixer |
 
