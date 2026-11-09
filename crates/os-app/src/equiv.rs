@@ -287,6 +287,8 @@ struct Rig {
     edits: std::collections::BTreeSet<String>,
     /// The kind the last generated step aimed at.
     aimed: Option<String>,
+    /// The first step after which two things shared an id, or one had none (`ids_fault`).
+    id_fault: Option<String>,
     /// How many frames showed each kind of control: with `used` and `edits`, what a recording reports as its
     /// coverage (`<trace>.kinds`).
     seen: std::collections::BTreeMap<String, u32>,
@@ -325,7 +327,7 @@ impl Rig {
         app.plugins.available = crate::plugins::builtin();
         app.plugins.effects = crate::plugins::builtin_effects();
         app.open(copy);
-        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0, used: Default::default(), edits: Default::default(), aimed: None, seen: Default::default() };
+        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0, used: Default::default(), edits: Default::default(), aimed: None, seen: Default::default(), id_fault: None };
         rig.settle();
         // Mixer effects are hosted a few ticks after loading.
         for _ in 0..20 {
@@ -395,6 +397,9 @@ impl Rig {
             let _ = std::fs::create_dir_all(&dir);
             let n = std::fs::read_dir(&dir).map_or(0, |d| d.count());
             let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}", self.app.state.project, side(&self.app)));
+        }
+        if self.id_fault.is_none() {
+            self.id_fault = ids_fault(&self.app.state.project).map(|f| format!("step {}: {f}", self.step));
         }
         self.step += 1;
         let fp = Fp::of(&self.app);
@@ -518,6 +523,9 @@ impl Rig {
                 bad.push("engine-behind".into());
             }
         }
+        if let Some(f) = &self.id_fault {
+            bad.push(format!("ids({f})"));
+        }
         let last = self.app.state.project.clone();
         let last_side = side(&self.app);
         // Undo back to the start, then redo to where the trace ended.
@@ -626,6 +634,28 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
         m.send_levels.sort_by_key(|&(d, _)| d);
     }
     p
+}
+
+/// Whether every channel, pattern, mixer track, slot plugin, arrangement and clip has an id and no two share one (the
+/// session gives them out from one counter, `control::ids`): what is wrong, if anything.
+fn ids_fault(p: &os_model::Project) -> Option<String> {
+    let mut all: Vec<(&str, os_model::Id)> = Vec::new();
+    all.extend(p.channels.iter().map(|c| ("channel", c.id)));
+    all.extend(p.patterns.iter().map(|q| ("pattern", q.id)));
+    all.extend(p.mixer.iter().map(|m| ("track", m.id)));
+    all.extend(p.mixer.iter().flat_map(|m| m.slots.iter().flatten()).map(|x| ("slot", x.id)));
+    all.extend(p.arrangements.iter().map(|a| ("arrangement", a.id)));
+    all.extend(p.arrangements.iter().flat_map(|a| &a.clips).map(|c| ("clip", c.id)));
+    if let Some((kind, _)) = all.iter().find(|(_, id)| id.is_none()) {
+        return Some(format!("a {kind} without an id"));
+    }
+    let mut seen = std::collections::HashMap::new();
+    for (kind, id) in &all {
+        if let Some(first) = seen.insert(id.0, *kind) {
+            return Some(format!("a {first} and a {kind} share id {}", id.0));
+        }
+    }
+    None
 }
 
 /// A second app with `path` opened, as the rig opens (builtin plugins only), loading waited for.
