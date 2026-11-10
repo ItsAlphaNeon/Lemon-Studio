@@ -372,7 +372,7 @@ impl App {
 
     /// Song marker jump (spec §3): the `i`-th of the playlist's time markers, in SONG mode.
     fn marker_jump(&mut self, i: usize) {
-        if !self.state.song_mode {
+        if !self.state.song_mode() {
             self.state.message = Some("Song marker jump: in SONG mode".into());
             return self.invalidate();
         }
@@ -422,7 +422,7 @@ impl App {
                 T::Paused => self.transport.resume(),
                 T::Stopped => {
                     if ahead > 0 {
-                        let at = if self.state.song_mode { self.state.playlist.pos } else { self.state.piano.marker };
+                        let at = if self.state.song_mode() { self.state.playlist.pos } else { self.state.piano.marker };
                         self.ext_position(at + ahead);
                     }
                     self.start_playback();
@@ -452,7 +452,7 @@ impl App {
     /// Puts the song position (SONG) or the play-start marker (PAT) at `t` without restarting.
     fn ext_position(&mut self, t: u32) {
         let s = &mut self.state;
-        if s.song_mode {
+        if s.song_mode() {
             s.playlist.pos = t;
             crate::init::apply(s);
         } else {

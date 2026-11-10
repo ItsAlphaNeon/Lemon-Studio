@@ -1252,10 +1252,13 @@ fn restore(s: &mut State, side: Side) {
 
 /// Muting and soloing are steps of their own (a channel's, `Taken::Mutes`) or none (a mixer track's, as in FL), and
 /// locking a channel's mute state is none (`ui/undo-steps.md`): an undo or redo of another step leaves every channel
-/// and mixer track that is still there muted, and every channel locked and zipped (no step either), or not as it is now. The states by id.
+/// and mixer track that is still there muted, and every channel locked and zipped (no step either), or not as it is now,
+/// and the song mode as it is. The states by id.
 struct Mutes {
     channels: std::collections::HashMap<u32, (bool, bool, bool)>,
     tracks: std::collections::HashMap<u32, bool>,
+    /// The song mode: no step either.
+    song_mode: Option<bool>,
 }
 
 impl Mutes {
@@ -1263,10 +1266,12 @@ impl Mutes {
         Mutes {
             channels: p.channels.iter().map(|c| (c.id.0, (c.enabled, c.rack.locked, c.rack.zipped))).collect(),
             tracks: p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect(),
+            song_mode: p.song_mode,
         }
     }
 
     fn keep(&self, p: &mut Project) {
+        p.song_mode = self.song_mode;
         for c in &mut p.channels {
             if let Some(&(on, locked, zipped)) = self.channels.get(&c.id.0) {
                 (c.enabled, c.rack.locked, c.rack.zipped) = (on, locked, zipped);

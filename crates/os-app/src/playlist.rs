@@ -4131,7 +4131,7 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
         s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
         // Moving the song position switches to SONG mode; a time selection does not (§7). The initial values follow
         // (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
-        s.song_mode = true;
+        s.set_song_mode(true);
         crate::init::apply(s);
         app.drag = Some(Drag::Pl(PlDrag::SongPos));
     }
@@ -4189,7 +4189,7 @@ pub fn press_markers(app: &mut App, grid: Rect, right: bool) {
         let t0 = markers(s)[i].position;
         // As a click on the ruler: SONG mode, the initial values follow (§7).
         s.playlist.pos = t0;
-        s.song_mode = true;
+        s.set_song_mode(true);
         crate::init::apply(s);
         app.drag = Some(Drag::Pl(PlDrag::Marker { i, dt: 0, t0 }));
     }
@@ -5470,7 +5470,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         }
         Key::Named(NamedKey::Enter) if ctrl => {
             // Play from the song start.
-            app.state.song_mode = true;
+            app.state.set_song_mode(true);
             app.state.playlist.pos = 0;
             app.play_song_from(0);
             return true;

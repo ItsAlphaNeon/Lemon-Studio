@@ -371,7 +371,7 @@ impl App {
     /// playlist's in SONG mode; one with no length does not count.
     pub(crate) fn selection_loop(&self) -> Option<(u32, u32)> {
         let s = &self.state;
-        let r = if s.song_mode { s.playlist.range } else if s.shown(crate::app::Win::PianoRoll) { s.piano.range } else { None };
+        let r = if s.song_mode() { s.playlist.range } else if s.shown(crate::app::Win::PianoRoll) { s.piano.range } else { None };
         r.filter(|r| r.1 > r.0)
     }
 

@@ -322,7 +322,7 @@ fn transport(ui: &mut Ui, c: &Ctx) {
     let song = a.span(384.0, 418.0, 20.0, 35.0);
     ui.hit(pat, Action::PatSong(false), "Pattern: play the current pattern");
     ui.hit(song, Action::PatSong(true), "Song: play the arrangement");
-    for (r, label, active) in [(pat, "PAT", !s.song_mode), (song, "SONG", s.song_mode)] {
+    for (r, label, active) in [(pat, "PAT", !s.song_mode()), (song, "SONG", s.song_mode())] {
         if active && lemon {
             os_ui::kit::lemon::lit_in(ui.c, ui.t, Rect::new(r.x + 2.0, r.y + 1.0, r.w - 3.0, r.h - 1.5), 4.0, false);
         } else if active {

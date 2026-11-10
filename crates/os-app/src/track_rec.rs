@@ -124,7 +124,7 @@ impl App {
                 }
             }
         }
-        let song_pos = (!self.state.song_mode).then_some(self.state.playlist.pos);
+        let song_pos = (!self.state.song_mode()).then_some(self.state.playlist.pos);
         self.transport.record_tracks(Some(takes.clone()));
         self.track_rec = Some(TrackRec { takes, recs, rate, song_pos, ending: false });
         self.invalidate();
@@ -239,7 +239,7 @@ mod tests {
     fn an_armed_track_records_into_the_playlist() {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(crate::app::test_project());
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         if Opt::Audio.on() {
             Opt::Audio.toggle();
         }

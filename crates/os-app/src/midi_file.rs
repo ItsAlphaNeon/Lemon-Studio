@@ -679,7 +679,7 @@ impl App {
             s.path = None;
             s.tempo = tempo;
             s.pattern = 1;
-            s.song_mode = false;
+            s.set_song_mode(false);
             s.piano.reset();
             s.playlist.reset();
             s.history.reset();
@@ -809,7 +809,7 @@ impl App {
 
     fn project_midi(&self) -> Smf {
         let s = &self.state;
-        project_file(&s.project, s.song_mode, s.pattern, s.tempo)
+        project_file(&s.project, s.song_mode(), s.pattern, s.tempo)
     }
 
     /// TOOLS ▸ Save MIDI clipboard to browser (Lemon Studio's design after the original's entry; greyed while nothing
@@ -1087,7 +1087,7 @@ mod tests {
     fn test_app() -> App {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(crate::app::test_project());
-        app.state.song_mode = false;
+        app.state.set_song_mode(false);
         app
     }
 
@@ -1125,7 +1125,7 @@ mod tests {
         assert_eq!(p.patterns[0].notes.len(), 4);
         assert!(p.arrangement().is_none_or(|a| a.clips.is_empty()), "nothing on the playlist");
         assert_eq!(app.state.tempo, 120.0);
-        assert!(!app.state.song_mode);
+        assert!(!app.state.song_mode());
         assert_eq!(app.state.rack.groups[0].name, stem(&path));
         assert_eq!(app.state.rack.filter, crate::rack::Filter::Group(0));
         assert!(app.unsaved());

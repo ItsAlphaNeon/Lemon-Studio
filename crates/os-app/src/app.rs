@@ -1025,6 +1025,18 @@ pub enum Drag {
     PickHue(Rect),
 }
 
+impl State {
+    /// SONG (or PAT) on the toolbar: the project's song mode (event 9). As in FL it is no undo step and no unsaved
+    /// change (`ui/undo-steps.md`): `App::unsaved` leaves it out, and an undo or redo of another step leaves it.
+    pub fn song_mode(&self) -> bool {
+        self.project.song_mode.unwrap_or(false)
+    }
+
+    pub fn set_song_mode(&mut self, on: bool) {
+        self.project.write_if(|p| p.song_mode.replace(on) != Some(on));
+    }
+}
+
 pub struct State {
     pub project: crate::locked::Locked,
     /// The toolbar's scope / analyzer and peak bars (fed from the audio tap in `App::tick`).
@@ -1090,7 +1102,6 @@ pub struct State {
     pub selected_channel: usize,
     pub selected_mixer: u16,
     pub pattern: u16,
-    pub song_mode: bool,
     pub menu_open: Option<usize>,
     /// The open dropdown's submenu, shown as `playlist.popup`: the flat index of its ▸ entry.
     pub menu_sub: Option<usize>,
@@ -1569,7 +1580,6 @@ impl App {
                 selected_mixer: 1,
                 mixer: Default::default(),
                 pattern: 1,
-                song_mode: false,
                 menu_open: None,
                 menu_sub: None,
                 lane_menu: false,
@@ -1846,7 +1856,8 @@ impl App {
                 s.mixer_scroll = 0.0;
                 // As saved (event 9); a file without it opens in song mode, as in FL 26 (spec: flp/engine-events.md
                 // "Project").
-                s.song_mode = project.song_mode.unwrap_or(true);
+                let mut project = project;
+                project.song_mode = Some(project.song_mode.unwrap_or(true));
                 s.project = crate::locked::Locked::new(project);
                 // Opening in song mode sets the initial values, as FL 26 does (spec: flp/engine-events.md "Event
                 // 216"); the project is opened with them, not changed.
@@ -2035,7 +2046,12 @@ impl App {
         self.store_builtin_states();
         let s = &mut self.state;
         s.project.get_mut().tempo = Some(s.tempo);
-        s.project.get_mut().song_mode = Some(s.song_mode);
+        // Kept as the project says, or pattern mode, as a new project's (an unsaved change of none).
+        s.project.write_if(|p| {
+            let unset = p.song_mode.is_none();
+            p.song_mode.get_or_insert(false);
+            unset
+        });
         // The pattern shown is saved, so the project opens on it again with the loops the rack stores into it (event
         // 67, spec: flp/engine-events.md).
         s.project.get_mut().current_pattern = Some(s.pattern);
@@ -2149,7 +2165,7 @@ impl App {
 
     /// Whether the project changed since it was last opened, saved or created, a hosted plugin's settings included.
     pub fn unsaved(&self) -> bool {
-        !crate::rack::same_but_locks(&self.saved.0, &self.state.project)
+        !same_as_saved(&self.saved.0, &self.state.project)
             || self.saved.1 != self.state.tempo
             || self.saved.2 != crate::lemon_state::saved_form(&self.state, &self.plugins)
             || self.state.plugin_edited
@@ -2479,7 +2495,7 @@ impl App {
         s.tempo = 130.0;
         s.pattern = 1;
         // FL's default template is saved in pattern mode.
-        s.song_mode = false;
+        s.set_song_mode(false);
         s.piano.reset();
         s.playlist.reset();
         s.history.reset();
@@ -4786,7 +4802,7 @@ impl App {
             None => self.invalidate(),
         }
         // In PAT mode the song position slider shows the play-start marker within the pattern's length.
-        if !self.state.song_mode {
+        if !self.state.song_mode() {
             self.damage_band(crate::song_pos::PANEL);
         }
     }
@@ -4836,7 +4852,7 @@ impl App {
 
     /// Song playback from `tick` (Song mode; spec: ui/playlist.md §7).
     pub fn play_song_from(&mut self, tick: u32) {
-        self.state.song_mode = true;
+        self.state.set_song_mode(true);
         if self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             // Nothing plays in SONG mode, so a pattern that was playing stops too.
             if self.transport.playing() {
@@ -8049,7 +8065,7 @@ impl App {
             Key::Named(NamedKey::Space) if ctrl => self.act(Action::Play),
             Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
             // L flips the PAT / SONG switch, as in FL (the typing keyboard, when on, takes L first).
-            Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("l") => self.act(Action::PatSong(!self.state.song_mode)),
+            Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("l") => self.act(Action::PatSong(!self.state.song_mode())),
             // spec: ui/tempo-tapper.md §1
             Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
             Key::Named(NamedKey::F7) if alt && !ctrl => self.act(Action::ToggleWin(Win::Touch)),
@@ -8180,7 +8196,7 @@ impl App {
 
     /// `start_playback` after a recording count-in of `bars` bars (spec: ui/recording.md §3).
     pub(crate) fn start_playback_counted(&mut self, bars: u32) {
-        let song = self.state.song_mode;
+        let song = self.state.song_mode();
         if song && !self.one_click_starting() && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             self.state.message = Some("The arranger is empty: nothing to play as a song".into());
             self.invalidate();
@@ -8226,7 +8242,7 @@ impl App {
     }
 
     fn play_mode(&self) -> PlayMode {
-        if self.state.song_mode { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) }
+        if self.state.song_mode() { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) }
     }
 
     /// Play one note of channel `channel` (Note::channel) once (also while playing or paused).
@@ -8759,7 +8775,7 @@ impl App {
         if a == Action::PianoRuler {
             if let Some(g) = self.piano_geom() {
                 let t = crate::piano_snap::place(&self.state, &g, g.tick_at(self.mouse.0), self.alt);
-                if self.state.song_mode && self.piano_song_seek(t, true) {
+                if self.state.song_mode() && self.piano_song_seek(t, true) {
                     self.drag = Some(Drag::SongRuler);
                 } else {
                     self.state.piano.marker = t;
@@ -8836,7 +8852,7 @@ impl App {
                 // Stop rewinds to where playback started: the song position (or the piano roll's play-start marker)
                 // stays where it was put, so the next start plays from there again; with a time selection, its start.
                 let s = &mut self.state;
-                if s.song_mode {
+                if s.song_mode() {
                     if let Some((a, _)) = s.playlist.range {
                         s.playlist.pos = a;
                     }
@@ -8850,8 +8866,8 @@ impl App {
                 self.invalidate();
             }
             Action::PatSong(song) => {
-                let changed = s.song_mode != song;
-                s.song_mode = song;
+                let changed = s.song_mode() != song;
+                s.set_song_mode(song);
                 // The running playback follows the switch: it restarts in the new mode (a paused one is stopped),
                 // so the playheads always show what is heard.
                 if changed && self.transport.playing() {
@@ -9317,13 +9333,13 @@ impl App {
     /// Speaker (spec: ui/channel-rack.md §7): plays the current pattern; while it plays, pauses / resumes.
     fn rack_speaker(&mut self) {
         match self.transport.state() {
-            TransportState::Playing if !self.state.song_mode => self.transport.pause(),
-            TransportState::Paused if !self.state.song_mode => self.transport.resume(),
+            TransportState::Playing if !self.state.song_mode() => self.transport.pause(),
+            TransportState::Paused if !self.state.song_mode() => self.transport.resume(),
             _ => {
                 if self.transport.playing() {
                     self.transport.stop();
                 }
-                self.state.song_mode = false;
+                self.state.set_song_mode(false);
                 self.start_playback();
             }
         }
@@ -10058,6 +10074,22 @@ pub(crate) fn add_channel(p: &mut Project) -> usize {
 
 /// A new project (owner's choice, 2026-10-10): one empty sampler channel, played and edited by Lemon Sampler, on
 /// insert 1, and pattern 1.
+/// `now` is the project as `saved` but for what FL does not count as an unsaved change though the file keeps it
+/// (`ui/undo-steps.md`): the channels' locks and the song mode.
+fn same_as_saved(saved: &Project, now: &Project) -> bool {
+    if saved == now {
+        return true;
+    }
+    let mut now = now.clone();
+    now.song_mode = saved.song_mode;
+    if saved.channels.len() == now.channels.len() {
+        for (x, y) in saved.channels.iter().zip(&mut now.channels) {
+            y.rack.locked = x.rack.locked;
+        }
+    }
+    *saved == now
+}
+
 pub fn default_project() -> Project {
     template_project(&[crate::plugins::LEMON_SAMPLER])
 }
@@ -15364,7 +15396,7 @@ mod tests {
                 }
             }
             app.state.project.get_mut().patterns[0].notes = notes;
-            app.state.song_mode = false;
+            app.state.set_song_mode(false);
             app.transport.set_instruments(app.plugins.instruments());
         } else {
             app.open(song.clone().into());
@@ -17263,14 +17295,14 @@ mod tests {
     #[test]
     fn stop_keeps_the_start_position() {
         let mut app = App::new(None);
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         app.state.playlist.pos = 768;
         app.act(Action::Stop);
         assert_eq!(app.state.playlist.pos, 768);
         app.state.playlist.range = Some((384, 1152));
         app.act(Action::Stop);
         assert_eq!(app.state.playlist.pos, 384, "the time selection's start");
-        app.state.song_mode = false;
+        app.state.set_song_mode(false);
         app.state.piano.marker = 48;
         app.act(Action::Stop);
         assert_eq!(app.state.piano.marker, 48);
@@ -17284,13 +17316,13 @@ mod tests {
         if app.typing_on() {
             app.toggle_typing();
         }
-        let song = app.state.song_mode;
+        let song = app.state.song_mode();
         app.key(&Key::Character("l".into()), false, false);
-        assert_eq!(app.state.song_mode, !song);
+        assert_eq!(app.state.song_mode(), !song);
         app.key(&Key::Character("L".into()), false, false);
-        assert_eq!(app.state.song_mode, song);
+        assert_eq!(app.state.song_mode(), song);
         app.key(&Key::Character("l".into()), true, false);
-        assert_eq!(app.state.song_mode, song, "Ctrl+L is not the switch");
+        assert_eq!(app.state.song_mode(), song, "Ctrl+L is not the switch");
         app.toggle_typing();
         assert!(app.typing_key(KeyCode::KeyL, true, false, false), "the typing keyboard takes L");
     }
@@ -17340,7 +17372,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
         app.state.pattern = 1;
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         // Pattern 1 at bar 2 (window 0..384) and at bar 5 showing its second half only (window 192..384).
         let mut cut = Clip::new(4 * 384, 192, 0, ClipSource::Pattern(1));
         cut.window = Some((192.0, 384.0));
@@ -17949,9 +17981,9 @@ mod tests {
             let copies: Vec<u32> = spans(&app).iter().filter(|n| n.2 == 41 && n.0 >= 800).map(|n| n.0).collect();
             assert_eq!(copies, [896, 944, 992, 1040]);
             // L (PAT / SONG) held: one flip; Ctrl+L held: one legato.
-            let song = app.state.song_mode;
+            let song = app.state.song_mode();
             letter(&mut app, 'l', 0, 3);
-            assert_eq!(app.state.song_mode, !song);
+            assert_eq!(app.state.song_mode(), !song);
             letter(&mut app, 'l', 0, 1);
             app.state.piano.clear_selection();
             letter(&mut app, 'l', CTRL, 1);
@@ -19561,16 +19593,16 @@ mod tests {
     fn ruler_click_switches_to_song_mode() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let (mut app, ruler, g, bar) = ruler_app(&mut c);
-        assert!(!app.state.song_mode);
+        assert!(!app.state.song_mode());
         ruler_press(&mut app, &mut c, g.x_of(bar as f32) + 1.0, g.x_of(3.0 * bar as f32), ruler.cy(), true);
         assert!(app.state.playlist.range.is_some(), "a time selection");
-        assert!(!app.state.song_mode, "a time selection keeps PAT");
+        assert!(!app.state.song_mode(), "a time selection keeps PAT");
         // The project's initial values follow the move (spec: ui/settings-choices.md "Advanced: Initialize controls
         // automatically").
         app.state.project.get_mut().init_controls = vec![os_model::InitControl { head: 0, target: os_model::target::TEMPO, value: 140_000 }];
         app.state.tempo = 90.0;
         ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
-        assert!(app.state.song_mode, "a click on the ruler switches to SONG");
+        assert!(app.state.song_mode(), "a click on the ruler switches to SONG");
         assert_eq!(app.state.playlist.pos, 4 * bar);
         assert!(!app.transport.playing(), "and does not start playback");
         assert_eq!(app.state.tempo, 140.0, "the initial tempo");
@@ -20793,7 +20825,7 @@ mod tests {
         assert!(app.transport.playing() && !app.transport.song());
         ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(app.state.song_mode && app.transport.playing() && app.transport.song(), "the song plays");
+        assert!(app.state.song_mode() && app.transport.playing() && app.transport.song(), "the song plays");
         let tick = app.transport.tick();
         assert!(tick >= f64::from(4 * bar) && tick < f64::from(5 * bar), "from the clicked bar: {tick}");
         app.act(Action::Stop);
@@ -21125,7 +21157,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project.get_mut().arrangements =
             vec![os_model::Arrangement { number: 1, clips: vec![os_model::Clip::new(0, 3168, 0, os_model::ClipSource::Pattern(1))], ..Default::default() }];
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         app.state.playlist.pos = 0;
         frame(&mut app, &mut c, None);
         assert_eq!(hit_rect(&app, &Action::SongPos), PANEL);
@@ -21169,7 +21201,7 @@ mod tests {
         assert_eq!(pos(&app), 3167);
 
         // PAT mode: through the (empty, one-bar) pattern; right-click at the middle.
-        app.state.song_mode = false;
+        app.state.set_song_mode(false);
         frame(&mut app, &mut c, None);
         app.mouse_move(480.0, y);
         app.mouse_down_right();
@@ -21177,7 +21209,7 @@ mod tests {
         assert_eq!(app.hint, "Song position: 1:09:00");
 
         // SONG mode with an empty playlist: disabled.
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         app.state.project.get_mut().arrangements[0].clips.clear();
         frame(&mut app, &mut c, None);
         assert!(app.hits.iter().all(|h| h.action != Action::SongPos));

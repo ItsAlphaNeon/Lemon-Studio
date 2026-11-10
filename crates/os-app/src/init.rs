@@ -86,7 +86,7 @@ pub fn items(s: &State, control: Option<(u32, f64)>) -> [PItem; 2] {
 /// or playback loops back to the song's start). Not an undo step. A record whose units aren't known, or whose control
 /// the project doesn't have, is left alone. Returns whether a value changed; the project then goes to playback.
 pub fn apply(s: &mut State) -> bool {
-    if !s.song_mode {
+    if !s.song_mode() {
         return false;
     }
     let mut changed = false;
@@ -397,14 +397,14 @@ mod tests {
         const MOVED: (f64, f64) = (1.0, 90.0);
         let mut a = song_app();
         // Pattern mode: nothing.
-        a.state.song_mode = false;
+        a.state.set_song_mode(false);
         moved(&mut a);
         a.set_song_pos(96, false);
         loop_back(&mut a, false);
         assert_eq!(controls(&a), MOVED);
 
         // Song mode: the position slider.
-        a.state.song_mode = true;
+        a.state.set_song_mode(true);
         a.set_song_pos(192, false);
         assert_eq!(controls(&a), INIT);
         // Playback start, then Stop (the position goes back to where playback started).
@@ -447,25 +447,25 @@ mod tests {
             (q.channels[0].volume, q.tempo.unwrap())
         };
         let mut a = song_app();
-        a.state.song_mode = true;
+        a.state.set_song_mode(true);
         moved(&mut a);
         a.save_to(path.clone());
         assert_eq!(stored(&path), MOVED);
         let mut b = App::new(None);
         b.open(path.clone());
-        assert!(b.state.song_mode);
+        assert!(b.state.song_mode());
         assert_eq!(controls(&b), INIT);
         assert!(!b.unsaved() && b.state.history.len() == 0, "opened, not changed");
         b.save_to(resaved.clone());
         assert_eq!(stored(&resaved), INIT, "saved as the stored values");
 
         // Saved in pattern mode, with the clips: opened in pattern mode, the stored values.
-        a.state.song_mode = false;
+        a.state.set_song_mode(false);
         a.save_to(path.clone());
         let mut c = App::new(None);
-        c.state.song_mode = true;
+        c.state.set_song_mode(true);
         c.open(path.clone());
-        assert!(!c.state.song_mode && !pl::clips(&c.state).is_empty());
+        assert!(!c.state.song_mode() && !pl::clips(&c.state).is_empty());
         assert_eq!(controls(&c), MOVED);
         // Without event 9 (a file from before Lemon Studio wrote it): song mode, even with no clips.
         pl::arr_mut(&mut a.state).clips.clear();
@@ -479,7 +479,7 @@ mod tests {
         std::fs::write(&path, f.to_bytes().unwrap()).unwrap();
         let mut d = App::new(None);
         d.open(path.clone());
-        assert!(d.state.song_mode);
+        assert!(d.state.song_mode());
         assert_eq!(controls(&d), INIT);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&resaved);

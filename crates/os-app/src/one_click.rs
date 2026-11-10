@@ -145,7 +145,7 @@ impl App {
             self.state.message = Some(format!("Audio recording: {e}"));
             return self.invalidate();
         }
-        if !self.state.song_mode {
+        if !self.state.song_mode() {
             self.act(Action::PatSong(true));
         }
         // Armed directly: the audio was the answer to "what to record".

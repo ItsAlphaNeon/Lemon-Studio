@@ -3659,7 +3659,7 @@ mod tests {
     fn render_to_wave_file_opens_the_form_for_the_tracks() {
         let mut a = app();
         a.state.project.get_mut().patterns[0].notes.push(os_model::Note::step(0, 0));
-        a.state.song_mode = false;
+        a.state.set_song_mode(false);
         let file = track_items(&a.state, 2).into_iter().find(|i| i.label == "File").unwrap();
         assert_eq!(file.children[3].cmd, Cmd::Mixer(MCmd::RenderWave(2)));
         track_mut(&mut a.state, 2).unwrap().name = Some("Bass: sub".into());

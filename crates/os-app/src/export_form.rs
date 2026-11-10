@@ -272,7 +272,7 @@ impl App {
         }
         let s = &self.state;
         let p = crate::rack::play_project(s);
-        let song = s.song_mode;
+        let song = s.song_mode();
         // Play starts on the app's mode, else on whichever of the two has something to render (as FL: PAT with an
         // empty pattern still exports the playlist). Only with neither is it refused, in a warning box: a hint-bar
         // message is lost under the menu's own hint at once.
@@ -546,7 +546,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
-        app.state.song_mode = false;
+        app.state.set_song_mode(false);
         app
     }
 
@@ -557,7 +557,7 @@ mod tests {
         let mut empty = App::new(None);
         empty.state.project = crate::locked::Locked::new(crate::app::test_project());
         empty.state.project.get_mut().patterns[0].notes.clear();
-        empty.state.song_mode = false;
+        empty.state.set_song_mode(false);
         empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));
         assert!(form(&empty).is_none());
         assert_eq!(empty.state.dialogs.len(), 1, "a warning says why");

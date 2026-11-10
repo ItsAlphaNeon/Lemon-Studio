@@ -1004,21 +1004,6 @@ pub fn locked_rows(p: &os_model::Project) -> BTreeSet<usize> {
     p.channels.iter().enumerate().filter(|(_, c)| c.rack.locked).map(|(r, _)| r).collect()
 }
 
-/// `a` and `b` the same but for the channels' locks: locking is no unsaved change, as in FL (`ui/undo-steps.md`).
-pub fn same_but_locks(a: &os_model::Project, b: &os_model::Project) -> bool {
-    if a == b {
-        return true;
-    }
-    if a.channels.len() != b.channels.len() || a.channels.iter().zip(&b.channels).all(|(x, y)| x.rack.locked == y.rack.locked) {
-        return false;
-    }
-    let mut b = b.clone();
-    for (x, y) in a.channels.iter().zip(&mut b.channels) {
-        y.rack.locked = x.rack.locked;
-    }
-    *a == b
-}
-
 /// The zipped rows (Zip selected, Unzip all, "Auto-collapse empty channels"; event 15): no undo step, as in FL, but an
 /// unsaved change (`ui/undo-steps.md`); an undo or redo of another step leaves them as they are.
 pub fn zipped_rows(p: &os_model::Project) -> BTreeSet<usize> {
@@ -3128,6 +3113,25 @@ fn store_loops(s: &mut State) {
 mod tests {
     use super::*;
 
+    /// The song mode is the project's (event 9); as in FL, switching it is no undo step and no unsaved change, and an
+    /// undo of another step leaves it.
+    #[test]
+    fn the_song_mode_is_no_undo_step_and_no_unsaved_change() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.mark_saved();
+        let steps = a.state.history.done();
+        let song = a.state.song_mode();
+        a.state.set_song_mode(!song);
+        assert_eq!(a.state.project.song_mode, Some(!song));
+        assert!(!a.unsaved());
+        assert_eq!(a.state.history.done(), steps, "no step");
+        crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.project.get_mut().main_volume = Some(50));
+        a.state.set_song_mode(song);
+        assert!(crate::history::undo(&mut a.state).is_some());
+        assert_eq!(a.state.song_mode(), song, "the undo left it");
+    }
+
     /// Lock active/mute state is kept in the channel (the file's event 32), and as in FL it is no undo step and no
     /// unsaved change; an undo of another step, a whole-project one included, leaves it as it is.
     #[test]
@@ -4674,7 +4678,7 @@ mod tests {
         assert_eq!(crate::init::entry(&app.state, target::MAIN_SWING).map(|c| c.value), Some(32));
         assert_eq!(entry(&app, 2, crate::init::INIT_LABEL).mark, Mark::Check(true));
         app.state.project.get_mut().swing = Some(100);
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         assert!(crate::init::apply(&mut app.state));
         assert_eq!(app.state.project.swing, Some(32), "the song starts with it");
         let delete = entry(&app, 2, crate::init::DELETE_LABEL);
@@ -4791,7 +4795,7 @@ mod tests {
         assert_eq!(app.state.project.init_controls.iter().map(|c| c.value).collect::<Vec<_>>(), [2, 1]);
         app.state.project.get_mut().channels[row].mixer_track = 5;
         app.state.project.get_mut().channels[row].enabled = false;
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         assert!(crate::init::apply(&mut app.state));
         assert_eq!((app.state.project.channels[row].mixer_track, app.state.project.channels[row].enabled), (2, true));
         for a in &actions[1..] {

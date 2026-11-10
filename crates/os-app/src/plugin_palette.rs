@@ -622,10 +622,10 @@ mod tests {
     #[test]
     fn letters_go_to_the_search_not_the_shortcuts() {
         let mut app = app();
-        let song = app.state.song_mode;
+        let song = app.state.song_mode();
         app.open_plugin_palette(Target::All, (0.0, 0.0), None);
         type_text(&mut app, "l");
-        assert_eq!(app.state.song_mode, song);
+        assert_eq!(app.state.song_mode(), song);
         assert_eq!(app.state.palette.query, "l");
         assert!(!app.typing_key(winit::keyboard::KeyCode::KeyZ, true, false, false), "the typing keyboard leaves it alone");
     }

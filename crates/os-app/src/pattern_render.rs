@@ -269,7 +269,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
-        app.state.song_mode = false;
+        app.state.set_song_mode(false);
         app
     }
 
@@ -407,7 +407,7 @@ mod tests {
         let mut app = app();
         let d = temp("form");
         with_data_folder(&mut app, &d);
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         let channels = app.state.project.channels.len();
         app.pattern_cmd(crate::patterns::Cmd::RenderAsClip);
         let Some(crate::dialog::Modal { body: crate::dialog::Body::Project(crate::project_forms::Form::Export(f)), .. }) = app.state.dialogs.last() else {

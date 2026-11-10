@@ -139,7 +139,7 @@ impl App {
         let s = &mut self.state;
         let Some(ch) = crate::piano::channel(s) else { return };
         let pos = crate::song_pos::stored(s);
-        let at = if s.song_mode {
+        let at = if s.song_mode() {
             let Some(t) = crate::piano::pattern_tick_in_song(s, f64::from(pos)) else {
                 let m = format!("Step edit: {} does not play at the song position", crate::patterns::name_of(s, s.pattern));
                 return self.say(m);
@@ -161,7 +161,7 @@ impl App {
         s.piano.select(s.pattern, ch, new);
         s.piano.dirty = true;
         let to = pos + len;
-        if s.song_mode {
+        if s.song_mode() {
             s.playlist.pos = to;
             // The initial values follow a song position move, as with the slider (`App::set_song_pos`).
             crate::init::apply(s);
@@ -189,7 +189,7 @@ mod tests {
     fn app() -> App {
         let mut app = App::new(None);
         app.state.z = vec![Win::PianoRoll];
-        app.state.song_mode = false;
+        app.state.set_song_mode(false);
         app.state.selected_channel = 0;
         app.state.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         assert!(app.typing_on() && !on(), "the typing keyboard is on and step edit off at start");
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(app.hint, "Song position: 1:03:00");
         // In SONG mode the song position is the playlist's, and the notes go where the pattern plays there, as the
         // piano roll shows it: a clip of it at bar 3, the position a beat into it.
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         let bar = app.state.project.bar_ticks();
         let clip = os_model::Clip::new(2 * bar, bar, 0, os_model::ClipSource::Pattern(app.state.pattern));
         crate::playlist::arr_mut(&mut app.state).clips = vec![clip];
