@@ -67,6 +67,22 @@ fn hash(v: &impl fmt::Debug) -> u64 {
     h.0
 }
 
+/// The project without what `side` holds (the tempo, the pattern shown, the song mode, the rack's groups, locks, zips
+/// and loops): a build may keep those in the interface until a save or in the project itself (control-plane step 5),
+/// and they are compared once, in `side`. What a save writes of them is checked by the save and reopen checks.
+fn project_part(p: &os_model::Project) -> os_model::Project {
+    let mut p = p.clone();
+    (p.tempo, p.current_pattern, p.song_mode) = (None, None, None);
+    p.groups.clear();
+    for c in &mut p.channels {
+        (c.rack.locked, c.rack.zipped, c.rack.group) = (false, false, 0);
+    }
+    for q in &mut p.patterns {
+        (q.loops, q.loop_off) = (Vec::new(), None);
+    }
+    p
+}
+
 /// Project state the interface holds until save (specs: control-plane.md part 2, "Where main is"), as one value: a
 /// field per line, so a difference names its field.
 fn side(app: &App) -> String {
@@ -102,7 +118,7 @@ impl Fp {
         let side = hash(&side(app));
         let history = hash(&(s.history.entries(), s.history.at()));
         Fp(vec![
-            ("project", hash(&s.project)),
+            ("project", hash(&project_part(&s.project))),
             ("side", side),
             ("lemon", hash(&crate::lemon_state::saved_form(s, &app.plugins))),
             ("history", history),
