@@ -76,6 +76,11 @@ fn project_part(p: &os_model::Project) -> os_model::Project {
     p.groups.clear();
     for c in &mut p.channels {
         (c.rack.locked, c.rack.zipped, c.rack.group) = (false, false, None);
+        // Lemon Studio's own (the `lemon` part compares them, as `.lemon` stores them).
+        c.lemon_icon = None;
+    }
+    for m in &mut p.mixer {
+        (m.slot_names, m.slot_colors, m.slot_icons, m.lemon_icon) = Default::default();
     }
     for q in &mut p.patterns {
         (q.loops, q.loop_off) = (Vec::new(), None);
@@ -103,6 +108,9 @@ fn project_hash(p: &os_model::Project) -> u64 {
         }
     }
     out.push_str(&text[from..]);
+    // The fields step 5 added for what `.lemon` keeps, as `project_part` leaves them: out of the text, as before them.
+    let ten = ["None"; 10].join(", ");
+    let out = out.replace(&format!(", slot_names: [{ten}], slot_colors: [{ten}], slot_icons: [{ten}], lemon_icon: None"), "").replace(", lemon_icon: None", "");
     let mut h = Fnv::new();
     let _ = write!(h, "{out}");
     h.0

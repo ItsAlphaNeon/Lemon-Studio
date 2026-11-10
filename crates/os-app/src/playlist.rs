@@ -688,8 +688,6 @@ pub struct PlaylistState {
     pub perf_plus_scene: bool,
     /// A Performance mode MIDI note's velocity picks the slot's sub-clip (§3a).
     pub perf_velocity_subclips: bool,
-    /// Change icon... (Lemon Studio's design): the icon each channel or effect slot shows, for the session.
-    pub icons: HashMap<IconOwner, crate::icons::Icon>,
 }
 
 /// Change icon... (Lemon Studio's design, spec: ui/plugin-window.md "Change icon"): the icons a channel or an effect slot
@@ -748,8 +746,53 @@ fn icon_owner(p: &os_model::Project, key: usize) -> Option<IconOwner> {
 }
 
 /// The icon chosen for `key` (a rack row, a mixer track's `TRACK_ICON_KEY + track` or an `fx_key`), if any.
-pub fn window_icon(p: &os_model::Project, icons: &HashMap<IconOwner, crate::icons::Icon>, key: usize) -> Option<crate::icons::Icon> {
-    icons.get(&icon_owner(p, key)?).copied()
+pub fn window_icon(p: &os_model::Project, key: usize) -> Option<crate::icons::Icon> {
+    icon_of(p, icon_owner(p, key)?)
+}
+
+/// The icon `owner` shows: the project's (the channel's, the track's or the slot's `lemon_icon` / `slot_icons`, by
+/// name; kept in `.lemon`).
+pub fn icon_of(p: &os_model::Project, owner: IconOwner) -> Option<crate::icons::Icon> {
+    let name = match owner {
+        IconOwner::Channel(id) => p.channels.iter().find(|c| c.id.0 == id)?.lemon_icon.as_deref()?,
+        IconOwner::Track(t) => p.mixer.iter().find(|m| m.index == t)?.lemon_icon.as_deref()?,
+        IconOwner::Slot(t, k) => p.mixer.iter().find(|m| m.index == t)?.slot_icons.get(usize::from(k))?.as_deref()?,
+    };
+    ICONS.iter().find(|(n, _)| *n == name).map(|&(_, i)| i)
+}
+
+/// Every icon chosen, by owner.
+pub fn icons(p: &os_model::Project) -> HashMap<IconOwner, crate::icons::Icon> {
+    let mut v = HashMap::new();
+    for c in &p.channels {
+        if let Some(i) = icon_of(p, IconOwner::Channel(c.id.0)) {
+            v.insert(IconOwner::Channel(c.id.0), i);
+        }
+    }
+    for m in &p.mixer {
+        if let Some(i) = icon_of(p, IconOwner::Track(m.index)) {
+            v.insert(IconOwner::Track(m.index), i);
+        }
+        for k in 0..10u8 {
+            if let Some(i) = icon_of(p, IconOwner::Slot(m.index, k)) {
+                v.insert(IconOwner::Slot(m.index, k), i);
+            }
+        }
+    }
+    v
+}
+
+/// Sets (`None`: clears) the icon `owner` shows; the project is written only when it changes.
+pub fn put_icon(s: &mut State, owner: IconOwner, icon: Option<crate::icons::Icon>) {
+    let name = icon.and_then(|i| ICONS.iter().find(|(_, x)| *x == i)).map(|&(n, _)| n.to_string());
+    s.project.write_if(|p| {
+        let slot = match owner {
+            IconOwner::Channel(id) => p.channels.iter_mut().find(|c| c.id.0 == id).map(|c| &mut c.lemon_icon),
+            IconOwner::Track(t) => p.mixer.iter_mut().find(|m| m.index == t).map(|m| &mut m.lemon_icon),
+            IconOwner::Slot(t, k) => p.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_icons.get_mut(usize::from(k))),
+        };
+        slot.is_some_and(|v| std::mem::replace(v, name) != *v)
+    });
 }
 
 /// Change icon... ▸: None, then [`ICONS`], the current one ticked; each sets the icon of `key` (a rack row, a mixer
@@ -758,15 +801,15 @@ pub fn icon_items(s: &State, key: usize) -> Vec<PItem> {
     // A container's member: its own icon, saved with the container (`crate::container::Member::icon`).
     let cur = match crate::container::of_key(s, key) {
         Some((t, k, id)) => crate::container::member(s, t, k, id).and_then(|m| m.icon),
-        None => window_icon(&s.project, &s.playlist.icons, key),
+        None => window_icon(&s.project, key),
     };
     let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];
     v.extend(ICONS.iter().enumerate().map(|(i, &(name, icon))| PItem::new(name, Cmd::SetIcon(key, Some(i))).mark(Mark::Check(cur == Some(icon)))));
     v
 }
 
-/// Sets (or with `None` clears) the icon of `key`; no undo step (it is not part of the project). A container member's
-/// icon is part of its container's state: one undo step.
+/// Sets (or with `None` clears) the icon of `key`. A container member's icon is part of its container's state: one undo
+/// step.
 fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
     if let Some((t, k, id)) = crate::container::of_key(s, key) {
         let icon = icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i);
@@ -774,10 +817,7 @@ fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
         return;
     }
     let Some(owner) = icon_owner(&s.project, key) else { return };
-    match icon.and_then(|i| ICONS.get(i)) {
-        Some(&(_, i)) => s.playlist.icons.insert(owner, i),
-        None => s.playlist.icons.remove(&owner),
-    };
+    put_icon(s, owner, icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i));
 }
 
 impl Default for PlaylistState {
@@ -821,7 +861,6 @@ impl Default for PlaylistState {
             perf_track_progress: false,
             perf_plus_scene: false,
             perf_velocity_subclips: true,
-            icons: HashMap::new(),
         }
     }
 }
@@ -4314,11 +4353,7 @@ pub fn commit_edit(s: &mut State) {
             });
         }
         EditTarget::SlotName(t, k) => crate::control::edit(s, "Slot name", crate::control::command::Region::Project, |s| {
-            if text.is_empty() {
-                s.mixer.slot_names.remove(&(t, k));
-            } else {
-                s.mixer.slot_names.insert((t, k), text);
-            }
+            crate::mixer::set_slot_label(s, t, k, (!text.is_empty()).then_some(text));
         }),
         EditTarget::MemberName(t, k, id) => crate::container::rename(s, t, k, id, &text),
         EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
@@ -5893,16 +5928,16 @@ mod tests {
         // Change icon... ▸: the slot's icon, its window's title draws it.
         let star = entry(&m, "Change icon...").children.iter().find(|i| i.label == "Star").unwrap().cmd.clone();
         run(&mut app, star);
-        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, key), Some(crate::icons::Icon::Star));
+        assert_eq!(window_icon(&app.state.project, key), Some(crate::icons::Icon::Star));
         // Change color... ▸ and Random color: the slot's colour, on that slot.
         let change = entry(&m, "Change color...");
         assert!(change.enabled && change.children.len() > 1);
         let red = change.children.iter().find(|i| i.cmd != Cmd::Nothing && i.label != change.children[0].label).unwrap().cmd.clone();
         run(&mut app, red);
-        let c = app.state.mixer.slot_colors.get(&(t, k)).copied();
+        let c = crate::mixer::slot_colors_of(&app.state.project).get(&(t, k)).copied();
         assert!(c.is_some(), "a colour on slot {k} of track {t}");
         run(&mut app, entry(&m, "Random color").cmd.clone());
-        assert!(app.state.mixer.slot_colors.get(&(t, k)).is_some_and(|&r| Some(r) != c));
+        assert!(crate::mixer::slot_colors_of(&app.state.project).get(&(t, k)).is_some_and(|&r| Some(r) != c));
         app.state.selected_mixer = 5;
         // Replace ▸: the effects, into this slot.
         fn leaf(items: &[PItem]) -> Option<&PItem> {
@@ -5936,7 +5971,7 @@ mod tests {
         assert!(m.enabled && m.children[0].label == "None" && m.children[0].mark == Mark::Check(true));
         let keys = m.children.iter().find(|i| i.label == "Keys").unwrap().cmd.clone();
         run(&mut app, keys);
-        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, 0), Some(crate::icons::Icon::PianoRoll));
+        assert_eq!(window_icon(&app.state.project, 0), Some(crate::icons::Icon::PianoRoll));
         assert_eq!(menu(&app).children.iter().find(|i| i.label == "Keys").unwrap().mark, Mark::Check(true));
         // The window menu shows the same choice.
         let mut w = plugin_window_menu(0, false, 0.0, 0.0);
@@ -5944,10 +5979,10 @@ mod tests {
         assert_eq!(entry(&w, "Change icon...").children.iter().find(|i| i.label == "Keys").unwrap().mark, Mark::Check(true));
         // It belongs to the channel, not the row.
         app.state.project.get_mut().channels.swap(0, 1);
-        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, 1), Some(crate::icons::Icon::PianoRoll));
-        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, 0), None);
+        assert_eq!(window_icon(&app.state.project, 1), Some(crate::icons::Icon::PianoRoll));
+        assert_eq!(window_icon(&app.state.project, 0), None);
         run(&mut app, Cmd::SetIcon(1, None));
-        assert!(app.state.playlist.icons.is_empty());
+        assert!(crate::playlist::icons(&app.state.project).is_empty());
     }
 
     /// The window menu's CPU entries (ui/plugin-window.md "CPU"): ticked from the plugin's switches, each flip one undo

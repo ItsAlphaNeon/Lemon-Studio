@@ -382,7 +382,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         // A channel locked to a note source shows a padlock at the button's right end (§18 Receive notes from ▸).
         let locked = s.rack.note_lock.contains(&Some(i));
         // Change icon... (§18, Lemon Studio's design): the icon at the button's left end, the name moved right of it.
-        let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, i);
+        let icon = crate::playlist::window_icon(&s.project, i);
         let icon_lead = if icon.is_some() { 16.0 } else { 0.0 };
         // A channel with an instrument track (playlist §6c): the "I" disc before the name, as on the track header.
         let inst = crate::track_links::instrument_track_of(s, ch.index).is_some();

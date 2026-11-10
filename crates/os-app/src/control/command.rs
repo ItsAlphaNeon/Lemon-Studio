@@ -304,7 +304,7 @@ impl PluginSide {
             // A container's effect has no name of its own (a preset renames nothing).
             None if key >= crate::plugins::MEMBER_KEY => None,
             None => s.project.channels[key].name.clone(),
-            Some(slot) => s.mixer.slot_names.get(&slot).cloned(),
+            Some((t, k)) => crate::mixer::slot_label(s, t, k),
         })
     }
 
@@ -313,14 +313,7 @@ impl PluginSide {
         let Some(key) = owner_key(s, owner).filter(|&k| k < crate::plugins::MEMBER_KEY) else { return };
         match crate::plugins::fx_of(key) {
             None => s.project.get_mut().channels[key].name = self.name.clone(),
-            Some(slot) => match &self.name {
-                Some(n) => {
-                    s.mixer.slot_names.insert(slot, n.clone());
-                }
-                None => {
-                    s.mixer.slot_names.remove(&slot);
-                }
-            },
+            Some((t, k)) => crate::mixer::set_slot_label(s, t, k, self.name.clone()),
         }
     }
 }
@@ -366,18 +359,13 @@ impl Settings {
     }
 }
 
-/// The whole project with the state of it the interface holds: the tempo, the rack's loops, and the mixer's slot names, colours and icons.
+/// The whole project with the state of it the interface holds: the tempo and the rack's loops.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Side {
     pub project: Project,
     pub tempo: f64,
     pub pattern: u16,
     pub loop_len: std::collections::BTreeMap<usize, u32>,
-    /// The mixer's slot names typed in this session (they follow tracks and slots as they move).
-    pub slot_names: std::collections::HashMap<(u16, u8), String>,
-    /// The slots' colours and the channels', slots' and tracks' icons, which follow them the same way.
-    pub slot_colors: std::collections::HashMap<(u16, u8), os_model::Rgb>,
-    pub icons: std::collections::HashMap<crate::playlist::IconOwner, crate::icons::Icon>,
     /// Advanced looping's loop points by row, beside the loop lengths.
     pub loop_unit: std::collections::BTreeMap<usize, crate::rack::LoopUnit>,
     /// Loop mode and type, which say with the lengths what `pattern`'s loops are.
@@ -393,9 +381,6 @@ impl Side {
             tempo: s.tempo(),
             pattern: s.pattern(),
             loop_len: r.loop_len.clone(),
-            slot_names: s.mixer.slot_names.clone(),
-            slot_colors: s.mixer.slot_colors.clone(),
-            icons: s.playlist.icons.clone(),
             loop_unit: r.loop_unit.clone(),
             loop_mode: r.loop_mode,
             loop_type: r.loop_type,
@@ -957,12 +942,12 @@ impl Command {
                     Some(k) => return Err(format!("slots are 0..=9, not {k}")),
                     None => m.slots.iter().position(Option::is_none).ok_or("the track has no empty slot")?,
                 };
-                let (t, m) = (m.index, &mut s.project.get_mut().mixer[place]);
+                let m = &mut s.project.get_mut().mixer[place];
                 m.slots[k] = Some(crate::plugins::new_slot(&plugin));
                 m.slot_on[k] = true;
                 m.slot_mix[k] = 1.0;
                 m.slot_cpu[k] = os_model::PluginCpu::default();
-                s.mixer.slot_names.remove(&(t, k as u8));
+                m.slot_names[k] = None;
                 s.control.settle(s.project.get_mut());
                 let id = s.project.mixer[place].slots[k].as_ref().map_or(Id::NONE, |x| x.id);
                 s.control.host.push(super::HostReq::Effect { slot: id, plugin });
@@ -1216,11 +1201,10 @@ fn restore(s: &mut State, side: Side) {
     let sel_clips = selected_clips(s);
     let new_row: std::collections::HashMap<u32, usize> = side.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
-    let Side { project, tempo, pattern, loop_len, slot_names, slot_colors, icons, loop_unit, loop_mode, loop_type } = side;
+    let Side { project, tempo, pattern, loop_len, loop_unit, loop_mode, loop_type } = side;
     let shown = s.pattern();
     let numbers = |p: &Project| p.patterns.iter().map(|q| q.number).collect::<std::collections::BTreeSet<_>>();
     let patterns_before = numbers(&s.project);
-    (s.mixer.slot_names, s.mixer.slot_colors, s.playlist.icons) = (slot_names, slot_colors, icons);
     let mutes = Mutes::of(&s.project);
     s.project = crate::locked::Locked::new(project);
     mutes.keep(s.project.get_mut());

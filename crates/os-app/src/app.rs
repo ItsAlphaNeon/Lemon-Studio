@@ -2874,14 +2874,14 @@ impl App {
         #[cfg(plugin_windows)]
         let requests = {
             let members = self.member_infos();
-            let (project, mixer, icons) = (&self.state.project, &self.state.mixer, &self.state.playlist.icons);
+            let project = &self.state.project;
             self.plugins.idle(|row| {
                 // A container's member (`crate::container`): its name over its slot's title.
                 if row >= crate::plugins::MEMBER_KEY {
                     return members.get(&row).cloned();
                 }
-                let info = if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) };
-                info.map(|i| crate::plugin_window::ChannelInfo { icon: crate::playlist::window_icon(project, icons, row), ..i })
+                let info = if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, row) } else { channel_info(project, row) };
+                info.map(|i| crate::plugin_window::ChannelInfo { icon: crate::playlist::window_icon(project, row), ..i })
             })
         };
         // No plugin windows here, so no requests.

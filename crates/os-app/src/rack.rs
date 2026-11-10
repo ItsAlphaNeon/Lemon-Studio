@@ -529,9 +529,8 @@ fn put_in_group(p: &mut os_model::Project, rows: impl IntoIterator<Item = usize>
 /// Group selected… / Add filter group (§7): a group named `name` after the others, holding `rows`, shown.
 pub fn add_group(s: &mut State, name: &str, rows: &BTreeSet<usize>) {
     s.project.write_if(|p| {
-        let u = unsorted_at(p);
-        // After every group, Unsorted included when the file lists it before them.
-        let at = if u.is_some_and(|u| u + 1 < p.groups.len()) { Some(p.groups.len()) } else { None };
+        // Last in the file's list when it has "Unsorted" (after it too); else before the "Unsorted" it gets.
+        let at = unsorted_at(p).map(|_| p.groups.len());
         let g = insert_group(p, at, name);
         put_in_group(p, rows.iter().copied(), Some(g));
         p.current_group = Some(g);
@@ -4764,7 +4763,7 @@ mod tests {
         assert_eq!(icons.children.len(), 1 + crate::playlist::ICONS.len());
         assert_eq!((icons.children[0].label.as_ref(), icons.children[0].mark), ("None", Mark::Check(true)));
         crate::playlist::run(&mut app, icons.children[8].cmd.clone());
-        assert_eq!(crate::playlist::window_icon(&app.state.project, &app.state.playlist.icons, 0), Some(crate::icons::Icon::Star));
+        assert_eq!(crate::playlist::window_icon(&app.state.project, 0), Some(crate::icons::Icon::Star));
         assert_eq!(entry(&app, 0, "Change icon...").children[8].mark, Mark::Check(true));
 
         assert!(!entry(&app, 1, "Show waveform preview").enabled, "no sample");

@@ -694,12 +694,12 @@ fn a_dry_run_leaves_the_instruments_and_the_selections() {
 #[test]
 fn slot_names_come_back_with_their_track() {
     let mut a = app();
-    a.state.mixer.slot_names.insert((3, 1), "Crunch".into());
+    crate::mixer::set_slot_label(&mut a.state, 3, 1, Some("Crunch".into()));
     crate::mixer::run(&mut a, crate::mixer::MCmd::Delete(2));
-    assert_eq!(a.state.mixer.slot_names.get(&(2, 1)).map(String::as_str), Some("Crunch"), "moved left with its track");
+    assert_eq!(crate::mixer::slot_names_of(&a.state.project).get(&(2, 1)).map(String::as_str), Some("Crunch"), "moved left with its track");
     crate::history::undo(&mut a.state);
-    assert_eq!(a.state.mixer.slot_names.get(&(3, 1)).map(String::as_str), Some("Crunch"));
-    assert_eq!(a.state.mixer.slot_names.len(), 1);
+    assert_eq!(crate::mixer::slot_names_of(&a.state.project).get(&(3, 1)).map(String::as_str), Some("Crunch"));
+    assert_eq!(crate::mixer::slot_names_of(&a.state.project).len(), 1);
 }
 
 #[test]
