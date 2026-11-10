@@ -2110,6 +2110,7 @@ impl App {
         }
         let s = &mut self.state;
         let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone(), s.plugin_edited);
+        let written = s.project.written_at();
         // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a
         // recent one (spec: ui/recent-projects.md §2).
         let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
@@ -2124,14 +2125,15 @@ impl App {
         };
         let project;
         (project, s.path, s.file, s.message, self.saved, s.plugin_edited) = keep;
-        s.project = crate::locked::Locked::new(project);
+        s.project = crate::locked::Locked::restored(project, written);
         Some(done)
     }
 
     /// The project as it is now counts as saved (opened, saved, new).
     pub(crate) fn mark_saved(&mut self) {
         // New things get their ids before the copy, so ids alone are no unsaved change.
-        self.state.control.settle(self.state.project.get_mut());
+        let control = &mut self.state.control;
+        self.state.project.write_if(|p| control.settle(p));
         self.saved = (self.state.project.clone(), self.state.tempo, crate::lemon_state::saved_form(&self.state, &self.plugins));
         self.state.plugin_edited = false;
     }
@@ -4274,7 +4276,8 @@ impl App {
     pub fn tick(&mut self) -> bool {
         // Things the interface added get their ids before anything looks them up (`control::ids`).
         let s = &mut self.state;
-        s.control.settle_tick(s.project.get_mut(), s.piano.dirty);
+        let edited = s.piano.dirty || s.project.written_at().is_some();
+        s.control.settle_tick(&mut s.project, edited);
         self.control_tick();
         self.plugin_tick();
         // Playback loops over the time selection, as it is now (spec: ui/recording.md §5).
@@ -4364,7 +4367,7 @@ impl App {
         // Audio clips follow their channel's stretch, pitch and the tempo (ui/playlist.md §9c). The lengths are worked
         // out, not edited: the saved copy gets them too, so a fit alone (an opened FL project) is not an unsaved change.
         if let Some(fits) = crate::playlist::audio_fits(&self.state) {
-            if crate::playlist::fit_clips(&mut self.state.project.get_mut().arrangements, &fits) {
+            if self.state.project.write_if(|p| crate::playlist::fit_clips(&mut p.arrangements, &fits)) {
                 crate::playlist::fit_clips(&mut self.saved.0.arrangements, &fits);
                 self.state.piano.dirty = true;
                 self.damage_win(Win::Playlist);
@@ -4377,9 +4380,14 @@ impl App {
             self.state.playlist.pos = t;
             self.damage_win(Win::Playlist);
         }
-        // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
-        // also during a drag (at most once per tick).
-        if self.state.piano.dirty {
+        // Edits reach playback right away, also during a drag (at most once per tick): every write to the project
+        // (`locked::Locked`), and the flag for what playback reads outside it (the tempo, song mode, the pattern shown;
+        // control-plane step 5 moves those into the project).
+        let written = self.state.project.take_written();
+        // A write alone that changes nothing playback reads (the project's info, a plugin state stored for a save) builds
+        // no new engine.
+        let play = (written.is_some() && !self.state.piano.dirty).then(|| crate::rack::play_project(&self.state));
+        if self.state.piano.dirty || play.as_ref().is_some_and(|p| !self.transport.holds(p)) {
             self.state.piano.dirty = false;
             // An edit in the interface (a command's change is its event already; an undo or redo is one too).
             let s = &mut self.state;
@@ -4387,9 +4395,7 @@ impl App {
                 s.control.event(&crate::control::By::User, "edit", "", Vec::new());
             }
             // Also while Play is still starting (not `playing` yet); ignored when stopped.
-            {
-                self.transport.update(&crate::rack::play_project(&self.state));
-            }
+            self.transport.update(&play.unwrap_or_else(|| crate::rack::play_project(&self.state)));
         }
         self.playback_damage();
         self.has_damage()

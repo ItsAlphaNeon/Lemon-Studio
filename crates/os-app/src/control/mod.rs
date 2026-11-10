@@ -143,9 +143,9 @@ impl Control {
 
     /// `settle` on the app's tick: when the project was edited (`dirty`) or holds another number of things (one was
     /// added or copied), else nothing to do.
-    pub fn settle_tick(&mut self, p: &mut os_model::Project, dirty: bool) {
+    pub fn settle_tick(&mut self, p: &mut crate::locked::Locked, dirty: bool) {
         if dirty || count(p) != self.counted {
-            self.settle(p);
+            p.write_if(|p| self.settle(p));
         }
     }
 
@@ -516,6 +516,7 @@ struct Queues {
     plugin_channel: usize,
     clips: Vec<usize>,
     piano: crate::piano::PianoState,
+    written: Option<&'static std::panic::Location<'static>>,
 }
 
 impl Queues {
@@ -527,6 +528,7 @@ impl Queues {
             sample_loads: s.sample_loads.len(),
             fx: s.mixer.pending.len(),
             dirty: s.piano.dirty,
+            written: s.project.written_at(),
             message: s.message.clone(),
             hosted_rows: s.hosted_rows.clone(),
             selected_channel: s.selected_channel,
@@ -552,6 +554,7 @@ impl Queues {
         (s.z, s.plugin_channel, s.playlist.sel) = (self.windows, self.plugin_channel, self.clips);
         s.piano = self.piano;
         s.piano.dirty = self.dirty;
+        s.project.rewind_written(self.written);
     }
 }
 

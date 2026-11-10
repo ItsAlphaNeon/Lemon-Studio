@@ -9,17 +9,51 @@
 
 use os_model::Project;
 
-pub struct Locked(Project);
+pub struct Locked(Project, Option<&'static std::panic::Location<'static>>);
 
 impl Locked {
     pub fn new(project: Project) -> Self {
-        Locked(project)
+        Locked(project, None)
     }
 
-    /// The project to change in place, past the commands.
+    /// The project to change in place, past the commands. Marks it written, from where (`take_written`).
     #[deprecated(note = "a direct write to the project: to be replaced by a command (control-plane steps 3 and 14)")]
+    #[track_caller]
     pub fn get_mut(&mut self) -> &mut Project {
+        self.1.get_or_insert(std::panic::Location::caller());
         &mut self.0
+    }
+
+    /// `f` changes the project in place and says whether it changed anything; only then is the project written.
+    #[deprecated(note = "a direct write to the project: to be replaced by a command (control-plane steps 3 and 14)")]
+    #[track_caller]
+    pub fn write_if(&mut self, f: impl FnOnce(&mut Project) -> bool) -> bool {
+        let changed = f(&mut self.0);
+        if changed {
+            self.1.get_or_insert(std::panic::Location::caller());
+        }
+        changed
+    }
+
+    /// Where the project was first written since the last `take_written`, if it was (left as it is).
+    pub fn written_at(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.1
+    }
+
+    /// The lock on `project` put back as it was, written at `at` (`written_at`): for what changes the project only to
+    /// take it back (a dry run, a saved copy).
+    pub fn restored(project: Project, at: Option<&'static std::panic::Location<'static>>) -> Self {
+        Locked(project, at)
+    }
+
+    /// The mark put back as it was (`written_at`) after a change that was taken back.
+    pub fn rewind_written(&mut self, at: Option<&'static std::panic::Location<'static>>) {
+        self.1 = at;
+    }
+
+    /// Where the project was first written since the last call, if it was.
+    pub fn take_written(&mut self) -> Option<&'static std::panic::Location<'static>> {
+        self.1.take()
     }
 }
 
@@ -39,7 +73,7 @@ impl std::fmt::Debug for Locked {
 
 impl Default for Locked {
     fn default() -> Self {
-        Locked(Project::default())
+        Locked(Project::default(), None)
     }
 }
 

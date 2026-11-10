@@ -560,6 +560,8 @@ pub struct Transport {
     latest: Arc<Mutex<Option<Project>>>,
     /// The project `update` last sent, with its edits; `None` once a playback starts from a project of its own.
     sent: Mutex<Option<Project>>,
+    /// How many times `update` was called (tests: an idle tick hands playback nothing).
+    updates: std::sync::atomic::AtomicU64,
     instruments: Instruments,
     shared: Arc<Shared>,
     /// The audio thread: joined when the transport goes (see `Drop`).
@@ -584,7 +586,7 @@ impl Transport {
                 }
             })
             .expect("spawn audio thread");
-        Transport { tx, latest, sent: Mutex::new(None), instruments, shared, thread: Some(thread) }
+        Transport { tx, latest, sent: Mutex::new(None), updates: Default::default(), instruments, shared, thread: Some(thread) }
     }
 
     /// Hosted generator plugins by rack row; playing engines pick them up at once.
@@ -747,7 +749,19 @@ impl Transport {
         self.sent.lock().ok().and_then(|s| s.clone())
     }
 
+    /// Tests: how many times the engine was handed the project (`update`).
+    #[cfg(test)]
+    pub fn updates_for_tests(&self) -> u64 {
+        self.updates.load(Ordering::Relaxed)
+    }
+
+    /// Whether playback holds `project` as it is (what `update` last sent, with its edits).
+    pub fn holds(&self, project: &Project) -> bool {
+        self.sent.lock().is_ok_and(|s| s.as_ref() == Some(project))
+    }
+
     pub fn update(&self, project: &Project) {
+        self.updates.fetch_add(1, Ordering::Relaxed);
         // Levels alone reach the playing engines in place: a new engine at every move of a knob takes milliseconds of
         // building each time (up to some 70 in a large project). What was last sent says what changed.
         if let Ok(mut sent) = self.sent.lock() {

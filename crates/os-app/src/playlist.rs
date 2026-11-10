@@ -1367,7 +1367,8 @@ pub fn audio_fits(s: &State) -> Option<Fits> {
 /// with the edit that made them. As with the fits, the saved copy gets them too: an opened project's crossfades are
 /// not an unsaved change.
 pub fn follow_crossfades(app: &mut App) {
-    if !app.state.piano.dirty || !os_model::crossfade::derive(app.state.project.get_mut(), app.state.tempo) {
+    let tempo = app.state.tempo;
+    if !(app.state.piano.dirty || app.state.project.written_at().is_some()) || !app.state.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
         return;
     }
     os_model::crossfade::derive(&mut app.saved.0, app.saved.1);

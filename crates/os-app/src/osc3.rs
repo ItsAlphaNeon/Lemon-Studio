@@ -184,7 +184,8 @@ impl crate::app::App {
         self.osc3_look = Some(now);
         let mut changed = false;
         for row in self.state.hosted_rows.clone() {
-            changed |= follow_sample(self.state.project.get_mut(), &self.plugins, row, false);
+            let plugins = &self.plugins;
+            changed |= self.state.project.write_if(|p| follow_sample(p, plugins, row, false));
         }
         if changed {
             self.invalidate();

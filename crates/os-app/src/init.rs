@@ -106,11 +106,20 @@ fn set<T: PartialEq>(x: &mut T, v: T) -> bool {
     changed
 }
 
-/// Control `c.target` set to `c.value` (stored units) in the model.
+/// Control `c.target` set to `c.value` (stored units) in the model. The project counts as written only when a value
+/// changed.
 fn set_value(s: &mut State, c: InitControl) -> bool {
+    let main = matches!(c.target, InitControl::MAIN_VOLUME | InitControl::MAIN_SWING | InitControl::MAIN_PITCH);
+    if !main && matches!(target::decode(c.target), Target::Tempo) {
+        return set(&mut s.tempo, (f64::from(c.value) / 1000.0).clamp(10.0, 522.0));
+    }
+    s.project.write_if(|p| set_in_project(p, c))
+}
+
+/// `set_value` for a control the project holds.
+fn set_in_project(p: &mut os_model::Project, c: InitControl) -> bool {
     let v = c.value;
     let f = f64::from(v);
-    let p = s.project.get_mut();
     match c.target {
         InitControl::MAIN_VOLUME => return set(&mut p.main_volume, Some(v.clamp(0, 16000) as u16)),
         InitControl::MAIN_SWING => return set(&mut p.swing, Some(v.clamp(0, 128) as u8)),
@@ -119,7 +128,6 @@ fn set_value(s: &mut State, c: InitControl) -> bool {
     }
     let last = crate::mixer::max_insert(p);
     match target::decode(c.target) {
-        Target::Tempo => set(&mut s.tempo, (f / 1000.0).clamp(10.0, 522.0)),
         // The rack's mixer box (the track number, at most the last insert) and LED (1 = on) (spec: flp/engine-events.md
         // "Channel rack records").
         Target::ChannelMixerTrack(ch) => p.channels.iter_mut().find(|x| x.index == ch).is_some_and(|x| set(&mut x.mixer_track, v.clamp(0, i32::from(last)) as u16)),

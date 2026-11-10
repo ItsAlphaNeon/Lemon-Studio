@@ -1039,3 +1039,45 @@ fn a_hosted_slots_scaling_and_help() {
     a.plugins.hosted.clear();
     assert!(!scaling(&a).enabled);
 }
+
+/// Control-plane step 4: playback is handed the project when it was written (`locked::Locked`), and only then.
+#[test]
+fn idle_ticks_hand_playback_nothing() {
+    let mut a = app();
+    for _ in 0..3 {
+        a.tick();
+    }
+    let n = a.transport.updates_for_tests();
+    for _ in 0..20 {
+        a.tick();
+    }
+    assert_eq!(a.transport.updates_for_tests(), n, "an idle tick writes nothing");
+}
+
+#[test]
+fn a_write_reaches_playback_with_no_flag_set() {
+    let mut a = app();
+    for _ in 0..3 {
+        a.tick();
+    }
+    let n = a.transport.updates_for_tests();
+    a.state.piano.dirty = false;
+    a.state.project.get_mut().main_volume = Some(1234);
+    a.tick();
+    assert_eq!(a.transport.updates_for_tests(), n + 1);
+    a.tick();
+    assert_eq!(a.transport.updates_for_tests(), n + 1, "once");
+}
+
+#[test]
+fn a_proposal_hands_playback_nothing() {
+    let mut a = app();
+    for _ in 0..3 {
+        a.tick();
+    }
+    let n = a.transport.updates_for_tests();
+    let kick = ids(&a).0[0];
+    propose(&mut a.state, &test_client(), "Boom", vec![cmd(json!({"op": "set_channel", "channel": kick, "name": "Boom"}))]).unwrap();
+    a.tick();
+    assert_eq!(a.transport.updates_for_tests(), n, "the dry run took its change back");
+}
