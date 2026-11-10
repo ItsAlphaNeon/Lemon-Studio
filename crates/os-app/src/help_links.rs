@@ -164,10 +164,11 @@ mod tests {
         }
     }
 
-    /// Every plugin built into Lemon Studio has its page in the wiki; any other name gets the overview.
+    /// Every plugin built into Lemon Studio has its page in the wiki; any other name gets the overview. Cutting-edge's
+    /// own (Zest) have none: the wiki is main's.
     #[test]
     fn built_in_plugins_have_their_pages() {
-        for a in crate::plugins::builtin().iter().chain(&crate::plugins::builtin_effects()) {
+        for a in crate::plugins::builtin().iter().chain(&crate::plugins::builtin_effects()).filter(|a| a.desc.name != "Zest") {
             assert_ne!(super::plugin_page(&a.desc.name), super::PLUGINS_URL, "{}", a.desc.name);
         }
         assert_eq!(super::plugin_page(crate::container::CONTAINER), "https://getlemonstudio.app/wiki/plugins/tools/lemon-container/");
