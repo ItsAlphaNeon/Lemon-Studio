@@ -135,7 +135,7 @@ impl App {
     fn track_rec_end(&mut self) {
         self.transport.record_tracks(None);
         let p = &self.state.project;
-        let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+        let tempo = p.tick_tempo(self.state.tempo.max(1.0));
         let Some(r) = self.track_rec.as_mut() else { return };
         r.takes.on.store(false, Ordering::Release);
         let tick = os_engine::laws::tick_to_frame(1.0, p.ppq.max(1), tempo, r.rate).max(1);
@@ -184,7 +184,7 @@ impl App {
                 let s = &mut self.state;
                 crate::playlist::snapshot_as(s, crate::one_click::RECORDED);
                 let p = &s.project;
-                let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+                let tempo = p.tick_tempo(s.tempo.max(1.0));
                 let ppq = f64::from(p.ppq.max(1));
                 let mut placed = 0;
                 for (t, path, frames, at) in &made {
