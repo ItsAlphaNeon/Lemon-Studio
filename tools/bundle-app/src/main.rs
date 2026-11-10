@@ -11,14 +11,33 @@
 //! bundle is signed ad hoc, as Apple silicon requires of any program it runs. `--install` copies it to
 //! `~/Applications`.
 //!
+//! The release workflow builds with `LEMON_VERSION` set (a nightly's `YEAR.MONTH.DAY.N`, or a release's semantic
+//! version), which the bundle's version follows; otherwise it is the workspace's. With `LEMON_CHANNEL` set to `nightly`
+//! it is `Lemon Studio Nightly.app`, an app of its own beside Lemon Studio, with the icon made from
+//! `assets/logo/macOS-nightly.icon` (`tools/logo/macos-icon.sh nightly`).
+//!
 //! The macOS counterpart of Linux's desktop entry (`crates/os-app/assets/lemonstudio.desktop`).
 
 use std::path::PathBuf;
 use std::process::Command;
 
-const NAME: &str = "Lemon Studio";
 const EXE: &str = "lemonstudio";
-const IDENTIFIER: &str = "io.github.itsalphaneon.lemonstudio";
+
+/// What the bundle is called, and which icon it has.
+struct Identity {
+    name: &'static str,
+    identifier: &'static str,
+    /// The stem of the icon files in `assets`.
+    icon: &'static str,
+}
+
+fn identity(channel: Option<&str>) -> Identity {
+    if channel == Some("nightly") {
+        Identity { name: "Lemon Studio Nightly", identifier: "io.github.itsalphaneon.lemonstudio.nightly", icon: "lemonstudio-nightly" }
+    } else {
+        Identity { name: "Lemon Studio", identifier: "io.github.itsalphaneon.lemonstudio", icon: "lemonstudio" }
+    }
+}
 
 fn main() {
     if !cfg!(target_os = "macos") {
@@ -26,6 +45,7 @@ fn main() {
         std::process::exit(1);
     }
     let install = std::env::args().any(|a| a == "--install");
+    let id = identity(std::env::var("LEMON_CHANNEL").ok().as_deref());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repository root");
     let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
     let target = if target.is_relative() { root.join(target) } else { target };
@@ -38,7 +58,7 @@ fn main() {
         .success();
     assert!(ok, "build of os-app failed");
 
-    let app = target.join("bundled").join(format!("{NAME}.app"));
+    let app = target.join("bundled").join(format!("{}.app", id.name));
     if app.exists() {
         std::fs::remove_dir_all(&app).expect("remove the old bundle");
     }
@@ -47,17 +67,17 @@ fn main() {
     std::fs::create_dir_all(&macos).expect("bundle folders");
     std::fs::create_dir_all(&resources).expect("bundle folders");
     std::fs::copy(target.join("release").join(EXE), macos.join(EXE)).expect("copy the program");
-    std::fs::write(contents.join("Info.plist"), info_plist()).expect("Info.plist");
+    std::fs::write(contents.join("Info.plist"), info_plist(&id)).expect("Info.plist");
     std::fs::write(contents.join("PkgInfo"), "APPL????").expect("PkgInfo");
     let assets = root.join("crates/os-app/assets");
-    std::fs::copy(assets.join(format!("{EXE}.car")), resources.join("Assets.car")).expect("copy the icon");
-    std::fs::copy(assets.join(format!("{EXE}.icns")), resources.join(format!("{EXE}.icns"))).expect("copy the icon");
+    std::fs::copy(assets.join(format!("{}.car", id.icon)), resources.join("Assets.car")).expect("copy the icon");
+    std::fs::copy(assets.join(format!("{}.icns", id.icon)), resources.join(format!("{EXE}.icns"))).expect("copy the icon");
     run(Command::new("codesign").args(["--force", "--sign", "-"]).arg(&app), "codesign");
     println!("{}", app.display());
 
     if install {
         let dir = PathBuf::from(std::env::var_os("HOME").expect("HOME")).join("Applications");
-        let to = dir.join(format!("{NAME}.app"));
+        let to = dir.join(format!("{}.app", id.name));
         if to.exists() {
             std::fs::remove_dir_all(&to).expect("remove the installed bundle");
         }
@@ -72,21 +92,30 @@ fn run(cmd: &mut Command, what: &str) {
     assert!(cmd.status().unwrap_or_else(|e| panic!("{what}: {e}")).success(), "{what} failed");
 }
 
-fn info_plist() -> String {
-    let version = env!("CARGO_PKG_VERSION");
+/// The bundle's (short version, build version): `CFBundleShortVersionString` takes three numbers at most, so a
+/// nightly's `2026.11.7.1` is `2026.11.7` there and whole as `CFBundleVersion`.
+fn versions() -> (String, String) {
+    let full = std::env::var("LEMON_VERSION").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
+    let short = full.split(['-', '+']).next().unwrap_or("").split('.').take(3).collect::<Vec<_>>().join(".");
+    (short, full)
+}
+
+fn info_plist(id: &Identity) -> String {
+    let (short, version) = versions();
+    let Identity { name, identifier, .. } = id;
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>{NAME}</string>
+	<string>{name}</string>
 	<key>CFBundleDisplayName</key>
-	<string>{NAME}</string>
+	<string>{name}</string>
 	<key>CFBundleExecutable</key>
 	<string>{EXE}</string>
 	<key>CFBundleIdentifier</key>
-	<string>{IDENTIFIER}</string>
+	<string>{identifier}</string>
 	<key>CFBundleIconFile</key>
 	<string>{EXE}</string>
 	<key>CFBundleIconName</key>
@@ -94,7 +123,7 @@ fn info_plist() -> String {
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>{version}</string>
+	<string>{short}</string>
 	<key>CFBundleVersion</key>
 	<string>{version}</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -126,4 +155,25 @@ fn info_plist() -> String {
 </plist>
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A nightly is an app of its own: its name, its identifier (so macOS keeps its permissions apart) and its icon.
+    #[test]
+    fn a_nightly_is_an_app_of_its_own() {
+        let plist = info_plist(&identity(Some("nightly")));
+        assert!(plist.contains("<string>Lemon Studio Nightly</string>") && plist.contains("<string>io.github.itsalphaneon.lemonstudio.nightly</string>"), "{plist}");
+        for channel in [None, Some("stable")] {
+            let id = identity(channel);
+            let plist = info_plist(&id);
+            assert_eq!(id.icon, "lemonstudio");
+            assert!(plist.contains("<string>Lemon Studio</string>") && plist.contains("<string>io.github.itsalphaneon.lemonstudio</string>"), "{plist}");
+        }
+        // Both name the icon in the catalog as macos-icon.sh compiles it.
+        let nightly = info_plist(&identity(Some("nightly")));
+        assert!(nightly.contains("<key>CFBundleIconName</key>\n\t<string>lemonstudio</string>"), "{nightly}");
+    }
 }

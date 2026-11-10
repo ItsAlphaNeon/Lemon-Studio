@@ -161,6 +161,7 @@ mod tests {
         let path = wav("plays");
         let mut pl = Plugins::default();
         pl.available = crate::plugins::builtin();
+        pl.set_rate(48000);
         let index = pl.index_of(LEMON_DRUMS).expect("built-in Lemon Drum Sampler");
         assert!(crate::project_plugins::is_builtin(&pl.available[index].desc));
         assert_eq!(crate::plugin_db::category(&pl.available[index].desc), "Sampler");

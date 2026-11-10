@@ -1040,7 +1040,7 @@ fn a_hosted_slots_scaling_and_help() {
     assert_eq!((a.plugins.scale_for(fx, 1.0), scaling(&a).children[2].mark.clone()), (1.25, Mark::Radio(true)));
     run(&mut a, MCmd::SlotScale(0, None));
     assert_eq!(a.plugins.scale_for(fx, 1.5), 1.5, "Main");
-    assert_eq!(run(&mut a, MCmd::SlotHelp(0)), Some(format!("Opening {}", crate::help_links::BUILTIN_PLUGINS_URL)));
+    assert_eq!(run(&mut a, MCmd::SlotHelp(0)), Some(format!("Opening {}", crate::help_links::plugin_page("Lemon Sampler"))));
     // No instance (an effect the engine plays itself has no editor): greyed.
     a.plugins.hosted.clear();
     assert!(!scaling(&a).enabled);

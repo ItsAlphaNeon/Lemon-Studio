@@ -465,7 +465,9 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
         icons::draw(ui.c, source_icon(s, src, pl::source_kind(s, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
-        ui.c.text_clip(Font::new(14), row.x + 20.0, title.cy() - 8.0, row.w - 23.0, ic, &pl::source_name(s, src));
+        let nf = Font::new(14);
+        let ty = title.cy() - ui.c.cap_mid(nf);
+        ui.c.text_clip(nf, row.x + 20.0, ty, row.w - 23.0, ic, &pl::source_name(s, src));
         if src == cur {
             let ax = list.x - 1.0;
             let mark = if lemon { ui.t.accent } else { Color::rgb(0xe64363) };
@@ -1006,7 +1008,10 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         }
     }
     if r.w > 16.0 {
-        ui.c.text_clip(Font::new(12), inner.x + 14.0, inner.y - 1.0, inner.w - 16.0, ic, &pl::source_name(s, c.source));
+        // Level with the icon (its middle is iy + 5).
+        let nf = Font::new(12);
+        let ty = iy + 5.0 - ui.c.cap_mid(nf);
+        ui.c.text_clip(nf, inner.x + 14.0, ty, inner.w - 16.0, ic, &pl::source_name(s, c.source));
     }
     // Content.
     let content = if c.muted { dim(text).with_alpha(90) } else { dim(cc(t, NOTE)) };

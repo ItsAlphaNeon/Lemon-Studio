@@ -139,6 +139,8 @@ pub enum Then {
     MidiExportConfirm,
     /// Marker settings: Accept (Ok) prepares with this count and spacing.
     PerfMarkers(u8, u8),
+    /// The update offered (`crate::update`): Install (Yes), Skip this version (No) or Later (Cancel).
+    Update(crate::update::Found),
 }
 
 /// What waits for the save-changes question.

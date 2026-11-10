@@ -33,7 +33,7 @@ fn entry(info: &std::panic::PanicHookInfo) -> String {
     format!(
         "{} Lemon Studio {} panicked on thread {} at {}: {}\n{}\n\n",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-        env!("CARGO_PKG_VERSION"),
+        crate::version::text(),
         thread.name().unwrap_or("(unnamed)"),
         at,
         message(info.payload()),

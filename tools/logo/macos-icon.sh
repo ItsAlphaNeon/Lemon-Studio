@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-# Generate the macOS app icon from the Icon Composer document crates/os-app/assets/logo/macOS.icon:
+# Generate the macOS app icon from the Icon Composer document crates/os-app/assets/logo/macOS.icon, or for nightly
+# builds from macOS-nightly.icon:
 #
-#     tools/logo/macos-icon.sh            (on macOS, with Xcode and Icon Composer in /Applications; run from anywhere)
+#     tools/logo/macos-icon.sh [nightly]  (on macOS, with Xcode and Icon Composer in /Applications; run from anywhere)
 #
-# Writes, for `cargo run -p bundle-app` to put in Lemon Studio.app:
+# Writes, for `cargo run -p bundle-app` to put in the app (nightly: lemonstudio-nightly.car and .icns):
 #   crates/os-app/assets/lemonstudio.car   the compiled asset catalog (Assets.car in the bundle): the icon as macOS 26
 #                                          and later draw it, light, dark, tinted and clear (Xcode's actool)
 #   crates/os-app/assets/lemonstudio.icns  every size an .icns holds, the Default rendition, 8 bits per channel in
@@ -19,18 +20,24 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 ictool="${ICTOOL:-/Applications/Icon Composer.app/Contents/Executables/ictool}"
 # Xcode's tools, whatever `xcode-select` points at (the Command Line Tools have no actool).
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-src="$root/crates/os-app/assets/logo/macOS.icon"
 assets="$root/crates/os-app/assets"
+if [ "${1:-}" = nightly ]; then
+    src="$assets/logo/macOS-nightly.icon"
+    out="lemonstudio-nightly"
+else
+    src="$assets/logo/macOS.icon"
+    out="lemonstudio"
+fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # The asset catalog. The icon's name in it is its document's: compiled as lemonstudio.icon, it is `lemonstudio`
-# (`CFBundleIconName` in the bundle's Info.plist).
+# (`CFBundleIconName` in the bundle's Info.plist), a nightly's too.
 cp -R "$src" "$work/lemonstudio.icon"
 mkdir "$work/car"
 xcrun actool "$work/lemonstudio.icon" --compile "$work/car" --platform macosx --minimum-deployment-target 11.0 \
     --app-icon lemonstudio --output-partial-info-plist "$work/car/partial.plist" --errors --warnings > /dev/null
-cp "$work/car/Assets.car" "$assets/lemonstudio.car"
+cp "$work/car/Assets.car" "$assets/$out.car"
 
 # The .icns: icon_<points>x<points>[@2x].png, the image at that size and scale.
 set_dir="$work/lemonstudio.iconset"
@@ -60,6 +67,6 @@ for path in CommandLine.arguments.dropFirst() {
 }
 SWIFT
 xcrun swift "$work/to8.swift" "$set_dir"/*.png
-iconutil -c icns -o "$assets/lemonstudio.icns" "$set_dir"
-echo "$assets/lemonstudio.car"
-echo "$assets/lemonstudio.icns"
+iconutil -c icns -o "$assets/$out.icns" "$set_dir"
+echo "$assets/$out.car"
+echo "$assets/$out.icns"

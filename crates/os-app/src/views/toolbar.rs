@@ -541,8 +541,9 @@ fn time(ui: &mut Ui, c: &Ctx) {
         ui.c.text(small, tick_x, a.y(9.0), dim, &tick_s);
     } else {
         ui.c.text(big, bar_x, a.y(-3.0), g, &bar_s);
-        ui.c.fill_rect(Rect::new(step_x - 5.5, a.y(20.0), 2.0, 2.5), g);
-        ui.c.fill_rect(Rect::new(step_x - 5.5, a.y(30.0), 2.0, 2.5), g);
+        // Centered on the big digits (which span y 9..31), not on the small ones like the colon below.
+        ui.c.fill_rect(Rect::new(step_x - 5.5, a.y(14.0), 2.0, 2.5), g);
+        ui.c.fill_rect(Rect::new(step_x - 5.5, a.y(24.0), 2.0, 2.5), g);
         ui.c.text(big, step_x, a.y(-3.0), g, &step_s);
         ui.c.fill_rect(Rect::new(tick_x - 5.0, a.y(21.0), 2.0, 2.0), g);
         ui.c.fill_rect(Rect::new(tick_x - 5.0, a.y(29.5), 2.0, 2.0), g);
@@ -876,7 +877,7 @@ fn snap(ui: &mut Ui, c: &Ctx) {
     let label = global.label();
     let room = snap.w - 5.0 - 14.0;
     let font = if ui.c.text_width(Font::new(16), label) <= room { Font::new(16) } else { Font::condensed(16, 6) };
-    ui.c.text(font, snap.x + 5.0, a.y(51.0), t.glyph, label);
+    ui.c.text_mid(font, snap.x + 5.0, snap.cy(), t.glyph, label);
     // The arrow points down while the mouse is over the combo (§1).
     let dir = if hov { os_ui::kit::Dir::Down } else { os_ui::kit::Dir::Right };
     os_ui::kit::triangle(ui.c, snap.right() - 8.0, a.y(61.0), 3.5, dir, t.glyph_dim);
@@ -908,12 +909,14 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
     // reference cuts long labels (its long pattern names are unverified: Lemon Studio's choice).
     let pf = Font::condensed(21, 7);
     let end = pb.right() - 11.0;
+    // Level with the + after it (the box and the button share y 50..72, middle 61.5).
+    let ty = a.y(61.5) - ui.c.cap_mid(pf);
     if ui.c.text_width(pf, &name) <= end - (pb.x + 2.0) {
         ui.c.push_clip(pb.inset(2.0));
-        ui.c.text_right(pf, end, a.y(49.0), t.glyph, &name);
+        ui.c.text_right(pf, end, ty, t.glyph, &name);
         ui.c.pop_clip();
     } else {
-        ui.c.text_clip(pf, pb.x + 4.0, a.y(49.0), end - (pb.x + 4.0), t.glyph, &name);
+        ui.c.text_clip(pf, pb.x + 4.0, ty, end - (pb.x + 4.0), t.glyph, &name);
     }
     let add = a.span(951.0, 962.0, 50.0, 72.0);
     ui.hit(add, Action::PatternAdd, "New pattern (find first / next empty)");

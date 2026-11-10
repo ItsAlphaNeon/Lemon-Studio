@@ -1003,6 +1003,21 @@ impl Canvas {
         self.text(f, (r.cx() - w / 2.0).round(), (r.cy() - h / 2.0).round(), c, s);
     }
 
+    /// Distance from a text cell's top to the middle of its capitals, in logical pixels: the label's visual centre.
+    /// Cuprum's win ascent puts the baseline at 0.91 em and its capitals are 0.70 em tall (the other faces are scaled to
+    /// match), so the middle is the ascent less half the cap height, which is also the middle of the cell.
+    pub fn cap_mid(&mut self, f: Font) -> f32 {
+        self.ascent(f) - 0.35 * f32::from(f.size)
+    }
+
+    /// `text` with the middle of its capitals on `cy`: a label sits level with the icon or control it is beside when
+    /// `cy` is that thing's centre. `text` takes the cell's top, so a hand-picked top (a spec's y) leaves the label a
+    /// pixel or two off the icon's middle; centring the cell (as `text_center` does) or using this does not.
+    pub fn text_mid(&mut self, f: Font, x: f32, cy: f32, c: Color, s: &str) -> f32 {
+        let y = cy - self.cap_mid(f);
+        self.text(f, x, y, c, s)
+    }
+
     /// `f`, horizontally condensed step by step (then shrunk) until `s` fits in `max_w`.
     pub fn fit_font(&mut self, f: Font, s: &str, max_w: f32) -> Font {
         if self.text_width(f, s) <= max_w {
@@ -1783,6 +1798,18 @@ mod tests {
         assert_eq!(px(&c, 20, 19), (255, 0));
         let edge = px(&c, 2, 17);
         assert!(edge.0 > 0 && edge.1 > 0, "the arc is blended: {edge:?}");
+    }
+
+    /// The UI face's capitals are centred on its text cell, so `cap_mid` is half the line height (within the pixel
+    /// rounding of the cell): `text_mid` and a cell centred on the same line put a label in the same place.
+    #[test]
+    fn caps_are_centred_on_the_text_cell() {
+        let Ok(mut c) = Canvas::new(10, 10, 2.0) else { return };
+        for size in [10u16, 12, 13, 14, 15, 17, 21] {
+            let f = Font::new(size);
+            let (caps, cell) = (c.cap_mid(f), c.line_height(f) / 2.0);
+            assert!((caps - cell).abs() <= 1.0, "size {size}: caps' middle {caps}, cell's middle {cell}");
+        }
     }
 
     /// A layer at 0 shows what was there, at 1 what was painted, in between a mix; only the damage region changes.

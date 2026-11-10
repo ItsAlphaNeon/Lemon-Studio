@@ -984,7 +984,8 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     icon_at(c, &tb::SETTINGS_FILLED, g.cx(), g.cy(), 18.4, gear);
     let p = presets_rect(st);
     let f = title_font();
-    let ty = (19.0 - c.ascent(f)).round();
+    // The title row is centred on y 15.5 (the gear, the carets and the icon).
+    let ty = (15.5 - c.cap_mid(f)).round();
     let mut nx = 48.0;
     if let Some(i) = st.info.icon {
         crate::icons::draw(c, i, Rect::new(nx, 8.0, 15.0, 15.0), c_text());

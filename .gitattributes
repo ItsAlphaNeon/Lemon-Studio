@@ -3,3 +3,6 @@
 
 # cutting-edge keeps its own README when main is merged in (needs: git config merge.ours.driver true).
 README.md merge=ours
+
+# Shell scripts run as they are, on Windows too (Git Bash): a CR at each line's end would break them.
+*.sh text eol=lf

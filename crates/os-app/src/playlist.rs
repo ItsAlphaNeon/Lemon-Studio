@@ -4465,8 +4465,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             return None;
         }
         Cmd::Web(url) => {
-            crate::help_links::open(url);
-            app.state.message = Some(format!("Opening {url}"));
+            app.open_web(url);
             return None;
         }
         Cmd::MidiImport(piano) => {

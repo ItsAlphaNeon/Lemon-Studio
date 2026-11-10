@@ -5,8 +5,9 @@
 //! X11 parts of a Lemon plugin editor (Linux; XWayland under Wayland): the editor's window, a child of the host's, run
 //! on a GUI thread of its own with its own connection, as other plugin toolkits do on Linux (any host works, none has to
 //! run the editor's loop); painting a canvas into it; the cursor held in place during a knob drag (XInput 2 raw
-//! motion, else pointer motion with the pointer warped back); popup menus painted with `os_ui::kit::menu` (never native menus) and the "Type in value" box. The Win32
-//! counterpart is `win`; `mac` has this API on macOS, and the input types are shared (`input`).
+//! motion, else pointer motion with the pointer warped back); popup menus painted with `os_ui::kit::menu` (never native menus) and the "Type in value" box; a
+//! floating window of a plugin's own (`spawn_floating`), a see-through top-level one. The Win32 counterpart is `win`; `mac`
+//! has this API on macOS, and the input types are shared (`input`).
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,13 +19,17 @@ use os_theme::{Color, Palette};
 use os_ui::kit::menu as kmenu;
 use os_ui::{Canvas, Font, Rect};
 use x11rb::connection::{Connection, RequestConnection as _};
+use x11rb::properties::{WmHints, WmSizeHints, WmSizeHintsSpecification};
+use x11rb::protocol::randr::ConnectionExt as _;
+use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::xinput::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
-    ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, GrabMode, GrabStatus, ImageFormat, ImageOrder, KeyButMask, NotifyDetail,
-    VisualClass, WindowClass,
+    AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ClipOrdering, ColormapAlloc, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
+    CreateWindowAux, EventMask, GrabMode, GrabStatus, Gravity, ImageFormat, ImageOrder, KeyButMask, NotifyDetail, PropMode, VisualClass, WindowClass,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 
 pub use crate::input::{keysym, keysym_char, Button, Input};
 use crate::{MenuDef, Opener};
@@ -148,6 +153,23 @@ pub fn spawn(parent: Parent, size: (u32, u32), slot: &Slot, run: impl FnOnce(Win
     }
     let thread = std::thread::Builder::new().name("plugin editor".into()).spawn(move || run(win)).ok()?;
     Some(EditorThread { waker, slot: slot.clone(), thread: Some(thread) })
+}
+
+/// Opens a floating window at screen `rect` (x, y, w, h, device px; `min` the smallest side) and runs `run` with it on a
+/// thread of its own, as `spawn` does: a borderless top-level window with per-pixel alpha that never takes the keyboard.
+/// It is not mapped until `XWindow::map`, and `XWindow::blit` takes premultiplied ARGB. `None` when there is no X11 display
+/// or no 32-bit visual.
+pub fn spawn_floating(rect: [i32; 4], min: u32, title: &str, run: impl FnOnce(XWindow) + Send + 'static) -> Option<EditorThread> {
+    let waker = Waker::new()?;
+    let win = match XWindow::floating(rect, min, title, waker.clone()) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("floating window: {e}");
+            return None;
+        }
+    };
+    let thread = std::thread::Builder::new().name("plugin float".into()).spawn(move || run(win)).ok()?;
+    Some(EditorThread { waker, slot: Slot::default(), thread: Some(thread) })
 }
 
 // -------------------------------------------------------------------------------------------------------------------
@@ -282,7 +304,9 @@ pub struct XWindow {
     pub win: u32,
     root: u32,
     root_size: (i32, i32),
+    /// The screen's depth (popups and boxes), and this window's: 32 for a floating one.
     depth: u8,
+    win_depth: u8,
     gc: u32,
     lsb_first: bool,
     max_request: usize,
@@ -307,6 +331,11 @@ pub struct XWindow {
     next_tick: Instant,
     /// Inputs read but not handed out yet (`next` reads every pending event at once).
     queue: std::collections::VecDeque<Input>,
+    /// A floating window's colormap and sizing cursor (0: none).
+    colormap: u32,
+    grip: u32,
+    /// The window changed place or size since `take_configured`.
+    configured: bool,
 }
 
 impl XWindow {
@@ -323,11 +352,9 @@ impl XWindow {
         }
         let (root, depth) = (s.root, s.root_depth);
         let root_size = (i32::from(s.width_in_pixels), i32::from(s.height_in_pixels));
-        let lsb_first = setup.image_byte_order == ImageOrder::LSB_FIRST;
         let fail = |e: &dyn std::fmt::Display| format!("could not create the editor window: {e}");
         let win = c.generate_id().map_err(|e| fail(&e))?;
         let gc = c.generate_id().map_err(|e| fail(&e))?;
-        let blank = c.generate_id().map_err(|e| fail(&e))?;
         let px = |v: u32| v.clamp(1, u32::from(u16::MAX)) as u16;
         let events = EventMask::EXPOSURE
             | EventMask::BUTTON_PRESS
@@ -344,29 +371,106 @@ impl XWindow {
             let aux = CreateWindowAux::new().event_mask(events).background_pixel(bg);
             c.create_window(x11rb::COPY_DEPTH_FROM_PARENT, win, parent, 0, 0, px(w), px(h), 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &aux)?;
             c.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0))?;
-            // An invisible cursor: a cleared 1 x 1 bitmap as its own mask.
-            let (pix, pgc) = (c.generate_id()?, c.generate_id()?);
-            c.create_pixmap(1, pix, root, 1, 1)?;
-            c.create_gc(pgc, pix, &CreateGCAux::new().foreground(0))?;
-            c.poly_fill_rectangle(pix, pgc, &[x11rb::protocol::xproto::Rectangle { x: 0, y: 0, width: 1, height: 1 }])?;
-            c.create_cursor(blank, pix, pix, 0, 0, 0, 0, 0, 0, 0, 0)?;
-            c.free_gc(pgc)?;
-            c.free_pixmap(pix)?;
             c.map_window(win)?;
             c.flush()?;
             Ok(())
         })()
         .map_err(|e| fail(&e))?;
+        XWindow::finish(c, root, root_size, depth, depth, win, gc, waker).map_err(|e| fail(&*e))
+    }
+
+    /// A floating window (`spawn_floating`), not mapped yet.
+    fn floating(r: [i32; 4], min: u32, title: &str, waker: Waker) -> Result<XWindow, String> {
+        let err = |e: &dyn std::fmt::Display| format!("no X11 display: {e}");
+        let (c, screen) = RustConnection::connect(None).map_err(|e| err(&e))?;
+        let setup = c.setup();
+        let s = &setup.roots[screen];
+        let (root, depth) = (s.root, s.root_depth);
+        let root_size = (i32::from(s.width_in_pixels), i32::from(s.height_in_pixels));
+        // A 32-bit TrueColor visual: per-pixel alpha.
+        let visual = s
+            .allowed_depths
+            .iter()
+            .filter(|d| d.depth == 32)
+            .flat_map(|d| &d.visuals)
+            .find(|v| v.class == VisualClass::TRUE_COLOR && v.red_mask == 0xff_0000 && v.green_mask == 0xff00 && v.blue_mask == 0xff)
+            .map(|v| v.visual_id)
+            .ok_or("the screen has no 32-bit visual")?;
+        let fail = |e: &dyn std::fmt::Display| format!("could not create the window: {e}");
+        let (win, gc, colormap, font, grip) = (|| -> Result<_, Box<dyn std::error::Error>> {
+            Ok((c.generate_id()?, c.generate_id()?, c.generate_id()?, c.generate_id()?, c.generate_id()?))
+        })()
+        .map_err(|e| fail(&*e))?;
+        (|| -> Result<(), Box<dyn std::error::Error>> {
+            c.create_colormap(ColormapAlloc::NONE, colormap, root, visual)?;
+            let events = EventMask::EXPOSURE
+                | EventMask::BUTTON_PRESS
+                | EventMask::BUTTON_RELEASE
+                | EventMask::POINTER_MOTION
+                | EventMask::LEAVE_WINDOW
+                | EventMask::STRUCTURE_NOTIFY;
+            // North-west gravity: a resize keeps the picture until the next frame, it does not blink clear.
+            let aux = CreateWindowAux::new().event_mask(events).background_pixel(0).border_pixel(0).colormap(colormap).bit_gravity(Gravity::NORTH_WEST);
+            let px = |v: i32| v.clamp(1, i32::from(u16::MAX)) as u16;
+            c.create_window(32, win, root, r[0] as i16, r[1] as i16, px(r[2]), px(r[3]), 0, WindowClass::INPUT_OUTPUT, visual, &aux)?;
+            c.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0))?;
+            // The window manager keeps it where it is put, with no frame, off the taskbar and without the keyboard.
+            let atom = |name: &[u8]| -> Result<u32, Box<dyn std::error::Error>> { Ok(c.intern_atom(false, name)?.reply()?.atom) };
+            let utf8 = atom(b"UTF8_STRING")?;
+            c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes())?;
+            c.change_property8(PropMode::REPLACE, win, atom(b"_NET_WM_NAME")?, utf8, title.as_bytes())?;
+            c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"lemonstudio\0LemonStudio\0")?;
+            c.change_property32(PropMode::REPLACE, win, atom(b"_NET_WM_PID")?, AtomEnum::CARDINAL, &[std::process::id()])?;
+            c.change_property32(PropMode::REPLACE, win, atom(b"_NET_WM_WINDOW_TYPE")?, AtomEnum::ATOM, &[atom(b"_NET_WM_WINDOW_TYPE_NORMAL")?])?;
+            let motif = atom(b"_MOTIF_WM_HINTS")?;
+            c.change_property32(PropMode::REPLACE, win, motif, motif, &[2, 0, 0, 0, 0])?;
+            let states = [atom(b"_NET_WM_STATE_SKIP_TASKBAR")?, atom(b"_NET_WM_STATE_SKIP_PAGER")?];
+            c.change_property32(PropMode::REPLACE, win, atom(b"_NET_WM_STATE")?, AtomEnum::ATOM, &states)?;
+            let mut hints = WmHints::new();
+            hints.input = Some(false);
+            hints.set(&c, win)?.check()?;
+            let mut size = WmSizeHints::new();
+            size.position = Some((WmSizeHintsSpecification::UserSpecified, r[0], r[1]));
+            size.min_size = Some((min as i32, min as i32));
+            size.set_normal_hints(&c, win)?.check()?;
+            // The sizing cursor, for the corner that sizes the window: the X cursor font's bottom_right_corner.
+            c.open_font(font, b"cursor")?;
+            c.create_glyph_cursor(grip, font, font, 14, 15, 0, 0, 0, 0xffff, 0xffff, 0xffff)?;
+            c.close_font(font)?;
+            c.flush()?;
+            Ok(())
+        })()
+        .map_err(|e| fail(&*e))?;
+        let mut w = XWindow::finish(c, root, root_size, depth, 32, win, gc, waker).map_err(|e| fail(&*e))?;
+        w.colormap = colormap;
+        w.grip = grip;
+        Ok(w)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish(c: RustConnection, root: u32, root_size: (i32, i32), depth: u8, win_depth: u8, win: u32, gc: u32, waker: Waker) -> Result<XWindow, Box<dyn std::error::Error>> {
+        // An invisible cursor: a cleared 1 x 1 bitmap as its own mask.
+        let blank = c.generate_id()?;
+        let (pix, pgc) = (c.generate_id()?, c.generate_id()?);
+        c.create_pixmap(1, pix, root, 1, 1)?;
+        c.create_gc(pgc, pix, &CreateGCAux::new().foreground(0))?;
+        c.poly_fill_rectangle(pix, pgc, &[x11rb::protocol::xproto::Rectangle { x: 0, y: 0, width: 1, height: 1 }])?;
+        c.create_cursor(blank, pix, pix, 0, 0, 0, 0, 0, 0, 0, 0)?;
+        c.free_gc(pgc)?;
+        c.free_pixmap(pix)?;
+        c.flush()?;
         let xi = c.extension_information(xinput::X11_EXTENSION_NAME).ok().flatten().is_some()
             && c.xinput_xi_query_version(2, 0).ok().and_then(|r| r.reply().ok()).is_some_and(|r| r.major_version >= 2);
         let keys = Keymap::load(&c);
         let max_request = c.maximum_request_bytes();
+        let lsb_first = c.setup().image_byte_order == ImageOrder::LSB_FIRST;
         Ok(XWindow {
             c,
             win,
             root,
             root_size,
             depth,
+            win_depth,
             gc,
             lsb_first,
             max_request,
@@ -383,6 +487,9 @@ impl XWindow {
             lock: None,
             next_tick: Instant::now() + TICK,
             queue: std::collections::VecDeque::new(),
+            colormap: 0,
+            grip: 0,
+            configured: false,
         })
     }
 
@@ -477,6 +584,10 @@ impl XWindow {
         };
         match e {
             Event::Expose(e) if e.window == self.win && e.count == 0 => Some(Input::Expose),
+            Event::ConfigureNotify(e) if e.window == self.win => {
+                self.configured = true;
+                None
+            }
             Event::ButtonPress(e) if e.event == self.win => {
                 self.track((e.root_x, e.root_y), e.state);
                 let (x, y) = (f32::from(e.event_x), f32::from(e.event_y));
@@ -549,7 +660,7 @@ impl XWindow {
 
     /// Copies `px` (XRGB rows of `w`) into the window at (0, 0).
     pub fn blit(&self, px: &[u32], w: u32, h: u32) {
-        put(&self.c, self.win, self.gc, self.depth, self.lsb_first, self.max_request, px, w, h);
+        put(&self.c, self.win, self.gc, self.win_depth, self.lsb_first, self.max_request, px, w, h);
         let _ = self.c.flush();
     }
 
@@ -565,6 +676,119 @@ impl XWindow {
         let (x, y) = (x.clamp(-32768, 32767) as i16, y.clamp(-32768, 32767) as i16);
         let t = self.c.translate_coordinates(self.win, self.root, x, y);
         t.ok().and_then(|t| t.reply().ok()).map_or((i32::from(x), i32::from(y)), |r| (i32::from(r.dst_x), i32::from(r.dst_y)))
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // A floating window's place among the desktop's windows.
+
+    /// Shows a floating window.
+    pub fn map(&self) {
+        let _ = self.c.map_window(self.win);
+        let _ = self.c.flush();
+    }
+
+    /// A window's place on the screen (x, y, w, h, device px); any window of the display.
+    pub fn rect_of(&self, w: u32) -> Option<[i32; 4]> {
+        let g = self.c.get_geometry(w).ok()?.reply().ok()?;
+        let t = self.c.translate_coordinates(w, self.root, 0, 0).ok()?.reply().ok()?;
+        Some([i32::from(t.dst_x), i32::from(t.dst_y), i32::from(g.width), i32::from(g.height)])
+    }
+
+    /// Whether the window changed place or size since the last call (the window manager moves it during a drag).
+    pub fn take_configured(&mut self) -> bool {
+        std::mem::take(&mut self.configured)
+    }
+
+    /// Puts the window at `r` (x, y, w, h, device px).
+    pub fn set_rect(&self, r: [i32; 4]) {
+        let aux = ConfigureWindowAux::new().x(r[0]).y(r[1]).width(r[2].max(1) as u32).height(r[3].max(1) as u32);
+        let _ = self.c.configure_window(self.win, &aux);
+        let _ = self.c.flush();
+    }
+
+    /// The monitors (x, y, w, h, device px), the whole screen when RandR has none.
+    pub fn monitors(&self) -> Vec<[i32; 4]> {
+        let list = self.c.randr_get_monitors(self.root, true).ok().and_then(|r| r.reply().ok());
+        let mons: Vec<[i32; 4]> = list.map_or(Vec::new(), |r| {
+            r.monitors.iter().map(|m| [i32::from(m.x), i32::from(m.y), i32::from(m.width), i32::from(m.height)]).collect()
+        });
+        if mons.is_empty() { vec![[0, 0, self.root_size.0, self.root_size.1]] } else { mons }
+    }
+
+    /// The top-level window `w` is in, and on through the windows it is transient for: the application's main window.
+    pub fn top_owner(&self, w: u32) -> Option<u32> {
+        let wm_state = self.c.intern_atom(false, b"WM_STATE").ok()?.reply().ok()?.atom;
+        let mut top = w;
+        // The first window up the tree the window manager manages (its parent may be the manager's frame).
+        for _ in 0..32 {
+            let managed = self.c.get_property(false, top, wm_state, AtomEnum::ANY, 0, 1).ok()?.reply().ok()?;
+            if managed.type_ != x11rb::NONE {
+                break;
+            }
+            let parent = self.c.query_tree(top).ok()?.reply().ok()?.parent;
+            if parent == x11rb::NONE || parent == self.root {
+                break;
+            }
+            top = parent;
+        }
+        for _ in 0..32 {
+            let owner = self.c.get_property(false, top, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, 0, 1).ok()?.reply().ok()?;
+            match owner.value32().and_then(|mut v| v.next()) {
+                Some(o) if o != x11rb::NONE && o != self.root => top = o,
+                _ => break,
+            }
+        }
+        Some(top)
+    }
+
+    /// Stays with `owner` (above it, minimised with it) or, with none, on its own.
+    pub fn set_owner(&self, owner: Option<u32>) {
+        let _ = match owner {
+            Some(o) => self.c.change_property32(PropMode::REPLACE, self.win, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, &[o]).map(|_| ()),
+            None => self.c.delete_property(self.win, AtomEnum::WM_TRANSIENT_FOR.into()).map(|_| ()),
+        };
+        let _ = self.c.flush();
+    }
+
+    /// A request to the window manager (EWMH), on the root window.
+    fn to_manager(&self, kind: &[u8], data: [u32; 5]) {
+        let Some(kind) = self.c.intern_atom(false, kind).ok().and_then(|r| r.reply().ok()) else { return };
+        let e = ClientMessageEvent::new(32, self.win, kind.atom, data);
+        let _ = self.c.send_event(false, self.root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, e);
+        let _ = self.c.flush();
+    }
+
+    /// Above every window, or among them. The window must be mapped.
+    pub fn set_above(&self, on: bool) {
+        let Some(above) = self.c.intern_atom(false, b"_NET_WM_STATE_ABOVE").ok().and_then(|r| r.reply().ok()) else { return };
+        self.to_manager(b"_NET_WM_STATE", [u32::from(on), above.atom, 0, 1, 0]);
+    }
+
+    /// Clicks go through the window to what is behind it (an empty input shape), or it takes them.
+    pub fn set_click_through(&self, on: bool) {
+        let _ = if on {
+            self.c.shape_rectangles(shape::SO::SET, shape::SK::INPUT, ClipOrdering::UNSORTED, self.win, 0, 0, &[]).map(|_| ())
+        } else {
+            self.c.shape_mask(shape::SO::SET, shape::SK::INPUT, self.win, 0, 0, x11rb::NONE).map(|_| ())
+        };
+        let _ = self.c.flush();
+    }
+
+    /// The window manager takes the left button's drag from here (a press just arrived), moving the window or sizing it
+    /// by its lower right corner: under XWayland only it can follow the pointer as the window moves under it.
+    pub fn manager_drag(&self, size: bool) {
+        const SIZE_BOTTOM_RIGHT: u32 = 4;
+        const MOVE: u32 = 8;
+        let _ = self.c.ungrab_pointer(x11rb::CURRENT_TIME);
+        let (x, y) = (i32::from(self.pointer.0) as u32, i32::from(self.pointer.1) as u32);
+        self.to_manager(b"_NET_WM_MOVERESIZE", [x, y, if size { SIZE_BOTTOM_RIGHT } else { MOVE }, 1, 1]);
+    }
+
+    /// The pointer shows the sizing cursor over this window, or its default.
+    pub fn set_grip_cursor(&self, on: bool) {
+        let aux = ChangeWindowAttributesAux::new().cursor(if on { self.grip } else { x11rb::NONE });
+        let _ = self.c.change_window_attributes(self.win, &aux);
+        let _ = self.c.flush();
     }
 
     /// Runs a desktop dialog (a file dialog): here, at once on this thread (`mac` runs it on the main thread).
@@ -901,6 +1125,12 @@ impl Drop for XWindow {
         let _ = self.c.free_cursor(self.blank);
         let _ = self.c.free_gc(self.gc);
         let _ = self.c.destroy_window(self.win);
+        if self.colormap != 0 {
+            let _ = self.c.free_colormap(self.colormap);
+        }
+        if self.grip != 0 {
+            let _ = self.c.free_cursor(self.grip);
+        }
         let _ = self.c.flush();
     }
 }

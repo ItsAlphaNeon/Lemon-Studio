@@ -1628,6 +1628,8 @@ pub struct App {
     pub(crate) track_rec: Option<crate::track_rec::TrackRec>,
     /// TOOLS > Retro audio capture: the last minutes the device played (spec: ui/audio-logger.md).
     pub(crate) audio_log: crate::audio_log::Log,
+    /// Checking for, downloading and installing a newer build (`crate::update`).
+    pub(crate) updates: crate::update::Updates,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
     /// A Shift+press grabbed piano-roll notes: the drag's first move picks up copies of them (`App::pick_up_notes`).
@@ -1940,6 +1942,7 @@ impl App {
             audio_rec: None,
             track_rec: None,
             audio_log: Default::default(),
+            updates: Default::default(),
             menu_notch: 0.0,
             shift_clone: false,
             auto_close: Default::default(),
@@ -2535,6 +2538,9 @@ impl App {
         if n == crate::dialog::Next::Quit {
             self.quit_answer = Some(false);
         }
+        if matches!(n, crate::dialog::Next::Quit | crate::dialog::Next::Close) {
+            self.update_put_off();
+        }
     }
 
     /// A dialog was answered: what waited for it (spec: ui/dialogs.md §5).
@@ -2708,6 +2714,11 @@ impl App {
             Then::PerfConfirm => {
                 if reply == Reply::Button(Answer::Ok) {
                     self.open_marker_settings();
+                }
+            }
+            Then::Update(found) => {
+                if let Reply::Button(a) = reply {
+                    self.update_answer(found, a);
                 }
             }
             Then::MidiExportConfirm => {
@@ -4865,6 +4876,7 @@ impl App {
         }
         self.record_tick();
         self.audio_log.tick();
+        self.update_tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
@@ -6345,7 +6357,7 @@ impl App {
         self.state.message = Some(format!("Automatic crossfades: {}", if on { "on" } else { "off" }));
     }
 
-    fn settings_act(&mut self, a: views::settings::SAct) {
+    pub(crate) fn settings_act(&mut self, a: views::settings::SAct) {
         use views::settings::SAct;
         // A click anywhere but the colour picker and the colour circles closes the picker.
         if !matches!(a, SAct::Swatch(..) | SAct::PickBody | SAct::PickPart(_) | SAct::PickSv | SAct::PickHue | SAct::PickRevert) {
@@ -6507,6 +6519,10 @@ impl App {
             }
             SAct::Button("Load theme...") => self.theme_dialog(),
             SAct::Button(views::settings::SHOW_ASIO_PANEL) => self.transport.asio_panel(),
+            SAct::Button(views::settings::CHECK_UPDATES) => self.check_updates_now(),
+            SAct::Button(views::settings::WEBSITE) => self.open_web(crate::help_links::WEBSITE_URL),
+            SAct::Button(views::settings::WIKI) => self.open_web(crate::help_links::HELP_INDEX_URL),
+            SAct::Button(views::settings::SOURCE_CODE) => self.open_web(crate::help_links::SOURCE_CODE_URL),
             SAct::Button("Manage plugins") => self.open_settings(views::settings::PLUGINS),
             SAct::Button("Manage messages") => return self.messages_menu(),
             SAct::Button("Scan for new plugins") => self.start_scan(crate::plugin_db::Mode::Changed),
@@ -10346,8 +10362,7 @@ impl App {
                     piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 }
             }
-            // No help index yet: the left click does nothing.
-            Action::Util(Util::Help) => {}
+            Action::Util(Util::Help) => self.open_web(crate::help_links::HELP_INDEX_URL),
             Action::Util(Util::Save) => self.menu_item(0, views::menus::FILE_SAVE_AS),
             Action::Util(Util::AudioEditor) => self.audio_editor(0, false),
             Action::Util(Util::NewAudioEditor) => self.audio_editor(0, true),
@@ -10733,8 +10748,7 @@ impl App {
 
     pub(crate) fn menu_item(&mut self, menu: usize, item: usize) {
         use views::menus::*;
-        // FILE's first entries and About go by their place; every other entry by its command (`MenuCmd`), never its
-        // label.
+        // FILE's first entries go by their place; every other entry by its command (`MenuCmd`), never its label.
         match (menu, item) {
             (0, FILE_NEW) => return self.ask_discard("starting a new project", crate::dialog::Next::NewProject),
             (0, FILE_OPEN) => return self.ask_discard("opening another project", crate::dialog::Next::OpenDialog),
@@ -10746,12 +10760,6 @@ impl App {
             (0, FILE_EXPORT_MIDI) => return self.export_midi_dialog(false),
             (0, FILE_EXIT) => {
                 self.want_close = true;
-                return;
-            }
-            (HELP_MENU, HELP_ABOUT) => {
-                // The Windows build includes the ASIO SDK, which is under version 3 only (THIRD-PARTY-NOTICES.txt §9).
-                let licence = if cfg!(windows) { "the GNU GPL v3" } else { "the GNU GPL v3 or later" };
-                self.state.message = Some(format!("Lemon Studio {} (cutting-edge pre-alpha), free software under {licence}", env!("CARGO_PKG_VERSION")));
                 return;
             }
             (PATTERNS, i) if i >= PATTERN_PICK => return crate::patterns::select(&mut self.state, (i - PATTERN_PICK) as u16),
@@ -10787,13 +10795,11 @@ impl App {
             MenuCmd::Rescan => self.start_scan(crate::plugin_db::Mode::Changed),
             // The plugin menus' display mode, as their own radios set it (spec: ui/plugin-menu.md §2-3).
             MenuCmd::View(v) => self.state.message = crate::plugin_menu::run(self, crate::plugin_menu::PlugCmd::View(v)),
-            MenuCmd::Web(url) => {
-                crate::help_links::open(url);
-                self.state.message = Some(format!("Opening {url}"));
-            }
+            MenuCmd::Web(url) => self.open_web(url),
             MenuCmd::SaveMidiClip => self.save_midi_clipboard(),
             MenuCmd::SaveAudioClip => self.save_audio_clipboard(),
             MenuCmd::Diagnostics => self.save_diagnostics(),
+            MenuCmd::CheckUpdates => self.check_updates_now(),
             MenuCmd::NewPattern => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {
@@ -11215,7 +11221,7 @@ fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra:
         os_flp::lemon::to_flp(file);
         return Ok(());
     }
-    extra.insert(0, os_flp::lemon::saved_by(&format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))));
+    extra.insert(0, os_flp::lemon::saved_by(&format!("Lemon Studio {}", crate::version::VERSION)));
     os_flp::lemon::to_lemon(file, &extra).map_err(|e| e.to_string())
 }
 
@@ -11835,6 +11841,38 @@ mod tests {
             assert_eq!((slot.name.as_str(), &slot.state), (*file, fl));
         }
         assert_eq!(saved.mixer[4].slots[0], Some(shaper));
+    }
+
+    /// A project's Wave Candy slot opens as Lemon Drop with its state, shows the Lemon name, and a save keeps Wave
+    /// Candy with the same bytes.
+    // spec: plugins/lemon-drop.md "Projects"
+    #[test]
+    fn wave_candy_slots_open_as_lemon_drop() {
+        use crate::plugins::fx_key;
+        let mut st = lemon_drop::state::State::new_default();
+        st.title = b"Lemon".to_vec();
+        st.gain = 25;
+        st.mode = lemon_drop::state::Mode::Spectrum;
+        let fl = st.to_bytes();
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.project.mixer[2].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Wave Candy".into(), state: fl.clone() });
+        a.sync_effects();
+        let key = fx_key(2, 3);
+        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(crate::plugins::LEMON_DROP.to_string()));
+        assert_eq!(crate::mixer::slot_name(&a.state, 2, 3).as_deref(), Some(crate::plugins::LEMON_DROP));
+        assert_eq!(a.plugins.recreation_file_state(key, "Wave Candy").as_ref(), Some(&fl));
+        let path = std::env::temp_dir().join(format!("lemon-wave-candy-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let slot = saved.mixer[2].slots[3].clone().unwrap();
+        assert_eq!((slot.name.as_str(), &slot.state), ("Wave Candy", &fl));
     }
 
     /// A project's Fruity Flanger and Fruity Phaser slots open as Lemon Flanger and Lemon Phaser with their state, show
@@ -18191,7 +18229,7 @@ mod tests {
         assert_eq!(std::fs::read(&flp).unwrap(), before, "the FLP is still not written");
         let file = os_flp::FlpFile::parse(&std::fs::read(&lemon).unwrap()).unwrap();
         assert_eq!(os_flp::lemon::version(&file), Some(os_flp::lemon::VERSION));
-        assert_eq!(os_flp::lemon::saved_by_text(&file), Some(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(os_flp::lemon::saved_by_text(&file), Some(format!("Lemon Studio {}", crate::version::VERSION)));
         // Save again: in place, no dialog.
         app.state.tempo = 125.0;
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
@@ -24008,15 +24046,17 @@ mod tests {
         assert_eq!(hint(&app, &Action::Util(Util::AudioEditor)), "Open audio editor / New audio editor");
         // Hidden until it has a shop icon of its own.
         assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("Plugin repository")));
-        // Help: the left click does nothing; the right click is About, on the release over the button only.
+        // Help: the left click opens the help index; the right click is About, on the release over the button only.
         let help = hit_rect(&app, &Action::Util(Util::Help));
-        app.state.message = None;
         click(&mut app, &mut c, help);
-        assert!(app.state.message.is_none() && app.state.dialogs.is_empty());
+        assert_eq!(app.state.message, Some(format!("Opening {}", crate::help_links::HELP_INDEX_URL)));
+        assert!(app.state.dialogs.is_empty());
         right(&mut app, &mut c, help, (help.cx() + 40.0, help.cy()));
-        assert!(app.state.message.is_none());
+        assert!(!app.state.settings.open);
         right(&mut app, &mut c, help, (help.cx(), help.cy()));
-        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Lemon Studio ")), "{:?}", app.state.message);
+        assert_eq!((app.state.settings.open, app.state.settings.tab), (true, views::settings::ABOUT));
+        app.state.settings.open = false;
+        frame(&mut app, &mut c, None);
         // Undo: EDIT > Undo; its right click does nothing yet.
         let undo = hit_rect(&app, &Action::Util(Util::Undo));
         app.state.message = None;

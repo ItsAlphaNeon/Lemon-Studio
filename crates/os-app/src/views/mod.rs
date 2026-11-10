@@ -250,10 +250,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if docked.is_none() && !split && !crate::wallpaper::paint(ui, work) {
         let wm = ui.t.watermark.mix(CUTTING_EDGE_RED, 0.12);
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
-        let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - cutting-edge pre-alpha");
+        let version = format!("Lemon Studio v{} - cutting-edge pre-alpha", crate::version::staged());
         let vc = ui.t.version_text.mix(CUTTING_EDGE_RED, 0.65);
-        let vw = ui.c.text_width(crate::views::fnt(16.0), version);
-        ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, work.bottom() - 22.0, vc, version);
+        let vw = ui.c.text_width(crate::views::fnt(16.0), &version);
+        ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, &version);
     }
 
     // One stacking order for all child windows (spec: ui/channel-rack.md §5). A maximized window
