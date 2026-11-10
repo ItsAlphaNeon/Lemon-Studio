@@ -287,6 +287,14 @@ impl Window {
         }
     }
 
+    /// The editor's X11 window; `None` when it is drawn in Lemon Studio's window.
+    pub fn x11_window(&self) -> Option<u32> {
+        match &self.0 {
+            Backend::X11(w) => Some(w.win),
+            Backend::Embedded(_) => None,
+        }
+    }
+
     /// Shows a menu at (`x`, `y`) (`to_root`'s points); the picked entry's command.
     pub fn popup<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32) -> Option<C> {
         either!(mut self, w => w.popup(x, y, def, pal, scale))

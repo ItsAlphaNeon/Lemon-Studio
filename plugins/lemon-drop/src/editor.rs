@@ -1071,7 +1071,9 @@ mod gui {
             #[cfg(target_os = "macos")]
             crate::float::ensure(&self.logic.params, &self.logic.shared, &self.win);
             #[cfg(target_os = "linux")]
-            crate::float::ensure(&self.logic.params, &self.logic.shared, self.scale, self.win.win);
+            // Drawn in Lemon Studio's window there is no window of the editor's own: the display then has no owner, as
+            // On desktop.
+            crate::float::ensure(&self.logic.params, &self.logic.shared, self.scale, self.win.x11_window().unwrap_or(0));
             if self.logic.hint != self.last_hint {
                 self.last_hint.clone_from(&self.logic.hint);
                 self.link.set_hint(&self.logic.hint);

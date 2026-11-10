@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use os_plugkit::gui::{self as px, Button, Input, Window};
+use os_plugkit::gui::{self as px, Button, Input, XWindow as Window};
 use os_theme::Palette;
 use os_ui::{Canvas, Rect};
 
