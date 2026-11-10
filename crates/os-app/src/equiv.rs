@@ -72,7 +72,7 @@ fn hash(v: &impl fmt::Debug) -> u64 {
 /// and they are compared once, in `side`. What a save writes of them is checked by the save and reopen checks.
 fn project_part(p: &os_model::Project) -> os_model::Project {
     let mut p = p.clone();
-    (p.tempo, p.current_pattern, p.song_mode) = (None, None, None);
+    (p.tempo, p.current_pattern, p.song_mode, p.current_group) = (None, None, None, None);
     p.groups.clear();
     for c in &mut p.channels {
         (c.rack.locked, c.rack.zipped, c.rack.group) = (false, false, 0);
