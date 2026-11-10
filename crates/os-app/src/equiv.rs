@@ -618,9 +618,11 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
     for a in &mut p.arrangements {
         // A clip's position, kind, item, length, track, mute bit and id are written from its fields on every save
         // (os-flp encode_clip, encode_clips): the stored record's copy of them is left as it was read, so a clip made
-        // here holds zeros.
+        // here holds zeros. Its offsets (bytes 24..32) are its window, written from it when it changed (an edit
+        // that cuts or trims a clip changes only the window); the window is compared.
         for c in &mut a.clips {
             c.raw[..14].fill(0);
+            c.raw[24..32].fill(0);
             c.raw[19] &= !0x20;
             c.raw[32..36].fill(0);
         }
