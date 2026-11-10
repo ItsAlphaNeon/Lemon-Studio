@@ -6,8 +6,6 @@
   <img alt="Lemon Studio" src="docs/assets/logo-light.png" width="520">
 </picture>
 
-<h3>Make music. Keep the source.</h3>
-
 <p>A free and open-source digital audio workstation, written in Rust, for Windows, Linux and macOS.</p>
 
 <p>
