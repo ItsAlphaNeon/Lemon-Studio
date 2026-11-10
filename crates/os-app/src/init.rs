@@ -13,6 +13,7 @@
 //! in event 216 (`os_flp::project`).
 // spec: ui/settings-choices.md "Advanced: Initialize controls automatically (2026-10-16)"
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::target::{self, Target};
 use os_model::InitControl;
 
@@ -37,7 +38,7 @@ pub fn listed(s: &State, t: u32) -> bool {
 
 /// Puts control `t`'s entry in the list (`None`: takes it out). An entry already there keeps its place.
 pub(crate) fn put(s: &mut State, t: u32, e: Option<InitControl>) {
-    let list = &mut s.project.init_controls;
+    let list = &mut s.project.get_mut().init_controls;
     match e {
         Some(c) => match list.iter_mut().find(|x| x.target == t) {
             Some(x) => *x = c,
@@ -109,7 +110,7 @@ fn set<T: PartialEq>(x: &mut T, v: T) -> bool {
 fn set_value(s: &mut State, c: InitControl) -> bool {
     let v = c.value;
     let f = f64::from(v);
-    let p = &mut s.project;
+    let p = s.project.get_mut();
     match c.target {
         InitControl::MAIN_VOLUME => return set(&mut p.main_volume, Some(v.clamp(0, 16000) as u16)),
         InitControl::MAIN_SWING => return set(&mut p.swing, Some(v.clamp(0, 128) as u8)),
@@ -223,7 +224,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = test_project();
+        app.state.project = crate::locked::Locked::new(test_project());
         app
     }
 
@@ -337,7 +338,7 @@ mod tests {
         assert_eq!((a.state.project.channels.len(), a.state.rack.filter), (channels, crate::rack::Filter::Group(g)));
         assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 10000)], 1));
         // A second clip on the moved knob: its new value replaces the old one; undo brings that back.
-        a.state.project.channels[0].volume = 0.5;
+        a.state.project.get_mut().channels[0].volume = 0.5;
         pl::run(&mut a, Cmd::CreateAutomation(vol, "Kick - Channel volume".into(), 0.5));
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
@@ -358,13 +359,13 @@ mod tests {
     fn song_app() -> App {
         let mut a = app();
         pl::arr_mut(&mut a.state).clips.push(Clip::new(0, 4 * 384, 0, ClipSource::Pattern(1)));
-        a.state.project.init_controls = vec![rec(target::channel(0, target::CHANNEL_VOLUME), 6400), rec(target::TEMPO, 140_000)];
+        a.state.project.get_mut().init_controls = vec![rec(target::channel(0, target::CHANNEL_VOLUME), 6400), rec(target::TEMPO, 140_000)];
         a
     }
 
     /// The listed controls moved away from their initial values.
     fn moved(a: &mut App) {
-        a.state.project.channels[0].volume = 1.0;
+        a.state.project.get_mut().channels[0].volume = 1.0;
         a.state.tempo = 90.0;
     }
 
@@ -415,7 +416,7 @@ mod tests {
         assert_eq!(controls(&a), INIT);
         assert_eq!(a.state.history.len(), 0, "no undo step");
         // An entry for a control the project doesn't have, or whose units aren't known, is left alone.
-        a.state.project.init_controls.extend([rec(target::channel(40, target::CHANNEL_VOLUME), 0), rec(target::channel_param(0, 2), 5)]);
+        a.state.project.get_mut().init_controls.extend([rec(target::channel(40, target::CHANNEL_VOLUME), 0), rec(target::channel_param(0, 2), 5)]);
         moved(&mut a);
         a.set_song_pos(0, false);
         assert_eq!(controls(&a), INIT);
@@ -486,7 +487,7 @@ mod tests {
         let folder = format!("1:Current project/{INITIALIZED_CONTROLS}");
         a.state.browser_open.extend(["1:Current project".to_string(), folder.clone()]);
         assert!(!rows(&a.state).iter().any(|r| r.key == folder), "no folder while the list is empty");
-        a.state.project.init_controls = vec![
+        a.state.project.get_mut().init_controls = vec![
             rec(target::channel(1, target::CHANNEL_VOLUME), 10000),
             rec(target::mixer(1, target::MIXER_VOLUME), 12800),
             rec(target::TEMPO, 140_000),

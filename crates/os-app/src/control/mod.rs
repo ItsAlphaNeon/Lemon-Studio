@@ -14,6 +14,7 @@
 //! - `query`: the project as clients read it.
 //! - `rpc`: JSON-RPC 2.0 over a local socket (`server`), the adapter clients speak.
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 pub mod command;
 pub mod host;
 pub mod ids;
@@ -258,7 +259,7 @@ fn op(c: &Command) -> &'static str {
 /// Applies `commands` in order, all or none; returns each one's result and the commands that undo them all (in the
 /// order to apply them). Records nothing.
 pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
-    s.control.settle(&mut s.project);
+    s.control.settle(s.project.get_mut());
     let queues = Queues::of(s);
     let known = s.control.known.clone();
     let mut undo = Vec::with_capacity(commands.len());
@@ -268,7 +269,7 @@ pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Val
             Ok(done) => {
                 undo.push(done.undo);
                 results.push(done.result);
-                s.control.settle(&mut s.project);
+                s.control.settle(s.project.get_mut());
             }
             Err(e) => {
                 // Back to where the list started.
@@ -296,7 +297,7 @@ pub fn take_back(s: &mut State, undo: Vec<Command>) -> Vec<Command> {
                 break;
             }
         }
-        s.control.settle(&mut s.project);
+        s.control.settle(s.project.get_mut());
     }
     redo.reverse();
     redo
@@ -430,7 +431,7 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     let Some(param) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
     if command::key_owner(s, key) == Some(0) {
-        s.control.settle(&mut s.project);
+        s.control.settle(s.project.get_mut());
     }
     let Some(owner) = command::key_owner(s, key) else { return };
     // Known for the undo's other side (`Command::apply`).
@@ -448,7 +449,7 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
 /// release could judge.
 pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command::PluginSide) {
     if command::key_owner(s, key) == Some(0) {
-        s.control.settle(&mut s.project);
+        s.control.settle(s.project.get_mut());
     }
     let Some(owner) = command::key_owner(s, key).filter(|&o| o != 0) else { return };
     crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(command::Taken::Plugin(owner, Box::new(before))))]));

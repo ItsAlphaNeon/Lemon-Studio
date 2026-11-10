@@ -897,7 +897,7 @@ mod tests {
         use crate::views::browser::{rows, section_key, REMOTE_CONTROL};
         use crate::views::menus::{item_at, works, VIEW};
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         set_links(&[]);
         add(Link::new(0, 7, Target::Knob(KnobId::ChanVol(1))), true);
         add(Link { omni: true, ..Link::new(1, 10, Target::Knob(KnobId::ChanPan(0))) }, true);
@@ -945,7 +945,7 @@ mod tests {
     fn the_mixer_links_a_tracks_controls() {
         use crate::playlist::Cmd;
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         set_links(&[]);
         app.state.selected_mixer = 1;
         if let Some(t) = crate::mixer::track_mut(&mut app.state, 1) {

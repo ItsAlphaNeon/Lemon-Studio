@@ -6,6 +6,7 @@
 //! project's patterns and channels; a pick makes a pattern current or opens a channel's window.
 // spec: ui/project-picker.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::ChannelKind;
 
 use crate::app::{App, State};
@@ -104,8 +105,8 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = test_project();
-        app.state.project.patterns.push(Pattern { number: 3, name: Some("Drop".into()), ..Pattern::default() });
+        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.project.get_mut().patterns.push(Pattern { number: 3, name: Some("Drop".into()), ..Pattern::default() });
         app.state.pattern = 1;
         app
     }
@@ -125,9 +126,9 @@ mod tests {
         assert!(v[0].head && v.iter().any(|i| i.col));
         let marked: Vec<String> = v.iter().filter(|i| i.mark == Mark::Radio(true)).map(|i| i.label.to_string()).collect();
         assert_eq!(marked, ["Pattern 1", "Hat"]);
-        app.state.project.channels[4].kind = ChannelKind::Automation;
+        app.state.project.get_mut().channels[4].kind = ChannelKind::Automation;
         assert!(!labels(&items(&app.state)).contains(&"Pluck".to_string()), "automation clip channels are left out");
-        app.state.project.channels.clear();
+        app.state.project.get_mut().channels.clear();
         let v = items(&app.state);
         assert!(v.iter().any(|i| i.label == "(no channels)" && !i.enabled));
     }

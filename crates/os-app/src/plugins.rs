@@ -3558,12 +3558,12 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-vst3-save-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 4800]).unwrap();
         let mut a = crate::app::App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.file = None;
         a.state.path = None;
         a.plugins.available = vec![load(&smp)];
         a.plugins.effects = vec![load(&eq)];
-        let row = crate::app::add_plugin_channel(&mut a.state.project, "Lemon Sampler");
+        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), "Lemon Sampler");
         a.plugins.create(row, 0).unwrap();
         a.state.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
@@ -3823,7 +3823,7 @@ mod tests {
         // SAFETY: test-only, run alone; `OPENSTUDIO_NATIVE` is read only by the scan.
         unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
         let mut a = crate::app::App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.plugins = Plugins::scan();
         a.state.plugdb.rebuild(&a.plugins);
         use crate::plugin_menu::PlugCmd;

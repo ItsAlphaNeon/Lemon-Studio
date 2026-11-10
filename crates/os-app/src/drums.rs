@@ -9,6 +9,7 @@
 //!
 // spec: plugins/lemon-drum-sampler.md §4 (app integration); plugins/fpc.md §1
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{Channel, ChannelKind, Project};
 
 use crate::plugins::{Plugins, FX_KEY};
@@ -187,11 +188,11 @@ mod tests {
         let file = std::env::temp_dir().join(format!("openstudio-drums-{}.flp", std::process::id()));
         let path = wav("reopen");
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.file = None;
         a.state.path = None;
         a.plugins.available = crate::plugins::builtin();
-        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_DRUMS);
+        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), LEMON_DRUMS);
         let ch = &a.state.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_DRUMS));

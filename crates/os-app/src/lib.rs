@@ -8,6 +8,9 @@
 // Plugin windows exist on Windows, Linux and macOS (`plugin_window`): elsewhere what only they reach (the Misc tab, the
 // window and preset menus, their requests) is built but unused. Those builds still report real dead code.
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
+// Only the modules that still write the project directly may call `locked::Locked::get_mut` (each says so with
+// `#![allow(deprecated)]`); a new module that writes it fails to build (control-plane part 2, step 3).
+#![deny(deprecated)]
 
 mod anim;
 mod app;
@@ -120,6 +123,7 @@ mod plugins;
 mod ppi;
 mod prefs;
 mod settings_window;
+pub mod locked;
 mod preview_track;
 mod project_files;
 mod project_forms;

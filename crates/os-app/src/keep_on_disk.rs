@@ -11,6 +11,7 @@
 // spec: ui/settings-choices.md "Advanced: Fast sample preview, Auto keep long audio on disk, Threaded project sample
 // loading (2026-10-16)"
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::Path;
 
 use os_model::ChannelSound;
@@ -117,7 +118,7 @@ mod tests {
     fn a_short_file_after_a_long_one_keeps_it() {
         let mut app = App::new(None);
         let r = sampler_row(&app);
-        app.state.project.channels[r].sound.sampler_flags = Some(ChannelSound::RESAMPLE);
+        app.state.project.get_mut().channels[r].sound.sampler_flags = Some(ChannelSound::RESAMPLE);
         let (long, short) = (wav("long", 44100, 1, 31 * 44100), wav("short", 44100, 1, 5 * 44100));
         sample_chosen(&mut app, r, long.clone());
         assert_eq!(flags(&app, r), Some(ChannelSound::RESAMPLE | ChannelSound::KEEP_ON_DISK));

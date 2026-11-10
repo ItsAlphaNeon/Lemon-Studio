@@ -7,6 +7,7 @@
 //! transpose, plus the name box and the delete confirmation.
 // spec: ui/pattern-menu.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ClipSource, Pattern, Rgb};
 
 use crate::app::State;
@@ -165,7 +166,7 @@ pub fn next_empty(s: &State, after: u16) -> u16 {
 
 /// The pattern `n`, added when the project has none with that number.
 pub fn pat_mut(s: &mut State, n: u16) -> &mut Pattern {
-    let ps = &mut s.project.patterns;
+    let ps = &mut s.project.get_mut().patterns;
     let i = match ps.iter().position(|p| p.number == n) {
         Some(i) => i,
         None => {
@@ -181,7 +182,7 @@ pub fn pat_mut(s: &mut State, n: u16) -> &mut Pattern {
 /// end up without a pattern keep an empty entry so saving clears their blocks.
 pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
     let old: Vec<u16> = s.project.patterns.iter().map(|p| p.number).collect();
-    let mut pats: Vec<Pattern> = std::mem::take(&mut s.project.patterns)
+    let mut pats: Vec<Pattern> = std::mem::take(&mut s.project.get_mut().patterns)
         .into_iter()
         .filter_map(|mut p| {
             let n = map(p.number)?;
@@ -195,8 +196,8 @@ pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
         }
     }
     pats.sort_by_key(|p| p.number);
-    s.project.patterns = pats;
-    if let Some(a) = s.project.arrangement_mut() {
+    s.project.get_mut().patterns = pats;
+    if let Some(a) = s.project.get_mut().arrangement_mut() {
         a.clips.retain_mut(|c| match c.source {
             ClipSource::Pattern(n) => match map(n) {
                 Some(m) => {
@@ -232,7 +233,7 @@ fn swap(s: &mut State, a: u16, b: u16) {
 
 /// Transpose every note of pattern `n` by `semis`.
 pub fn transpose(s: &mut State, n: u16, semis: i32) {
-    if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
+    if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
         for note in &mut p.notes {
             note.key = (i32::from(note.key) + semis).clamp(0, 131) as u16;
         }
@@ -443,7 +444,7 @@ pub fn split_by_channel(s: &mut State) {
         let notes = orig.notes.iter().filter(|n| n.channel == *ch).copied().collect();
         *pat_mut(s, cur + j) = Pattern { number: cur + j, name: Some(name.clone()), notes, controls: Vec::new(), ..orig.clone() };
     }
-    if let Some(a) = s.project.arrangement_mut() {
+    if let Some(a) = s.project.get_mut().arrangement_mut() {
         // Clips are drawn in record order: the new ones go just before their original, which stays on top.
         let mut clips = Vec::with_capacity(a.clips.len());
         for c in std::mem::take(&mut a.clips) {
@@ -553,14 +554,14 @@ fn set_color_now(s: &mut State, i: usize) {
         match target {
             Some(BoxTarget::Name(n)) => pat_mut(s, n).color = col,
             Some(BoxTarget::Rack(crate::rack::RBox::Channel(r))) => {
-                if let Some(ch) = s.project.channels.get_mut(r) {
+                if let Some(ch) = s.project.get_mut().channels.get_mut(r) {
                     ch.color = col;
                 }
             }
             // Color selected ▸ All...: every selected channel, and the box closes.
             Some(BoxTarget::Rack(crate::rack::RBox::ColorSel)) => {
                 for r in s.rack.sel.clone() {
-                    if let Some(ch) = s.project.channels.get_mut(r) {
+                    if let Some(ch) = s.project.get_mut().channels.get_mut(r) {
                         ch.color = col;
                     }
                 }
@@ -646,9 +647,9 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         let s = &mut app.state;
-        s.project.patterns = vec![
+        s.project.get_mut().patterns = vec![
             Pattern { number: 1, name: Some("Kick".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() },
             Pattern { number: 2, name: Some("Kick #2".into()), notes: vec![Note::step(0, 48)], ..Pattern::default() },
             Pattern { number: 3, notes: vec![Note::step(1, 0)], ..Pattern::default() },

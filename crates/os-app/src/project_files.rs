@@ -15,6 +15,7 @@
 //! data folder.
 // spec: ui/project-templates.md, ui/menu-submenus.md §1, §4, ui/data-folder.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use os_model::DataFolder;
@@ -253,7 +254,7 @@ impl App {
         if crate::prefs::check(&crate::prefs::COPY_USED_SAMPLES) {
             self.copy_used_samples_to(&dir);
         }
-        let df = self.state.project.data_folder.get_or_insert_with(DataFolder::default);
+        let df = self.state.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
         if df.choice == DataFolder::NONE {
             df.choice = DataFolder::RELATIVE;
         }
@@ -469,9 +470,9 @@ mod tests {
         // The project in the folder, with a channel on old.wav.
         let mut app = App::new(None);
         let song = dir.join("song.flp");
-        app.state.project.data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: String::new() });
+        app.state.project.get_mut().data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: String::new() });
         app.save_to(song.clone());
-        if let Some(ch) = app.state.project.channels.first_mut() {
+        if let Some(ch) = app.state.project.get_mut().channels.first_mut() {
             ch.sample_path = Some(dir.join("Samples").join("old.wav").to_string_lossy().into_owned());
         }
         let left = unused_files(&dir, &app.used_files());

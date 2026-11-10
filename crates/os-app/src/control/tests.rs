@@ -5,6 +5,7 @@
 //! The control plane's tests: every command undoes and redoes exactly, transactions are whole, proposals leave the
 //! project alone, ids stay with their things, and the JSON-RPC adapter answers over a real socket.
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use serde_json::{json, Value};
 
 use super::*;
@@ -12,9 +13,9 @@ use crate::app::App;
 
 fn app() -> App {
     let mut a = App::new(None);
-    a.state.project = crate::app::test_project();
-    a.state.project.arrangements = vec![os_flp::project::default_arrangement()];
-    a.state.control.settle(&mut a.state.project);
+    a.state.project = crate::locked::Locked::new(crate::app::test_project());
+    a.state.project.get_mut().arrangements = vec![os_flp::project::default_arrangement()];
+    a.state.control.settle(a.state.project.get_mut());
     a
 }
 
@@ -45,7 +46,7 @@ fn round_trip(a: &mut App, c: Value) -> Vec<Value> {
     let steps = a.state.history.at();
     let what = c.to_string();
     let r = apply(&mut a.state, &test_client(), None, vec![cmd(c)]).unwrap_or_else(|e| panic!("{what}: {e}"));
-    a.state.control.settle(&mut a.state.project);
+    a.state.control.settle(a.state.project.get_mut());
     let after = reading(a);
     assert_ne!(before, after, "{what} changes something");
     assert_eq!(a.state.history.at(), steps + 1, "{what} is one step");
@@ -149,7 +150,7 @@ fn the_interface_and_the_commands_share_one_history() {
     let mut a = app();
     let kick = ids(&a).0[0];
     crate::history::knob(&mut a.state, crate::knobs::KnobId::ChanVol(0), false);
-    a.state.project.channels[0].volume = 0.3;
+    a.state.project.get_mut().channels[0].volume = 0.3;
     apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": kick, "volume": 0.6}))]).unwrap();
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Test: channel settings"));
     assert_eq!(a.state.project.channels[0].volume, 0.3);
@@ -171,7 +172,7 @@ fn ids_stay_with_their_things() {
     assert_eq!(a.state.project.channels[1].name.as_deref(), Some("Still me"));
     // The interface's edits keep them too: a clone gets a new id, the original keeps its own.
     crate::rack::clone_rows(&mut a, &[0]);
-    a.state.control.settle(&mut a.state.project);
+    a.state.control.settle(a.state.project.get_mut());
     assert_eq!(a.state.project.channels[0].id.0, ch[0]);
     assert!(!ch.contains(&a.state.project.channels[1].id.0), "the clone's id is new");
     // A deleted channel's id names nothing; an undo brings it back with its id.
@@ -184,9 +185,10 @@ fn ids_are_not_an_unsaved_change() {
     let mut a = app();
     a.mark_saved();
     assert!(!a.unsaved());
-    a.state.project.channels.push(a.state.project.channels[0].clone());
-    a.state.control.settle(&mut a.state.project);
-    a.state.project.channels.pop();
+    let first = a.state.project.channels[0].clone();
+    a.state.project.get_mut().channels.push(first);
+    a.state.control.settle(a.state.project.get_mut());
+    a.state.project.get_mut().channels.pop();
     assert!(!a.unsaved(), "a copy's new id alone changes nothing");
 }
 
@@ -246,7 +248,7 @@ fn events_tell_clients_what_changed() {
     assert_eq!((ev[0].kind, ev[0].name.as_str(), ev[0].ops.clone(), ev[0].by.as_str()), ("apply", "Faster", vec!["set_tempo"], "Test"));
     assert_eq!(newest, ev[0].seq);
     // An edit in the interface is an event on the next tick.
-    a.state.project.channels[0].volume = 0.1;
+    a.state.project.get_mut().channels[0].volume = 0.1;
     a.state.piano.dirty = true;
     a.tick();
     let (ev, _) = a.state.control.events_since(newest);
@@ -425,7 +427,7 @@ fn saving_asks_the_user_unless_headless() {
 #[test]
 fn a_first_clip_makes_the_playlist_and_its_undo_takes_it_away() {
     let mut a = app();
-    a.state.project.arrangements.clear();
+    a.state.project.get_mut().arrangements.clear();
     let pat = ids(&a).2[0];
     let r = round_trip(&mut a, json!({"op": "add_clip", "track": 1, "position": 0, "pattern": pat}));
     assert!(r[0]["clip"].as_u64().is_some());
@@ -439,7 +441,7 @@ fn ui_round_trip(a: &mut App, name: &str, f: impl FnOnce(&mut App)) {
     let before = reading(a);
     let steps = a.state.history.at();
     f(a);
-    a.state.control.settle(&mut a.state.project);
+    a.state.control.settle(a.state.project.get_mut());
     let after = reading(a);
     assert_ne!(before, after, "{name} changes something");
     assert_eq!(a.state.history.at(), steps + 1, "{name} is one step");
@@ -508,7 +510,7 @@ fn the_mixer_s_edits_are_undoable() {
         run(a, MCmd::AddEffect(0, 0));
     });
     run(&mut a, MCmd::AddEffect(0, 0));
-    a.state.control.settle(&mut a.state.project);
+    a.state.control.settle(a.state.project.get_mut());
     ui_round_trip(&mut a, "Move effect", |a| {
         run(a, MCmd::SlotMove(0, 1));
     });
@@ -531,7 +533,7 @@ fn the_mixer_s_edits_are_undoable() {
     assert_eq!(a.state.history.at(), steps, "a click without a drag");
     ui_round_trip(&mut a, "Mixer track volume", |a| {
         crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
-        a.state.project.mixer[1].volume = Some(0.3);
+        a.state.project.get_mut().mixer[1].volume = Some(0.3);
         crate::history::settle(&mut a.state);
     });
 }
@@ -872,7 +874,7 @@ fn preset_loads_are_undo_steps() {
     let mut h = crate::plugins::Hosted::new(knob.clone());
     h.owner = a.state.project.channels[0].id;
     a.plugins.hosted.insert(0, h);
-    a.state.project.channels[0].name = Some("808 Snare".into());
+    a.state.project.get_mut().channels[0].name = Some("808 Snare".into());
     a.params_tick();
     let dir = std::env::temp_dir().join(format!("os-preset-undo-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -899,7 +901,7 @@ fn preset_loads_are_undo_steps() {
     assert_eq!(a.state.history.at(), steps + 2, "the same preset again changes nothing");
 
     // The channel moves without a step of its own: the instance follows it, and so does the undo.
-    a.state.project.channels.swap(0, 1);
+    a.state.project.get_mut().channels.swap(0, 1);
     a.follow_ids(true, false);
     assert!(a.plugins.hosted.contains_key(&1));
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PRESET));

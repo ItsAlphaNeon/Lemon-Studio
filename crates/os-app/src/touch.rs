@@ -193,7 +193,7 @@ mod tests {
     fn opens_and_plays() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = test_project();
+        app.state.project = crate::locked::Locked::new(test_project());
         app.state.selected_channel = 1;
         app.paint(&mut c, None);
         let b = hit_rect(&app, &Action::ToggleWin(Win::Touch));

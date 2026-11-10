@@ -9,6 +9,7 @@
 //!
 // spec: plugins/midi-out.md §2 (state), §3 (what it sends), §6 (Lemon MIDI Out)
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -568,8 +569,8 @@ impl crate::app::App {
     pub(crate) fn add_midi_out(&mut self) -> Option<String> {
         crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
-            let row = crate::app::add_plugin_channel(&mut s.project, LEMON_MIDI_OUT);
-            make_midi_out(&mut s.project.channels[row], &Settings::default());
+            let row = crate::app::add_plugin_channel(s.project.get_mut(), LEMON_MIDI_OUT);
+            make_midi_out(&mut s.project.get_mut().channels[row], &Settings::default());
             s.piano.dirty = true;
             s.selected_channel = row;
             s.rack.select_only(row);
@@ -606,13 +607,13 @@ impl crate::app::App {
             let s = &mut app.state;
             let groups = cut_groups(&rows.iter().map(|&r| s.project.channels[r].misc.cut).collect::<Vec<_>>());
             for (i, &row) in rows.iter().enumerate() {
-                let ch = &mut s.project.channels[row];
+                let ch = &mut s.project.get_mut().channels[row];
                 // A new id at once, before anything is hosted on the row and takes its channel's.
                 ch.id = os_model::Id::NONE;
                 make_midi_out(ch, &Settings { channel: (i % 16) as u8, ..Settings::default() });
                 (ch.misc.cut, ch.misc.cut_by) = (groups[i], groups[i]);
             }
-            s.control.settle(&mut s.project);
+            s.control.settle(s.project.get_mut());
             s.piano.dirty = true;
             app.sync_midi_outs();
             app.transport.set_instruments(app.plugins.instruments());
@@ -745,7 +746,7 @@ mod tests {
 
     fn app() -> App {
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.file = None;
         a.state.path = None;
         a.plugins = crate::plugins::Plugins::default();
@@ -827,10 +828,10 @@ mod tests {
     fn set_up_for_midi_export() {
         let mut a = app();
         // The five samplers, then a Lemon Trio and an automation clip channel.
-        let trio = crate::app::add_plugin_channel(&mut a.state.project, crate::osc3::LEMON_TRIO);
-        let auto = crate::app::add_channel(&mut a.state.project);
-        a.state.project.channels[auto].kind = ChannelKind::Automation;
-        a.state.project.channels[1].misc.cut = 4;
+        let trio = crate::app::add_plugin_channel(a.state.project.get_mut(), crate::osc3::LEMON_TRIO);
+        let auto = crate::app::add_channel(a.state.project.get_mut());
+        a.state.project.get_mut().channels[auto].kind = ChannelKind::Automation;
+        a.state.project.get_mut().channels[1].misc.cut = 4;
         for _ in 0..4 {
             a.plugin_tick();
         }
@@ -878,7 +879,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let (first, second) = (dir.join("a.flp"), dir.join("b.flp"));
         let mut a = app();
-        a.state.project.patterns[0].notes.push(os_model::Note { length: 48, key: 60, ..os_model::Note::step(2, 0) });
+        a.state.project.get_mut().patterns[0].notes.push(os_model::Note { length: 48, key: 60, ..os_model::Note::step(2, 0) });
         a.save_to(first.clone());
         let mut b = App::new(None);
         b.plugins.available = crate::plugins::builtin();

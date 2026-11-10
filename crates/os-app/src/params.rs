@@ -10,6 +10,7 @@
 // spec: plugins/plugin-parameters.md §3 (targets), §4 (clip names), §5 (last tweaked; §5.1, §5.2 the parameter
 // menu), §6 (browse parameters); plugins/patcher/README.md §4.2 (the effects inside a container)
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -515,7 +516,7 @@ impl App {
         // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
         // So are its root note page's: the engine applies the main pitch switch.
         for (row, name, v) in stretch {
-            let Some(ch) = self.state.project.channels.get_mut(row) else { continue };
+            let Some(ch) = self.state.project.get_mut().channels.get_mut(row) else { continue };
             let mut st = ch.sound.stretch;
             let mut misc = ch.misc;
             if crate::plugins::stretch_param(&name, v, &mut st) && st != ch.sound.stretch {
@@ -702,7 +703,7 @@ mod tests {
     fn targets_and_names() {
         let mut app = App::new(None);
         let s = &mut app.state;
-        s.project.channels[0].name = Some("Lead".into());
+        s.project.get_mut().channels[0].name = Some("Lead".into());
         let ch = s.project.channels[0].index;
         assert_eq!(target_of(s, 0, 7), Some(target::channel_param(ch, 7)));
         assert_eq!(target_of(s, fx_key(2, 3), 35), Some(target::slot_param(2, 3, 35)));
@@ -726,11 +727,11 @@ mod tests {
     fn slot_plugin_parameters_browse_and_automate() {
         use crate::views::browser::{rows, Item};
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
-        a.state.project.mixer[2].slots[1] = Some(eq);
+        a.state.project.get_mut().mixer[2].slots[1] = Some(eq);
         a.sync_effects();
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
@@ -795,11 +796,11 @@ mod tests {
     /// The app with the built-in EQ hosted in mixer track 2's slot 2, its parameters listed in the browser.
     fn eq_app() -> (App, usize) {
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
-        a.state.project.mixer[2].slots[1] = Some(eq);
+        a.state.project.get_mut().mixer[2].slots[1] = Some(eq);
         a.sync_effects();
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
@@ -985,7 +986,7 @@ mod tests {
                 continue;
             }
             let mut a = App::new(None);
-            a.state.project = project;
+            a.state.project = crate::locked::Locked::new(project);
             a.reset_hosted();
             a.plugins.effects = crate::plugins::builtin_effects();
             a.sync_effects();
@@ -1023,7 +1024,7 @@ mod tests {
         a.params_tick();
         let key = a.state.params.lists.keys().copied().find(|&k| fx_of(k).is_some()).expect("a hosted EQ slot");
         println!("{:?}", a.params_automate(key, k));
-        let auto = a.state.project.automations.last_mut().unwrap();
+        let auto = a.state.project.get_mut().automations.last_mut().unwrap();
         println!("target {:#010x}", auto.target().unwrap());
         let end = auto.points.last().map_or(16.0, |p| p.beat.max(16.0));
         auto.points = vec![os_model::AutoPoint::new(0.0, 0.0), os_model::AutoPoint::new(end, 1.0)];

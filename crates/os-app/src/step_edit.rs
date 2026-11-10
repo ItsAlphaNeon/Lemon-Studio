@@ -9,6 +9,7 @@
 //! `settings.txt` (`step_edit`), off by default.
 // spec: ui/step-edit.md, ui/global-snap.md "Step edit step"
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::borrow::Cow;
 
 use winit::keyboard::KeyCode;
@@ -190,7 +191,7 @@ mod tests {
         app.state.z = vec![Win::PianoRoll];
         app.state.song_mode = false;
         app.state.selected_channel = 0;
-        app.state.project.patterns.iter_mut().for_each(|p| p.notes.clear());
+        app.state.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         assert!(app.typing_on() && !on(), "the typing keyboard is on and step edit off at start");
         ctrl_e(&mut app);
         assert!(on());

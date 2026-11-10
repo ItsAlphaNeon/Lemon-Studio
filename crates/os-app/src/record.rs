@@ -9,6 +9,7 @@
 //! settings in `settings.txt`, also shown on Settings ▸ Recording (`crate::prefs`); the arm itself is not saved.
 // spec: ui/recording.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::{App, State};
 use crate::knobs::KnobId;
 use crate::playlist::Snap;
@@ -347,13 +348,13 @@ impl App {
         let snap = crate::history::Snap::pattern(s, pattern);
         crate::history::record(s, crate::score_log::DUMPED, snap);
         let n = new.len();
-        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pattern) {
+        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
             if replace {
                 p.notes.clear();
             }
             p.notes.extend(new);
         } else {
-            s.project.patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
+            s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
         }
         s.piano.dirty = true;
         Some(format!("Captured {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
@@ -680,10 +681,10 @@ impl App {
             .chain(take.new.iter())
             .cloned()
             .collect();
-        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pattern) {
+        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
             p.notes = notes;
         } else {
-            s.project.patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
+            s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
         }
         // The time selection stays (it may be looping, spec §5).
         let range = s.piano.range;
@@ -918,10 +919,10 @@ mod tests {
     fn app() -> App {
         crate::settings_file::set_flag("rec_ask", false);
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.selected_channel = 0;
         app.state.pattern = 1;
-        app.state.project.patterns.iter_mut().for_each(|p| p.notes.clear());
+        app.state.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         app.state.global_snap.now = Snap::Step;
         app
     }
@@ -1366,7 +1367,7 @@ mod tests {
         use os_model::target;
         let mut app = app();
         if crate::mixer::track(&app.state, 1).is_none() {
-            app.state.project.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+            app.state.project.get_mut().mixer = (0..3).map(os_model::MixerTrack::new).collect();
         }
         app.toggle_record();
         app.transport.pretend_at(24.0, false);
