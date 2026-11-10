@@ -719,6 +719,8 @@ pub struct Channel {
     /// Sound settings the engine reads that have no other place in the model (filter, sampler flags, declick,
     /// stretch).
     pub sound: ChannelSound,
+    /// Lemon Studio's icon for the channel (by name), kept in `.lemon`; FL's own is [`ChannelRack::icon`].
+    pub lemon_icon: Option<String>,
 }
 
 impl Channel {
@@ -1543,6 +1545,13 @@ pub struct MixerTrack {
     pub monitor: u8,
     /// Per slot: the slot plugin's CPU switches (event 212 flags; they follow the plugin when it moves).
     pub slot_cpu: [PluginCpu; 10],
+    /// Lemon Studio's own per slot: a name typed for it, its colour and its icon (by name), kept in `.lemon` (FL's file
+    /// has none); they follow the slot's track when it moves.
+    pub slot_names: [Option<String>; 10],
+    pub slot_colors: [Option<Rgb>; 10],
+    pub slot_icons: [Option<String>; 10],
+    /// Lemon Studio's icon for the track (by name), kept in `.lemon`; FL's own is [`MixerTrack::icon`].
+    pub lemon_icon: Option<String>,
     /// Armed for disk recording (the strip's record button). Not saved, and not part of the track: tracks that differ
     /// only here are equal (spec: audio/track-io.md §1.5).
     pub armed: bool,
@@ -1585,6 +1594,10 @@ impl PartialEq for MixerTrack {
             rec_source,
             monitor,
             slot_cpu,
+            slot_names,
+            slot_colors,
+            slot_icons,
+            lemon_icon,
             armed: _,
             origin: _,
         } = self;
@@ -1615,6 +1628,10 @@ impl PartialEq for MixerTrack {
             && *rec_source == o.rec_source
             && *monitor == o.monitor
             && *slot_cpu == o.slot_cpu
+            && *slot_names == o.slot_names
+            && *slot_colors == o.slot_colors
+            && *slot_icons == o.slot_icons
+            && *lemon_icon == o.lemon_icon
     }
 }
 
@@ -1665,6 +1682,10 @@ impl MixerTrack {
             rec_source: REC_POST_EQ,
             monitor: MONITOR_ARMED,
             slot_cpu: [PluginCpu::default(); 10],
+            slot_names: Default::default(),
+            slot_colors: Default::default(),
+            slot_icons: Default::default(),
+            lemon_icon: None,
             armed: false,
             origin: None,
         }

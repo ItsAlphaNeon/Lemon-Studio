@@ -10022,6 +10022,7 @@ pub(crate) fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
         envelopes: Default::default(),
         rack: Default::default(),
         misc: Default::default(), sound: Default::default(),
+        lemon_icon: None,
     }
 }
 

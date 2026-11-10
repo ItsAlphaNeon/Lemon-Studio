@@ -2270,6 +2270,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         sample_path: None,
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        lemon_icon: None,
     });
     s.project.get_mut().automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
     let row = s.project.channels.len() - 1;
@@ -2317,6 +2318,7 @@ pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os
         sample_path: None,
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        lemon_icon: None,
     });
     let beats = points.last().map_or(0.0, |p| p.beat);
     let mut a = os_flp::project::new_automation(index, target, points.first().map_or(0.0, |p| p.value), beats);
@@ -2378,6 +2380,7 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
         sample_path: None,
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        lemon_icon: None,
     });
     if !audio {
         // Two points, at 0 and at 4 beats (one 4/4 bar), both 0.5, single curve without tension (§2).
@@ -2419,6 +2422,7 @@ pub fn add_layer_channel(s: &mut State) -> usize {
         sample_path: None,
         layer_children: children,
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        lemon_icon: None,
     });
     let row = s.project.channels.len() - 1;
     s.selected_channel = row;
@@ -2468,6 +2472,7 @@ pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
+        lemon_icon: None,
     });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Audio;

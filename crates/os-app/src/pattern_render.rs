@@ -112,6 +112,7 @@ pub fn add_channel(s: &mut State, path: &str, pattern: u16) -> u16 {
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
+        lemon_icon: None,
     });
     let row = s.project.channels.len() - 1;
     s.selected_channel = row;

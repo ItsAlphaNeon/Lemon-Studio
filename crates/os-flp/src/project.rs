@@ -968,6 +968,7 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
         },
         misc: load_misc(block),
         sound: load_sound(block, &i32_at),
+        lemon_icon: None,
     }
 }
 
@@ -4396,6 +4397,7 @@ mod tests {
             sample_path: None,
             layer_children: vec![],
             envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         }
     }
 
