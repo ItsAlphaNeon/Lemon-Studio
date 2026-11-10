@@ -146,7 +146,7 @@ impl Default for TapperUi {
             count: Tapper::default(),
             flash_at: None,
             flash: 0.0,
-            epoch: Instant::now(),
+            epoch: crate::anim::now(),
             #[cfg(test)]
             test_time: None,
             #[cfg(test)]
@@ -162,7 +162,7 @@ impl TapperUi {
         if let Some(t) = self.test_time {
             return t;
         }
-        self.epoch.elapsed().as_secs_f64()
+        crate::anim::now().saturating_duration_since(self.epoch).as_secs_f64()
     }
 
     /// Fades the pad's flash (spec §4, §8: over 250 ms). Returns whether it is still fading or just went out (the pad

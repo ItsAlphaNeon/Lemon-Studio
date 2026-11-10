@@ -348,7 +348,7 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             }
         }
         Cmd::RandomColor => {
-            let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+            let seed = crate::clip_colors::clock();
             pat_mut(s, cur).color = Some(random_color(seed ^ u64::from(cur)));
             s.piano.dirty = true;
         }
