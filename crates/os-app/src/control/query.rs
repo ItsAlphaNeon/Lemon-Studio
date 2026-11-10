@@ -143,7 +143,7 @@ pub fn project(s: &State) -> Value {
         "info": { "title": i.title, "author": i.author, "genre": i.genre, "comments": i.comments, "url": i.url },
         "file": s.path.as_ref().map(|p| p.display().to_string()),
         "song_mode": s.song_mode(),
-        "current_pattern": p.pattern(s.pattern).map(|q| q.id.0),
+        "current_pattern": p.pattern(s.pattern()).map(|q| q.id.0),
         "selected_channel": p.channels.get(s.selected_channel).map(|c| c.id.0),
         "channels": channels,
         "mixer": tracks,

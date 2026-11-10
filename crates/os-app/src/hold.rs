@@ -142,7 +142,7 @@ impl App {
         let (Some(g), Some(ch)) = (self.piano_geom(), piano::channel(&self.state)) else { return };
         let s = &mut self.state;
         crate::history::rename(s, "Piano roll clone note");
-        let selected = !s.piano.selection(s.pattern, Some(ch)).is_empty();
+        let selected = !s.piano.selection(s.pattern(), Some(ch)).is_empty();
         let p = piano::pattern_mut(s);
         for &(i, o) in &orig {
             if let Some(n) = p.notes.get_mut(i) {
@@ -154,7 +154,7 @@ impl App {
         p.notes.extend(orig.iter().map(|&(_, o)| o));
         let copies: Vec<(usize, Note)> = orig.iter().enumerate().map(|(k, &(_, o))| (first + k, o)).collect();
         if selected {
-            s.piano.select(s.pattern, ch, (first..first + copies.len()).collect());
+            s.piano.select(s.pattern(), ch, (first..first + copies.len()).collect());
         }
         let unit = crate::piano_snap::unit(s).unwrap_or(u32::from(s.project.ppq.max(4)) / 4);
         let x0 = if step { x0 - unit as f32 * g.ppt } else { x0 };
@@ -381,7 +381,7 @@ mod tests {
         app.mouse_up();
         let b = *notes(&app).iter().find(|n| *n != &a).unwrap();
         let ch = piano::channel(&app.state).unwrap();
-        app.state.piano.select(app.state.pattern, ch, vec![0, 1]);
+        app.state.piano.select(app.state.pattern(), ch, vec![0, 1]);
         app.paint(&mut c, None);
         app.shift = true;
         press(&mut app, x, y);
@@ -392,7 +392,7 @@ mod tests {
         let moved = |n: Note| Note { position: n.position + 8 * unit, ..n };
         assert_eq!(ns.len(), 4);
         assert!([a, b, moved(a), moved(b)].iter().all(|n| ns.contains(n)), "{ns:?}");
-        let sel: Vec<Note> = app.state.piano.selection(app.state.pattern, Some(ch)).iter().map(|&i| ns[i]).collect();
+        let sel: Vec<Note> = app.state.piano.selection(app.state.pattern(), Some(ch)).iter().map(|&i| ns[i]).collect();
         assert!(sel.len() == 2 && sel.contains(&moved(a)) && sel.contains(&moved(b)), "the copies are selected");
         undo(&mut app);
         // Shift pressed during a plain drag: the note stays on its key, nothing is copied.

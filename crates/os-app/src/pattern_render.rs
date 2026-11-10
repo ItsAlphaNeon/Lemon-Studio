@@ -73,7 +73,7 @@ pub fn job(s: &State, dir: &Path, stem: &str) -> ex::Job {
         ..Options::default()
     };
     let tempo = s.project.tick_tempo(s.tempo);
-    let ticks = crate::piano::pattern_length(s, s.pattern);
+    let ticks = crate::piano::pattern_length(s, s.pattern());
     ex::Job {
         options,
         folder: dir.to_path_buf(),
@@ -187,7 +187,7 @@ impl App {
             return;
         }
         let s = &self.state;
-        let pattern = s.pattern.max(1);
+        let pattern = s.pattern().max(1);
         if !s.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty()) {
             let text = format!("Nothing to render: {} has no notes.", crate::patterns::name_of(s, pattern));
             return self.tell(crate::dialog::Kind::Warning, TITLE, crate::dialog::spans(&[&text]));
@@ -211,7 +211,7 @@ impl App {
             return;
         }
         let s = &self.state;
-        let pattern = s.pattern.max(1);
+        let pattern = s.pattern().max(1);
         if !s.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty()) {
             let text = format!("Nothing to render: {} has no notes.", crate::patterns::name_of(s, pattern));
             return self.tell(crate::dialog::Kind::Warning, TITLE, crate::dialog::spans(&[&text]));
@@ -237,7 +237,7 @@ impl App {
             return self.invalidate();
         }
         let job = self.export_job(f);
-        self.pattern_render = Some(Pending { pattern: self.state.pattern.max(1), replace: false });
+        self.pattern_render = Some(Pending { pattern: self.state.pattern().max(1), replace: false });
         self.start_export(job, false);
     }
 
@@ -394,7 +394,7 @@ mod tests {
         crate::history::undo(&mut app.state);
         assert_eq!(app.state.project.channels.len(), channels, "one undo step");
         // A pattern with no notes: a warning, no render.
-        app.state.pattern = 2;
+        app.state.set_pattern(2);
         app.pattern_cmd(crate::patterns::Cmd::QuickRender);
         assert!(app.export.is_none() && app.pattern_render.is_none() && !app.state.dialogs.is_empty());
         let _ = std::fs::remove_dir_all(&d);

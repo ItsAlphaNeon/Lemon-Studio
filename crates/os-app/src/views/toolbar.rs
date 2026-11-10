@@ -871,7 +871,7 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
     ui.c.fill_rrect(prev, if lemon { 4.0 } else { 2.0 }, t.button);
     icons::draw(ui.c, Icon::ArrowRight, prev.inset(2.0), t.glyph);
     let pb = a.span(855.0, 948.0, 47.0, 76.0);
-    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(s, s.pattern.max(1)));
+    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(s, s.pattern().max(1)));
     if lemon {
         os_ui::kit::lemon::well(ui.c, t, pb, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
     } else {
@@ -881,9 +881,9 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
         .project
         .patterns
         .iter()
-        .find(|p| p.number == s.pattern)
+        .find(|p| p.number == s.pattern())
         .and_then(|p| p.name.clone())
-        .unwrap_or_else(|| format!("Pattern {}", s.pattern));
+        .unwrap_or_else(|| format!("Pattern {}", s.pattern()));
     // Right-aligned before the spin arrow; a name too long for that keeps its start and is cut at the arrow, as FL
     // cuts long labels (long names were not measured here: Lemon Studio's choice).
     let pf = Font::condensed(21, 7);

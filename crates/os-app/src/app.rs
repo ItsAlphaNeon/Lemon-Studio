@@ -1035,6 +1035,16 @@ impl State {
     pub fn set_song_mode(&mut self, on: bool) {
         self.project.write_if(|p| p.song_mode.replace(on) != Some(on));
     }
+
+    /// The pattern shown: the project's (event 67), so a save opens on it again with its loops. As in FL, showing
+    /// another is no undo step but an unsaved change (`ui/undo-steps.md`); an undo leaves it (control::command).
+    pub fn pattern(&self) -> u16 {
+        self.project.current_pattern.unwrap_or(1).max(1)
+    }
+
+    pub fn set_pattern(&mut self, n: u16) {
+        self.project.write_if(|p| p.current_pattern.replace(n) != Some(n));
+    }
 }
 
 pub struct State {
@@ -1101,7 +1111,6 @@ pub struct State {
     pub plugin_pos: (f32, f32),
     pub selected_channel: usize,
     pub selected_mixer: u16,
-    pub pattern: u16,
     pub menu_open: Option<usize>,
     /// The open dropdown's submenu, shown as `playlist.popup`: the flat index of its ▸ entry.
     pub menu_sub: Option<usize>,
@@ -1579,7 +1588,6 @@ impl App {
                 selected_channel: 0,
                 selected_mixer: 1,
                 mixer: Default::default(),
-                pattern: 1,
                 menu_open: None,
                 menu_sub: None,
                 lane_menu: false,
@@ -1844,7 +1852,6 @@ impl App {
                 self.reset_hosted();
                 let s = &mut self.state;
                 s.tempo = project.tempo.unwrap_or(130.0);
-                s.pattern = project.current_pattern.unwrap_or(1).max(1);
                 s.selected_channel = 0;
                 s.selected_mixer = 1;
                 s.mixer = Default::default();
@@ -1858,6 +1865,7 @@ impl App {
                 // "Project").
                 let mut project = project;
                 project.song_mode = Some(project.song_mode.unwrap_or(true));
+                project.current_pattern = Some(project.current_pattern.unwrap_or(1).max(1));
                 s.project = crate::locked::Locked::new(project);
                 // Opening in song mode sets the initial values, as FL 26 does (spec: flp/engine-events.md "Event
                 // 216"); the project is opened with them, not changed.
@@ -1960,7 +1968,7 @@ impl App {
         let rate = Transport::device_rate().unwrap_or(44100);
         let first = job.options.ticked().next().unwrap_or(0);
         let name = job.file(first).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        let mode = if song { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) };
+        let mode = if song { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern()) };
         self.export_reveal = job.options.reveal;
         self.plugins.set_offline(job.options.hq);
         // Lemon Sampler voices playing from disk wait for their frames in every export, high quality or not.
@@ -2052,9 +2060,6 @@ impl App {
             p.song_mode.get_or_insert(false);
             unset
         });
-        // The pattern shown is saved, so the project opens on it again with the loops the rack stores into it (event
-        // 67, spec: flp/engine-events.md).
-        s.project.get_mut().current_pattern = Some(s.pattern);
         // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
         crate::rack::to_model(s);
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
@@ -2493,7 +2498,7 @@ impl App {
         s.file = None;
         s.path = None;
         s.tempo = 130.0;
-        s.pattern = 1;
+        s.set_pattern(1);
         // FL's default template is saved in pattern mode.
         s.set_song_mode(false);
         s.piano.reset();
@@ -5999,7 +6004,7 @@ impl App {
                         let mut sel = base.clone();
                         sel.extend(piano::notes_in(s, &g, r).into_iter().filter(|i| !base.contains(i)));
                         if let Some(ch) = piano::channel(s) {
-                            s.piano.select(s.pattern, ch, sel);
+                            s.piano.select(s.pattern(), ch, sel);
                         }
                     }
                     self.damage_piano();
@@ -7754,7 +7759,7 @@ impl App {
         }
         if matches!(area, Some(Action::PatternNext)) {
             let d = if dy + dx > 0.0 { 1 } else { -1 };
-            let n = (i32::from(self.state.pattern.max(1)) + d).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+            let n = (i32::from(self.state.pattern().max(1)) + d).clamp(1, i32::from(crate::patterns::MAX)) as u16;
             crate::patterns::select(&mut self.state, n);
             return None;
         }
@@ -8104,7 +8109,7 @@ impl App {
                 let s = &mut self.state;
                 if let Some(ch) = piano::channel(s) {
                     let all = piano::notes(s).iter().enumerate().filter(|(_, n)| n.channel == ch).map(|(i, _)| i).collect();
-                    s.piano.select(s.pattern, ch, all);
+                    s.piano.select(s.pattern(), ch, all);
                     s.piano.range = Some((0, piano::pattern_end(s)));
                 }
             }
@@ -8129,7 +8134,7 @@ impl App {
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") && self.state.shown(Win::PianoRoll) => {
                 let s = &mut self.state;
-                let sel = s.piano.selection(s.pattern, piano::channel(s));
+                let sel = s.piano.selection(s.pattern(), piano::channel(s));
                 let notes = piano::notes(s);
                 s.piano.clipboard = sel.iter().filter_map(|&i| notes.get(i).copied()).collect();
             }
@@ -8242,7 +8247,7 @@ impl App {
     }
 
     fn play_mode(&self) -> PlayMode {
-        if self.state.song_mode() { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) }
+        if self.state.song_mode() { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern()) }
     }
 
     /// Play one note of channel `channel` (Note::channel) once (also while playing or paused).
@@ -8470,7 +8475,7 @@ impl App {
         if self.ctrl && matches!(tool, Tool::Draw | Tool::Paint) && matches!(a, Action::PianoGrid | Action::PianoNote(_)) {
             let s = &mut self.state;
             let base = if let Action::PianoNote(i) = *a { vec![i] } else { Vec::new() };
-            s.piano.select(s.pattern, ch, base.clone());
+            s.piano.select(s.pattern(), ch, base.clone());
             self.drag = Some(Drag::Marquee { x0: x, y0: y, base });
             self.damage_piano();
             return;
@@ -8529,8 +8534,8 @@ impl App {
                     return;
                 }
                 Tool::Select if note.is_none() => {
-                    let base = if self.ctrl { s.piano.selection(s.pattern, Some(ch)) } else { Vec::new() };
-                    s.piano.select(s.pattern, ch, base.clone());
+                    let base = if self.ctrl { s.piano.selection(s.pattern(), Some(ch)) } else { Vec::new() };
+                    s.piano.select(s.pattern(), ch, base.clone());
                     self.drag = Some(Drag::Marquee { x0: x, y0: y, base });
                     self.damage_piano();
                     return;
@@ -8538,13 +8543,13 @@ impl App {
                 Tool::Select => {
                     // Clicking an unselected note selects it (Ctrl adds), then drags as Draw does.
                     let i = note.unwrap_or(0);
-                    let mut sel = s.piano.selection(s.pattern, Some(ch));
+                    let mut sel = s.piano.selection(s.pattern(), Some(ch));
                     if !sel.contains(&i) {
                         if !self.ctrl {
                             sel.clear();
                         }
                         sel.push(i);
-                        s.piano.select(s.pattern, ch, sel);
+                        s.piano.select(s.pattern(), ch, sel);
                     }
                 }
                 // Paint on a note: drags that one note like Draw (no group move).
@@ -8570,7 +8575,7 @@ impl App {
             Action::PianoNote(i) => {
                 let Some(&n) = piano::notes(s).get(i) else { return };
                 piano::snapshot(s);
-                let sel = s.piano.selection(s.pattern, Some(ch));
+                let sel = s.piano.selection(s.pattern(), Some(ch));
                 let idx = if sel.contains(&i) && tool.moves_groups() {
                     sel
                 } else {
@@ -8673,7 +8678,7 @@ impl App {
             Action::PlPick(src) => {
                 self.state.playlist.source = Some(src);
                 if let os_model::ClipSource::Pattern(n) = src {
-                    self.state.pattern = n;
+                    self.state.set_pattern(n);
                 }
                 if right {
                     let (x, y) = self.mouse;
@@ -8952,7 +8957,7 @@ impl App {
                 s.pat_ui.menu_at = Some((at.x, at.y));
                 s.menu_open = Some(views::menus::PATTERNS);
             }
-            Action::PatternNext => self.drag = Some(Drag::PatternBox { y0: self.mouse.1, p0: s.pattern.max(1) }),
+            Action::PatternNext => self.drag = Some(Drag::PatternBox { y0: self.mouse.1, p0: s.pattern().max(1) }),
             Action::PatternAdd => {
                 let at = views::band_rect(s, Rect::new(crate::patterns::PLUS_BOX_AT.0, crate::patterns::PLUS_BOX_AT.1, 0.0, 0.0));
                 crate::patterns::run(s, crate::patterns::Cmd::FindFirst, (at.x, at.y));
@@ -9319,7 +9324,7 @@ impl App {
         if let Some(l) = crate::rack::explicit_len(s) {
             if k >= l {
                 let ps = crate::rack::per_step(s);
-                crate::rack::set_len(s, Some(s.project.pattern_bar_end(s.pattern, (k + 1) * ps).div_ceil(ps)));
+                crate::rack::set_len(s, Some(s.project.pattern_bar_end(s.pattern(), (k + 1) * ps).div_ceil(ps)));
             }
         }
         if crate::prefs::check(&crate::prefs::BOTH_MOUSE_BUTTONS) {
@@ -10868,7 +10873,7 @@ mod tests {
         (app.state.file, app.state.path) = (None, None);
         // A note ending at tick 300 of the current pattern: one 4/4 bar.
         app.state.project.get_mut().patterns[0].notes = vec![Note { length: 276, ..Note::step(0, 24) }];
-        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern), 384);
+        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern()), 384);
         app.mark_saved();
         app.open_settings(PROJECT);
         frame(&mut app, &mut c, None);
@@ -10895,12 +10900,12 @@ mod tests {
         assert_eq!(app.state.message.as_deref(), Some("Time signature: 3/4"));
         assert!(app.unsaved(), "a change to the project");
         // Patterns are whole bars of the signature: 288 ticks in 3/4.
-        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern), 576);
-        assert_eq!(crate::playlist::source_len(&app.state, os_model::ClipSource::Pattern(app.state.pattern)), 576);
+        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern()), 576);
+        assert_eq!(crate::playlist::source_len(&app.state, os_model::ClipSource::Pattern(app.state.pattern())), 576);
         pick(&mut app, &mut c, DENOMINATOR, "8", 4);
         assert_eq!(app.state.project.bar, Some((3, 2)), "an eighth is two sixteenths");
         assert_eq!((shown(&app, NUMERATOR).as_deref(), shown(&app, DENOMINATOR).as_deref()), (Some("3"), Some("8")));
-        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern), 432);
+        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern()), 432);
         // Play truncated notes: on in a new project, as in FL's default template (spec: flp/engine-events.md "Event
         // 30"), on File > New too; a click switches it.
         assert!(default_project().play_truncated);
@@ -11514,7 +11519,7 @@ mod tests {
         assert_eq!((app.state.piano.marker, app.state.piano.clipboard[0].position), (96, 48));
         assert_eq!((app.state.playlist.pos, app.state.playlist.range), (192, Some((192, 384))));
         // The pattern is still one 4/4 bar long, in the new ticks.
-        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern), 768);
+        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern()), 768);
         // The change is one step, "Project settings": undone, the old timebase and its ticks, and the undo step made
         // before it then works in those; redone, both come back in the new ticks.
         assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::history::PROJECT_SETTINGS));
@@ -11736,7 +11741,7 @@ mod tests {
         let mut app = App::new(None);
         let s = &mut app.state;
         pl::arr_mut(s).clips.clear();
-        let current = s.pattern;
+        let current = s.pattern();
         if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == current) {
             (p.notes, p.length) = (Vec::new(), None);
         }
@@ -13325,7 +13330,7 @@ mod tests {
         app.state.rack.graph_open = true;
         app.state.selected_channel = 0;
         let ch = app.state.project.channels[0].index;
-        let n = app.state.pattern.max(1);
+        let n = app.state.pattern().max(1);
         crate::patterns::pat_mut(&mut app.state, n).notes.push(os_model::Note::step(ch, 0));
         frame(&mut app, &mut c, None);
         let area = hit_rect(&app, &Action::RackGraphArea);
@@ -13341,7 +13346,7 @@ mod tests {
         assert_eq!((app.state.history.done(), app.state.history.newest_done()), (steps + 1, Some("Graph editor change velocity")));
         assert!(crate::history::undo(&mut app.state).is_some());
         assert_eq!(vel(&app), before, "one step takes the whole drag back");
-        app.state.pattern = n + 1;
+        app.state.set_pattern(n + 1);
         frame(&mut app, &mut c, None);
         let steps = app.state.history.done();
         app.mouse_move(x, area.y + area.h * 0.5);
@@ -15033,7 +15038,8 @@ mod tests {
         let bar = app.state.project.bar_ticks();
         let c = crate::playlist::place(&mut app.state, 0, 2 * bar);
         crate::playlist::arr_mut(&mut app.state).clips[c].length = 8 * bar;
-        app.state.project.get_mut().patterns.iter_mut().filter(|p| p.number == app.state.pattern).for_each(|p| p.length = Some(8 * bar));
+        let n = app.state.pattern();
+        app.state.project.get_mut().patterns.iter_mut().filter(|p| p.number == n).for_each(|p| p.length = Some(8 * bar));
         let ws = &mut app.state.wins[Win::PianoRoll.slot().unwrap()];
         ws.maxed = false;
         ws.rect = Rect::new(220.0, 90.0, 1000.0, 480.0);
@@ -16395,9 +16401,9 @@ mod tests {
         app.state.z = vec![Win::Playlist];
         app.shift = true;
         app.code = Some(KeyCode::Digit4);
-        let pattern = app.state.pattern;
+        let pattern = app.state.pattern();
         assert!(crate::playlist::key(&mut app, &plus, false, false));
-        assert_eq!(app.state.pattern, pattern);
+        assert_eq!(app.state.pattern(), pattern);
     }
 
     /// Shift+Ctrl+S is Save as: it asks where and leaves the open file as it was. Ctrl+S saves in place without asking.
@@ -16754,14 +16760,14 @@ mod tests {
         let labels = right(&mut app, &mut c, |r| r.item == Item::Pattern(2));
         assert!(labels.iter().any(|l| l == "Rename and colour..."));
         pick(&mut app, &mut c, "Select pattern");
-        assert_eq!(app.state.pattern, 2);
-        app.state.pattern = 1;
+        assert_eq!(app.state.pattern(), 2);
+        app.state.set_pattern(1);
         let n = app.state.project.patterns.len();
         right(&mut app, &mut c, |r| r.item == Item::Pattern(2));
         pick(&mut app, &mut c, "Clone");
         assert_eq!(app.state.project.patterns.len(), n + 1);
         let copy = app.state.project.pattern(3).and_then(|p| p.name.clone()).unwrap_or_default();
-        assert!(app.state.pattern == 3 && copy.starts_with("Verse"), "pattern 2 cloned, not the current one: {copy}");
+        assert!(app.state.pattern() == 3 && copy.starts_with("Verse"), "pattern 2 cloned, not the current one: {copy}");
         // A channel under Generators: selected from its menu.
         app.state.browser_open.insert(crate::views::browser::section_key("Generators").unwrap());
         right(&mut app, &mut c, |r| r.item == Item::Channel(1));
@@ -17371,7 +17377,7 @@ mod tests {
         use os_model::{Clip, ClipSource};
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         app.state.set_song_mode(true);
         // Pattern 1 at bar 2 (window 0..384) and at bar 5 showing its second half only (window 192..384).
         let mut cut = Clip::new(4 * 384, 192, 0, ClipSource::Pattern(1));
@@ -17676,13 +17682,13 @@ mod tests {
             app.ctrl = false;
             frame(&mut app, &mut c, None);
             assert_eq!(mine(&app), drawn, "{tool:?}: no note added or moved");
-            assert_eq!(app.state.piano.selection(app.state.pattern, ch).len(), 2, "{tool:?}");
+            assert_eq!(app.state.piano.selection(app.state.pattern(), ch).len(), 2, "{tool:?}");
             assert!(app.state.piano.overlay.is_none(), "marquee gone after release");
             // Ctrl+click on the third note: that note only.
             app.ctrl = true;
             click(&mut app, &mut c, g.x_of(192.0) + 4.0, row(60));
             app.ctrl = false;
-            let sel = app.state.piano.selection(app.state.pattern, ch);
+            let sel = app.state.piano.selection(app.state.pattern(), ch);
             assert_eq!(sel.len(), 1, "{tool:?}");
             assert_eq!(piano::notes(&app.state)[sel[0]].position, 192);
             assert_eq!(mine(&app), drawn);
@@ -17734,7 +17740,7 @@ mod tests {
         app.key(&Key::Character("e".into()), false, false);
         assert_eq!(app.state.piano.tool, Tool::Select);
         swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, row(61)), (g.x_of(120.0), row(59)), false);
-        assert_eq!(app.state.piano.selection(app.state.pattern, ch).len(), 2);
+        assert_eq!(app.state.piano.selection(app.state.pattern(), ch).len(), 2);
         assert!(app.state.piano.overlay.is_none(), "marquee gone after release");
 
         // Shift+Right moves the selection one step; Ctrl+Up an octave; plain Right scrolls.
@@ -17796,7 +17802,7 @@ mod tests {
         app.key(&Key::Character("c".into()), true, false);
         app.key(&Key::Character("v".into()), true, false);
         assert_eq!(mine(&app).len(), count * 2);
-        assert_eq!(app.state.piano.selection(app.state.pattern, ch).len(), count);
+        assert_eq!(app.state.piano.selection(app.state.pattern(), ch).len(), count);
         // Ctrl+B duplicates right after the selection's end.
         app.key(&Key::Character("b".into()), true, false);
         assert_eq!(mine(&app).len(), count * 3);
@@ -17812,7 +17818,7 @@ mod tests {
         assert_eq!(piano::paste_tick(&app.state, &[Note::step(0, 500)]), 192, "placed: paste at the marker");
         swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, ry), (g.x_of(100.0), ry), true);
         assert_eq!(app.state.piano.range, Some((0, 96)));
-        let sel = app.state.piano.selection(app.state.pattern, ch);
+        let sel = app.state.piano.selection(app.state.pattern(), ch);
         let notes = piano::notes(&app.state);
         assert!(!sel.is_empty() && sel.iter().all(|&i| notes[i].position < 96));
         app.key(&Key::Character("a".into()), true, false);
@@ -17837,7 +17843,7 @@ mod tests {
         crate::piano_tools::duplicate(&mut app.state);
         assert_eq!(starts(&app), [48, 432]);
         assert_eq!(app.state.piano.range, Some((384, 768)), "the range moves on");
-        assert_eq!(app.state.piano.selection(app.state.pattern, Some(ch)).len(), 1, "the copy is selected");
+        assert_eq!(app.state.piano.selection(app.state.pattern(), Some(ch)).len(), 1, "the copy is selected");
         // Again: from the moved range.
         crate::piano_tools::duplicate(&mut app.state);
         assert_eq!(starts(&app), [48, 432, 816]);
@@ -17847,7 +17853,7 @@ mod tests {
         assert_eq!(starts(&app).len(), 3);
         assert_eq!(app.state.piano.range, Some((1100, 1200)));
         // No range: right after the selection's end.
-        app.state.piano.select(app.state.pattern, ch, vec![0]);
+        app.state.piano.select(app.state.pattern(), ch, vec![0]);
         crate::piano_tools::duplicate(&mut app.state);
         assert_eq!(starts(&app), [48, 72, 432, 816]);
     }
@@ -17949,12 +17955,12 @@ mod tests {
 
         fn select(app: &mut App, pos: u32, key: u16) {
             let i = piano::notes(&app.state).iter().position(|n| n.position == pos && n.key == key).expect("the note");
-            app.state.piano.select(app.state.pattern, 0, vec![i]);
+            app.state.piano.select(app.state.pattern(), 0, vec![i]);
         }
 
         fn selected(app: &App) -> Vec<(u32, u16)> {
             let all = piano::notes(&app.state);
-            let mut v: Vec<(u32, u16)> = app.state.piano.selection(app.state.pattern, Some(0)).iter().map(|&i| (all[i].position, all[i].key)).collect();
+            let mut v: Vec<(u32, u16)> = app.state.piano.selection(app.state.pattern(), Some(0)).iter().map(|&i| (all[i].position, all[i].key)).collect();
             v.sort_unstable();
             v
         }
@@ -18840,10 +18846,10 @@ mod tests {
         // A selection limits the edit and follows the results.
         put(&mut app, &[(0, 72, 60), (96, 72, 62)]);
         let first = piano::notes(&app.state).iter().position(|n| n.channel == ch && n.key == 60).unwrap();
-        app.state.piano.select(app.state.pattern, ch, vec![first]);
+        app.state.piano.select(app.state.pattern(), ch, vec![first]);
         key(&mut app, "u", true, false, false);
         assert_eq!(mine(&app), vec![(0, 24, 60), (24, 24, 60), (48, 24, 60), (96, 72, 62)]);
-        assert_eq!(app.state.piano.selection(app.state.pattern, Some(ch)).len(), 3);
+        assert_eq!(app.state.piano.selection(app.state.pattern(), Some(ch)).len(), 3);
         // Ctrl+X cuts the selection, Ctrl+D deselects.
         key(&mut app, "x", true, false, false);
         assert_eq!(mine(&app), vec![(96, 72, 62)]);
@@ -18863,7 +18869,7 @@ mod tests {
             let first = mine(&app);
             assert!(first.iter().all(|&(p, _, k)| p % grid == 0 && (48..84).contains(&k)), "{first:?}");
             assert_eq!(first.iter().map(|n| n.1).sum::<u32>(), end, "the steps tile the pattern");
-            assert_eq!(app.state.piano.selection(app.state.pattern, Some(ch)).len(), first.len(), "the new notes are selected");
+            assert_eq!(app.state.piano.selection(app.state.pattern(), Some(ch)).len(), first.len(), "the new notes are selected");
             frame(&mut app, &mut c, None);
             let k = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::RandOctave)));
             app.mouse_move(k.cx(), k.cy());
@@ -19146,7 +19152,7 @@ mod tests {
                 .filter(|(_, n)| n.channel == ch && n.position < 4 * st)
                 .map(|(i, _)| i)
                 .collect();
-            app.state.piano.select(app.state.pattern, ch, first4);
+            app.state.piano.select(app.state.pattern(), ch, first4);
             key(&mut app, "w", false, true, false);
             assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Claw);
             assert_eq!(keys(&app), vec![60, 61, 62, 64, 65, 66, 67], "the first beat's last quarter trashed, the selection alone");
@@ -19168,7 +19174,7 @@ mod tests {
             frame(&mut app, &mut c, None);
             click(&mut app, Action::PianoDlg(DAct::Accept));
             assert!(!app.state.shown(Win::PianoDlg));
-            assert_eq!(app.state.piano.selection(app.state.pattern, Some(ch)).len(), 4, "the selection holds the result");
+            assert_eq!(app.state.piano.selection(app.state.pattern(), Some(ch)).len(), 4, "the selection holds the result");
             assert!(piano::undo(&mut app.state));
             assert_eq!(mine(&app), steps, "one undo step");
             key(&mut app, "w", false, true, false);
@@ -19332,25 +19338,25 @@ mod tests {
         // holds the preview.
         {
             use crate::piano_dlg::Act as DAct;
-            let pat = app.state.pattern;
+            let pat = app.state.pattern();
             let notes_of = |app: &App, n: u16| app.state.project.patterns.iter().find(|p| p.number == n).map(|p| p.notes.clone()).unwrap_or_default();
             put(&mut app, &[(0, 96, 60), (96, 48, 62)]);
             let before = notes_of(&app, pat);
             for close in [Action::CloseWin(Win::PianoDlg), Action::PianoDlg(DAct::Accept)] {
                 key(&mut app, "u", false, true, false);
                 assert_ne!(notes_of(&app, pat), before, "previewed");
-                app.state.pattern = pat + 1;
+                app.state.set_pattern(pat + 1);
                 app.act(close.clone());
                 assert_eq!(notes_of(&app, pat), before, "{close:?} puts back the pattern previewed on");
                 assert!(!app.state.shown(Win::PianoDlg));
-                app.state.pattern = pat;
+                app.state.set_pattern(pat);
             }
             key(&mut app, "u", false, true, false);
-            app.state.pattern = pat + 1;
+            app.state.set_pattern(pat + 1);
             app.act(Action::PianoDlg(DAct::Group));
             assert_eq!(notes_of(&app, pat), before, "a preview on the new pattern puts the old one back");
             app.act(Action::CloseWin(Win::PianoDlg));
-            app.state.pattern = pat;
+            app.state.set_pattern(pat);
             assert_eq!(notes_of(&app, pat), before);
         }
         frame(&mut app, &mut c, None);
@@ -20251,11 +20257,11 @@ mod tests {
         assert_eq!(app.state.selected_channel, row);
         assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([row]));
         app.state.pending_open = None;
-        app.state.pattern = 2;
+        app.state.set_pattern(2);
         tap(&mut app, &mut c, 2);
         tap(&mut app, &mut c, 2);
         assert_eq!(app.state.pending_open, None, "a pattern clip opens no sampler");
-        assert!(app.state.shown(Win::PianoRoll) && app.state.pattern == 1, "it opens its pattern in the piano roll");
+        assert!(app.state.shown(Win::PianoRoll) && app.state.pattern() == 1, "it opens its pattern in the piano roll");
         let _ = std::fs::remove_file(&wav);
     }
 
@@ -20757,7 +20763,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.playlist.source = Some(ClipSource::Pattern(1));
         app.menu_item(PATTERNS, PATTERN_PICK + 2);
-        assert_eq!(app.state.pattern, 2);
+        assert_eq!(app.state.pattern(), 2);
         assert_eq!(crate::playlist::source(&app.state), ClipSource::Pattern(2));
         crate::playlist::place(&mut app.state, 0, 0);
         assert_eq!(crate::playlist::clips(&app.state).last().map(|c| c.source), Some(ClipSource::Pattern(2)));
@@ -21920,7 +21926,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
         app.state.project.get_mut().patterns.push(os_model::Pattern { number: 2, name: Some("Drums".into()), ..Default::default() });
-        app.state.pattern = 2;
+        app.state.set_pattern(2);
         let (pats, fx) = (section_key("Patterns").unwrap(), section_key("Effects").unwrap());
         let reset = |app: &mut App| {
             let s = &mut app.state;
@@ -21947,11 +21953,11 @@ mod tests {
         check(&app, &drums);
         // A pattern the section does not list: the section is selected.
         reset(&mut app);
-        app.state.pattern = 7;
+        app.state.set_pattern(7);
         app.menu_item(PATTERNS, entry);
         check(&app, &pats);
         // Shift+Ctrl+P (the playlist in front keeps it for Performance mode, ui/playlist.md).
-        app.state.pattern = 2;
+        app.state.set_pattern(2);
         reset(&mut app);
         app.state.z.retain(|&w| w != Win::Playlist);
         app.shift = true;
@@ -22148,7 +22154,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         // The left end of the box's text area, drawn with pattern 1 named `name`.
         let left = |app: &mut App, c: &mut Canvas, name: &str| {
             crate::patterns::pat_mut(&mut app.state, 1).name = Some(name.into());
@@ -22194,7 +22200,7 @@ mod tests {
         use os_model::TimeMarker;
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         crate::patterns::pat_mut(&mut app.state, 1).notes.clear();
         let set_to = |app: &App| -> Vec<u32> {
             let items = crate::rack::length_menu(&app.state, 0.0, 0.0).items;
@@ -22219,7 +22225,7 @@ mod tests {
         // A 6/8 project: beats of 2 steps and bars of 12 (an empty pattern without a marker, Set to's 1 bar); 6/16:
         // beats of 1 and bars of 6.
         app.state.project.get_mut().bar = Some((6, 2));
-        app.state.pattern = 2;
+        app.state.set_pattern(2);
         let s = &app.state;
         assert_eq!((pattern_steps(s), beat_steps(s), bar_steps(s)), (12, 2, 12));
         assert_eq!(set_to(&app)[0], 12);
@@ -22240,7 +22246,7 @@ mod tests {
         };
         let f: Vec<_> = (0..5).map(|k| face(&app, &c, k)).collect();
         assert!(f[0] == f[1] && f[1] != f[2] && f[2] == f[3] && f[3] != f[4], "pairs");
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         app.state.rack_roll_view = true;
         frame(&mut app, &mut c, None);
         let b = hit_rect(&app, &Action::RackRoll(1));
@@ -22259,7 +22265,7 @@ mod tests {
         app.state.rack_size.0 = views::rack::DEFAULT_SIZE.0 + 320.0;
         let ch = app.state.project.channels[1].index;
         let ps = crate::rack::per_step(&app.state);
-        let n = app.state.pattern.max(1);
+        let n = app.state.pattern().max(1);
         crate::patterns::pat_mut(&mut app.state, n).notes.push(os_model::Note { length: ps, ..os_model::Note::step(ch, 12 * ps) });
         app.state.raise(Win::ChannelRack);
         frame(&mut app, &mut c, None);
@@ -22818,7 +22824,7 @@ mod tests {
         pl::arr_mut(&mut app.state).clips = clips.clone();
         app.state.playlist.sel = vec![1];
         let before = (app.state.project.patterns.clone(), clips.clone());
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         let entry = MENUS[PATTERNS].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Split by instrument").unwrap();
         assert!(works(PATTERNS, item_at(PATTERNS, entry).unwrap()));
         let popup = pattern_popup(0.0, 0.0);
@@ -22838,7 +22844,7 @@ mod tests {
             assert_eq!((p.color, &p.markers, &p.loops, p.length, p.controls.is_empty()), (color, &p1.markers, &p1.loops, None, true), "pattern {n}");
         }
         assert_eq!((pat(1).color, &pat(1).controls, &pat(1).markers), (color, &p1.controls, &p1.markers));
-        assert_eq!(s.pattern, 1, "the first stays current");
+        assert_eq!(s.pattern(), 1, "the first stays current");
         // The playlist: one clip per new pattern at each clip of the original, just before it (the original on top).
         let at = |c: &Clip| (c.source, c.position, c.length, c.track, c.window);
         let want: Vec<_> = [(2, 0), (3, 0), (1, 0), (4, 1), (2, 2), (3, 2), (1, 2)]
@@ -22852,13 +22858,13 @@ mod tests {
         assert_eq!(pl::run(&mut app, Cmd::Undo).as_deref(), Some("Undo: split by instrument"));
         assert_eq!((app.state.project.patterns.clone(), pl::clips(&app.state).to_vec()), before);
         // A pattern with one channel's notes is only renamed; one without notes stays as it is.
-        app.state.pattern = 3;
+        app.state.set_pattern(3);
         let n = app.state.history.at();
         app.pattern_cmd(PCmd::SplitByChannel);
         let s = &app.state;
         assert_eq!((s.project.patterns.len(), s.project.pattern(3).unwrap().name.as_deref(), pl::clips(s).len()), (3, Some("Hat"), 3));
         assert_eq!(s.history.at(), n + 1);
-        app.state.pattern = 7;
+        app.state.set_pattern(7);
         app.pattern_cmd(PCmd::SplitByChannel);
         assert_eq!((app.state.project.patterns.len(), app.state.history.at()), (3, n + 1));
     }
@@ -22994,7 +23000,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         app.state.project.get_mut().patterns[0].markers = vec![TimeMarker::new(192, "Mid")];
         app.mark_saved();
         let entry = MENUS[PATTERNS].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Set time signature...").unwrap();
@@ -23081,7 +23087,7 @@ mod tests {
         assert!(!app.modal_open());
         assert_eq!(app.state.project.pattern(1).unwrap().markers, [TimeMarker::new(192, "Mid")]);
         // No marker: straight to the dialog; Enter accepts. Another pattern gets its own.
-        app.state.pattern = 2;
+        app.state.set_pattern(2);
         app.menu_item(PATTERNS, entry);
         assert_eq!(form(&app), Some(SigForm { pattern: 2, num: 4, den: 4, song: None }));
         app.key(&Key::Named(NamedKey::Enter), false, false);
@@ -23106,7 +23112,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         let note = |end: u32| Note { length: 100, ..Note::step(0, end - 100) };
         let sig = |pos: u32, num: u8, den: u8| TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(pos, &format!("{num}/{den}")) };
         let len = |app: &App| {
@@ -24125,7 +24131,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         // Kick on every beat, a clap on 2 and 4; two clips of the pattern.
         let note = |ch: u16, at: u32| Note { length: 48, ..Note::step(ch, at) };
         app.state.project.get_mut().patterns[0].notes = vec![note(0, 0), note(1, 96), note(0, 192), note(1, 288), note(0, 384), note(1, 480)];
@@ -24211,7 +24217,7 @@ mod tests {
         save(&mut app, &mut c, "14_audio_clip");
         // The channel rack with pattern 1 in 3/8 (ui/channel-rack.md §23): lit to its length, grouped by the project's
         // beat; its mini roll over the pattern's bars; then the same in a 6/8 project.
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         let sig = os_model::TimeMarker { kind: os_model::TimeMarker::SIGNATURE, numerator: 3, denominator: 8, ..os_model::TimeMarker::new(0, "3/8") };
         app.state.project.get_mut().patterns[0].markers = vec![sig];
         app.state.project.get_mut().patterns[0].length = None;

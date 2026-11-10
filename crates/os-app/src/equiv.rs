@@ -94,7 +94,7 @@ fn side(app: &App) -> String {
         let _ = writeln!(out, "{name}: {v:#?}");
     };
     f("tempo", &s.tempo.to_bits());
-    f("pattern", &s.pattern);
+    f("pattern", &s.pattern());
     f("song_mode", &s.song_mode());
     f("filter", &r.filter);
     f("groups", &r.groups);

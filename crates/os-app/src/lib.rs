@@ -1554,7 +1554,7 @@ fn screenshot(args: &[String]) {
         None => {}
     }
     if let Some(p) = pattern {
-        app.state.pattern = p;
+        app.state.set_pattern(p);
     }
     if let Some(c) = channel {
         app.state.selected_channel = c;

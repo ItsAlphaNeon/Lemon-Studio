@@ -1190,7 +1190,7 @@ pub fn track_name(s: &State, t: u16) -> String {
 
 /// The current clip source (the current pattern unless another was picked).
 pub fn source(s: &State) -> ClipSource {
-    s.playlist.source.unwrap_or(ClipSource::Pattern(s.pattern.max(1)))
+    s.playlist.source.unwrap_or(ClipSource::Pattern(s.pattern().max(1)))
 }
 
 /// The source Draw and Paint place on `track`: the one it is locked to, else the current one (`source`).
@@ -2211,7 +2211,7 @@ pub fn make_unique(s: &mut State, i: usize) -> Option<u16> {
         cl.source = ClipSource::Pattern(next);
     }
     s.playlist.source = Some(ClipSource::Pattern(next));
-    s.pattern = next;
+    s.set_pattern(next);
     s.piano.dirty = true;
     Some(next)
 }
@@ -2296,7 +2296,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
 /// the caller then takes away). Returns its rack row.
 pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os_model::AutoPoint>) -> usize {
     let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
-    let before = crate::history::Snap::Several(vec![rack, crate::history::Snap::pattern(s, s.pattern)]);
+    let before = crate::history::Snap::Several(vec![rack, crate::history::Snap::pattern(s, s.pattern())]);
     snapshot_with(s, crate::events::TURN_INTO_CLIP, before);
     let name = unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
@@ -2337,7 +2337,7 @@ pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os
 pub fn automation_span(s: &State) -> (u32, u32) {
     let a = if crate::prefs::check(&crate::prefs::AUTOMATION_AT_PLAYBACK_POSITION) { s.playlist.pos } else { 0 };
     let end = clips(s).iter().filter(|c| !c.muted).map(|c| c.end()).max().unwrap_or(0);
-    let b = if end > a { end } else { a + source_len(s, ClipSource::Pattern(s.pattern)).max(1) };
+    let b = if end > a { end } else { a + source_len(s, ClipSource::Pattern(s.pattern())).max(1) };
     (a, b)
 }
 
@@ -3531,7 +3531,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 // Clicking a clip makes its source current (§3).
                 s.playlist.source = Some(c.source);
                 if let ClipSource::Pattern(n) = c.source {
-                    s.pattern = n;
+                    s.set_pattern(n);
                 }
                 s.playlist.picker = source_kind(s, c.source);
                 // A resized clip lends its length to the clips placed next; a clip of natural length clears it.
@@ -4918,7 +4918,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ClipEditSource(i) => {
             if let Some(ClipSource::Pattern(n)) = clips(s).get(i).map(|c| c.source) {
-                s.pattern = n;
+                s.set_pattern(n);
                 s.raise(crate::app::Win::PianoRoll);
             }
             None

@@ -163,7 +163,7 @@ fn paint_one(ui: &mut Ui, s: &State, e: &EventsUi, front: bool) {
     let r = ruler_of(e);
     let ppq = ppq(s);
     let bar = ppq * 4.0;
-    let len = f64::from(s.project.pattern_length(s.pattern));
+    let len = f64::from(s.project.pattern_length(s.pattern()));
     let accent = if lemon { t.brand_lit(brand::MAIN) } else { Color::rgb(0x8fb35c) };
 
     // The ruler: bar numbers.

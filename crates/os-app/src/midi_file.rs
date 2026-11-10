@@ -678,7 +678,7 @@ impl App {
             s.file = None;
             s.path = None;
             s.tempo = tempo;
-            s.pattern = 1;
+            s.set_pattern(1);
             s.set_song_mode(false);
             s.piano.reset();
             s.playlist.reset();
@@ -696,7 +696,7 @@ impl App {
             // As every playlist step does (`playlist::snapshot_as`), the arrangement exists before the step.
             crate::playlist::arr_mut(s);
             // One undo step through the control plane, as the rack's other channel adds (`control::edit`).
-            let n = s.pattern;
+            let n = s.pattern();
             crate::control::edit(s, IMPORT_STEP, crate::control::command::Region::Project, |s| place(s, imp, o, &name, n));
         }
         let s = &mut self.state;
@@ -715,7 +715,7 @@ impl App {
         if new.is_empty() {
             return self.tell(Kind::Info, TITLE, spans(&["", &file_name(path), " has no notes in the tracks and channels chosen."]));
         }
-        let n = s.pattern;
+        let n = s.pattern();
         history::record(s, IMPORT_STEP, Snap::Patterns { patterns: s.project.patterns.clone(), current: n });
         let old = s.project.pattern_length(n);
         let pat = crate::patterns::pat_mut(s, n);
@@ -804,12 +804,12 @@ impl App {
 
     fn piano_midi(&self) -> Smf {
         let s = &self.state;
-        pattern_file(&s.project, s.pattern, crate::piano::channel(s).unwrap_or(0), s.tempo)
+        pattern_file(&s.project, s.pattern(), crate::piano::channel(s).unwrap_or(0), s.tempo)
     }
 
     fn project_midi(&self) -> Smf {
         let s = &self.state;
-        project_file(&s.project, s.song_mode(), s.pattern, s.tempo)
+        project_file(&s.project, s.song_mode(), s.pattern(), s.tempo)
     }
 
     /// TOOLS ▸ Save MIDI clipboard to browser (Lemon Studio's design after the original's entry; greyed while nothing

@@ -174,7 +174,7 @@ impl Snap {
             Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
             Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
             Snap::Init(t, _) => Snap::Init(*t, crate::init::entry(s, *t)),
-            Snap::Patterns { .. } => Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern },
+            Snap::Patterns { .. } => Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern() },
             Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(s, r.row))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
             // What each command would put back, as it is now (`swap` applies them).
@@ -253,7 +253,7 @@ impl Snap {
             Snap::Init(t, e) => crate::init::put(s, t, e),
             Snap::Patterns { patterns, current } => {
                 s.project.get_mut().patterns = patterns;
-                s.pattern = current;
+                s.set_pattern(current);
                 s.piano.clear_selection();
             }
             Snap::Rack(r) => put_rack(s, *r),
@@ -746,7 +746,7 @@ mod tests {
     use crate::app::App;
 
     fn note_count(s: &State) -> usize {
-        s.project.pattern(s.pattern).map_or(0, |p| p.notes.len())
+        s.project.pattern(s.pattern()).map_or(0, |p| p.notes.len())
     }
 
     /// Two recorded edits: undo and redo swap them back and forth; a new action drops the undone branch; past
@@ -757,7 +757,7 @@ mod tests {
         let s = &mut app.state;
         let start = note_count(s);
         for k in 0..2 {
-            let snap = Snap::pattern(s, s.pattern);
+            let snap = Snap::pattern(s, s.pattern());
             record(s, STEP_SEQ_EDIT, snap);
             crate::rack::set_step(s, 0, 10 + k, true);
         }
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!((redo(s).as_deref(), note_count(s)), (Some(STEP_SEQ_EDIT), start + 1));
         assert!(s.history.undone(2) && s.history.current(1) && !s.history.undone(1));
         // A new action: the undone step is gone.
-        let snap = Snap::pattern(s, s.pattern);
+        let snap = Snap::pattern(s, s.pattern());
         record(s, "Piano roll add note", snap);
         crate::rack::set_step(s, 0, 14, true);
         assert_eq!(s.history.entries().iter().map(|e| e.1).collect::<Vec<_>>(), [LAST_RESET, STEP_SEQ_EDIT, "Piano roll add note"]);
@@ -776,7 +776,7 @@ mod tests {
         // Three levels kept: the oldest go.
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, 3);
         for k in 0..3 {
-            let snap = Snap::pattern(s, s.pattern);
+            let snap = Snap::pattern(s, s.pattern());
             record(s, "Piano roll edit", snap);
             crate::rack::set_step(s, 0, 20 + k, true);
         }
@@ -794,11 +794,11 @@ mod tests {
     fn settle_and_wheel_runs() {
         let mut app = App::new(None);
         let s = &mut app.state;
-        let snap = Snap::pattern(s, s.pattern);
+        let snap = Snap::pattern(s, s.pattern());
         record(s, "Piano roll edit", snap);
         settle(s);
         assert_eq!(s.history.len(), 0, "nothing changed");
-        let snap = Snap::pattern(s, s.pattern);
+        let snap = Snap::pattern(s, s.pattern());
         record(s, "Piano roll edit", snap);
         crate::rack::set_step(s, 0, 9, !crate::rack::row_steps(s, 0, 10)[9]);
         settle(s);
@@ -1002,15 +1002,15 @@ mod tests {
         // notes and leave pattern 2 shown (equivalence harness, redo to the end showed the pattern edited).
         let mut app = App::new(None);
         let s = &mut app.state;
-        s.pattern = 1;
+        s.set_pattern(1);
         crate::piano::snapshot_as(s, "Piano roll edit");
         crate::patterns::pat_mut(s, 1).notes.push(os_model::Note::step(0, 0));
         let edited = s.project.pattern(1).map(|p| p.notes.clone());
-        s.pattern = 2;
+        s.set_pattern(2);
         assert!(undo(s).is_some());
-        assert_eq!((s.pattern, s.project.pattern(1).map(|p| p.notes.len())), (2, Some(0)));
+        assert_eq!((s.pattern(), s.project.pattern(1).map(|p| p.notes.len())), (2, Some(0)));
         assert!(redo(s).is_some());
-        assert_eq!((s.pattern, s.project.pattern(1).map(|p| p.notes.clone())), (2, edited));
+        assert_eq!((s.pattern(), s.project.pattern(1).map(|p| p.notes.clone())), (2, edited));
     }
 
     #[test]

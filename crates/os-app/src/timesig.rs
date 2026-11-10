@@ -111,7 +111,7 @@ impl App {
     /// PATTERNS > Set time signature... on the current pattern: the conflict question when it has a signature at its
     /// start (§3), else the dialog.
     pub(crate) fn ask_time_signature(&mut self) {
-        let n = self.state.pattern.max(1);
+        let n = self.state.pattern().max(1);
         if start_marker(&self.state, n).is_none() {
             return self.open_time_signature(n);
         }
@@ -134,7 +134,7 @@ impl App {
     /// The dialog for a song time signature marker, at 4 / 4 (spec: ui/playlist.md §7a).
     pub(crate) fn open_song_signature(&mut self, at: SongSig) {
         self.state.playlist.popup = None;
-        let n = self.state.pattern.max(1);
+        let n = self.state.pattern().max(1);
         self.show_form(Body::TimeSig(SigForm { pattern: n, num: 4, den: 4, song: Some(at) }));
     }
 

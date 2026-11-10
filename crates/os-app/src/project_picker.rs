@@ -30,7 +30,7 @@ pub fn items(s: &State) -> Vec<PItem> {
     nums.dedup();
     let mut v = vec![PItem::head("Patterns")];
     v.extend(nums.into_iter().map(|n| {
-        PItem::new(crate::patterns::name_of(s, n), Cmd::Project(ProjCmd::Pattern(n))).mark(Mark::Radio(n == s.pattern))
+        PItem::new(crate::patterns::name_of(s, n), Cmd::Project(ProjCmd::Pattern(n))).mark(Mark::Radio(n == s.pattern()))
     }));
     v.push(PItem::sep());
     v.push(PItem::new("New pattern", Cmd::Project(ProjCmd::NewPattern)));
@@ -74,7 +74,7 @@ impl App {
 /// Runs a project picker pick (spec §2 Picks). Returns a status message.
 pub fn run(app: &mut App, c: ProjCmd) -> Option<String> {
     match c {
-        ProjCmd::Pattern(n) => app.state.pattern = n,
+        ProjCmd::Pattern(n) => app.state.set_pattern(n),
         ProjCmd::Channel(r) if r < app.state.project.channels.len() => {
             app.state.selected_channel = r;
             app.state.rack.select_only(r);
@@ -107,7 +107,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
         app.state.project.get_mut().patterns.push(Pattern { number: 3, name: Some("Drop".into()), ..Pattern::default() });
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         app
     }
 
@@ -138,7 +138,7 @@ mod tests {
     fn picks() {
         let mut app = app();
         run(&mut app, ProjCmd::Pattern(3));
-        assert_eq!(app.state.pattern, 3);
+        assert_eq!(app.state.pattern(), 3);
         run(&mut app, ProjCmd::Channel(3));
         assert_eq!(app.state.selected_channel, 3);
         assert_eq!(app.state.rack.sel.iter().copied().collect::<Vec<_>>(), [3]);

@@ -296,7 +296,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let first_step = (sx / STEP_W).floor() as u32;
     let per_step = rk::per_step(s);
     let (group, bars) = (rk::beat_steps(s), rk::pattern_bars(s, len * per_step));
-    let pat = s.project.pattern(s.pattern);
+    let pat = s.project.pattern(s.pattern());
     let notes: &[os_model::Note] = pat.map_or(&[], |p| &p.notes);
     // Playback position (pattern mode): the current step (§16).
     let cur_step = (f.playing && !f.song).then(|| (f.tick / f64::from(per_step)).floor() as u32);

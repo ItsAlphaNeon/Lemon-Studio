@@ -394,7 +394,7 @@ impl Side {
         Side {
             project: s.project.clone(),
             tempo: s.tempo,
-            pattern: s.pattern,
+            pattern: s.pattern(),
             groups: r.groups.clone(),
             unsorted_at: r.unsorted_at,
             filter: r.filter,
@@ -1223,7 +1223,7 @@ fn restore(s: &mut State, side: Side) {
     let new_row: std::collections::HashMap<u32, usize> = side.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
     let Side { project, tempo, pattern, groups, unsorted_at, filter, loop_len, slot_names, slot_colors, icons, loop_unit, loop_mode, loop_type } = side;
-    let shown = s.pattern;
+    let shown = s.pattern();
     let numbers = |p: &Project| p.patterns.iter().map(|q| q.number).collect::<std::collections::BTreeSet<_>>();
     let patterns_before = numbers(&s.project);
     (s.mixer.slot_names, s.mixer.slot_colors, s.playlist.icons) = (slot_names, slot_colors, icons);
@@ -1231,17 +1231,18 @@ fn restore(s: &mut State, side: Side) {
     s.project = crate::locked::Locked::new(project);
     mutes.keep(s.project.get_mut());
     s.tempo = tempo;
-    s.pattern = pattern;
+    s.set_pattern(pattern);
     crate::rack::remap_ui(s, &map);
+    let now = s.pattern();
     let r = &mut s.rack;
     (r.groups, r.unsorted_at, r.filter, r.loop_len, r.loop_unit) = (groups, unsorted_at, filter, loop_len, loop_unit);
     (r.loop_mode, r.loop_type) = (loop_mode, loop_type);
     // The loops put back are those of the pattern shown when the step was made. The pattern shown now stays shown, as
     // in FL (an undo leaves the pattern shown), and gets its own loops; a step that made or removed patterns (a clone,
     // a delete) shows the pattern it showed.
-    r.loops_of = s.pattern;
+    r.loops_of = now;
     if numbers(&s.project) == patterns_before {
-        s.pattern = shown;
+        s.set_pattern(shown);
     }
     crate::rack::follow_pattern(s);
     let tracks = crate::mixer::inserts(s);

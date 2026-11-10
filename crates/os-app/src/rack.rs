@@ -458,7 +458,7 @@ pub fn per_step(s: &State) -> u32 {
 /// The current pattern's explicit length in steps (`None` = Auto).
 pub fn explicit_len(s: &State) -> Option<u32> {
     let ps = per_step(s);
-    s.project.pattern(s.pattern).and_then(|p| p.length).filter(|&l| l > 0).map(|l| (l / ps).max(1))
+    s.project.pattern(s.pattern()).and_then(|p| p.length).filter(|&l| l > 0).map(|l| (l / ps).max(1))
 }
 
 /// Pattern length in steps (§3, §7, §23): the explicit length, else the content rounded up to whole bars of the
@@ -467,7 +467,7 @@ pub fn pattern_steps(s: &State) -> u32 {
     if let Some(l) = explicit_len(s) {
         return l;
     }
-    s.project.pattern_length(s.pattern).div_ceil(per_step(s)).max(1)
+    s.project.pattern_length(s.pattern()).div_ceil(per_step(s)).max(1)
 }
 
 /// Steps in a bar of the project's signature: what the length box's Set to ▸ N bars counts (§23).
@@ -489,7 +489,7 @@ pub fn max_steps(s: &State) -> u32 {
 /// The current pattern's bars up to tick `end`, as `(start, end)` ticks (§6, §23): its own signature's from each
 /// marker on, the project's before the first; a marker cuts the bar it falls in.
 pub fn pattern_bars(s: &State, end: u32) -> Vec<(u32, u32)> {
-    let regions = s.project.pattern_bars(s.pattern);
+    let regions = s.project.pattern_bars(s.pattern());
     let mut bars = Vec::new();
     for (i, &(start, bar, _)) in regions.iter().enumerate() {
         let stop = regions.get(i + 1).map_or(end, |r| r.0.min(end));
@@ -505,7 +505,7 @@ pub fn pattern_bars(s: &State, end: u32) -> Vec<(u32, u32)> {
 /// Set the current pattern's length (`None` = Auto).
 pub fn set_len(s: &mut State, steps: Option<u32>) {
     let ps = per_step(s);
-    let n = s.pattern.max(1);
+    let n = s.pattern().max(1);
     let max = max_steps(s);
     // No undo step, as in FL (measured 2026-10-28).
     crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
@@ -530,7 +530,7 @@ pub fn row_len(s: &State, r: usize) -> u32 {
 
 /// Under Advanced looping, row `r`'s loop length in the current pattern (`None`: it does not loop there).
 fn unit_len(s: &State, r: usize) -> Option<u32> {
-    let notes = s.project.pattern(s.pattern).map_or(&[][..], |p| &p.notes[..]);
+    let notes = s.project.pattern(s.pattern()).map_or(&[][..], |p| &p.notes[..]);
     unit_steps(s, notes, ch_index(s, r)?, s.rack.loop_unit.get(&r).copied())
 }
 
@@ -717,13 +717,13 @@ pub fn step_on(notes: &[Note], ch: u16, k: u32, ps: u32) -> bool {
 /// The current pattern's notes of row `r`.
 pub fn row_notes(s: &State, r: usize) -> Vec<Note> {
     let Some(ch) = ch_index(s, r) else { return Vec::new() };
-    s.project.pattern(s.pattern).map(|p| p.notes.iter().filter(|n| n.channel == ch).copied().collect()).unwrap_or_default()
+    s.project.pattern(s.pattern()).map(|p| p.notes.iter().filter(|n| n.channel == ch).copied().collect()).unwrap_or_default()
 }
 
 /// Replace row `r`'s notes in the current pattern.
 fn set_row_notes(s: &mut State, r: usize, notes: Vec<Note>) {
     let Some(ch) = ch_index(s, r) else { return };
-    let n = s.pattern.max(1);
+    let n = s.pattern().max(1);
     let p = crate::patterns::pat_mut(s, n);
     p.notes.retain(|x| x.channel != ch);
     p.notes.extend(notes.into_iter().map(|x| Note { channel: ch, ..x }));
@@ -766,7 +766,7 @@ fn paste_at(s: &mut State, r: usize) {
 pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
     let Some(ch) = ch_index(s, r) else { return };
     let ps = per_step(s);
-    let n = s.pattern.max(1);
+    let n = s.pattern().max(1);
     let mute = s.rack.opts.contains(MUTE_REMOVED);
     let p = crate::patterns::pat_mut(s, n);
     let has = step_on(&p.notes, ch, k, ps);
@@ -792,13 +792,13 @@ pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
 /// Before a step-sequencer edit of the current pattern: a "Step seq edit" step of the project's undo history
 /// (`crate::history`; spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
 pub fn snapshot(s: &mut State) {
-    let snap = crate::history::Snap::pattern(s, s.pattern.max(1));
+    let snap = crate::history::Snap::pattern(s, s.pattern().max(1));
     crate::history::record(s, crate::history::STEP_SEQ_EDIT, snap);
 }
 
 /// Toggle step `k` of row `r`; returns its new state (§9).
 pub fn toggle_step(s: &mut State, r: usize, k: u32) -> bool {
-    let on = !ch_index(s, r).is_some_and(|ch| s.project.pattern(s.pattern).is_some_and(|p| step_on(&p.notes, ch, k, per_step(s))));
+    let on = !ch_index(s, r).is_some_and(|ch| s.project.pattern(s.pattern()).is_some_and(|p| step_on(&p.notes, ch, k, per_step(s))));
     set_step(s, r, k, on);
     on
 }
@@ -966,7 +966,7 @@ fn solo_now(s: &mut State, r: usize) {
 ///   with "+") leaves the selection alone.
 impl App {
     pub(crate) fn pattern_tick(&mut self) {
-        let now = self.state.pattern;
+        let now = self.state.pattern();
         let seen = self.state.rack.pattern_seen.replace(now);
         if seen.is_none_or(|p| p == now) {
             return;
@@ -1094,7 +1094,7 @@ pub fn cut_itself(s: &mut State, r: usize) {
 /// Transpose the selected channels' notes of the current pattern.
 pub fn transpose_selected(s: &mut State, semis: i32) {
     let chans: Vec<u16> = s.rack.sel.iter().filter_map(|&r| ch_index(s, r)).collect();
-    let n = s.pattern.max(1);
+    let n = s.pattern().max(1);
     for note in crate::patterns::pat_mut(s, n).notes.iter_mut().filter(|x| chans.contains(&x.channel)) {
         note.key = (i32::from(note.key) + semis).clamp(0, 131) as u16;
     }
@@ -2692,7 +2692,7 @@ pub fn play_project(s: &State) -> Project {
     }
     p.tempo = Some(s.tempo);
     // The pattern shown: a song with no clips plays it (os-engine), not the one the project was opened or saved on.
-    p.current_pattern = Some(s.pattern.max(1));
+    p.current_pattern = Some(s.pattern().max(1));
     let rows = loop_rows(s);
     if s.rack.loop_mode && !rows.is_empty() {
         expand_loops(&mut p, s, &rows);
@@ -2734,7 +2734,8 @@ fn burn(s: &mut State, all: bool) {
     let rows: Vec<usize> = if all { looping } else { s.rack.sel.iter().copied().filter(|r| looping.contains(r)).collect() };
     let mut p = s.project.clone();
     expand_loops(&mut p, s, &rows);
-    if let (Some(src), Some(dst)) = (p.pattern(s.pattern).cloned(), s.project.get_mut().patterns.iter_mut().find(|x| x.number == s.pattern)) {
+    let n = s.pattern();
+    if let (Some(src), Some(dst)) = (p.pattern(n).cloned(), s.project.get_mut().patterns.iter_mut().find(|x| x.number == n)) {
         dst.notes = src.notes;
     }
     for r in rows {
@@ -2932,7 +2933,7 @@ pub fn fill_hit(s: &mut State, h: FillHit) {
 /// ui/undo-steps.md, "Graph editor change velocity", one per drag). Only the velocity tab's name was measured.
 pub fn graph_step(s: &mut State) {
     let name = if s.rack.graph_tab == Tab::Vel { "Graph editor change velocity" } else { "Graph editor change" };
-    let snap = crate::history::Snap::pattern(s, s.pattern.max(1));
+    let snap = crate::history::Snap::pattern(s, s.pattern().max(1));
     crate::history::record(s, name, snap);
 }
 
@@ -2943,7 +2944,7 @@ pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
     let ch = ch_index(s, r)?;
     let ps = per_step(s);
     let tab = s.rack.graph_tab;
-    let n = s.pattern.max(1);
+    let n = s.pattern().max(1);
     let p = crate::patterns::pat_mut(s, n);
     let idx = p
         .notes
@@ -3000,10 +3001,11 @@ pub fn from_model(s: &mut State) {
 
 /// The shown pattern's loop lengths, loop type and loop mode into the rack (they are the pattern's, in the file).
 fn load_loops(s: &mut State) {
+    let n = s.pattern();
     let p = &s.project;
     let rack = &mut s.rack;
-    rack.loops_of = s.pattern;
-    let pat = p.pattern(s.pattern);
+    rack.loops_of = n;
+    let pat = p.pattern(n);
     let loops = pat.map(|p| p.loops.clone()).unwrap_or_default();
     rack.loop_len = loops
         .iter()
@@ -3066,14 +3068,14 @@ pub fn to_model(s: &mut State) {
 /// When another pattern is shown than the one the rack's loops belong to: they go into theirs (unless it is gone),
 /// and the shown pattern's are loaded. Before, a save wrote them into whichever pattern was shown, over its own.
 pub(crate) fn follow_pattern(s: &mut State) {
-    let (shown, of) = (s.pattern, s.rack.loops_of);
+    let (shown, of) = (s.pattern(), s.rack.loops_of);
     if shown == of {
         return;
     }
     if s.project.pattern(of).is_some() {
-        s.pattern = of;
+        s.set_pattern(of);
         store_loops(s);
-        s.pattern = shown;
+        s.set_pattern(shown);
     }
     load_loops(s);
     // Playback follows: the pattern's loops, and a song with no clips plays the pattern shown (`play_project`).
@@ -3086,6 +3088,7 @@ fn store_loops(s: &mut State) {
     // file's own form for them is not known); a row with no notes there has none.
     let lens: BTreeMap<usize, u32> =
         if advanced(s) { s.rack.loop_unit.keys().filter_map(|&r| unit_len(s, r).map(|l| (r, l))).collect() } else { s.rack.loop_len.clone() };
+    let n = s.pattern();
     let rack = &s.rack;
     let p = &mut s.project;
     let mut loops: Vec<(u16, u32)> = lens.iter().filter_map(|(&r, &l)| p.channels.get(r).map(|c| (c.index, l))).collect();
@@ -3098,7 +3101,6 @@ fn store_loops(s: &mut State) {
     }
     loops.sort_by_key(|l| l.0);
     let loop_off = (!rack.loop_mode && !loops.is_empty()).then(|| LOOP_TYPE_CODES[usize::from(rack.loop_type.min(2))]);
-    let n = s.pattern;
     // A pattern whose loops already say what the rack holds is left as the file has it (pairs of no length, or a
     // follow entry for only some channels, say the same).
     let changed = p.pattern(n).map_or(!loops.is_empty(), |pat| loop_state(&pat.loops, pat.loop_off) != loop_state(&loops, loop_off));
@@ -3112,6 +3114,24 @@ fn store_loops(s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pattern shown is the project's (event 67); as in FL, showing another is no undo step but an unsaved change,
+    /// and an undo of another step leaves it.
+    #[test]
+    fn the_pattern_shown_is_no_undo_step_but_an_unsaved_change() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.mark_saved();
+        let steps = a.state.history.done();
+        a.state.set_pattern(2);
+        assert_eq!(a.state.project.current_pattern, Some(2));
+        assert!(a.unsaved());
+        assert_eq!(a.state.history.done(), steps, "no step");
+        crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.project.get_mut().main_volume = Some(50));
+        a.state.set_pattern(3);
+        assert!(crate::history::undo(&mut a.state).is_some());
+        assert_eq!(a.state.pattern(), 3, "the undo left it");
+    }
 
     /// The song mode is the project's (event 9); as in FL, switching it is no undo step and no unsaved change, and an
     /// undo of another step leaves it.
@@ -3156,7 +3176,7 @@ mod tests {
     fn loop_mode_with_every_channel_following_survives_a_save() {
         let mut a = crate::app::App::new(None);
         a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.pattern = 1;
+        a.state.set_pattern(1);
         let ch = a.state.project.channels[0].index;
         let follow = os_model::Pattern::LOOP_FOLLOW;
         let pat = crate::patterns::pat_mut(&mut a.state, 1);
@@ -3186,18 +3206,18 @@ mod tests {
             let pat = crate::patterns::pat_mut(&mut a.state, n);
             (pat.loops, pat.loop_off) = (vec![(ch, len)], None);
         }
-        a.state.pattern = 1;
+        a.state.set_pattern(1);
         from_model(&mut a.state);
         assert_eq!(a.state.rack.loop_len, [(0, 3)].into());
         a.state.rack.loop_len.insert(0, 4);
-        a.state.pattern = 2;
+        a.state.set_pattern(2);
         follow_pattern(&mut a.state);
         assert_eq!(a.state.rack.loop_len, [(0, 5)].into(), "pattern 2's own");
         to_model(&mut a.state);
         let loops = |a: &crate::app::App, n| a.state.project.pattern(n).map(|p| p.loops.clone());
         assert_eq!(loops(&a, 2), Some(vec![(ch, 5)]), "pattern 2 keeps its lengths");
         assert_eq!(loops(&a, 1), Some(vec![(ch, 4)]), "pattern 1 keeps the length set while it was shown");
-        a.state.pattern = 1;
+        a.state.set_pattern(1);
         follow_pattern(&mut a.state);
         assert_eq!(a.state.rack.loop_len, [(0, 4)].into());
     }
@@ -3214,18 +3234,18 @@ mod tests {
         pat.notes.push(os_model::Note::step(ch, 0));
         (pat.loops, pat.loop_off) = (vec![(ch, 0)], Some(LOOP_TYPE_CODES[0]));
         let before = a.state.project.pattern(1).cloned();
-        a.state.pattern = 1;
+        a.state.set_pattern(1);
         from_model(&mut a.state);
         let p2 = crate::patterns::pat_mut(&mut a.state, 2);
         p2.notes.push(os_model::Note::step(ch, 0));
         (p2.loops, p2.loop_off) = (vec![(ch, 4)], None);
         crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.project.get_mut().main_volume = Some(50));
-        a.state.pattern = 2;
+        a.state.set_pattern(2);
         follow_pattern(&mut a.state);
         assert!(crate::history::undo(&mut a.state).is_some());
-        assert_eq!(a.state.pattern, 2, "the pattern shown stays");
+        assert_eq!(a.state.pattern(), 2, "the pattern shown stays");
         assert_eq!((a.state.rack.loop_len.clone(), a.state.rack.loop_mode), ([(0, 4)].into(), true), "pattern 2's own loops");
-        a.state.pattern = 3;
+        a.state.set_pattern(3);
         follow_pattern(&mut a.state);
         assert_eq!(a.state.project.pattern(1).cloned(), before, "pattern 1's loops as they were");
     }
@@ -3236,10 +3256,10 @@ mod tests {
     fn the_engine_gets_the_pattern_shown() {
         let mut a = crate::app::App::new(None);
         a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.pattern = 1;
+        a.state.set_pattern(1);
         from_model(&mut a.state);
         a.state.piano.dirty = false;
-        a.state.pattern = 2;
+        a.state.set_pattern(2);
         follow_pattern(&mut a.state);
         assert!(a.state.piano.dirty, "playback follows the switch");
         assert_eq!(play_project(&a.state).current_pattern, Some(2));
@@ -3253,7 +3273,7 @@ mod tests {
         let mut a = crate::app::App::new(None);
         a.state.project = crate::locked::Locked::new(crate::app::test_project());
         (a.state.file, a.state.path) = (None, None);
-        a.state.pattern = 3;
+        a.state.set_pattern(3);
         a.state.piano.dirty = false;
         a.save_to(file.clone());
         assert_eq!(a.state.project.current_pattern, Some(3));
@@ -3276,14 +3296,14 @@ mod tests {
         let ch = a.state.project.channels[0].index;
         let note = os_model::Note { position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
         crate::patterns::pat_mut(&mut a.state, 2).notes.push(note);
-        a.state.pattern = 2;
+        a.state.set_pattern(2);
         follow_pattern(&mut a.state);
         a.state.rack.loop_len.insert(0, 8);
         a.save_to(file.clone());
         let mut b = crate::app::App::new(None);
         b.open(file.clone());
         let _ = std::fs::remove_file(&file);
-        assert_eq!(b.state.pattern, 2);
+        assert_eq!(b.state.pattern(), 2);
         assert_eq!(b.state.rack.loop_len.get(&0), Some(&8));
     }
 
@@ -3455,16 +3475,16 @@ mod tests {
         assert!(burn(&app, auto).iter().all(|(_, on, _)| !on), "greyed on an automation clip's channel");
 
         // Burn a two-echo row of channel 1's step into a new pattern.
-        let cur = app.state.pattern.max(1);
-        app.state.pattern = cur;
+        let cur = app.state.pattern().max(1);
+        app.state.set_pattern(cur);
         let ch = app.state.project.channels[1].index;
         crate::patterns::pat_mut(&mut app.state, cur).notes.push(os_model::Note::step(ch, 0));
         let e = &mut app.state.project.get_mut().channels[1].misc.echo;
         (e.feed, e.echoes, e.time) = (0.25, 2, 48.0 / 384.0);
         let Cmd::Rack(c) = burn(&app, 1)[1].2.clone() else { panic!() };
         run(&mut app, c);
-        assert_ne!(app.state.pattern, cur);
-        let p = app.state.project.pattern(app.state.pattern).unwrap();
+        assert_ne!(app.state.pattern(), cur);
+        let p = app.state.project.pattern(app.state.pattern()).unwrap();
         assert_eq!(p.notes.iter().map(|n| (n.channel, n.position)).collect::<Vec<_>>(), [(ch, 0), (ch, 24), (ch, 48)]);
     }
 
@@ -3507,15 +3527,15 @@ mod tests {
         let s = &mut app.state;
         let ch = s.project.channels[0].index;
         let ps = per_step(s);
-        let at = |s: &State| s.project.pattern(s.pattern).map(|p| p.notes.iter().filter(|n| n.channel == ch && n.position / ps == 3).copied().collect::<Vec<_>>()).unwrap_or_default();
+        let at = |s: &State| s.project.pattern(s.pattern()).map(|p| p.notes.iter().filter(|n| n.channel == ch && n.position / ps == 3).copied().collect::<Vec<_>>()).unwrap_or_default();
         set_step(s, 0, 3, true);
-        crate::patterns::pat_mut(s, s.pattern.max(1)).notes.iter_mut().filter(|n| n.channel == ch && n.position / ps == 3).for_each(|n| n.velocity = 33);
+        crate::patterns::pat_mut(s, s.pattern().max(1)).notes.iter_mut().filter(|n| n.channel == ch && n.position / ps == 3).for_each(|n| n.velocity = 33);
         run(&mut app, RCmd::Opt(MUTE_REMOVED));
         let s = &mut app.state;
         set_step(s, 0, 3, false);
         let notes = at(s);
         assert!(notes.len() == 1 && notes[0].muted() && notes[0].velocity == 33, "{notes:?}");
-        assert!(!step_on(&s.project.pattern(s.pattern).unwrap().notes, ch, 3, ps), "a muted note shows as off");
+        assert!(!step_on(&s.project.pattern(s.pattern()).unwrap().notes, ch, 3, ps), "a muted note shows as off");
         set_step(s, 0, 3, true);
         let notes = at(s);
         assert!(notes.len() == 1 && !notes[0].muted() && notes[0].velocity == 33, "back with its velocity: {notes:?}");
@@ -3568,7 +3588,7 @@ mod tests {
         s.rack.loop_mode = true;
         let ch = s.project.channels[0].index;
         let ps = per_step(s);
-        let n = s.pattern.max(1);
+        let n = s.pattern().max(1);
         let p = crate::patterns::pat_mut(s, n);
         p.notes.retain(|x| x.channel != ch);
         p.notes.extend([Note::step(ch, 0), Note::step(ch, 5 * ps)]);
@@ -4097,15 +4117,15 @@ mod tests {
             let selection = |app: &App| (app.state.rack.sel.iter().copied().collect::<Vec<_>>(), app.state.selected_channel);
             select(&mut app, 4);
             app.tick();
-            app.state.pattern = 2;
+            app.state.set_pattern(2);
             app.tick();
             assert_eq!(selection(&app), if on { (vec![1], 1) } else { (vec![4], 4) }, "check {on}");
             select(&mut app, 4);
-            app.state.pattern = 3;
+            app.state.set_pattern(3);
             app.tick();
             assert_eq!(selection(&app), (vec![4], 4), "no notes: the selection stays (check {on})");
             // The frame's damage brings it up to date too (an input's paint can come before the tick).
-            app.state.pattern = 2;
+            app.state.set_pattern(2);
             let _ = app.take_damage();
             assert_eq!(selection(&app).1, if on { 1 } else { 4 }, "before the frame (check {on})");
         }
@@ -4131,7 +4151,7 @@ mod tests {
             app.tick();
             assert_eq!(zips(&app), vec![4], "no switch yet, check {on}");
             let switch = |app: &mut App, p: u16| {
-                app.state.pattern = p;
+                app.state.set_pattern(p);
                 app.tick();
                 zips(app)
             };
@@ -4156,7 +4176,7 @@ mod tests {
         app.state.z = vec![Win::ChannelRack];
         let ch = ch_index(&app.state, 0).expect("row 0");
         let ps = per_step(&app.state);
-        let n = app.state.pattern;
+        let n = app.state.pattern();
         crate::patterns::pat_mut(&mut app.state, n).notes = on.iter().map(|&k| Note::step(ch, k * ps)).collect();
         app.paint(c, None);
         app
@@ -4165,7 +4185,7 @@ mod tests {
     /// Row 0's steps that are on among the first 16.
     fn steps(app: &App) -> Vec<u32> {
         let (ch, ps) = (ch_index(&app.state, 0).expect("row 0"), per_step(&app.state));
-        let notes = app.state.project.pattern(app.state.pattern).map(|p| p.notes.clone()).unwrap_or_default();
+        let notes = app.state.project.pattern(app.state.pattern()).map(|p| p.notes.clone()).unwrap_or_default();
         (0..16).filter(|&k| step_on(&notes, ch, k, ps)).collect()
     }
 
