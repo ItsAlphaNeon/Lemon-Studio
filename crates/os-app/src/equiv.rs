@@ -561,7 +561,8 @@ impl Rig {
             self.tick();
         }
         self.after_step(self.app.transport.generation_for_tests());
-        if let Some(d) = difference(&canonical(opened), &canonical(&self.app.state.project), false) {
+        // The project's part only: what `side` holds is compared there (the end only: what undo leaves, as FL does).
+        if let Some(d) = difference(&canonical(&project_part(opened)), &canonical(&project_part(&self.app.state.project)), false) {
             bad.push(format!("undo-to-start({undone}:{d})"));
         }
         // Redo as many steps as were done at the end: steps the trace itself undid stay undone.
@@ -572,7 +573,7 @@ impl Rig {
             self.tick();
         }
         self.after_step(self.app.transport.generation_for_tests());
-        if let Some(d) = difference(&canonical(&last), &canonical(&self.app.state.project), false) {
+        if let Some(d) = difference(&canonical(&project_part(&last)), &canonical(&project_part(&self.app.state.project)), false) {
             bad.push(format!("redo-to-end({d})"));
         }
         let now_side = side(&self.app);
