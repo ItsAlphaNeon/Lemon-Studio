@@ -25,3 +25,4 @@ undo-to-start(show_info	Show info on opening makes no undo step, as in FL (measu
 roundtrip(mixer[].volume	A mixer volume with an initial value (event 216) opens at that value in song mode, and moving the fader leaves the initial value as it was (flp/engine-events.md; the resave entry above).
 engine-behind(show_info	Show info on opening is not handed to playback, which plays nothing of it; control-plane step 4 reports every change from the one entry point.
 engine-behind(info.	The project info (title, genre, author, comments, link) is not handed to playback, which plays nothing of it; control-plane step 4 reports every change from the one entry point.
+engine-behind(work_time	The project info's work time (reset on its page) is not handed to playback, which plays nothing of it; control-plane step 4 reports every change from the one entry point.
