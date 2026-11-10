@@ -10,7 +10,11 @@ use os_model::{ControlPoint, Note, Pattern};
 use os_ui::Rect;
 
 use crate::app::State;
-use crate::views::piano::{ROW, TOP_KEY};
+
+/// Default grid row pitch: 17 px of fill plus a 1 px separator (§3); the vertical zoom changes it (§3a).
+pub const ROW: f32 = 18.0;
+/// Highest key (B10); the lowest is 0 (C0) (§3).
+pub const TOP_KEY: i32 = 131;
 
 /// Piano-roll tools (§9), with their shortcut letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

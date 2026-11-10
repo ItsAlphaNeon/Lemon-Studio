@@ -360,10 +360,12 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
 }
 
 /// Icon for a file by extension (spec §6 table).
-pub fn file_icon(name: &str) -> Icon {
+fn file_icon(name: &str) -> Icon {
+    if crate::browser_index::is_audio_file(name) {
+        return Icon::FileAudio;
+    }
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" | "m4a" => Icon::FileAudio,
         "mid" | "midi" => Icon::PianoRoll,
         "flp" | "lemon" => Icon::FileProject,
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
@@ -375,7 +377,7 @@ pub fn file_icon(name: &str) -> Icon {
 
 /// What a file row stands for (spec §6): an audio file a sample, a preset file a preset, anything else a file.
 fn file_item(name: &str, path: &str) -> Item {
-    if file_icon(name) == Icon::FileAudio {
+    if crate::browser_index::is_audio_file(name) {
         Item::Sample(path.into())
     } else if crate::presets::is_preset_file(Path::new(path)) || crate::presets::is_factory(Path::new(path)) || crate::channel_states::is_state_file(Path::new(path)) {
         Item::Preset(path.into())

@@ -115,22 +115,6 @@ pub fn option_hint(o: Opt) -> &'static str {
     }
 }
 
-/// Set while Record is armed and Loop record is off: playback runs on past its end (spec §4). Every playback engine
-/// reads it (`Engine::set_run_on`); `App::record_tick` keeps it up to date. One per test thread under tests.
-pub fn run_on_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-    use std::sync::{atomic::AtomicBool, Arc};
-    #[cfg(test)]
-    {
-        thread_local!(static TEST: Arc<AtomicBool> = Arc::new(AtomicBool::new(false)));
-        TEST.with(Arc::clone)
-    }
-    #[cfg(not(test))]
-    {
-        static FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
-        FLAG.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
-    }
-}
-
 /// A recording count-in under way (spec §3): when it started, a beat's length in seconds, its beats.
 #[derive(Debug, Clone, Copy)]
 pub struct CountIn {
@@ -741,7 +725,7 @@ impl App {
             self.invalidate();
         }
         let run_on = self.state.rec.armed && !Opt::Loop.on();
-        run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
+        crate::transport::run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
         let sel = self.sync_loop_range();
         let live = self.transport.playing() && !self.transport.paused();
         // Punch (spec §5): armed with Loop record off, playback stops at the selection's end; held notes end there.
@@ -1535,13 +1519,13 @@ mod tests {
         use std::sync::atomic::Ordering;
         let mut app = app();
         app.record_tick();
-        assert!(!run_on_flag().load(Ordering::Relaxed), "disarmed");
+        assert!(!crate::transport::run_on_flag().load(Ordering::Relaxed), "disarmed");
         app.toggle_record();
         app.record_tick();
-        assert!(run_on_flag().load(Ordering::Relaxed), "armed, Loop record off: runs on");
+        assert!(crate::transport::run_on_flag().load(Ordering::Relaxed), "armed, Loop record off: runs on");
         app.toggle_record_option(Opt::Loop);
         app.record_tick();
-        assert!(!run_on_flag().load(Ordering::Relaxed), "Loop record on: loops");
+        assert!(!crate::transport::run_on_flag().load(Ordering::Relaxed), "Loop record on: loops");
         let len = f64::from(app.state.project.pattern_length(1).max(1));
         let steps = app.state.history.len();
         key(&mut app, KeyCode::KeyZ, true, 48.0, false);

@@ -3656,7 +3656,7 @@ mod tests {
     #[test]
     #[ignore]
     fn native_window_shots() {
-        let fl = os_native::default_fl_dir();
+        let fl = os_paths::default_fl_dir();
         let dir = std::env::var_os("OS_SHOT_DIR").map(std::path::PathBuf::from);
         for name in ["Fruity Balance", "Fruity Parametric EQ 2", "Fruity Delay 3", "Fruity Limiter"] {
             let Some(dll) = os_native::find_plugin(&fl, name) else { continue };
@@ -3700,7 +3700,7 @@ mod tests {
     fn native_effect_lifecycle() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
-        let fl = os_native::default_fl_dir();
+        let fl = os_paths::default_fl_dir();
         let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
         let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
         let a = Available { desc: lib.plugins()[0].clone(), lib };
@@ -3887,7 +3887,7 @@ mod tests {
     #[ignore]
     fn native_generator_lifecycle() {
         let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
-        let fl = os_native::default_fl_dir();
+        let fl = os_paths::default_fl_dir();
         let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
         let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
         let a = Available { desc: lib.plugins()[0].clone(), lib };
@@ -3954,7 +3954,7 @@ mod tests {
     #[test]
     #[ignore]
     fn native_plugins_listed_when_opted_in() {
-        let fl = os_native::default_fl_dir();
+        let fl = os_paths::default_fl_dir();
         if !fl.join("Plugins").join("Fruity").join("Effects").is_dir() {
             return;
         }

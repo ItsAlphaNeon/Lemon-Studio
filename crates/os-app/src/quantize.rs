@@ -142,7 +142,7 @@ impl Template {
 
 /// FL's Quantization folder (read in place when FL Studio is installed).
 pub fn folder() -> PathBuf {
-    os_native::default_fl_dir().join("Data").join("Patches").join("Scores").join("Quantization")
+    os_paths::default_fl_dir().join("Data").join("Patches").join("Scores").join("Quantization")
 }
 
 /// A pick from the dialog's menus.

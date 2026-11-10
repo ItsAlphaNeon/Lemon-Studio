@@ -57,7 +57,7 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
 
 /// FL's Sytrus factory presets, when FL is installed.
 fn factory_dir() -> PathBuf {
-    let fl = crate::factory_folder::dir().unwrap_or_else(os_native::default_fl_dir);
+    let fl = crate::factory_folder::dir().unwrap_or_else(os_paths::default_fl_dir);
     fl.join("Data").join("Patches").join("Plugin presets").join("Generators").join("Sytrus")
 }
 

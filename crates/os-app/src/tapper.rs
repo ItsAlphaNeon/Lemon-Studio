@@ -97,25 +97,9 @@ pub enum TapAct {
     Nudge(i8),
 }
 
-/// The nudge being held: -1, 0 or +1 (spec §6). Every playback engine reads it (`Engine::set_nudge`); a press on a
-/// nudge button sets it and any release of the mouse button clears it. One per test thread under tests.
-pub fn nudge_flag() -> std::sync::Arc<std::sync::atomic::AtomicI8> {
-    use std::sync::{atomic::AtomicI8, Arc};
-    #[cfg(test)]
-    {
-        thread_local!(static TEST: Arc<AtomicI8> = Arc::new(AtomicI8::new(0)));
-        TEST.with(Arc::clone)
-    }
-    #[cfg(not(test))]
-    {
-        static FLAG: std::sync::OnceLock<Arc<AtomicI8>> = std::sync::OnceLock::new();
-        FLAG.get_or_init(|| Arc::new(AtomicI8::new(0))).clone()
-    }
-}
-
-/// The nudge held now (`nudge_flag`).
+/// The nudge held now (`transport::nudge_flag`).
 pub fn nudging() -> i8 {
-    nudge_flag().load(std::sync::atomic::Ordering::Relaxed)
+    crate::transport::nudge_flag().load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The window's state: where it is (centred over the main window the first time, then where it was left, also in later

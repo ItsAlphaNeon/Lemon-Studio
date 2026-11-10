@@ -15,10 +15,7 @@ use crate::app::{Action, Live, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 use crate::piano::{self, Geom, Lane, Overlay, Tool};
 
-/// Default grid row pitch: 17 px of fill plus a 1 px separator (§3); the vertical zoom changes it (§3a).
-pub const ROW: f32 = 18.0;
-/// Highest key shown (B10); the lowest is 0 (C0) (§3).
-pub const TOP_KEY: i32 = 131;
+pub use crate::piano::{ROW, TOP_KEY};
 
 /// Key name in FL's naming (key 60 = C5) (§3), as the settings choose it (`crate::note_names`).
 pub fn key_name(key: i32) -> String {

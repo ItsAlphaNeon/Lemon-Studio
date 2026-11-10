@@ -119,6 +119,7 @@ mod plugin_window;
 mod plugins;
 mod ppi;
 mod prefs;
+mod settings_window;
 mod preview_track;
 mod project_files;
 mod project_forms;

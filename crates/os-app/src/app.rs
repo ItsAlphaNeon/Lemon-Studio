@@ -3940,7 +3940,7 @@ impl App {
             // Held while playing (§6): the engine runs 2 % slower / faster until the release; stopped, it does nothing.
             TapAct::Nudge(n) => {
                 if self.transport.playing() && !self.transport.paused() {
-                    crate::tapper::nudge_flag().store(n.signum(), std::sync::atomic::Ordering::Relaxed);
+                    crate::transport::nudge_flag().store(n.signum(), std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -6021,7 +6021,7 @@ impl App {
                 Drag::Events(st) => self.events_drag(st, x, y),
                 Drag::PianoKeys { key } => {
                     if let Some(g) = self.piano_geom() {
-                        let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
+                        let k = g.key_at(y).clamp(0, crate::piano::TOP_KEY);
                         if k != key {
                             self.drag = Some(Drag::PianoKeys { key: k });
                             self.key_velocity = self.key_click_velocity(x);
@@ -6272,7 +6272,7 @@ impl App {
         }
         if let (Some(Action::PianoKeys), Some(g)) = (&hover, self.piano_geom()) {
             // The key under the cursor: "C5 / 60" (spec: ui/settings-choices.md "Note names and Black notes").
-            hint = Cow::Owned(crate::note_names::key_hint(g.key_at(y).clamp(0, views::piano::TOP_KEY)));
+            hint = Cow::Owned(crate::note_names::key_hint(g.key_at(y).clamp(0, crate::piano::TOP_KEY)));
         }
         if let (Some(Action::Mix(crate::mixer::MHit::EqGraph)), Some(g)) = (&hover, rect) {
             hint = Cow::Owned(crate::mixer::eq_graph_hint(&self.state, g, x));
@@ -7076,7 +7076,7 @@ impl App {
     fn release(&mut self) {
         self.scrub_release();
         // A held nudge ends with the button (spec: ui/tempo-tapper.md §6).
-        if crate::tapper::nudge_flag().swap(0, std::sync::atomic::Ordering::Relaxed) != 0 {
+        if crate::transport::nudge_flag().swap(0, std::sync::atomic::Ordering::Relaxed) != 0 {
             self.damage_win(Win::Tapper);
         }
         // The pressed button's window comes to the front, before the button acts (it may close the window).
@@ -7209,7 +7209,7 @@ impl App {
             dt = dt.max(-min_pos);
             let lo = orig.iter().map(|(_, o)| i32::from(o.key)).min().unwrap_or(0);
             let hi = orig.iter().map(|(_, o)| i32::from(o.key)).max().unwrap_or(0);
-            let dk = dk.clamp(-lo, views::piano::TOP_KEY - hi);
+            let dk = dk.clamp(-lo, crate::piano::TOP_KEY - hi);
             // The grabbed note (first) is auditioned again whenever its key changes (§8).
             if let Some(&(_, o)) = orig.first() {
                 let k = i32::from(o.key) + dk;
@@ -7259,7 +7259,7 @@ impl App {
         }
         let row = piano::channel(&self.state).and_then(|ch| self.state.project.channels.iter().position(|c| c.index == ch));
         if let (Some(k), true, Some(row)) = (key, play, row) {
-            let k = k.clamp(0, views::piano::TOP_KEY) as u16;
+            let k = k.clamp(0, crate::piano::TOP_KEY) as u16;
             self.sync_live();
             let velocity = std::mem::replace(&mut self.key_velocity, TYPING_VELOCITY);
             self.transport.note_on(row, k, velocity);
@@ -8459,7 +8459,7 @@ impl App {
                 Tool::Paint if note.is_none() => {
                     piano::snapshot_as(s, "Piano roll add note");
                     s.piano.clear_selection();
-                    let key = g.key_at(y).clamp(0, views::piano::TOP_KEY);
+                    let key = g.key_at(y).clamp(0, crate::piano::TOP_KEY);
                     let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
                     let i = piano::add_note(s, ch, start, key);
                     let i = piano::paint_mono(s, i);
@@ -8569,7 +8569,7 @@ impl App {
                 self.paint_velocity(x, y, x, y);
             }
             Action::PianoKeys => {
-                let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
+                let k = g.key_at(y).clamp(0, crate::piano::TOP_KEY);
                 self.drag = Some(Drag::PianoKeys { key: k });
                 self.key_velocity = self.key_click_velocity(x);
                 self.hold_key(Some(k), true);

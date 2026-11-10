@@ -449,7 +449,7 @@ mod tests {
         let dlls: Vec<PathBuf> = if names == "all" {
             crate::dll_files()
         } else {
-            names.split(',').filter_map(|n| crate::find_plugin(&crate::default_fl_dir(), n.trim())).collect()
+            names.split(',').filter_map(|n| crate::find_plugin(&os_paths::default_fl_dir(), n.trim())).collect()
         };
         assert!(!dlls.is_empty(), "no plugin found");
         for dll in dlls {

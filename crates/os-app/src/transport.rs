@@ -242,8 +242,43 @@ struct Tap {
     metered: u64,
 }
 
+/// Set while Record is armed and Loop record is off: playback runs on past its end (`ui/recording.md` §4). Every playback engine
+/// reads it (`Engine::set_run_on`); `App::record_tick` keeps it up to date. One per test thread under tests.
+pub fn run_on_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::{atomic::AtomicBool, Arc};
+    #[cfg(test)]
+    {
+        thread_local!(static TEST: Arc<AtomicBool> = Arc::new(AtomicBool::new(false)));
+        TEST.with(Arc::clone)
+    }
+    #[cfg(not(test))]
+    {
+        static FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+        FLAG.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
+    }
+}
+
+/// The nudge being held: -1, 0 or +1 (`ui/tempo-tapper.md` §6). Every playback engine reads it (`Engine::set_nudge`); a press on a
+/// nudge button sets it and any release of the mouse button clears it. One per test thread under tests.
+pub fn nudge_flag() -> std::sync::Arc<std::sync::atomic::AtomicI8> {
+    use std::sync::{atomic::AtomicI8, Arc};
+    #[cfg(test)]
+    {
+        thread_local!(static TEST: Arc<AtomicI8> = Arc::new(AtomicI8::new(0)));
+        TEST.with(Arc::clone)
+    }
+    #[cfg(not(test))]
+    {
+        static FLAG: std::sync::OnceLock<Arc<AtomicI8>> = std::sync::OnceLock::new();
+        FLAG.get_or_init(|| Arc::new(AtomicI8::new(0))).clone()
+    }
+}
+
+/// Largest analyzer FFT the output monitor asks of the tap (`Transport::tap` hands back at most this many samples).
+pub const MAX_FFT: usize = 1 << 14;
+
 /// Frames the tap holds: the largest analyzer FFT behind the newest block (two of the longest buffer length).
-const TAP_FRAMES: usize = crate::monitor::MAX_FFT + 2 * 8192;
+const TAP_FRAMES: usize = MAX_FFT + 2 * 8192;
 
 impl Default for Tap {
     fn default() -> Self {
@@ -882,12 +917,12 @@ impl Transport {
         *self.shared.pace.lock().ok()?
     }
 
-    /// Fills `out` with the output heard last (mono, oldest first, at most `monitor::MAX_FFT`) and returns the count
+    /// Fills `out` with the output heard last (mono, oldest first, at most `MAX_FFT`) and returns the count
     /// of frames heard; an unchanged count means nothing was played since the last call (`Tap::heard`).
     pub fn tap(&self, out: &mut [f32]) -> u64 {
         let Ok(t) = self.shared.tap.lock() else { return 0 };
         let heard = t.heard(Instant::now());
-        let n = out.len().min(crate::monitor::MAX_FFT).min(heard as usize);
+        let n = out.len().min(MAX_FFT).min(heard as usize);
         let skip = out.len() - n;
         out[..skip].fill(0.0);
         let first = heard as usize - n;
@@ -1712,8 +1747,8 @@ impl Audio {
             e.set_count_in(at.count_in);
         }
         if song {
-            e.set_run_on(crate::record::run_on_flag());
-            e.set_nudge(crate::tapper::nudge_flag());
+            e.set_run_on(run_on_flag());
+            e.set_nudge(nudge_flag());
             e.set_record_tap(self.shared.record.lock().ok().and_then(|t| t.clone()));
             if let Some(gate) = self.shared.gate.lock().ok().and_then(|g| *g) {
                 e.set_load_gate(gate);
