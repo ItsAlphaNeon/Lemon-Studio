@@ -83,6 +83,31 @@ fn project_part(p: &os_model::Project) -> os_model::Project {
     p
 }
 
+/// The fingerprint of `project_part`, its channels' groups left out of the text too: `side` compares the groups, and
+/// the model's type for a channel's group may change (control-plane step 5 made it optional).
+fn project_hash(p: &os_model::Project) -> u64 {
+    let text = format!("{:?}", project_part(p));
+    let mut out = String::with_capacity(text.len());
+    let (mut from, mut search) = (0, 0);
+    const KEY: &str = ", group: ";
+    while let Some(k) = text[search..].find(KEY) {
+        let i = search + k;
+        // `ChannelRack`'s group follows its zip (a note's group is another field).
+        if text[..i].ends_with("zipped: true") || text[..i].ends_with("zipped: false") {
+            out.push_str(&text[from..i]);
+            let after = &text[i + KEY.len()..];
+            from = i + KEY.len() + after.find([',', '}']).unwrap_or(after.len());
+            search = from;
+        } else {
+            search = i + 1;
+        }
+    }
+    out.push_str(&text[from..]);
+    let mut h = Fnv::new();
+    let _ = write!(h, "{out}");
+    h.0
+}
+
 /// Project state the interface holds until save (specs: control-plane.md part 2, "Where main is"), as one value: a
 /// field per line, so a difference names its field.
 fn side(app: &App) -> String {
@@ -118,7 +143,7 @@ impl Fp {
         let side = hash(&side(app));
         let history = hash(&(s.history.entries(), s.history.at()));
         Fp(vec![
-            ("project", hash(&project_part(&s.project))),
+            ("project", project_hash(&s.project)),
             ("side", side),
             ("lemon", hash(&crate::lemon_state::saved_form(s, &app.plugins))),
             ("history", history),
