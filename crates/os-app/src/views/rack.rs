@@ -328,7 +328,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         // Mute LED, or the padlock of a locked channel (§10).
         let lr = Rect::new(x + 11.5, ry + 6.5, 12.0, 12.0);
         ui.hit(lr, Action::ChannelEnable(i), "Mute / solo  (shift/ctrl+)0..9");
-        if s.rack.locked.contains(&i) {
+        if ch.rack.locked {
             padlock(ui, x + 17.5, ry + 12.5, ch.enabled);
         } else {
             rack_led(ui, x + 17.5, ry + 12.5, ch.enabled);

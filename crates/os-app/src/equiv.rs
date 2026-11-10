@@ -83,7 +83,6 @@ fn side(app: &App) -> String {
     f("filter", &r.filter);
     f("groups", &r.groups);
     f("zipped", &r.zipped);
-    f("locked", &r.locked);
     f("loop_mode", &r.loop_mode);
     f("loop_len", &r.loop_len);
     f("loop_unit", &r.loop_unit);

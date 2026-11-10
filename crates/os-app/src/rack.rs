@@ -215,8 +215,6 @@ pub struct RackUi {
     pub filter: Filter,
     pub groups: Vec<Group>,
     pub zipped: BTreeSet<usize>,
-    /// Channels whose mute state solo leaves alone (§10).
-    pub locked: BTreeSet<usize>,
     /// The channel the last solo click soloed.
     pub soloed: Option<usize>,
     /// Mute states (`enabled` per row) from before the first solo: what unsolo puts back when "Restore previous
@@ -303,7 +301,6 @@ impl Default for RackUi {
             filter: Filter::All,
             groups: Vec::new(),
             zipped: BTreeSet::new(),
-            locked: BTreeSet::new(),
             soloed: None,
             pre_solo: None,
             pattern_seen: None,
@@ -360,7 +357,6 @@ impl RackUi {
         let set = |s: &BTreeSet<usize>| s.iter().filter_map(|&r| m(r)).collect::<BTreeSet<usize>>();
         self.sel = set(&self.sel);
         self.zipped = set(&self.zipped);
-        self.locked = set(&self.locked);
         for g in &mut self.groups {
             g.members = set(&g.members);
         }
@@ -940,7 +936,7 @@ pub fn solo(s: &mut State, r: usize) {
 pub const MUTE_SOLO: &str = "Channel mute / solo";
 
 fn solo_now(s: &mut State, r: usize) {
-    let locked = s.rack.locked.clone();
+    let locked: BTreeSet<usize> = locked_rows(&s.project);
     let soloed_now = solo_of(s, r);
     // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
     let in_solo = s.rack.soloed.is_some_and(|a| solo_of(s, a));
@@ -1003,9 +999,32 @@ impl App {
 
 /// Channel `r` is the only unlocked channel on.
 fn solo_of(s: &State, r: usize) -> bool {
-    let locked = &s.rack.locked;
-    s.project.channels.get(r).is_some_and(|c| c.enabled)
-        && s.project.channels.iter().enumerate().all(|(i, c)| i == r || locked.contains(&i) || !c.enabled)
+    s.project.channels.get(r).is_some_and(|c| c.enabled) && s.project.channels.iter().enumerate().all(|(i, c)| i == r || c.rack.locked || !c.enabled)
+}
+
+/// The rows whose mute state is locked (Lock active/mute state, event 32): solos leave them as they are.
+pub fn locked_rows(p: &os_model::Project) -> BTreeSet<usize> {
+    p.channels.iter().enumerate().filter(|(_, c)| c.rack.locked).map(|(r, _)| r).collect()
+}
+
+/// `a` and `b` the same but for the channels' locks: locking is no unsaved change, as in FL (`ui/undo-steps.md`).
+pub fn same_but_locks(a: &os_model::Project, b: &os_model::Project) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.channels.len() != b.channels.len() || a.channels.iter().zip(&b.channels).all(|(x, y)| x.rack.locked == y.rack.locked) {
+        return false;
+    }
+    let mut b = b.clone();
+    for (x, y) in a.channels.iter().zip(&mut b.channels) {
+        y.rack.locked = x.rack.locked;
+    }
+    *a == b
+}
+
+/// Whether row `r`'s mute state is locked.
+pub fn is_locked(s: &State, r: usize) -> bool {
+    s.project.channels.get(r).is_some_and(|c| c.rack.locked)
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
@@ -1017,9 +1036,11 @@ pub fn toggle_mute(s: &mut State, r: usize) {
     });
 }
 
+/// Lock active/mute state: no undo step and no unsaved change, as in FL (`ui/undo-steps.md`), though the file keeps it
+/// (`App::unsaved` leaves it out; an undo or redo of another step leaves it as it is, `control::command::Mutes`).
 pub fn toggle_lock(s: &mut State, r: usize) {
-    if !s.rack.locked.remove(&r) {
-        s.rack.locked.insert(r);
+    if let Some(c) = s.project.get_mut().channels.get_mut(r) {
+        c.rack.locked = !c.rack.locked;
     }
 }
 
@@ -2076,7 +2097,7 @@ pub fn led_menu(s: &State, r: usize, auto: Option<(u32, String, f64)>, x: f32, y
     let soloed = s.rack.soloed == Some(r);
     let mut items = vec![
         it("Solo", RCmd::Solo(r)).mark(Mark::Check(soloed)),
-        it("Lock active/mute state", RCmd::Lock(r)).mark(Mark::Check(s.rack.locked.contains(&r))),
+        it("Lock active/mute state", RCmd::Lock(r)).mark(Mark::Check(is_locked(s, r))),
     ];
     items.extend(value_groups(s, None, Some(crate::typein::Target::RackLed(r)), auto));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
@@ -2946,7 +2967,6 @@ const LOOP_TYPE_CODES: [u32; 3] = [3, 2, 3];
 pub fn from_model(s: &mut State) {
     let p = &s.project;
     let rack = &mut s.rack;
-    rack.locked = p.channels.iter().enumerate().filter(|(_, c)| c.rack.locked).map(|(r, _)| r).collect();
     rack.zipped = p.channels.iter().enumerate().filter(|(_, c)| c.rack.zipped).map(|(r, _)| r).collect();
     rack.groups.clear();
     rack.unsorted_at = None;
@@ -3019,7 +3039,6 @@ pub fn to_model(s: &mut State) {
     names.insert(unsorted, os_model::UNSORTED_GROUP.to_string());
     let file_index = |g: usize| if g < unsorted { g } else { g + 1 } as u32;
     for (r, c) in p.channels.iter_mut().enumerate() {
-        c.rack.locked = rack.locked.contains(&r);
         c.rack.zipped = rack.zipped.contains(&r);
         // A channel is in one group in the file: its first one.
         c.rack.group = rack.groups.iter().position(|g| g.members.contains(&r)).map_or(unsorted as u32, file_index);
@@ -3088,6 +3107,25 @@ fn store_loops(s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lock active/mute state is kept in the channel (the file's event 32), and as in FL it is no undo step and no
+    /// unsaved change; an undo of another step, a whole-project one included, leaves it as it is.
+    #[test]
+    fn a_lock_is_no_undo_step_and_no_unsaved_change() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.mark_saved();
+        let steps = a.state.history.done();
+        toggle_lock(&mut a.state, 0);
+        assert!(is_locked(&a.state, 0) && !a.unsaved());
+        assert_eq!(a.state.history.done(), steps, "no step");
+        crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.project.get_mut().main_volume = Some(50));
+        assert!(a.unsaved());
+        toggle_lock(&mut a.state, 1);
+        assert!(crate::history::undo(&mut a.state).is_some(), "the project step undone");
+        assert_eq!(a.state.project.main_volume, a.saved.0.main_volume);
+        assert_eq!(locked_rows(&a.state.project), [0, 1].into(), "the locks stay");
+    }
 
     /// Loop mode on with every channel following the pattern (follow entries, no lengths) is still on after a save.
     #[test]
@@ -3888,7 +3926,7 @@ mod tests {
         delete_rows(&mut app, &[2]);
         let s = &mut app.state;
         s.project.get_mut().swing = Some(64);
-        s.rack.locked = [1].into();
+        toggle_lock(s, 1);
         s.rack.zipped = [2].into();
         s.rack.groups = vec![Group { name: "Drums".into(), members: [0, 2].into() }];
         s.rack.filter = Filter::Group(0);
@@ -3908,7 +3946,7 @@ mod tests {
         let mut notes: Vec<u16> = p.patterns[0].notes.iter().map(|x| x.channel).collect();
         notes.sort_unstable();
         assert_eq!(notes, vec![0, 2], "the clone has no notes; channel 2 moved back to row 2");
-        assert_eq!(s.rack.locked, [1].into());
+        assert_eq!(locked_rows(p), [1].into());
         assert_eq!(s.rack.zipped, [2].into());
         assert_eq!(s.rack.groups.len(), 1);
         assert_eq!(s.rack.groups[0].members, [0, 2].into());

@@ -2149,7 +2149,7 @@ impl App {
 
     /// Whether the project changed since it was last opened, saved or created, a hosted plugin's settings included.
     pub fn unsaved(&self) -> bool {
-        self.saved.0 != self.state.project
+        !crate::rack::same_but_locks(&self.saved.0, &self.state.project)
             || self.saved.1 != self.state.tempo
             || self.saved.2 != crate::lemon_state::saved_form(&self.state, &self.plugins)
             || self.state.plugin_edited
