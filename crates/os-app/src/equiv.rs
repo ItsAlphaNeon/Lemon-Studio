@@ -519,10 +519,16 @@ impl Rig {
             self.app.act(crate::app::Action::Stop);
             self.run(&[]);
         }
-        // The engine holds what the project says (an edit that never reached it shows here).
+        // The engine holds what the project says (an edit that never reached it shows here), named by the first field
+        // that differs, one off the accepted list if there is one (an accepted field must not hide another).
         if let Some(sent) = self.app.transport.sent_for_tests() {
-            if sent != crate::rack::play_project(&self.app.state) {
-                bad.push("engine-behind".into());
+            let play = crate::rack::play_project(&self.app.state);
+            if sent != play {
+                let diff = differences(&sent, &play, false);
+                let list = accepted();
+                let open = diff.iter().find(|d| !list.iter().any(|(a, _)| normalized(&format!("engine-behind({d}")).starts_with(a)));
+                let named = |d: &String| format!("engine-behind({d}(+{}))", diff.len() - 1);
+                bad.push(open.or(diff.first()).map_or_else(|| "engine-behind".into(), named));
             }
         }
         if let Some(f) = &self.id_fault {
