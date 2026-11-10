@@ -6,6 +6,7 @@
 //! units (0..1, bipolar knobs centred at 0.5); the model keeps bipolar knobs as -1..1.
 // spec: ui/plugin-window.md (Misc tab)
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::misc_page::{self as mp, MiscVals, M};
 use os_model::{Channel, ChannelMisc};
 
@@ -163,7 +164,7 @@ pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
 /// A Misc tab edit of rack row `row`: the channel model, its hosted Lemon Sampler (root / fine), then playback.
 /// No undo step, as in FL (measured 2026-10-28).
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
-    let Some(ch) = app.state.project.channels.get_mut(row) else { return };
+    let Some(ch) = app.state.project.get_mut().channels.get_mut(row) else { return };
     put(&mut ch.misc, m, v);
     sync(app, row, &[m]);
     app.state.piano.dirty = true;
@@ -214,7 +215,7 @@ mod tests {
     fn knob_and_slider_menus_reset() {
         use crate::playlist::Cmd;
         let mut app = crate::app::App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         for m in [M::LevelPan, M::TimeGate, M::VolMid, M::Fine] {
             let menu = menu(&app, 0, m, 0.0, 0.0);
             assert_eq!(menu.items.len(), 1, "{m:?}");

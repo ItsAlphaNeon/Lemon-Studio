@@ -8,6 +8,7 @@
 //! Render and replace also puts a clip of it over every clip of the pattern in the playlist and mutes those.
 // spec: ui/pattern-render.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use os_model::{Channel, ChannelKind, Clip, ClipSource};
@@ -94,7 +95,7 @@ pub fn add_channel(s: &mut State, path: &str, pattern: u16) -> u16 {
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = crate::playlist::unique_channel_name(s, &crate::patterns::name_of(s, pattern));
     let color = s.project.pattern(pattern).and_then(|p| p.color).or_else(|| Some(s.clip_colors.new_channel(index)));
-    s.project.channels.push(Channel {
+    s.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,
         kind: ChannelKind::AudioClip,
@@ -266,8 +267,8 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
-        app.state.project.patterns[0].notes.push(Note::step(0, 0));
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
         app.state.song_mode = false;
         app
     }
@@ -280,7 +281,7 @@ mod tests {
     }
 
     fn with_data_folder(app: &mut App, dir: &Path) {
-        app.state.project.data_folder = Some(DataFolder { choice: DataFolder::SPECIFIED, folder: crate::data_folder::folder_text(dir) });
+        app.state.project.get_mut().data_folder = Some(DataFolder { choice: DataFolder::SPECIFIED, folder: crate::data_folder::folder_text(dir) });
     }
 
     /// The renders go to the data folder's Rendered folder; without a data folder, to one-click recording's fallback

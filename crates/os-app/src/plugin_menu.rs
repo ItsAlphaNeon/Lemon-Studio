@@ -9,6 +9,7 @@
 //! palette (`crate::plugin_palette`), which lists the same plugins and picks the same way.
 // spec: ui/plugin-menu.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeMap;
 
 use crate::app::{App, State};
@@ -207,7 +208,7 @@ pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize
     let d = app.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
-    let mut ch = if sampler { crate::app::add_channel(&mut s.project) } else { crate::app::add_plugin_channel(&mut s.project, &d.name) };
+    let mut ch = if sampler { crate::app::add_channel(s.project.get_mut()) } else { crate::app::add_plugin_channel(s.project.get_mut(), &d.name) };
     if sampler {
         s.pending_open = Some(ch);
     } else {
@@ -251,12 +252,12 @@ fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<Stri
     app.state.hosted_rows.retain(|&r| r != row);
     app.transport.set_instruments(app.plugins.instruments());
     let s = &mut app.state;
-    let ch = &mut s.project.channels[row];
+    let ch = &mut s.project.get_mut().channels[row];
     ch.plugin_state = None;
     // A new id at once, before the new instance is hosted and takes its channel's.
     ch.id = os_model::Id::NONE;
-    s.control.settle(&mut s.project);
-    let ch = &mut s.project.channels[row];
+    s.control.settle(s.project.get_mut());
+    let ch = &mut s.project.get_mut().channels[row];
     if sampler {
         ch.kind = os_model::ChannelKind::Sampler;
         ch.plugin = None;

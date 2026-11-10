@@ -6,6 +6,7 @@
 //! folder index, and the menu bar's ways in.
 // spec: ui/browser.md, ui/browser-commands.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ChannelKind, ClipSource};
 use os_ui::Rect;
 
@@ -1253,7 +1254,7 @@ fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<Str
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
     let path = crate::data_folder::adopt(s, path);
     crate::history::load_sample(s, row);
-    let ch = &mut s.project.channels[row];
+    let ch = &mut s.project.get_mut().channels[row];
     crate::rack::auto_name(ch, std::path::Path::new(&path));
     crate::rack::read_tags(ch, std::path::Path::new(&path));
     ch.sample_path = Some(path.clone());
@@ -1341,7 +1342,7 @@ mod tests {
         assert_eq!(labels(&app), [crate::plugins::LEMON_SAMPLER]);
         assert!(app.state.browser_favs.is_empty());
         // "Add to plugin database (flag as favorite)" of a hosted plugin toggles the same star.
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         let row = 0;
         app.plugins.create(row, 0).expect("Lemon Sampler hosted");
         assert!(app.browser_cmd(BCmd::Star(row)).is_some_and(|m| m.contains("no longer")));

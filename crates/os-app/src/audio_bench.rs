@@ -6,7 +6,7 @@
 //! song tick by tick and prints how long each second of audio took to render, as a share of one core. Ticks render the
 //! same way during playback, so a second near 100 % here is a second that drops out live.
 //!
-//! `OS_AUDIO_BENCH=<project.flp> cargo test -p os-app --bin lemonstudio audio_load -- --ignored --nocapture`
+//! `OS_AUDIO_BENCH=<project.flp> cargo test -p os-app --lib audio_load -- --ignored --nocapture`
 //! (`OS_AUDIO_BENCH_SECS=n` stops after n seconds of song; `OS_MIX_THREADS=n` renders on n mixing workers beside the
 //! rendering thread, spec: audio/multicore.md, where the time is still the rendering thread's wall clock;
 //! `OS_MIX_AUTO=1` uses them only when needed, as playing live does).

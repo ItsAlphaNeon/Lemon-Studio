@@ -1189,7 +1189,7 @@ mod tests {
 
     /// A docked window that closes, hides, detaches or shrinks uncovers part of the main window, which must be presented
     /// whole again or that part keeps showing the plugin window. Opens real windows:
-    /// `cargo test -p os-app --bin lemonstudio docked_windows_expose_the_main_window -- --ignored`.
+    /// `cargo test -p os-app --lib docked_windows_expose_the_main_window -- --ignored`.
     #[test]
     #[ignore]
     fn docked_windows_expose_the_main_window() {
@@ -1252,7 +1252,7 @@ mod tests {
     /// Spec ui/settings-choices.md "Advanced: Don't limit windows to screen (2026-10-16)": a docked window keeps 31 px
     /// of its width and its title bar in the workspace it is clipped to, also when the workspace shrinks, and Into
     /// workspace brings it fully back in, keeping its size. Opens real windows:
-    /// `cargo test -p os-app --bin lemonstudio docked_windows_keep_their_part -- --ignored`.
+    /// `cargo test -p os-app --lib docked_windows_keep_their_part -- --ignored`.
     #[test]
     #[ignore]
     fn docked_windows_keep_their_part() {
@@ -1298,7 +1298,7 @@ mod tests {
     /// A resizable editor's frame (Tesla) maximizes from its title bar's button or a double-click: docked, to the
     /// workspace it is clipped to, which it keeps filling when that changes; detached, to its monitor's work area. Again
     /// restores where it was (spec: ui/plugin-window.md "Frame"). Opens real windows:
-    /// `cargo test -p os-app --bin lemonstudio resizable_windows_maximize -- --ignored`.
+    /// `cargo test -p os-app --lib resizable_windows_maximize -- --ignored`.
     #[test]
     #[ignore]
     fn resizable_windows_maximize() {

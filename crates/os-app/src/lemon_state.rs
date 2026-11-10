@@ -13,6 +13,7 @@
 //! file saved again holds no stale state); an FLP target drops them with the rest of `LMex`. Open reads them back from
 //! a `.lemon` file only; an FLP's icons come from its icon numbers instead.
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::State;
 use crate::playlist::{ICONS, IconOwner};
 use crate::plugins::Plugins;
@@ -120,7 +121,7 @@ pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
     }
     let read = |id| lemon::data(file, id).filter(|d| d.first() == Some(&LAYOUT));
     if let Some(&flags) = read(lemon::MIXER).as_deref().and_then(|d| d.get(1)) {
-        s.project.pdc_off = flags & PDC_AUTO == 0;
+        s.project.get_mut().pdc_off = flags & PDC_AUTO == 0;
         s.mixer.waveforms = flags & WAVEFORMS != 0;
         s.mixer.extra = flags & EXTRA_PROPS != 0;
     }
@@ -164,7 +165,7 @@ pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
                 CLIP_CHANNEL => os_model::ClipSource::Channel(v),
                 _ => continue,
             };
-            if let Some(tr) = s.project.arrangements.get_mut(usize::from(a)).and_then(|a| a.tracks.get_mut(usize::from(t))) {
+            if let Some(tr) = s.project.get_mut().arrangements.get_mut(usize::from(a)).and_then(|a| a.tracks.get_mut(usize::from(t))) {
                 tr.clip_lock = Some(src);
             }
         }
@@ -465,8 +466,8 @@ mod tests {
     /// and slot 0's colour on track 2; Performance settings other than the defaults.
     fn with_state() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
-        app.state.control.settle(&mut app.state.project);
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.control.settle(app.state.project.get_mut());
         let ch = app.state.project.channels[1].id.0;
         let s = &mut app.state;
         s.playlist.icons.insert(IconOwner::Channel(ch), Icon::Mic);
@@ -530,15 +531,15 @@ mod tests {
     fn with_settings() -> App {
         let mut app = with_state();
         let s = &mut app.state;
-        s.project.pdc_off = true;
+        s.project.get_mut().pdc_off = true;
         s.mixer.waveforms = true;
         s.mixer.extra = false;
         s.rack.wave_preview.insert(s.project.channels[1].id.0);
         s.rack.through_off.insert(s.project.channels[2].id.0);
         if s.project.arrangements.is_empty() {
-            s.project.arrangements.push(os_flp::project::default_arrangement());
+            s.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
         }
-        let tracks = &mut s.project.arrangements[0].tracks;
+        let tracks = &mut s.project.get_mut().arrangements[0].tracks;
         tracks[3].clip_lock = Some(os_model::ClipSource::Pattern(1));
         tracks[4].clip_lock = Some(os_model::ClipSource::Channel(0));
         app.plugins.editor_scales.insert(0, 1.5);
@@ -638,9 +639,9 @@ mod tests {
         let d = dir("flp_icons");
         let path = d.join("Icons.flp");
         let mut made = App::new(None);
-        made.state.project = crate::app::test_project();
-        made.state.control.settle(&mut made.state.project);
-        let m = &mut made.state.project.mixer;
+        made.state.project = crate::locked::Locked::new(crate::app::test_project());
+        made.state.control.settle(made.state.project.get_mut());
+        let m = &mut made.state.project.get_mut().mixer;
         m[2].icon = Some(75);
         m[3].icon = Some(74); // the automation clip's nodes: no picture of Lemon Studio's
         m[4].icon = Some(80);

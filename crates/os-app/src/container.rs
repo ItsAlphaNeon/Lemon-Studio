@@ -27,6 +27,7 @@
 //! a slot or channel wraps its plugin as the menu does (`App::drop_container_on_slot`, `App::drop_container_on_rack`).
 // spec: plugins/patcher/README.md §3.1, §3.3, §4 slices 1, 3 and 5, §4.1, §4.2, §4.3, §4.4, §4.5
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -227,7 +228,7 @@ pub fn level_text(name: &str, wet: bool, v: f32) -> String {
 
 /// Writes `list` as the state of the container at place (`t`, `k`).
 fn set_members(s: &mut State, t: u16, k: u8, list: &[Member]) {
-    if let Some(b) = state_in_mut(&mut s.project, t, k) {
+    if let Some(b) = state_in_mut(s.project.get_mut(), t, k) {
         *b = encode(list);
     }
 }
@@ -757,7 +758,7 @@ impl Moved {
             }
             None => {}
         };
-        let p = &mut s.project;
+        let p = s.project.get_mut();
         p.automations.iter_mut().flat_map(|a| a.targets.iter_mut()).for_each(&mut f);
         p.patterns.iter_mut().flat_map(|q| q.controls.iter_mut()).for_each(|c| f(&mut c.kind));
         for l in &mut p.controller_links {
@@ -1142,11 +1143,11 @@ impl App {
         self.state.hosted_rows.retain(|&r| r != row);
         self.transport.set_instruments(self.plugins.instruments());
         let s = &mut self.state;
-        let ch = &mut s.project.channels[row];
+        let ch = &mut s.project.get_mut().channels[row];
         // A new id at once, before the container plays the channel.
         ch.id = Id::NONE;
-        s.control.settle(&mut s.project);
-        let ch = &mut s.project.channels[row];
+        s.control.settle(s.project.get_mut());
+        let ch = &mut s.project.get_mut().channels[row];
         ch.plugin = Some(CONTAINER.into());
         ch.plugin_state = Some(encode(&[member]));
         s.piano.dirty = true;
@@ -1184,8 +1185,8 @@ impl App {
         }
         crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
-            let row = crate::app::add_plugin_channel(&mut s.project, CONTAINER);
-            s.project.channels[row].plugin_state = Some(encode(&[]));
+            let row = crate::app::add_plugin_channel(s.project.get_mut(), CONTAINER);
+            s.project.get_mut().channels[row].plugin_state = Some(encode(&[]));
             s.selected_channel = row;
             s.rack.select_only(row);
             crate::rack::autosize(s);
@@ -1515,7 +1516,7 @@ mod tests {
 
     /// A tick as the program runs it for the mixer: ids for new slots, the mixer's requests, instances following ids.
     fn tick(a: &mut App) {
-        a.state.control.settle(&mut a.state.project);
+        a.state.control.settle(a.state.project.get_mut());
         a.mixer_tick();
         a.follow_ids(false, true);
     }
@@ -1523,7 +1524,7 @@ mod tests {
     /// An app with Lemon Studio's effects, the limiter in slot 1 and the delay in slot 2 of track 2; the two names.
     fn two_effects() -> (App, String, String) {
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         a.state.plugdb.rebuild(&a.plugins);
@@ -2134,7 +2135,7 @@ mod tests {
         let ch = a.state.project.channels.last().unwrap().index;
         let mix = target::slot(2, 1, target::SLOT_MIX);
         crate::playlist::run(&mut a, Cmd::CreateAutomation(mix, "Mix".into(), 0.5));
-        let p = &mut a.state.project;
+        let p = a.state.project.get_mut();
         p.patterns[0].controls.push(os_model::ControlPoint { position: 0, kind: target::slot_param(2, 1, 3), value: 9 });
         p.controller_links.push(os_model::ControllerLink::new(0x7000 + 3 * 64, 0, target::slot_param(2, 0, 1)));
         p.init_controls.push(os_model::InitControl { head: 0, target: target::slot_param(2, 0, 2), value: 7 });
@@ -2436,7 +2437,7 @@ mod tests {
     fn the_originals_serial_patches_open_as_containers() {
         crate::project_plugins::NATIVE_FIRST.with(|n| n.set(Some(false)));
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         let effect = |a: &App, n: &str| a.plugins.effects.iter().position(|e| e.desc.name == n).unwrap_or_else(|| panic!("{n}"));
@@ -2449,8 +2450,8 @@ mod tests {
         let patcher = |state: &[u8]| Some(SlotPlugin { id: Id::NONE, name: os_flp::patcher::PATCHER.into(), state: state.to_vec() });
         let t = crate::mixer::track_mut(&mut a.state, 2).unwrap();
         (t.slots[0], t.slots[1]) = (patcher(&serial), patcher(&leveled));
-        a.state.project.channels[0].plugin = Some(os_flp::patcher::PATCHER.into());
-        a.state.project.channels[0].name = Some("Keys".into());
+        a.state.project.get_mut().channels[0].plugin = Some(os_flp::patcher::PATCHER.into());
+        a.state.project.get_mut().channels[0].name = Some("Keys".into());
         let msg = open_patchers(&mut a.state, &a.plugins.effects).expect("a hint");
         let bus = crate::mixer::name(&a.state, 2);
         assert_eq!(msg, format!("Patcher: {bus}, slot 1 opened as a container; left as they were: {bus}, slot 2 (link levels other than 1.0), Keys (an instrument patch)"));
@@ -2478,7 +2479,7 @@ mod tests {
         // Audio input straight to Audio output (an unlinked surface beside it) is an empty container; 16 effects are
         // more than a container holds.
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         let empty = patcher_state(&[("Control Surface", "Surface", &[])], &[(1001, 1000, 1.0)]);
         let many: Vec<(&str, &str, &[u8])> = vec![("Fruity Limiter", "Fruity Limiter", &[][..]); MAX_MEMBERS + 1];
         let many = patcher_state(&many, &chain_links(MAX_MEMBERS as u32 + 1, 1.0));

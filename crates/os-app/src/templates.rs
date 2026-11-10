@@ -15,6 +15,7 @@
 //! program setting too; one that is missing or does not load gives the Default template).
 // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project", "General"
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use crate::app::App;
@@ -212,7 +213,7 @@ mod tests {
             let mut a = App::new(None);
             a.state.tempo = 140.0;
             let ch = a.state.project.channels[0].clone();
-            a.state.project.channels.push(ch);
+            a.state.project.get_mut().channels.push(ch);
             let at = dir.join(cat).join(name);
             std::fs::create_dir_all(&at).unwrap();
             a.save_to(at.join(format!("{name}.flp")));

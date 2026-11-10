@@ -571,7 +571,7 @@ pub fn white_x(k: i32) -> f32 {
 
 /// The largest keyboard scroll.
 pub fn kb_max() -> f32 {
-    white_x(crate::views::piano::TOP_KEY) + KEY_W - KB_W
+    white_x(crate::piano::TOP_KEY) + KEY_W - KB_W
 }
 
 /// Apply the open dialog to the targets; `step` names the undo step (none for a preview).
@@ -903,7 +903,7 @@ pub fn limit_cmd(s: &mut State, c: LCmd) {
 
 /// Limit's keys: key `k` becomes the green key, the transposition `60 − k` (§1 "Mouse on the keyboard").
 pub fn set_green(s: &mut State, k: i32) {
-    let t = 60 - k.clamp(0, crate::views::piano::TOP_KEY);
+    let t = 60 - k.clamp(0, crate::piano::TOP_KEY);
     if s.piano_dlg.limit.transpose != t {
         s.piano_dlg.limit.transpose = t;
         preview(s);
@@ -920,7 +920,7 @@ pub fn nearer_end(s: &State, k: i32) -> bool {
 /// Move a range end to key `k`; it stops at the other end (a Lemon Studio choice, piano-limit.md §5).
 pub fn set_end(s: &mut State, high: bool, k: i32) {
     let (lo, hi) = s.piano_dlg.limit.shown_range();
-    let k = k.clamp(0, crate::views::piano::TOP_KEY) as u16;
+    let k = k.clamp(0, crate::piano::TOP_KEY) as u16;
     let range = if high { (lo, k.max(lo)) } else { (k.min(hi), hi) };
     if s.piano_dlg.limit.range != Some(range) {
         s.piano_dlg.limit.range = Some(range);

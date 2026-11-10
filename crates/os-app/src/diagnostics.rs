@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn diagnostics_writes_the_report() {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         let at = (0..20).find(|&i| item_at(HELP_MENU, i).is_some_and(|it| it.label == "Diagnostics")).unwrap();
         assert!(works(HELP_MENU, item_at(HELP_MENU, at).unwrap()));
         app.menu_item(HELP_MENU, at);

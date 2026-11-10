@@ -10,6 +10,7 @@
 //! highlighted, and they only answer "not available yet".
 // spec: ui/menus.md, ui/main-window.md §3
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_ui::{Font, Rect};
 
 use crate::app::{Action, State, Ui, Win};
@@ -1126,7 +1127,7 @@ mod tests {
         assert_eq!(playlist.mark, Mark::Check(app.state.shown(Win::Playlist)));
         // Patterns in use head PATTERNS, the current one marked.
         assert_eq!(bar[PATTERNS].rows[0].label, "New empty pattern...", "a new project uses no pattern yet");
-        app.state.project.patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
+        app.state.project.get_mut().patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
         let first = bar_model(&app.state)[PATTERNS].rows[0].clone();
         assert_eq!((first.label.as_str(), first.mark, first.pick), ("Intro", Mark::Radio(true), Some((PATTERNS, PATTERN_PICK + 1))));
         // Live state: hiding the playlist unticks it.

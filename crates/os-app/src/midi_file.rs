@@ -7,6 +7,7 @@
 //! FILE ▸ Export MIDI... and the piano roll's Export as MIDI file... write one.
 // spec: ui/midi-files.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::cell::RefCell;
@@ -562,10 +563,10 @@ fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
     let max = crate::mixer::max_insert(&s.project);
     for (i, part) in imp.parts.iter().enumerate() {
         let row = match o.instrument {
-            Instrument::Sampler => crate::app::add_channel(&mut s.project),
-            k => crate::app::add_plugin_channel(&mut s.project, k.label()),
+            Instrument::Sampler => crate::app::add_channel(s.project.get_mut()),
+            k => crate::app::add_plugin_channel(s.project.get_mut(), k.label()),
         };
-        let ch = &mut s.project.channels[row];
+        let ch = &mut s.project.get_mut().channels[row];
         ch.name = Some(part.name.clone());
         ch.mixer_track = if o.mixer { (i as u16 + 1).min(max) } else { 0 };
     }
@@ -670,9 +671,9 @@ impl App {
             self.reset_hosted();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;
-            s.project = crate::app::empty_project();
-            s.project.ppq = ppq;
-            s.project.tempo = Some(tempo);
+            s.project = crate::locked::Locked::new(crate::app::empty_project());
+            s.project.get_mut().ppq = ppq;
+            s.project.get_mut().tempo = Some(tempo);
             crate::project_info::created(s);
             s.file = None;
             s.path = None;
@@ -1085,7 +1086,7 @@ mod tests {
 
     fn test_app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.song_mode = false;
         app
     }

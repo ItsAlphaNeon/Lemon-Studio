@@ -11,6 +11,7 @@
 //! be theirs.
 // spec: ui/plugin-window.md "Channel states", ui/browser.md "Channel presets"
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use crate::app::App;
@@ -185,10 +186,10 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         ROOT.with(|r| *r.borrow_mut() = Some(dir.clone()));
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         let row = 1;
         {
-            let ch = &mut app.state.project.channels[row];
+            let ch = &mut app.state.project.get_mut().channels[row];
             ch.name = Some("Snare top".into());
             ch.volume = 0.25;
             ch.misc.cpu.smart_disable = true;

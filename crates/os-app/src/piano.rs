@@ -6,11 +6,16 @@
 //! Piano roll state and note editing (view geometry, selection, undo).
 // spec: ui/piano-roll.md §3, §5, §7a, §7b, §8, §9; flp/events/patterns.md (note records, control points)
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ControlPoint, Note, Pattern};
 use os_ui::Rect;
 
 use crate::app::State;
-use crate::views::piano::{ROW, TOP_KEY};
+
+/// Default grid row pitch: 17 px of fill plus a 1 px separator (§3); the vertical zoom changes it (§3a).
+pub const ROW: f32 = 18.0;
+/// Highest key (B10); the lowest is 0 (C0) (§3).
+pub const TOP_KEY: i32 = 131;
 
 /// Piano-roll tools (§9), with their shortcut letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -524,10 +529,10 @@ pub fn velocity_at(panel: Rect, y: f32) -> u8 {
 pub fn pattern_mut(s: &mut State) -> &mut Pattern {
     let number = s.pattern;
     match s.project.patterns.iter().position(|p| p.number == number) {
-        Some(i) => &mut s.project.patterns[i],
+        Some(i) => &mut s.project.get_mut().patterns[i],
         None => {
-            s.project.patterns.push(Pattern { number, ..Pattern::default() });
-            s.project.patterns.last_mut().expect("pushed")
+            s.project.get_mut().patterns.push(Pattern { number, ..Pattern::default() });
+            s.project.get_mut().patterns.last_mut().expect("pushed")
         }
     }
 }
@@ -1167,7 +1172,7 @@ mod tests {
                 old.process(&mut buf);
             }
             assert!(peak(&buf) > 0.05, "pluck rings");
-            let p = &mut a.state.project;
+            let p = a.state.project.get_mut();
             match edit {
                 0 => p.channels[4].volume = 0.0,
                 1 => p.channels[4].enabled = false,
@@ -1196,14 +1201,14 @@ mod tests {
         add_note(&mut a.state, 4, 0, 60);
         let mut lib = os_engine::SampleLibrary::new(None);
         let mode = os_engine::PlayMode::Pattern(1);
-        a.state.project.tempo = Some(130.0);
+        a.state.project.get_mut().tempo = Some(130.0);
         let mut old = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
         let mut buf = vec![0.0f32; 2 * 500];
         for _ in 0..10 {
             old.process(&mut buf);
         }
         let (tick, frame) = (old.tick_position(), old.position());
-        a.state.project.tempo = Some(65.0);
+        a.state.project.get_mut().tempo = Some(65.0);
         let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
         e.continue_from(&mut old);
         assert_eq!((e.tick_position(), e.position()), (tick, frame), "same tick, same frame");
@@ -1299,7 +1304,7 @@ mod tests {
         for on in [false, true] {
             set_check(&AUTO_ZOOM_PIANO, on);
             let mut app = App::new(None);
-            app.state.project = crate::app::test_project();
+            app.state.project = crate::locked::Locked::new(crate::app::test_project());
             app.state.selected_channel = 0;
             // A floating window: a grid about 300 px tall.
             let ws = &mut app.state.wins[Win::PianoRoll.slot().expect("a window")];

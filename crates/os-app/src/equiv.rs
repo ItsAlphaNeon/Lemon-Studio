@@ -17,7 +17,7 @@
 //! hidden display (`hidden-tests`):
 //! ```text
 //! OS_EQUIV_DIR=<traces> OS_EQUIV_CORPUS=<folder of .flp> \
-//!   cargo test -p os-app --bin lemonstudio equiv_record -- --ignored --nocapture
+//!   cargo test -p os-app --lib equiv_record -- --ignored --nocapture
 //! ```
 //! `equiv_show` runs in the test's own process: give it `HOME=<OS_EQUIV_DIR>/home` and no `DISPLAY` (`equiv_shrink`
 //! runs each candidate in a process of its own, as a recording does). Both work in the folder the trace's recording
@@ -1197,12 +1197,21 @@ fn equiv_show() {
         let line: Vec<String> = inputs.iter().map(ToString::to_string).collect();
         eprintln!("step {i}: {}", line.join("; "));
         let before = rig.app.state.project.clone();
+        let sent = rig.app.transport.sent_for_tests();
         rig.run(inputs);
         rig.undo_start(&mut start);
         let s = &rig.app.state;
         eprintln!("  undo: {:?} ({} steps), message: {:?}", s.history.newest_done(), s.history.done(), s.message);
         if let Some(d) = difference(&before, &s.project, false) {
             eprintln!("  changed: {d}");
+        }
+        // What playback was handed (the engine's part of the fingerprint).
+        let now = rig.app.transport.sent_for_tests();
+        if now != sent {
+            match (&sent, &now) {
+                (Some(a), Some(b)) => eprintln!("  playback: {}", difference(a, b, false).unwrap_or_else(|| "the same project again".into())),
+                _ => eprintln!("  playback: {}", if now.is_some() { "handed the project" } else { "plays a project of its own" }),
+            }
         }
     }
     // OS_EQUIV_SHOW=checks: then the end checks, as a recording runs them.

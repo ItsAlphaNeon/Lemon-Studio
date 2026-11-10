@@ -10,7 +10,7 @@
 //!   theme gives `NoteColor0..15`, a random entry of that list instead, stored as given.
 //!
 //! Drawn, not stored: the measured values are channel buttons as FL's rack draws them, and Lemon Studio's rack draws a
-//! stored colour mixed with the name button's face (`views::rack::NAME_MIX`). The colour stored is the one the Classic
+//! stored colour mixed with the name button's face (`NAME_MIX`). The colour stored is the one the Classic
 //! rack in its default palette (the stock Dark theme the values were measured in) draws at the measured values. Those
 //! land among the pastels FL stores for audio-clip channels (`ui/playlist.md` "Channel-colour rule": one component
 //! about 0x68, one about 0x7e), so the clips' title strips and waveforms look as FL's do.
@@ -18,6 +18,10 @@
 
 use os_model::Rgb;
 use os_theme::{FlTheme, Palette};
+
+/// The Classic name button's face: the channel colour mixed this far toward the theme's neutral face. The rack draws
+/// with it, and new clip channels' colours are stored through it.
+pub const NAME_MIX: f32 = 0.35;
 
 /// Saturation and lightness of a new clip channel's button as drawn, with the setting off (any hue).
 pub const OFF: (f32, f32) = (0.08, 0.37);
@@ -103,7 +107,7 @@ fn hsl(h: f32, s: f32, l: f32) -> [f32; 3] {
 /// The colour to store for a button drawn `drawn`: the inverse of the rack's mix with the default name button face.
 fn stored(drawn: [f32; 3]) -> Rgb {
     let face = Palette::default().name_button;
-    let k = crate::views::rack::NAME_MIX;
+    let k = NAME_MIX;
     let inv = |d: f32, f: u8| ((d - k * f32::from(f)) / (1.0 - k)).round().clamp(0.0, 255.0) as u8;
     Rgb::new(inv(drawn[0], face.r), inv(drawn[1], face.g), inv(drawn[2], face.b))
 }
@@ -111,7 +115,7 @@ fn stored(drawn: [f32; 3]) -> Rgb {
 /// The face the Classic rack draws for stored colour `c` in its default palette.
 #[cfg(test)]
 pub fn drawn(c: Rgb) -> os_theme::Color {
-    crate::views::rgb(c).mix(Palette::default().name_button, crate::views::rack::NAME_MIX)
+    crate::views::rgb(c).mix(Palette::default().name_button, NAME_MIX)
 }
 
 #[cfg(test)]

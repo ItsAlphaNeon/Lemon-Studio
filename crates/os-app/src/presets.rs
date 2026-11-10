@@ -9,6 +9,7 @@
 //!
 // spec: plugins/presets.md, ui/plugin-window.md (Presets box), ui/browser.md (Plugin presets)
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 /// File extension of a preset.
@@ -681,7 +682,7 @@ fn auto_name(app: &mut App, key: usize, path: &Path) {
         }
         Some(_) => {}
         None => {
-            if let Some(ch) = s.project.channels.get_mut(key) {
+            if let Some(ch) = s.project.get_mut().channels.get_mut(key) {
                 crate::rack::auto_name(ch, path);
             }
         }
@@ -1297,7 +1298,7 @@ mod tests {
         pl.create(0, index).unwrap();
         pl.create(fx, index).unwrap();
         app.plugins = pl;
-        app.state.project.channels[0].name = Some("808 Snare".into());
+        app.state.project.get_mut().channels[0].name = Some("808 Snare".into());
         crate::mixer::track_mut(&mut app.state, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
         let (h, state) = (header(&app, 0).unwrap(), app.plugins.state(0).unwrap());
         let preset = |name: &str| {
@@ -1312,7 +1313,7 @@ mod tests {
         assert_eq!(run(&mut app, PCmd::Load(0, bass)).as_deref(), Some("Preset: Deep Bass"));
         assert_eq!(channel(&app), "Deep Bass");
         prefs::set_check(&AUTO_NAME_CHANNELS, false);
-        app.state.project.channels[0].name = Some("808 HiHat".into());
+        app.state.project.get_mut().channels[0].name = Some("808 HiHat".into());
         run(&mut app, PCmd::Load(0, chorus.clone()));
         assert_eq!(channel(&app), "808 HiHat", "off: the channel keeps its name");
         // Effect slots: off by default.

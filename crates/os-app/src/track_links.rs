@@ -10,6 +10,7 @@
 //!
 // spec: ui/playlist.md §6c, ui/mixer-track-commands.md §8, ui/channel-rack.md §18, flp/events/playlist.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ChannelKind, ClipSource, TrackLink};
 
 use crate::app::State;
@@ -308,7 +309,7 @@ pub fn route_clips(s: &mut State, idx: &[usize]) {
         .collect();
     let max = crate::mixer::max_insert(&s.project);
     for (ch, m) in moves {
-        if let Some(c) = s.project.channels.iter_mut().find(|c| c.index == ch) {
+        if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
             if c.mixer_track != m && m <= max {
                 c.mixer_track = m;
                 s.piano.dirty = true;
@@ -361,7 +362,7 @@ mod tests {
     /// Kick, Clap, Hat, Snare and Pluck on Inserts 1-5.
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app
     }
 
@@ -412,7 +413,7 @@ mod tests {
     #[test]
     fn assign_instrument_track() {
         let mut app = app();
-        app.state.project.channels[1].color = Some(os_model::Rgb::new(0xaa, 0x33, 0x55));
+        app.state.project.get_mut().channels[1].color = Some(os_model::Rgb::new(0xaa, 0x33, 0x55));
         let insert2 = crate::mixer::name(&app.state, 2);
         let menu = |app: &App| crate::rack::channel_menu(&app.state, 1, 0.0, 0.0).items;
         assert!(entry(&menu(&app), "Assign to new instrument track").enabled);
@@ -509,7 +510,7 @@ mod tests {
     fn audio_clips_follow_the_track() {
         let mut app = app();
         let s = &mut app.state;
-        s.project.channels[4].kind = ChannelKind::AudioClip;
+        s.project.get_mut().channels[4].kind = ChannelKind::AudioClip;
         let audio = ClipSource::Channel(s.project.channels[4].index);
         crate::playlist::arr_mut(s).tracks[2].link = TrackLink::audio(7);
         crate::playlist::arr_mut(s).tracks[5].link = TrackLink::instrument(0);
@@ -543,7 +544,7 @@ mod tests {
         crate::mixer::delete_track(s, 3);
         assert!(link(s, 0).is_none());
         assert_eq!(link(s, 1), TrackLink::audio(4));
-        crate::rack::remap_project(&mut s.project, &[Some(0), None, Some(1), Some(2), Some(3)]);
+        crate::rack::remap_project(s.project.get_mut(), &[Some(0), None, Some(1), Some(2), Some(3)]);
         assert!(link(s, 2).is_none());
         assert_eq!(link(s, 3), TrackLink::instrument(3));
     }

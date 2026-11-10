@@ -10,6 +10,7 @@ use os_ui::{Color, Font, Rect};
 
 use super::{rgb, FrameInfo};
 use crate::app::{Action, Live, Scroll, State, Ui, Win};
+use crate::clip_colors::NAME_MIX;
 use crate::icons::{self, Icon};
 use crate::knobs::KnobId;
 use crate::rack::{self as rk, FillHit, FillType, Tab};
@@ -22,9 +23,6 @@ pub const DEFAULT_SIZE: (f32, f32) = (499.0 + rk::NAME_W - rk::FL_NAME_W, 246.0)
 pub const MIN_H: f32 = 96.0 + ROW_H;
 /// Space above the first row and below the last one inside the rows panel.
 const PAD: f32 = 18.0;
-/// The Classic name button's face: the channel colour mixed this far toward the theme's neutral face (`clip_colors`
-/// stores new clip channels' colours through it).
-pub const NAME_MIX: f32 = 0.35;
 /// Graph editor panel height (§14), its tab row included.
 pub const GRAPH_H: f32 = 240.0;
 const GRAPH_TABS_H: f32 = 20.0;

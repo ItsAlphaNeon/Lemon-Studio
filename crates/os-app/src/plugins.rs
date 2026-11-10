@@ -2297,7 +2297,7 @@ mod tests {
     }
 
     /// Plugin editors draw at the window's DPI scale and follow a scale change (spec: ui/ui-scaling.md §3). Opens real
-    /// windows: `cargo test -p os-app --bin lemonstudio plugin_editors_follow_the_scale -- --ignored`.
+    /// windows: `cargo test -p os-app --lib plugin_editors_follow_the_scale -- --ignored`.
     #[test]
     #[ignore]
     fn plugin_editors_follow_the_scale() {
@@ -2360,7 +2360,7 @@ mod tests {
 
     /// The built-in Lemon Parametric EQ in a mixer slot window: the frame without a strip, the editor inside it, and a
     /// click on a band's switch reaching the plugin state.
-    /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio eq_window_shots -- --ignored`
+    /// `OS_SHOT_DIR=.. cargo test -p os-app --lib eq_window_shots -- --ignored`
     #[test]
     #[ignore]
     fn eq_window_shots() {
@@ -2387,7 +2387,7 @@ mod tests {
     }
 
     /// Lemon Trio in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
-    /// plugins/lemon-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio osc3_window_redraws -- --ignored`
+    /// plugins/lemon-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --lib osc3_window_redraws -- --ignored`
     #[test]
     #[ignore]
     fn osc3_window_redraws() {
@@ -2439,7 +2439,7 @@ mod tests {
 
     /// The built-in Citrus's editor in its window: the wheel on SOFTEN and a right click on a matrix cell edit the
     /// Sytrus state the channel saves (spec: plugins/citrus.md §6).
-    /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio citrus_window_edits -- --ignored`
+    /// `OS_SHOT_DIR=.. cargo test -p os-app --lib citrus_window_edits -- --ignored`
     #[test]
     #[ignore]
     fn citrus_window_edits() {
@@ -2479,7 +2479,7 @@ mod tests {
 
     /// The built-in Smith's editor in its window: the wheel on LEVEL and a click on the filter's HP edit the Ogun state
     /// the channel saves (spec: plugins/smith.md).
-    /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio smith_window_edits -- --ignored`
+    /// `OS_SHOT_DIR=.. cargo test -p os-app --lib smith_window_edits -- --ignored`
     #[test]
     #[ignore]
     fn smith_window_edits() {
@@ -2896,7 +2896,7 @@ mod tests {
     /// mouse drag in it (`OS_VST2_DRAG=x,y` in editor pixels as it first opens, default the middle) must reach the app
     /// as an edit. The window first opens at the monitor's scale, as in the app (whose DPI awareness the test takes).
     /// Moves the desktop cursor. Screenshots go to `OS_SHOT_DIR` when it is set.
-    /// `OS_VST2=<plugin dll> cargo test -p os-app --bin lemonstudio vst2_editor_scales -- --ignored --nocapture`
+    /// `OS_VST2=<plugin dll> cargo test -p os-app --lib vst2_editor_scales -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn vst2_editor_scales() {
@@ -3558,12 +3558,12 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-vst3-save-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 4800]).unwrap();
         let mut a = crate::app::App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.file = None;
         a.state.path = None;
         a.plugins.available = vec![load(&smp)];
         a.plugins.effects = vec![load(&eq)];
-        let row = crate::app::add_plugin_channel(&mut a.state.project, "Lemon Sampler");
+        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), "Lemon Sampler");
         a.plugins.create(row, 0).unwrap();
         a.state.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
@@ -3613,7 +3613,7 @@ mod tests {
     }
 
     /// VST3 editors inside Lemon Studio's plugin frame, moved off every screen and captured with PrintWindow:
-    /// `OS_SHOT_DIR=<dir> cargo test -p os-app --bin lemonstudio vst3_window_shots -- --ignored`.
+    /// `OS_SHOT_DIR=<dir> cargo test -p os-app --lib vst3_window_shots -- --ignored`.
     #[test]
     #[ignore]
     fn vst3_window_shots() {
@@ -3651,12 +3651,12 @@ mod tests {
 
     /// The user's installed FL native effects show their own editors inside Lemon Studio's plugin frame (spec
     /// plugins/fruity-abi.md, "Editors"): frame moved off every screen, captured with PrintWindow, closed and opened
-    /// again. Loads FL DLLs in-process, so ignored: `OS_SHOT_DIR=<dir> cargo test -p os-app --bin lemonstudio
+    /// again. Loads FL DLLs in-process, so ignored: `OS_SHOT_DIR=<dir> cargo test -p os-app --lib
     /// native_window_shots -- --ignored` (shots only when OS_SHOT_DIR is set). Skips without FL.
     #[test]
     #[ignore]
     fn native_window_shots() {
-        let fl = os_native::default_fl_dir();
+        let fl = os_paths::default_fl_dir();
         let dir = std::env::var_os("OS_SHOT_DIR").map(std::path::PathBuf::from);
         for name in ["Fruity Balance", "Fruity Parametric EQ 2", "Fruity Delay 3", "Fruity Limiter"] {
             let Some(dll) = os_native::find_plugin(&fl, name) else { continue };
@@ -3694,13 +3694,13 @@ mod tests {
     /// One installed native effect (`OS_NATIVE_ONE=<folder name>`) through the app's whole path: created and
     /// activated at the device rate, rendered on an audio thread while its editor is open, state saved and restored,
     /// closed and dropped. Loads FL DLLs in-process, so ignored; run once per plugin in its own process:
-    /// `OS_NATIVE_ONE="Fruity Balance" cargo test -p os-app --bin lemonstudio native_effect_lifecycle -- --ignored`.
+    /// `OS_NATIVE_ONE="Fruity Balance" cargo test -p os-app --lib native_effect_lifecycle -- --ignored`.
     #[test]
     #[ignore]
     fn native_effect_lifecycle() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
-        let fl = os_native::default_fl_dir();
+        let fl = os_paths::default_fl_dir();
         let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
         let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
         let a = Available { desc: lib.plugins()[0].clone(), lib };
@@ -3757,7 +3757,7 @@ mod tests {
     /// host on (`App::host_native`, spec plugins/fruity-abi.md "Opened projects"): prints each plugin channel and filled
     /// slot with what became of it (hosted, hosted but keeping the file's state, not installed, did not start), then
     /// renders a few blocks through every instance. Loads FL DLLs in-process: ignored, run alone on a hidden desktop:
-    /// `OS_NATIVE_FLP="x.flp" cargo test -p os-app --bin lemonstudio native_plugins_of_an_opened_project -- --ignored --nocapture`.
+    /// `OS_NATIVE_FLP="x.flp" cargo test -p os-app --lib native_plugins_of_an_opened_project -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn native_plugins_of_an_opened_project() {
@@ -3813,7 +3813,7 @@ mod tests {
     /// create it on the new channel, and an export of a pattern with one C5 on that channel has the note at its pitch,
     /// centred (spec plugins/fruity-abi.md, "Voices"). Loads FL DLLs in-process and sets `OPENSTUDIO_NATIVE`, so
     /// ignored; run in its own process:
-    /// `OS_NATIVE_ONE="Harmor" cargo test -p os-app --bin lemonstudio native_generator_from_the_rack_menu -- --ignored`.
+    /// `OS_NATIVE_ONE="Harmor" cargo test -p os-app --lib native_generator_from_the_rack_menu -- --ignored`.
     /// The test process may then crash while it exits: some plugins fail in their own shutdown once the thread that
     /// created them has ended (here the test's thread; the app creates them on its main thread, spec "Threads").
     #[test]
@@ -3823,7 +3823,7 @@ mod tests {
         // SAFETY: test-only, run alone; `OPENSTUDIO_NATIVE` is read only by the scan.
         unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
         let mut a = crate::app::App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.plugins = Plugins::scan();
         a.state.plugdb.rebuild(&a.plugins);
         use crate::plugin_menu::PlugCmd;
@@ -3882,12 +3882,12 @@ mod tests {
     /// row, a note played on an audio thread while its editor is open (spec plugins/fruity-abi.md, "Voices"), state
     /// saved and restored, closed and dropped. Prints the note's peak and whether it ended after its note off. Loads FL
     /// DLLs in-process, so ignored; run once per plugin in its own process:
-    /// `OS_NATIVE_ONE="3x Osc" cargo test -p os-app --bin lemonstudio native_generator_lifecycle -- --ignored`.
+    /// `OS_NATIVE_ONE="3x Osc" cargo test -p os-app --lib native_generator_lifecycle -- --ignored`.
     #[test]
     #[ignore]
     fn native_generator_lifecycle() {
         let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
-        let fl = os_native::default_fl_dir();
+        let fl = os_paths::default_fl_dir();
         let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
         let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
         let a = Available { desc: lib.plugins()[0].clone(), lib };
@@ -3954,7 +3954,7 @@ mod tests {
     #[test]
     #[ignore]
     fn native_plugins_listed_when_opted_in() {
-        let fl = os_native::default_fl_dir();
+        let fl = os_paths::default_fl_dir();
         if !fl.join("Plugins").join("Fruity").join("Effects").is_dir() {
             return;
         }
@@ -4136,7 +4136,7 @@ mod tests {
 
     /// Third-party effects added to mixer slots with their windows open while a pattern plays, then removed one by
     /// one, round after round. `OS_VST3_FX=<bundle>;<bundle>` (two effects whose editors run their own message
-    /// handling), `OS_ROUNDS` (default 6): `cargo test -p os-app --bin lemonstudio effect_churn -- --ignored`.
+    /// handling), `OS_ROUNDS` (default 6): `cargo test -p os-app --lib effect_churn -- --ignored`.
     #[test]
     #[ignore]
     fn effect_churn() {
@@ -4211,7 +4211,7 @@ mod tests {
     /// The limit and the reopening place with real windows (spec: as above): a detached window moved, closed and
     /// reopened comes back where it was; of 26 Lemon Parametric EQ windows the first opened closes, its plugin still
     /// hosted; without the check there is no limit. Opens real windows:
-    /// `cargo test -p os-app --bin lemonstudio editor_limit_and_reopen_place -- --ignored`
+    /// `cargo test -p os-app --lib editor_limit_and_reopen_place -- --ignored`
     #[test]
     #[ignore]
     fn editor_limit_and_reopen_place() {
@@ -4312,7 +4312,7 @@ mod slot_tests {
     /// A UI call holding a plugin 3 ms every 40 ms beside an audio thread that processes it every 5.33 ms (256 frames at
     /// 48 kHz) and gives up after waiting 2 ms, as the engine does: taken at any moment it makes the plugin late now and
     /// then; taken between two blocks (`lock_between_blocks`), never. Timing on the real clock for 3 s per way:
-    /// `cargo test -p os-app --bin lemonstudio long_ui_calls_between_blocks -- --ignored --nocapture`.
+    /// `cargo test -p os-app --lib long_ui_calls_between_blocks -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn long_ui_calls_between_blocks_make_no_plugin_late() {

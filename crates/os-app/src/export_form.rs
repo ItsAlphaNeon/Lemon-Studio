@@ -6,6 +6,7 @@
 //! its parts do, and the export it starts. `views::export_form` paints it; `export` writes the files.
 // spec: audio/export.md §2-3
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::PathBuf;
 
 use winit::keyboard::{Key, NamedKey};
@@ -543,8 +544,8 @@ mod tests {
     /// A pattern with notes, played in PAT mode.
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
-        app.state.project.patterns[0].notes.push(Note::step(0, 0));
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
         app.state.song_mode = false;
         app
     }
@@ -554,8 +555,8 @@ mod tests {
     #[test]
     fn opens_with_the_last_choices() {
         let mut empty = App::new(None);
-        empty.state.project = crate::app::test_project();
-        empty.state.project.patterns[0].notes.clear();
+        empty.state.project = crate::locked::Locked::new(crate::app::test_project());
+        empty.state.project.get_mut().patterns[0].notes.clear();
         empty.state.song_mode = false;
         empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));
         assert!(form(&empty).is_none());

@@ -9,6 +9,7 @@
 //! settings in `settings.txt`, also shown on Settings ▸ Recording (`crate::prefs`); the arm itself is not saved.
 // spec: ui/recording.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::{App, State};
 use crate::knobs::KnobId;
 use crate::playlist::Snap;
@@ -112,22 +113,6 @@ pub fn option_hint(o: Opt) -> &'static str {
         Opt::Precount => "Count-in (Ctrl+P) - right-click for the length",
         Opt::Loop => "Loop record (off: playback runs on past the end while recording)",
         _ => "Blend recorded notes (Ctrl+B)",
-    }
-}
-
-/// Set while Record is armed and Loop record is off: playback runs on past its end (spec §4). Every playback engine
-/// reads it (`Engine::set_run_on`); `App::record_tick` keeps it up to date. One per test thread under tests.
-pub fn run_on_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-    use std::sync::{atomic::AtomicBool, Arc};
-    #[cfg(test)]
-    {
-        thread_local!(static TEST: Arc<AtomicBool> = Arc::new(AtomicBool::new(false)));
-        TEST.with(Arc::clone)
-    }
-    #[cfg(not(test))]
-    {
-        static FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
-        FLAG.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
     }
 }
 
@@ -363,13 +348,13 @@ impl App {
         let snap = crate::history::Snap::pattern(s, pattern);
         crate::history::record(s, crate::score_log::DUMPED, snap);
         let n = new.len();
-        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pattern) {
+        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
             if replace {
                 p.notes.clear();
             }
             p.notes.extend(new);
         } else {
-            s.project.patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
+            s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
         }
         s.piano.dirty = true;
         Some(format!("Captured {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
@@ -696,10 +681,10 @@ impl App {
             .chain(take.new.iter())
             .cloned()
             .collect();
-        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pattern) {
+        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
             p.notes = notes;
         } else {
-            s.project.patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
+            s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
         }
         // The time selection stays (it may be looping, spec §5).
         let range = s.piano.range;
@@ -741,7 +726,7 @@ impl App {
             self.invalidate();
         }
         let run_on = self.state.rec.armed && !Opt::Loop.on();
-        run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
+        crate::transport::run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
         let sel = self.sync_loop_range();
         let live = self.transport.playing() && !self.transport.paused();
         // Punch (spec §5): armed with Loop record off, playback stops at the selection's end; held notes end there.
@@ -934,10 +919,10 @@ mod tests {
     fn app() -> App {
         crate::settings_file::set_flag("rec_ask", false);
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.selected_channel = 0;
         app.state.pattern = 1;
-        app.state.project.patterns.iter_mut().for_each(|p| p.notes.clear());
+        app.state.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         app.state.global_snap.now = Snap::Step;
         app
     }
@@ -1382,7 +1367,7 @@ mod tests {
         use os_model::target;
         let mut app = app();
         if crate::mixer::track(&app.state, 1).is_none() {
-            app.state.project.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+            app.state.project.get_mut().mixer = (0..3).map(os_model::MixerTrack::new).collect();
         }
         app.toggle_record();
         app.transport.pretend_at(24.0, false);
@@ -1535,13 +1520,13 @@ mod tests {
         use std::sync::atomic::Ordering;
         let mut app = app();
         app.record_tick();
-        assert!(!run_on_flag().load(Ordering::Relaxed), "disarmed");
+        assert!(!crate::transport::run_on_flag().load(Ordering::Relaxed), "disarmed");
         app.toggle_record();
         app.record_tick();
-        assert!(run_on_flag().load(Ordering::Relaxed), "armed, Loop record off: runs on");
+        assert!(crate::transport::run_on_flag().load(Ordering::Relaxed), "armed, Loop record off: runs on");
         app.toggle_record_option(Opt::Loop);
         app.record_tick();
-        assert!(!run_on_flag().load(Ordering::Relaxed), "Loop record on: loops");
+        assert!(!crate::transport::run_on_flag().load(Ordering::Relaxed), "Loop record on: loops");
         let len = f64::from(app.state.project.pattern_length(1).max(1));
         let steps = app.state.history.len();
         key(&mut app, KeyCode::KeyZ, true, 48.0, false);

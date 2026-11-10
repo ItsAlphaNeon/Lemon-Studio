@@ -136,11 +136,17 @@ impl Index {
     }
 }
 
+/// Whether the browser takes a file for audio, by its extension (spec §6 table).
+pub fn is_audio_file(name: &str) -> bool {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    matches!(ext.as_str(), "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" | "m4a")
+}
+
 /// How a disk entry is labelled in the tree (spec §6): audio files and presets without their extension, other files
 /// and folders by their whole name.
 pub fn disk_label(name: &str, path: &Path, dir: bool) -> String {
     let stem = || name.rsplit_once('.').map_or(name, |(a, _)| a).to_string();
-    if !dir && (crate::views::browser::file_icon(name) == crate::icons::Icon::FileAudio || crate::presets::is_preset_file(path)) {
+    if !dir && (is_audio_file(name) || crate::presets::is_preset_file(path)) {
         stem()
     } else {
         name.to_string()

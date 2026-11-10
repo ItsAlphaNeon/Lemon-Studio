@@ -22,6 +22,7 @@
 //! changes and Show recent changes at the top (the browser's History folder, `views::browser`).
 // spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)"
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::borrow::Cow;
 
 use os_model::{ControlPoint, Note};
@@ -234,7 +235,7 @@ impl Snap {
                 }
             }
             Snap::Sample { row, path, name, root, stretch, flags } => {
-                if let Some(ch) = s.project.channels.get_mut(row) {
+                if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
                     (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (path.clone(), name, root, stretch);
                     ch.sound.sampler_flags = flags;
                     // Its Lemon Sampler follows on the next tick: the sample (none: cleared), root note, stretch and
@@ -250,7 +251,7 @@ impl Snap {
             },
             Snap::Init(t, e) => crate::init::put(s, t, e),
             Snap::Patterns { patterns, current } => {
-                s.project.patterns = patterns;
+                s.project.get_mut().patterns = patterns;
                 s.pattern = current;
                 s.piano.clear_selection();
             }
@@ -263,7 +264,7 @@ impl Snap {
                 let Timebase { ppq, patterns, arrangements } = *t;
                 let from = s.project.ppq.max(1);
                 crate::app::retime(s, from, ppq.max(1));
-                (s.project.patterns, s.project.arrangements) = (patterns, arrangements);
+                (s.project.get_mut().patterns, s.project.get_mut().arrangements) = (patterns, arrangements);
                 // Playback stops on the next tick, as for the change (`App::set_timebase`).
                 s.retimed = true;
             }
@@ -304,8 +305,8 @@ fn knob_value(s: &State, id: KnobId) -> f64 {
 
 fn set_knob_value(s: &mut State, id: KnobId, v: f64) {
     match id {
-        KnobId::ChanVol(i) => s.project.channels.get_mut(i).into_iter().for_each(|c| c.volume = v),
-        KnobId::ChanPan(i) => s.project.channels.get_mut(i).into_iter().for_each(|c| c.pan = v),
+        KnobId::ChanVol(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.volume = v),
+        KnobId::ChanPan(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.pan = v),
         _ => s.set_knob(id, v as f32),
     }
 }
@@ -1564,7 +1565,7 @@ mod tests {
     fn a_channel_delete_is_one_step() {
         let mut app = App::new(None);
         assert!(app.state.project.channels.len() >= 3);
-        app.state.project.patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
+        app.state.project.get_mut().patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
         let (chans, pats) = (app.state.project.channels.clone(), app.state.project.patterns.clone());
         crate::rack::delete_step(&mut app, &[1]);
         let (gone_chans, gone_pats) = (app.state.project.channels.clone(), app.state.project.patterns.clone());
@@ -1609,7 +1610,7 @@ mod tests {
     fn a_timebase_change_is_a_step() {
         let mut app = App::new(None);
         app.set_timebase(96);
-        app.state.project.patterns[0].notes = vec![os_model::Note { length: 7, ..os_model::Note::step(0, 5) }];
+        app.state.project.get_mut().patterns[0].notes = vec![os_model::Note { length: 7, ..os_model::Note::step(0, 5) }];
         let before = app.state.project.clone();
         app.set_timebase(24);
         app.set_timebase(24);
@@ -1669,7 +1670,7 @@ mod tests {
         a.plugins.available = crate::plugins::builtin();
         let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         assert!(a.state.project.channels.len() >= 3);
-        a.state.project.patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
+        a.state.project.get_mut().patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
         let (chans, pats) = (a.state.project.channels.clone(), a.state.project.patterns.clone());
         crate::plugin_menu::add_generator(&mut a, trio, Some(0));
         a.plugin_tick();
