@@ -20,7 +20,8 @@
 //!   cargo test -p os-app --bin lemonstudio equiv_record -- --ignored --nocapture
 //! ```
 //! `equiv_show` runs in the test's own process: give it `HOME=<OS_EQUIV_DIR>/home` and no `DISPLAY` (`equiv_shrink`
-//! runs each candidate in a process of its own, as a recording does).
+//! runs each candidate in a process of its own, as a recording does). Both work in the folder the trace's recording
+//! used, so `OS_EQUIV_DIR` must be the recording's folder: a save writes its path.
 //! `equiv_replay` replays every trace in `OS_EQUIV_DIR`; `equiv_twice` records and replays on the same build (what
 //! isn't deterministic yet). `equiv_coverage` adds up what the recordings in `OS_EQUIV_DIR` reached: each kind of
 //! control, how many frames showed it, how often a step aimed at it, and whether it ever changed something. `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (300) steps each,
@@ -1058,10 +1059,10 @@ fn equiv_one() {
             let new = unaccepted(&t.invariants);
             format!("{} steps, findings {new:?} ({} accepted)", t.steps.len(), t.invariants.len() - new.len())
         }
-        ["check", project, kind, path] => {
+        ["check", project, seed, kind, path] => {
             let steps: Option<Vec<Vec<Input>>> =
                 std::fs::read_to_string(path).expect("read").lines().map(|l| l.split("; ").map(Input::parse).collect()).collect();
-            fails_here(&root, project, &steps.expect("a candidate"), kind).map_or_else(|| "holds".into(), |f| format!("fails: {f}"))
+            fails_here(&root, project, seed.parse().expect("a seed"), &steps.expect("a candidate"), kind).map_or_else(|| "holds".into(), |f| format!("fails: {f}"))
         }
         ["replay", path] => {
             let t = Trace::read(&std::fs::read_to_string(path).expect("read")).expect("a trace");
@@ -1075,17 +1076,18 @@ fn equiv_one() {
 /// Whether running `steps` on `project` breaks an invariant whose normalized name (`normalized`) starts with `kind`
 /// and is not on the accepted list, in a process of its own as
 /// a recording runs (settings and process-wide switches one candidate changes must not reach the next).
-fn fails(_root: &Path, project: &str, steps: &[Vec<Input>], kind: &str) -> Option<String> {
+fn fails(_root: &Path, project: &str, seed: u64, steps: &[Vec<Input>], kind: &str) -> Option<String> {
     let file = traces_dir().join("shrink-candidate.txt");
     let text: String = steps.iter().map(|s| s.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ") + "\n").collect();
     std::fs::write(&file, text).expect("write the candidate");
-    let r = isolated("shrink", &format!("check\t{project}\t{kind}\t{}", file.display()));
+    let r = isolated("shrink", &format!("check\t{project}\t{seed}\t{kind}\t{}", file.display()));
     r.strip_prefix("fails: ").map(String::from)
 }
 
-/// `fails` in this process.
-fn fails_here(root: &Path, project: &str, steps: &[Vec<Input>], kind: &str) -> Option<String> {
-    let work = work_dir("shrink");
+/// `fails` in this process, in the folder the trace's recording used (a save writes its path, so another folder can
+/// change what is saved).
+fn fails_here(root: &Path, project: &str, seed: u64, steps: &[Vec<Input>], kind: &str) -> Option<String> {
+    let work = work_dir(&trace_name(project, seed));
     let mut rig = Rig::open(&root.join(project), &work);
     let mut start = rig.app.state.project.clone();
     for s in steps {
@@ -1113,10 +1115,10 @@ fn equiv_shrink() {
     let mut steps: Vec<Vec<Input>> = t.steps.into_iter().map(|(i, _)| i).collect();
     // The shortest failing prefix first: the steps after it play no part.
     let (mut lo, mut hi) = (0, steps.len());
-    let Some(mut why) = fails(&root, &t.project, &steps, &kind) else { panic!("the whole trace does not break {kind}") };
+    let Some(mut why) = fails(&root, &t.project, t.seed, &steps, &kind) else { panic!("the whole trace does not break {kind}") };
     while lo + 1 < hi {
         let mid = (lo + hi) / 2;
-        match fails(&root, &t.project, &steps[..mid], &kind) {
+        match fails(&root, &t.project, t.seed, &steps[..mid], &kind) {
             Some(w) => {
                 hi = mid;
                 why = w;
@@ -1131,7 +1133,7 @@ fn equiv_shrink() {
         while i < steps.len() && steps.len() > 1 {
             let mut less = steps.clone();
             less.drain(i..(i + chunk).min(steps.len()));
-            match fails(&root, &t.project, &less, &kind) {
+            match fails(&root, &t.project, t.seed, &less, &kind) {
                 Some(w) => {
                     steps = less;
                     why = w;
@@ -1159,7 +1161,7 @@ fn equiv_show() {
     let (root, _) = corpus();
     let path = std::env::var("OS_EQUIV_TRACE").expect("OS_EQUIV_TRACE: a trace file");
     let t = Trace::read(&std::fs::read_to_string(&path).expect("read")).expect("a trace");
-    let work = work_dir("show");
+    let work = work_dir(&trace_name(&t.project, t.seed));
     let mut rig = Rig::open(&root.join(&t.project), &work);
     let mut start = rig.app.state.project.clone();
     for (i, (inputs, _)) in t.steps.iter().enumerate() {
