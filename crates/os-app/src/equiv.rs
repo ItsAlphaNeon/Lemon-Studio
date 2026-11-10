@@ -520,16 +520,17 @@ impl Rig {
             self.app.act(crate::app::Action::Stop);
             self.run(&[]);
         }
-        // The engine holds what the project says (an edit that never reached it shows here), named by the first field
-        // that differs, one off the accepted list if there is one (an accepted field must not hide another).
+        // The engine holds what the project says (an edit that never reached it shows here): one finding per top-level
+        // field that differs, named by its first difference, so what is accepted is decided per field and the names
+        // don't depend on the accepted list.
         if let Some(sent) = self.app.transport.sent_for_tests() {
             let play = crate::rack::play_project(&self.app.state);
             if sent != play {
                 let diff = differences(&sent, &play, false);
-                let list = accepted();
-                let open = diff.iter().find(|d| !list.iter().any(|(a, _)| normalized(&format!("engine-behind({d}")).starts_with(a)));
-                let named = |d: &String| format!("engine-behind({d}(+{}))", diff.len() - 1);
-                bad.push(open.or(diff.first()).map_or_else(|| "engine-behind".into(), named));
+                if diff.is_empty() {
+                    bad.push("engine-behind".into());
+                }
+                bad.extend(engine_findings(&diff));
             }
         }
         if let Some(f) = &self.id_fault {
@@ -731,6 +732,21 @@ fn difference(a: &impl fmt::Debug, b: &impl fmt::Debug, rounding: bool) -> Optio
 }
 
 /// Every leaf where `a` and `b` differ, as `path:a->b`.
+/// `engine-behind` findings from the differences between what the engine holds and what the project says: one per
+/// top-level field (the path up to its first `.` or `[`), in the order found, named by its first difference and the
+/// count of the others.
+fn engine_findings(diff: &[String]) -> Vec<String> {
+    let top = |d: &str| d[..d.find(['.', '[', ':']).unwrap_or(d.len())].to_string();
+    let mut groups: Vec<(String, &String, usize)> = Vec::new();
+    for d in diff {
+        match groups.iter_mut().find(|(t, _, _)| *t == top(d)) {
+            Some(g) => g.2 += 1,
+            None => groups.push((top(d), d, 0)),
+        }
+    }
+    groups.into_iter().map(|(_, d, n)| format!("engine-behind({d}(+{n}))")).collect()
+}
+
 fn differences(a: &impl fmt::Debug, b: &impl fmt::Debug, rounding: bool) -> Vec<String> {
     let kept = |l: Vec<(String, String)>| -> Vec<(String, String)> { l.into_iter().filter(|(k, _)| !(k.ends_with(".id") || k.contains(".id["))).collect() };
     let (a, b) = (kept(leaves(&format!("{a:#?}"))), kept(leaves(&format!("{b:#?}"))));
@@ -911,6 +927,15 @@ fn normalized(finding: &str) -> String {
 fn unaccepted(inv: &[String]) -> Vec<&String> {
     let list = accepted();
     inv.iter().filter(|i| !list.iter().any(|(p, _)| normalized(i).starts_with(p))).collect()
+}
+
+#[test]
+fn engine_findings_are_one_per_field_and_matched_one_by_one() {
+    let diff: Vec<String> =
+        ["work_time[0].spent:0.5->0.0", "info.url:None->absent", "info.genre:x->y", "tempo:120->121"].map(String::from).into();
+    let found = engine_findings(&diff);
+    assert_eq!(found, ["engine-behind(work_time[0].spent:0.5->0.0(+0))", "engine-behind(info.url:None->absent(+1))", "engine-behind(tempo:120->121(+0))"]);
+    assert_eq!(unaccepted(&found), [&found[2]], "the info and the work time are accepted, the tempo is not");
 }
 
 #[test]
