@@ -214,7 +214,6 @@ pub struct RackUi {
     pub sel: BTreeSet<usize>,
     pub filter: Filter,
     pub groups: Vec<Group>,
-    pub zipped: BTreeSet<usize>,
     /// The channel the last solo click soloed.
     pub soloed: Option<usize>,
     /// Mute states (`enabled` per row) from before the first solo: what unsolo puts back when "Restore previous
@@ -300,7 +299,6 @@ impl Default for RackUi {
             sel: BTreeSet::from([0]),
             filter: Filter::All,
             groups: Vec::new(),
-            zipped: BTreeSet::new(),
             soloed: None,
             pre_solo: None,
             pattern_seen: None,
@@ -356,7 +354,6 @@ impl RackUi {
     fn remap(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
         let set = |s: &BTreeSet<usize>| s.iter().filter_map(|&r| m(r)).collect::<BTreeSet<usize>>();
         self.sel = set(&self.sel);
-        self.zipped = set(&self.zipped);
         for g in &mut self.groups {
             g.members = set(&g.members);
         }
@@ -983,7 +980,7 @@ impl App {
         if crate::prefs::check(&crate::prefs::AUTO_ZIP_EMPTY) {
             let s = &mut self.state;
             let zipped: BTreeSet<usize> = used.iter().enumerate().filter(|&(_, &u)| !u).map(|(r, _)| r).collect();
-            s.rack.zipped = if zipped.len() == used.len() { BTreeSet::new() } else { zipped };
+            set_zipped(s, &if zipped.len() == used.len() { BTreeSet::new() } else { zipped });
             autosize(s);
             self.invalidate();
         }
@@ -1020,6 +1017,24 @@ pub fn same_but_locks(a: &os_model::Project, b: &os_model::Project) -> bool {
         y.rack.locked = x.rack.locked;
     }
     *a == b
+}
+
+/// The zipped rows (Zip selected, Unzip all, "Auto-collapse empty channels"; event 15): no undo step, as in FL, but an
+/// unsaved change (`ui/undo-steps.md`); an undo or redo of another step leaves them as they are.
+pub fn zipped_rows(p: &os_model::Project) -> BTreeSet<usize> {
+    p.channels.iter().enumerate().filter(|(_, c)| c.rack.zipped).map(|(r, _)| r).collect()
+}
+
+/// Zips `rows` and unzips the others; the project is written only when that changes something.
+pub fn set_zipped(s: &mut State, rows: &BTreeSet<usize>) {
+    s.project.write_if(|p| {
+        let mut changed = false;
+        for (r, c) in p.channels.iter_mut().enumerate() {
+            changed |= c.rack.zipped != rows.contains(&r);
+            c.rack.zipped = rows.contains(&r);
+        }
+        changed
+    });
 }
 
 /// Whether row `r`'s mute state is locked.
@@ -1297,6 +1312,8 @@ pub fn clone_rows(app: &mut App, rows: &[usize]) {
             let from = c.index;
             c.index = app.state.project.channels.len() as u16;
             c.name = Some(name);
+            // The copy starts unlocked and unzipped.
+            (c.rack.locked, c.rack.zipped) = (false, false);
             // An automation clip's copy has its curve and targets (spec: ui/playlist.md §10a).
             if let Some(mut a) = app.state.project.automation(from).cloned() {
                 a.channel = c.index;
@@ -2547,12 +2564,13 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::ZipSel => {
-            s.rack.zipped.extend(sel.iter().copied());
+            let rows: BTreeSet<usize> = zipped_rows(&s.project).into_iter().chain(sel.iter().copied()).collect();
+            set_zipped(s, &rows);
             autosize(s);
             None
         }
         RCmd::UnzipAll => {
-            s.rack.zipped.clear();
+            set_zipped(s, &BTreeSet::new());
             autosize(s);
             None
         }
@@ -2683,6 +2701,10 @@ fn tempo_fitted(c: &os_model::Channel) -> bool {
 /// steps across the pattern (polyrhythms).
 pub fn play_project(s: &State) -> Project {
     let mut p = s.project.clone();
+    // Playback reads nothing of the rack's locks and zips: without them, locking or zipping builds no new engine.
+    for c in &mut p.channels {
+        (c.rack.locked, c.rack.zipped) = (false, false);
+    }
     p.tempo = Some(s.tempo);
     // The pattern shown: a song with no clips plays it (os-engine), not the one the project was opened or saved on.
     p.current_pattern = Some(s.pattern.max(1));
@@ -2967,7 +2989,6 @@ const LOOP_TYPE_CODES: [u32; 3] = [3, 2, 3];
 pub fn from_model(s: &mut State) {
     let p = &s.project;
     let rack = &mut s.rack;
-    rack.zipped = p.channels.iter().enumerate().filter(|(_, c)| c.rack.zipped).map(|(r, _)| r).collect();
     rack.groups.clear();
     rack.unsorted_at = None;
     let mut file_to_ui = Vec::new();
@@ -3039,7 +3060,6 @@ pub fn to_model(s: &mut State) {
     names.insert(unsorted, os_model::UNSORTED_GROUP.to_string());
     let file_index = |g: usize| if g < unsorted { g } else { g + 1 } as u32;
     for (r, c) in p.channels.iter_mut().enumerate() {
-        c.rack.zipped = rack.zipped.contains(&r);
         // A channel is in one group in the file: its first one.
         c.rack.group = rack.groups.iter().position(|g| g.members.contains(&r)).map_or(unsorted as u32, file_index);
     }
@@ -3927,7 +3947,7 @@ mod tests {
         let s = &mut app.state;
         s.project.get_mut().swing = Some(64);
         toggle_lock(s, 1);
-        s.rack.zipped = [2].into();
+        set_zipped(s, &[2].into());
         s.rack.groups = vec![Group { name: "Drums".into(), members: [0, 2].into() }];
         s.rack.filter = Filter::Group(0);
         s.rack.loop_len = [(0, 5)].into();
@@ -3947,7 +3967,7 @@ mod tests {
         notes.sort_unstable();
         assert_eq!(notes, vec![0, 2], "the clone has no notes; channel 2 moved back to row 2");
         assert_eq!(locked_rows(p), [1].into());
-        assert_eq!(s.rack.zipped, [2].into());
+        assert_eq!(zipped_rows(p), [2].into());
         assert_eq!(s.rack.groups.len(), 1);
         assert_eq!(s.rack.groups[0].members, [0, 2].into());
         assert_eq!(s.rack.filter, Filter::Group(0));
@@ -4102,8 +4122,8 @@ mod tests {
             // Rows: 0 Kick, 1 Clap, 2 Hat, 3 Snare, 4 Pluck.
             let pat = |number: u16, notes: Vec<Note>| os_model::Pattern { number, notes, ..Default::default() };
             app.state.project.get_mut().patterns = vec![pat(1, vec![Note::step(0, 0), Note::step(2, 48)]), pat(2, vec![Note::step(1, 96)]), pat(3, Vec::new())];
-            let zips = |app: &App| app.state.rack.zipped.iter().copied().collect::<Vec<usize>>();
-            app.state.rack.zipped = [4].into();
+            let zips = |app: &App| zipped_rows(&app.state.project).into_iter().collect::<Vec<usize>>();
+            set_zipped(&mut app.state, &[4].into());
             app.tick();
             assert_eq!(zips(&app), vec![4], "no switch yet, check {on}");
             let switch = |app: &mut App, p: u16| {
@@ -4114,7 +4134,9 @@ mod tests {
             assert_eq!(switch(&mut app, 2), if on { vec![0, 2, 3, 4] } else { vec![4] }, "pattern 2, check {on}");
             assert_eq!(switch(&mut app, 1), if on { vec![1, 3, 4] } else { vec![4] }, "pattern 1, check {on}");
             // Zipping by hand works between switches.
-            app.state.rack.zipped.insert(0);
+            let mut rows = zipped_rows(&app.state.project);
+            rows.insert(0);
+            set_zipped(&mut app.state, &rows);
             app.tick();
             assert_eq!(zips(&app), if on { vec![0, 1, 3, 4] } else { vec![0, 4] }, "zipped by hand, check {on}");
             // A pattern without notes (as one just made with "+") unzips every channel.

@@ -134,7 +134,7 @@ pub fn layout(s: &State) -> Vec<RowPos> {
     rk::shown(s)
         .into_iter()
         .map(|row| {
-            let zipped = s.rack.zipped.contains(&row);
+            let zipped = s.project.channels.get(row).is_some_and(|c| c.rack.zipped);
             let p = RowPos { row, top: y, zipped };
             y += p.pitch();
             p
