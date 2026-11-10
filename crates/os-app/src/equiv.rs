@@ -83,6 +83,8 @@ fn side(app: &App) -> String {
     f("filter", &r.filter);
     f("groups", &r.groups);
     f("zipped", &r.zipped);
+    // Since step 5 a channel's own (`rack.locked`); read the same way as when the rack kept the rows.
+    f("locked", &crate::rack::locked_rows(&s.project));
     f("loop_mode", &r.loop_mode);
     f("loop_len", &r.loop_len);
     f("loop_unit", &r.loop_unit);
