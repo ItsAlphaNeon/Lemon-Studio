@@ -481,7 +481,7 @@ fn time(ui: &mut Ui, c: &Ctx) {
     let ppq = f64::from(s.project.ppq.max(1));
     // A bar that makes no signature (3 steps per beat) counts its beats as quarters.
     let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
-    let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo.max(1.0));
+    let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo().max(1.0));
     let ticks96 = f.tick * 96.0 / ppq;
     // The bars count from the Start marker's bar (spec: ui/playlist.md §7a, ui/performance-mode.md §1).
     let start = crate::playlist::start_marker(s).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);

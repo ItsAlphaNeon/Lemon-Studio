@@ -28,7 +28,7 @@ fn test_client() -> By {
 fn reading(a: &App) -> (os_model::Project, Value, f64) {
     let mut q = query::project(&a.state);
     q.as_object_mut().unwrap().remove("selected_channel");
-    (a.state.project.clone(), q, a.state.tempo)
+    (a.state.project.clone(), q, a.state.tempo())
 }
 
 fn ids(a: &App) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
@@ -209,14 +209,14 @@ fn a_proposal_leaves_the_project_until_accepted() {
     assert!(paths.iter().any(|p| p.starts_with("channels.") && changes.iter().any(|c| c.path == *p && c.before.is_null())), "the new channel: {paths:?}");
     assert_eq!(a.state.control.proposals.len(), 1);
     accept(&mut a.state, n).unwrap();
-    assert_eq!(a.state.tempo, 150.0);
+    assert_eq!(a.state.tempo(), 150.0);
     assert_eq!(a.state.project.channels[0].name.as_deref(), Some("Boom"));
     assert_eq!(a.state.history.at(), steps + 1);
     assert!(a.state.control.proposals.is_empty());
     assert!(accept(&mut a.state, n).is_err(), "only once");
     let (n, _) = propose(&mut a.state, &test_client(), "Slower", vec![cmd(json!({"op": "set_tempo", "bpm": 60}))]).unwrap();
     discard(&mut a.state, n).unwrap();
-    assert_eq!(a.state.tempo, 150.0);
+    assert_eq!(a.state.tempo(), 150.0);
 }
 
 #[test]
@@ -229,11 +229,11 @@ fn proposals_ask_the_user() {
     assert_eq!(a.state.dialogs.len(), 1, "a box asks");
     // Apply.
     a.dialog_done(crate::dialog::Then::Proposal(n), crate::dialog::Reply::Button(crate::dialog::Answer::Yes));
-    assert_eq!(a.state.tempo, 150.0);
+    assert_eq!(a.state.tempo(), 150.0);
     // A client that may only propose can't accept or apply.
     assert!(a.rpc(&mut c, "apply", &json!({"command": {"op": "set_tempo", "bpm": 100}})).is_err());
     assert!(a.rpc(&mut c, "accept", &json!({"proposal": n})).is_err());
-    assert_eq!(a.state.tempo, 150.0);
+    assert_eq!(a.state.tempo(), 150.0);
 }
 
 #[test]
@@ -283,7 +283,7 @@ fn rpc_requests_and_errors() {
     assert_eq!(code(call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 9, "method": "apply", "params": {"command": {"op": "delete_channel", "channel": 9999}}}))), Some(-32000));
     let mut reader = rpc::Client { name: "Reader".into(), level: Level::Read, saves: false, token: None };
     assert_eq!(code(call(&mut a, &mut reader, json!({"jsonrpc": "2.0", "id": 10, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 99}}}))), Some(-32001));
-    assert_eq!(a.state.tempo, 130.0);
+    assert_eq!(a.state.tempo(), 130.0);
     // A notification (no id) gets no answer.
     assert!(a.rpc_line(&mut c, &json!({"jsonrpc": "2.0", "method": "undo"}).to_string()).is_none());
     // Notes read back as commands write them.
@@ -385,7 +385,7 @@ fn clients_connect_over_a_local_socket() {
     assert_eq!(r1["result"]["name"], "Socket");
     let r2 = ask(&mut a, json!({"jsonrpc": "2.0", "id": 2, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 111}}}));
     assert!(r2.get("error").is_none(), "{r2}");
-    assert_eq!(a.state.tempo, 111.0);
+    assert_eq!(a.state.tempo(), 111.0);
     let h = &a.state.history;
     assert_eq!(h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string()).as_deref(), Some("Socket: tempo"), "the client's name stays with its connection");
     let _ = std::fs::remove_file(&path);
@@ -635,7 +635,7 @@ fn clients_connect_over_a_local_port() {
     let hello = json!({"jsonrpc": "2.0", "id": 3, "method": "hello", "params": {"name": "Port", "token": token}}).to_string();
     assert_eq!(code(&ask(&mut a, &hello)), None);
     assert_eq!(code(&ask(&mut a, &apply)), Some(-32001), "a read-only client");
-    assert_eq!(a.state.tempo, 130.0);
+    assert_eq!(a.state.tempo(), 130.0);
     // A web page's request: one parse error, then the connection is closed.
     assert_eq!(code(&ask(&mut a, "POST / HTTP/1.1")), Some(-32700));
     let mut rest = String::new();

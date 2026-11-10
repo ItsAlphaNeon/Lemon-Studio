@@ -318,7 +318,7 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
     };
     crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
     crate::history::done_with(s);
-    s.control.saw(&s.project, s.tempo);
+    s.control.saw(&s.project, s.tempo());
     s.control.event(by, "apply", step, ops);
     Ok(results)
 }

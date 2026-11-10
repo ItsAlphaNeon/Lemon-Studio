@@ -700,7 +700,7 @@ impl App {
         let from_plugin = hosted.map(|h| {
             let input = own.as_deref().unwrap_or(&src);
             let end = s.project.pattern_length(cur).max(input.iter().map(|n| n.position + n.length.max(1)).max().unwrap_or(0));
-            plugin_pass(&h, input, ppq, s.tempo, end, ch.index, s.project.signature().unwrap_or((4, 4)))
+            plugin_pass(&h, input, ppq, s.tempo(), end, ch.index, s.project.signature().unwrap_or((4, 4)))
         });
         let notes = match (from_plugin, own) {
             (Some(p), _) if !p.is_empty() => p,

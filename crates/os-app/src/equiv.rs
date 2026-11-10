@@ -93,7 +93,7 @@ fn side(app: &App) -> String {
     let mut f = |name: &str, v: &dyn fmt::Debug| {
         let _ = writeln!(out, "{name}: {v:#?}");
     };
-    f("tempo", &s.tempo.to_bits());
+    f("tempo", &s.tempo().to_bits());
     f("pattern", &s.pattern());
     f("song_mode", &s.song_mode());
     f("filter", &r.filter);

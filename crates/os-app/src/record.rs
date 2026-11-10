@@ -396,7 +396,7 @@ impl App {
         self.start_playback_counted(bars);
         if bars > 0 && self.transport.playing() {
             let p = &self.state.project;
-            let tempo = p.tick_tempo(self.state.tempo.max(1.0));
+            let tempo = p.tick_tempo(self.state.tempo().max(1.0));
             let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
             let beats = bars * u32::from(p.bar().0.max(1));
             self.state.rec.count = Some(CountIn { from: std::time::Instant::now(), beat, beats });
@@ -901,7 +901,7 @@ fn point_of(s: &State, a: &crate::app::Action) -> Option<(u32, i32)> {
             let id = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f)] + b;
             (target::mixer(t, id), track(t)?.eq[usize::from(b)][usize::from(f)])
         }
-        Action::Tempo => (target::TEMPO, r(s.tempo * 1000.0)),
+        Action::Tempo => (target::TEMPO, r(s.tempo() * 1000.0)),
         _ => return None,
     })
 }
@@ -1367,7 +1367,7 @@ mod tests {
     fn timing_follows_the_tempo_playing() {
         let mut app = app();
         app.state.project.get_mut().tempo = Some(140.0);
-        app.state.tempo = 70.0;
+        app.state.set_tempo(70.0);
         let p = &app.state.project;
         let at_70 = f64::from(p.ppq) * p.tick_tempo(70.0) / 60.0;
         assert!((crate::score_log::ticks_per_second(&app.state) - at_70).abs() < 1e-9);
@@ -1388,7 +1388,7 @@ mod tests {
         app.record_control(&Action::Fader(1));
         app.record_control(&Action::Knob(KnobId::MixPan(1)));
         app.transport.pretend_at(48.0, false);
-        app.state.tempo = 150.0;
+        app.state.set_tempo(150.0);
         app.record_control(&Action::Tempo);
         app.record_param(target::slot_param(1, 2, 0), (-64.0, 64.0), 0.75);
         app.record_param(target::slot_param(1, 2, 1), (0.0, 1.0), 0.25);

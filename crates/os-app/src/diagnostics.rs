@@ -46,7 +46,7 @@ impl App {
             String::new(),
             format!("Project: {}", s.path.as_ref().map_or_else(|| "not saved".into(), |f| f.display().to_string())),
             format!("  Channels: {}, patterns: {}, mixer tracks: {}, arranger clips: {}", p.channels.len(), p.patterns.len(), p.mixer.len(), p.arrangements.iter().map(|a| a.clips.len()).sum::<usize>()),
-            format!("  Tempo: {} BPM, {} PPQ", s.tempo, p.ppq),
+            format!("  Tempo: {} BPM, {} PPQ", s.tempo(), p.ppq),
             String::new(),
         ];
         out.join("\n")

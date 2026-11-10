@@ -295,7 +295,7 @@ impl App {
             None => crate::save_form::default_root().unwrap_or_else(std::env::temp_dir),
         };
         let device_rate = crate::transport::Transport::device_rate().unwrap_or(44100);
-        let tempo = s.project.tick_tempo(s.tempo);
+        let tempo = s.project.tick_tempo(s.tempo());
         let secs_per_tick = 60.0 / tempo.max(1.0) / f64::from(s.project.ppq.max(1));
         let song_end = crate::playlist::clips(s).iter().map(|c| c.end()).max().unwrap_or(0);
         let pat_len = crate::piano::pattern_length(s, s.pattern());
@@ -432,7 +432,7 @@ impl App {
         let s = &self.state;
         let o = f.o.clone();
         let rate = f.device_rate;
-        let tempo = s.project.tick_tempo(s.tempo);
+        let tempo = s.project.tick_tempo(s.tempo());
         let ppq = s.project.ppq;
         let song_end = crate::playlist::clips(s).iter().map(|c| c.end()).max().unwrap_or(0);
         // The spans of ticks the file plays, in order: the export's span; a whole song from its start marker, broken at

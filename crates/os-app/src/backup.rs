@@ -144,7 +144,7 @@ impl App {
 
     /// Whether the project changed since it was last backed up, and since it was last saved (or opened, or created).
     pub(crate) fn changed_since_backup(&self) -> bool {
-        self.unsaved() && self.backup.last.as_ref().is_none_or(|(p, t)| *p != self.state.project || *t != self.state.tempo)
+        self.unsaved() && self.backup.last.as_ref().is_none_or(|(p, t)| *p != self.state.project || *t != self.state.tempo())
     }
 
     /// Writes a backup of the project as it is now, named for local time `t`, then deletes its oldest autosaves beyond
@@ -160,7 +160,7 @@ impl App {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return Some(Err(format!("{}: {e}", dir.display())));
         }
-        let snap = (self.state.project.clone(), self.state.tempo);
+        let snap = (self.state.project.clone(), self.state.tempo());
         let done = self.save_copy(target.clone())?;
         if done.is_ok() {
             self.backup.last = Some(snap);
@@ -244,7 +244,7 @@ mod tests {
         app.backup_tick(t0);
         app.backup_tick(t0 + minute);
         assert!(names(&dir).is_empty(), "nothing changed");
-        app.state.tempo += 7.0;
+        app.state.set_tempo(app.state.tempo() + 7.0);
         app.state.message = Some("hello".into());
         app.backup_tick(t0 + minute + Duration::from_secs(30));
         assert!(names(&dir).is_empty(), "the interval runs on");
@@ -254,14 +254,14 @@ mod tests {
         assert!(autosaved_at(&files[0], "untitled").is_some(), "{files:?}");
         assert!(app.unsaved() && app.state.path.is_none() && app.state.message.as_deref() == Some("hello"), "a copy, not a save");
         let opened = App::new(Some(dir.join(&files[0])));
-        assert_eq!(opened.state.tempo, app.state.tempo, "the backup holds the change");
+        assert_eq!(opened.state.tempo(), app.state.tempo(), "the backup holds the change");
         // Backed up already: the next interval writes nothing.
         assert!(!app.changed_since_backup());
         app.backup_tick(t0 + 3 * minute);
         assert_eq!(names(&dir).len(), 1);
         // Never: no timer.
         prefs::set_choice(&prefs::AUTOSAVE, 0);
-        app.state.tempo += 1.0;
+        app.state.set_tempo(app.state.tempo() + 1.0);
         app.backup_tick(t0 + 4 * minute);
         app.backup_tick(t0 + 9 * minute);
         assert_eq!(names(&dir).len(), 1);
@@ -279,7 +279,7 @@ mod tests {
         app.save_to(song.clone());
         assert!(song.is_file());
         assert_eq!(names(&dir), ["work"], "a new file: nothing saved over");
-        app.state.tempo = 99.0;
+        app.state.set_tempo(99.0);
         app.save_to(song.clone());
         let over: Vec<String> = names(&dir).into_iter().filter(|n| n.starts_with("song (overwritten on ")).collect();
         assert_eq!(over.len(), 1, "{:?}", names(&dir));
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(prefs::number(&prefs::BACKUP_MAXIMUM), 100);
         prefs::set_number(&prefs::BACKUP_MAXIMUM, 5);
         for i in 0..7 {
-            app.state.tempo = 100.0 + f64::from(i);
+            app.state.set_tempo(100.0 + f64::from(i));
             let t = at(10, 1 + i / 60, 12, i % 60);
             assert_eq!(app.write_backup(t), Some(Ok(dir.join(file_name("song", "autosaved", t)))));
         }
@@ -299,7 +299,7 @@ mod tests {
         // Lowered, nothing goes until the next backup.
         prefs::set_number(&prefs::BACKUP_MAXIMUM, 2);
         assert_eq!(names(&dir).into_iter().filter(|n| autosaved_at(n, "song").is_some()).count(), 5);
-        app.state.tempo = 1.0;
+        app.state.set_tempo(1.0);
         app.write_backup(at(10, 1, 13, 0)).unwrap().unwrap();
         let auto: Vec<String> = names(&dir).into_iter().filter(|n| autosaved_at(n, "song").is_some()).collect();
         assert_eq!(auto, [file_name("song", "autosaved", at(10, 1, 12, 6)), file_name("song", "autosaved", at(10, 1, 13, 0))]);

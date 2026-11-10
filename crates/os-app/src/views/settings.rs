@@ -946,7 +946,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 format!("Lemon Studio {}", crate::version::text()),
                 format!("Project: {}", s.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
                 format!("Saved by: {}", s.project.saved_by),
-                format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo),
+                format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo()),
                 format!("Channels {}, patterns {}, mixer tracks {}", s.project.channels.len(), s.project.patterns.len(), s.project.mixer.len()),
                 format!("Output device: {}", st.device),
                 format!("Device rate: {:?}", st.rate),

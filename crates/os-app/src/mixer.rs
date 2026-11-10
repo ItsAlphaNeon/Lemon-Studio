@@ -2931,7 +2931,7 @@ mod tests {
     fn latency_settings_are_typed_in_and_undo() {
         use crate::typein::{accept, parse, LatUnit, Target};
         let mut a = app();
-        a.state.tempo = 120.0;
+        a.state.set_tempo(120.0);
         // The app's tick gives the tracks their ids, which the undo steps name them by.
         a.state.control.settle(a.state.project.get_mut());
         let labels = |p: &Popup| p.items.iter().map(|i| (i.label.to_string(), i.enabled)).collect::<Vec<_>>();

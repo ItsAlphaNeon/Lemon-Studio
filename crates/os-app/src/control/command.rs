@@ -345,7 +345,7 @@ impl Settings {
     fn of(s: &State) -> Settings {
         let p = &s.project;
         Settings {
-            tempo: s.tempo,
+            tempo: s.tempo(),
             swing: p.swing,
             main_volume: p.main_volume,
             main_pitch: p.main_pitch,
@@ -358,8 +358,8 @@ impl Settings {
     }
 
     fn put(self, s: &mut State) {
+        s.set_tempo(self.tempo);
         let p = s.project.get_mut();
-        s.tempo = self.tempo;
         (p.swing, p.main_volume, p.main_pitch, p.bar, p.bar_as_signature, p.info) =
             (self.swing, self.main_volume, self.main_pitch, self.bar, self.bar_as_signature, self.info);
         (p.panning_law, p.play_truncated) = (self.panning_law, self.play_truncated);
@@ -393,7 +393,7 @@ impl Side {
         let r = &s.rack;
         Side {
             project: s.project.clone(),
-            tempo: s.tempo,
+            tempo: s.tempo(),
             pattern: s.pattern(),
             groups: r.groups.clone(),
             unsorted_at: r.unsorted_at,
@@ -719,7 +719,7 @@ impl Command {
         let none = Ok(Value::Null);
         match self {
             Command::SetTempo { bpm } => {
-                s.tempo = unit("bpm", bpm, 10.0, 522.0)?;
+                s.set_tempo(unit("bpm", bpm, 10.0, 522.0)?);
                 none
             }
             Command::SetSwing { swing } => {
@@ -1230,7 +1230,7 @@ fn restore(s: &mut State, side: Side) {
     let mutes = Mutes::of(&s.project);
     s.project = crate::locked::Locked::new(project);
     mutes.keep(s.project.get_mut());
-    s.tempo = tempo;
+    s.set_tempo(tempo);
     s.set_pattern(pattern);
     crate::rack::remap_ui(s, &map);
     let now = s.pattern();

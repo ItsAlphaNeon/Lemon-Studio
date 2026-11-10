@@ -72,7 +72,7 @@ pub fn job(s: &State, dir: &Path, stem: &str) -> ex::Job {
         reveal: false,
         ..Options::default()
     };
-    let tempo = s.project.tick_tempo(s.tempo);
+    let tempo = s.project.tick_tempo(s.tempo());
     let ticks = crate::piano::pattern_length(s, s.pattern());
     ex::Job {
         options,

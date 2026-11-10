@@ -2664,7 +2664,7 @@ fn restretch_all(app: &mut App) -> Option<String> {
         app.plugins.set_sampler_stretch(r, &sound);
     }
     app.state.piano.dirty = true;
-    let tempo = format!("{:.3}", app.state.tempo);
+    let tempo = format!("{:.3}", app.state.tempo());
     let tempo = tempo.trim_end_matches('0').trim_end_matches('.');
     Some(match rows.len() {
         0 => "No stretched channels to restretch".to_string(),
@@ -2690,7 +2690,7 @@ pub fn play_project(s: &State) -> Project {
     for c in &mut p.channels {
         (c.rack.locked, c.rack.zipped) = (false, false);
     }
-    p.tempo = Some(s.tempo);
+    p.tempo = Some(s.tempo());
     // The pattern shown: a song with no clips plays it (os-engine), not the one the project was opened or saved on.
     p.current_pattern = Some(s.pattern().max(1));
     let rows = loop_rows(s);
@@ -4841,7 +4841,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.project.get_mut().ppq = 96;
-        app.state.tempo = 130.0;
+        app.state.set_tempo(130.0);
         app.state.playlist.reset();
         let enabled = |app: &App| options_menu(&app.state, 0.0, 0.0).items.iter().find(|i| i.label == "Restretch all").map(|i| (i.enabled, i.key));
         assert_eq!(enabled(&app), Some((true, "Ctrl+Alt+R")));
@@ -4854,10 +4854,10 @@ mod tests {
         // 6.4 s at 130 BPM, PPQ 96 (ui/playlist.md §9c); at 120 BPM 1229 ticks.
         pl::fit_audio(&mut app.state);
         assert_eq!(len(&app), Some(1331));
-        app.state.tempo = 120.0;
+        app.state.set_tempo(120.0);
         assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("Restretched 1 channel to 120 BPM"));
         assert_eq!(len(&app), Some(1229), "fitted at once");
-        app.state.tempo = 122.5;
+        app.state.set_tempo(122.5);
         assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("Restretched 1 channel to 122.5 BPM"));
         let _ = std::fs::remove_file(&wav);
     }

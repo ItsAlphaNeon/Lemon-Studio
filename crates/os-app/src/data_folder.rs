@@ -527,12 +527,12 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         let mut app = App::new(None);
         app.save_to(work.join("t.flp"));
-        app.state.tempo = 99.0;
+        app.state.set_tempo(99.0);
         app.save_to(work.join("t.flp"));
         let count = |d: &Path| std::fs::read_dir(d).map(|r| r.count()).unwrap_or(0);
         assert_eq!((count(&global), count(&work.join(BACKUP_DIR))), (1, 0), "no data folder: the global folder");
         app.set_data_folder_choice(DataFolder::RELATIVE);
-        app.state.tempo = 98.0;
+        app.state.set_tempo(98.0);
         app.save_to(work.join("t.flp"));
         assert_eq!((count(&global), count(&work.join(BACKUP_DIR))), (1, 1), "into <data folder>/Backup");
         let path = app.state.path.clone();

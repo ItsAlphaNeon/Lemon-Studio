@@ -677,7 +677,7 @@ impl App {
             crate::project_info::created(s);
             s.file = None;
             s.path = None;
-            s.tempo = tempo;
+            s.set_tempo(tempo);
             s.set_pattern(1);
             s.set_song_mode(false);
             s.piano.reset();
@@ -804,12 +804,12 @@ impl App {
 
     fn piano_midi(&self) -> Smf {
         let s = &self.state;
-        pattern_file(&s.project, s.pattern(), crate::piano::channel(s).unwrap_or(0), s.tempo)
+        pattern_file(&s.project, s.pattern(), crate::piano::channel(s).unwrap_or(0), s.tempo())
     }
 
     fn project_midi(&self) -> Smf {
         let s = &self.state;
-        project_file(&s.project, s.song_mode(), s.pattern(), s.tempo)
+        project_file(&s.project, s.song_mode(), s.pattern(), s.tempo())
     }
 
     /// TOOLS ▸ Save MIDI clipboard to browser (Lemon Studio's design after the original's entry; greyed while nothing
@@ -819,7 +819,7 @@ impl App {
     pub(crate) fn save_midi_clipboard(&mut self) {
         let s = &self.state;
         let Some(dir) = clipboard_dir() else { return };
-        let file = clipboard_file(&s.piano.clipboard, s.project.ppq, s.tempo);
+        let file = clipboard_file(&s.piano.clipboard, s.project.ppq, s.tempo());
         let path = (1..).map(|n| dir.join(format!("MIDI clipboard {n}.mid"))).find(|p| !p.exists()).expect("a free name");
         match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, os_smf::write(&file))) {
             Ok(()) => {
@@ -1124,7 +1124,7 @@ mod tests {
         assert_eq!(p.patterns[0].name.as_deref(), Some(stem(&path).as_str()));
         assert_eq!(p.patterns[0].notes.len(), 4);
         assert!(p.arrangement().is_none_or(|a| a.clips.is_empty()), "nothing on the playlist");
-        assert_eq!(app.state.tempo, 120.0);
+        assert_eq!(app.state.tempo(), 120.0);
         assert!(!app.state.song_mode());
         assert_eq!(app.state.rack.groups[0].name, stem(&path));
         assert_eq!(app.state.rack.filter, crate::rack::Filter::Group(0));
@@ -1223,7 +1223,7 @@ mod tests {
         app.dialog_click(crate::dialog::DHit::Form(FHit::Main));
         let notes = &app.state.project.patterns[0].notes;
         assert_eq!(notes.iter().map(|n| (n.position, n.length, n.key)).collect::<Vec<_>>(), [(0, 48, 60)]);
-        assert_eq!(app.state.tempo, 110.026);
+        assert_eq!(app.state.tempo(), 110.026);
         assert_eq!(LAST.with_borrow(|l| l.as_ref().map(|o| o.realign)), Some(false));
         assert!(!options_for(&one_note(3 * 480, None)).realign, "a pickup imports where it is");
         // Realign chosen for an ordinary file is remembered, as the other settings are.

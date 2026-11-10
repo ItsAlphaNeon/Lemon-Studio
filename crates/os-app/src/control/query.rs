@@ -134,7 +134,7 @@ pub fn project(s: &State) -> Value {
     let i = &p.info;
     json!({
         "ppq": p.ppq,
-        "tempo": s.tempo,
+        "tempo": s.tempo(),
         "time_signature": if p.bar_is_signature() { json!([beats, 16 / steps.max(1)]) } else { Value::Null },
         "bar": { "beats": beats, "steps_per_beat": steps },
         "swing": f64::from(p.swing.unwrap_or(0)) / 128.0,

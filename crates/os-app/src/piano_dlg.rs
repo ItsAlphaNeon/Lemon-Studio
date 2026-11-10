@@ -584,7 +584,7 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
     match d.tool {
         Tool::Flam => {
             let set = d.flam;
-            let off = set.offset(u32::from(s.project.ppq.max(4)), s.tempo);
+            let off = set.offset(u32::from(s.project.ppq.max(4)), s.tempo());
             let mut used: Vec<u16> = piano::notes(s).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
             used.sort_unstable();
             used.dedup();

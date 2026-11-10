@@ -111,7 +111,10 @@ fn set<T: PartialEq>(x: &mut T, v: T) -> bool {
 fn set_value(s: &mut State, c: InitControl) -> bool {
     let main = matches!(c.target, InitControl::MAIN_VOLUME | InitControl::MAIN_SWING | InitControl::MAIN_PITCH);
     if !main && matches!(target::decode(c.target), Target::Tempo) {
-        return set(&mut s.tempo, (f64::from(c.value) / 1000.0).clamp(10.0, 522.0));
+        let bpm = (f64::from(c.value) / 1000.0).clamp(10.0, 522.0);
+        let changed = s.tempo() != bpm;
+        s.set_tempo(bpm);
+        return changed;
     }
     s.project.write_if(|p| set_in_project(p, c))
 }
@@ -374,12 +377,12 @@ mod tests {
     /// The listed controls moved away from their initial values.
     fn moved(a: &mut App) {
         a.state.project.get_mut().channels[0].volume = 1.0;
-        a.state.tempo = 90.0;
+        a.state.set_tempo(90.0);
     }
 
     /// (channel 1's volume, tempo).
     fn controls(a: &App) -> (f64, f64) {
-        (a.state.project.channels[0].volume, a.state.tempo)
+        (a.state.project.channels[0].volume, a.state.tempo())
     }
 
     /// Playback at tick 900, then back at tick 12 (the song looped), then stopped.

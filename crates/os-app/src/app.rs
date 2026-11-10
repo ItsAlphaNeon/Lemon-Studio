@@ -1045,6 +1045,15 @@ impl State {
     pub fn set_pattern(&mut self, n: u16) {
         self.project.write_if(|p| p.current_pattern.replace(n) != Some(n));
     }
+
+    /// The tempo: the project's (BPM). Its edits are undo steps, as FL's "Knob tweak (tempo)" (`ui/undo-steps.md`).
+    pub fn tempo(&self) -> f64 {
+        self.project.tempo.unwrap_or(130.0)
+    }
+
+    pub fn set_tempo(&mut self, bpm: f64) {
+        self.project.write_if(|p| p.tempo.replace(bpm) != Some(bpm));
+    }
 }
 
 pub struct State {
@@ -1171,7 +1180,6 @@ pub struct State {
     /// "Copy value": a normalized value for "Paste value", one for every control and automation point, as in FL
     /// (spec: ui/playlist.md §8 "Point menu").
     pub value_clip: Option<f64>,
-    pub tempo: f64,
     /// Where the tempo box's tenths, hundredths and thousandths digits start (x), as last painted: a drag from a digit
     /// steps the tempo by that digit (views/toolbar.rs).
     pub tempo_digits: std::cell::Cell<[f32; 3]>,
@@ -1628,7 +1636,6 @@ impl App {
                 browser_marquee: Default::default(),
                 browser_favs: crate::browser::load_favs(),
                 browser_index: Default::default(),
-                tempo: 130.0,
                 tempo_digits: std::cell::Cell::new([f32::INFINITY; 3]),
                 message: None,
                 monitor: crate::monitor::Monitor::with_cfg(load_monitor_cfg()),
@@ -1851,7 +1858,6 @@ impl App {
                 self.transport.silence();
                 self.reset_hosted();
                 let s = &mut self.state;
-                s.tempo = project.tempo.unwrap_or(130.0);
                 s.selected_channel = 0;
                 s.selected_mixer = 1;
                 s.mixer = Default::default();
@@ -1866,6 +1872,7 @@ impl App {
                 let mut project = project;
                 project.song_mode = Some(project.song_mode.unwrap_or(true));
                 project.current_pattern = Some(project.current_pattern.unwrap_or(1).max(1));
+                project.tempo = Some(project.tempo.unwrap_or(130.0));
                 s.project = crate::locked::Locked::new(project);
                 // Opening in song mode sets the initial values, as FL 26 does (spec: flp/engine-events.md "Event
                 // 216"); the project is opened with them, not changed.
@@ -2053,7 +2060,8 @@ impl App {
         let before = self.state.project.clone();
         self.store_builtin_states();
         let s = &mut self.state;
-        s.project.get_mut().tempo = Some(s.tempo);
+        let tempo = s.tempo();
+        s.project.write_if(|p| p.tempo.replace(tempo) != Some(tempo));
         // Kept as the project says, or pattern mode, as a new project's (an unsaved change of none).
         s.project.write_if(|p| {
             let unset = p.song_mode.is_none();
@@ -2164,14 +2172,14 @@ impl App {
         // New things get their ids before the copy, so ids alone are no unsaved change.
         let control = &mut self.state.control;
         self.state.project.write_if(|p| control.settle(p));
-        self.saved = (self.state.project.clone(), self.state.tempo, crate::lemon_state::saved_form(&self.state, &self.plugins));
+        self.saved = (self.state.project.clone(), self.state.tempo(), crate::lemon_state::saved_form(&self.state, &self.plugins));
         self.state.plugin_edited = false;
     }
 
     /// Whether the project changed since it was last opened, saved or created, a hosted plugin's settings included.
     pub fn unsaved(&self) -> bool {
         !same_as_saved(&self.saved.0, &self.state.project)
-            || self.saved.1 != self.state.tempo
+            || self.saved.1 != self.state.tempo()
             || self.saved.2 != crate::lemon_state::saved_form(&self.state, &self.plugins)
             || self.state.plugin_edited
     }
@@ -2497,7 +2505,7 @@ impl App {
         crate::project_info::created(s);
         s.file = None;
         s.path = None;
-        s.tempo = 130.0;
+        s.set_tempo(130.0);
         s.set_pattern(1);
         // FL's default template is saved in pattern mode.
         s.set_song_mode(false);
@@ -4021,8 +4029,8 @@ impl App {
     /// toolbar shows it. Returns the tempo set.
     pub(crate) fn set_tempo(&mut self, bpm: f64) -> f64 {
         let t = bpm.clamp(10.0, 522.0);
-        if self.state.tempo != t {
-            self.state.tempo = t;
+        if self.state.tempo() != t {
+            self.state.set_tempo(t);
             self.state.piano.dirty = true;
             self.damage_band(TEMPO_RECT);
         }
@@ -4424,7 +4432,7 @@ impl App {
             self.state.piano.dirty = false;
             // An edit in the interface (a command's change is its event already; an undo or redo is one too).
             let s = &mut self.state;
-            if s.control.changed_since_seen(&s.project, s.tempo) {
+            if s.control.changed_since_seen(&s.project, s.tempo()) {
                 s.control.event(&crate::control::By::User, "edit", "", Vec::new());
             }
             // Also while Play is still starting (not `playing` yet); ignored when stopped.
@@ -4449,7 +4457,7 @@ impl App {
             paused: self.shown.paused,
             tick: self.shown.tick,
             song: self.shown.song,
-            tempo: self.shown.tempo.unwrap_or(self.state.tempo),
+            tempo: self.shown.tempo.unwrap_or(self.state.tempo()),
             peaks: self.transport.peaks(),
             sounding: self.shown.sounding.clone(),
             song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
@@ -4869,7 +4877,7 @@ impl App {
         // The initial values first (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
         crate::init::apply(&mut self.state);
         let mut p = self.state.project.clone();
-        p.tempo = Some(self.state.tempo);
+        p.tempo = Some(self.state.tempo());
         self.transport.stop();
         self.transport.set_loop(self.state.playlist.range);
         self.transport.play(&p, PlayMode::Song, f64::from(tick));
@@ -4879,7 +4887,7 @@ impl App {
     /// Clip menu "Preview": play just this clip once (spec: ui/playlist.md §10).
     pub fn preview_clip(&self, c: &os_model::Clip) {
         let mut p = self.state.project.clone();
-        p.tempo = Some(self.state.tempo);
+        p.tempo = Some(self.state.tempo());
         let mut clip = *c;
         clip.position = 0;
         clip.track = 0;
@@ -5043,7 +5051,7 @@ impl App {
         let start = s.playlist.pos;
         let secs = s.playlist.wave(&path).map_or(0.0, |w| w.secs());
         let p = &s.project;
-        let tempo = p.tick_tempo(s.tempo.max(1.0));
+        let tempo = p.tick_tempo(s.tempo().max(1.0));
         let len = (secs * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
         let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
         let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -5860,7 +5868,7 @@ impl App {
                 let v = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 (target::mixer(t, target::MIXER_VOLUME), format!("{} - Volume", mix_name(t)), v)
             }
-            Action::Tempo => (target::TEMPO, "Tempo".into(), crate::playlist::tempo_value(s.tempo)),
+            Action::Tempo => (target::TEMPO, "Tempo".into(), crate::playlist::tempo_value(s.tempo())),
             // The channel rack's swing knob, mixer box and LED, named as the original names their clips (spec:
             // ui/channel-rack.md §19, measured 2026-11-02); a new clip stores the knob's level, the track over 500
             // (Insert 2 → 0.004) and 1 for a channel that is on.
@@ -8911,7 +8919,7 @@ impl App {
                 let step = [1.0, 0.1, 0.01, 0.001][n];
                 // One undo step for the drag (none when it doesn't change the tempo).
                 crate::control::edit_press(s, crate::control::command::TEMPO, crate::control::command::Region::Settings);
-                self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo, step });
+                self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo(), step });
             }
             Action::SongPos => self.song_pos_press(),
             Action::Clock => {
@@ -10828,7 +10836,7 @@ mod tests {
         app.state.project = crate::locked::Locked::new(test_project());
         app.state.file = None;
         app.state.path = None;
-        app.state.tempo = 111.0;
+        app.state.set_tempo(111.0);
         app.state.project.get_mut().patterns[0].notes.push(Note::step(2, 48));
         app.state.project.get_mut().patterns.push(Pattern { number: 2, name: Some("Two".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() });
         // A changed mixer is kept: the save gives the new file a playlist, which the mixer is stored after.
@@ -11931,7 +11939,7 @@ mod tests {
         let mut app = App::new(None);
         frame(&mut app, &mut a, None);
         let r = hit_rect(&app, &Action::Tempo);
-        let t0 = app.state.tempo;
+        let t0 = app.state.tempo();
         // On the whole number.
         let x = app.state.tempo_digits.get()[0] - 4.0;
         app.mouse_move(x, r.cy());
@@ -11939,7 +11947,7 @@ mod tests {
         app.mouse_down();
         assert!(app.cursor_locked(), "tempo drags lock the cursor");
         app.mouse_move(x, r.cy() - 10.0);
-        assert_eq!(app.state.tempo, t0 + 10.0);
+        assert_eq!(app.state.tempo(), t0 + 10.0);
         app.mouse_up();
         assert!(!app.cursor_locked());
     }
@@ -11953,7 +11961,7 @@ mod tests {
         let mut app = App::new(None);
         frame(&mut app, &mut a, None);
         let r = hit_rect(&app, &Action::Tempo);
-        let (t0, steps) = (app.state.tempo, app.state.history.at());
+        let (t0, steps) = (app.state.tempo(), app.state.history.at());
         let x = app.state.tempo_digits.get()[0] - 4.0;
         app.mouse_move(x, r.cy());
         app.mouse_down();
@@ -11963,11 +11971,11 @@ mod tests {
         app.mouse_move(x, r.cy() - 10.0);
         app.mouse_move(x, r.cy() - 20.0);
         app.mouse_up();
-        assert_eq!((app.state.tempo, app.state.history.at()), (t0 + 20.0, steps + 1));
+        assert_eq!((app.state.tempo(), app.state.history.at()), (t0 + 20.0, steps + 1));
         assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TEMPO));
-        assert_eq!(app.state.tempo, t0);
+        assert_eq!(app.state.tempo(), t0);
         assert_eq!(crate::history::redo(&mut app.state).as_deref(), Some(TEMPO));
-        assert_eq!(app.state.tempo, t0 + 20.0);
+        assert_eq!(app.state.tempo(), t0 + 20.0);
 
         let bar = app.state.project.bar();
         app.set_bar(3, 4);
@@ -12011,14 +12019,14 @@ mod tests {
         assert!(d[0] < d[1] && d[1] < d[2], "{d:?}");
         let whole = d[0] - 4.0;
         for (x, step) in [(whole, 1.0), ((d[0] + d[1]) / 2.0, 0.1), ((d[1] + d[2]) / 2.0, 0.01), (d[2] + 2.0, 0.001)] {
-            app.state.tempo = 130.0;
+            app.state.set_tempo(130.0);
             frame(&mut app, &mut a, None);
             app.mouse_move(x, y);
             app.mouse_down();
             app.mouse_move(x, y - 3.0);
             app.mouse_up();
             let want = 130.0 + 3.0 * step;
-            assert!((app.state.tempo - want).abs() < 1e-9, "from x {x}: {} vs {want}", app.state.tempo);
+            assert!((app.state.tempo() - want).abs() < 1e-9, "from x {x}: {} vs {want}", app.state.tempo());
         }
     }
 
@@ -14394,7 +14402,7 @@ mod tests {
         for design in [Design::Citrus, Design::Lemon] {
             let mut app = App::new(None);
             app.set_design(design, false);
-            app.state.tempo = 99.0;
+            app.state.set_tempo(99.0);
             assert!(app.unsaved());
             app.menu_item(0, FILE_NEW);
             let (title, text) = app.top_message().expect("asked");
@@ -14405,7 +14413,7 @@ mod tests {
             // Cancel (a click) stays.
             let r = hit_rect(&app, &Action::Dlg(DHit::Button(2)));
             click(&mut app, &mut c, r);
-            assert!(!app.modal_open() && app.unsaved() && app.state.tempo == 99.0, "Cancel keeps the project");
+            assert!(!app.modal_open() && app.unsaved() && app.state.tempo() == 99.0, "Cancel keeps the project");
             // Clicks behind a dialog do nothing.
             app.menu_item(0, FILE_NEW);
             frame(&mut app, &mut c, None);
@@ -14415,9 +14423,9 @@ mod tests {
             assert!(app.modal_open());
             // N (the accelerator) = No: the new project replaces the changes.
             typed(&mut app, "n");
-            assert!(!app.modal_open() && !app.unsaved() && app.state.tempo == 130.0, "No goes on");
+            assert!(!app.modal_open() && !app.unsaved() && app.state.tempo() == 130.0, "No goes on");
             // Yes on a project without a file: the save dialog, then the window may close.
-            app.state.tempo = 98.0;
+            app.state.set_tempo(98.0);
             app.ask_discard("closing", Next::Close);
             frame(&mut app, &mut c, None);
             named(&mut app, NamedKey::Tab);
@@ -14437,7 +14445,7 @@ mod tests {
             assert!(app.want_exit && !app.modal_open(), "then the window closes");
             // Save as onto that file: the replace question starts on No; Yes replaces.
             app.want_exit = false;
-            app.state.tempo = 97.0;
+            app.state.set_tempo(97.0);
             app.save(true);
             frame(&mut app, &mut c, None);
             assert_eq!(top_file(&app).dir, dir, "the dialog starts in the project's folder");
@@ -15206,16 +15214,16 @@ mod tests {
             click(app, c, pad);
         };
         assert!(crate::tapper::get().apply);
-        assert_eq!(app.state.tempo, 130.0);
+        assert_eq!(app.state.tempo(), 130.0);
         let steps = app.state.history.at();
         tap(&mut app, &mut c, 10.0);
-        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (None, 130.0), "one tap: TAP stays");
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo()), (None, 130.0), "one tap: TAP stays");
         assert!(app.state.tapper.flash == 1.0 && app.animating(), "a tap lights the pad, which then fades");
         tap(&mut app, &mut c, 10.5);
-        assert_eq!(app.state.tempo, 120.0);
+        assert_eq!(app.state.tempo(), 120.0);
         tap(&mut app, &mut c, 11.0);
         tap(&mut app, &mut c, 11.4);
-        assert_eq!(app.state.tempo, 129.0, "the average of every interval, rounded (128.57)");
+        assert_eq!(app.state.tempo(), 129.0, "the average of every interval, rounded (128.57)");
         assert!(app.unsaved(), "a tapped tempo is a change to the project");
         assert_eq!(app.state.history.at(), steps + 1, "a count's taps are one undo step");
         // Off: the pad shows the tempo, the project keeps its own; turning it on applies the pad's.
@@ -15223,31 +15231,31 @@ mod tests {
         click(&mut app, &mut c, apply);
         assert!(!crate::tapper::get().apply);
         tap(&mut app, &mut c, 11.8);
-        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (Some(133.0), 129.0));
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo()), (Some(133.0), 129.0));
         click(&mut app, &mut c, apply);
         assert!(crate::tapper::get().apply);
-        assert_eq!(app.state.tempo, 133.0);
+        assert_eq!(app.state.tempo(), 133.0);
         // A long pause starts a new count (the tempo stays); the project tempo stays in 10-522.
         tap(&mut app, &mut c, 20.0);
-        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (None, 133.0));
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo()), (None, 133.0));
         tap(&mut app, &mut c, 20.05);
-        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo), (Some(1200.0), 522.0));
+        assert_eq!((app.state.tapper.count.tempo(), app.state.tempo()), (Some(1200.0), 522.0));
         // Steps: the first count, turning Apply tempo on, the new count; each undoes to the tempo before it.
         assert_eq!(app.state.history.at(), steps + 3);
         for want in [133.0, 129.0, 130.0] {
             assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::control::command::TEMPO));
-            assert_eq!(app.state.tempo, want);
+            assert_eq!(app.state.tempo(), want);
         }
         for want in [129.0, 133.0, 522.0] {
             crate::history::redo(&mut app.state);
-            assert_eq!(app.state.tempo, want);
+            assert_eq!(app.state.tempo(), want);
         }
         // MIDI keys tap while the window is open; a chord's keys are one tap.
         for t in [30.0, 30.03, 30.5] {
             app.state.tapper.test_time = Some(t);
             app.key_tap();
         }
-        assert_eq!(app.state.tempo, 120.0);
+        assert_eq!(app.state.tempo(), 120.0);
         // Every tap clicked, accented on the first of each four of a count (§8); the chord's second key did not.
         let (t, f) = (true, false);
         assert_eq!(app.state.tapper.test_clicks, [t, f, f, f, t, t, f, t, f]);
@@ -15309,7 +15317,7 @@ mod tests {
         assert!(!key(&mut app, 10.3, KeyCode::F1), "not a note key");
         assert!(key(&mut app, 10.5, KeyCode::KeyC));
         app.typing_key(KeyCode::KeyC, false, false, false);
-        assert_eq!((app.state.tapper.count.taps(), app.state.tempo), (2, 120.0));
+        assert_eq!((app.state.tapper.count.taps(), app.state.tempo()), (2, 120.0));
 
         app.state.tapper.test_time = Some(11.0);
         app.act(Action::Touch(TouchAct::Note(56)));
@@ -15318,7 +15326,7 @@ mod tests {
         app.touch_hold(Some(57));
         app.touch_hold(None);
         let (t, f) = (true, false);
-        assert_eq!((app.state.tapper.test_clicks.as_slice(), app.state.tempo), ([t, f, f].as_slice(), 120.0));
+        assert_eq!((app.state.tapper.test_clicks.as_slice(), app.state.tempo()), ([t, f, f].as_slice(), 120.0));
     }
 
     /// The tapper's flash fades on the ticks (spec: ui/tempo-tapper.md §4, §8): each repaints just the pad, which shows
@@ -15853,7 +15861,8 @@ mod tests {
         if !os_model::crossfade::on(&a.state.project) {
             a.toggle_auto_crossfades();
         }
-        assert!(os_model::crossfade::derive(a.state.project.get_mut(), a.state.tempo), "the overlap makes a crossfade");
+        let tempo = a.state.tempo();
+        assert!(os_model::crossfade::derive(a.state.project.get_mut(), tempo), "the overlap makes a crossfade");
         let p = crate::rack::play_project(&a.state);
         let out = std::env::temp_dir().join(format!("os-app-crossfade-{}-export.wav", std::process::id()));
         a.plugins.set_offline(true);
@@ -15870,7 +15879,7 @@ mod tests {
         let _ = std::fs::remove_file(&out);
         let _ = std::fs::remove_file(&wav);
         let left: Vec<f32> = bytes[44..].chunks_exact(8).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
-        let at = |t: u32| os_engine::Clock::frame_of_tick(48000, p.ppq, f64::from(a.state.tempo), u64::from(t)) as usize;
+        let at = |t: u32| os_engine::Clock::frame_of_tick(48000, p.ppq, f64::from(a.state.tempo()), u64::from(t)) as usize;
         let level = left[at(first.length / 4)];
         assert!(level > 0.1, "the first clip sounds: {level}");
         // From the first clip's start to the second's end.
@@ -16218,7 +16227,7 @@ mod tests {
             app.paint(&mut canvas, None);
         }
         assert!(!app.unsaved(), "opening and loading change nothing");
-        app.state.tempo = 99.0;
+        app.state.set_tempo(99.0);
         assert!(app.unsaved(), "an edit is unsaved");
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
         assert!(!app.unsaved(), "saved");
@@ -16239,7 +16248,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = App::new(None);
-        app.state.tempo = 123.0;
+        app.state.set_tempo(123.0);
         let flp = dir.join("Old.flp");
         app.save_to(flp.clone());
         let plain = os_flp::FlpFile::parse(&std::fs::read(&flp).unwrap()).unwrap();
@@ -16247,8 +16256,8 @@ mod tests {
         let before = std::fs::read(&flp).unwrap();
         let mut app = App::new(None);
         app.open(flp.clone());
-        assert_eq!(app.state.tempo, 123.0);
-        app.state.tempo = 124.0;
+        assert_eq!(app.state.tempo(), 123.0);
+        app.state.set_tempo(124.0);
         let lemon = dir.join("Old.lemon");
         let asked = fake::shown().1;
         fake::answer(None);
@@ -16266,12 +16275,12 @@ mod tests {
         assert_eq!(os_flp::lemon::version(&file), Some(os_flp::lemon::VERSION));
         assert_eq!(os_flp::lemon::saved_by_text(&file), Some(format!("Lemon Studio {}", crate::version::VERSION)));
         // Save again: in place, no dialog.
-        app.state.tempo = 125.0;
+        app.state.set_tempo(125.0);
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
         assert_eq!(fake::shown().1, asked + 2);
         let mut back = App::new(None);
         back.open(lemon.clone());
-        assert_eq!((back.state.tempo, back.state.path.as_deref()), (125.0, Some(lemon.as_path())));
+        assert_eq!((back.state.tempo(), back.state.path.as_deref()), (125.0, Some(lemon.as_path())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -16428,7 +16437,7 @@ mod tests {
             app.shift = false;
         };
 
-        app.state.tempo = 99.0;
+        app.state.set_tempo(99.0);
         key(&mut app, "S", true);
         assert_eq!(fake::shown(), (0, 1), "Save as asks where");
         assert_eq!(std::fs::read(&song).unwrap(), before, "cancelled: the open file is not written");
@@ -16454,7 +16463,7 @@ mod tests {
         assert!(app.export.is_none());
         assert!(!dir.join("Other_2.lemon").exists(), "no new version");
 
-        app.state.tempo = 100.0;
+        app.state.set_tempo(100.0);
         key(&mut app, "s", false);
         assert_eq!(fake::shown(), (0, 2), "Ctrl+S does not ask");
         assert!(!app.unsaved(), "Ctrl+S saved in place");
@@ -19016,7 +19025,7 @@ mod tests {
             let ppq = u32::from(app.state.project.ppq);
             key(&mut app, "f", false, true, false);
             assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Flam);
-            let d = app.state.piano_dlg.flam.offset(ppq, app.state.tempo).unsigned_abs() as u32;
+            let d = app.state.piano_dlg.flam.offset(ppq, app.state.tempo()).unsigned_abs() as u32;
             assert!(d > 0);
             assert_eq!(mine(&app), vec![(0, d, 60), (d, 96, 60), (96, d, 64), (96 + d, 48, 64)], "leading flams, previewed");
             app.act(Action::PianoDlg(DAct::Options));
@@ -19606,12 +19615,12 @@ mod tests {
         // The project's initial values follow the move (spec: ui/settings-choices.md "Advanced: Initialize controls
         // automatically").
         app.state.project.get_mut().init_controls = vec![os_model::InitControl { head: 0, target: os_model::target::TEMPO, value: 140_000 }];
-        app.state.tempo = 90.0;
+        app.state.set_tempo(90.0);
         ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
         assert!(app.state.song_mode(), "a click on the ruler switches to SONG");
         assert_eq!(app.state.playlist.pos, 4 * bar);
         assert!(!app.transport.playing(), "and does not start playback");
-        assert_eq!(app.state.tempo, 140.0, "the initial tempo");
+        assert_eq!(app.state.tempo(), 140.0, "the initial tempo");
     }
 
     /// Stretch mode (spec: ui/playlist.md §9b): Shift+M on, then dragging an audio clip's end to twice its length
@@ -19643,7 +19652,7 @@ mod tests {
         let after = pl::clips(&app.state)[ci];
         // The time becomes the whole sample's length (1 s at the project tempo) times two; the multiplier stays at 1.
         let sound = app.state.project.channels[row].sound;
-        let want = app.state.tempo / 60.0 * 2.0;
+        let want = app.state.tempo() / 60.0 * 2.0;
         let beats = sound.stretch_time().expect("a stretch time");
         assert!((beats - want).abs() < 0.02 * want, "time {beats} beats, want {want}");
         assert_eq!((sound.stretch[2], sound.stretch_mode()), (0, 0), "multiplier 1, method kept");
@@ -19735,7 +19744,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
         app.state.project.get_mut().ppq = 96;
-        app.state.tempo = 130.0;
+        app.state.set_tempo(130.0);
         app.state.playlist.reset();
         let wav = std::env::temp_dir().join(format!("os-app-fit-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 282240]).unwrap();
@@ -19748,7 +19757,7 @@ mod tests {
         let mut check = |app: &mut App, stretch: [u32; 4], pitch: i32, tempo: f64, want: [u32; 3], what: &str| {
             app.state.project.get_mut().channels[row].sound.stretch = stretch;
             app.state.project.get_mut().channels[row].pitch_cents = pitch;
-            app.state.tempo = tempo;
+            app.state.set_tempo(tempo);
             pl::fit_audio(&mut app.state);
             let got: Vec<u32> = pl::clips(&app.state).iter().filter(|c| c.source == src).map(|c| c.length).collect();
             assert_eq!(got, want, "{what}");
@@ -19798,7 +19807,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
         app.state.project.get_mut().ppq = 96;
-        app.state.tempo = 140.0;
+        app.state.set_tempo(140.0);
         app.state.playlist.reset();
         let wav = std::env::temp_dir().join(format!("os-app-fit-bar-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 176400]).unwrap();
@@ -19847,9 +19856,9 @@ mod tests {
         assert!(m.starts_with("Exported 2 tracks"), "{m}");
         let read = |name: &str| os_engine::sample::load(&dir.join(name)).expect(name);
         let (t1, t3) = (read("01 Track 1.wav"), read("03 Track 3.wav"));
-        assert!(t1.frames() >= os_engine::laws::tick_to_frame(f64::from(3 * bar - 3), 96, app.state.tempo, 44100) as usize);
+        assert!(t1.frames() >= os_engine::laws::tick_to_frame(f64::from(3 * bar - 3), 96, app.state.tempo(), 44100) as usize);
         let loud = |s: &os_engine::sample::Sample, a: usize, b: usize| s.left[a..b.min(s.frames())].iter().any(|v| v.abs() > 0.01);
-        let f = |t: u32| os_engine::laws::tick_to_frame(f64::from(t), 96, app.state.tempo, 44100) as usize;
+        let f = |t: u32| os_engine::laws::tick_to_frame(f64::from(t), 96, app.state.tempo(), 44100) as usize;
         assert!(loud(&t1, f(step), f(step + ppq)) && !loud(&t3, f(step), f(step + ppq)), "track 1's clip only in its file");
         assert!(loud(&t3, f(2 * bar), f(2 * bar + ppq)), "track 3's clip in its file");
         let _ = std::fs::remove_dir_all(&dir);
@@ -20087,7 +20096,7 @@ mod tests {
         let (mut app, _, _, _) = ruler_app(&mut c);
         app.state.playlist_bar_w = 400.0;
         app.state.project.get_mut().auto_crossfades = Some(true);
-        app.state.tempo = 130.0;
+        app.state.set_tempo(130.0);
         let wav = std::env::temp_dir().join(format!("os-app-crossfades-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.5; 2 * 96000]).unwrap();
         // Two 2 s clips (416 ticks at 130 BPM), the second from tick 192: 224 ticks of overlap.
@@ -23675,7 +23684,7 @@ mod tests {
             x.points[0].value = 0.0;
             x.points[1].value = 1.0;
         }
-        let tempo = f64::from(a.state.tempo);
+        let tempo = f64::from(a.state.tempo());
         let export = |a: &mut App, tag: &str| -> Vec<f32> {
             let path = std::env::temp_dir().join(format!("lemon-vst2-{tag}-{}.wav", std::process::id()));
             a.transport.export(&a.state.project, os_engine::PlayMode::Song, rate, crate::export::Job::wav(&path));
