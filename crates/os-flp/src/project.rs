@@ -912,6 +912,11 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         }
     }
     p.mixer = load_mixer(events, &l, enc);
+    // A channel in no group: the "Unsorted" entry, or an index past the list.
+    let (unsorted, n) = (p.unsorted_group(), p.groups.len());
+    for c in &mut p.channels {
+        c.rack.group = c.rack.group.filter(|&g| (g as usize) < n && g != unsorted);
+    }
     Ok(p)
 }
 
@@ -957,7 +962,7 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             origin: None,
             locked: loc.locked.is_some_and(|i| int(&events[i]) != 0),
             zipped: loc.zipped.is_some_and(|i| int(&events[i]) != 0),
-            group: loc.group.map_or(0, |i| int(&events[i])),
+            group: Some(loc.group.map_or(0, |i| int(&events[i]))),
             stored_color: loc.color.map(|i| rgb_from_bgr(int(&events[i]))),
             icon: find(id::PLUGIN_ICON).map_or(0, int),
         },
@@ -2992,10 +2997,11 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 (None, false) => {}
             }
         }
-        if ch.rack.group != old.rack.group {
+        let group = ch.rack.group.unwrap_or(project.unsorted_group());
+        if group != old.rack.group.unwrap_or(current.unsorted_group()) {
             match loc.group {
-                Some(i) => set_int(&mut events[i], ch.rack.group),
-                None => inserts.push((loc.end, Event::new(id::CH_GROUP, Value::U32(ch.rack.group)))),
+                Some(i) => set_int(&mut events[i], group),
+                None => inserts.push((loc.end, Event::new(id::CH_GROUP, Value::U32(group)))),
             }
         }
         // A sampler's sample (Lemon Sampler loads one): event 196 replaced, or added right after event 20 where FL
@@ -3045,7 +3051,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         let at = l.channels.last().map(|c| c.end + 1).ok_or_else(|| ProjectError::Structure("no channels".into()))?;
         let mut block = Vec::new();
         for ch in &project.channels[current.channels.len()..] {
-            block.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
+            block.extend(channel_block_events(ch, project.automation(ch.index), project.unsorted_group(), enc)?);
         }
         inserts.extend(block.into_iter().rev().map(|e| (at, e)));
     }
@@ -3741,7 +3747,7 @@ fn restructure(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError
                 });
                 region.extend(b);
             }
-            None => region.extend(channel_block_events(ch, project.automation(ch.index), enc)?),
+            None => region.extend(channel_block_events(ch, project.automation(ch.index), project.unsorted_group(), enc)?),
         }
         if let Some(g) = gaps.get(i) {
             region.extend(g.iter().cloned());
@@ -3937,7 +3943,7 @@ fn channel_type_code(kind: ChannelKind) -> u8 {
 
 /// One channel block in the minimal form FL 26 loads (spec: flp/events/channels.md; every record not written here
 /// takes FL's default).
-fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -> Result<Vec<Event>, ProjectError> {
+fn channel_block_events(ch: &Channel, auto: Option<&Automation>, unsorted: u32, enc: TextEnc) -> Result<Vec<Event>, ProjectError> {
     let plugin = (ch.kind == ChannelKind::Plugin).then_some(ch.plugin.as_deref()).flatten().filter(|p| !p.is_empty());
     if matches!(ch.kind, ChannelKind::Other(_)) || (ch.kind == ChannelKind::Plugin && plugin.is_none()) {
         return Err(ProjectError::Mismatch(format!(
@@ -3987,7 +3993,7 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
         // FL writes the sample settings right after the levels.
         b.push(Event::new(id::CH_SAMPLE_SETTINGS, Value::var(audio_clip_215(ch.sound.stretch))));
     }
-    b.push(Event::new(id::CH_GROUP, Value::U32(ch.rack.group)));
+    b.push(Event::new(id::CH_GROUP, Value::U32(ch.rack.group.unwrap_or(unsorted))));
     if let Some(a) = auto.filter(|_| ch.kind == ChannelKind::Automation) {
         b.push(Event::new(id::AUTO_DATA, Value::var(encode_automation(a))));
     }
@@ -4101,7 +4107,7 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         ev.extend(c.formula.as_deref().map(|s| Event::new(id::LINK_FORMULA, Value::var(encode_text(s, enc)))));
     }
     for (i, ch) in project.channels.iter().enumerate() {
-        ev.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
+        ev.extend(channel_block_events(ch, project.automation(ch.index), project.unsorted_group(), enc)?);
         if i == 0 {
             for pat in &patterns {
                 if pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_off.is_some() || !pat.markers.is_empty() {
@@ -6496,7 +6502,7 @@ mod tests {
         m.groups = vec!["Drums".into(), os_model::UNSORTED_GROUP.into()];
         m.current_group = Some(0);
         m.channels[0].rack.zipped = true;
-        m.channels[1].rack = ChannelRack { group: 1, locked: true, ..m.channels[1].rack };
+        m.channels[1].rack = ChannelRack { group: None, locked: true, ..m.channels[1].rack };
         for pat in &mut m.patterns {
             if pat.number == 2 {
                 pat.length = Some(72);

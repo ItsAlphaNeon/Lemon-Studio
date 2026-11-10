@@ -75,7 +75,7 @@ fn project_part(p: &os_model::Project) -> os_model::Project {
     (p.tempo, p.current_pattern, p.song_mode) = (None, None, None);
     p.groups.clear();
     for c in &mut p.channels {
-        (c.rack.locked, c.rack.zipped, c.rack.group) = (false, false, 0);
+        (c.rack.locked, c.rack.zipped, c.rack.group) = (false, false, None);
     }
     for q in &mut p.patterns {
         (q.loops, q.loop_off) = (Vec::new(), None);
@@ -112,8 +112,10 @@ fn project_hash(p: &os_model::Project) -> u64 {
 /// field per line, so a difference names its field.
 fn side(app: &App) -> String {
     let (s, r) = (&app.state, &app.state.rack);
+    // Since step 5 the project's (`rack::groups`, `rack::filter`, `rack::unsorted_at`), read as the rack held them.
+    let groups = crate::rack::groups(&s.project);
     // "Unsorted" at the end of the group list reads as None (last) or as its place there: the same thing.
-    let unsorted = r.unsorted_at.filter(|&u| u < r.groups.len());
+    let unsorted = crate::rack::unsorted_at(&s.project).filter(|&u| u < groups.len());
     let mut out = String::new();
     let mut f = |name: &str, v: &dyn fmt::Debug| {
         let _ = writeln!(out, "{name}: {v:#?}");
@@ -121,8 +123,8 @@ fn side(app: &App) -> String {
     f("tempo", &s.tempo().to_bits());
     f("pattern", &s.pattern());
     f("song_mode", &s.song_mode());
-    f("filter", &r.filter);
-    f("groups", &r.groups);
+    f("filter", &crate::rack::filter(&s.project));
+    f("groups", &groups);
     f("zipped", &crate::rack::zipped_rows(&s.project));
     // Since step 5 a channel's own (`rack.locked`); read the same way as when the rack kept the rows.
     f("locked", &crate::rack::locked_rows(&s.project));

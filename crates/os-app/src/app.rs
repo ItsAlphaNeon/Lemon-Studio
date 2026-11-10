@@ -2068,7 +2068,7 @@ impl App {
             p.song_mode.get_or_insert(false);
             unset
         });
-        // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
+        // The loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
         crate::rack::to_model(s);
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
         crate::playlist::store_view(s);
@@ -2088,6 +2088,7 @@ impl App {
                 s.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
             }
             let mut first = s.project.clone();
+            crate::rack::as_saved(&mut first);
             crate::project_plugins::store_hosted(&mut first, &self.plugins);
             match os_flp::project::create(&first) {
                 Ok(f) => f,
@@ -2105,6 +2106,7 @@ impl App {
         // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
+        crate::rack::as_saved(&mut proj);
         // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`).
         let extra = crate::lemon_state::events(s, &self.plugins);
         crate::project_info::stamp(s, &mut proj);
@@ -10088,16 +10090,16 @@ pub(crate) fn add_channel(p: &mut Project) -> usize {
 /// A new project (owner's choice, 2026-10-10): one empty sampler channel, played and edited by Lemon Sampler, on
 /// insert 1, and pattern 1.
 /// `now` is the project as `saved` but for what FL does not count as an unsaved change though the file keeps it
-/// (`ui/undo-steps.md`): the channels' locks and the song mode.
+/// (`ui/undo-steps.md`): the channels' locks, the song mode, and the filter groups and filter shown.
 fn same_as_saved(saved: &Project, now: &Project) -> bool {
     if saved == now {
         return true;
     }
     let mut now = now.clone();
-    now.song_mode = saved.song_mode;
+    (now.song_mode, now.groups, now.current_group) = (saved.song_mode, saved.groups.clone(), saved.current_group);
     if saved.channels.len() == now.channels.len() {
         for (x, y) in saved.channels.iter().zip(&mut now.channels) {
-            y.rack.locked = x.rack.locked;
+            (y.rack.locked, y.rack.group) = (x.rack.locked, x.rack.group);
         }
     }
     *saved == now
@@ -18386,11 +18388,11 @@ mod tests {
         assert!(app.state.playlist.popup.is_none());
 
         // A filter group gets its own section, before Unsorted.
-        app.state.rack.groups.push(crate::rack::Group { name: "Drums".into(), members: [0, 3].into_iter().collect() });
+        crate::rack::set_groups(&mut app.state, &[crate::rack::Group { name: "Drums".into(), members: [0, 3].into_iter().collect() }], None);
         let menu = crate::piano_tools::target_menu(&app.state, 0.0, 0.0);
         let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(labels[4..], ["Drums", "Kick", "Snare", "Unsorted", "Clap", "Hat", "Pluck", "", "Auto locate"]);
-        app.state.rack.groups.clear();
+        crate::rack::set_groups(&mut app.state, &[], None);
 
         // Wheel (§3): from Snare (no notes) down gives Kick (wrapping), up from Snare gives Hat.
         frame(&mut app, &mut c, None);
@@ -22698,13 +22700,12 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(test_project());
         // A file's groups: Drums, then Unsorted.
-        app.state.rack.groups = vec![Group { name: "Drums".into(), members: [0, 3].into_iter().collect() }];
-        app.state.rack.unsorted_at = Some(1);
+        crate::rack::set_groups(&mut app.state, &[Group { name: "Drums".into(), members: [0, 3].into_iter().collect() }], Some(1));
         app.state.rack.select_only(1);
         app.state.selected_channel = 1;
         let before = (app.state.playlist.source, app.state.playlist.picker);
         let clips = pl::clips(&app.state).len();
-        let names = |app: &App| app.state.rack.groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>();
+        let names = |app: &App| crate::rack::groups(&app.state.project).iter().map(|g| g.name.clone()).collect::<Vec<_>>();
         // Audio clip.
         app.menu_item(ADD_MENU, entry("Audio clip"));
         let s = &app.state;
@@ -22712,9 +22713,9 @@ mod tests {
         assert_eq!((s.project.channels.len(), ch.index, ch.kind, ch.name.as_deref()), (6, 5, ChannelKind::AudioClip, Some("Audio Clip")));
         assert_eq!((ch.mixer_track, ch.sample_path.as_deref(), ch.sound), (0, None, Default::default()));
         assert_eq!((s.rack.sel.iter().copied().collect::<Vec<_>>(), s.selected_channel), (vec![5], 5));
-        assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into(), "Audio".into()], Some(2), Filter::Group(1)));
+        assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.project), crate::rack::filter(&app.state.project)), (vec!["Drums".into(), "Audio".into()], Some(2), Filter::Group(1)));
         let s = &app.state;
-        assert_eq!(s.rack.groups[1].members.iter().copied().collect::<Vec<_>>(), [5]);
+        assert_eq!(crate::rack::groups(&s.project)[1].members.iter().copied().collect::<Vec<_>>(), [5]);
         assert_eq!((s.playlist.source, s.playlist.picker, pl::clips(s).len()), (Some(ClipSource::Channel(5)), PickKind::Audio, clips));
         assert_eq!(s.pending_open, Some(5), "its settings (Lemon Sampler's window) open");
         assert!(app.unsaved());
@@ -22728,7 +22729,7 @@ mod tests {
         let pts: Vec<_> = a.points.iter().map(|p| (p.beat, p.value, p.tension, p.mode)).collect();
         assert_eq!(pts, [(0.0, 0.5, 0.0, AutoMode::Single), (4.0, 0.5, 0.0, AutoMode::Single)]);
         assert!(a.targets.is_empty() && a.lfo.mode == 1);
-        assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into(), "Audio".into(), "Automation".into()], Some(3), Filter::Group(2)));
+        assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.project), crate::rack::filter(&app.state.project)), (vec!["Drums".into(), "Audio".into(), "Automation".into()], Some(3), Filter::Group(2)));
         let s = &app.state;
         assert!(s.shown(Win::Plugin) && s.plugin_channel == 6 && s.pending_open.is_none(), "its channel window opens");
         assert_eq!((s.playlist.source, s.playlist.picker), (Some(ClipSource::Channel(6)), PickKind::Automation));
@@ -22736,8 +22737,8 @@ mod tests {
         app.menu_item(ADD_MENU, entry("Audio clip"));
         let s = &app.state;
         assert_eq!(s.project.channels[7].name.as_deref(), Some("Audio Clip #2"));
-        assert_eq!((s.rack.groups.len(), s.rack.filter), (3, Filter::Group(1)));
-        assert_eq!(s.rack.groups[1].members.iter().copied().collect::<Vec<_>>(), [5, 7]);
+        assert_eq!((crate::rack::groups(&s.project).len(), crate::rack::filter(&s.project)), (3, Filter::Group(1)));
+        assert_eq!(crate::rack::groups(&s.project)[1].members.iter().copied().collect::<Vec<_>>(), [5, 7]);
         // Saved as FL stores them: types 4 and 5, the groups before Unsorted, the automation's points and no link.
         let path = std::env::temp_dir().join(format!("os_add_clips_{}.flp", std::process::id()));
         app.save_to(path.clone());
@@ -22745,22 +22746,22 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(back.groups, ["Drums", "Audio", "Automation", os_model::UNSORTED_GROUP]);
         let kinds: Vec<_> = back.channels[5..].iter().map(|c| (c.kind, c.name.clone().unwrap_or_default(), c.rack.group)).collect();
-        assert_eq!(kinds, [(ChannelKind::AudioClip, "Audio Clip".into(), 1), (ChannelKind::Automation, "Automation Clip".into(), 2), (ChannelKind::AudioClip, "Audio Clip #2".into(), 1)]);
+        assert_eq!(kinds, [(ChannelKind::AudioClip, "Audio Clip".into(), Some(1)), (ChannelKind::Automation, "Automation Clip".into(), Some(2)), (ChannelKind::AudioClip, "Audio Clip #2".into(), Some(1))]);
         assert_eq!(back.current_group, Some(1));
         let a2 = back.automation(6).expect("saved points");
         assert_eq!((&a2.points, &a2.targets, a2.lfo.mode), (&a.points, &Vec::new(), 1));
         // Undo (Ctrl+Z), one step each: the channel goes, the groups, filter, selection and clip source come back.
         let undo = |app: &mut App| crate::playlist::run(app, crate::playlist::Cmd::Undo);
         assert_eq!(undo(&mut app).as_deref(), Some("Undo: add audio clip"));
-        assert_eq!((app.state.project.channels.len(), app.state.rack.groups[1].members.len()), (7, 1));
+        assert_eq!((app.state.project.channels.len(), crate::rack::groups(&app.state.project)[1].members.len()), (7, 1));
         assert_eq!(undo(&mut app).as_deref(), Some("Undo: add automation clip"));
         let s = &app.state;
         assert_eq!((s.project.channels.len(), s.project.automation(6).is_none()), (6, true));
-        assert_eq!((names(&app), app.state.rack.filter, app.state.selected_channel), (vec!["Drums".into(), "Audio".into()], Filter::Group(1), 5));
+        assert_eq!((names(&app), crate::rack::filter(&app.state.project), app.state.selected_channel), (vec!["Drums".into(), "Audio".into()], Filter::Group(1), 5));
         undo(&mut app);
         let s = &app.state;
         assert_eq!(s.project.channels.len(), 5);
-        assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into()], Some(1), Filter::All));
+        assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.project), crate::rack::filter(&app.state.project)), (vec!["Drums".into()], Some(1), Filter::All));
         let s = &app.state;
         assert_eq!((s.rack.sel.iter().copied().collect::<Vec<_>>(), s.selected_channel, (s.playlist.source, s.playlist.picker)), (vec![1], 1, before));
     }

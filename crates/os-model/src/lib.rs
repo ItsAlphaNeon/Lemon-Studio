@@ -462,6 +462,14 @@ impl PlaylistView {
 pub const UNSORTED_GROUP: &str = "Unsorted";
 
 impl Project {
+    /// The index the file gives channels in no group: the "Unsorted" entry of [`Project::groups`], or one past the end
+    /// when the list has none.
+    pub fn unsorted_group(&self) -> u32 {
+        self.groups.iter().position(|g| g == UNSORTED_GROUP).unwrap_or(self.groups.len()) as u32
+    }
+}
+
+impl Project {
     /// Index into `arrangements` of the current arrangement (the first when unset or not found).
     pub fn arrangement_index(&self) -> usize {
         self.current_arrangement.and_then(|n| self.arrangements.iter().position(|a| a.number == n)).unwrap_or(0)
@@ -1192,8 +1200,9 @@ pub struct ChannelRack {
     pub locked: bool,
     /// Zipped row (event 15).
     pub zipped: bool,
-    /// Filter group index into [`Project::groups`] (event 145).
-    pub group: u32,
+    /// Filter group: an index into [`Project::groups`] (event 145); `None` in no group, which the file writes as the
+    /// "Unsorted" entry's index ([`Project::unsorted_group`]).
+    pub group: Option<u32>,
     /// The colour event 128 holds, whether or not it is a custom colour: the playlist draws audio and automation
     /// clips with it (spec: ui/playlist.md §2, "Channel-colour rule"). Display only; saving writes `Channel::color`.
     pub stored_color: Option<Rgb>,

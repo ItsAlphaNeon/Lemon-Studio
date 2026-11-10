@@ -277,14 +277,15 @@ pub fn target_menu(s: &State, x: f32, y: f32) -> Popup {
     let head = |name: String| PItem { label: name.into(), ..PItem::head("") };
     let mut items = vec![PItem::head("Current pattern")];
     items.extend((0..n).filter(|&r| has_notes(s, r)).map(row_item));
-    for g in &s.rack.groups {
+    let groups = crate::rack::groups(&s.project);
+    for g in &groups {
         let rows: Vec<usize> = g.members.iter().copied().filter(|&r| r < n).collect();
         if !rows.is_empty() {
             items.push(head(g.name.clone()));
             items.extend(rows.into_iter().map(row_item));
         }
     }
-    let unsorted: Vec<usize> = (0..n).filter(|r| !s.rack.groups.iter().any(|g| g.members.contains(r))).collect();
+    let unsorted: Vec<usize> = (0..n).filter(|&r| s.project.channels[r].rack.group.is_none()).collect();
     if !unsorted.is_empty() {
         items.push(PItem::head("Unsorted"));
         items.extend(unsorted.into_iter().map(row_item));

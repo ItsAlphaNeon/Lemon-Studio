@@ -554,9 +554,9 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         ui.c.fill_rect(Rect::new(cf.x, cf.y + 1.0, cf.w, cf.h / 2.0), ui.t.s(0x202122));
         ui.c.fill_rect(Rect::span(cf.x, cf.right(), cf.y + 1.0 + cf.h / 2.0, cf.bottom()), ui.t.s(0x1b1c1d));
     }
-    let label = match s.rack.filter {
+    let label = match rk::filter(&s.project) {
         rk::Filter::All => "All".to_string(),
-        rk::Filter::Group(g) => s.rack.groups.get(g).map_or("All".to_string(), |g| g.name.clone()),
+        rk::Filter::Group(g) => rk::groups(&s.project).get(g).map_or("All".to_string(), |g| g.name.clone()),
         rk::Filter::Unsorted => "Unsorted".to_string(),
     };
     let lf = Font::new(17);

@@ -392,9 +392,9 @@ fn rack_settings_survive() {
         project.swing = Some(77);
         project.groups.insert(0, "Added".into());
         for c in &mut project.channels {
-            c.rack.group += 1;
+            c.rack.group = c.rack.group.map(|g| g + 1);
         }
-        project.channels[0].rack.group = 0;
+        project.channels[0].rack.group = Some(0);
         project.current_group = Some(0);
         project.channels[0].rack.locked = !project.channels[0].rack.locked;
         project.channels[1].rack.zipped = !project.channels[1].rack.zipped;

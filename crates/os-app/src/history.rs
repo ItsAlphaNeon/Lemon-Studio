@@ -116,9 +116,8 @@ impl Timebase {
 pub struct RackSide {
     pub row: usize,
     pub ch: Option<os_model::Channel>,
-    pub groups: Vec<crate::rack::Group>,
-    pub filter: crate::rack::Filter,
-    pub unsorted_at: Option<usize>,
+    /// The project's filter groups: their names, each channel's group and the filter shown.
+    pub groups: (Vec<String>, Vec<Option<u32>>, Option<u32>),
     pub sel: std::collections::BTreeSet<usize>,
     pub selected: usize,
     pub source: Option<os_model::ClipSource>,
@@ -132,9 +131,7 @@ impl RackSide {
         RackSide {
             row,
             ch: s.project.channels.get(row).cloned(),
-            groups: r.groups.clone(),
-            filter: r.filter,
-            unsorted_at: r.unsorted_at,
+            groups: (s.project.groups.clone(), s.project.channels.iter().map(|c| c.rack.group).collect(), s.project.current_group),
             sel: r.sel.clone(),
             selected: s.selected_channel,
             source: s.playlist.source,
@@ -282,13 +279,20 @@ pub fn timebase(s: &mut State) {
 
 /// Puts the rack's side `r` back (`Snap::Rack`).
 fn put_rack(s: &mut State, r: RackSide) {
-    let RackSide { row, ch, groups, filter, unsorted_at, sel, selected, source, picker } = r;
+    let RackSide { row, ch, groups: (names, of, shown), sel, selected, source, picker } = r;
     match ch {
         None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
         Some(c) if row == s.project.channels.len() => crate::rack::push_channel(s, c),
         _ => {}
     }
-    (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
+    s.project.write_if(|p| {
+        let before = (p.groups.clone(), p.current_group, p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>());
+        (p.groups, p.current_group) = (names, shown);
+        for (c, g) in p.channels.iter_mut().zip(of) {
+            c.rack.group = g;
+        }
+        before != (p.groups.clone(), p.current_group, p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>())
+    });
     (s.rack.sel, s.selected_channel) = (sel, selected);
     (s.playlist.source, s.playlist.picker) = (source, picker);
 }

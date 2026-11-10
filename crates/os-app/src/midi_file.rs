@@ -592,10 +592,7 @@ fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
     if !imp.markers.is_empty() {
         crate::playlist::arr_mut(s).markers.extend(imp.markers.iter().cloned());
     }
-    let rack = &mut s.rack;
-    rack.groups.insert(0, crate::rack::Group { name: name.to_string(), members: (base..base + index.len()).collect() });
-    rack.unsorted_at = None;
-    rack.filter = crate::rack::Filter::Group(0);
+    crate::rack::import_group(s, name, base..base + index.len());
     s.selected_channel = base;
     s.rack.select_only(base);
     crate::rack::autosize(s);
@@ -1126,8 +1123,8 @@ mod tests {
         assert!(p.arrangement().is_none_or(|a| a.clips.is_empty()), "nothing on the playlist");
         assert_eq!(app.state.tempo(), 120.0);
         assert!(!app.state.song_mode());
-        assert_eq!(app.state.rack.groups[0].name, stem(&path));
-        assert_eq!(app.state.rack.filter, crate::rack::Filter::Group(0));
+        assert_eq!(crate::rack::groups(&app.state.project)[0].name, stem(&path));
+        assert_eq!(crate::rack::filter(&app.state.project), crate::rack::Filter::Group(0));
         assert!(app.unsaved());
         let _ = std::fs::remove_file(path);
     }

@@ -212,8 +212,6 @@ pub enum RBox {
 pub struct RackUi {
     /// Selected channels (§8); the focused channel is `State::selected_channel`.
     pub sel: BTreeSet<usize>,
-    pub filter: Filter,
-    pub groups: Vec<Group>,
     /// The channel the last solo click soloed.
     pub soloed: Option<usize>,
     /// Mute states (`enabled` per row) from before the first solo: what unsolo puts back when "Restore previous
@@ -239,8 +237,6 @@ pub struct RackUi {
     /// [`follow_pattern`] stores them into it and loads the shown one's when another is shown.
     pub loops_of: u16,
     pub loop_type: u8,
-    /// Position of "Unsorted" in the file's group list (`None` = last; see [`to_model`]).
-    pub unsorted_at: Option<usize>,
     /// Steps copied by Cut / Copy: the copied channels' notes of the pattern, a row each (§11).
     pub clipboard: Option<Vec<Vec<Note>>>,
     /// Copied knob value (knob menu, §19).
@@ -297,8 +293,6 @@ impl Default for RackUi {
     fn default() -> Self {
         RackUi {
             sel: BTreeSet::from([0]),
-            filter: Filter::All,
-            groups: Vec::new(),
             soloed: None,
             pre_solo: None,
             pattern_seen: None,
@@ -315,7 +309,6 @@ impl Default for RackUi {
             // The pattern a new project shows (`State`'s `pattern`).
             loops_of: 1,
             loop_type: 0,
-            unsorted_at: None,
             clipboard: None,
             opts: [COMPLETE_PREVIEW, PREVIEW_MUTE].into_iter().collect(),
             pending_delete: None,
@@ -354,9 +347,6 @@ impl RackUi {
     fn remap(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
         let set = |s: &BTreeSet<usize>| s.iter().filter_map(|&r| m(r)).collect::<BTreeSet<usize>>();
         self.sel = set(&self.sel);
-        for g in &mut self.groups {
-            g.members = set(&g.members);
-        }
         self.soloed = self.soloed.and_then(m);
         self.pre_solo = None; // rows renumbered: unsolo turns everything on
         self.loop_len = self.loop_len.iter().filter_map(|(&r, &l)| m(r).map(|n| (n, l))).collect();
@@ -438,11 +428,202 @@ pub fn euclid(n: usize, k: usize) -> Vec<bool> {
 
 /// Whether row `r` passes the display filter.
 pub fn in_filter(s: &State, r: usize) -> bool {
-    match s.rack.filter {
+    let group = s.project.channels.get(r).and_then(|c| c.rack.group);
+    match filter(&s.project) {
         Filter::All => true,
-        Filter::Group(g) => s.rack.groups.get(g).is_some_and(|g| g.members.contains(&r)),
-        Filter::Unsorted => !s.rack.groups.iter().any(|g| g.members.contains(&r)),
+        Filter::Group(g) => group.is_some() && group == file_group(&s.project, g),
+        Filter::Unsorted => group.is_none(),
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Filter groups (§7): the project's (event 231 names, 145 a channel's group, 146 the filter shown). The rack lists
+// them without "Unsorted", whose place in the file's list they keep. As in FL a channel is in one group, and grouping
+// and choosing the filter are no undo step and no unsaved change (`ui/undo-steps.md`).
+
+/// The groups as the rack lists them (all but "Unsorted"), each with its rows.
+pub fn groups(p: &os_model::Project) -> Vec<Group> {
+    let u = p.unsorted_group() as usize;
+    p.groups
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| i != u)
+        .map(|(i, name)| Group {
+            name: name.clone(),
+            members: p.channels.iter().enumerate().filter(|(_, c)| c.rack.group == Some(i as u32)).map(|(r, _)| r).collect(),
+        })
+        .collect()
+}
+
+/// The file's index of the rack's group `g`.
+fn file_group(p: &os_model::Project, g: usize) -> Option<u32> {
+    let u = p.unsorted_group() as usize;
+    (0..p.groups.len()).filter(|&i| i != u).nth(g).map(|i| i as u32)
+}
+
+/// The rack's group of the file's index `i`.
+fn rack_group(p: &os_model::Project, i: u32) -> Option<usize> {
+    let u = p.unsorted_group();
+    (i != u && (i as usize) < p.groups.len()).then(|| (0..i).filter(|&j| j != u).count())
+}
+
+/// Where "Unsorted" is among the rack's groups, if the file lists it before others (`None`: last).
+pub fn unsorted_at(p: &os_model::Project) -> Option<usize> {
+    p.groups.iter().position(|g| g == os_model::UNSORTED_GROUP)
+}
+
+/// The filter shown.
+pub fn filter(p: &os_model::Project) -> Filter {
+    match p.current_group {
+        None => Filter::All,
+        Some(i) if i == p.unsorted_group() => Filter::Unsorted,
+        Some(i) => rack_group(p, i).map_or(Filter::All, Filter::Group),
+    }
+}
+
+pub fn set_filter(s: &mut State, f: Filter) {
+    s.project.write_if(|p| {
+        let now = match f {
+            Filter::All => None,
+            Filter::Group(g) => file_group(p, g),
+            Filter::Unsorted => Some(p.unsorted_group()),
+        };
+        std::mem::replace(&mut p.current_group, now) != now
+    });
+}
+
+/// A new group named `name` in the file's list at `at` (`None`: after the others, before "Unsorted" if it is last),
+/// with the channels after it renumbered; the list gets "Unsorted" if it had none. Returns its file index.
+fn insert_group(p: &mut os_model::Project, at: Option<usize>, name: &str) -> u32 {
+    if !p.groups.iter().any(|g| g == os_model::UNSORTED_GROUP) {
+        p.groups.push(os_model::UNSORTED_GROUP.to_string());
+    }
+    let u = p.unsorted_group() as usize;
+    let at = at.unwrap_or(if u + 1 == p.groups.len() { u } else { p.groups.len() }).min(p.groups.len());
+    p.groups.insert(at, name.to_string());
+    let at32 = at as u32;
+    for c in &mut p.channels {
+        if let Some(g) = &mut c.rack.group {
+            if *g >= at32 {
+                *g += 1;
+            }
+        }
+    }
+    if let Some(g) = &mut p.current_group {
+        if *g >= at32 {
+            *g += 1;
+        }
+    }
+    at32
+}
+
+/// Puts `rows` in the file's group `g` (out of any other: a channel is in one).
+fn put_in_group(p: &mut os_model::Project, rows: impl IntoIterator<Item = usize>, g: Option<u32>) {
+    for r in rows {
+        if let Some(c) = p.channels.get_mut(r) {
+            c.rack.group = g;
+        }
+    }
+}
+
+/// Group selected… / Add filter group (§7): a group named `name` after the others, holding `rows`, shown.
+pub fn add_group(s: &mut State, name: &str, rows: &BTreeSet<usize>) {
+    s.project.write_if(|p| {
+        let u = unsorted_at(p);
+        // After every group, Unsorted included when the file lists it before them.
+        let at = if u.is_some_and(|u| u + 1 < p.groups.len()) { Some(p.groups.len()) } else { None };
+        let g = insert_group(p, at, name);
+        put_in_group(p, rows.iter().copied(), Some(g));
+        p.current_group = Some(g);
+        true
+    });
+    autosize(s);
+}
+
+/// Rename filter group: the rack's group `g` named `name`.
+pub fn rename_group(s: &mut State, g: usize, name: &str) {
+    s.project.write_if(|p| match file_group(p, g).and_then(|i| p.groups.get_mut(i as usize)) {
+        Some(n) if n != name => {
+            *n = name.to_string();
+            true
+        }
+        _ => false,
+    });
+}
+
+/// Tests: the groups `groups` in this order, "Unsorted" after them (or at `unsorted_at`), each channel in its first.
+#[cfg(test)]
+pub fn set_groups(s: &mut State, groups: &[Group], unsorted_at: Option<usize>) {
+    let p = s.project.get_mut();
+    p.groups = groups.iter().map(|g| g.name.clone()).collect();
+    let u = unsorted_at.unwrap_or(p.groups.len()).min(p.groups.len());
+    p.groups.insert(u, os_model::UNSORTED_GROUP.to_string());
+    for (r, c) in p.channels.iter_mut().enumerate() {
+        c.rack.group = groups.iter().position(|g| g.members.contains(&r)).map(|g| if g < u { g } else { g + 1 } as u32);
+    }
+    if groups.is_empty() {
+        p.groups.clear();
+    }
+}
+
+/// The project as a save writes it: a file without groups shows All (its filter would name no group).
+pub fn as_saved(p: &mut os_model::Project) {
+    if p.groups.is_empty() {
+        p.current_group = None;
+    }
+}
+
+/// An imported MIDI file's channels: a group named `name` first in the list, "Unsorted" last, shown.
+pub fn import_group(s: &mut State, name: &str, rows: impl IntoIterator<Item = usize>) {
+    s.project.write_if(|p| {
+        if let Some(u) = unsorted_at(p) {
+            p.groups.remove(u);
+            let u = u as u32;
+            for c in &mut p.channels {
+                if let Some(g) = &mut c.rack.group {
+                    if *g > u {
+                        *g -= 1;
+                    }
+                }
+            }
+        }
+        let g = insert_group(p, Some(0), name);
+        let last = p.groups.iter().rposition(|g| g == os_model::UNSORTED_GROUP);
+        if last.is_some_and(|l| l + 1 < p.groups.len()) {
+            let l = last.unwrap();
+            p.groups.remove(l);
+            p.groups.push(os_model::UNSORTED_GROUP.to_string());
+            for c in &mut p.channels {
+                if let Some(x) = &mut c.rack.group {
+                    if *x > l as u32 {
+                        *x -= 1;
+                    }
+                }
+            }
+        }
+        put_in_group(p, rows, Some(g));
+        p.current_group = Some(g);
+        true
+    });
+}
+
+/// Delete filter group: the rack's group `g` goes, its channels to "Unsorted"; the filter shows All.
+pub fn delete_group(s: &mut State, g: usize) {
+    s.project.write_if(|p| {
+        if let Some(i) = file_group(p, g) {
+            p.groups.remove(i as usize);
+            for c in &mut p.channels {
+                c.rack.group = match c.rack.group {
+                    Some(x) if x == i => None,
+                    Some(x) if x > i => Some(x - 1),
+                    other => other,
+                };
+            }
+        }
+        p.current_group = None;
+        true
+    });
+    autosize(s);
 }
 
 /// The rows the rack shows, top to bottom.
@@ -663,7 +844,8 @@ pub fn filter_tick(s: &mut State) -> bool {
     if !s.rack.opts.contains(AUTO_FILTER) || r >= s.project.channels.len() || in_filter(s, r) {
         return false;
     }
-    s.rack.filter = s.rack.groups.iter().position(|g| g.members.contains(&r)).map_or(Filter::Unsorted, Filter::Group);
+    let f = s.project.channels[r].rack.group.and_then(|i| rack_group(&s.project, i)).map_or(Filter::Unsorted, Filter::Group);
+    set_filter(s, f);
     autosize(s);
     true
 }
@@ -849,18 +1031,18 @@ pub fn row_steps(s: &State, r: usize, len: u32) -> Vec<bool> {
 /// Put row `r` into the filter group `name` and show that group (ADD > Audio clip / Automation clip, spec:
 /// ui/add-clip-channels.md §1-3). A missing group is made, before "Unsorted" in the file's order.
 pub fn join_group(s: &mut State, r: usize, name: &str) {
-    let rack = &mut s.rack;
-    let g = match rack.groups.iter().position(|g| g.name == name) {
-        Some(g) => g,
-        None => {
-            let at = rack.unsorted_at.unwrap_or(rack.groups.len()).min(rack.groups.len());
-            rack.groups.insert(at, Group { name: name.to_string(), members: BTreeSet::new() });
-            rack.unsorted_at = rack.unsorted_at.map(|u| u.max(at) + 1);
-            at
-        }
-    };
-    rack.groups[g].members.insert(r);
-    rack.filter = Filter::Group(g);
+    s.project.write_if(|p| {
+        let g = match p.groups.iter().position(|g| g == name) {
+            Some(g) => g as u32,
+            None => {
+                let u = unsorted_at(p);
+                insert_group(p, u.or(Some(p.groups.len())), name)
+            }
+        };
+        put_in_group(p, [r], Some(g));
+        p.current_group = Some(g);
+        true
+    });
     autosize(s);
 }
 
@@ -1444,8 +1626,8 @@ pub fn sort(app: &mut App, by: SortBy) {
 pub fn box_text(s: &State, b: RBox) -> String {
     match b {
         RBox::Channel(r) => channel_name(s, r),
-        RBox::GroupSel | RBox::NewGroup => format!("Group {}", s.rack.groups.len() + 1),
-        RBox::RenameGroup(g) => s.rack.groups.get(g).map(|g| g.name.clone()).unwrap_or_default(),
+        RBox::GroupSel | RBox::NewGroup => format!("Group {}", groups(&s.project).len() + 1),
+        RBox::RenameGroup(g) => groups(&s.project).get(g).map(|g| g.name.clone()).unwrap_or_default(),
         RBox::Transpose | RBox::ColorSel => String::new(),
         RBox::NameWidth => s.rack.name_pct.to_string(),
         RBox::SwingMix => {
@@ -1476,15 +1658,9 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
         }
         RBox::GroupSel | RBox::NewGroup if !text.is_empty() => {
             let members = if b == RBox::GroupSel { s.rack.sel.clone() } else { BTreeSet::new() };
-            s.rack.groups.push(Group { name: text.to_string(), members });
-            s.rack.filter = Filter::Group(s.rack.groups.len() - 1);
-            autosize(s);
+            add_group(s, text, &members);
         }
-        RBox::RenameGroup(g) if !text.is_empty() => {
-            if let Some(g) = s.rack.groups.get_mut(g) {
-                g.name = text.to_string();
-            }
-        }
+        RBox::RenameGroup(g) if !text.is_empty() => rename_group(s, g, text),
         RBox::Transpose => {
             if let Ok(v) = text.trim_start_matches('+').parse::<i32>() {
                 transpose_selected(s, v);
@@ -2107,16 +2283,16 @@ pub fn led_menu(s: &State, r: usize, auto: Option<(u32, String, f64)>, x: f32, y
 
 /// Group combo (§7): left click lists the filters.
 pub fn filter_menu(s: &State, x: f32, y: f32) -> Popup {
-    let f = s.rack.filter;
+    let f = filter(&s.project);
     let mut items = vec![it("All", RCmd::SetFilter(Filter::All)).mark(Mark::Radio(f == Filter::All))];
-    items.extend(s.rack.groups.iter().enumerate().map(|(i, g)| it(g.name.clone(), RCmd::SetFilter(Filter::Group(i))).mark(Mark::Radio(f == Filter::Group(i)))));
+    items.extend(groups(&s.project).iter().enumerate().map(|(i, g)| it(g.name.clone(), RCmd::SetFilter(Filter::Group(i))).mark(Mark::Radio(f == Filter::Group(i)))));
     items.push(it("Unsorted", RCmd::SetFilter(Filter::Unsorted)).mark(Mark::Radio(f == Filter::Unsorted)));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Group combo right click (§7).
 pub fn filter_edit_menu(s: &State, x: f32, y: f32) -> Popup {
-    let group = matches!(s.rack.filter, Filter::Group(_));
+    let group = matches!(filter(&s.project), Filter::Group(_));
     let del = it("Delete filter group", RCmd::DeleteGroup);
     let ren = it("Rename filter group", RCmd::RenameGroup);
     Popup { x, y, items: vec![it("Add filter group", RCmd::AddGroup), if group { del } else { del.off() }, if group { ren } else { ren.off() }], sub: None, scroll: [0; 2] }
@@ -2439,7 +2615,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::SetFilter(f) => {
-            s.rack.filter = f;
+            set_filter(s, f);
             s.rack_scroll = 0.0;
             autosize(s);
             None
@@ -2449,17 +2625,13 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::DeleteGroup => {
-            if let Filter::Group(g) = s.rack.filter {
-                if g < s.rack.groups.len() {
-                    s.rack.groups.remove(g);
-                }
-                s.rack.filter = Filter::All;
-                autosize(s);
+            if let Filter::Group(g) = filter(&s.project) {
+                delete_group(s, g);
             }
             None
         }
         RCmd::RenameGroup => {
-            if let Filter::Group(g) = s.rack.filter {
+            if let Filter::Group(g) = filter(&s.project) {
                 open_box(s, RBox::RenameGroup(g), crate::patterns::box_at_mouse(mouse));
             }
             None
@@ -2794,9 +2966,10 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Named(k @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)) if ctrl && shift => RCmd::Rotate(focus, if *k == NamedKey::ArrowLeft { -1 } else { 1 }),
         Key::Named(k @ (NamedKey::PageUp | NamedKey::PageDown)) => {
             let mut all = vec![Filter::All];
-            all.extend((0..s.rack.groups.len()).map(Filter::Group));
+            all.extend((0..groups(&s.project).len()).map(Filter::Group));
             all.push(Filter::Unsorted);
-            let i = all.iter().position(|&f| f == s.rack.filter).unwrap_or(0);
+            let now = filter(&s.project);
+            let i = all.iter().position(|&f| f == now).unwrap_or(0);
             let j = if *k == NamedKey::PageUp { (i + all.len() - 1) % all.len() } else { (i + 1) % all.len() };
             RCmd::SetFilter(all[j])
         }
@@ -2970,32 +3143,9 @@ pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
 /// looping). Advanced looping was not measured; it is written like step channels.
 const LOOP_TYPE_CODES: [u32; 3] = [3, 2, 3];
 
-/// The rack state of an opened (or new) project: lock, zip, filter groups and the current filter from the channels,
-/// loop lengths and loop mode from the current pattern.
+/// The rack state of an opened (or new) project: loop lengths and loop mode from the current pattern (lock, zip,
+/// filter groups and the filter shown are the project's own).
 pub fn from_model(s: &mut State) {
-    let p = &s.project;
-    let rack = &mut s.rack;
-    rack.groups.clear();
-    rack.unsorted_at = None;
-    let mut file_to_ui = Vec::new();
-    for (i, name) in p.groups.iter().enumerate() {
-        if name == os_model::UNSORTED_GROUP && rack.unsorted_at.is_none() {
-            rack.unsorted_at = Some(i);
-            file_to_ui.push(None);
-            continue;
-        }
-        let members = p.channels.iter().enumerate().filter(|(_, c)| c.rack.group as usize == i).map(|(r, _)| r).collect();
-        file_to_ui.push(Some(rack.groups.len()));
-        rack.groups.push(Group { name: name.clone(), members });
-    }
-    rack.filter = match p.current_group.map(|g| g as usize) {
-        None => Filter::All,
-        Some(g) => match file_to_ui.get(g) {
-            Some(Some(u)) => Filter::Group(*u),
-            Some(None) => Filter::Unsorted,
-            None => Filter::All,
-        },
-    };
     load_loops(s);
 }
 
@@ -3039,29 +3189,6 @@ fn loop_state(loops: &[(u16, u32)], off: Option<u32>) -> (BTreeSet<(u16, u32)>, 
 /// Writes the rack state into the project before a save (the inverse of [`from_model`]).
 pub fn to_model(s: &mut State) {
     follow_pattern(s);
-    let rack = &s.rack;
-    let p = s.project.get_mut();
-    // Groups in file order: the user groups, with "Unsorted" where the file had it (else last, like FL's Alt+G).
-    let mut names: Vec<String> = rack.groups.iter().map(|g| g.name.clone()).collect();
-    let unsorted = rack.unsorted_at.unwrap_or(names.len()).min(names.len());
-    names.insert(unsorted, os_model::UNSORTED_GROUP.to_string());
-    let file_index = |g: usize| if g < unsorted { g } else { g + 1 } as u32;
-    for (r, c) in p.channels.iter_mut().enumerate() {
-        // A channel is in one group in the file: its first one.
-        c.rack.group = rack.groups.iter().position(|g| g.members.contains(&r)).map_or(unsorted as u32, file_index);
-    }
-    // A file without groups keeps none when nothing was grouped.
-    if !(p.groups.is_empty() && rack.groups.is_empty()) {
-        p.groups = names;
-    }
-    p.current_group = match rack.filter {
-        Filter::All => None,
-        Filter::Group(g) => Some(file_index(g)),
-        Filter::Unsorted => Some(unsorted as u32),
-    };
-    if p.groups.is_empty() {
-        p.current_group = None;
-    }
     store_loops(s);
 }
 
@@ -3625,22 +3752,22 @@ mod tests {
     fn auto_switch_display_filter() {
         let mut app = App::new(None);
         let s = &mut app.state;
-        s.rack.groups = vec![Group { name: "Drums".into(), members: BTreeSet::from([0, 1]) }, Group { name: "Keys".into(), members: BTreeSet::from([2]) }];
-        s.rack.filter = Filter::Group(0);
+        set_groups(s, &[Group { name: "Drums".into(), members: BTreeSet::from([0, 1]) }, Group { name: "Keys".into(), members: BTreeSet::from([2]) }], None);
+        set_filter(s, Filter::Group(0));
         s.selected_channel = 2;
         assert!(!filter_tick(s), "unticked");
-        assert_eq!(s.rack.filter, Filter::Group(0));
+        assert_eq!(crate::rack::filter(&s.project), Filter::Group(0));
         s.rack.opts.insert(AUTO_FILTER);
         s.selected_channel = 0;
         assert!(!filter_tick(s), "shown already");
         s.selected_channel = 2;
         assert!(filter_tick(s));
-        assert_eq!(s.rack.filter, Filter::Group(1));
-        s.rack.filter = Filter::Group(0);
+        assert_eq!(crate::rack::filter(&s.project), Filter::Group(1));
+        set_filter(s, Filter::Group(0));
         assert!(!filter_tick(s), "the hand-picked filter stays");
         s.selected_channel = 3;
         assert!(filter_tick(s));
-        assert_eq!(s.rack.filter, Filter::Unsorted);
+        assert_eq!(crate::rack::filter(&s.project), Filter::Unsorted);
     }
 
     /// Focus selected channel on playback: on a start and on a stop the highest selected channel scrolls into view;
@@ -3972,8 +4099,8 @@ mod tests {
         s.project.get_mut().swing = Some(64);
         toggle_lock(s, 1);
         set_zipped(s, &[2].into());
-        s.rack.groups = vec![Group { name: "Drums".into(), members: [0, 2].into() }];
-        s.rack.filter = Filter::Group(0);
+        set_groups(s, &[Group { name: "Drums".into(), members: [0, 2].into() }], None);
+        set_filter(s, Filter::Group(0));
         s.rack.loop_len = [(0, 5)].into();
         s.rack.loop_mode = true;
         app.save_to(path.clone());
@@ -3992,9 +4119,9 @@ mod tests {
         assert_eq!(notes, vec![0, 2], "the clone has no notes; channel 2 moved back to row 2");
         assert_eq!(locked_rows(p), [1].into());
         assert_eq!(zipped_rows(p), [2].into());
-        assert_eq!(s.rack.groups.len(), 1);
-        assert_eq!(s.rack.groups[0].members, [0, 2].into());
-        assert_eq!(s.rack.filter, Filter::Group(0));
+        assert_eq!(crate::rack::groups(&s.project).len(), 1);
+        assert_eq!(crate::rack::groups(&s.project)[0].members, [0, 2].into());
+        assert_eq!(crate::rack::filter(&s.project), Filter::Group(0));
         assert_eq!(s.rack.loop_len, [(0, 5)].into());
         assert!(s.rack.loop_mode);
     }
