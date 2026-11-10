@@ -1066,7 +1066,8 @@ fn equiv_one() {
     eprintln!("EQUIV-RESULT {}", result.replace('\n', " "));
 }
 
-/// Whether running `steps` on `project` breaks an invariant whose name starts with `kind`, in a process of its own as
+/// Whether running `steps` on `project` breaks an invariant whose normalized name (`normalized`) starts with `kind`
+/// and is not on the accepted list, in a process of its own as
 /// a recording runs (settings and process-wide switches one candidate changes must not reach the next).
 fn fails(_root: &Path, project: &str, steps: &[Vec<Input>], kind: &str) -> Option<String> {
     let file = traces_dir().join("shrink-candidate.txt");
@@ -1085,17 +1086,23 @@ fn fails_here(root: &Path, project: &str, steps: &[Vec<Input>], kind: &str) -> O
         rig.run(s);
         rig.undo_start(&mut start);
     }
-    rig.invariants(&start, &work).into_iter().find(|i| i.starts_with(kind))
+    let list = accepted();
+    rig.invariants(&start, &work).into_iter().find(|i| {
+        let n = normalized(i);
+        n.starts_with(kind) && !list.iter().any(|(a, _)| n.starts_with(a))
+    })
 }
 
-/// Cuts `OS_EQUIV_TRACE` down to the steps that still break invariant `OS_EQUIV_KIND` (delta debugging: drop
+/// Cuts `OS_EQUIV_TRACE` down to the steps that still give a finding starting with `OS_EQUIV_KIND`, accepted ones
+/// left aside (delta debugging: drop
 /// chunks of steps, halving their size, while it still fails), and prints what is left as a trace.
 #[test]
 #[ignore = "the equivalence harness: shrinks a trace to what breaks an invariant (see the module's doc)"]
 fn equiv_shrink() {
     let (root, _) = corpus();
     let path = std::env::var("OS_EQUIV_TRACE").expect("OS_EQUIV_TRACE: a trace file");
-    let kind = std::env::var("OS_EQUIV_KIND").expect("OS_EQUIV_KIND: the invariant's name, e.g. undo-to-start");
+    let kind = std::env::var("OS_EQUIV_KIND")
+        .expect("OS_EQUIV_KIND: the start of a finding as the accepted list writes it, e.g. undo-to-start or roundtrip(arrangements[].clips");
     let t = Trace::read(&std::fs::read_to_string(&path).expect("read")).expect("a trace");
     let mut steps: Vec<Vec<Input>> = t.steps.into_iter().map(|(i, _)| i).collect();
     // The shortest failing prefix first: the steps after it play no part.
