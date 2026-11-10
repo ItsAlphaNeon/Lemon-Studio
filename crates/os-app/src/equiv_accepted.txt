@@ -11,6 +11,7 @@ resave(tempo	A tempo with an initial value opens at that value, not the saved te
 undo-to-start(tempo	Save writes the interface's tempo into the project, and no undo step takes a save back; the tempo moves into the project in control-plane step 5.
 undo-to-start(song_mode	Save writes the interface's song mode into the project, and no undo step takes a save back (control-plane step 5).
 undo-to-start(current_pattern	Save writes the pattern shown into the project, and no undo step takes a save back (control-plane step 5).
+undo-to-start(mixer[].slots[][].name	Save writes the plugins' states into the project (a slot's plugin as the file stores it, Edison as its wrapper), and no undo step takes a save back (control-plane step 15: plugin states in the model).
 undo-to-start(playlist_view	Save writes the playlist's view (scroll, zoom) into the project, and no undo step takes a save back.
 undo-to-start(work_time	The time spent on the project counts on while it is open; no undo step takes it back.
 roundtrip(channels[].rack.origin	A channel's origin is the file block it was read from: a channel made in Lemon Studio has none until it is saved and opened, and blocks are numbered anew in each file.
