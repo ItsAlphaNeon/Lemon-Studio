@@ -111,6 +111,8 @@ fn project_hash(p: &os_model::Project) -> u64 {
     // The fields step 5 added for what `.lemon` keeps, as `project_part` leaves them: out of the text, as before them.
     let ten = ["None"; 10].join(", ");
     let out = out.replace(&format!(", slot_names: [{ten}], slot_colors: [{ten}], slot_icons: [{ten}], lemon_icon: None"), "").replace(", lemon_icon: None", "");
+    // Step 5 renamed a pattern's `loop_off` (cleared above) to `loop_mode`: the text keeps the name it was recorded with.
+    let out = out.replace(", loop_mode: None, ", ", loop_off: None, ");
     let mut h = Fnv::new();
     let _ = write!(h, "{out}");
     h.0
