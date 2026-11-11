@@ -159,12 +159,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let g = PGeom::new(s, grid);
     let (sx, sy) = s.playlist_scroll;
     let bar_w = s.playlist_bar_w;
+    // The zoom counts in four quarter notes (`bar_t`), whatever the time signature; the song's extent is counted in
+    // the project's bars.
     let bar_t = (g.ppq * 4) as f32;
+    let proj_bar = s.project.bar_ticks() as f32;
 
     // Overview (horizontal scroll bar with a miniature of the clips) + ruler. The song extends 16 bars past
     // its last clip, at least 100 bars; 500 tracks.
-    let last = pl::clips(s).iter().map(|c| c.end() as f32 / bar_t).fold(0.0, f32::max);
-    let bars = (last.ceil() + 16.0).max(100.0);
+    let last = pl::clips(s).iter().map(|c| c.end() as f32 / proj_bar).fold(0.0, f32::max);
+    let bars = (last.ceil() + 16.0).max(100.0) * proj_bar / bar_t;
     let (hbar, vbar) = bar_sizes();
     let over = Rect::new(grid_x, client.y + 1.0, grid_w, hbar);
     debug_assert_eq!(over, overview_rect(s, grid));
@@ -217,7 +220,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let x = g.x_of(p as f32).clamp(grid_x, grid.right());
         ui.c.fill_rect(Rect::span(grid_x, x, grid.y, grid.bottom()), t.s(0x000000).with_alpha(70));
     }
-    grid_lines(ui, &g, bar_w, start_bar(&g, start));
+    let bars = pl::Bars::new(s);
+    grid_lines(ui, s, &g, &bars, start_bar(&bars, start));
     for &row in &visible {
         let (y, h) = (g.y_of(row), g.rows.height(row));
         // The gap line at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast).
@@ -646,8 +650,8 @@ fn overview(ui: &mut Ui, s: &State, over: Rect, total_ticks: f32) {
 }
 
 /// The bar the Start marker is in (0 without one): bars count from it (§7a).
-fn start_bar(g: &PGeom, start: Option<u32>) -> i32 {
-    start.map_or(0, |p| (p / (g.ppq * 4).max(1)) as i32)
+fn start_bar(bars: &pl::Bars, start: Option<u32>) -> i32 {
+    start.map_or(0, |p| bars.index(p))
 }
 
 /// Bar numbers, time selection, song position (§7).
@@ -662,23 +666,24 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
     // Bars count from the Start marker (§7a): "1" on its bar; before it the ruler is darker and the bars have no
     // numbers.
     let start = pl::start_marker(s);
-    let sb = start_bar(g, start);
+    let bars = pl::Bars::new(s);
+    let sb = start_bar(&bars, start);
     if let Some(p) = start {
         let x = g.x_of(p as f32).clamp(ruler.x, ruler.right());
         ui.c.fill_rect(Rect::span(ruler.x, x, ruler.y, ruler.bottom()), offset(t.ruler, -8));
     }
-    let bar_w = g.bar_w;
-    let every = label_step(bar_w);
+    // Labels by the project's bar width; the song's bars follow the time-signature markers (`pl::Bars`).
+    let every = label_step(s.project.bar_ticks() as f32 * g.ppt);
     // From the bars whose numbers still reach into view (a number is up to ~40 px wide): which labels are drawn must
     // not depend on the scroll position, or a scrolled ruler would differ from a repainted one.
-    let first_bar = ((g.scroll_x - 48.0) / bar_w).floor().max(0.0) as i32;
-    let last_bar = ((g.scroll_x + ruler.w) / bar_w).ceil() as i32 + 1;
-    for b in first_bar.max(sb)..last_bar {
+    let t0 = ((g.scroll_x - 48.0) / g.ppt).max(0.0) as u32;
+    let t1 = ((g.scroll_x + ruler.w) / g.ppt).max(0.0) as u32 + 1;
+    for (b, tick, _) in bars.lines(t0, t1) {
         let n = b - sb;
-        if n % every != 0 {
+        if n < 0 || n % every != 0 {
             continue;
         }
-        let x = g.xs(f64::from(b) * f64::from(bar_w));
+        let x = g.xs(f64::from(tick) * f64::from(g.bar_w) / f64::from(g.ppq * 4));
         let size = if n % (every * 4) == 0 { 15.0 } else { 13.0 };
         // Along the ruler's bottom 17 px (all of it unless thin scroll bars made it taller).
         ui.c.text(super::fnt(size), x + 2.0, ruler.bottom() - 17.0 + (16.0 - size), t.ruler_text, &format!("{}", n + 1));
@@ -800,36 +805,44 @@ pub(crate) fn marker_label(m: &TimeMarker) -> String {
 
 /// Vertical lines: grid units (dim), beats, bars (bright); every fourth bar group tinted, counted from bar `sb` (the
 /// Start marker's, §7a).
-fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32, sb: i32) {
+fn grid_lines(ui: &mut Ui, s: &State, g: &PGeom, bars: &pl::Bars, sb: i32) {
     let t = ui.t;
     let grid = g.grid;
+    let bar_w = g.bar_w;
+    // A bar's width is the project's (the time signature); bars of another length follow its markers (`pl::Bars`).
+    let pb = s.project.bar_ticks() as f32 * g.ppt;
     let mut bar_step = 1;
-    while bar_w * (bar_step as f32) < 8.0 {
+    while pb * (bar_step as f32) < 8.0 {
         bar_step *= 2;
     }
-    let first_bar = ((g.scroll_x / bar_w) as i32 / bar_step) * bar_step;
-    let n = (grid.w / bar_w).ceil() as i32 + bar_step + 1;
     // Lines at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast).
     let beat = t.pl_line(t.grid_gap.mix(t.grid, 0.4));
     let bar_line = t.pl_line(t.grid_bar);
-    let unit = pl::grid_ticks(g.ppq, bar_w) as f32 * g.ppt;
-    let per_bar = ((bar_w / unit).round() as i32).max(1);
-    // Bar b's x on the drawing grid (`PGeom::xs`), plus `d` content pixels.
-    let bar_x = |b: i32, d: f32| g.xs(f64::from(b) * f64::from(bar_w) + f64::from(d));
-    let mut b = first_bar;
-    while b < first_bar + n {
-        let x = bar_x(b, 0.0);
-        if (b - sb).div_euclid(4).rem_euclid(2) == 1 {
-            ui.c.fill_rect(Rect::new(x, grid.y, bar_x(b + bar_step, 0.0) - x, grid.h), t.grid_alt.with_alpha(160));
+    let unit_t = pl::grid_ticks(g.ppq, bar_w);
+    let unit = unit_t as f32 * g.ppt;
+    let ref_t = g.ppq * 4;
+    // Content x of `tick` (`PGeom::xs`): the same exact products as bars counted from 0 in 4/4.
+    let tick_x = |tick: u32, d: f32| g.xs(f64::from(tick) * f64::from(bar_w) / f64::from(ref_t) + f64::from(d));
+    let t0 = (g.scroll_x / g.ppt).max(0.0) as u32;
+    let t1 = ((g.scroll_x + grid.w) / g.ppt).max(0.0) as u32 + 1;
+    for (b, at, len) in bars.lines(t0, t1) {
+        if b.rem_euclid(bar_step) != 0 {
+            continue;
         }
-        if bar_step == 1 && per_bar > 1 {
-            for q in 1..per_bar {
-                let c = if unit * q as f32 % (bar_w / 4.0) < 0.5 { beat } else { beat.mix(t.grid, 0.5) };
-                ui.c.fill_rect(Rect::new(bar_x(b, q as f32 * unit), grid.y, 1.0, grid.h), c);
+        let x = tick_x(at, 0.0);
+        if (b - sb).div_euclid(4).rem_euclid(2) == 1 {
+            let next = if bar_step == 1 { at + len } else { bars.floor(at + len * bar_step as u32).max(at + len) };
+            ui.c.fill_rect(Rect::new(x, grid.y, tick_x(next, 0.0) - x, grid.h), t.grid_alt.with_alpha(160));
+        }
+        if bar_step == 1 && unit_t < ref_t {
+            let mut q = 1;
+            while q * unit_t < len {
+                let c = if (q * unit_t) % g.ppq == 0 { beat } else { beat.mix(t.grid, 0.5) };
+                ui.c.fill_rect(Rect::new(tick_x(at, q as f32 * unit), grid.y, 1.0, grid.h), c);
+                q += 1;
             }
         }
         ui.c.fill_rect(Rect::new(x, grid.y, if bar_step == 1 { 2.0 } else { 1.0 }, grid.h), bar_line);
-        b += bar_step;
     }
 }
 

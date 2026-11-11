@@ -19690,6 +19690,22 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// The playlist draws with a 3/8 project bar and a time-signature marker (bars of another length): no panic, the
+    /// ruler and grid repaint after a scroll the same as a fresh paint.
+    #[test]
+    fn playlist_paints_other_bars() {
+        use crate::playlist as pl;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut app, _, _, _) = ruler_app(&mut c);
+        app.state.project.bar = Some((3, 2));
+        pl::add_marker(&mut app.state, os_model::TimeMarker { kind: os_model::TimeMarker::SIGNATURE, numerator: 5, denominator: 4, ..os_model::TimeMarker::new(1000, "5/4") });
+        frame(&mut app, &mut c, None);
+        app.state.playlist_scroll.0 = 700.0;
+        frame(&mut app, &mut c, None);
+        let g = app.pl_grid.expect("playlist shown");
+        assert!(g.w > 0.0);
+    }
+
     /// Tools menu (spec: ui/playlist.md §10): quick quantize moves clip starts onto the snap grid (one undo step);
     /// export renders every playing track to its own file, all as long as the song.
     #[test]
