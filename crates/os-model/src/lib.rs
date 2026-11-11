@@ -1318,12 +1318,14 @@ pub struct Pattern {
     /// Length set in the channel rack's pattern length box, in ticks; `None` = Auto (whole bars past the last
     /// note). Stored as metadata event 164 plus a "Length" marker (spec: flp/events/patterns.md).
     pub length: Option<u32>,
-    /// Per-channel loop lengths `(channel, steps)` in channel order (events 160/161 after the notes);
-    /// steps [`Pattern::LOOP_FOLLOW`] = a channel that only follows "Loop all channels".
+    /// Per-channel loop points `(channel, value)` in channel order (events 160/161 after the notes), as FL 24.1.1 writes
+    /// them: a length in steps, 0 = no loop, or [`Pattern::LOOP_STEP`], [`Pattern::LOOP_BEAT`], [`Pattern::LOOP_BAR`]
+    /// (Advanced looping's units; Bar is also what "Loop all channels" writes for a channel that loops).
     pub loops: Vec<(u16, u32)>,
-    /// Loop mode off with loop lengths kept: the loop type value (metadata events 26 = 1 and 162; 3 = loop step
-    /// channels, 2 = loop all channels). `None` = loop mode on (or no loops).
-    pub loop_off: Option<u32>,
+    /// Loop mode on, with its type: event 162 after event 26 = 1 in the metadata block, 1 = Loop step channels, 2 = Loop
+    /// all channels, 3 = Advanced looping. FL 24.1.1 writes them while loop mode is on (spec: flp/events/patterns.md
+    /// "Loop settings on FL 24.1.1"; what FL 26 writes is REQUESTS #15). `None` = loop mode off.
+    pub loop_mode: Option<u32>,
     /// The pattern's own time markers (piano-roll Alt+T markers, time signatures, kinds kept as read), sorted by
     /// position; the "Length" marker is not among them (it follows `length`). Metadata marker groups (spec:
     /// flp/events/patterns.md, metadata block).
@@ -1331,8 +1333,12 @@ pub struct Pattern {
 }
 
 impl Pattern {
-    /// Stored loop length of channels that follow "Loop all channels" (0xFFFFFFFD).
-    pub const LOOP_FOLLOW: u32 = 0xFFFF_FFFD;
+    /// Loop points of [`Pattern::loops`]: Advanced looping's Step, Beat and Bar (−1, −2, −3).
+    pub const LOOP_STEP: u32 = 0xFFFF_FFFF;
+    pub const LOOP_BEAT: u32 = 0xFFFF_FFFE;
+    pub const LOOP_BAR: u32 = 0xFFFF_FFFD;
+    /// What "Loop all channels" writes for a channel that loops: Bar.
+    pub const LOOP_FOLLOW: u32 = Self::LOOP_BAR;
 }
 
 /// One point of a pattern's channel control lane (event 223 record). `kind` is

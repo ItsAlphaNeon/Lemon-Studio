@@ -144,6 +144,7 @@ mod id {
     pub const PAT_LENGTH: u8 = 164;
     pub const LOOP_CHANNEL: u8 = 160;
     pub const LOOP_STEPS: u8 = 161;
+    /// With 162: loop mode on and its type (FL 24.1.1; spec: flp/events/patterns.md).
     pub const LOOP_OFF: u8 = 26;
     pub const LOOP_TYPE: u8 = 162;
 
@@ -349,7 +350,7 @@ struct PatternLoc {
     loops: Vec<usize>,
     /// Metadata: 157/158 (new loop/length events go after the last), 26 / 162, 164 and every marker group's events.
     meta_158: Option<usize>,
-    loop_off: Vec<usize>,
+    loop_mode: Vec<usize>,
     length: Option<usize>,
     markers: Vec<usize>,
 }
@@ -451,7 +452,7 @@ impl Layout {
 const LENGTH_MARKER_KIND: u32 = 6;
 const LENGTH_MARKER_NAME: &str = "Length";
 /// Loop type "Loop step channels" (event 162).
-const LOOP_TYPE_STEP: u32 = 3;
+const LOOP_TYPE_STEP: u32 = 1;
 
 fn int(e: &Event) -> u32 {
     e.int_value().unwrap_or(0)
@@ -550,7 +551,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                             id::PAT_NAME => loc.name = Some(k),
                             id::PAT_COLOR => loc.color = Some(k),
                             157 | 158 => loc.meta_158 = Some(k),
-                            id::LOOP_OFF | id::LOOP_TYPE => loc.loop_off.push(k),
+                            id::LOOP_OFF | id::LOOP_TYPE => loc.loop_mode.push(k),
                             id::PAT_LENGTH => loc.length = Some(k),
                             id::MARKER_NAME => in_marker = false,
                             id::PAT_START | id::CH_START | id::ARR_START => break,
@@ -883,11 +884,11 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
                 .filter(|p| events[p[0]].id == id::LOOP_CHANNEL && events[p[1]].id == id::LOOP_STEPS)
                 .map(|p| (int(&events[p[0]]) as u16, int(&events[p[1]])))
                 .collect(),
-            loop_off: loc
-                .loop_off
+            loop_mode: loc
+                .loop_mode
                 .iter()
                 .any(|&i| events[i].id == id::LOOP_OFF && int(&events[i]) != 0)
-                .then(|| loc.loop_off.iter().find(|&&i| events[i].id == id::LOOP_TYPE).map_or(LOOP_TYPE_STEP, |&i| int(&events[i]))),
+                .then(|| loc.loop_mode.iter().find(|&&i| events[i].id == id::LOOP_TYPE).map_or(LOOP_TYPE_STEP, |&i| int(&events[i]))),
         });
     }
     let mut a_index = 0;
@@ -3176,16 +3177,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         let wants_meta = pat.name.is_some()
             || pat.color.is_some()
             || pat.length.is_some()
-            || pat.loop_off.is_some()
+            || pat.loop_mode.is_some()
             || !pat.markers.is_empty();
         if meta_start.is_some()
             && (old.map(|o| o.length) != Some(pat.length)
-                || old.map(|o| o.loop_off) != Some(pat.loop_off)
+                || old.map(|o| o.loop_mode) != Some(pat.loop_mode)
                 || old.map(|o| &o.markers) != Some(&pat.markers))
         {
             // Loop-off flag, markers and length are rewritten together where they were.
             let m = loc.expect("has metadata");
-            let old_ones: Vec<usize> = m.loop_off.iter().chain(&m.markers).chain(m.length.iter()).copied().collect();
+            let old_ones: Vec<usize> = m.loop_mode.iter().chain(&m.markers).chain(m.length.iter()).copied().collect();
             let at = old_ones.iter().min().copied().or(m.meta_158.map(|i| i + 1)).unwrap_or(m.meta_start.unwrap_or(0) + 1);
             removals.extend(old_ones);
             inserts.extend(meta_length_events(pat, enc).into_iter().rev().map(|e| (at, e)));
@@ -3887,7 +3888,7 @@ fn loop_events(loops: &[(u16, u32)]) -> Vec<Event> {
 /// the "Length" marker, sorted by position as FL saves them), the length (spec: flp/events/patterns.md, metadata block).
 fn meta_length_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
     let mut out = Vec::new();
-    if let Some(t) = pat.loop_off {
+    if let Some(t) = pat.loop_mode {
         out.push(Event::new(id::LOOP_OFF, Value::U8(1)));
         out.push(Event::new(id::LOOP_TYPE, Value::U32(t)));
     }
@@ -4111,7 +4112,7 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         ev.extend(channel_block_events(ch, project.automation(ch.index), project.unsorted_group(), enc)?);
         if i == 0 {
             for pat in &patterns {
-                if pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_off.is_some() || !pat.markers.is_empty() {
+                if pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_mode.is_some() || !pat.markers.is_empty() {
                     ev.extend(meta_block_events(pat, enc));
                 }
             }
@@ -6509,7 +6510,7 @@ mod tests {
             if pat.number == 2 {
                 pat.length = Some(72);
                 pat.loops = vec![(0, 5), (1, Pattern::LOOP_FOLLOW)];
-                pat.loop_off = Some(2);
+                pat.loop_mode = Some(2);
             } else {
                 pat.length = Some(192);
             }
@@ -6532,7 +6533,7 @@ mod tests {
         cleared.channels[0].rack.zipped = false;
         cleared.channels[1].rack.locked = false;
         for pat in &mut cleared.patterns {
-            (pat.length, pat.loops, pat.loop_off) = (None, Vec::new(), None);
+            (pat.length, pat.loops, pat.loop_mode) = (None, Vec::new(), None);
         }
         let mut file2 = file.clone();
         apply(&cleared, &mut file2).unwrap();

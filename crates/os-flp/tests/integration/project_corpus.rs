@@ -401,7 +401,7 @@ fn rack_settings_survive() {
         if let Some(pat) = project.patterns.iter_mut().find(|p| !p.notes.is_empty()) {
             pat.length = Some(96 * 3);
             pat.loops = vec![(0, 3)];
-            pat.loop_off = Some(3);
+            pat.loop_mode = Some(3);
         }
         apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
         let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();

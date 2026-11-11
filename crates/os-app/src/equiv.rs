@@ -83,7 +83,7 @@ fn project_part(p: &os_model::Project) -> os_model::Project {
         (m.slot_names, m.slot_colors, m.slot_icons, m.lemon_icon) = Default::default();
     }
     for q in &mut p.patterns {
-        (q.loops, q.loop_off) = (Vec::new(), None);
+        (q.loops, q.loop_mode) = (Vec::new(), None);
     }
     p
 }
@@ -685,7 +685,7 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
     // keeps no loop lengths: FL keeps none for a pattern without notes (flp/events/patterns.md "Loop lengths").
     for q in &mut p.patterns {
         if q.notes.is_empty() {
-            (q.loops, q.loop_off) = (Vec::new(), None);
+            (q.loops, q.loop_mode) = (Vec::new(), None);
         }
     }
     p.patterns.retain(|q| {
