@@ -1257,7 +1257,7 @@ fn equiv_show() {
         rig.undo_start(&mut start);
         let s = &rig.app.state;
         eprintln!("  undo: {:?} ({} steps), message: {:?}", s.history.newest_done(), s.history.done(), s.message);
-        if let Some(d) = difference(&before, &s.project, false) {
+        for d in differences(&before, &s.project, false).iter().take(8) {
             eprintln!("  changed: {d}");
         }
         // What playback was handed (the engine's part of the fingerprint).

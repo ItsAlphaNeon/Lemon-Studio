@@ -10091,7 +10091,7 @@ pub(crate) fn add_channel(p: &mut Project) -> usize {
 /// A new project (owner's choice, 2026-10-10): one empty sampler channel, played and edited by Lemon Sampler, on
 /// insert 1, and pattern 1.
 /// `now` is the project as `saved` but for what FL does not count as an unsaved change though the file keeps it
-/// (`ui/undo-steps.md`): the channels' locks, the song mode, and the filter groups and filter shown.
+/// (`ui/undo-steps.md`): the channels' locks, the song mode, the filter groups and filter shown, and the patterns' loops.
 fn same_as_saved(saved: &Project, now: &Project) -> bool {
     if saved == now {
         return true;
@@ -10102,6 +10102,11 @@ fn same_as_saved(saved: &Project, now: &Project) -> bool {
         for (x, y) in saved.channels.iter().zip(&mut now.channels) {
             (y.rack.locked, y.rack.group) = (x.rack.locked, x.rack.group);
         }
+    }
+    // Loop mode, type and points: steps of their own in FL, but no unsaved change.
+    for q in &mut now.patterns {
+        let (loops, mode) = saved.pattern(q.number).map_or((Vec::new(), None), |x| (x.loops.clone(), x.loop_mode));
+        (q.loops, q.loop_mode) = (loops, mode);
     }
     *saved == now
 }
