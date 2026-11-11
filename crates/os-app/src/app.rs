@@ -1516,6 +1516,8 @@ pub struct App {
     /// The running export is PATTERNS > Quick render as audio clip / Render and replace's (spec: ui/pattern-render.md):
     /// what to do with its file.
     pub(crate) pattern_render: Option<crate::pattern_render::Pending>,
+    /// The playlist's Consolidate or Export all playlist tracks, running as an export (`playlist::Render`).
+    pub(crate) playlist_render: Option<crate::playlist::Render>,
     /// `device::opens` when the hosted plugins last followed the output device's rate (`follow_device`).
     device_opens: u64,
     /// The project, tempo and Lemon Studio's own saved state (`lemon_state::saved_form`) as last opened, saved or
@@ -1744,6 +1746,7 @@ impl App {
             export: None,
             export_reveal: false,
             pattern_render: None,
+            playlist_render: None,
             device_opens: 0,
             saved: (Project::default(), 0.0, Vec::new()),
             backup: Default::default(),
@@ -1945,6 +1948,11 @@ impl App {
             return;
         }
         let p = crate::rack::play_project(&self.state);
+        self.start_export_of(job, p, song);
+    }
+
+    /// `start_export` for the project `p` (a playlist render's own clips) rather than the one being edited.
+    pub(crate) fn start_export_of(&mut self, job: crate::export::Job, p: os_model::Project, song: bool) {
         let rate = Transport::device_rate().unwrap_or(44100);
         let first = job.options.ticked().next().unwrap_or(0);
         let name = job.file(first).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -1974,6 +1982,9 @@ impl App {
                 lemon_sampler::stream::export_finished();
                 if let Some(p) = self.pattern_render.take() {
                     return self.pattern_render_done(p, r);
+                }
+                if let Some(p) = self.playlist_render.take() {
+                    return self.playlist_render_done(p, r);
                 }
                 self.state.message = Some(match r {
                     Ok((secs, files)) => {
@@ -19690,6 +19701,72 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// Follows a playlist render (Consolidate, Export all playlist tracks) as the app's tick does, until it is done.
+    fn finish_playlist_render(app: &mut App) -> String {
+        let t0 = std::time::Instant::now();
+        while app.export.is_some() || app.playlist_render.is_some() {
+            assert!(t0.elapsed().as_secs() < 120, "the render did not finish");
+            app.export_tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.state.message.clone().unwrap_or_default()
+    }
+
+    /// An app whose rack has a hosted plugin channel (Lemon Trio) playing a note in pattern 1, which one playlist clip
+    /// on track 0 plays.
+    fn plugin_clip_app() -> (App, u32) {
+        use os_model::{Clip, ClipSource};
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        // The export renders at the output device's rate; hosted plugins run at it.
+        app.plugins.set_rate(Transport::device_rate().unwrap_or(44100));
+        app.state.project = test_project();
+        let row = add_plugin_channel(&mut app.state.project, crate::osc3::LEMON_TRIO);
+        let index = app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        app.plugins.create(row, index).unwrap();
+        app.state.hosted_rows.push(row);
+        app.transport.set_instruments(app.plugins.instruments());
+        let ppq = u32::from(app.state.project.ppq);
+        let ch = app.state.project.channels[row].index;
+        app.state.project.patterns[0].notes = vec![os_model::Note { length: ppq, ..os_model::Note::step(ch, 0) }];
+        crate::playlist::arr_mut(&mut app.state).clips = vec![Clip::new(0, 4 * ppq, 0, ClipSource::Pattern(1))];
+        app.state.path = Some(std::env::temp_dir().join(format!("os-plugin-render-{}.flp", std::process::id())));
+        (app, ppq)
+    }
+
+    /// Export all playlist tracks and Consolidate play hosted plugins: a plugin channel's track is not silent in its
+    /// file, and Consolidate's new clip carries the plugin's sound (it used to render with a bare engine).
+    #[test]
+    fn playlist_renders_play_hosted_plugins() {
+        use crate::playlist as pl;
+        let loud = |s: &os_engine::sample::Sample| s.left.iter().any(|v| v.abs() > 0.01);
+        let (mut app, ppq) = plugin_clip_app();
+        // The old render: an engine with no hosted instruments leaves the plugin channel silent.
+        let mut bare = os_engine::Engine::new(&crate::rack::play_project(&app.state), &mut os_engine::SampleLibrary::default(), 44100, PlayMode::Song);
+        assert!(bare.render_all(512).iter().all(|v| v.abs() < 1e-6), "a bare engine is silent for a plugin channel");
+        pl::run(&mut app, pl::Cmd::ExportTracks).unwrap();
+        let m = finish_playlist_render(&mut app);
+        let dir = std::env::temp_dir().join("Rendered").join(format!("os-plugin-render-{} tracks", std::process::id()));
+        assert!(m.starts_with("Exported 1 track"), "{m}");
+        let t1 = os_engine::sample::load(&dir.join("01 Track 1.wav")).expect("track file");
+        assert!(loud(&t1), "the plugin channel's track is not silent");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Consolidate: the clip is muted, a new audio clip carries the sound.
+        app.state.playlist.sel = vec![0];
+        pl::run(&mut app, pl::Cmd::Consolidate).unwrap();
+        let m = finish_playlist_render(&mut app);
+        assert!(m.starts_with("Consolidated to"), "{m}");
+        let clips = pl::clips(&app.state).to_vec();
+        assert_eq!(clips.len(), 2);
+        assert!(clips[0].muted && !clips[1].muted, "source muted, render audible");
+        assert_eq!(clips[1].length, 4 * ppq);
+        let path = m.trim_start_matches("Consolidated to ").to_string();
+        let r = os_engine::sample::load(std::path::Path::new(&path)).expect("render file");
+        assert!(loud(&r), "the consolidated file is not silent");
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Tools menu (spec: ui/playlist.md §10): quick quantize moves clip starts onto the snap grid (one undo step);
     /// export renders every playing track to its own file, all as long as the song.
     #[test]
@@ -19714,7 +19791,8 @@ mod tests {
         assert_eq!(pl::clips(&app.state)[0].position, step + 5, "one undo step");
         // Export: two files (tracks 1 and 3), the same length, each with sound only where its clip is.
         app.state.path = Some(std::env::temp_dir().join(format!("os-export-{}.flp", std::process::id())));
-        let m = pl::run(&mut app, pl::Cmd::ExportTracks).unwrap();
+        pl::run(&mut app, pl::Cmd::ExportTracks).unwrap();
+        let m = finish_playlist_render(&mut app);
         let dir = std::env::temp_dir().join("Rendered").join(format!("os-export-{} tracks", std::process::id()));
         assert!(m.starts_with("Exported 2 tracks"), "{m}");
         let read = |name: &str| os_engine::sample::load(&dir.join(name)).expect(name);

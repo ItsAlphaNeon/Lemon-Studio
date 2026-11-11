@@ -9,6 +9,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use os_model::{
@@ -5231,55 +5232,87 @@ pub fn quantize_starts(s: &mut State) -> String {
     format!("Quick quantize: moved {moved} clip start{}", if moved == 1 { "" } else { "s" })
 }
 
+/// A playlist render under way on the audio thread (`App::playlist_render`): what to do with the file(s) once written.
+/// Both go through the export's path (`App::start_export_of`), so hosted instruments and effects play.
+#[derive(Debug, Clone)]
+pub enum Render {
+    /// Consolidate: the clips `used` (arranger indices) over `a..b` render to a file; they are muted and a clip of it
+    /// goes on `track` at `a`.
+    Consolidate { a: u32, b: u32, used: Vec<usize>, track: u16 },
+    /// Export all playlist tracks: `todo` tracks are still to render, one at a time, from `audible` clips, each file
+    /// `end` ticks long, into `dir`.
+    Tracks { todo: Vec<u16>, audible: Vec<Clip>, end: u32, dir: PathBuf, written: usize },
+}
+
+/// A render's job: one 32-bit float WAV, `name` in `dir`, ticks `0..ticks` exactly (the span fixes the length, so
+/// the files of a track export line up), insert and master effects as the engine plays them.
+fn render_job(s: &State, dir: &Path, name: &str, ticks: u32) -> crate::export::Job {
+    let mut j = crate::pattern_render::job(s, dir, name);
+    j.options.tail = crate::export::Tail::Cut;
+    j.options.master_fx = true;
+    j.span = Some((0, u64::from(ticks.max(1))));
+    j.tempo = (s.project.tick_tempo(s.tempo), f64::from(ticks) / f64::from(s.project.ppq.max(1)));
+    j
+}
+
+fn render_dir(s: &State) -> PathBuf {
+    s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"))
+}
+
 /// Tools > Export all playlist tracks (§10, OS): every track with unmuted clips on a playing track is rendered alone,
 /// from the song's start, into `Rendered/<project> tracks` next to the project file (the temp folder for a new
-/// project): "<NN> <track name>.wav", 44.1 kHz float, at least as long as the song so the files line up.
+/// project): "<NN> <track name>.wav", float, at least as long as the song so the files line up. Hosted instruments and
+/// effects play (the render runs on the audio thread as an export does), one track after another.
 pub fn export_tracks(app: &mut App) -> String {
+    if app.export.is_some() {
+        return "Export tracks: another render is running".into();
+    }
     let s = &app.state;
     let audible: Vec<Clip> = clips(s).iter().filter(|c| !c.muted && track_on(s, c.track)).copied().collect();
     let Some(end) = audible.iter().map(|c| c.end()).max() else { return "Export tracks: the arranger has no clips to play".into() };
-    let mut tracks: Vec<u16> = audible.iter().map(|c| c.track).collect();
-    tracks.sort_unstable();
-    tracks.dedup();
+    let mut todo: Vec<u16> = audible.iter().map(|c| c.track).collect();
+    todo.sort_unstable();
+    todo.dedup();
+    todo.reverse(); // popped from the end: the first track first
     let stem = s.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
-    let base = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
-    let dir = base.join(format!("{stem} tracks"));
+    let dir = render_dir(s).join(format!("{stem} tracks"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return format!("Export tracks: {e}");
     }
-    let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
-    let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.project.ppq, s.project.tick_tempo(s.tempo), rate) as usize;
-    let mut written = 0;
-    for &t in &tracks {
-        let mut p = s.project.clone();
-        p.tempo = Some(s.tempo);
-        if let Some(arr) = p.arrangement_mut() {
-            arr.clips = audible.iter().filter(|c| c.track == t).copied().collect();
-            for tr in &mut arr.tracks {
-                tr.enabled = true;
-            }
-        }
-        let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
-        let mut audio = e.render_all(512);
-        if audio.len() < song_frames * 2 {
-            audio.resize(song_frames * 2, 0.0);
-        }
-        let name: String = track_name(s, t).chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
-        let file = dir.join(format!("{:02} {name}.wav", t + 1));
-        let ok = std::fs::File::create(&file).and_then(|f| {
-            let mut w = std::io::BufWriter::new(f);
-            os_engine::wav::write_f32_stereo(&mut w, rate, &audio)
-        });
-        if let Err(e) = ok {
-            return format!("Export tracks: {}: {e}", file.display());
-        }
-        written += 1;
-    }
-    format!("Exported {written} track{} to {}", if written == 1 { "" } else { "s" }, dir.display())
+    app.playlist_render = Some(Render::Tracks { todo, audible, end, dir, written: 0 });
+    next_track(app)
 }
 
+/// Starts the next track of an Export all playlist tracks, or ends it.
+fn next_track(app: &mut App) -> String {
+    let Some(Render::Tracks { todo, audible, end, dir, written }) = &mut app.playlist_render else { return String::new() };
+    let Some(t) = todo.pop() else {
+        let m = format!("Exported {written} track{} to {}", if *written == 1 { "" } else { "s" }, dir.display());
+        app.playlist_render = None;
+        return m;
+    };
+    let (end, dir, mine): (u32, PathBuf, Vec<Clip>) = (*end, dir.clone(), audible.iter().filter(|c| c.track == t).copied().collect());
+    let s = &app.state;
+    let name: String = track_name(s, t).chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
+    let job = render_job(s, &dir, &format!("{:02} {name}", t + 1), end);
+    let mut p = crate::rack::play_project(s);
+    if let Some(arr) = p.arrangement_mut() {
+        arr.clips = mine;
+        for tr in &mut arr.tracks {
+            tr.enabled = true;
+        }
+    }
+    app.start_export_of(job, p, true);
+    format!("Exporting track {}...", t + 1)
+}
+
+/// Tools > Consolidate (§10): the selected clips (or the range's) rendered to one audio clip, with hosted instruments
+/// and effects; the source clips are muted and the new clip goes on the first free track. The render runs as an
+/// export; `App::playlist_render_done` places the clip.
 pub fn consolidate(app: &mut App) -> String {
+    if app.export.is_some() {
+        return "Consolidate: another render is running".into();
+    }
     let s = &mut app.state;
     let sel = s.playlist.sel.clone();
     let (a, b) = match (s.playlist.range, sel.is_empty()) {
@@ -5299,8 +5332,7 @@ pub fn consolidate(app: &mut App) -> String {
         sel.clone()
     };
     // A project with just those clips, shifted to start at 0 (clips crossing the start are cut there).
-    let mut p = s.project.clone();
-    p.tempo = Some(s.tempo);
+    let mut p = crate::rack::play_project(s);
     let mut parts = Vec::new();
     for &i in &use_idx {
         let Some(mut c) = clips(s).get(i).copied() else { continue };
@@ -5321,29 +5353,23 @@ pub fn consolidate(app: &mut App) -> String {
             t.enabled = true;
         }
     }
-    let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
-    let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
-    let mut audio = e.render_all(512);
-    let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo), rate) as usize) * 2;
-    audio.resize(want.max(2), 0.0);
-    let dir = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
+    let dir = render_dir(s);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return format!("Consolidate: {e}");
     }
     let n = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0) + 1;
-    let file = dir.join(format!("Consolidated {n}.wav"));
-    let written = std::fs::File::create(&file).and_then(|f| {
-        let mut w = std::io::BufWriter::new(f);
-        os_engine::wav::write_f32_stereo(&mut w, rate, &audio)
-    });
-    if let Err(e) = written {
-        return format!("Consolidate: {e}");
-    }
-    let path = file.to_string_lossy().into_owned();
+    let job = render_job(s, &dir, &format!("Consolidated {n}"), b - a);
     let track = free_track(s, track_after_used(s), a, b);
+    app.playlist_render = Some(Render::Consolidate { a, b, used: use_idx, track });
+    app.start_export_of(job, p, true);
+    "Consolidating...".into()
+}
+
+/// Places a finished Consolidate's file: the source clips muted and a clip of the render on `track`, one undo step.
+fn consolidate_place(s: &mut State, a: u32, b: u32, used: &[usize], track: u16, file: &Path) -> String {
+    let path = file.to_string_lossy().into_owned();
     snapshot(s);
-    for &i in &use_idx {
+    for &i in used {
         if let Some(c) = arr_mut(s).clips.get_mut(i) {
             c.muted = true;
         }
@@ -5358,6 +5384,27 @@ pub fn consolidate(app: &mut App) -> String {
             format!("Consolidated to {}", file.display())
         }
         None => format!("Consolidate: could not read back {}", file.display()),
+    }
+}
+
+impl App {
+    /// A playlist render's export has finished (`App::export_tick`): Consolidate places its clip; Export all playlist
+    /// tracks goes on to the next track.
+    pub(crate) fn playlist_render_done(&mut self, r: Render, result: Result<(f64, Vec<PathBuf>), String>) {
+        let msg = match (r, result) {
+            (Render::Consolidate { .. }, Err(e)) => format!("Consolidate: {e}"),
+            (Render::Tracks { .. }, Err(e)) => format!("Export tracks: {e}"),
+            (Render::Consolidate { a, b, used, track }, Ok((_, files))) => match files.first() {
+                Some(f) => consolidate_place(&mut self.state, a, b, &used, track, f),
+                None => "Consolidate: no file was written".into(),
+            },
+            (Render::Tracks { todo, audible, end, dir, written }, Ok(_)) => {
+                self.playlist_render = Some(Render::Tracks { todo, audible, end, dir, written: written + 1 });
+                next_track(self)
+            }
+        };
+        self.state.message = Some(msg);
+        self.invalidate();
     }
 }
 
