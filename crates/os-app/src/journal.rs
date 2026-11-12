@@ -275,7 +275,7 @@ impl App {
             return true;
         }
         // Changed since it was first read after the project opened: an edit in the plugin's own window.
-        self.state.plugin_edited |= was.is_some();
+        self.state.session.plugin_edited |= was.is_some();
         if !self.journal.known.insert(format!("{hash:016x}")) {
             return true;
         }

@@ -1246,9 +1246,6 @@ pub struct State {
     /// The mixer tracks and rack rows a control surface's faders and pads take, marked while its Shift is held or a
     /// moment after its banks move.
     pub surface_marks: crate::surface::Marks,
-    /// A setting inside a hosted plugin changed since the project was opened or saved (its knobs, its own window, a
-    /// control surface): the project counts as unsaved, as the plugin's state is saved with it.
-    pub plugin_edited: bool,
     /// How muted each split window is now, 0 to 1, by `Win::slot` (`tiles::veil_target`; `App::veils_tick` fades it).
     pub veil: [f32; 3],
     /// The plugin windows drawn in the app's (Linux), by `Plugins::hosted` key: painted as `Win::Hosted` (kept by
@@ -1857,7 +1854,6 @@ impl App {
                 tile_anim: None,
                 float_layer: Default::default(),
                 surface_marks: Default::default(),
-                plugin_edited: false,
                 veil: [0.0; 3],
                 #[cfg(target_os = "linux")]
                 embeds: Default::default(),
@@ -2404,7 +2400,7 @@ impl App {
             return None;
         }
         let s = &mut self.state;
-        let keep = (s.session.project.clone(), s.session.path.clone(), s.session.file.clone(), s.message.take(), self.saved.clone(), s.plugin_edited);
+        let keep = (s.session.project.clone(), s.session.path.clone(), s.session.file.clone(), s.message.take(), self.saved.clone(), s.session.plugin_edited);
         self.copying = true;
         let written = s.session.project.written_at();
         // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a

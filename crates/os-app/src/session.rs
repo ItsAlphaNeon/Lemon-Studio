@@ -26,8 +26,8 @@ pub struct Session {
     pub sample_loads: Vec<(usize, String)>,
     /// An undo or redo changed the timebase (`history::Timebase`): playback stops on the next tick.
     pub retimed: bool,
-    /// A setting inside a hosted plugin changed since the project was opened or saved (its knobs, its own window): the
-    /// project counts as unsaved, as the plugin's state is saved with it.
+    /// A setting inside a hosted plugin changed since the project was opened or saved (its knobs, its own window, a
+    /// control surface): the project counts as unsaved, as the plugin's state is saved with it.
     pub plugin_edited: bool,
     /// The loop type last chosen while loop mode was off, and the pattern it was chosen in (FL keeps it in memory, not
     /// in the file: `rack::loop_type`).
