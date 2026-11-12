@@ -126,13 +126,13 @@ fn serve<R: BufRead + Send + 'static, W: Write + Send + 'static>(conn: u64, r: R
 impl crate::app::App {
     /// Answers `server`'s clients from now on.
     pub fn listen(&mut self, server: Server) {
-        self.rpc_server = Some(server);
+        self.state.session.rpc_server = Some(server);
         self.state.session.control.watched = true;
     }
 
     /// Answers the requests waiting (on every tick).
     pub fn control_tick(&mut self) {
-        let Some(mut server) = self.rpc_server.take() else { return };
+        let Some(mut server) = self.state.session.rpc_server.take() else { return };
         while let Ok(req) = server.rx.try_recv() {
             let level = server.level;
             let headless = server.headless;
@@ -144,7 +144,7 @@ impl crate::app::App {
             }
             server.clients.insert(req.conn, client);
         }
-        self.rpc_server = Some(server);
+        self.state.session.rpc_server = Some(server);
     }
 }
 

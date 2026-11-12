@@ -364,8 +364,8 @@ impl App {
         let s = &mut self.state;
         s.session.project.get_mut().work_time.get_or_insert_with(os_flp::project::work_time_now).spent = 0.0;
         s.credits.clock.restart(crate::anim::now());
-        if self.saved.0.work_time == s.session.project.work_time {
-            self.saved.0.work_time = None;
+        if s.session.saved.0.work_time == s.session.project.work_time {
+            s.session.saved.0.work_time = None;
         }
         s.message = Some("Working time reset".into());
         self.invalidate();
@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(w.spent, 0.0);
         assert!((w.started - os_flp::project::work_time_now().started).abs() < 1.0 / 24.0);
         app.state.session.project.get_mut().work_time = Some(WorkTime { started: 42_146.5, spent: 1.0 });
-        app.saved.0.work_time = app.state.session.project.work_time;
+        app.state.session.saved.0.work_time = app.state.session.project.work_time;
         app.state.credits.clock = WorkClock::default();
         app.state.credits.clock.focus(true, Instant::now() - Duration::from_secs(600));
         assert!(!app.unsaved(), "counting is no change");
@@ -943,7 +943,7 @@ mod tests {
     fn reset_working_time() {
         let mut app = app();
         app.state.session.project.get_mut().work_time = Some(WorkTime { started: 42_146.5, spent: 0.25 });
-        app.saved.0 = app.state.session.project.clone();
+        app.state.session.saved.0 = app.state.session.project.clone();
         app.state.credits.clock.focus(true, Instant::now() - Duration::from_secs(300));
         assert!(!app.unsaved());
         app.act(Action::Settings(SAct::Button(settings::RESET_WORK_TIME)));

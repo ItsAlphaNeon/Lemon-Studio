@@ -267,7 +267,7 @@ impl App {
     /// the last choices, unless there is nothing to render (spec §2).
     // spec: audio/export.md §2
     pub(crate) fn open_export(&mut self, mp3: bool) {
-        if self.export.is_some() {
+        if self.state.session.export.is_some() {
             return;
         }
         let s = &self.state;
@@ -504,7 +504,7 @@ impl App {
     /// is one; Export writes each track's output (`ex::Job::tracks`). Lemon Studio's choice: the original renders the
     /// selected tracks to wave files, through a form that was not looked at.
     pub(crate) fn open_track_render(&mut self, tracks: Vec<u16>) {
-        if self.export.is_some() || tracks.is_empty() {
+        if self.state.session.export.is_some() || tracks.is_empty() {
             return;
         }
         let name = match tracks[..] {
@@ -582,7 +582,7 @@ mod tests {
         click(&mut app, FHit::Tile(ex::FLAC as u8));
         click(&mut app, FHit::Main);
         // The render started (and keeps going in the background); the next form remembers FLAC.
-        while app.export.is_some() {
+        while app.state.session.export.is_some() {
             app.plugin_tick();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }

@@ -1407,10 +1407,7 @@ pub struct App {
     /// Velocity of the next key the mouse sounds (a keyboard click sets it from the click's x; back to the default
     /// after use).
     key_velocity: u8,
-    /// MIDI controller input, and its held notes: (key, rack row they started on).
-    pub midi: crate::midi_in::MidiIn,
     pub(crate) midi_play: crate::midi_play::Play,
-    pub midi_out: crate::midi_out::MidiOut,
     pub(crate) remote: crate::remote::Remote,
     /// Step edit's chord being collected from the typing keyboard and MIDI notes (`crate::step_edit`).
     pub(crate) step_chord: crate::step_edit::Chord,
@@ -1485,34 +1482,15 @@ pub struct App {
     piano_win: Option<Rect>,
     pub(crate) piano_grid: Option<Rect>,
     piano_panel: Option<Rect>,
-    /// The control plane's socket (`--control`), when it listens.
-    pub rpc_server: Option<crate::control::server::Server>,
     /// The running plugin scan, and the scan asked for while it runs (spec: ui/plugin-manager.md §4).
     pub(crate) sweep: Option<crate::plugin_scan::Sweep>,
     pub(crate) scan_queued: Option<crate::plugin_db::Mode>,
     /// When the Lemon Trio instances were last looked at for a sample they loaded (`follow_osc3_samples`).
     pub(crate) osc3_look: Option<std::time::Instant>,
-    /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
-    loading: Option<crate::loading::Loading>,
-    /// The opened project's missing samples and plugins (`crate::missing`).
-    pub(crate) missing: crate::missing::Missing,
-    /// A zipped project being unzipped or written (`crate::zipped`): its panel shows, input waits.
-    pub(crate) zipping: Option<crate::zipped::Zipping>,
-    /// An export is rendering (FILE > Export): its first file's name and progress (0..1); the same panel shows, input
-    /// waits.
-    pub(crate) export: Option<(String, f32)>,
     /// The running export opens the file manager on its first file when done (Open the folder when done).
     export_reveal: bool,
-    /// The running export is PATTERNS > Quick render as audio clip / Render and replace's (spec: ui/pattern-render.md):
-    /// what to do with its file.
-    pub(crate) pattern_render: Option<crate::pattern_render::Pending>,
     /// `device::opens` when the hosted plugins last followed the output device's rate (`follow_device`).
     device_opens: u64,
-    /// The project, tempo and Lemon Studio's own saved state (`lemon_state::saved_form`) as last opened, saved or
-    /// created: anything else has unsaved changes.
-    pub(crate) saved: (Project, f64, Vec<u8>),
-    /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
-    pub(crate) backup: crate::backup::Backup,
 }
 
 /// Window-level requests the shell must carry out after an event.
@@ -1657,9 +1635,7 @@ impl App {
             scrub_notes: Vec::new(),
             cables_at: None,
             key_velocity: TYPING_VELOCITY,
-            midi: crate::midi_in::MidiIn::none(),
             midi_play: Default::default(),
-            midi_out: crate::midi_out::MidiOut::none(),
             remote: Default::default(),
             step_chord: crate::step_edit::Chord::default(),
             title_click: None,
@@ -1702,19 +1678,11 @@ impl App {
             piano_win: None,
             piano_grid: None,
             piano_panel: None,
-            rpc_server: None,
             sweep: None,
             scan_queued: None,
             osc3_look: None,
-            loading: None,
-            missing: Default::default(),
-            zipping: None,
-            export: None,
             export_reveal: false,
-            pattern_render: None,
             device_opens: 0,
-            saved: (Project::default(), 0.0, Vec::new()),
-            backup: Default::default(),
         };
         // The snap settings are program settings, kept in the user folder (spec: ui/global-snap.md §6).
         let snap = crate::snap::load();
@@ -1852,7 +1820,7 @@ impl App {
                 }
                 self.mark_saved();
                 crate::missing::opened(self);
-                self.loading = Some(crate::loading::Loading::start(&self.state.session.project));
+                self.state.session.loading = Some(crate::loading::Loading::start(&self.state.session.project));
                 self.state.session.samples.wait = true;
                 self.invalidate();
             }
@@ -1910,7 +1878,7 @@ impl App {
     /// written.
     // spec: audio/export.md
     pub(crate) fn start_export(&mut self, job: crate::export::Job, song: bool) {
-        if self.export.is_some() {
+        if self.state.session.export.is_some() {
             return;
         }
         let p = crate::rack::play_project(&self.state);
@@ -1923,25 +1891,25 @@ impl App {
         // Lemon Sampler voices playing from disk wait for their frames in every export, high quality or not.
         lemon_sampler::stream::export_started();
         self.state.session.transport.export(&p, mode, rate, job);
-        self.export = Some((name, 0.0));
+        self.state.session.export = Some((name, 0.0));
         self.invalidate();
     }
 
     /// Follows a running export: moves the progress bar, then reports the result (a pattern render's goes to
     /// `pattern_render_done`).
     pub(crate) fn export_tick(&mut self) {
-        let Some((name, _)) = self.export.clone() else { return };
+        let Some((name, _)) = self.state.session.export.clone() else { return };
         match self.state.session.transport.export_status() {
             crate::transport::Export::Running(p) => {
-                self.export = Some((name, p));
+                self.state.session.export = Some((name, p));
                 self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
             }
             crate::transport::Export::Done(r) => {
-                self.export = None;
+                self.state.session.export = None;
                 self.midi_after_export();
                 self.state.session.plugins.set_offline(false);
                 lemon_sampler::stream::export_finished();
-                if let Some(p) = self.pattern_render.take() {
+                if let Some(p) = self.state.session.pattern_render.take() {
                     return self.pattern_render_done(p, r);
                 }
                 self.state.message = Some(match r {
@@ -2085,11 +2053,11 @@ impl App {
 
     /// `save_copy`, with `edit` changing what is written (`write_project`).
     pub(crate) fn save_copy_with(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<Result<(), String>> {
-        if self.loading.is_some() || self.export.is_some() {
+        if self.state.session.loading.is_some() || self.state.session.export.is_some() {
             return None;
         }
         let s = &mut self.state;
-        let keep = (s.session.project.clone(), s.session.path.clone(), s.session.file.clone(), s.message.take(), self.saved.clone(), s.session.plugin_edited);
+        let keep = (s.session.project.clone(), s.session.path.clone(), s.session.file.clone(), s.message.take(), s.session.saved.clone(), s.session.plugin_edited);
         let written = s.session.project.written_at();
         // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a
         // recent one (spec: ui/recent-projects.md §2).
@@ -2104,7 +2072,7 @@ impl App {
             m => Err(m.map_or_else(String::new, |m| m.trim_start_matches("Save failed: ").to_string())),
         };
         let project;
-        (project, s.session.path, s.session.file, s.message, self.saved, s.session.plugin_edited) = keep;
+        (project, s.session.path, s.session.file, s.message, s.session.saved, s.session.plugin_edited) = keep;
         s.session.project = crate::locked::Locked::restored(project, written);
         Some(done)
     }
@@ -2114,15 +2082,15 @@ impl App {
         // New things get their ids before the copy, so ids alone are no unsaved change.
         let control = &mut self.state.session.control;
         self.state.session.project.write_if(|p| control.settle(p));
-        self.saved = (self.state.session.project.clone(), self.state.tempo(), crate::lemon_state::saved_form(&self.state, &self.state.session.plugins));
+        self.state.session.saved = (self.state.session.project.clone(), self.state.tempo(), crate::lemon_state::saved_form(&self.state, &self.state.session.plugins));
         self.state.session.plugin_edited = false;
     }
 
     /// Whether the project changed since it was last opened, saved or created, a hosted plugin's settings included.
     pub fn unsaved(&self) -> bool {
-        !same_as_saved(&self.saved.0, &self.state.session.project)
-            || self.saved.1 != self.state.tempo()
-            || self.saved.2 != crate::lemon_state::saved_form(&self.state, &self.state.session.plugins)
+        !same_as_saved(&self.state.session.saved.0, &self.state.session.project)
+            || self.state.session.saved.1 != self.state.tempo()
+            || self.state.session.saved.2 != crate::lemon_state::saved_form(&self.state, &self.state.session.plugins)
             || self.state.session.plugin_edited
     }
 
@@ -2516,7 +2484,7 @@ impl App {
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
     pub(crate) fn reset_hosted(&mut self) {
         self.state.session.plugins.clear();
-        self.loading = None;
+        self.state.session.loading = None;
         self.state.session.samples.wait = false;
         self.state.session.hosted_rows.clear();
         self.state.session.plugins.sampler_failed.clear();
@@ -2545,7 +2513,7 @@ impl App {
                 break;
             }
             let st = crate::plugins::sampler_state(ch);
-            if let Some(l) = &mut self.loading {
+            if let Some(l) = &mut self.state.session.loading {
                 l.hosted += 1;
                 l.label = ch.name.clone().unwrap_or_default();
             }
@@ -2576,14 +2544,14 @@ impl App {
     /// instances start a few per tick (`loading::HOST_BUDGET`) so the progress panel keeps moving. Without a loading
     /// project, new sampler rows are hosted at once.
     fn loading_tick(&mut self) {
-        let Some(decoded) = self.loading.as_mut().map(|l| l.decode_done()) else {
+        let Some(decoded) = self.state.session.loading.as_mut().map(|l| l.decode_done()) else {
             self.sync_samplers(None);
             return;
         };
         let deadline = std::time::Instant::now() + crate::loading::HOST_BUDGET;
         // Then the plugin channels and mixer effects, under the same budget, then the samplers' played samples.
-        if decoded && self.sync_samplers(Some(deadline)) && self.host_plugins(deadline) && self.loading.as_mut().is_some_and(|l| l.builds_done()) {
-            self.loading = None;
+        if decoded && self.sync_samplers(Some(deadline)) && self.host_plugins(deadline) && self.state.session.loading.as_mut().is_some_and(|l| l.builds_done()) {
+            self.state.session.loading = None;
             self.state.session.samples.wait = false;
             // What was not found is listed now (spec: ui/project-loading.md §6).
             crate::missing::loaded(self);
@@ -2609,7 +2577,7 @@ impl App {
         let samplers = self.state.session.hosted_rows.iter().filter(|&&r| self.state.session.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
         let done = (self.state.session.plugins.hosted.len() + self.state.session.plugins.wrap_failed.len() + self.state.session.plugins.fx_failed.len() + self.state.session.plugins.native_failed.len()).saturating_sub(samplers);
         let more = self.state.session.plugins.host_more;
-        if let Some(l) = &mut self.loading {
+        if let Some(l) = &mut self.state.session.loading {
             l.label.clear();
             l.plugins_done = done;
             // Plugins no host plays (FL's own effects without a recreation) are not waited for.
@@ -2639,12 +2607,12 @@ impl App {
     /// A project is loading or an export is rendering: the window shows the progress and takes no input (spec:
     /// ui/project-loading.md §2).
     pub fn loading(&self) -> bool {
-        self.loading.is_some() || self.export.is_some() || self.missing.search.is_some() || self.zipping.is_some()
+        self.state.session.loading.is_some() || self.state.session.export.is_some() || self.state.session.missing.search.is_some() || self.state.session.zipping.is_some()
     }
 
     /// The opened project's loading, for the startup splash: its progress (0..=1) and step, while it loads.
     pub fn project_loading(&self) -> Option<(f32, String)> {
-        let l = self.loading.as_ref()?;
+        let l = self.state.session.loading.as_ref()?;
         Some((l.progress(), l.status().split_whitespace().collect::<Vec<_>>().join(" ")))
     }
 
@@ -2683,7 +2651,7 @@ impl App {
         crate::presets::pending_tick(self);
         self.params_tick();
         // While a project loads, `loading_tick` starts these a few per tick.
-        if self.loading.is_none() {
+        if self.state.session.loading.is_none() {
             self.sync_effects();
             self.sync_wrapped();
             self.sync_osc3();
@@ -3278,8 +3246,8 @@ impl App {
             && views::playlist::grid_of(&self.state) == self.pl_grid
             && self.overlays.is_empty()
             && matches!(self.drag, None | Some(Drag::Scroll { .. }))
-            && self.loading.is_none()
-            && self.export.is_none()
+            && self.state.session.loading.is_none()
+            && self.state.session.export.is_none()
             && self.state.playlist.overlay.is_none()
             && !self.state.monitor.debug
             && !self.state.motion.get_mut().over_frame(None)
@@ -4267,7 +4235,7 @@ impl App {
         // out, not edited: the saved copy gets them too, so a fit alone (an opened FL project) is not an unsaved change.
         if let Some(fits) = crate::playlist::audio_fits(&self.state.session) {
             if self.state.session.project.write_if(|p| crate::playlist::fit_clips(&mut p.arrangements, &fits)) {
-                crate::playlist::fit_clips(&mut self.saved.0.arrangements, &fits);
+                crate::playlist::fit_clips(&mut self.state.session.saved.0.arrangements, &fits);
                 self.state.session.dirty = true;
                 self.damage_win(Win::Playlist);
             }
@@ -4651,16 +4619,16 @@ impl App {
             (Some(g), Some(p)) => Some(Rect::new(g.x - 73.0, g.y - 41.0, g.w + 96.0, p.bottom() - g.y + 41.0)),
             _ => None,
         };
-        if let Some(l) = &self.loading {
+        if let Some(l) = &self.state.session.loading {
             crate::loading::paint(canvas, &self.theme.colors, l);
         }
-        if let Some(s) = &self.missing.search {
+        if let Some(s) = &self.state.session.missing.search {
             crate::missing::paint(canvas, &self.theme.colors, s);
         }
-        if let Some(z) = &self.zipping {
+        if let Some(z) = &self.state.session.zipping {
             crate::zipped::paint(canvas, &self.theme.colors, z);
         }
-        if let Some((name, p)) = &self.export {
+        if let Some((name, p)) = &self.state.session.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
             crate::loading::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
         }
@@ -16415,7 +16383,7 @@ mod tests {
         assert!(export_form(&app), "Shift+Ctrl+R opens the Export form (MP3)");
         escape(&mut app);
         assert_eq!(fake::shown(), (0, 2), "no open or file dialog");
-        assert!(app.export.is_none());
+        assert!(app.state.session.export.is_none());
         assert!(!dir.join("Other_2.lemon").exists(), "no new version");
 
         app.state.set_tempo(100.0);
@@ -24058,7 +24026,7 @@ mod tests {
         let out = std::path::PathBuf::from(out);
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.midi = crate::midi_in::MidiIn::open(|| {});
+        app.state.session.midi = crate::midi_in::MidiIn::open(|| {});
         app.open_settings(MIDI);
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(out.join("01_midi_page.png")).unwrap();

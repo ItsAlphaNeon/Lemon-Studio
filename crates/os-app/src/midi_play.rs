@@ -143,10 +143,10 @@ const TEMPO_EVERY: Duration = Duration::from_millis(250);
 impl App {
     /// The input devices' messages, the device lists, the external clock and what master sync sends: on every tick.
     pub(crate) fn midi_tick(&mut self) {
-        if self.midi.take_changed() {
+        if self.state.session.midi.take_changed() {
             self.midi_refresh(false);
         }
-        let evs = self.midi.poll();
+        let evs = self.state.session.midi.poll();
         self.midi_events(evs);
         self.midi_pending();
         self.ext_sync_tick();
@@ -163,11 +163,11 @@ impl App {
     /// changed in the hint bar.
     pub(crate) fn midi_refresh(&mut self, said: bool) {
         let before: Vec<String> = self.midi_page().inputs.iter().map(|i| i.name.clone()).collect();
-        let opened = self.midi.refresh();
-        self.midi.set_ext_sync(cfg::ext_sync().as_deref());
+        let opened = self.state.session.midi.refresh();
+        self.state.session.midi.set_ext_sync(cfg::ext_sync().as_deref());
         let p = &mut self.state.midi;
-        p.inputs = self.midi.inputs.clone();
-        p.outputs = self.midi.outputs.clone();
+        p.inputs = self.state.session.midi.inputs.clone();
+        p.outputs = self.state.session.midi.outputs.clone();
         p.input = p.input.min(p.inputs.len().saturating_sub(1));
         p.output = p.output.min(p.outputs.len().saturating_sub(1));
         let failed: Vec<&str> = p.inputs.iter().filter(|i| i.failed).map(|i| i.name.as_str()).collect();
@@ -462,7 +462,7 @@ impl App {
 
     /// The external clock's tempo and the status line (spec §8).
     fn ext_sync_tick(&mut self) {
-        let st = self.midi.ext_status();
+        let st = self.state.session.midi.ext_status();
         let text = st.text();
         if self.state.midi.status != text {
             self.state.midi.status = text;
@@ -484,7 +484,7 @@ impl App {
     fn midi_out_tick(&mut self) {
         let send = Switch::Output.on() && Switch::MasterSync.on();
         let sync = if send {
-            self.midi
+            self.state.session.midi
                 .outputs
                 .iter()
                 .filter_map(|name| {
@@ -497,7 +497,7 @@ impl App {
         };
         let (mut ports, mut ports_off) = (Vec::new(), Vec::new());
         if Switch::Output.on() {
-            for name in &self.midi.outputs {
+            for name in &self.state.session.midi.outputs {
                 let c = cfg::output(name);
                 if let Some(p) = c.port {
                     ports.push((name.clone(), p));
@@ -516,13 +516,13 @@ impl App {
             ppq: self.state.session.project.ppq.max(1),
             tempo: self.state.tempo(),
         };
-        self.midi_out.configure(c);
+        self.state.session.midi_out.configure(c);
     }
 
     /// After an export: all notes off to the outputs that want it (spec §2).
     pub(crate) fn midi_after_export(&mut self) {
         if Switch::Output.on() {
-            self.midi_out.notes_off();
+            self.state.session.midi_out.notes_off();
         }
     }
 }
@@ -680,7 +680,7 @@ impl App {
     /// External clock sync chosen (`Cmd::MidiExt`).
     pub(crate) fn set_ext_sync(&mut self, device: Option<String>) -> Option<String> {
         cfg::set_ext_sync(device.as_deref());
-        self.midi.set_ext_sync(device.as_deref());
+        self.state.session.midi.set_ext_sync(device.as_deref());
         self.invalidate();
         Some(format!("External clock sync: {}", device.as_deref().unwrap_or("Off")))
     }
@@ -836,9 +836,9 @@ mod tests {
     fn master_clock_loopback() {
         use std::sync::{Arc, Mutex};
         let mut app = App::new(None);
-        app.midi = crate::midi_in::MidiIn::open(|| {});
-        app.midi_out = crate::midi_out::MidiOut::start(app.state.session.transport.watch());
-        let name = app.midi.outputs.iter().find(|n| n.contains("LemonKeys")).cloned().expect("a LemonKeys output");
+        app.state.session.midi = crate::midi_in::MidiIn::open(|| {});
+        app.state.session.midi_out = crate::midi_out::MidiOut::start(app.state.session.transport.watch());
+        let name = app.state.session.midi.outputs.iter().find(|n| n.contains("LemonKeys")).cloned().expect("a LemonKeys output");
         let input = midir::MidiInput::new("Lemon Studio clock test").unwrap();
         let port = input.ports().into_iter().find(|p| input.port_name(p).is_ok_and(|n| n.contains("LemonKeys")));
         let got: Arc<Mutex<Vec<u8>>> = Arc::default();

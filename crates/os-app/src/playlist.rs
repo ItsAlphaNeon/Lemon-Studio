@@ -1130,7 +1130,7 @@ pub fn follow_crossfades(app: &mut App) {
     if !(app.state.session.dirty || app.state.session.project.written_at().is_some()) || !app.state.session.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
         return;
     }
-    os_model::crossfade::derive(&mut app.saved.0, app.saved.1);
+    os_model::crossfade::derive(&mut app.state.session.saved.0, app.state.session.saved.1);
     app.damage_win(crate::app::Win::Playlist);
 }
 

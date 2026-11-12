@@ -120,11 +120,11 @@ impl App {
     /// a backup is written. A new Autosave choice starts the timer again.
     pub(crate) fn backup_tick(&mut self, now: Instant) {
         let every = interval(prefs::index(&prefs::AUTOSAVE));
-        if every != self.backup.every {
-            self.backup.every = every;
-            self.backup.due = every.map(|e| now + e);
+        if every != self.state.session.backup.every {
+            self.state.session.backup.every = every;
+            self.state.session.backup.due = every.map(|e| now + e);
         }
-        let (Some(every), Some(due)) = (every, self.backup.due) else { return };
+        let (Some(every), Some(due)) = (every, self.state.session.backup.due) else { return };
         if now < due {
             return;
         }
@@ -139,12 +139,12 @@ impl App {
                 Some(Ok(_)) => {}
             }
         }
-        self.backup.due = Some(now + every);
+        self.state.session.backup.due = Some(now + every);
     }
 
     /// Whether the project changed since it was last backed up, and since it was last saved (or opened, or created).
     pub(crate) fn changed_since_backup(&self) -> bool {
-        self.unsaved() && self.backup.last.as_ref().is_none_or(|(p, t)| *p != self.state.session.project || *t != self.state.tempo())
+        self.unsaved() && self.state.session.backup.last.as_ref().is_none_or(|(p, t)| *p != self.state.session.project || *t != self.state.tempo())
     }
 
     /// Writes a backup of the project as it is now, named for local time `t`, then deletes its oldest autosaves beyond
@@ -163,7 +163,7 @@ impl App {
         let snap = (self.state.session.project.clone(), self.state.tempo());
         let done = self.save_copy(target.clone())?;
         if done.is_ok() {
-            self.backup.last = Some(snap);
+            self.state.session.backup.last = Some(snap);
             prune(&dir, &name, usize::from(prefs::number(&prefs::BACKUP_MAXIMUM)));
         }
         Some(done.map(|()| target))
