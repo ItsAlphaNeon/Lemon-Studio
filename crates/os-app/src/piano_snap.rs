@@ -60,7 +60,7 @@ fn targets(s: &State, skip: &[usize]) -> Vec<u32> {
                 .flat_map(|(_, n)| [n.position, n.position + piano::shown_len(s, n)])
                 .collect()
         }
-        EditorSnap::Markers => s.project.pattern(s.pattern).map_or(Vec::new(), |p| p.markers.iter().map(|m| m.position).collect()),
+        EditorSnap::Markers => s.project.pattern(s.pattern()).map_or(Vec::new(), |p| p.markers.iter().map(|m| m.position).collect()),
         _ => Vec::new(),
     }
 }

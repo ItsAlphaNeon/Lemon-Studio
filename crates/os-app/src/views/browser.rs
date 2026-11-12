@@ -360,10 +360,12 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
 }
 
 /// Icon for a file by extension (spec §6 table).
-pub fn file_icon(name: &str) -> Icon {
+fn file_icon(name: &str) -> Icon {
+    if crate::browser_index::is_audio_file(name) {
+        return Icon::FileAudio;
+    }
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" | "m4a" => Icon::FileAudio,
         "mid" | "midi" => Icon::PianoRoll,
         "flp" | "lemon" => Icon::FileProject,
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
@@ -375,7 +377,7 @@ pub fn file_icon(name: &str) -> Icon {
 
 /// What a file row stands for (spec §6): an audio file a sample, a preset file a preset, anything else a file.
 fn file_item(name: &str, path: &str) -> Item {
-    if file_icon(name) == Icon::FileAudio {
+    if crate::browser_index::is_audio_file(name) {
         Item::Sample(path.into())
     } else if crate::presets::is_preset_file(Path::new(path)) || crate::presets::is_factory(Path::new(path)) || crate::channel_states::is_state_file(Path::new(path)) {
         Item::Preset(path.into())
@@ -444,7 +446,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 pats.sort_by_key(|p| p.number);
                 for pat in pats {
                     let label = pat.name.clone().unwrap_or_else(|| format!("Pattern {}", pat.number));
-                    leaf(out, &parent, label, Icon::Note, cat, pat.number == s.pattern, Item::Pattern(pat.number));
+                    leaf(out, &parent, label, Icon::Note, cat, pat.number == s.pattern(), Item::Pattern(pat.number));
                 }
             }
             // Hosted plugins open into their parameters (spec: plugins/plugin-parameters.md §6).
@@ -929,7 +931,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         let over = ui.c.text_width(f, &row.label) - w;
         // Hovered, a label that does not fit scrolls (§9) rather than being cut.
         if hov && over > 0.0 {
-            let now = std::time::Instant::now();
+            let now = crate::anim::now();
             let since = s.browser_marquee.borrow().as_ref().filter(|m| m.key == row.key).map_or(now, |m| m.since);
             let off = marquee_offset(now.duration_since(since).as_secs_f32(), over);
             let lr = Rect::new(x + 25.0, y, w, ROW_H);

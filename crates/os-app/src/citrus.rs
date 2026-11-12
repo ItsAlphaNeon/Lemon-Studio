@@ -9,6 +9,7 @@
 //!
 // spec: plugins/citrus.md (app integration, presets)
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use os_model::{Channel, ChannelKind, Project};
@@ -57,7 +58,7 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
 
 /// FL's Sytrus factory presets, when FL is installed.
 fn factory_dir() -> PathBuf {
-    let fl = crate::factory_folder::dir().unwrap_or_else(os_native::default_fl_dir);
+    let fl = crate::factory_folder::dir().unwrap_or_else(os_paths::default_fl_dir);
     fl.join("Data").join("Patches").join("Plugin presets").join("Generators").join("Sytrus")
 }
 
@@ -193,11 +194,11 @@ mod tests {
     fn sytrus_channels_save_and_reopen() {
         let path = std::env::temp_dir().join(format!("openstudio-citrus-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.file = None;
         a.state.path = None;
         a.plugins.available = crate::plugins::builtin();
-        let row = crate::app::add_plugin_channel(&mut a.state.project, CITRUS);
+        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), CITRUS);
         let ch = &a.state.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(CITRUS));

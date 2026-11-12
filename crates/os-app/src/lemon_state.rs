@@ -13,8 +13,11 @@
 //! file saved again holds no stale state); an FLP target drops them with the rest of `LMex`. Open reads them back from
 //! a `.lemon` file only; an FLP's icons come from its icon numbers instead.
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::State;
-use crate::playlist::{ICONS, IconOwner};
+use crate::playlist::ICONS;
+#[cfg(test)]
+use crate::playlist::IconOwner;
 use crate::plugins::Plugins;
 use os_flp::{Event, FlpFile, Value, lemon};
 
@@ -120,7 +123,7 @@ pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
     }
     let read = |id| lemon::data(file, id).filter(|d| d.first() == Some(&LAYOUT));
     if let Some(&flags) = read(lemon::MIXER).as_deref().and_then(|d| d.get(1)) {
-        s.project.pdc_off = flags & PDC_AUTO == 0;
+        s.project.get_mut().pdc_off = flags & PDC_AUTO == 0;
         s.mixer.waveforms = flags & WAVEFORMS != 0;
         s.mixer.extra = flags & EXTRA_PROPS != 0;
     }
@@ -164,7 +167,7 @@ pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
                 CLIP_CHANNEL => os_model::ClipSource::Channel(v),
                 _ => continue,
             };
-            if let Some(tr) = s.project.arrangements.get_mut(usize::from(a)).and_then(|a| a.tracks.get_mut(usize::from(t))) {
+            if let Some(tr) = s.project.get_mut().arrangements.get_mut(usize::from(a)).and_then(|a| a.tracks.get_mut(usize::from(t))) {
                 tr.clip_lock = Some(src);
             }
         }
@@ -187,14 +190,18 @@ pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
         for _ in 0..r.u32().unwrap_or(0) {
             let (Some(t), Some(k), Some(len)) = (r.u16(), r.u8(), r.u16()) else { break };
             let Some(text) = r.take(usize::from(len)) else { break };
-            s.mixer.slot_names.insert((t, k), String::from_utf8_lossy(text).into_owned());
+            if let Some(v) = s.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_names.get_mut(usize::from(k))) {
+                *v = Some(String::from_utf8_lossy(text).into_owned());
+            }
         }
     }
     if let Some(d) = read(lemon::SLOT_COLORS) {
         let mut r = Reader(&d[1..]);
         for _ in 0..r.u32().unwrap_or(0) {
             let (Some(t), Some(k), Some(c)) = (r.u16(), r.u8(), r.take(3)) else { break };
-            s.mixer.slot_colors.insert((t, k), os_model::Rgb::new(c[0], c[1], c[2]));
+            if let Some(v) = s.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_colors.get_mut(usize::from(k))) {
+                *v = Some(os_model::Rgb::new(c[0], c[1], c[2]));
+            }
         }
     }
     if let Some(&flags) = read(lemon::PERFORMANCE).as_deref().and_then(|d| d.get(1)) {
@@ -210,11 +217,23 @@ pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
 /// the Change icon... list ([`crate::playlist::FLP_ICONS`]). A `.lemon` file's icons are its own (event 193), so a
 /// choice made in Lemon Studio, None too, wins over the numbers its FLP events keep.
 fn from_flp(s: &mut State) {
-    let p = &s.project;
-    let channels = p.channels.iter().filter_map(|c| Some((IconOwner::Channel(c.id.0), crate::playlist::flp_icon(c.rack.icon)?)));
-    let tracks = p.mixer.iter().filter_map(|m| Some((IconOwner::Track(m.index), crate::playlist::flp_icon(u32::from(m.icon?))?)));
-    let found: Vec<_> = channels.chain(tracks).collect();
-    s.playlist.icons.extend(found);
+    let name = |i: crate::icons::Icon| ICONS.iter().find(|(_, x)| *x == i).map(|&(n, _)| n.to_string());
+    s.project.write_if(|p| {
+        let mut changed = false;
+        for c in &mut p.channels {
+            if let Some(n) = crate::playlist::flp_icon(c.rack.icon).and_then(name) {
+                c.lemon_icon = Some(n);
+                changed = true;
+            }
+        }
+        for m in &mut p.mixer {
+            if let Some(n) = m.icon.and_then(|i| crate::playlist::flp_icon(u32::from(i))).and_then(name) {
+                m.lemon_icon = Some(n);
+                changed = true;
+            }
+        }
+        changed
+    });
 }
 
 /// [`lemon::ICONS`]: a u32 count, then per icon its owner's kind (u8: 0 a channel, 1 a mixer track, 2 an effect slot),
@@ -222,18 +241,20 @@ fn from_flp(s: &mut State) {
 /// icon's name (u8 length, UTF-8; the names of the Change icon... menu). A channel is kept by its position, since the
 /// file holds the channels in rack order and ids are not saved.
 fn icons(s: &State) -> Event {
+    let p = &s.project;
+    // Only names this version knows (as the menu offers them).
+    fn known(n: &Option<String>) -> Option<&str> {
+        n.as_deref().filter(|n| ICONS.iter().any(|(x, _)| x == n))
+    }
     let mut v: Vec<(u8, u16, u8, &str)> = Vec::new();
-    for (owner, icon) in &s.playlist.icons {
-        let Some(&(name, _)) = ICONS.iter().find(|(_, i)| i == icon) else { continue };
-        let at = match *owner {
-            IconOwner::Channel(id) => match s.project.channels.iter().position(|c| c.id.0 == id) {
-                Some(i) => (CHANNEL, i as u16, 0),
-                None => continue,
-            },
-            IconOwner::Track(t) => (TRACK, t, 0),
-            IconOwner::Slot(t, k) => (SLOT, t, k),
-        };
-        v.push((at.0, at.1, at.2, name));
+    for (i, c) in p.channels.iter().enumerate() {
+        v.extend(known(&c.lemon_icon).map(|n| (CHANNEL, i as u16, 0, n)));
+    }
+    for m in &p.mixer {
+        v.extend(known(&m.lemon_icon).map(|n| (TRACK, m.index, 0, n)));
+        for (k, icon) in m.slot_icons.iter().enumerate() {
+            v.extend(known(icon).map(|n| (SLOT, m.index, k as u8, n)));
+        }
     }
     v.sort();
     let mut b = start(v.len());
@@ -253,26 +274,29 @@ fn read_icons(s: &mut State, d: &[u8]) {
         let (Some(kind), Some(n), Some(k), Some(len)) = (r.u8(), r.u16(), r.u8(), r.u8()) else { break };
         let Some(name) = r.take(usize::from(len)) else { break };
         // A name this version does not know (one added later) is left out.
-        let Some(&(_, icon)) = ICONS.iter().find(|(nm, _)| nm.as_bytes() == name) else { continue };
-        let owner = match kind {
-            CHANNEL => match s.project.channels.get(usize::from(n)) {
-                Some(c) => IconOwner::Channel(c.id.0),
-                None => continue,
-            },
-            TRACK => IconOwner::Track(n),
-            SLOT => IconOwner::Slot(n, k),
+        let Some(&(name, _)) = ICONS.iter().find(|(nm, _)| nm.as_bytes() == name) else { continue };
+        let p = s.project.get_mut();
+        let to = match kind {
+            CHANNEL => p.channels.get_mut(usize::from(n)).map(|c| &mut c.lemon_icon),
+            TRACK => p.mixer.iter_mut().find(|m| m.index == n).map(|m| &mut m.lemon_icon),
+            SLOT => p.mixer.iter_mut().find(|m| m.index == n).and_then(|m| m.slot_icons.get_mut(usize::from(k))),
             _ => continue,
         };
-        s.playlist.icons.insert(owner, icon);
+        if let Some(to) = to {
+            *to = Some(name.to_string());
+        }
     }
 }
 
 /// [`lemon::SLOT_NAMES`]: a u32 count, then per slot its mixer track (u16), slot (u8) and name (u16 length, UTF-8).
 fn slot_names(s: &State) -> Event {
-    let mut v: Vec<_> = s.mixer.slot_names.iter().collect();
+    let mut v: Vec<((u16, u8), &String)> = Vec::new();
+    for m in &s.project.mixer {
+        v.extend(m.slot_names.iter().enumerate().filter_map(|(k, n)| Some(((m.index, k as u8), n.as_ref()?))));
+    }
     v.sort();
     let mut b = start(v.len());
-    for (&(t, k), name) in v {
+    for ((t, k), name) in v {
         let name = &name.as_bytes()[..name.len().min(usize::from(u16::MAX))];
         b.extend_from_slice(&t.to_le_bytes());
         b.push(k);
@@ -284,10 +308,13 @@ fn slot_names(s: &State) -> Event {
 
 /// [`lemon::SLOT_COLORS`]: a u32 count, then per slot its mixer track (u16), slot (u8) and colour (u8 red, green, blue).
 fn slot_colors(s: &State) -> Event {
-    let mut v: Vec<_> = s.mixer.slot_colors.iter().collect();
-    v.sort_by_key(|(k, _)| **k);
+    let mut v: Vec<((u16, u8), &os_model::Rgb)> = Vec::new();
+    for m in &s.project.mixer {
+        v.extend(m.slot_colors.iter().enumerate().filter_map(|(k, c)| Some(((m.index, k as u8), c.as_ref()?))));
+    }
+    v.sort_by_key(|(k, _)| *k);
     let mut b = start(v.len());
-    for (&(t, k), c) in v {
+    for ((t, k), c) in v {
         b.extend_from_slice(&t.to_le_bytes());
         b.extend_from_slice(&[k, c.r, c.g, c.b]);
     }
@@ -465,15 +492,15 @@ mod tests {
     /// and slot 0's colour on track 2; Performance settings other than the defaults.
     fn with_state() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
-        app.state.control.settle(&mut app.state.project);
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.control.settle(app.state.project.get_mut());
         let ch = app.state.project.channels[1].id.0;
         let s = &mut app.state;
-        s.playlist.icons.insert(IconOwner::Channel(ch), Icon::Mic);
-        s.playlist.icons.insert(IconOwner::Track(2), Icon::Star);
-        s.playlist.icons.insert(IconOwner::Slot(2, 1), Icon::Plug);
-        s.mixer.slot_names.insert((2, 1), "Crunch ✓".into());
-        s.mixer.slot_colors.insert((2, 0), os_model::Rgb::new(10, 200, 30));
+        crate::playlist::put_icon(s, IconOwner::Channel(ch), Some(Icon::Mic));
+        crate::playlist::put_icon(s, IconOwner::Track(2), Some(Icon::Star));
+        crate::playlist::put_icon(s, IconOwner::Slot(2, 1), Some(Icon::Plug));
+        crate::mixer::set_slot_label(s, 2, 1, Some("Crunch ✓".into()));
+        crate::mixer::set_slot_color(s, 2, 0, Some(os_model::Rgb::new(10, 200, 30)));
         s.playlist.perf_clip_progress = false;
         s.playlist.perf_track_progress = true;
         s.playlist.perf_plus_scene = true;
@@ -504,22 +531,22 @@ mod tests {
         assert!(!back.unsaved(), "the state read back is the saved state");
         let s = &back.state;
         let ch = s.project.channels[1].id.0;
-        assert_eq!(s.playlist.icons.get(&IconOwner::Channel(ch)), Some(&Icon::Mic));
-        assert_eq!(s.playlist.icons.get(&IconOwner::Track(2)), Some(&Icon::Star));
-        assert_eq!(s.playlist.icons.get(&IconOwner::Slot(2, 1)), Some(&Icon::Plug));
-        assert_eq!(s.playlist.icons.len(), 3);
-        assert_eq!(s.mixer.slot_names.get(&(2, 1)).map(String::as_str), Some("Crunch ✓"));
-        assert_eq!(s.mixer.slot_colors.get(&(2, 0)), Some(&os_model::Rgb::new(10, 200, 30)));
+        assert_eq!(crate::playlist::icons(&s.project).get(&IconOwner::Channel(ch)), Some(&Icon::Mic));
+        assert_eq!(crate::playlist::icons(&s.project).get(&IconOwner::Track(2)), Some(&Icon::Star));
+        assert_eq!(crate::playlist::icons(&s.project).get(&IconOwner::Slot(2, 1)), Some(&Icon::Plug));
+        assert_eq!(crate::playlist::icons(&s.project).len(), 3);
+        assert_eq!(crate::mixer::slot_names_of(&s.project).get(&(2, 1)).map(String::as_str), Some("Crunch ✓"));
+        assert_eq!(crate::mixer::slot_colors_of(&s.project).get(&(2, 0)), Some(&os_model::Rgb::new(10, 200, 30)));
         let pl = &s.playlist;
         assert_eq!((pl.perf_clip_progress, pl.perf_track_progress, pl.perf_plus_scene, pl.perf_velocity_subclips), (false, true, true, false));
-        back.state.playlist.icons.remove(&IconOwner::Track(2));
+        crate::playlist::put_icon(&mut back.state, IconOwner::Track(2), None);
         assert!(back.unsaved(), "an icon taken off is an unsaved change");
         // Saved again, what was taken off stays off (the events are replaced, not kept from the opened file).
         back.save_to(path.clone());
         let mut again = App::new(None);
         again.open(path);
-        assert_eq!(again.state.playlist.icons.len(), 2);
-        assert!(!again.state.playlist.icons.contains_key(&IconOwner::Track(2)));
+        assert_eq!(crate::playlist::icons(&again.state.project).len(), 2);
+        assert!(!crate::playlist::icons(&again.state.project).contains_key(&IconOwner::Track(2)));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -530,15 +557,15 @@ mod tests {
     fn with_settings() -> App {
         let mut app = with_state();
         let s = &mut app.state;
-        s.project.pdc_off = true;
+        s.project.get_mut().pdc_off = true;
         s.mixer.waveforms = true;
         s.mixer.extra = false;
         s.rack.wave_preview.insert(s.project.channels[1].id.0);
         s.rack.through_off.insert(s.project.channels[2].id.0);
         if s.project.arrangements.is_empty() {
-            s.project.arrangements.push(os_flp::project::default_arrangement());
+            s.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
         }
-        let tracks = &mut s.project.arrangements[0].tracks;
+        let tracks = &mut s.project.get_mut().arrangements[0].tracks;
         tracks[3].clip_lock = Some(os_model::ClipSource::Pattern(1));
         tracks[4].clip_lock = Some(os_model::ClipSource::Channel(0));
         app.plugins.editor_scales.insert(0, 1.5);
@@ -638,9 +665,9 @@ mod tests {
         let d = dir("flp_icons");
         let path = d.join("Icons.flp");
         let mut made = App::new(None);
-        made.state.project = crate::app::test_project();
-        made.state.control.settle(&mut made.state.project);
-        let m = &mut made.state.project.mixer;
+        made.state.project = crate::locked::Locked::new(crate::app::test_project());
+        made.state.control.settle(made.state.project.get_mut());
+        let m = &mut made.state.project.get_mut().mixer;
         m[2].icon = Some(75);
         m[3].icon = Some(74); // the automation clip's nodes: no picture of Lemon Studio's
         m[4].icon = Some(80);
@@ -661,15 +688,15 @@ mod tests {
         let s = &app.state;
         let (first, second) = (s.project.channels[0].id.0, s.project.channels[1].id.0);
         assert_eq!(s.project.channels[1].rack.icon, 30);
-        assert_eq!(s.playlist.icons.get(&IconOwner::Channel(second)), Some(&Icon::Mic));
-        assert_eq!(s.playlist.icons.get(&IconOwner::Channel(first)), None);
-        assert_eq!(s.playlist.icons.get(&IconOwner::Track(2)), Some(&Icon::Wave));
-        assert_eq!(s.playlist.icons.get(&IconOwner::Track(4)), Some(&Icon::Kick));
-        assert_eq!(s.playlist.icons.len(), 3, "74 has no picture here");
-        assert_eq!(crate::playlist::window_icon(&s.project, &s.playlist.icons, 1), Some(Icon::Mic));
+        assert_eq!(crate::playlist::icons(&s.project).get(&IconOwner::Channel(second)), Some(&Icon::Mic));
+        assert_eq!(crate::playlist::icons(&s.project).get(&IconOwner::Channel(first)), None);
+        assert_eq!(crate::playlist::icons(&s.project).get(&IconOwner::Track(2)), Some(&Icon::Wave));
+        assert_eq!(crate::playlist::icons(&s.project).get(&IconOwner::Track(4)), Some(&Icon::Kick));
+        assert_eq!(crate::playlist::icons(&s.project).len(), 3, "74 has no picture here");
+        assert_eq!(crate::playlist::window_icon(&s.project, 1), Some(Icon::Mic));
         assert!(!app.unsaved(), "the icons are the opened state");
         // Saved as .lemon with the track 2 icon taken off: the FLP events keep the original numbers.
-        app.state.playlist.icons.remove(&IconOwner::Track(2));
+        crate::playlist::put_icon(&mut app.state, IconOwner::Track(2), None);
         let lemon_path = d.join("Icons.lemon");
         app.save_to(lemon_path.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&lemon_path).unwrap()).unwrap()).unwrap();
@@ -677,9 +704,9 @@ mod tests {
         let mut back = App::new(None);
         back.open(lemon_path);
         let s = &back.state;
-        assert_eq!(s.playlist.icons.get(&IconOwner::Channel(s.project.channels[1].id.0)), Some(&Icon::Mic));
-        assert_eq!(s.playlist.icons.get(&IconOwner::Track(2)), None, "event 193 holds the choice, not event 95");
-        assert_eq!(s.playlist.icons.len(), 2);
+        assert_eq!(crate::playlist::icons(&s.project).get(&IconOwner::Channel(s.project.channels[1].id.0)), Some(&Icon::Mic));
+        assert_eq!(crate::playlist::icons(&s.project).get(&IconOwner::Track(2)), None, "event 193 holds the choice, not event 95");
+        assert_eq!(crate::playlist::icons(&s.project).len(), 2);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -697,7 +724,7 @@ mod tests {
         let mut back = App::new(None);
         back.open(path);
         let s = &back.state;
-        assert!(s.playlist.icons.is_empty() && s.mixer.slot_names.is_empty() && s.mixer.slot_colors.is_empty());
+        assert!(crate::playlist::icons(&s.project).is_empty() && crate::mixer::slot_names_of(&s.project).is_empty() && crate::mixer::slot_colors_of(&s.project).is_empty());
         let fresh = crate::playlist::PlaylistState::default();
         assert_eq!((s.playlist.perf_clip_progress, s.playlist.perf_velocity_subclips), (fresh.perf_clip_progress, fresh.perf_velocity_subclips));
         let _ = std::fs::remove_dir_all(&d);
@@ -747,21 +774,23 @@ mod tests {
         let mut back = App::new(None);
         back.open(path.clone());
         assert!(back.state.playlist.perf_clip_progress, "a layout 2 Performance event is not read: the defaults stay");
-        assert_eq!(back.state.playlist.icons.len(), 3);
+        assert_eq!(crate::playlist::icons(&back.state.project).len(), 3);
         back.save_to(path.clone());
         let file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(lemon::data(&file, 240), Some(vec![7, 7]), "the unknown event is kept");
         // Two colours, the second cut short: the first is read.
         let mut s = with_state();
-        s.state.mixer.slot_colors.insert((3, 4), os_model::Rgb::new(1, 2, 3));
+        crate::mixer::set_slot_color(&mut s.state, 3, 4, Some(os_model::Rgb::new(1, 2, 3)));
         let mut b = slot_colors(&s.state).data().unwrap().to_vec();
         b.truncate(b.len() - 1);
-        s.state.mixer.slot_colors.clear();
+        for (t, k) in crate::mixer::slot_colors_of(&s.state.project).into_keys() {
+            crate::mixer::set_slot_color(&mut s.state, t, k, None);
+        }
         let mut f = file.clone();
         lemon::to_lemon(&mut f, &[Event::new(lemon::SLOT_COLORS, Value::var(b))]).unwrap();
         apply(&mut s.state, &mut s.plugins, &f);
-        assert_eq!(s.state.mixer.slot_colors.len(), 1);
-        assert_eq!(s.state.mixer.slot_colors.get(&(2, 0)), Some(&os_model::Rgb::new(10, 200, 30)));
+        assert_eq!(crate::mixer::slot_colors_of(&s.state.project).len(), 1);
+        assert_eq!(crate::mixer::slot_colors_of(&s.state.project).get(&(2, 0)), Some(&os_model::Rgb::new(10, 200, 30)));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

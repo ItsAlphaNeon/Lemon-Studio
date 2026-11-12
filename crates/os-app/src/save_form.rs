@@ -10,6 +10,7 @@
 //! `views::save_form` paints them.
 // spec: ui/data-folder.md §7
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use os_model::DataFolder;
@@ -402,7 +403,7 @@ impl App {
         }
         // One undo step when the text changed (`control::edit`).
         crate::control::edit(&mut self.state, crate::control::command::SONG_INFO, crate::control::command::Region::Settings, |s| {
-            let info = &mut s.project.info;
+            let info = &mut s.project.get_mut().info;
             for (value, field) in [&mut info.title, &mut info.author, &mut info.url, &mut info.genre].into_iter().zip(&f.info) {
                 let text = field.text.trim();
                 if value.as_deref().unwrap_or("") != text {
@@ -417,7 +418,7 @@ impl App {
         if f.copy {
             self.state.message = Some(self.copy_used_samples_to(&dir));
         }
-        self.state.project.data_folder.get_or_insert_with(DataFolder::default).folder = df::folder_text(&dir);
+        self.state.project.get_mut().data_folder.get_or_insert_with(DataFolder::default).folder = df::folder_text(&dir);
         let file = f.file();
         self.dialog_done(Then::SaveProject(f.next), Reply::File(Some(file)));
         df::reread(&self.state);
@@ -483,7 +484,7 @@ mod tests {
         let kick = dir.join("lib").join("kick.wav");
         std::fs::create_dir_all(kick.parent().unwrap()).unwrap();
         std::fs::write(&kick, [7u8; 12]).unwrap();
-        app.state.project.channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
+        app.state.project.get_mut().channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
         app.act(Action::MenuItem(0, crate::views::menus::FILE_SAVE));
         let f = form(&app).expect("the Save as form").clone();
         assert_eq!((f.title(), f.name.text.as_str(), f.name.all, f.new_folder, f.copy, f.files), (SAVE_TITLE, "Project_1", true, true, false, 0));

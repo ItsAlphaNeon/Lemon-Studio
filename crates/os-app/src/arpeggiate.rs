@@ -303,7 +303,7 @@ pub fn load(path: &Path) -> Result<Pattern, String> {
 
 /// FL's Arpeggiator folder (read in place when FL Studio is installed; §9).
 pub fn folder() -> PathBuf {
-    let fl = crate::factory_folder::dir().unwrap_or_else(os_native::default_fl_dir);
+    let fl = crate::factory_folder::dir().unwrap_or_else(os_paths::default_fl_dir);
     fl.join("Data").join("Patches").join("Scores").join("Arpeggiator")
 }
 
@@ -647,12 +647,12 @@ pub fn preview(s: &mut State) {
     let Some(ch) = piano::channel(s) else { return };
     let now = piano::notes(s).to_vec();
     let fresh = match &s.arp.session {
-        Some(se) => se.pattern != s.pattern || se.channel != ch || se.last != now,
+        Some(se) => se.pattern != s.pattern() || se.channel != ch || se.last != now,
         None => true,
     };
     if fresh {
-        let base_sel = s.piano.selection(s.pattern, Some(ch));
-        s.arp.session = Some(Session { pattern: s.pattern, channel: ch, base: now, base_sel, last: Vec::new() });
+        let base_sel = s.piano.selection(s.pattern(), Some(ch));
+        s.arp.session = Some(Session { pattern: s.pattern(), channel: ch, base: now, base_sel, last: Vec::new() });
     }
     restore(s);
     run(s, None);
@@ -665,7 +665,7 @@ pub fn preview(s: &mut State) {
 /// The session's notes and selection back, when the notes are still what its last preview left.
 fn restore(s: &mut State) -> bool {
     let Some(se) = &s.arp.session else { return false };
-    if se.pattern != s.pattern || piano::notes(s) != se.last.as_slice() && !se.last.is_empty() {
+    if se.pattern != s.pattern() || piano::notes(s) != se.last.as_slice() && !se.last.is_empty() {
         return false;
     }
     let (base, sel, ch) = (se.base.clone(), se.base_sel.clone(), se.channel);
@@ -673,7 +673,7 @@ fn restore(s: &mut State) -> bool {
     if sel.is_empty() {
         s.piano.clear_selection();
     } else {
-        s.piano.select(s.pattern, ch, sel);
+        s.piano.select(s.pattern(), ch, sel);
     }
     s.piano.dirty = true;
     true

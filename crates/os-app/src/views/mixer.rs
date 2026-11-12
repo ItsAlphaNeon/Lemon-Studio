@@ -617,7 +617,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
             if also { c.mix(ui.t.tx(0xffffff), 0.5) } else { c.mix(ui.t.s(0x7f868a), 0.4) }
         });
     // Change icon... (Lemon Studio's design): the icon at the bottom of the name's column, the name above it.
-    let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, crate::playlist::TRACK_ICON_KEY + usize::from(n));
+    let icon = crate::playlist::window_icon(&s.project, crate::playlist::TRACK_ICON_KEY + usize::from(n));
     if let Some(ic) = icon {
         icons::draw(ui.c, ic, Rect::new(sx - 9.0, meter.bottom() - 12.0, 12.0, 12.0), name_c);
     }
@@ -921,7 +921,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         // one has its own ascent). Classic keeps the reference's place.
         let ty = if super::lemon(ui) { (row.cy() + 0.36 * f32::from(fs) - ui.c.ascent(f)).round() } else { row.y + 4.0 * kp };
         // Change icon... (Lemon Studio's design): the icon before the name.
-        let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, crate::plugins::fx_key(n, k));
+        let icon = crate::playlist::window_icon(&s.project, crate::plugins::fx_key(n, k));
         if let Some(ic) = icon {
             let sz = (12.0 * kp.max(0.62)).round();
             icons::draw(ui.c, ic, Rect::new(row.x + 19.0 + shift, row.cy() - sz / 2.0, sz, sz), ink);

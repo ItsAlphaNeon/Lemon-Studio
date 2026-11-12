@@ -3183,6 +3183,7 @@ dependencies = [
  "os-dsp",
  "os-engine",
  "os-host",
+ "os-paths",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
 ]

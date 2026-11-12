@@ -68,6 +68,13 @@ fn platform_dir() -> Option<PathBuf> {
     None
 }
 
+/// Default FL Studio install folder (data path): `OPENSTUDIO_FACTORY` if set, else the usual path.
+pub fn default_fl_dir() -> PathBuf {
+    std::env::var_os("OPENSTUDIO_FACTORY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Image-Line\FL Studio 2026"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

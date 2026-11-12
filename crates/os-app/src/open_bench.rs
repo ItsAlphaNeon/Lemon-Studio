@@ -5,7 +5,7 @@
 //! UI-thread load of opening a real project: opens it as the app does, then ticks and paints until it has loaded and
 //! settled, and prints every tick or paint that held the UI thread for long, with how long the open itself took.
 //!
-//! `OS_OPEN_BENCH=<project.flp or .zip> cargo test -p os-app --bin lemonstudio open_load -- --ignored --nocapture`
+//! `OS_OPEN_BENCH=<project.flp or .zip> cargo test -p os-app --lib open_load -- --ignored --nocapture`
 
 use std::time::{Duration, Instant};
 

@@ -921,7 +921,7 @@ impl App {
             Target::Knob(k) => f64::from(s.knob(k)),
             Target::Fader(m) => crate::mixer::track(s, m).and_then(|m| m.volume).unwrap_or(0.8),
             Target::Param(key, i) => crate::params::param_value(s, key, i).unwrap_or(0.0),
-            Target::Tempo => self.transport.tempo().unwrap_or(s.tempo),
+            Target::Tempo => self.transport.tempo().unwrap_or(s.tempo()),
         }
     }
 
@@ -1116,7 +1116,7 @@ impl App {
                 ("Zoom", if into { "In".into() } else { "Out".into() })
             }
             4 => {
-                if !self.state.song_mode {
+                if !self.state.song_mode() {
                     ("Marker", "Pattern mode".into())
                 } else {
                     self.state.raise(Win::Playlist);
@@ -1398,7 +1398,7 @@ impl App {
             }
             _ => {}
         }
-        let tempo = self.transport.tempo().unwrap_or(s.tempo);
+        let tempo = self.transport.tempo().unwrap_or(s.tempo());
         let master_again = d.master_again.filter(|t| *t <= Instant::now()).is_some();
         let master = (crate::mixer::name(s, 0), crate::mixer::track(s, 0).and_then(|m| m.volume).unwrap_or(0.8));
         let shown = plugin.as_ref().zip(reread).filter(|(_, (read, _))| *read).map(|(pt, (_, texts))| (now, pt.key, pt.page, texts));

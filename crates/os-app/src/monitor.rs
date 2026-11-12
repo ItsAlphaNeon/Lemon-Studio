@@ -14,10 +14,10 @@
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 
+use crate::transport::MAX_FFT;
+
 /// Columns of the scope / analyzer panel (its inner width in logical px).
 pub const COLS: usize = 84;
-/// Largest analyzer FFT (the tap keeps at least this many samples).
-pub const MAX_FFT: usize = 1 << 14;
 
 /// One tunable: label, default, min, max, decimals shown, unit.
 pub struct Param {

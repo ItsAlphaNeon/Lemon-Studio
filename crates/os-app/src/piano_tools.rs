@@ -131,7 +131,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         }
         Key::Character(c) if ctrl && !alt && is(c, "x") => {
             let s = &mut app.state;
-            let sel = s.piano.selection(s.pattern, piano::channel(s));
+            let sel = s.piano.selection(s.pattern(), piano::channel(s));
             if sel.is_empty() {
                 return true;
             }
@@ -196,7 +196,7 @@ pub(crate) fn zoom_key(app: &mut App, notches: f32) -> bool {
 fn pick(app: &mut App, letter: &str) -> bool {
     let s = &mut app.state;
     let Some(ch) = piano::channel(s) else { return true };
-    let sel = s.piano.selection(s.pattern, Some(ch));
+    let sel = s.piano.selection(s.pattern(), Some(ch));
     let all = piano::notes(s);
     let mine: Vec<usize> = (0..all.len()).filter(|&i| all[i].channel == ch).collect();
     let mut rng = s.piano.rng;
@@ -213,7 +213,7 @@ fn pick(app: &mut App, letter: &str) -> bool {
         _ => mine.iter().copied().filter(|&i| colour(&all[i]) == now).collect(),
     };
     s.piano.rng = rng;
-    s.piano.select(s.pattern, ch, new);
+    s.piano.select(s.pattern(), ch, new);
     app.invalidate();
     true
 }
@@ -221,7 +221,7 @@ fn pick(app: &mut App, letter: &str) -> bool {
 /// Ctrl+Enter (spec: ui/piano-keys.md §4 rule 12): the time selection becomes the selected notes' span (first start to
 /// last end) and the play-start marker goes to its start; nothing selected: nothing.
 pub fn span_to_range(s: &mut State) {
-    let sel = s.piano.selection(s.pattern, piano::channel(s));
+    let sel = s.piano.selection(s.pattern(), piano::channel(s));
     let all = piano::notes(s);
     let picked: Vec<&Note> = sel.iter().filter_map(|&i| all.get(i)).collect();
     let (Some(a), Some(b)) = (picked.iter().map(|n| n.position).min(), picked.iter().map(|n| n.position + piano::shown_len(s, n)).max()) else { return };
@@ -277,14 +277,15 @@ pub fn target_menu(s: &State, x: f32, y: f32) -> Popup {
     let head = |name: String| PItem { label: name.into(), ..PItem::head("") };
     let mut items = vec![PItem::head("Current pattern")];
     items.extend((0..n).filter(|&r| has_notes(s, r)).map(row_item));
-    for g in &s.rack.groups {
+    let groups = crate::rack::groups(&s.project);
+    for g in &groups {
         let rows: Vec<usize> = g.members.iter().copied().filter(|&r| r < n).collect();
         if !rows.is_empty() {
             items.push(head(g.name.clone()));
             items.extend(rows.into_iter().map(row_item));
         }
     }
-    let unsorted: Vec<usize> = (0..n).filter(|r| !s.rack.groups.iter().any(|g| g.members.contains(r))).collect();
+    let unsorted: Vec<usize> = (0..n).filter(|&r| s.project.channels[r].rack.group.is_none()).collect();
     if !unsorted.is_empty() {
         items.push(PItem::head("Unsorted"));
         items.extend(unsorted.into_iter().map(row_item));
@@ -379,7 +380,7 @@ pub fn add_marker(s: &mut State, tick: u32) -> String {
 pub fn duplicate(s: &mut State) {
     let range = s.piano.range.filter(|(a, b)| b > a);
     let idx = match range {
-        Some(_) => s.piano.selection(s.pattern, piano::channel(s)),
+        Some(_) => s.piano.selection(s.pattern(), piano::channel(s)),
         None => piano::targets(s),
     };
     let all = piano::notes(s);
@@ -412,7 +413,7 @@ pub(crate) fn apply_as(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<N
     if idx.is_empty() {
         return false;
     }
-    let had_sel = !s.piano.selection(s.pattern, Some(ch)).is_empty();
+    let had_sel = !s.piano.selection(s.pattern(), Some(ch)).is_empty();
     let all = piano::notes(s);
     let picked: Vec<Note> = idx.iter().filter_map(|&i| all.get(i).copied()).collect();
     let out = f(s, picked.clone());
@@ -429,7 +430,7 @@ pub(crate) fn apply_as(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<N
     let end = notes.len();
     p.notes = notes;
     if had_sel {
-        s.piano.select(s.pattern, ch, (start..end).collect());
+        s.piano.select(s.pattern(), ch, (start..end).collect());
     } else {
         s.piano.clear_selection();
     }

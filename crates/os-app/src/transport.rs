@@ -242,8 +242,43 @@ struct Tap {
     metered: u64,
 }
 
+/// Set while Record is armed and Loop record is off: playback runs on past its end (`ui/recording.md` §4). Every playback engine
+/// reads it (`Engine::set_run_on`); `App::record_tick` keeps it up to date. One per test thread under tests.
+pub fn run_on_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::{atomic::AtomicBool, Arc};
+    #[cfg(test)]
+    {
+        thread_local!(static TEST: Arc<AtomicBool> = Arc::new(AtomicBool::new(false)));
+        TEST.with(Arc::clone)
+    }
+    #[cfg(not(test))]
+    {
+        static FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+        FLAG.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
+    }
+}
+
+/// The nudge being held: -1, 0 or +1 (`ui/tempo-tapper.md` §6). Every playback engine reads it (`Engine::set_nudge`); a press on a
+/// nudge button sets it and any release of the mouse button clears it. One per test thread under tests.
+pub fn nudge_flag() -> std::sync::Arc<std::sync::atomic::AtomicI8> {
+    use std::sync::{atomic::AtomicI8, Arc};
+    #[cfg(test)]
+    {
+        thread_local!(static TEST: Arc<AtomicI8> = Arc::new(AtomicI8::new(0)));
+        TEST.with(Arc::clone)
+    }
+    #[cfg(not(test))]
+    {
+        static FLAG: std::sync::OnceLock<Arc<AtomicI8>> = std::sync::OnceLock::new();
+        FLAG.get_or_init(|| Arc::new(AtomicI8::new(0))).clone()
+    }
+}
+
+/// Largest analyzer FFT the output monitor asks of the tap (`Transport::tap` hands back at most this many samples).
+pub const MAX_FFT: usize = 1 << 14;
+
 /// Frames the tap holds: the largest analyzer FFT behind the newest block (two of the longest buffer length).
-const TAP_FRAMES: usize = crate::monitor::MAX_FFT + 2 * 8192;
+const TAP_FRAMES: usize = MAX_FFT + 2 * 8192;
 
 impl Default for Tap {
     fn default() -> Self {
@@ -527,6 +562,8 @@ pub struct Transport {
     latest: Arc<Mutex<Option<Project>>>,
     /// The project `update` last sent, with its edits; `None` once a playback starts from a project of its own.
     sent: Mutex<Option<Project>>,
+    /// How many times `update` was called (tests: an idle tick hands playback nothing).
+    updates: std::sync::atomic::AtomicU64,
     instruments: Instruments,
     shared: Arc<Shared>,
     /// The audio thread: joined when the transport goes (see `Drop`).
@@ -551,7 +588,7 @@ impl Transport {
                 }
             })
             .expect("spawn audio thread");
-        Transport { tx, latest, sent: Mutex::new(None), instruments, shared, thread: Some(thread) }
+        Transport { tx, latest, sent: Mutex::new(None), updates: Default::default(), instruments, shared, thread: Some(thread) }
     }
 
     /// Hosted generator plugins by rack row; playing engines pick them up at once.
@@ -708,7 +745,31 @@ impl Transport {
         }
     }
 
+    /// Tests: how many times playback was started or stopped (the equivalence harness).
+    #[cfg(test)]
+    pub fn generation_for_tests(&self) -> u64 {
+        self.shared.generation.load(Ordering::Acquire)
+    }
+
+    /// Tests: the project the engine was last given whole, with the live edits since (the equivalence harness).
+    #[cfg(test)]
+    pub fn sent_for_tests(&self) -> Option<Project> {
+        self.sent.lock().ok().and_then(|s| s.clone())
+    }
+
+    /// Tests: how many times the engine was handed the project (`update`).
+    #[cfg(test)]
+    pub fn updates_for_tests(&self) -> u64 {
+        self.updates.load(Ordering::Relaxed)
+    }
+
+    /// Whether playback holds `project` as it is (what `update` last sent, with its edits).
+    pub fn holds(&self, project: &Project) -> bool {
+        self.sent.lock().is_ok_and(|s| s.as_ref() == Some(project))
+    }
+
     pub fn update(&self, project: &Project) {
+        self.updates.fetch_add(1, Ordering::Relaxed);
         // Levels alone reach the playing engines in place: a new engine at every move of a knob takes milliseconds of
         // building each time (up to some 70 in a large project). What was last sent says what changed.
         if let Ok(mut sent) = self.sent.lock() {
@@ -878,12 +939,12 @@ impl Transport {
         *self.shared.pace.lock().ok()?
     }
 
-    /// Fills `out` with the output heard last (mono, oldest first, at most `monitor::MAX_FFT`) and returns the count
+    /// Fills `out` with the output heard last (mono, oldest first, at most `MAX_FFT`) and returns the count
     /// of frames heard; an unchanged count means nothing was played since the last call (`Tap::heard`).
     pub fn tap(&self, out: &mut [f32]) -> u64 {
         let Ok(t) = self.shared.tap.lock() else { return 0 };
         let heard = t.heard(Instant::now());
-        let n = out.len().min(crate::monitor::MAX_FFT).min(heard as usize);
+        let n = out.len().min(MAX_FFT).min(heard as usize);
         let skip = out.len() - n;
         out[..skip].fill(0.0);
         let first = heard as usize - n;
@@ -1708,8 +1769,8 @@ impl Audio {
             e.set_count_in(at.count_in);
         }
         if song {
-            e.set_run_on(crate::record::run_on_flag());
-            e.set_nudge(crate::tapper::nudge_flag());
+            e.set_run_on(run_on_flag());
+            e.set_nudge(nudge_flag());
             e.set_record_tap(self.shared.record.lock().ok().and_then(|t| t.clone()));
             if let Some(gate) = self.shared.gate.lock().ok().and_then(|g| *g) {
                 e.set_load_gate(gate);
@@ -3509,7 +3570,7 @@ mod tests {
     }
 
     /// Linux: while a project plays, the feeder and the device callback run at real-time priority (`crate::rt`; needs an
-    /// audio device and rtkit or an rtprio limit): `hidden-tests cargo test -p os-app --bin lemonstudio
+    /// audio device and rtkit or an rtprio limit): `hidden-tests cargo test -p os-app --lib
     /// transport::tests::audio_threads_run_realtime -- --ignored --exact --nocapture`.
     #[cfg(target_os = "linux")]
     #[test]

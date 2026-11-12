@@ -14,6 +14,7 @@
 //! - `query`: the project as clients read it.
 //! - `rpc`: JSON-RPC 2.0 over a local socket (`server`), the adapter clients speak.
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 pub mod command;
 pub mod host;
 pub mod ids;
@@ -142,9 +143,9 @@ impl Control {
 
     /// `settle` on the app's tick: when the project was edited (`dirty`) or holds another number of things (one was
     /// added or copied), else nothing to do.
-    pub fn settle_tick(&mut self, p: &mut os_model::Project, dirty: bool) {
+    pub fn settle_tick(&mut self, p: &mut crate::locked::Locked, dirty: bool) {
         if dirty || count(p) != self.counted {
-            self.settle(p);
+            p.write_if(|p| self.settle(p));
         }
     }
 
@@ -258,7 +259,7 @@ fn op(c: &Command) -> &'static str {
 /// Applies `commands` in order, all or none; returns each one's result and the commands that undo them all (in the
 /// order to apply them). Records nothing.
 pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
-    s.control.settle(&mut s.project);
+    s.control.settle(s.project.get_mut());
     let queues = Queues::of(s);
     let known = s.control.known.clone();
     let mut undo = Vec::with_capacity(commands.len());
@@ -268,7 +269,7 @@ pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Val
             Ok(done) => {
                 undo.push(done.undo);
                 results.push(done.result);
-                s.control.settle(&mut s.project);
+                s.control.settle(s.project.get_mut());
             }
             Err(e) => {
                 // Back to where the list started.
@@ -296,7 +297,7 @@ pub fn take_back(s: &mut State, undo: Vec<Command>) -> Vec<Command> {
                 break;
             }
         }
-        s.control.settle(&mut s.project);
+        s.control.settle(s.project.get_mut());
     }
     redo.reverse();
     redo
@@ -317,7 +318,7 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
     };
     crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
     crate::history::done_with(s);
-    s.control.saw(&s.project, s.tempo);
+    s.control.saw(&s.project, s.tempo());
     s.control.event(by, "apply", step, ops);
     Ok(results)
 }
@@ -327,6 +328,9 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
 /// `Command::Put`, as a command's own undo is.
 pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
     s.link_moves.clear();
+    // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
+    // its region may name other things (tracks renumbered by a delete).
+    crate::history::settle(s);
     let before = command::Taken::of(s, region);
     let r = f(s);
     if let Some(before) = before {
@@ -354,6 +358,9 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
         return f(s);
     }
     s.link_moves.clear();
+    // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
+    // its region may name other things (tracks renumbered by a delete).
+    crate::history::settle(s);
     let before = command::Taken::of(s, region);
     let r = f(s);
     if let Some(before) = before {
@@ -368,7 +375,6 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
 /// Records an interface edit's step. A step of the same press that changed nothing goes first (a text box's playlist
 /// step when the box named a mixer track), as the press's release would have dropped it.
 fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
-    crate::history::settle(s);
     let mut undo = vec![Command::Put(Box::new(before))];
     // The remote control links the edit moved with what they drive (`remote::follow`) go back with it.
     let links: Vec<_> = std::mem::take(&mut s.link_moves).into_iter().map(|(from, to)| (to, from)).collect();
@@ -382,6 +388,7 @@ fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
 /// `edit` for an edit that needs the app (a mixer menu command hosting or dropping plugins).
 pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
     app.state.link_moves.clear();
+    crate::history::settle(&mut app.state);
     let before = command::Taken::of(&app.state, region);
     let r = f(app);
     let s = &mut app.state;
@@ -430,7 +437,7 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     let Some(param) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
     if command::key_owner(s, key) == Some(0) {
-        s.control.settle(&mut s.project);
+        s.control.settle(s.project.get_mut());
     }
     let Some(owner) = command::key_owner(s, key) else { return };
     // Known for the undo's other side (`Command::apply`).
@@ -448,7 +455,7 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
 /// release could judge.
 pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command::PluginSide) {
     if command::key_owner(s, key) == Some(0) {
-        s.control.settle(&mut s.project);
+        s.control.settle(s.project.get_mut());
     }
     let Some(owner) = command::key_owner(s, key).filter(|&o| o != 0) else { return };
     crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(command::Taken::Plugin(owner, Box::new(before))))]));
@@ -463,6 +470,7 @@ pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: comman
         return f(app);
     }
     app.state.link_moves.clear();
+    crate::history::settle(&mut app.state);
     let before = command::Taken::of(&app.state, region);
     let r = f(app);
     let s = &mut app.state;
@@ -515,6 +523,7 @@ struct Queues {
     plugin_channel: usize,
     clips: Vec<usize>,
     piano: crate::piano::PianoState,
+    written: Option<&'static std::panic::Location<'static>>,
 }
 
 impl Queues {
@@ -526,6 +535,7 @@ impl Queues {
             sample_loads: s.sample_loads.len(),
             fx: s.mixer.pending.len(),
             dirty: s.piano.dirty,
+            written: s.project.written_at(),
             message: s.message.clone(),
             hosted_rows: s.hosted_rows.clone(),
             selected_channel: s.selected_channel,
@@ -551,6 +561,7 @@ impl Queues {
         (s.z, s.plugin_channel, s.playlist.sel) = (self.windows, self.plugin_channel, self.clips);
         s.piano = self.piano;
         s.piano.dirty = self.dirty;
+        s.project.rewind_written(self.written);
     }
 }
 

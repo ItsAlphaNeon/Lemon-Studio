@@ -15,10 +15,7 @@ use crate::app::{Action, Live, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 use crate::piano::{self, Geom, Lane, Overlay, Tool};
 
-/// Default grid row pitch: 17 px of fill plus a 1 px separator (§3); the vertical zoom changes it (§3a).
-pub const ROW: f32 = 18.0;
-/// Highest key shown (B10); the lowest is 0 (C0) (§3).
-pub const TOP_KEY: i32 = 131;
+pub use crate::piano::{ROW, TOP_KEY};
 
 /// Key name with key 60 = C5 (§3), as the settings choose it (`crate::note_names`).
 pub fn key_name(key: i32) -> String {
@@ -126,9 +123,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let l = layout(r, s.piano.split);
     let g = Geom::new(s, l.grid);
     let ch = channel.map(|c| c.index);
-    let pat = s.project.patterns.iter().find(|p| p.number == s.pattern);
+    let pat = s.project.patterns.iter().find(|p| p.number == s.pattern());
     let notes: &[Note] = pat.map_or(&[], |p| &p.notes);
-    let sel = s.piano.selection(s.pattern, ch);
+    let sel = s.piano.selection(s.pattern(), ch);
     // Only a ruler time selection shades the grid, and only its columns (§10).
     let range = s.piano.range.map(|(a, b)| (g.x_of(a as f32), g.x_of(b as f32)));
 
@@ -154,7 +151,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     overview(ui, s, &l, &g, notes, ch);
     // A time-signature marker shows its signature (spec: ui/pattern-time-signature.md §2).
     let markers: Vec<(u32, String)> =
-        s.project.pattern(s.pattern).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, super::playlist::marker_label(m))).collect();
+        s.project.pattern(s.pattern()).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, super::playlist::marker_label(m))).collect();
     ruler(ui, &l, &g, range, s.piano.marker, &markers);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
@@ -283,7 +280,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     if let Some(tick) = head {
         let x = g.x_of(tick as f32);
         ui.c.fill_rect(Rect::new(x, l.grid.y, 1.5, l.grid.h), t.playhead);
-    } else if let Some(tick) = (!f.playing && s.song_mode).then(|| piano::pattern_tick_in_song(s, f64::from(s.playlist.pos))).flatten() {
+    } else if let Some(tick) = (!f.playing && s.song_mode()).then(|| piano::pattern_tick_in_song(s, f64::from(s.playlist.pos))).flatten() {
         // Stopped in song mode on a place where this pattern plays: a grey line there.
         let x = g.x_of(tick as f32).round();
         ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 3.0, l.grid.h), ui.t.s(0x38373b));
@@ -500,7 +497,7 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     // Horizontal scroll bar over the pattern plus room to scroll on (half a screen past the
     // pattern or the current view).
     let view = l.grid.w / g.ppt;
-    let len = piano::pattern_length(s, s.pattern) as f32;
+    let len = piano::pattern_length(s, s.pattern()) as f32;
     let span = s.piano.bar_span.unwrap_or(len.max(g.scroll_x + view) + view / 2.0);
     // Scroll arrows at both ends (§1a); the bar runs between them (small scroll bars: no arrows).
     let arrow = if super::small_scrollbars() { 0.0 } else { 19.0 };

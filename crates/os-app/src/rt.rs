@@ -389,7 +389,7 @@ mod tests {
     }
 
     /// With rtkit's promotions used up, a thread it refuses gets real-time priority once rtkit agrees again. Uses the
-    /// machine's rtkit for up to a minute: `hidden-tests cargo test -p os-app --bin lemonstudio rt::tests::a_refused_thread -- --ignored --exact --nocapture`
+    /// machine's rtkit for up to a minute: `hidden-tests cargo test -p os-app --lib rt::tests::a_refused_thread -- --ignored --exact --nocapture`
     #[test]
     #[ignore]
     fn a_refused_thread_gets_its_priority_later() {
@@ -442,7 +442,7 @@ mod tests {
     /// Deadlines met by a thread working like the audio feeder at 256 frames (48 kHz: a 5.33 ms period, 1.5 ms of work
     /// each) while every core is kept busy at normal priority, at normal priority and at real-time priority. Prints the
     /// misses; asserts the real-time thread misses fewer. Busies the machine for about 20 s:
-    /// `cargo test -p os-app --bin lemonstudio rt::tests::deadlines_under_load -- --ignored --exact --nocapture`
+    /// `cargo test -p os-app --lib rt::tests::deadlines_under_load -- --ignored --exact --nocapture`
     #[test]
     #[ignore]
     fn deadlines_under_load() {

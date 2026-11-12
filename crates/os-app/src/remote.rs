@@ -610,7 +610,7 @@ impl App {
         live.last_in = Some(val);
         match l.smooth {
             Some(ms) => {
-                live.glide = Some((now, val, Instant::now(), Duration::from_millis(u64::from(ms))));
+                live.glide = Some((now, val, crate::anim::now(), Duration::from_millis(u64::from(ms))));
             }
             None => {
                 live.set = Some(val);
@@ -626,7 +626,7 @@ impl App {
         }
         for i in 0..self.remote.live.len() {
             let Some((from, to, since, over)) = self.remote.live[i].glide else { continue };
-            let k = (since.elapsed().as_secs_f32() / over.as_secs_f32().max(1e-3)).min(1.0);
+            let k = (crate::anim::now().duration_since(since).as_secs_f32() / over.as_secs_f32().max(1e-3)).min(1.0);
             let v = from + (to - from) * k;
             if k >= 1.0 {
                 self.remote.live[i].glide = None;
@@ -897,7 +897,7 @@ mod tests {
         use crate::views::browser::{rows, section_key, REMOTE_CONTROL};
         use crate::views::menus::{item_at, works, VIEW};
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         set_links(&[]);
         add(Link::new(0, 7, Target::Knob(KnobId::ChanVol(1))), true);
         add(Link { omni: true, ..Link::new(1, 10, Target::Knob(KnobId::ChanPan(0))) }, true);
@@ -945,7 +945,7 @@ mod tests {
     fn the_mixer_links_a_tracks_controls() {
         use crate::playlist::Cmd;
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         set_links(&[]);
         app.state.selected_mixer = 1;
         if let Some(t) = crate::mixer::track_mut(&mut app.state, 1) {

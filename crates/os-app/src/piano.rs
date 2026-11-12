@@ -6,11 +6,16 @@
 //! Piano roll state and note editing (view geometry, selection, undo).
 // spec: ui/piano-roll.md §3, §5, §7a, §7b, §8, §9; flp/events/patterns.md (note records, control points)
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ControlPoint, Note, Pattern};
 use os_ui::Rect;
 
 use crate::app::State;
-use crate::views::piano::{ROW, TOP_KEY};
+
+/// Default grid row pitch: 17 px of fill plus a 1 px separator (§3); the vertical zoom changes it (§3a).
+pub const ROW: f32 = 18.0;
+/// Highest key (B10); the lowest is 0 (C0) (§3).
+pub const TOP_KEY: i32 = 131;
 
 /// Piano-roll tools (§9), with their shortcut letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -142,7 +147,7 @@ impl Default for PianoState {
             range: None,
             row_h: ROW,
             ghosts: true,
-            rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
+            rng: crate::clip_colors::clock() | 1,
             split: crate::piano_split::load(),
             split_click: None,
             was_shown: None,
@@ -201,7 +206,7 @@ impl Geom {
         let ppq = u32::from(s.project.ppq.max(4));
         // A beat is the signature's note value: a quarter in 4/4, an eighth in 3/8.
         let bars: Vec<(u32, u32, u32)> =
-            s.project.pattern_bars(s.pattern).into_iter().map(|(start, bar, (num, _))| (start, bar, (bar / u32::from(num.max(1))).max(1))).collect();
+            s.project.pattern_bars(s.pattern()).into_iter().map(|(start, bar, (num, _))| (start, bar, (bar / u32::from(num.max(1))).max(1))).collect();
         Geom {
             grid,
             ppt: s.piano.px_per_beat / ppq as f32,
@@ -277,11 +282,11 @@ impl Geom {
 /// (song tick of the clip's start, pattern tick there, length), in song order. A clip that plays its whole pattern
 /// (no window) lasts the pattern's length.
 pub fn song_spans(s: &State) -> Vec<(u32, u32, u32)> {
-    let whole = pattern_length(s, s.pattern);
+    let whole = pattern_length(s, s.pattern());
     let track_on = |t: u16| s.project.arrangement().and_then(|a| a.tracks.get(usize::from(t))).is_none_or(|t| t.enabled);
     let mut v: Vec<(u32, u32, u32)> = crate::playlist::clips(s)
         .iter()
-        .filter(|c| c.source == os_model::ClipSource::Pattern(s.pattern) && !c.muted && track_on(c.track))
+        .filter(|c| c.source == os_model::ClipSource::Pattern(s.pattern()) && !c.muted && track_on(c.track))
         .map(|c| match c.window {
             Some(w) => (c.position, w.0.max(0.0).round() as u32, c.length),
             None => (c.position, 0, whole),
@@ -522,18 +527,18 @@ pub fn velocity_at(panel: Rect, y: f32) -> u8 {
 
 /// The current pattern, created if it has no data yet.
 pub fn pattern_mut(s: &mut State) -> &mut Pattern {
-    let number = s.pattern;
+    let number = s.pattern();
     match s.project.patterns.iter().position(|p| p.number == number) {
-        Some(i) => &mut s.project.patterns[i],
+        Some(i) => &mut s.project.get_mut().patterns[i],
         None => {
-            s.project.patterns.push(Pattern { number, ..Pattern::default() });
-            s.project.patterns.last_mut().expect("pushed")
+            s.project.get_mut().patterns.push(Pattern { number, ..Pattern::default() });
+            s.project.get_mut().patterns.last_mut().expect("pushed")
         }
     }
 }
 
 pub fn notes(s: &State) -> &[Note] {
-    s.project.patterns.iter().find(|p| p.number == s.pattern).map_or(&[], |p| &p.notes)
+    s.project.patterns.iter().find(|p| p.number == s.pattern()).map_or(&[], |p| &p.notes)
 }
 
 /// The channel index (`Note::channel`) the piano roll edits.
@@ -543,7 +548,7 @@ pub fn channel(s: &State) -> Option<u16> {
 
 /// The current pattern's channel control points.
 pub fn controls(s: &State) -> &[ControlPoint] {
-    s.project.patterns.iter().find(|p| p.number == s.pattern).map_or(&[], |p| &p.controls)
+    s.project.patterns.iter().find(|p| p.number == s.pattern()).map_or(&[], |p| &p.controls)
 }
 
 /// Set (or replace) the control point of `channel`/`param` at `tick`, keeping the list ordered by
@@ -582,7 +587,7 @@ pub fn snapshot(s: &mut State) {
 /// the four checks (2026-10-16)").
 pub fn snapshot_as(s: &mut State, name: &'static str) {
     s.piano.dirty = true;
-    let snap = crate::history::Snap::pattern(s, s.pattern);
+    let snap = crate::history::Snap::pattern(s, s.pattern());
     crate::history::record(s, name, snap);
 }
 
@@ -678,7 +683,7 @@ pub fn delete(s: &mut State, mut idx: Vec<usize>) {
 
 /// Restore storage order (sorted by position, patterns.md) after an edit, keeping the selection.
 pub fn finish_edit(s: &mut State) {
-    let (pattern, sel_key) = (s.pattern, s.piano.sel_key);
+    let (pattern, sel_key) = (s.pattern(), s.piano.sel_key);
     let p = pattern_mut(s);
     let mut order: Vec<usize> = (0..p.notes.len()).collect();
     order.sort_by_key(|&i| (p.notes[i].position, p.notes[i].channel));
@@ -722,14 +727,14 @@ pub fn notes_in(s: &State, g: &Geom, r: Rect) -> Vec<usize> {
 pub fn select_range(s: &mut State, a: u32, b: u32) {
     let Some(ch) = channel(s) else { return };
     let sel = notes(s).iter().enumerate().filter(|(_, n)| n.channel == ch && n.position >= a && n.position < b).map(|(i, _)| i).collect();
-    s.piano.select(s.pattern, ch, sel);
+    s.piano.select(s.pattern(), ch, sel);
     s.piano.range = if b > a { Some((a, b)) } else { None };
 }
 
 /// The selection, or every note of the channel when nothing is selected (§9 selection editing).
 pub fn targets(s: &State) -> Vec<usize> {
     let ch = channel(s);
-    let sel = s.piano.selection(s.pattern, ch);
+    let sel = s.piano.selection(s.pattern(), ch);
     if !sel.is_empty() {
         return sel;
     }
@@ -783,12 +788,12 @@ pub fn slice(s: &mut State, tick: u32) -> usize {
 /// The end of the current pattern: its length rounded up to whole bars of its own grid, at least one bar. Ctrl+A's
 /// time selection, Ctrl+L's last notes and Ctrl+Shift+Left / Right's rotation stop there (spec: ui/piano-keys.md §4).
 pub fn pattern_end(s: &State) -> u32 {
-    s.project.pattern_bar_end(s.pattern, pattern_length(s, s.pattern))
+    s.project.pattern_bar_end(s.pattern(), pattern_length(s, s.pattern()))
 }
 
 /// Where the bar holding `tick` starts, on the current pattern's own bar grid.
 pub fn bar_start(s: &State, tick: u32) -> u32 {
-    let regions = s.project.pattern_bars(s.pattern);
+    let regions = s.project.pattern_bars(s.pattern());
     let (start, bar, _) = regions.iter().rev().find(|r| r.0 <= tick).copied().unwrap_or(regions[0]);
     start + (tick.saturating_sub(start) / bar.max(1)) * bar.max(1)
 }
@@ -800,7 +805,7 @@ pub fn paste_tick(s: &State, clip: &[Note]) -> u32 {
     let Some(first) = clip.iter().map(|n| n.position).min() else { return 0 };
     let at = if s.piano.marker_placed { s.piano.marker } else { first - bar_start(s, first) };
     let ch = channel(s);
-    let sel = s.piano.selection(s.pattern, ch);
+    let sel = s.piano.selection(s.pattern(), ch);
     let lands_on = |m: &Note| clip.iter().any(|n| n.key == m.key && (m.position..m.position + shown_len(s, m)).contains(&(n.position - first + at)));
     let hit = notes(s).iter().enumerate().any(|(i, m)| Some(m.channel) == ch && !sel.contains(&i) && lands_on(m));
     if hit { at + crate::piano_snap::unit(s).unwrap_or(1) } else { at }
@@ -835,7 +840,7 @@ pub fn paste(s: &mut State, clip: &[Note], at: u32) {
         p.notes.push(Note { position: n.position - first + at, channel: ch, ..*n });
     }
     let end = p.notes.len();
-    s.piano.select(s.pattern, ch, (start..end).collect());
+    s.piano.select(s.pattern(), ch, (start..end).collect());
     finish_edit(s);
 }
 
@@ -876,7 +881,7 @@ pub fn open_tick(s: &mut State) -> bool {
 /// is centred. A channel without notes: C5 centred at [`MIN_ROW`] rows.
 pub fn auto_zoom(s: &mut State, grid: Rect) {
     let ppq = f32::from(s.project.ppq.max(4));
-    let span = pattern_length(s, s.pattern) as f32 + s.project.bar_ticks() as f32 / 2.0;
+    let span = pattern_length(s, s.pattern()) as f32 + s.project.bar_ticks() as f32 / 2.0;
     s.piano.px_per_beat = (grid.w / span * ppq).clamp(6.0, 1600.0);
     let ch = channel(s);
     let keys = notes(s).iter().filter(|n| Some(n.channel) == ch).map(|n| i32::from(n.key));
@@ -1087,7 +1092,7 @@ mod tests {
         let clip = notes(s).to_vec();
         paste(s, &clip, 384);
         assert_eq!(notes(s).len(), 4);
-        assert_eq!(s.piano.selection(s.pattern, Some(4)).len(), 2);
+        assert_eq!(s.piano.selection(s.pattern(), Some(4)).len(), 2);
         assert_eq!(notes(s)[2].position, 384);
         let mut n = notes(s)[0];
         n.set_muted(true);
@@ -1106,10 +1111,10 @@ mod tests {
         assert_eq!(notes(s)[i].velocity, 100);
         snapshot(s);
         let j = add_note(s, 4, 0, 60);
-        s.piano.select(s.pattern, 4, vec![j]);
+        s.piano.select(s.pattern(), 4, vec![j]);
         finish_edit(s);
         assert_eq!(notes(s)[0].position, 0, "sorted by position");
-        assert_eq!(s.piano.selection(s.pattern, Some(4)), vec![0], "selection follows the sort");
+        assert_eq!(s.piano.selection(s.pattern(), Some(4)), vec![0], "selection follows the sort");
         assert!(undo(s));
         assert_eq!(notes(s).len(), 1);
         assert!(undo(s));
@@ -1216,7 +1221,7 @@ mod tests {
                 old.process(&mut buf);
             }
             assert!(peak(&buf) > 0.05, "pluck rings");
-            let p = &mut a.state.project;
+            let p = a.state.project.get_mut();
             match edit {
                 0 => p.channels[4].volume = 0.0,
                 1 => p.channels[4].enabled = false,
@@ -1245,14 +1250,14 @@ mod tests {
         add_note(&mut a.state, 4, 0, 60);
         let mut lib = os_engine::SampleLibrary::new(None);
         let mode = os_engine::PlayMode::Pattern(1);
-        a.state.project.tempo = Some(130.0);
+        a.state.project.get_mut().tempo = Some(130.0);
         let mut old = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
         let mut buf = vec![0.0f32; 2 * 500];
         for _ in 0..10 {
             old.process(&mut buf);
         }
         let (tick, frame) = (old.tick_position(), old.position());
-        a.state.project.tempo = Some(65.0);
+        a.state.project.get_mut().tempo = Some(65.0);
         let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
         e.continue_from(&mut old);
         assert_eq!((e.tick_position(), e.position()), (tick, frame), "same tick, same frame");
@@ -1348,7 +1353,7 @@ mod tests {
         for on in [false, true] {
             set_check(&AUTO_ZOOM_PIANO, on);
             let mut app = App::new(None);
-            app.state.project = crate::app::test_project();
+            app.state.project = crate::locked::Locked::new(crate::app::test_project());
             app.state.selected_channel = 0;
             // A floating window: a grid about 300 px tall.
             let ws = &mut app.state.wins[Win::PianoRoll.slot().expect("a window")];

@@ -10,6 +10,7 @@
 //! highlighted, and they only answer "not available yet".
 // spec: ui/menus.md, ui/main-window.md §3
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_ui::{Font, Rect};
 
 use crate::app::{Action, State, Ui, Win};
@@ -741,7 +742,7 @@ pub fn bar_model(s: &State) -> Vec<BarMenu> {
                 }
                 if mi == PATTERNS && ci == 0 {
                     for n in crate::patterns::listed(s) {
-                        let mark = Mark::Radio(n == s.pattern);
+                        let mark = Mark::Radio(n == s.pattern());
                         rows.push(BarRow { kind: Kind::Item, label: crate::patterns::name_of(s, n), shortcut: "", enabled: true, mark, pick: Some((mi, PATTERN_PICK + n as usize)) });
                     }
                 }
@@ -894,7 +895,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     let rr = Rect::new(col.x, y, col.w, row);
                     let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
                     ui.menu_row(crate::app::MENU_DROPDOWN);
-                    let on = hov || (*n == s.pattern && away);
+                    let on = hov || (*n == s.pattern() && away);
                     if hov && lit.glide {
                         lit.hot = Some(rr);
                     } else if on && lemon {
@@ -902,7 +903,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     } else if on {
                         ui.c.fill_rect(rr, ui.t.s(0x03080c));
                     }
-                    let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
+                    let col = if *n == s.pattern() { t.glyph } else { t.menu_pop_text };
                     let dx = if on { 22.0 } else { 20.0 };
                     ui.c.text_clip(font, rr.x + dx, rr.y + 2.0 + dy, rr.w - dx - 4.0, col, name);
                     y += row;
@@ -1137,7 +1138,7 @@ mod tests {
         assert_eq!(playlist.mark, Mark::Check(app.state.shown(Win::Playlist)));
         // Patterns in use head PATTERNS, the current one marked.
         assert_eq!(bar[PATTERNS].rows[0].label, "New empty pattern...", "a new project uses no pattern yet");
-        app.state.project.patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
+        app.state.project.get_mut().patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
         let first = bar_model(&app.state)[PATTERNS].rows[0].clone();
         assert_eq!((first.label.as_str(), first.mark, first.pick), ("Intro", Mark::Radio(true), Some((PATTERNS, PATTERN_PICK + 1))));
         // Live state: hiding the playlist unticks it.

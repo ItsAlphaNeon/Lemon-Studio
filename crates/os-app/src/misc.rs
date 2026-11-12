@@ -6,6 +6,7 @@
 //! units (0..1, bipolar knobs centred at 0.5); the model keeps bipolar knobs as -1..1.
 // spec: ui/plugin-window.md (Misc tab)
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::misc_page::{self as mp, MiscVals, M};
 use os_model::{Channel, ChannelMisc};
 
@@ -168,7 +169,7 @@ pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
     }
     let run = crate::history::Run::Channel(row, crate::history::ChannelControl::Misc(m));
     crate::control::run_edit(&mut app.state, "Channel settings", crate::control::command::Region::Channel(row), run, mp::draggable(m), |s| {
-        if let Some(ch) = s.project.channels.get_mut(row) {
+        if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
             put(&mut ch.misc, m, v);
         }
     });
@@ -221,7 +222,7 @@ mod tests {
     fn knob_and_slider_menus_reset() {
         use crate::playlist::Cmd;
         let mut app = crate::app::App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         for m in [M::LevelPan, M::TimeGate, M::VolMid, M::Fine] {
             let menu = menu(&app, 0, m, 0.0, 0.0);
             assert_eq!(menu.items.len(), 1, "{m:?}");

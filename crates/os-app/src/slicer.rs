@@ -10,6 +10,7 @@
 //!
 // spec: plugins/lemon-slicer.md §4 (dump), §6 (app integration); plugins/fruity-slicer.md §1
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{Channel, ChannelKind, Note, Project};
 
 use crate::plugins::{Plugins, FX_KEY};
@@ -236,11 +237,11 @@ mod tests {
         let file = std::env::temp_dir().join(format!("openstudio-slicer-{}.flp", std::process::id()));
         let wav = loop_file("reopen");
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.file = None;
         a.state.path = None;
         a.plugins.available = crate::plugins::builtin();
-        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_SLICER);
+        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), LEMON_SLICER);
         let ch = &a.state.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_SLICER));
@@ -252,7 +253,7 @@ mod tests {
 
         let fl = state_for(&wav);
         assert!(a.plugins.set_state(row, &plugin_state(&fl)));
-        a.state.project.channels[row].plugin = Some("Fruity slicer".into());
+        a.state.project.get_mut().channels[row].plugin = Some("Fruity slicer".into());
         a.save_to(file.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&file).unwrap()).unwrap()).unwrap();
         assert_eq!(saved.channels[row].plugin.as_deref(), Some("Fruity slicer"));
@@ -279,7 +280,7 @@ mod tests {
         }
         std::fs::write(&path, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.plugins.available = crate::plugins::builtin();
         let before = a.state.project.channels.len();
         a.sample_from_plugin(path.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
@@ -311,7 +312,7 @@ mod tests {
         s.cues.push(Cue { id: 2, name: "Part 2".into(), pos: 22050, len: Some(22050) });
         std::fs::write(&first, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.plugins.available = crate::plugins::builtin();
         a.sample_from_plugin(first.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
         let row = a.state.project.channels.len() - 1;
@@ -345,11 +346,11 @@ mod tests {
     #[test]
     fn dumped_notes_replace_the_channels_notes() {
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
-        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_SLICER);
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), LEMON_SLICER);
         let ch = a.state.project.channels[row].index;
         let other = a.state.project.channels[0].index;
-        a.state.project.ppq = 96;
+        a.state.project.get_mut().ppq = 96;
         let p = crate::piano::pattern_mut(&mut a.state);
         p.notes = vec![Note::step(ch, 0), Note::step(other, 48)];
         let notes: Vec<os_hostlink::NoteOut> = [(0.0, 0.5625, 60), (0.5625, 1.125, 61)]

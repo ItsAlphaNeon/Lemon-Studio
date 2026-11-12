@@ -500,12 +500,12 @@ mod tests {
     #[test]
     fn the_journal_follows_the_project() {
         let mut a = App::new(None);
-        a.state.project = crate::app::test_project();
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.journal_opened(None);
         let kinds = |a: &App, from: u64| a.journal.since(from).0.iter().map(|e| e["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let start = a.journal.since(0).1;
         // A tempo change in the interface: a step and its change.
-        crate::control::edit(&mut a.state, crate::control::command::TEMPO, crate::control::command::Region::Settings, |s| s.tempo = 140.0);
+        crate::control::edit(&mut a.state, crate::control::command::TEMPO, crate::control::command::Region::Settings, |s| s.set_tempo(140.0));
         a.journal.touch();
         a.journal.read_at = None;
         a.journal_tick();

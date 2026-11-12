@@ -5,6 +5,7 @@
 //! The control plane's tests: every command undoes and redoes exactly, transactions are whole, proposals leave the
 //! project alone, ids stay with their things, and the JSON-RPC adapter answers over a real socket.
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use serde_json::{json, Value};
 
 use super::*;
@@ -12,9 +13,9 @@ use crate::app::App;
 
 fn app() -> App {
     let mut a = App::new(None);
-    a.state.project = crate::app::test_project();
-    a.state.project.arrangements = vec![os_flp::project::default_arrangement()];
-    a.state.control.settle(&mut a.state.project);
+    a.state.project = crate::locked::Locked::new(crate::app::test_project());
+    a.state.project.get_mut().arrangements = vec![os_flp::project::default_arrangement()];
+    a.state.control.settle(a.state.project.get_mut());
     a
 }
 
@@ -27,7 +28,7 @@ fn test_client() -> By {
 fn reading(a: &App) -> (os_model::Project, Value, f64) {
     let mut q = query::project(&a.state);
     q.as_object_mut().unwrap().remove("selected_channel");
-    (a.state.project.clone(), q, a.state.tempo)
+    (a.state.project.clone(), q, a.state.tempo())
 }
 
 fn ids(a: &App) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
@@ -45,7 +46,7 @@ fn round_trip(a: &mut App, c: Value) -> Vec<Value> {
     let steps = a.state.history.at();
     let what = c.to_string();
     let r = apply(&mut a.state, &test_client(), None, vec![cmd(c)]).unwrap_or_else(|e| panic!("{what}: {e}"));
-    a.state.control.settle(&mut a.state.project);
+    a.state.control.settle(a.state.project.get_mut());
     let after = reading(a);
     assert_ne!(before, after, "{what} changes something");
     assert_eq!(a.state.history.at(), steps + 1, "{what} is one step");
@@ -149,7 +150,7 @@ fn the_interface_and_the_commands_share_one_history() {
     let mut a = app();
     let kick = ids(&a).0[0];
     crate::history::knob(&mut a.state, crate::knobs::KnobId::ChanVol(0), false);
-    a.state.project.channels[0].volume = 0.3;
+    a.state.project.get_mut().channels[0].volume = 0.3;
     apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": kick, "volume": 0.6}))]).unwrap();
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Test: channel settings"));
     assert_eq!(a.state.project.channels[0].volume, 0.3);
@@ -171,7 +172,7 @@ fn ids_stay_with_their_things() {
     assert_eq!(a.state.project.channels[1].name.as_deref(), Some("Still me"));
     // The interface's edits keep them too: a clone gets a new id, the original keeps its own.
     crate::rack::clone_rows(&mut a, &[0]);
-    a.state.control.settle(&mut a.state.project);
+    a.state.control.settle(a.state.project.get_mut());
     assert_eq!(a.state.project.channels[0].id.0, ch[0]);
     assert!(!ch.contains(&a.state.project.channels[1].id.0), "the clone's id is new");
     // A deleted channel's id names nothing; an undo brings it back with its id.
@@ -184,9 +185,10 @@ fn ids_are_not_an_unsaved_change() {
     let mut a = app();
     a.mark_saved();
     assert!(!a.unsaved());
-    a.state.project.channels.push(a.state.project.channels[0].clone());
-    a.state.control.settle(&mut a.state.project);
-    a.state.project.channels.pop();
+    let first = a.state.project.channels[0].clone();
+    a.state.project.get_mut().channels.push(first);
+    a.state.control.settle(a.state.project.get_mut());
+    a.state.project.get_mut().channels.pop();
     assert!(!a.unsaved(), "a copy's new id alone changes nothing");
 }
 
@@ -207,14 +209,14 @@ fn a_proposal_leaves_the_project_until_accepted() {
     assert!(paths.iter().any(|p| p.starts_with("channels.") && changes.iter().any(|c| c.path == *p && c.before.is_null())), "the new channel: {paths:?}");
     assert_eq!(a.state.control.proposals.len(), 1);
     accept(&mut a.state, n).unwrap();
-    assert_eq!(a.state.tempo, 150.0);
+    assert_eq!(a.state.tempo(), 150.0);
     assert_eq!(a.state.project.channels[0].name.as_deref(), Some("Boom"));
     assert_eq!(a.state.history.at(), steps + 1);
     assert!(a.state.control.proposals.is_empty());
     assert!(accept(&mut a.state, n).is_err(), "only once");
     let (n, _) = propose(&mut a.state, &test_client(), "Slower", vec![cmd(json!({"op": "set_tempo", "bpm": 60}))]).unwrap();
     discard(&mut a.state, n).unwrap();
-    assert_eq!(a.state.tempo, 150.0);
+    assert_eq!(a.state.tempo(), 150.0);
 }
 
 #[test]
@@ -227,11 +229,11 @@ fn proposals_ask_the_user() {
     assert_eq!(a.state.dialogs.len(), 1, "a box asks");
     // Apply.
     a.dialog_done(crate::dialog::Then::Proposal(n), crate::dialog::Reply::Button(crate::dialog::Answer::Yes));
-    assert_eq!(a.state.tempo, 150.0);
+    assert_eq!(a.state.tempo(), 150.0);
     // A client that may only propose can't accept or apply.
     assert!(a.rpc(&mut c, "apply", &json!({"command": {"op": "set_tempo", "bpm": 100}})).is_err());
     assert!(a.rpc(&mut c, "accept", &json!({"proposal": n})).is_err());
-    assert_eq!(a.state.tempo, 150.0);
+    assert_eq!(a.state.tempo(), 150.0);
 }
 
 #[test]
@@ -246,7 +248,7 @@ fn events_tell_clients_what_changed() {
     assert_eq!((ev[0].kind, ev[0].name.as_str(), ev[0].ops.clone(), ev[0].by.as_str()), ("apply", "Faster", vec!["set_tempo"], "Test"));
     assert_eq!(newest, ev[0].seq);
     // An edit in the interface is an event on the next tick.
-    a.state.project.channels[0].volume = 0.1;
+    a.state.project.get_mut().channels[0].volume = 0.1;
     a.state.piano.dirty = true;
     a.tick();
     let (ev, _) = a.state.control.events_since(newest);
@@ -281,7 +283,7 @@ fn rpc_requests_and_errors() {
     assert_eq!(code(call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 9, "method": "apply", "params": {"command": {"op": "delete_channel", "channel": 9999}}}))), Some(-32000));
     let mut reader = rpc::Client { name: "Reader".into(), level: Level::Read, saves: false, token: None };
     assert_eq!(code(call(&mut a, &mut reader, json!({"jsonrpc": "2.0", "id": 10, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 99}}}))), Some(-32001));
-    assert_eq!(a.state.tempo, 130.0);
+    assert_eq!(a.state.tempo(), 130.0);
     // A notification (no id) gets no answer.
     assert!(a.rpc_line(&mut c, &json!({"jsonrpc": "2.0", "method": "undo"}).to_string()).is_none());
     // Notes read back as commands write them.
@@ -383,7 +385,7 @@ fn clients_connect_over_a_local_socket() {
     assert_eq!(r1["result"]["name"], "Socket");
     let r2 = ask(&mut a, json!({"jsonrpc": "2.0", "id": 2, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 111}}}));
     assert!(r2.get("error").is_none(), "{r2}");
-    assert_eq!(a.state.tempo, 111.0);
+    assert_eq!(a.state.tempo(), 111.0);
     let h = &a.state.history;
     assert_eq!(h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string()).as_deref(), Some("Socket: tempo"), "the client's name stays with its connection");
     let _ = std::fs::remove_file(&path);
@@ -425,7 +427,7 @@ fn saving_asks_the_user_unless_headless() {
 #[test]
 fn a_first_clip_makes_the_playlist_and_its_undo_takes_it_away() {
     let mut a = app();
-    a.state.project.arrangements.clear();
+    a.state.project.get_mut().arrangements.clear();
     let pat = ids(&a).2[0];
     let r = round_trip(&mut a, json!({"op": "add_clip", "track": 1, "position": 0, "pattern": pat}));
     assert!(r[0]["clip"].as_u64().is_some());
@@ -439,7 +441,7 @@ fn ui_round_trip(a: &mut App, name: &str, f: impl FnOnce(&mut App)) {
     let before = reading(a);
     let steps = a.state.history.at();
     f(a);
-    a.state.control.settle(&mut a.state.project);
+    a.state.control.settle(a.state.project.get_mut());
     let after = reading(a);
     assert_ne!(before, after, "{name} changes something");
     assert_eq!(a.state.history.at(), steps + 1, "{name} is one step");
@@ -508,7 +510,7 @@ fn the_mixer_s_edits_are_undoable() {
         run(a, MCmd::AddEffect(0, 0));
     });
     run(&mut a, MCmd::AddEffect(0, 0));
-    a.state.control.settle(&mut a.state.project);
+    a.state.control.settle(a.state.project.get_mut());
     ui_round_trip(&mut a, "Move effect", |a| {
         run(a, MCmd::SlotMove(0, 1));
     });
@@ -531,7 +533,7 @@ fn the_mixer_s_edits_are_undoable() {
     assert_eq!(a.state.history.at(), steps, "a click without a drag");
     ui_round_trip(&mut a, "Mixer track volume", |a| {
         crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
-        a.state.project.mixer[1].volume = Some(0.3);
+        a.state.project.get_mut().mixer[1].volume = Some(0.3);
         crate::history::settle(&mut a.state);
     });
 }
@@ -633,7 +635,7 @@ fn clients_connect_over_a_local_port() {
     let hello = json!({"jsonrpc": "2.0", "id": 3, "method": "hello", "params": {"name": "Port", "token": token}}).to_string();
     assert_eq!(code(&ask(&mut a, &hello)), None);
     assert_eq!(code(&ask(&mut a, &apply)), Some(-32001), "a read-only client");
-    assert_eq!(a.state.tempo, 130.0);
+    assert_eq!(a.state.tempo(), 130.0);
     // A web page's request: one parse error, then the connection is closed.
     assert_eq!(code(&ask(&mut a, "POST / HTTP/1.1")), Some(-32700));
     let mut rest = String::new();
@@ -692,12 +694,12 @@ fn a_dry_run_leaves_the_instruments_and_the_selections() {
 #[test]
 fn slot_names_come_back_with_their_track() {
     let mut a = app();
-    a.state.mixer.slot_names.insert((3, 1), "Crunch".into());
+    crate::mixer::set_slot_label(&mut a.state, 3, 1, Some("Crunch".into()));
     crate::mixer::run(&mut a, crate::mixer::MCmd::Delete(2));
-    assert_eq!(a.state.mixer.slot_names.get(&(2, 1)).map(String::as_str), Some("Crunch"), "moved left with its track");
+    assert_eq!(crate::mixer::slot_names_of(&a.state.project).get(&(2, 1)).map(String::as_str), Some("Crunch"), "moved left with its track");
     crate::history::undo(&mut a.state);
-    assert_eq!(a.state.mixer.slot_names.get(&(3, 1)).map(String::as_str), Some("Crunch"));
-    assert_eq!(a.state.mixer.slot_names.len(), 1);
+    assert_eq!(crate::mixer::slot_names_of(&a.state.project).get(&(3, 1)).map(String::as_str), Some("Crunch"));
+    assert_eq!(crate::mixer::slot_names_of(&a.state.project).len(), 1);
 }
 
 #[test]
@@ -872,7 +874,7 @@ fn preset_loads_are_undo_steps() {
     let mut h = crate::plugins::Hosted::new(knob.clone());
     h.owner = a.state.project.channels[0].id;
     a.plugins.hosted.insert(0, h);
-    a.state.project.channels[0].name = Some("808 Snare".into());
+    a.state.project.get_mut().channels[0].name = Some("808 Snare".into());
     a.params_tick();
     let dir = std::env::temp_dir().join(format!("os-preset-undo-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -899,7 +901,7 @@ fn preset_loads_are_undo_steps() {
     assert_eq!(a.state.history.at(), steps + 2, "the same preset again changes nothing");
 
     // The channel moves without a step of its own: the instance follows it, and so does the undo.
-    a.state.project.channels.swap(0, 1);
+    a.state.project.get_mut().channels.swap(0, 1);
     a.follow_ids(true, false);
     assert!(a.plugins.hosted.contains_key(&1));
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PRESET));
@@ -1044,4 +1046,46 @@ fn a_hosted_slots_scaling_and_help() {
     // No instance (an effect the engine plays itself has no editor): greyed.
     a.plugins.hosted.clear();
     assert!(!scaling(&a).enabled);
+}
+
+/// Control-plane step 4: playback is handed the project when it was written (`locked::Locked`), and only then.
+#[test]
+fn idle_ticks_hand_playback_nothing() {
+    let mut a = app();
+    for _ in 0..3 {
+        a.tick();
+    }
+    let n = a.transport.updates_for_tests();
+    for _ in 0..20 {
+        a.tick();
+    }
+    assert_eq!(a.transport.updates_for_tests(), n, "an idle tick writes nothing");
+}
+
+#[test]
+fn a_write_reaches_playback_with_no_flag_set() {
+    let mut a = app();
+    for _ in 0..3 {
+        a.tick();
+    }
+    let n = a.transport.updates_for_tests();
+    a.state.piano.dirty = false;
+    a.state.project.get_mut().main_volume = Some(1234);
+    a.tick();
+    assert_eq!(a.transport.updates_for_tests(), n + 1);
+    a.tick();
+    assert_eq!(a.transport.updates_for_tests(), n + 1, "once");
+}
+
+#[test]
+fn a_proposal_hands_playback_nothing() {
+    let mut a = app();
+    for _ in 0..3 {
+        a.tick();
+    }
+    let n = a.transport.updates_for_tests();
+    let kick = ids(&a).0[0];
+    propose(&mut a.state, &test_client(), "Boom", vec![cmd(json!({"op": "set_channel", "channel": kick, "name": "Boom"}))]).unwrap();
+    a.tick();
+    assert_eq!(a.transport.updates_for_tests(), n, "the dry run took its change back");
 }

@@ -10,6 +10,7 @@
 // spec: ui/piano-flam.md, ui/piano-claw.md, ui/piano-flip.md, ui/piano-level-scaling.md, ui/piano-limit.md, ui/piano-lfo.md,
 // ui/piano-quantize.md, ui/piano-chop.md, ui/piano-randomize.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ControlPoint, Note};
 
 use crate::app::State;
@@ -571,7 +572,7 @@ pub fn white_x(k: i32) -> f32 {
 
 /// The largest keyboard scroll.
 pub fn kb_max() -> f32 {
-    white_x(crate::views::piano::TOP_KEY) + KEY_W - KB_W
+    white_x(crate::piano::TOP_KEY) + KEY_W - KB_W
 }
 
 /// Apply the open dialog to the targets; `step` names the undo step (none for a preview).
@@ -583,7 +584,7 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
     match d.tool {
         Tool::Flam => {
             let set = d.flam;
-            let off = set.offset(u32::from(s.project.ppq.max(4)), s.tempo);
+            let off = set.offset(u32::from(s.project.ppq.max(4)), s.tempo());
             let mut used: Vec<u16> = piano::notes(s).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
             used.sort_unstable();
             used.dedup();
@@ -615,13 +616,13 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
         }
         Tool::Lfo => {
             let (set, lane, ppq) = (d.lfo, s.piano.lane, u32::from(s.project.ppq.max(4)));
-            let len = piano::pattern_length(s, s.pattern);
+            let len = piano::pattern_length(s, s.pattern());
             if lane.is_channel() {
                 return lfo_points(s, &set, lane, ppq, len, step);
             }
             // With a selection the time starts at its first note and End is reached a tick before its end
             // (piano-lfo.md §3).
-            let sel = piano::channel(s).is_some_and(|ch| !s.piano.selection(s.pattern, Some(ch)).is_empty());
+            let sel = piano::channel(s).is_some_and(|ch| !s.piano.selection(s.pattern(), Some(ch)).is_empty());
             crate::piano_tools::apply_as(
                 s,
                 |_, ns| {
@@ -677,7 +678,7 @@ fn randomize_notes(s: &mut State, step: Option<&'static str>) -> bool {
     notes.extend(out);
     let end = notes.len();
     p.notes = notes;
-    s.piano.select(s.pattern, ch, (start..end).collect());
+    s.piano.select(s.pattern(), ch, (start..end).collect());
     piano::finish_edit(s);
     s.piano.dirty = true;
     true
@@ -711,14 +712,18 @@ pub fn preview(s: &mut State) {
         None if s.piano_dlg.on_events => 0,
         None => return,
     };
-    let (now, now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
+    let (mut now, mut now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
     let fresh = match &s.piano_dlg.session {
-        Some(se) => se.pattern != s.pattern || se.channel != ch || se.last != now || se.last_ctl != now_ctl,
+        Some(se) => se.pattern != s.pattern() || se.channel != ch || se.last != now || se.last_ctl != now_ctl,
         None => true,
     };
     if fresh {
-        let base_sel = s.piano.selection(s.pattern, Some(ch));
-        let se = Session { pattern: s.pattern, channel: ch, base: now, base_sel, base_ctl: now_ctl, last: Vec::new(), last_ctl: Vec::new(), shown: false };
+        // The last preview goes first: on another pattern or channel it would stay, with no undo step.
+        if restore(s) {
+            (now, now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
+        }
+        let base_sel = s.piano.selection(s.pattern(), Some(ch));
+        let se = Session { pattern: s.pattern(), channel: ch, base: now, base_sel, base_ctl: now_ctl, last: Vec::new(), last_ctl: Vec::new(), shown: false };
         s.piano_dlg.session = Some(se);
     }
     restore(s);
@@ -729,19 +734,22 @@ pub fn preview(s: &mut State) {
     }
 }
 
-/// The session's notes, selection and control points back, when they are still what its last preview left.
+/// The session's notes, selection and control points back in the pattern it previewed on (the one shown may be another
+/// by now: New pattern, the pattern selector), when they are still what its last preview left.
 fn restore(s: &mut State) -> bool {
     let Some(se) = &s.piano_dlg.session else { return false };
-    if se.pattern != s.pattern || se.shown && (piano::notes(s) != se.last.as_slice() || piano::controls(s) != se.last_ctl.as_slice()) {
+    let Some(i) = s.project.patterns.iter().position(|p| p.number == se.pattern) else { return false };
+    let p = &s.project.patterns[i];
+    if se.shown && (p.notes != se.last || p.controls != se.last_ctl) {
         return false;
     }
-    let (base, base_ctl, sel, ch) = (se.base.clone(), se.base_ctl.clone(), se.base_sel.clone(), se.channel);
-    let p = piano::pattern_mut(s);
+    let (base, base_ctl, sel, ch, number) = (se.base.clone(), se.base_ctl.clone(), se.base_sel.clone(), se.channel, se.pattern);
+    let p = &mut s.project.get_mut().patterns[i];
     (p.notes, p.controls) = (base, base_ctl);
     if sel.is_empty() {
         s.piano.clear_selection();
     } else {
-        s.piano.select(s.pattern, ch, sel);
+        s.piano.select(number, ch, sel);
     }
     s.piano.dirty = true;
     true
@@ -751,7 +759,9 @@ fn restore(s: &mut State) -> bool {
 pub fn accept(s: &mut State) -> String {
     let (tool, on_events) = (s.piano_dlg.tool, s.piano_dlg.on_events);
     let who = if on_events { "Event editor" } else { "Piano roll" };
-    if !restore(s) {
+    // Accept applies what was previewed: after a switch to another pattern, the previewed one only gets its notes back.
+    let here = s.piano_dlg.session.as_ref().is_some_and(|se| se.pattern == s.pattern());
+    if !restore(s) || !here {
         s.piano_dlg.session = None;
         return format!("{who}: nothing to change");
     }
@@ -903,7 +913,7 @@ pub fn limit_cmd(s: &mut State, c: LCmd) {
 
 /// Limit's keys: key `k` becomes the green key, the transposition `60 − k` (§1 "Mouse on the keyboard").
 pub fn set_green(s: &mut State, k: i32) {
-    let t = 60 - k.clamp(0, crate::views::piano::TOP_KEY);
+    let t = 60 - k.clamp(0, crate::piano::TOP_KEY);
     if s.piano_dlg.limit.transpose != t {
         s.piano_dlg.limit.transpose = t;
         preview(s);
@@ -920,7 +930,7 @@ pub fn nearer_end(s: &State, k: i32) -> bool {
 /// Move a range end to key `k`; it stops at the other end (a Lemon Studio choice, piano-limit.md §5).
 pub fn set_end(s: &mut State, high: bool, k: i32) {
     let (lo, hi) = s.piano_dlg.limit.shown_range();
-    let k = k.clamp(0, crate::views::piano::TOP_KEY) as u16;
+    let k = k.clamp(0, crate::piano::TOP_KEY) as u16;
     let range = if high { (lo, k.max(lo)) } else { (k.min(hi), hi) };
     if s.piano_dlg.limit.range != Some(range) {
         s.piano_dlg.limit.range = Some(range);

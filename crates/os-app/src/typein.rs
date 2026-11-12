@@ -8,6 +8,7 @@
 //!
 // spec: ui/type-in-value.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::State;
 use crate::knobs::KnobId;
 use crate::playlist::EditTarget;
@@ -66,7 +67,7 @@ impl LatUnit {
         match self {
             LatUnit::Ms => 1.0,
             LatUnit::Samples => 1000.0 / f64::from(crate::device::rate().unwrap_or(44100).max(1)),
-            LatUnit::Beats => 60000.0 / s.project.tempo.unwrap_or(140.0).max(1.0),
+            LatUnit::Beats => 60000.0 / s.tempo().max(1.0),
         }
     }
 }
@@ -267,7 +268,7 @@ fn set(s: &mut State, t: Target, v: f64) {
             let track = v.round().clamp(0.0, f64::from(crate::mixer::max_insert(&s.project))) as u16;
             if s.project.channels.get(r).is_some_and(|c| c.mixer_track != track) {
                 crate::control::edit(s, "Channel mixer track", crate::control::command::Region::Channel(r), |s| {
-                    if let Some(c) = s.project.channels.get_mut(r) {
+                    if let Some(c) = s.project.get_mut().channels.get_mut(r) {
                         c.mixer_track = track;
                     }
                 });

@@ -46,7 +46,7 @@ impl App {
             String::new(),
             format!("Project: {}", s.path.as_ref().map_or_else(|| "not saved".into(), |f| f.display().to_string())),
             format!("  Channels: {}, patterns: {}, mixer tracks: {}, arranger clips: {}", p.channels.len(), p.patterns.len(), p.mixer.len(), p.arrangements.iter().map(|a| a.clips.len()).sum::<usize>()),
-            format!("  Tempo: {} BPM, {} PPQ", s.tempo, p.ppq),
+            format!("  Tempo: {} BPM, {} PPQ", s.tempo(), p.ppq),
             String::new(),
         ];
         out.join("\n")
@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn diagnostics_writes_the_report() {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         let at = (0..20).find(|&i| item_at(HELP_MENU, i).is_some_and(|it| it.label == "Diagnostics")).unwrap();
         assert!(works(HELP_MENU, item_at(HELP_MENU, at).unwrap()));
         app.menu_item(HELP_MENU, at);

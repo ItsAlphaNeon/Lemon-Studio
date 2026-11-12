@@ -9,6 +9,7 @@
 //!
 // spec: flp/sample-paths.md "Missing samples", ui/project-loading.md §5-6
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
@@ -249,7 +250,7 @@ fn relink(app: &mut App, before: &[(usize, String)]) -> usize {
             continue;
         }
         found += 1;
-        let Some(ch) = app.state.project.channels.get_mut(*row) else { continue };
+        let Some(ch) = app.state.project.get_mut().channels.get_mut(*row) else { continue };
         ch.sample_path = Some(now.clone());
         if ch.kind.is_sampler() {
             app.state.sample_loads.push((*row, now));
@@ -331,11 +332,11 @@ pub(crate) mod tests {
         let wav = wav(4410);
         std::fs::write(dir.join("Here.wav"), &wav).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::app::default_project();
-        let a = crate::app::add_channel(&mut app.state.project);
-        let b = crate::app::add_channel(&mut app.state.project);
-        app.state.project.channels[a].sample_path = Some(r"C:\Users\someone\AppData\Local\Temp\Image-Line\x\Here.wav".into());
-        app.state.project.channels[b].sample_path = Some(r"C:\Users\someone\Downloads\Gone.wav".into());
+        app.state.project = crate::locked::Locked::new(crate::app::default_project());
+        let a = crate::app::add_channel(app.state.project.get_mut());
+        let b = crate::app::add_channel(app.state.project.get_mut());
+        app.state.project.get_mut().channels[a].sample_path = Some(r"C:\Users\someone\AppData\Local\Temp\Image-Line\x\Here.wav".into());
+        app.state.project.get_mut().channels[b].sample_path = Some(r"C:\Users\someone\Downloads\Gone.wav".into());
         app.state.file = None;
         app.save_to(dir.join("Song.flp"));
         app.plugins = crate::plugins::Plugins::default();

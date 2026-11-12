@@ -197,7 +197,7 @@ impl App {
                 let s = &mut self.state;
                 let name = if m == "undo" { crate::history::undo(s) } else { crate::history::redo(s) };
                 if let Some(n) = &name {
-                    s.control.saw(&s.project, s.tempo);
+                    s.control.saw(&s.project, s.tempo());
                     s.control.event(&by, if m == "undo" { "undo" } else { "redo" }, n.clone(), Vec::new());
                 }
                 Ok(json!({ "step": name }))

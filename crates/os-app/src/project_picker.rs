@@ -6,6 +6,7 @@
 //! project's patterns and channels; a pick makes a pattern current or opens a channel's window.
 // spec: ui/project-picker.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::ChannelKind;
 
 use crate::app::{App, State};
@@ -29,7 +30,7 @@ pub fn items(s: &State) -> Vec<PItem> {
     nums.dedup();
     let mut v = vec![PItem::head("Patterns")];
     v.extend(nums.into_iter().map(|n| {
-        PItem::new(crate::patterns::name_of(s, n), Cmd::Project(ProjCmd::Pattern(n))).mark(Mark::Radio(n == s.pattern))
+        PItem::new(crate::patterns::name_of(s, n), Cmd::Project(ProjCmd::Pattern(n))).mark(Mark::Radio(n == s.pattern()))
     }));
     v.push(PItem::sep());
     v.push(PItem::new("New pattern", Cmd::Project(ProjCmd::NewPattern)));
@@ -73,7 +74,7 @@ impl App {
 /// Runs a project picker pick (spec §2 Picks). Returns a status message.
 pub fn run(app: &mut App, c: ProjCmd) -> Option<String> {
     match c {
-        ProjCmd::Pattern(n) => app.state.pattern = n,
+        ProjCmd::Pattern(n) => app.state.set_pattern(n),
         ProjCmd::Channel(r) if r < app.state.project.channels.len() => {
             app.state.selected_channel = r;
             app.state.rack.select_only(r);
@@ -104,9 +105,9 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = test_project();
-        app.state.project.patterns.push(Pattern { number: 3, name: Some("Drop".into()), ..Pattern::default() });
-        app.state.pattern = 1;
+        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.project.get_mut().patterns.push(Pattern { number: 3, name: Some("Drop".into()), ..Pattern::default() });
+        app.state.set_pattern(1);
         app
     }
 
@@ -125,9 +126,9 @@ mod tests {
         assert!(v[0].head && v.iter().any(|i| i.col));
         let marked: Vec<String> = v.iter().filter(|i| i.mark == Mark::Radio(true)).map(|i| i.label.to_string()).collect();
         assert_eq!(marked, ["Pattern 1", "Hat"]);
-        app.state.project.channels[4].kind = ChannelKind::Automation;
+        app.state.project.get_mut().channels[4].kind = ChannelKind::Automation;
         assert!(!labels(&items(&app.state)).contains(&"Pluck".to_string()), "automation clip channels are left out");
-        app.state.project.channels.clear();
+        app.state.project.get_mut().channels.clear();
         let v = items(&app.state);
         assert!(v.iter().any(|i| i.label == "(no channels)" && !i.enabled));
     }
@@ -137,7 +138,7 @@ mod tests {
     fn picks() {
         let mut app = app();
         run(&mut app, ProjCmd::Pattern(3));
-        assert_eq!(app.state.pattern, 3);
+        assert_eq!(app.state.pattern(), 3);
         run(&mut app, ProjCmd::Channel(3));
         assert_eq!(app.state.selected_channel, 3);
         assert_eq!(app.state.rack.sel.iter().copied().collect::<Vec<_>>(), [3]);

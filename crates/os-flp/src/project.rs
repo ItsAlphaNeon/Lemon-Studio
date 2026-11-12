@@ -144,6 +144,7 @@ mod id {
     pub const PAT_LENGTH: u8 = 164;
     pub const LOOP_CHANNEL: u8 = 160;
     pub const LOOP_STEPS: u8 = 161;
+    /// With 162: loop mode on and its type (FL 24.1.1; spec: flp/events/patterns.md).
     pub const LOOP_OFF: u8 = 26;
     pub const LOOP_TYPE: u8 = 162;
 
@@ -349,7 +350,7 @@ struct PatternLoc {
     loops: Vec<usize>,
     /// Metadata: 157/158 (new loop/length events go after the last), 26 / 162, 164 and every marker group's events.
     meta_158: Option<usize>,
-    loop_off: Vec<usize>,
+    loop_mode: Vec<usize>,
     length: Option<usize>,
     markers: Vec<usize>,
 }
@@ -451,7 +452,7 @@ impl Layout {
 const LENGTH_MARKER_KIND: u32 = 6;
 const LENGTH_MARKER_NAME: &str = "Length";
 /// Loop type "Loop step channels" (event 162).
-const LOOP_TYPE_STEP: u32 = 3;
+const LOOP_TYPE_STEP: u32 = 1;
 
 fn int(e: &Event) -> u32 {
     e.int_value().unwrap_or(0)
@@ -550,7 +551,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                             id::PAT_NAME => loc.name = Some(k),
                             id::PAT_COLOR => loc.color = Some(k),
                             157 | 158 => loc.meta_158 = Some(k),
-                            id::LOOP_OFF | id::LOOP_TYPE => loc.loop_off.push(k),
+                            id::LOOP_OFF | id::LOOP_TYPE => loc.loop_mode.push(k),
                             id::PAT_LENGTH => loc.length = Some(k),
                             id::MARKER_NAME => in_marker = false,
                             id::PAT_START | id::CH_START | id::ARR_START => break,
@@ -883,11 +884,11 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
                 .filter(|p| events[p[0]].id == id::LOOP_CHANNEL && events[p[1]].id == id::LOOP_STEPS)
                 .map(|p| (int(&events[p[0]]) as u16, int(&events[p[1]])))
                 .collect(),
-            loop_off: loc
-                .loop_off
+            loop_mode: loc
+                .loop_mode
                 .iter()
                 .any(|&i| events[i].id == id::LOOP_OFF && int(&events[i]) != 0)
-                .then(|| loc.loop_off.iter().find(|&&i| events[i].id == id::LOOP_TYPE).map_or(LOOP_TYPE_STEP, |&i| int(&events[i]))),
+                .then(|| loc.loop_mode.iter().find(|&&i| events[i].id == id::LOOP_TYPE).map_or(LOOP_TYPE_STEP, |&i| int(&events[i]))),
         });
     }
     let mut a_index = 0;
@@ -912,6 +913,11 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         }
     }
     p.mixer = load_mixer(events, &l, enc);
+    // A channel in no group: the "Unsorted" entry, or an index past the list.
+    let (unsorted, n) = (p.unsorted_group(), p.groups.len());
+    for c in &mut p.channels {
+        c.rack.group = c.rack.group.filter(|&g| (g as usize) < n && g != unsorted);
+    }
     Ok(p)
 }
 
@@ -957,12 +963,13 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             origin: None,
             locked: loc.locked.is_some_and(|i| int(&events[i]) != 0),
             zipped: loc.zipped.is_some_and(|i| int(&events[i]) != 0),
-            group: loc.group.map_or(0, |i| int(&events[i])),
+            group: Some(loc.group.map_or(0, |i| int(&events[i]))),
             stored_color: loc.color.map(|i| rgb_from_bgr(int(&events[i]))),
             icon: find(id::PLUGIN_ICON).map_or(0, int),
         },
         misc: load_misc(block),
         sound: load_sound(block, &i32_at),
+        lemon_icon: None,
     }
 }
 
@@ -2992,10 +2999,11 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 (None, false) => {}
             }
         }
-        if ch.rack.group != old.rack.group {
+        let group = ch.rack.group.unwrap_or(project.unsorted_group());
+        if group != old.rack.group.unwrap_or(current.unsorted_group()) {
             match loc.group {
-                Some(i) => set_int(&mut events[i], ch.rack.group),
-                None => inserts.push((loc.end, Event::new(id::CH_GROUP, Value::U32(ch.rack.group)))),
+                Some(i) => set_int(&mut events[i], group),
+                None => inserts.push((loc.end, Event::new(id::CH_GROUP, Value::U32(group)))),
             }
         }
         // A sampler's sample (Lemon Sampler loads one): event 196 replaced, or added right after event 20 where FL
@@ -3045,7 +3053,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         let at = l.channels.last().map(|c| c.end + 1).ok_or_else(|| ProjectError::Structure("no channels".into()))?;
         let mut block = Vec::new();
         for ch in &project.channels[current.channels.len()..] {
-            block.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
+            block.extend(channel_block_events(ch, project.automation(ch.index), project.unsorted_group(), enc)?);
         }
         inserts.extend(block.into_iter().rev().map(|e| (at, e)));
     }
@@ -3169,16 +3177,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         let wants_meta = pat.name.is_some()
             || pat.color.is_some()
             || pat.length.is_some()
-            || pat.loop_off.is_some()
+            || pat.loop_mode.is_some()
             || !pat.markers.is_empty();
         if meta_start.is_some()
             && (old.map(|o| o.length) != Some(pat.length)
-                || old.map(|o| o.loop_off) != Some(pat.loop_off)
+                || old.map(|o| o.loop_mode) != Some(pat.loop_mode)
                 || old.map(|o| &o.markers) != Some(&pat.markers))
         {
             // Loop-off flag, markers and length are rewritten together where they were.
             let m = loc.expect("has metadata");
-            let old_ones: Vec<usize> = m.loop_off.iter().chain(&m.markers).chain(m.length.iter()).copied().collect();
+            let old_ones: Vec<usize> = m.loop_mode.iter().chain(&m.markers).chain(m.length.iter()).copied().collect();
             let at = old_ones.iter().min().copied().or(m.meta_158.map(|i| i + 1)).unwrap_or(m.meta_start.unwrap_or(0) + 1);
             removals.extend(old_ones);
             inserts.extend(meta_length_events(pat, enc).into_iter().rev().map(|e| (at, e)));
@@ -3565,6 +3573,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 let v = (v * scale).round() as i32;
                 data[off + 8..off + 12].copy_from_slice(&v.to_le_bytes());
             }
+            // The equaliser, band by band: gain, frequency and width (spec: flp/events/mixer.md). A file without a
+            // band's record gets one.
+            let loc = mixer_location(record_track(m.index, project.mixer.len()), 0);
+            for (b, (band, was)) in m.eq.iter().zip(&old.eq).enumerate() {
+                for (k, first) in [MX_EQ_GAIN, MX_EQ_FREQ, MX_EQ_WIDTH].into_iter().enumerate() {
+                    if band[k] != was[k] {
+                        set_param_record(data, loc, first + b as u8, band[k]);
+                    }
+                }
+            }
         }
     }
     if let (Some(v), Some(data)) = (project.main_volume.filter(|&v| Some(v) != current.main_volume), params.as_mut()) {
@@ -3731,7 +3749,7 @@ fn restructure(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError
                 });
                 region.extend(b);
             }
-            None => region.extend(channel_block_events(ch, project.automation(ch.index), enc)?),
+            None => region.extend(channel_block_events(ch, project.automation(ch.index), project.unsorted_group(), enc)?),
         }
         if let Some(g) = gaps.get(i) {
             region.extend(g.iter().cloned());
@@ -3870,7 +3888,7 @@ fn loop_events(loops: &[(u16, u32)]) -> Vec<Event> {
 /// the "Length" marker, sorted by position as FL saves them), the length (spec: flp/events/patterns.md, metadata block).
 fn meta_length_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
     let mut out = Vec::new();
-    if let Some(t) = pat.loop_off {
+    if let Some(t) = pat.loop_mode {
         out.push(Event::new(id::LOOP_OFF, Value::U8(1)));
         out.push(Event::new(id::LOOP_TYPE, Value::U32(t)));
     }
@@ -3927,7 +3945,7 @@ fn channel_type_code(kind: ChannelKind) -> u8 {
 
 /// One channel block in the minimal form FL 26 loads (spec: flp/events/channels.md; every record not written here
 /// takes FL's default).
-fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -> Result<Vec<Event>, ProjectError> {
+fn channel_block_events(ch: &Channel, auto: Option<&Automation>, unsorted: u32, enc: TextEnc) -> Result<Vec<Event>, ProjectError> {
     let plugin = (ch.kind == ChannelKind::Plugin).then_some(ch.plugin.as_deref()).flatten().filter(|p| !p.is_empty());
     if matches!(ch.kind, ChannelKind::Other(_)) || (ch.kind == ChannelKind::Plugin && plugin.is_none()) {
         return Err(ProjectError::Mismatch(format!(
@@ -3977,7 +3995,7 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
         // FL writes the sample settings right after the levels.
         b.push(Event::new(id::CH_SAMPLE_SETTINGS, Value::var(audio_clip_215(ch.sound.stretch))));
     }
-    b.push(Event::new(id::CH_GROUP, Value::U32(ch.rack.group)));
+    b.push(Event::new(id::CH_GROUP, Value::U32(ch.rack.group.unwrap_or(unsorted))));
     if let Some(a) = auto.filter(|_| ch.kind == ChannelKind::Automation) {
         b.push(Event::new(id::AUTO_DATA, Value::var(encode_automation(a))));
     }
@@ -4091,10 +4109,10 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         ev.extend(c.formula.as_deref().map(|s| Event::new(id::LINK_FORMULA, Value::var(encode_text(s, enc)))));
     }
     for (i, ch) in project.channels.iter().enumerate() {
-        ev.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
+        ev.extend(channel_block_events(ch, project.automation(ch.index), project.unsorted_group(), enc)?);
         if i == 0 {
             for pat in &patterns {
-                if pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_off.is_some() || !pat.markers.is_empty() {
+                if pat.name.is_some() || pat.color.is_some() || pat.length.is_some() || pat.loop_mode.is_some() || !pat.markers.is_empty() {
                     ev.extend(meta_block_events(pat, enc));
                 }
             }
@@ -4225,6 +4243,9 @@ fn track_records(t: u16, m: Option<&MixerTrack>) -> Vec<u8> {
             MX_VOLUME => m.volume.map_or(v, |x| (x * 16000.0).round() as i32),
             MX_PAN => m.pan.map_or(v, |x| (x * 6400.0).round() as i32),
             MX_STEREO => m.stereo_separation.map_or(v, |x| (x * 64.0).round() as i32),
+            MX_EQ_GAIN..MX_EQ_FREQ => m.eq[usize::from(pid - MX_EQ_GAIN)][0],
+            MX_EQ_FREQ..MX_EQ_WIDTH => m.eq[usize::from(pid - MX_EQ_FREQ)][1],
+            MX_EQ_WIDTH..=0xE2 => m.eq[usize::from(pid - MX_EQ_WIDTH)][2],
             _ => v,
         };
         out.extend(param_rec(pid, MX_KIND_PARAM, mixer_location(t, 0), v));
@@ -4377,6 +4398,7 @@ mod tests {
             sample_path: None,
             layer_children: vec![],
             envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         }
     }
 
@@ -4993,6 +5015,26 @@ mod tests {
     /// The track menu's Separator (flag 0x0400), Dock to (0x00C0) and Allow threaded processing (0x0010) are written by
     /// `create` and `apply` and read back; the last ("current") track keeps the master's docking (spec: flp/layouts.md
     /// "A mixer track's record (event 236)", ui/mixer.md §6.1).
+    /// A track's equaliser is written: a new track with its bands, an edit of a file's track band by band.
+    #[test]
+    fn mixer_equaliser_round_trips() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..10).map(MixerTrack::new).collect();
+        p.mixer[9].routes.clear();
+        p.mixer[1].eq[0] = [-600, 2641, 17500];
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer[1].eq, p.mixer[1].eq);
+        let mut edited = back.clone();
+        edited.mixer[1].eq[0][1] = 5777;
+        edited.mixer[2].eq[2] = [1200, 60000, 30000];
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!((again.mixer[1].eq, again.mixer[2].eq), (edited.mixer[1].eq, edited.mixer[2].eq));
+    }
+
     #[test]
     fn mixer_separator_docking_and_threading_round_trip() {
         use os_model::{MixerTrack, DOCK_LEFT, DOCK_MIDDLE, DOCK_RIGHT};
@@ -6463,12 +6505,12 @@ mod tests {
         m.groups = vec!["Drums".into(), os_model::UNSORTED_GROUP.into()];
         m.current_group = Some(0);
         m.channels[0].rack.zipped = true;
-        m.channels[1].rack = ChannelRack { group: 1, locked: true, ..m.channels[1].rack };
+        m.channels[1].rack = ChannelRack { group: None, locked: true, ..m.channels[1].rack };
         for pat in &mut m.patterns {
             if pat.number == 2 {
                 pat.length = Some(72);
                 pat.loops = vec![(0, 5), (1, Pattern::LOOP_FOLLOW)];
-                pat.loop_off = Some(2);
+                pat.loop_mode = Some(2);
             } else {
                 pat.length = Some(192);
             }
@@ -6491,7 +6533,7 @@ mod tests {
         cleared.channels[0].rack.zipped = false;
         cleared.channels[1].rack.locked = false;
         for pat in &mut cleared.patterns {
-            (pat.length, pat.loops, pat.loop_off) = (None, Vec::new(), None);
+            (pat.length, pat.loops, pat.loop_mode) = (None, Vec::new(), None);
         }
         let mut file2 = file.clone();
         apply(&cleared, &mut file2).unwrap();

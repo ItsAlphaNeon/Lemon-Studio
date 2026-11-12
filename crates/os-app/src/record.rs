@@ -9,6 +9,7 @@
 //! settings in `settings.txt`, also shown on Settings ▸ Recording (`crate::prefs`); the arm itself is not saved.
 // spec: ui/recording.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::{App, State};
 use crate::knobs::KnobId;
 use crate::playlist::Snap;
@@ -112,22 +113,6 @@ pub fn option_hint(o: Opt) -> &'static str {
         Opt::Precount => "Count-in (Ctrl+P) - right-click for the length",
         Opt::Loop => "Loop record (off: playback runs on past the end while recording)",
         _ => "Blend recorded notes (Ctrl+B)",
-    }
-}
-
-/// Set while Record is armed and Loop record is off: playback runs on past its end (spec §4). Every playback engine
-/// reads it (`Engine::set_run_on`); `App::record_tick` keeps it up to date. One per test thread under tests.
-pub fn run_on_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-    use std::sync::{atomic::AtomicBool, Arc};
-    #[cfg(test)]
-    {
-        thread_local!(static TEST: Arc<AtomicBool> = Arc::new(AtomicBool::new(false)));
-        TEST.with(Arc::clone)
-    }
-    #[cfg(not(test))]
-    {
-        static FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
-        FLAG.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
     }
 }
 
@@ -343,7 +328,7 @@ impl App {
         if new.is_empty() {
             return Some(format!("The score log has no notes from the last {minutes} minutes"));
         }
-        let pattern = s.pattern;
+        let pattern = s.pattern();
         let full = s.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty());
         let replace = match replace {
             Some(r) => r,
@@ -363,13 +348,13 @@ impl App {
         let snap = crate::history::Snap::pattern(s, pattern);
         crate::history::record(s, crate::score_log::DUMPED, snap);
         let n = new.len();
-        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pattern) {
+        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
             if replace {
                 p.notes.clear();
             }
             p.notes.extend(new);
         } else {
-            s.project.patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
+            s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
         }
         s.piano.dirty = true;
         Some(format!("Captured {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
@@ -386,7 +371,7 @@ impl App {
     /// playlist's in SONG mode; one with no length does not count.
     pub(crate) fn selection_loop(&self) -> Option<(u32, u32)> {
         let s = &self.state;
-        let r = if s.song_mode { s.playlist.range } else if s.shown(crate::app::Win::PianoRoll) { s.piano.range } else { None };
+        let r = if s.song_mode() { s.playlist.range } else if s.shown(crate::app::Win::PianoRoll) { s.piano.range } else { None };
         r.filter(|r| r.1 > r.0)
     }
 
@@ -411,7 +396,7 @@ impl App {
         self.start_playback_counted(bars);
         if bars > 0 && self.transport.playing() {
             let p = &self.state.project;
-            let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+            let tempo = p.tick_tempo(self.state.tempo().max(1.0));
             let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
             let beats = bars * u32::from(p.bar().0.max(1));
             self.state.rec.count = Some(CountIn { from: std::time::Instant::now(), beat, beats });
@@ -593,10 +578,10 @@ impl App {
     /// The take starts: one undo step for it, with the playlist too in SONG mode (a clip may be placed).
     fn open_take(&mut self, song: bool) {
         let s = &mut self.state;
-        if s.rec.take.as_ref().is_some_and(|t| t.pattern == s.pattern) {
+        if s.rec.take.as_ref().is_some_and(|t| t.pattern == s.pattern()) {
             return;
         }
-        let pattern = s.pattern;
+        let pattern = s.pattern();
         let snap = crate::history::Snap::pattern(s, pattern);
         let snap = if song {
             crate::playlist::arr_mut(s);
@@ -622,7 +607,7 @@ impl App {
             return Some(p);
         }
         let bar = s.project.bar_ticks().max(1);
-        let pattern = s.pattern;
+        let pattern = s.pattern();
         let whole = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none();
         let ti = t.max(0.0) as u32;
         if let Some(p) = crate::piano::pattern_tick_in_song(s, t) {
@@ -696,10 +681,10 @@ impl App {
             .chain(take.new.iter())
             .cloned()
             .collect();
-        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pattern) {
+        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
             p.notes = notes;
         } else {
-            s.project.patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
+            s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
         }
         // The time selection stays (it may be looping, spec §5).
         let range = s.piano.range;
@@ -741,7 +726,7 @@ impl App {
             self.invalidate();
         }
         let run_on = self.state.rec.armed && !Opt::Loop.on();
-        run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
+        crate::transport::run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
         let sel = self.sync_loop_range();
         let live = self.transport.playing() && !self.transport.paused();
         // Punch (spec §5): armed with Loop record off, playback stops at the selection's end; held notes end there.
@@ -810,7 +795,7 @@ impl App {
             }
         }
         let r = &self.state.rec;
-        let changed = r.take.as_ref().is_some_and(|t| t.pattern != self.state.pattern);
+        let changed = r.take.as_ref().is_some_and(|t| t.pattern != self.state.pattern());
         if (r.was_live && !live) || changed {
             self.end_take();
             if !self.transport.playing() && self.state.rec.armed && Opt::DisarmOnStop.on() {
@@ -860,7 +845,7 @@ impl App {
 /// The notes held for the current pattern's take, from their start (quantized as they will be written) to playback
 /// tick `now` (spec §2 "Shown while held").
 pub fn held_notes(s: &State, now: f64) -> Vec<Note> {
-    if s.rec.take.as_ref().is_none_or(|t| t.pattern != s.pattern) {
+    if s.rec.take.as_ref().is_none_or(|t| t.pattern != s.pattern()) {
         return Vec::new();
     }
     let note = |h: &Held| {
@@ -881,7 +866,7 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
         return None;
     }
     let bar = s.project.bar_ticks().max(1);
-    let pattern = s.pattern;
+    let pattern = s.pattern();
     let c = crate::playlist::arr_mut(s)
         .clips
         .iter_mut()
@@ -916,7 +901,7 @@ fn point_of(s: &State, a: &crate::app::Action) -> Option<(u32, i32)> {
             let id = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f)] + b;
             (target::mixer(t, id), track(t)?.eq[usize::from(b)][usize::from(f)])
         }
-        Action::Tempo => (target::TEMPO, r(s.tempo * 1000.0)),
+        Action::Tempo => (target::TEMPO, r(s.tempo() * 1000.0)),
         _ => return None,
     })
 }
@@ -934,10 +919,10 @@ mod tests {
     fn app() -> App {
         crate::settings_file::set_flag("rec_ask", false);
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.selected_channel = 0;
-        app.state.pattern = 1;
-        app.state.project.patterns.iter_mut().for_each(|p| p.notes.clear());
+        app.state.set_pattern(1);
+        app.state.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         app.state.global_snap.now = Snap::Step;
         app
     }
@@ -1377,12 +1362,23 @@ mod tests {
     /// A mixer track's fader and pan, the tempo and a plugin's parameter record into the current pattern as control
     /// points on their targets, each in its setting's own unit (the plugin's parameter: its plain value in a whole
     /// range), in the take's one undo step; a dialog's knob records nothing (spec §2 Taking automation).
+    /// What is timed in beats follows the tempo playing, not the tempo the project was last opened or saved with.
+    #[test]
+    fn timing_follows_the_tempo_playing() {
+        let mut app = app();
+        app.state.project.get_mut().tempo = Some(140.0);
+        app.state.set_tempo(70.0);
+        let p = &app.state.project;
+        let at_70 = f64::from(p.ppq) * p.tick_tempo(70.0) / 60.0;
+        assert!((crate::score_log::ticks_per_second(&app.state) - at_70).abs() < 1e-9);
+    }
+
     #[test]
     fn records_mixer_controls_the_tempo_and_plugin_parameters() {
         use os_model::target;
         let mut app = app();
         if crate::mixer::track(&app.state, 1).is_none() {
-            app.state.project.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+            app.state.project.get_mut().mixer = (0..3).map(os_model::MixerTrack::new).collect();
         }
         app.toggle_record();
         app.transport.pretend_at(24.0, false);
@@ -1392,13 +1388,13 @@ mod tests {
         app.record_control(&Action::Fader(1));
         app.record_control(&Action::Knob(KnobId::MixPan(1)));
         app.transport.pretend_at(48.0, false);
-        app.state.tempo = 150.0;
+        app.state.set_tempo(150.0);
         app.record_control(&Action::Tempo);
         app.record_param(target::slot_param(1, 2, 0), (-64.0, 64.0), 0.75);
         app.record_param(target::slot_param(1, 2, 1), (0.0, 1.0), 0.25);
         app.record_knob(KnobId::Swing);
         let points = |app: &App| {
-            let p = app.state.project.pattern(app.state.pattern).map(|p| p.controls.clone()).unwrap_or_default();
+            let p = app.state.project.pattern(app.state.pattern()).map(|p| p.controls.clone()).unwrap_or_default();
             p.into_iter().map(|c| (c.position, c.kind, c.value)).collect::<Vec<_>>()
         };
         assert_eq!(
@@ -1535,13 +1531,13 @@ mod tests {
         use std::sync::atomic::Ordering;
         let mut app = app();
         app.record_tick();
-        assert!(!run_on_flag().load(Ordering::Relaxed), "disarmed");
+        assert!(!crate::transport::run_on_flag().load(Ordering::Relaxed), "disarmed");
         app.toggle_record();
         app.record_tick();
-        assert!(run_on_flag().load(Ordering::Relaxed), "armed, Loop record off: runs on");
+        assert!(crate::transport::run_on_flag().load(Ordering::Relaxed), "armed, Loop record off: runs on");
         app.toggle_record_option(Opt::Loop);
         app.record_tick();
-        assert!(!run_on_flag().load(Ordering::Relaxed), "Loop record on: loops");
+        assert!(!crate::transport::run_on_flag().load(Ordering::Relaxed), "Loop record on: loops");
         let len = f64::from(app.state.project.pattern_length(1).max(1));
         let steps = app.state.history.len();
         key(&mut app, KeyCode::KeyZ, true, 48.0, false);

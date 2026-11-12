@@ -9,6 +9,7 @@
 //! of the devices (`Page`) and what master sync sends (`App::midi_out_tick`).
 // spec: ui/midi-settings.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -229,7 +230,7 @@ impl App {
                 // (`Transport::channel_pitch`) instead of taking a new project at every move.
                 Msg::Bend { v, .. } if crate::surface::launchkey::Model::is_keys_port(&ev.dev) => {
                     let row = self.state.selected_channel;
-                    if let Some(c) = self.state.project.channels.get_mut(row) {
+                    if let Some(c) = self.state.project.get_mut().channels.get_mut(row) {
                         let x = f64::from(v) / 16384.0 * 2.0 - 1.0;
                         c.pitch_cents = (x * 100.0 * f64::from(c.misc.pitch_range)).round() as i32;
                         let cents = c.pitch_cents;
@@ -400,7 +401,7 @@ impl App {
 
     /// Song marker jump (spec §3): the `i`-th of the playlist's time markers, in SONG mode.
     fn marker_jump(&mut self, i: usize) {
-        if !self.state.song_mode {
+        if !self.state.song_mode() {
             self.state.message = Some("Song marker jump: in SONG mode".into());
             return self.invalidate();
         }
@@ -439,7 +440,7 @@ impl App {
     fn ext_apply(&mut self, m: Msg, ahead_ms: u32) {
         use crate::transport::State as T;
         let ppq = u32::from(self.state.project.ppq.max(1));
-        let ahead = (f64::from(ahead_ms) / 1000.0 * self.state.tempo / 60.0 * f64::from(ppq)).round() as u32;
+        let ahead = (f64::from(ahead_ms) / 1000.0 * self.state.tempo() / 60.0 * f64::from(ppq)).round() as u32;
         match m {
             Msg::Start => {
                 self.transport.stop();
@@ -450,7 +451,7 @@ impl App {
                 T::Paused => self.transport.resume(),
                 T::Stopped => {
                     if ahead > 0 {
-                        let at = if self.state.song_mode { self.state.playlist.pos } else { self.state.piano.marker };
+                        let at = if self.state.song_mode() { self.state.playlist.pos } else { self.state.piano.marker };
                         self.ext_position(at + ahead);
                     }
                     self.start_playback();
@@ -480,7 +481,7 @@ impl App {
     /// Puts the song position (SONG) or the play-start marker (PAT) at `t` without restarting.
     fn ext_position(&mut self, t: u32) {
         let s = &mut self.state;
-        if s.song_mode {
+        if s.song_mode() {
             s.playlist.pos = t;
             crate::init::apply(s);
         } else {
@@ -501,7 +502,7 @@ impl App {
         let Some(bpm) = st.tempo else { return };
         let bpm = (bpm * 100.0).round() / 100.0;
         let due = self.midi_play.tempo_at.is_none_or(|t| t.elapsed() >= TEMPO_EVERY);
-        if due && (bpm - self.state.tempo).abs() > TEMPO_STEP {
+        if due && (bpm - self.state.tempo()).abs() > TEMPO_STEP {
             self.midi_play.tempo_at = Some(Instant::now());
             self.set_tempo(bpm);
         }
@@ -542,7 +543,7 @@ impl App {
             kind: crate::midi_out::SyncKind::of(prefs::index(&prefs::SYNC_TYPE)),
             offset_ms: cfg::offset(Offset::MasterSync),
             ppq: self.state.project.ppq.max(1),
-            tempo: self.state.tempo,
+            tempo: self.state.tempo(),
         };
         self.midi_out.configure(c);
     }
@@ -909,7 +910,7 @@ mod tests {
         let clocks = got.iter().filter(|b| **b == 0xf8).count();
         assert!(got.contains(&0xfa) && got.contains(&0xfc), "start and stop: {got:x?}");
         // 1 s at the tempo: 24 clocks a beat.
-        let want = app.state.tempo / 60.0 * 24.0;
+        let want = app.state.tempo() / 60.0 * 24.0;
         assert!((clocks as f64 - want).abs() < want * 0.25, "{clocks} clocks, want about {want}");
     }
 }

@@ -10,6 +10,7 @@
 //!
 // spec: ui/zipped-projects.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -433,14 +434,14 @@ mod tests {
         std::fs::write(d.join("one/Kick.wav"), &wav).unwrap();
         std::fs::write(d.join("two/Kick.wav"), &wav[..wav.len() - 2]).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::app::default_project();
-        let rows: Vec<usize> = (0..4).map(|_| crate::app::add_channel(&mut app.state.project)).collect();
+        app.state.project = crate::locked::Locked::new(crate::app::default_project());
+        let rows: Vec<usize> = (0..4).map(|_| crate::app::add_channel(app.state.project.get_mut())).collect();
         let one = d.join("one/Kick.wav").to_string_lossy().into_owned();
         let two = d.join("two/Kick.wav").to_string_lossy().into_owned();
-        app.state.project.channels[rows[0]].sample_path = Some(one.clone());
-        app.state.project.channels[rows[1]].sample_path = Some(two.clone());
-        app.state.project.channels[rows[2]].sample_path = Some(one.clone());
-        app.state.project.channels[rows[3]].sample_path = Some(d.join("Gone.wav").to_string_lossy().into_owned());
+        app.state.project.get_mut().channels[rows[0]].sample_path = Some(one.clone());
+        app.state.project.get_mut().channels[rows[1]].sample_path = Some(two.clone());
+        app.state.project.get_mut().channels[rows[2]].sample_path = Some(one.clone());
+        app.state.project.get_mut().channels[rows[3]].sample_path = Some(d.join("Gone.wav").to_string_lossy().into_owned());
         app.state.file = None;
         app.save_to(d.join("Song.flp"));
         let before = app.state.project.clone();

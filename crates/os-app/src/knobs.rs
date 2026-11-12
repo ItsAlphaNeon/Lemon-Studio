@@ -6,6 +6,7 @@
 //!
 //! Values are normalised 0..1. Every knob reads and writes the project model.
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_ui::Rect;
 
 use crate::app::State;
@@ -327,25 +328,26 @@ impl State {
         }
         match id {
             KnobId::MixPan(t) => {
-                if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
                     m.pan = Some(f64::from((v - 0.5) * 2.0));
                     self.piano.dirty = true;
                 }
             }
             KnobId::MixSep(t) => {
-                if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
-                    m.stereo_separation = Some(f64::from((v - 0.5) * 2.0));
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
+                    // In 64ths, as the file keeps it and FL's knob sets it (12% merged is 8, a typed 1% is 1).
+                    m.stereo_separation = Some((f64::from((v - 0.5) * 2.0) * 64.0).round() / 64.0);
                     self.piano.dirty = true;
                 }
             }
             KnobId::SlotMix(t, k) => {
-                if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
                     m.slot_mix[usize::from(k).min(9)] = f64::from(v);
                     self.piano.dirty = true;
                 }
             }
             KnobId::Send(a, b) => {
-                if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == a) {
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == a) {
                     m.send_levels.retain(|&(d, _)| d != b);
                     m.send_levels.push((b, f64::from(v)));
                     m.send_levels.sort_by_key(|&(d, _)| d);
@@ -353,31 +355,31 @@ impl State {
                 }
             }
             KnobId::ChanVol(i) => {
-                if let Some(c) = self.project.channels.get_mut(i) {
+                if let Some(c) = self.project.get_mut().channels.get_mut(i) {
                     c.volume = f64::from(v);
                     self.piano.dirty = true;
                 }
             }
             KnobId::ChanPan(i) => {
-                if let Some(c) = self.project.channels.get_mut(i) {
+                if let Some(c) = self.project.get_mut().channels.get_mut(i) {
                     c.pan = f64::from((v - 0.5) * 2.0);
                     self.piano.dirty = true;
                 }
             }
             KnobId::Swing => {
-                self.project.swing = Some((v * 128.0).round() as u8);
+                self.project.get_mut().swing = Some((v * 128.0).round() as u8);
                 self.piano.dirty = true;
             }
             KnobId::MasterVol => {
-                self.project.main_volume = Some((v * 16000.0).round() as u16);
+                self.project.get_mut().main_volume = Some((v * 16000.0).round() as u16);
                 self.piano.dirty = true;
             }
             KnobId::MasterPitch => {
-                self.project.main_pitch = Some(((v - 0.5) * 2400.0).round() as i16);
+                self.project.get_mut().main_pitch = Some(((v - 0.5) * 2400.0).round() as i16);
                 self.piano.dirty = true;
             }
             KnobId::Eq(t, b, f) => {
-                if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
                     let stored = if f == 0 { ((v * 2.0 - 1.0) * 1800.0).round() as i32 } else { (v * 65536.0).round() as i32 };
                     m.eq[usize::from(b.min(2))][usize::from(f.min(2))] = stored;
                     self.piano.dirty = true;
@@ -404,7 +406,7 @@ impl State {
             }
             KnobId::AutoLfo(row, k) => {
                 let Some(ch) = self.project.channels.get(row).map(|c| c.index) else { return };
-                if let Some(a) = self.project.automation_mut(ch) {
+                if let Some(a) = self.project.get_mut().automation_mut(ch) {
                     k.store(&mut a.lfo, v);
                     self.piano.dirty = true;
                 }
@@ -412,7 +414,7 @@ impl State {
             KnobId::MidiOut(row, k) => {
                 let Some(mut st) = crate::lemon_midi_out::row_settings(&self.project, row) else { return };
                 k.store(&mut st, v);
-                if crate::lemon_midi_out::set_row_settings(&mut self.project, row, &st) {
+                if crate::lemon_midi_out::set_row_settings(self.project.get_mut(), row, &st) {
                     self.piano.dirty = true;
                 }
             }
@@ -512,7 +514,7 @@ impl crate::app::App {
             }
             Control::ChanPitch(row) => {
                 crate::control::edit(s, "Channel pitch", crate::control::command::Region::Channel(row), |s| {
-                    if let Some(ch) = s.project.channels.get_mut(row) {
+                    if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
                         ch.pitch_cents = 0;
                         s.piano.dirty = true;
                     }
@@ -553,6 +555,20 @@ mod tests {
         assert_eq!(LfoKnob::Pulse.text(&ClipLfo { pulse_width: -64, ..d }), "LFO pulse width: -50%");
     }
 
+    /// Stereo separation moves in 64ths, the steps the file keeps, as FL's knob does (measured on FL 24.1.1: a
+    /// typed 1% is 1/64, shown as 2% merged), so what is set is what reopens.
+    #[test]
+    fn stereo_separation_moves_in_64ths() {
+        let mut app = crate::app::App::new(None);
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.set_knob(KnobId::MixSep(1), 0.5 + 0.01 / 2.0);
+        let sep = |app: &crate::app::App| crate::mixer::track(&app.state, 1).unwrap().stereo_separation;
+        assert_eq!(sep(&app), Some(1.0 / 64.0));
+        assert_eq!(app.state.knob_text(KnobId::MixSep(1)), "Stereo separation: 2% merged");
+        app.state.set_knob(KnobId::MixSep(1), 0.5 - 0.125 / 2.0);
+        assert_eq!(sep(&app), Some(-8.0 / 64.0));
+    }
+
     #[test]
     fn texts_and_roundtrip() {
         assert_eq!(pan_text(0.0), "Centered");
@@ -571,7 +587,7 @@ mod tests {
         s.set_knob(KnobId::MixPan(1), 0.75);
         assert_eq!(s.knob_text(KnobId::MixPan(1)), "Panning: 50% right");
         assert_eq!(s.knob_text(KnobId::Swing), "Main swing: 0%");
-        s.project.channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
+        s.project.get_mut().channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
         assert_eq!(s.knob_text(KnobId::ChanVol(0)), "Channel volume: 78%  -5.2dB  0.55");
     }
 
@@ -581,7 +597,7 @@ mod tests {
         use crate::app::Action;
         use crate::views::settings::SAct;
         let mut app = crate::app::App::new(None);
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         assert_eq!(Control::of(&Action::Knob(KnobId::Swing)), Some(Control::Knob(KnobId::Swing)));
         assert_eq!(Control::of(&Action::Fader(2)), Some(Control::Fader(2)));
         assert_eq!(Control::of(&Action::Settings(SAct::ThemeKnob(3))), Some(Control::Theme(3)));
@@ -599,7 +615,7 @@ mod tests {
         app.reset_control(Control::Fader(1));
         assert_eq!(crate::mixer::track(&app.state, 1).unwrap().volume, Some(0.8));
         assert_eq!(app.hint, "Volume: 100%  0.0dB  1.00");
-        app.state.project.channels[0].pitch_cents = 250;
+        app.state.project.get_mut().channels[0].pitch_cents = 250;
         app.reset_control(Control::ChanPitch(0));
         assert_eq!(app.state.project.channels[0].pitch_cents, 0);
         let s = &crate::prefs::SMOOTHING;

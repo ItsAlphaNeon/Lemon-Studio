@@ -281,6 +281,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore]
+    #[allow(deprecated)]
     fn slide_frames() {
         use crate::plugin_window::ChannelInfo;
         use std::time::Duration;
@@ -289,7 +290,7 @@ mod tests {
         a.state.bar.tiling = true;
         a.plugins.available = crate::plugins::builtin();
         a.plugins.scale = 1.0;
-        a.state.project.channels.push(Default::default());
+        a.state.project.get_mut().channels.push(Default::default());
         a.paint(&mut c, None);
         crate::prefs::set_check(&crate::prefs::PLUGIN_TABS, false);
         for (row, name) in [(0, "Zest"), (1, crate::citrus::CITRUS)] {

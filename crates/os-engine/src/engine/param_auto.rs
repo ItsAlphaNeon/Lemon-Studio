@@ -346,6 +346,7 @@ mod tests {
             rack: Default::default(),
             plugin_state: None,
             misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         }
     }
 

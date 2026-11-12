@@ -6,6 +6,7 @@
 //! folder index, and the menu bar's ways in.
 // spec: ui/browser.md, ui/browser-commands.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ChannelKind, ClipSource};
 use os_ui::Rect;
 
@@ -66,7 +67,7 @@ impl App {
                 }
                 match row.item {
                     Item::Pattern(n) => {
-                        s.pattern = n;
+                        s.set_pattern(n);
                     }
                     Item::Channel(c) => {
                         s.selected_channel = c;
@@ -93,7 +94,7 @@ impl App {
     /// Clicking a sample plays it once (spec §7): cut off after `PREVIEW_LIMIT` unless "Full sample preview" is ticked.
     pub(crate) fn preview_sample(&self, path: &str) {
         let mut p = crate::app::preview_project(path);
-        p.tempo = Some(self.state.tempo);
+        p.tempo = Some(self.state.tempo());
         crate::preview_track::route(&mut p, &self.state.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
         let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
         self.transport.preview_for(p, limit);
@@ -271,7 +272,7 @@ impl App {
                 s.browser_search.clear();
                 s.browser_open.insert(view::project_root());
                 s.browser_open.insert(key.clone());
-                let cur = view::Item::Pattern(s.pattern);
+                let cur = view::Item::Pattern(s.pattern());
                 let row = view::rows(s).into_iter().find(|r| r.item == cur).map(|r| r.key);
                 select(s, row.as_ref().unwrap_or(&key));
                 reveal(s);
@@ -435,7 +436,7 @@ impl App {
 
     /// A press on the browser's splitter: drags it; a double click gives the browser its default width (spec §9).
     fn browser_split_press(&mut self) {
-        let now = std::time::Instant::now();
+        let now = crate::anim::now();
         let s = &mut self.state;
         let double = s.browser_split_click.is_some_and(|t| now.duration_since(t).as_millis() < 400);
         s.browser_split_click = if double { None } else { Some(now) };
@@ -611,7 +612,7 @@ impl App {
                     let i = pl::place(s, track, tick);
                     s.playlist.sel = vec![i];
                 } else if matches!(win, Some(Win::PianoRoll | Win::ChannelRack)) {
-                    s.pattern = n;
+                    s.set_pattern(n);
                 }
             }
             Item::Channel(c) => {
@@ -754,7 +755,7 @@ impl App {
             }
             // What a click on the row does, without the click's open / close.
             RowCmd::Activate => match row.item {
-                Item::Pattern(n) => s.pattern = n,
+                Item::Pattern(n) => s.set_pattern(n),
                 Item::Channel(c) => {
                     s.selected_channel = c;
                     s.rack.select_only(c);
@@ -764,7 +765,7 @@ impl App {
             },
             RowCmd::Pattern(pc) => {
                 let Item::Pattern(n) = row.item else { return None };
-                s.pattern = n;
+                s.set_pattern(n);
                 return self.pattern_cmd(pc);
             }
             RowCmd::ChannelWindow => {
@@ -1272,7 +1273,7 @@ fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<Str
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
     let path = crate::data_folder::adopt(s, path);
     crate::history::load_sample(s, row);
-    let ch = &mut s.project.channels[row];
+    let ch = &mut s.project.get_mut().channels[row];
     crate::rack::auto_name(ch, std::path::Path::new(&path));
     crate::rack::read_tags(ch, std::path::Path::new(&path));
     ch.sample_path = Some(path.clone());
@@ -1360,7 +1361,7 @@ mod tests {
         assert_eq!(labels(&app), [crate::plugins::LEMON_SAMPLER]);
         assert!(app.state.browser_favs.is_empty());
         // "Add to plugin database (flag as favorite)" of a hosted plugin toggles the same star.
-        app.state.project = crate::app::test_project();
+        app.state.project = crate::locked::Locked::new(crate::app::test_project());
         let row = 0;
         app.plugins.create(row, 0).expect("Lemon Sampler hosted");
         assert!(app.browser_cmd(BCmd::Star(row)).is_some_and(|m| m.contains("no longer")));

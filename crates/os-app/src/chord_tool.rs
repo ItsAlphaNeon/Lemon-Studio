@@ -200,7 +200,7 @@ pub fn write(s: &mut State, text: &str) -> String {
     let first = p.notes.len();
     p.notes.extend(new);
     let last = p.notes.len();
-    s.piano.select(s.pattern, ch, (first..last).collect());
+    s.piano.select(s.pattern(), ch, (first..last).collect());
     crate::piano::finish_edit(s);
     let n = chords.iter().filter(|c| c.is_some()).count();
     format!("Wrote {n} chord{} into the pattern", if n == 1 { "" } else { "s" })

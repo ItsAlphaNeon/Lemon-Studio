@@ -15,6 +15,7 @@
 //! data folder.
 // spec: ui/project-templates.md, ui/menu-submenus.md §1, §4, ui/data-folder.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use os_model::DataFolder;
@@ -253,7 +254,7 @@ impl App {
         if crate::prefs::check(&crate::prefs::COPY_USED_SAMPLES) {
             self.copy_used_samples_to(&dir);
         }
-        let df = self.state.project.data_folder.get_or_insert_with(DataFolder::default);
+        let df = self.state.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
         if df.choice == DataFolder::NONE {
             df.choice = DataFolder::RELATIVE;
         }
@@ -372,19 +373,19 @@ mod tests {
         crate::backup::TEST_DIR.with(|d| *d.borrow_mut() = Some(bk.clone()));
         let song = dir.join("song.flp");
         let mut app = App::new(None);
-        app.state.tempo = 111.0;
+        app.state.set_tempo(111.0);
         app.save_to(song.clone());
         app.revert_to_backup();
         assert!(app.modal_open(), "no backup: a box says so");
         app.state.dialogs.clear();
-        assert_eq!(app.state.tempo, 111.0);
-        app.state.tempo = 123.0;
+        assert_eq!(app.state.tempo(), 111.0);
+        app.state.set_tempo(123.0);
         // Later than the "overwritten on" copy the next save makes now.
         assert_eq!(app.write_backup(at(12, 31, 23, 59)).map(|r| r.is_ok()), Some(true));
-        app.state.tempo = 150.0;
+        app.state.set_tempo(150.0);
         app.save_to(song.clone());
         app.revert_to_backup();
-        assert_eq!(app.state.tempo, 123.0, "the backup is open");
+        assert_eq!(app.state.tempo(), 123.0, "the backup is open");
         assert_eq!(app.state.path.as_deref(), Some(song.as_path()), "under the project's own name");
         assert!(app.unsaved(), "the project file still holds the last save");
         crate::backup::TEST_DIR.with(|d| *d.borrow_mut() = None);
@@ -404,7 +405,7 @@ mod tests {
         let rows = template_items(&App::new(None).state);
         assert_eq!(rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(), ["Empty"], "no templates: Empty alone");
         let mut app = App::new(None);
-        app.state.tempo = 97.0;
+        app.state.set_tempo(97.0);
         let work = scratch("tpl_work");
         let song = work.join("song.lemon");
         app.save_to(song.clone());
@@ -415,21 +416,21 @@ mod tests {
         assert_eq!(rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(), ["User", "Empty"]);
         assert_eq!(rows[0].children.len(), 1);
         assert_eq!((rows[0].children[0].label.as_ref(), &rows[0].children[0].cmd), ("Slow", &Cmd::NewTemplate("User/Slow".into())));
-        app.state.tempo = 140.0;
+        app.state.set_tempo(140.0);
         app.save_to(song.clone());
         app.pick_new_template("User/Slow");
-        assert_eq!((app.state.tempo, app.state.path.clone()), (97.0, None), "an untitled project from the template");
+        assert_eq!((app.state.tempo(), app.state.path.clone()), (97.0, None), "an untitled project from the template");
         assert!(!app.unsaved());
         // A template saved by the original (an FLP) is listed and opens too.
         let fl = root.join("User").join("Old");
         std::fs::create_dir_all(&fl).unwrap();
-        app.state.tempo = 88.0;
+        app.state.set_tempo(88.0);
         app.save_to(fl.join("Old.flp"));
         assert!(template_items(&app.state)[0].children.iter().any(|r| r.label.as_ref() == "Old"));
         app.pick_new_template("User/Old");
-        assert_eq!((app.state.tempo, app.state.path.clone()), (88.0, None), "an untitled project from the FLP template");
+        assert_eq!((app.state.tempo(), app.state.path.clone()), (88.0, None), "an untitled project from the FLP template");
         app.pick_new_template("Empty");
-        assert_eq!((app.state.tempo, app.state.path.clone()), (130.0, None), "the built-in project");
+        assert_eq!((app.state.tempo(), app.state.path.clone()), (130.0, None), "the built-in project");
         crate::templates::TEST_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&work);
@@ -469,9 +470,9 @@ mod tests {
         // The project in the folder, with a channel on old.wav.
         let mut app = App::new(None);
         let song = dir.join("song.flp");
-        app.state.project.data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: String::new() });
+        app.state.project.get_mut().data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: String::new() });
         app.save_to(song.clone());
-        if let Some(ch) = app.state.project.channels.first_mut() {
+        if let Some(ch) = app.state.project.get_mut().channels.first_mut() {
             ch.sample_path = Some(dir.join("Samples").join("old.wav").to_string_lossy().into_owned());
         }
         let left = unused_files(&dir, &app.used_files());

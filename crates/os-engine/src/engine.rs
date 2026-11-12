@@ -5312,6 +5312,7 @@ mod tests {
             sample_path: None, // plays the built-in tone
             layer_children: vec![],
             envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         }
     }
 

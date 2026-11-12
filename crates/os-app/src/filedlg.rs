@@ -402,8 +402,8 @@ impl FileDlg {
 
     /// A click on row `i`: selects it; the second click of a double click opens a folder or chooses a file.
     pub fn click_row(&mut self, i: usize) -> Outcome {
-        let double = self.last_click.is_some_and(|(r, t)| r == i && t.elapsed() < DOUBLE);
-        self.last_click = if double { None } else { Some((i, Instant::now())) };
+        let double = self.last_click.is_some_and(|(r, t)| r == i && crate::anim::now().duration_since(t) < DOUBLE);
+        self.last_click = if double { None } else { Some((i, crate::anim::now())) };
         self.select(i);
         if double { self.activate(i) } else { Outcome::Stay }
     }

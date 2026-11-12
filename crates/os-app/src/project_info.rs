@@ -15,6 +15,7 @@
 //! away at once.
 // spec: ui/settings.md "Info", ui/settings-choices.md "Info", flp/events/project-info.md
 
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::time::{Duration, Instant};
 
 use os_model::{Project, WorkTime};
@@ -86,27 +87,37 @@ pub fn spent_days(s: &State, now: Instant) -> f64 {
     s.project.work_time.map_or(0.0, |w| w.spent) + s.credits.clock.elapsed(now).as_secs_f64() / 86_400.0
 }
 
+/// The date and time now, as a project's start (days since 1899-12-30): fixed in a test that runs the motions' clock
+/// (`anim::set_clock_at`, the equivalence harness), so a project made new starts the same on every run.
+fn work_time_now() -> WorkTime {
+    #[cfg(test)]
+    if !crate::anim::still() {
+        return WorkTime { started: 46_000.5, spent: 0.0 };
+    }
+    os_flp::project::work_time_now()
+}
+
 /// The project as it is saved (`App::save_to`): its time spent includes the session's clock (spec:
 /// flp/events/project-info.md "Writer notes": "then adds the time spent").
 pub(crate) fn stamp(s: &State, p: &mut Project) {
-    let started = s.project.work_time.map_or_else(|| os_flp::project::work_time_now().started, |w| w.started);
-    p.work_time = Some(WorkTime { started, spent: spent_days(s, Instant::now()) });
+    let started = s.project.work_time.map_or_else(|| work_time_now().started, |w| w.started);
+    p.work_time = Some(WorkTime { started, spent: spent_days(s, crate::anim::now()) });
 }
 
 /// A project was opened (`App::open`): one whose file has no start is started now, as a writer creating a project does
 /// (spec: flp/events/project-info.md "Writer notes"); the clock starts again; the Song info box shows when the project
 /// asks for it (event 10).
 pub(crate) fn opened(s: &mut State) {
-    s.project.work_time.get_or_insert_with(os_flp::project::work_time_now);
-    s.credits.clock.restart(Instant::now());
+    s.project.get_mut().work_time.get_or_insert_with(work_time_now);
+    s.credits.clock.restart(crate::anim::now());
     s.credits.song_box = s.project.show_info == Some(true);
     (s.credits.song_since, s.credits.song_alpha) = (None, 1.0);
 }
 
 /// A new project: started now, nothing spent (spec: ui/settings-choices.md "Info": "A new project starts now").
 pub(crate) fn created(s: &mut State) {
-    s.project.work_time = Some(os_flp::project::work_time_now());
-    s.credits.clock.restart(Instant::now());
+    s.project.get_mut().work_time = Some(work_time_now());
+    s.credits.clock.restart(crate::anim::now());
     s.credits.song_box = false;
 }
 
@@ -319,7 +330,7 @@ impl App {
         let s = &mut self.state;
         accept_info(s);
         crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
-            let value = &mut s.project.info.genre;
+            let value = &mut s.project.get_mut().info.genre;
             if value.as_deref().unwrap_or("") != genre.unwrap_or("") {
                 *value = genre.map(str::to_string);
             }
@@ -331,7 +342,7 @@ impl App {
     /// Lemon Studio's main window came to the foreground (`on`) or left it: the working time counts only while it is in
     /// front (`WorkClock`).
     pub fn main_focused(&mut self, on: bool) {
-        self.state.credits.clock.focus(on, Instant::now());
+        self.state.credits.clock.focus(on, crate::anim::now());
     }
 
     /// Periodic (`App::tick`): the Info page shows the time spent by the minute; it repaints when that changes.
@@ -350,8 +361,8 @@ impl App {
     /// (the session's time is not in it, `WorkClock`): the saved copy then forgets its time so the two differ.
     pub(crate) fn reset_work_time(&mut self) {
         let s = &mut self.state;
-        s.project.work_time.get_or_insert_with(os_flp::project::work_time_now).spent = 0.0;
-        s.credits.clock.restart(Instant::now());
+        s.project.get_mut().work_time.get_or_insert_with(os_flp::project::work_time_now).spent = 0.0;
+        s.credits.clock.restart(crate::anim::now());
         if self.saved.0.work_time == s.project.work_time {
             self.saved.0.work_time = None;
         }
@@ -361,7 +372,7 @@ impl App {
 
     /// Info ▸ Show info on opening (event 10): switched for the project and saved with it.
     pub(crate) fn toggle_show_info(&mut self) {
-        let p = &mut self.state.project;
+        let p = self.state.project.get_mut();
         let on = !p.show_info.unwrap_or(false);
         p.show_info = Some(on);
         self.state.message = Some(format!("Show info on opening: {}", if on { "on" } else { "off" }));
@@ -468,7 +479,7 @@ pub(crate) fn accept_info(s: &mut State) {
     let Some(e) = s.settings.info_edit.take() else { return };
     let text = if e.field.multiline() { e.text.text } else { e.text.text.trim().to_string() };
     crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
-        let value = e.field.get_mut(&mut s.project.info);
+        let value = e.field.get_mut(&mut s.project.get_mut().info);
         if value.as_deref().unwrap_or("") != text {
             *value = (!text.is_empty()).then_some(text);
         }
@@ -560,7 +571,7 @@ mod tests {
     #[test]
     fn escape_cancels_and_empty_clears() {
         let mut app = app();
-        app.state.project.info.author = Some("Someone".into());
+        app.state.project.get_mut().info.author = Some("Someone".into());
         let before = app.state.project.clone();
         app.act(Action::Settings(SAct::Info(InfoField::Author)));
         typed(&mut app, " else");
@@ -687,7 +698,7 @@ mod tests {
     fn genre_menu_fills_the_box() {
         use crate::playlist::Mark;
         let mut app = app();
-        app.state.project.info.genre = Some("House".into());
+        app.state.project.get_mut().info.genre = Some("House".into());
         app.act(Action::Settings(SAct::Genres(10.0, 20.0)));
         let p = app.state.playlist.popup.as_ref().expect("menu");
         assert_eq!((p.x, p.y), (10.0, 21.0));
@@ -703,7 +714,7 @@ mod tests {
         pick(&mut app, "(none)");
         assert_eq!(app.state.project.info.genre, None);
         // An empty genre (as FL writes it) marks "(none)", and "(none)" leaves it as it is.
-        app.state.project.info.genre = Some(String::new());
+        app.state.project.get_mut().info.genre = Some(String::new());
         app.act(Action::Settings(SAct::Genres(10.0, 20.0)));
         assert_eq!(app.state.playlist.popup.as_ref().unwrap().items[0].mark, Mark::Radio(true));
         pick(&mut app, "(none)");
@@ -771,8 +782,8 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert!(lines[0].starts_with("This project was started on ") && !lines[0].contains("last saved"), "{lines:?}");
         assert_eq!(lines[1], "Less than a minute was spent working on it.");
-        app.state.project.saved_by = "24.1.1.4285\0".into();
-        app.state.project.work_time = Some(WorkTime { started: 42_146.675_951_990_74, spent: 6.122_916_666_7 });
+        app.state.project.get_mut().saved_by = "24.1.1.4285\0".into();
+        app.state.project.get_mut().work_time = Some(WorkTime { started: 42_146.675_951_990_74, spent: 6.122_916_666_7 });
         let lines = footer(&app.state, Instant::now());
         assert_eq!(lines[0], "This project was started on 5/22/2015 4:13 PM, last saved in 24.1.1.4285");
         assert_eq!(lines[1], "Total time spent on it:  146 hours 57 minutes.");
@@ -851,7 +862,7 @@ mod tests {
     fn song_info_fades_and_any_click_closes() {
         let secs = Duration::from_secs_f32;
         let mut app = app();
-        app.state.project.show_info = Some(true);
+        app.state.project.get_mut().show_info = Some(true);
         opened(&mut app.state);
         let t = Instant::now() + secs(60.0);
         app.song_info_tick(t);
@@ -869,7 +880,7 @@ mod tests {
         assert!(app.state.credits.song_box && app.state.credits.song_alpha == 1.0);
         for press in [App::mouse_down, App::mouse_down_right, App::mouse_down_middle] {
             let mut app = self::app();
-            app.state.project.show_info = Some(true);
+            app.state.project.get_mut().show_info = Some(true);
             opened(&mut app.state);
             app.mouse_move(2.0, 2.0);
             press(&mut app);
@@ -907,7 +918,7 @@ mod tests {
         let w = app.state.project.work_time.expect("a new project starts now");
         assert_eq!(w.spent, 0.0);
         assert!((w.started - os_flp::project::work_time_now().started).abs() < 1.0 / 24.0);
-        app.state.project.work_time = Some(WorkTime { started: 42_146.5, spent: 1.0 });
+        app.state.project.get_mut().work_time = Some(WorkTime { started: 42_146.5, spent: 1.0 });
         app.saved.0.work_time = app.state.project.work_time;
         app.state.credits.clock = WorkClock::default();
         app.state.credits.clock.focus(true, Instant::now() - Duration::from_secs(600));
@@ -930,7 +941,7 @@ mod tests {
     #[test]
     fn reset_working_time() {
         let mut app = app();
-        app.state.project.work_time = Some(WorkTime { started: 42_146.5, spent: 0.25 });
+        app.state.project.get_mut().work_time = Some(WorkTime { started: 42_146.5, spent: 0.25 });
         app.saved.0 = app.state.project.clone();
         app.state.credits.clock.focus(true, Instant::now() - Duration::from_secs(300));
         assert!(!app.unsaved());
@@ -953,7 +964,7 @@ mod tests {
         assert_eq!((b.w, b.right()), (150.0, url.right()));
         assert!(b.y > url.bottom() + 16.0 * 2.0);
         assert!(!app.hits.iter().any(|h| h.rect == b && matches!(h.action, Action::Placeholder(_))), "not greyed out");
-        app.state.project.work_time.as_mut().unwrap().spent = 1.0;
+        app.state.project.get_mut().work_time.as_mut().unwrap().spent = 1.0;
         app.mouse_move(b.cx(), b.cy());
         app.mouse_down();
         app.mouse_up();
@@ -971,9 +982,9 @@ mod tests {
         assert_eq!(app.state.project.show_info, Some(true));
         assert!(app.unsaved());
         assert!(!app.state.credits.song_box, "only opening shows it");
-        app.state.project.info.title = Some("Bien Duro".into());
-        app.state.project.info.author = Some("Astes".into());
-        app.state.project.info.comments = Some("line one\nline two".into());
+        app.state.project.get_mut().info.title = Some("Bien Duro".into());
+        app.state.project.get_mut().info.author = Some("Astes".into());
+        app.state.project.get_mut().info.comments = Some("line one\nline two".into());
         let path = std::env::temp_dir().join(format!("lemonstudio-showinfo-{}.flp", std::process::id()));
         app.save_to(path.clone());
         let bytes = std::fs::read(&path).expect("saved");
