@@ -321,104 +321,7 @@ impl crate::app::App {
     /// `Hosted::stand_in`). A plugin that is not found keeps its saved data (written back unchanged) and is not looked
     /// for again.
     pub(crate) fn sync_wrapped(&mut self) {
-        use crate::plugins::fx_key;
-        let mut added = (false, false);
-        let (mut missing, mut switched) = (Vec::new(), Vec::new());
-        for row in 0..self.state.session.project.channels.len() {
-            if self.state.session.hosted_rows.contains(&row) || self.state.session.plugins.wrap_failed.contains(&row) {
-                continue;
-            }
-            let Some(r) = wrapped_channel(&self.state.session.project.channels[row]) else { continue };
-            if self.past_deadline() {
-                break;
-            }
-            let made = find(&self.state.session.plugins.available, &r).map(|i| {
-                let other = switched_format(&self.state.session.plugins.available[i].desc, &r);
-                let state = other.is_none().then_some(r.state.as_slice());
-                (other, self.state.session.plugins.create_with(row, i, state))
-            });
-            match made {
-                Some((other, Ok(_))) => {
-                    self.state.session.hosted_rows.push(row);
-                    added.0 = true;
-                    // Glides reach a plugin without note tuning as pitch bend over the wrapper's range.
-                    if let Some(n) = self.state.session.project.channels[row].plugin_state.as_deref().and_then(wrapper::bend_range) {
-                        self.state.session.plugins.set_bend_range(row, n);
-                    }
-                    if other.is_some() {
-                        self.state.session.plugins.mark_stand_in(row);
-                    }
-                    switched.extend(other);
-                }
-                Some((_, Err(e))) => {
-                    self.state.session.plugins.wrap_failed.push(row);
-                    missing.push(format!("{} ({e})", r.name));
-                }
-                None => {
-                    self.state.session.plugins.wrap_failed.push(row);
-                    missing.push(r.name);
-                }
-            }
-        }
-        let slots: Vec<(u16, u8, PluginRef)> = self
-            .state
-            .session.project
-            .mixer
-            .iter()
-            .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((m.index, k as u8, s.as_ref()?))))
-            // Hosted and failed slots first: decoding a slot copies its whole saved state, and this runs every tick.
-            .filter(|&(t, k, _)| !self.state.session.plugins.hosted.contains_key(&fx_key(t, k)) && !self.state.session.plugins.wrap_failed.contains(&fx_key(t, k)))
-            .filter_map(|(t, k, s)| Some((t, k, wrapped_slot(s)?)))
-            .collect();
-        for (t, k, r) in slots {
-            if self.past_deadline() {
-                break;
-            }
-            let made = find(&self.state.session.plugins.effects, &r).map(|i| {
-                let other = switched_format(&self.state.session.plugins.effects[i].desc, &r);
-                let state = other.is_none().then_some(r.state.as_slice());
-                (other, self.state.session.plugins.create_effect(t, k, i, state))
-            });
-            match made {
-                Some((other, Ok(_))) => {
-                    added.1 = true;
-                    if other.is_some() {
-                        self.state.session.plugins.mark_stand_in(fx_key(t, k));
-                    }
-                    switched.extend(other);
-                }
-                Some((_, Err(e))) => {
-                    self.state.session.plugins.wrap_failed.push(fx_key(t, k));
-                    missing.push(format!("{} ({e})", r.name));
-                }
-                None => {
-                    self.state.session.plugins.wrap_failed.push(fx_key(t, k));
-                    missing.push(r.name);
-                }
-            }
-        }
-        if added.0 {
-            self.transport.set_instruments(self.state.session.plugins.instruments());
-        }
-        if added.1 {
-            self.transport.set_effects(self.state.session.plugins.effects());
-        }
-        let mut parts = Vec::new();
-        if !missing.is_empty() {
-            self.missing.add_plugins(&missing);
-            parts.push(format!("Plugins not found (kept in the project): {}", name_list(self.missing.plugins.clone(), 6)));
-        }
-        if !switched.is_empty() {
-            let names = name_list(switched, 4);
-            parts.push(format!("Played by a copy in another format, from its default settings (saved as the original until edited): {names}"));
-        }
-        if !parts.is_empty() {
-            self.state.message = Some(parts.join("; "));
-        }
-        if added.0 || added.1 || !missing.is_empty() {
-            self.state.session.dirty = true;
-            self.invalidate();
-        }
+        self.host(sync_wrapped);
     }
 
     /// With the experimental native host on (Settings > Plugins), the native plugins an opened project names are
@@ -436,121 +339,8 @@ impl crate::app::App {
     /// once the scan is over and kept in the project; one that does not start is reported and kept too. An instance
     /// that does not give the file's state back byte for byte keeps the file's bytes on a save (`Hosted::keep_file_state`).
     pub(crate) fn host_native(&mut self) {
-        use crate::plugins::fx_key;
         let scanning = self.sweep.is_some();
-        let pending = self.state.session.pending_plugin.map(|(r, _)| r);
-        let mut added = (false, false);
-        let (mut hosted, mut kept, mut missing, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let rows: Vec<(usize, String, Option<Vec<u8>>)> = (0..self.state.session.project.channels.len())
-            .filter(|&r| !self.state.session.hosted_rows.contains(&r) && !self.state.session.plugins.wrap_failed.contains(&r) && !self.state.session.plugins.native_failed.contains(&r) && Some(r) != pending)
-            .filter_map(|r| {
-                let ch = &self.state.session.project.channels[r];
-                // Lemon MIDI Out plays MIDI Out channels (`lemon_midi_out`), a container's chain a container's
-                // (`container`).
-                if crate::lemon_midi_out::is_midi_out(ch) || crate::container::is_container_channel(ch) {
-                    return None;
-                }
-                let name = ch.plugin.as_deref().filter(|n| ch.kind == ChannelKind::Plugin && !n.is_empty() && *n != WRAPPER)?;
-                Some((r, name.to_string(), ch.plugin_state.clone()))
-            })
-            .collect();
-        for (row, name, state) in rows {
-            if self.past_deadline() {
-                break;
-            }
-            let Some(i) = find_native(&self.state.session.plugins.available, &name) else {
-                if !scanning {
-                    self.state.session.plugins.native_failed.push(row);
-                    missing.push(name);
-                }
-                continue;
-            };
-            if !self.state.session.plugins.instrument_ready(i) {
-                continue;
-            }
-            match self.state.session.plugins.create_with(row, i, state.as_deref().filter(|s| !s.is_empty())) {
-                Ok(_) => {
-                    self.state.session.hosted_rows.push(row);
-                    added.0 = true;
-                    if !self.native_round_trips(row, state.as_deref()) {
-                        kept.push(name.clone());
-                    }
-                    hosted.push(name);
-                }
-                Err(e) => {
-                    self.state.session.plugins.native_failed.push(row);
-                    failed.push(format!("{name} ({e})"));
-                }
-            }
-        }
-        let slots: Vec<(u16, u8, String, Vec<u8>)> = self
-            .state
-            .session.project
-            .mixer
-            .iter()
-            .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| s.as_ref().map(|s| (m.index, k as u8, s))))
-            // Before the states are copied: this runs every tick, and an Edison slot's can be tens of megabytes.
-            .filter(|&(t, k, s)| {
-                let key = fx_key(t, k);
-                !s.name.is_empty() && s.name != WRAPPER && s.name != crate::container::CONTAINER && !self.state.session.plugins.hosted.contains_key(&key) && !self.state.session.plugins.native_failed.contains(&key)
-            })
-            .map(|(t, k, s)| (t, k, s.name.clone(), s.state.clone()))
-            .collect();
-        for (t, k, name, state) in slots {
-            if self.past_deadline() {
-                break;
-            }
-            let key = fx_key(t, k);
-            let Some(i) = find_native(&self.state.session.plugins.effects, &name) else {
-                if !scanning {
-                    self.state.session.plugins.native_failed.push(key);
-                    missing.push(name);
-                }
-                continue;
-            };
-            if !self.state.session.plugins.effect_ready(i) {
-                continue;
-            }
-            match self.state.session.plugins.create_effect(t, k, i, (!state.is_empty()).then_some(state.as_slice())) {
-                Ok(_) => {
-                    added.1 = true;
-                    if !self.native_round_trips(key, Some(&state)) {
-                        kept.push(name.clone());
-                    }
-                    hosted.push(name);
-                }
-                Err(e) => {
-                    self.state.session.plugins.native_failed.push(key);
-                    failed.push(format!("{name} ({e})"));
-                }
-            }
-        }
-        if added.0 {
-            self.transport.set_instruments(self.state.session.plugins.instruments());
-        }
-        if added.1 {
-            self.transport.set_effects(self.state.session.plugins.effects());
-        }
-        let mut parts = Vec::new();
-        if !hosted.is_empty() {
-            parts.push(format!("Hosted {} of the project's native plugins: {}", hosted.len(), name_list(hosted, 6)));
-        }
-        if !kept.is_empty() {
-            parts.push(format!("saving keeps the file's settings for {}", name_list(kept, 6)));
-        }
-        self.missing.add_plugins(&missing);
-        self.missing.add_plugins(&failed);
-        if !missing.is_empty() {
-            parts.push(format!("native plugins not installed (kept in the project): {}", name_list(missing, 6)));
-        }
-        if !failed.is_empty() {
-            parts.push(format!("native plugins that did not start (kept in the project): {}", name_list(failed, 4)));
-        }
-        if !parts.is_empty() {
-            self.state.message = Some(parts.join("; "));
-            self.state.session.dirty = true;
-            self.invalidate();
-        }
+        self.host(|s, t| host_native(s, t, scanning));
     }
 
     /// The hidden preference changed (or the native host with it): the channels and slots a built-in recreation can
@@ -601,19 +391,225 @@ impl crate::app::App {
         swap.len()
     }
 
-    /// Whether the native instance under `key`, just started from `file_state`, gives those bytes back as its own
-    /// state. If not, the instance is marked so a save keeps the file's bytes (spec: plugins/fruity-abi.md "Saved
-    /// state": the instance would lose the file's data otherwise). No file state = the plugin starts at its defaults
-    /// and its own state is what the file gets.
-    fn native_round_trips(&mut self, key: usize, file_state: Option<&[u8]>) -> bool {
-        let Some(file) = file_state.filter(|s| !s.is_empty()) else { return true };
-        let same = self.state.session.plugins.state(key).is_some_and(|s| s == file);
-        if !same {
-            if let Some(h) = self.state.session.plugins.hosted.get_mut(&key) {
-                h.keep_file_state = true;
+}
+
+/// `App::host_native` in the session; `scanning`: a plugin scan is running.
+pub(crate) fn host_native(ses: &mut crate::session::Session, transport: &crate::transport::Transport, scanning: bool) {
+    use crate::plugins::fx_key;
+    let pending = ses.pending_plugin.map(|(r, _)| r);
+    let mut added = (false, false);
+    let (mut hosted, mut kept, mut missing, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let rows: Vec<(usize, String, Option<Vec<u8>>)> = (0..ses.project.channels.len())
+        .filter(|&r| !ses.hosted_rows.contains(&r) && !ses.plugins.wrap_failed.contains(&r) && !ses.plugins.native_failed.contains(&r) && Some(r) != pending)
+        .filter_map(|r| {
+            let ch = &ses.project.channels[r];
+            // Lemon MIDI Out plays MIDI Out channels (`lemon_midi_out`), a container's chain a container's
+            // (`container`).
+            if crate::lemon_midi_out::is_midi_out(ch) || crate::container::is_container_channel(ch) {
+                return None;
+            }
+            let name = ch.plugin.as_deref().filter(|n| ch.kind == ChannelKind::Plugin && !n.is_empty() && *n != WRAPPER)?;
+            Some((r, name.to_string(), ch.plugin_state.clone()))
+        })
+        .collect();
+    for (row, name, state) in rows {
+        if ses.plugins.past_deadline() {
+            break;
+        }
+        let Some(i) = find_native(&ses.plugins.available, &name) else {
+            if !scanning {
+                ses.plugins.native_failed.push(row);
+                missing.push(name);
+            }
+            continue;
+        };
+        if !ses.plugins.instrument_ready(i) {
+            continue;
+        }
+        match ses.plugins.create_with(row, i, state.as_deref().filter(|s| !s.is_empty())) {
+            Ok(_) => {
+                ses.hosted_rows.push(row);
+                added.0 = true;
+                if !native_round_trips(ses, row, state.as_deref()) {
+                    kept.push(name.clone());
+                }
+                hosted.push(name);
+            }
+            Err(e) => {
+                ses.plugins.native_failed.push(row);
+                failed.push(format!("{name} ({e})"));
             }
         }
-        same
+    }
+    let slots: Vec<(u16, u8, String, Vec<u8>)> = ses.project
+        .mixer
+        .iter()
+        .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| s.as_ref().map(|s| (m.index, k as u8, s))))
+        // Before the states are copied: this runs every tick, and an Edison slot's can be tens of megabytes.
+        .filter(|&(t, k, s)| {
+            let key = fx_key(t, k);
+            !s.name.is_empty() && s.name != WRAPPER && s.name != crate::container::CONTAINER && !ses.plugins.hosted.contains_key(&key) && !ses.plugins.native_failed.contains(&key)
+        })
+        .map(|(t, k, s)| (t, k, s.name.clone(), s.state.clone()))
+        .collect();
+    for (t, k, name, state) in slots {
+        if ses.plugins.past_deadline() {
+            break;
+        }
+        let key = fx_key(t, k);
+        let Some(i) = find_native(&ses.plugins.effects, &name) else {
+            if !scanning {
+                ses.plugins.native_failed.push(key);
+                missing.push(name);
+            }
+            continue;
+        };
+        if !ses.plugins.effect_ready(i) {
+            continue;
+        }
+        match ses.plugins.create_effect(t, k, i, (!state.is_empty()).then_some(state.as_slice())) {
+            Ok(_) => {
+                added.1 = true;
+                if !native_round_trips(ses, key, Some(&state)) {
+                    kept.push(name.clone());
+                }
+                hosted.push(name);
+            }
+            Err(e) => {
+                ses.plugins.native_failed.push(key);
+                failed.push(format!("{name} ({e})"));
+            }
+        }
+    }
+    if added.0 {
+        transport.set_instruments(ses.plugins.instruments());
+    }
+    if added.1 {
+        transport.set_effects(ses.plugins.effects());
+    }
+    let mut parts = Vec::new();
+    if !hosted.is_empty() {
+        parts.push(format!("Hosted {} of the project's native plugins: {}", hosted.len(), name_list(hosted, 6)));
+    }
+    if !kept.is_empty() {
+        parts.push(format!("saving keeps the file's settings for {}", name_list(kept, 6)));
+    }
+    ses.plugins.add_not_found(&missing);
+    ses.plugins.add_not_found(&failed);
+    if !missing.is_empty() {
+        parts.push(format!("native plugins not installed (kept in the project): {}", name_list(missing, 6)));
+    }
+    if !failed.is_empty() {
+        parts.push(format!("native plugins that did not start (kept in the project): {}", name_list(failed, 4)));
+    }
+    if !parts.is_empty() {
+        ses.touched.views.push(crate::session::View::Message(parts.join("; ")));
+        ses.dirty = true;
+        ses.touched.repaint = true;
+    }
+}
+
+/// Hosts the wrapped plugins of an opened project (spec: flp/events/plugins.md §4): each wrapped channel and slot
+/// whose plugin is found starts from the state the file holds, or from its defaults when only a copy in another
+/// format is found (the hint bar names those; a save keeps the file's wrapper for them until they are changed,
+/// `Hosted::stand_in`). A plugin that is not found keeps its saved data (written back unchanged) and is not looked
+/// for again.
+pub(crate) fn sync_wrapped(ses: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    use crate::plugins::fx_key;
+    let mut added = (false, false);
+    let (mut missing, mut switched) = (Vec::new(), Vec::new());
+    for row in 0..ses.project.channels.len() {
+        if ses.hosted_rows.contains(&row) || ses.plugins.wrap_failed.contains(&row) {
+            continue;
+        }
+        let Some(r) = wrapped_channel(&ses.project.channels[row]) else { continue };
+        if ses.plugins.past_deadline() {
+            break;
+        }
+        let made = find(&ses.plugins.available, &r).map(|i| {
+            let other = switched_format(&ses.plugins.available[i].desc, &r);
+            let state = other.is_none().then_some(r.state.as_slice());
+            (other, ses.plugins.create_with(row, i, state))
+        });
+        match made {
+            Some((other, Ok(_))) => {
+                ses.hosted_rows.push(row);
+                added.0 = true;
+                // Glides reach a plugin without note tuning as pitch bend over the wrapper's range.
+                if let Some(n) = ses.project.channels[row].plugin_state.as_deref().and_then(wrapper::bend_range) {
+                    ses.plugins.set_bend_range(row, n);
+                }
+                if other.is_some() {
+                    ses.plugins.mark_stand_in(row);
+                }
+                switched.extend(other);
+            }
+            Some((_, Err(e))) => {
+                ses.plugins.wrap_failed.push(row);
+                missing.push(format!("{} ({e})", r.name));
+            }
+            None => {
+                ses.plugins.wrap_failed.push(row);
+                missing.push(r.name);
+            }
+        }
+    }
+    let slots: Vec<(u16, u8, PluginRef)> = ses.project
+        .mixer
+        .iter()
+        .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((m.index, k as u8, s.as_ref()?))))
+        // Hosted and failed slots first: decoding a slot copies its whole saved state, and this runs every tick.
+        .filter(|&(t, k, _)| !ses.plugins.hosted.contains_key(&fx_key(t, k)) && !ses.plugins.wrap_failed.contains(&fx_key(t, k)))
+        .filter_map(|(t, k, s)| Some((t, k, wrapped_slot(s)?)))
+        .collect();
+    for (t, k, r) in slots {
+        if ses.plugins.past_deadline() {
+            break;
+        }
+        let made = find(&ses.plugins.effects, &r).map(|i| {
+            let other = switched_format(&ses.plugins.effects[i].desc, &r);
+            let state = other.is_none().then_some(r.state.as_slice());
+            (other, ses.plugins.create_effect(t, k, i, state))
+        });
+        match made {
+            Some((other, Ok(_))) => {
+                added.1 = true;
+                if other.is_some() {
+                    ses.plugins.mark_stand_in(fx_key(t, k));
+                }
+                switched.extend(other);
+            }
+            Some((_, Err(e))) => {
+                ses.plugins.wrap_failed.push(fx_key(t, k));
+                missing.push(format!("{} ({e})", r.name));
+            }
+            None => {
+                ses.plugins.wrap_failed.push(fx_key(t, k));
+                missing.push(r.name);
+            }
+        }
+    }
+    if added.0 {
+        transport.set_instruments(ses.plugins.instruments());
+    }
+    if added.1 {
+        transport.set_effects(ses.plugins.effects());
+    }
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        ses.plugins.add_not_found(&missing);
+        parts.push(format!("Plugins not found (kept in the project): {}", name_list(ses.plugins.not_found.clone(), 6)));
+    }
+    if !switched.is_empty() {
+        let names = name_list(switched, 4);
+        parts.push(format!("Played by a copy in another format, from its default settings (saved as the original until edited): {names}"));
+    }
+    if !parts.is_empty() {
+        ses.touched.views.push(crate::session::View::Message(parts.join("; ")));
+    }
+    if added.0 || added.1 || !missing.is_empty() {
+        ses.dirty = true;
+        ses.touched.repaint = true;
     }
 }
 
@@ -1165,4 +1161,19 @@ mod tests {
         r.name = "Something else".into();
         assert_eq!(find(&list, &r), None);
     }
+}
+
+/// Whether the native instance under `key`, just started from `file_state`, gives those bytes back as its own
+/// state. If not, the instance is marked so a save keeps the file's bytes (spec: plugins/fruity-abi.md "Saved
+/// state": the instance would lose the file's data otherwise). No file state = the plugin starts at its defaults
+/// and its own state is what the file gets.
+pub(crate) fn native_round_trips(s: &mut crate::session::Session, key: usize, file_state: Option<&[u8]>) -> bool {
+    let Some(file) = file_state.filter(|s| !s.is_empty()) else { return true };
+    let same = s.plugins.state(key).is_some_and(|s| s == file);
+    if !same {
+        if let Some(h) = s.plugins.hosted.get_mut(&key) {
+            h.keep_file_state = true;
+        }
+    }
+    same
 }

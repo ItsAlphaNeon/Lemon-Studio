@@ -199,14 +199,14 @@ pub(crate) fn owner_name(s: &crate::session::Session, key: usize) -> String {
 
 /// The automation clip name for parameter `index` of instance `key` (spec §4).
 pub fn clip_name(s: &State, key: usize, index: usize) -> String {
-    let param = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map_or_else(|| format!("Parameter {}", index + 1), |e| e.name.clone());
+    let param = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map_or_else(|| format!("Parameter {}", index + 1), |e| e.name.clone());
     format!("{} - {param}", owner_name(&s.session, key))
 }
 
 /// Current normalized value of parameter `index` of instance `key`.
 fn value_of(s: &State, key: usize, index: usize) -> Option<f64> {
-    let id = s.params.lists.get(&key)?.params.get(index)?.id;
-    let p = s.params.plugin(key)?;
+    let id = s.session.params.lists.get(&key)?.params.get(index)?.id;
+    let p = s.session.params.plugin(key)?;
     let v = p.lock().ok()?.param_value(id);
     v
 }
@@ -214,7 +214,7 @@ fn value_of(s: &State, key: usize, index: usize) -> Option<f64> {
 /// Parameter `index` of instance `key`: its name, its normalized value, and setting it (the value box, spec:
 /// ui/type-in-value.md).
 pub(crate) fn param_name(s: &State, key: usize, index: usize) -> Option<String> {
-    Some(s.params.lists.get(&key)?.params.get(index)?.name.clone())
+    Some(s.session.params.lists.get(&key)?.params.get(index)?.name.clone())
 }
 
 pub(crate) fn param_value(s: &State, key: usize, index: usize) -> Option<f64> {
@@ -222,10 +222,10 @@ pub(crate) fn param_value(s: &State, key: usize, index: usize) -> Option<f64> {
 }
 
 pub(crate) fn set_param_value(s: &mut State, key: usize, index: usize, v: f64) -> bool {
-    let Some(id) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return false };
-    let set = s.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)));
+    let Some(id) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return false };
+    let set = s.session.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)));
     if set {
-        s.params.set_by_host(key, id, v);
+        s.session.params.set_by_host(key, id, v);
     }
     set
 }
@@ -238,16 +238,16 @@ pub fn automation(s: &State, key: usize, index: usize) -> Option<(u32, String, f
 /// The plugin's text for normalized `v` on a plugin-parameter target ("6.0dB"), when the instance is hosted.
 pub fn value_text(s: &State, t: Target, v: f64) -> Option<String> {
     let (key, index) = key_of(&s.session, t)?;
-    let id = s.params.lists.get(&key)?.params.get(index)?.id;
-    let p = s.params.plugin(key)?;
+    let id = s.session.params.lists.get(&key)?.params.get(index)?.id;
+    let p = s.session.params.plugin(key)?;
     let text = p.lock().ok()?.param_text(id, v);
     text
 }
 
 /// The hint of a parameter row in the browser (spec §6): "<parameter>: <value text>".
 pub fn row_hint(s: &State, key: usize, index: usize) -> String {
-    let Some(e) = s.params.lists.get(&key).and_then(|l| l.params.get(index)) else { return String::new() };
-    let text = s.params.plugin(key).and_then(|p| {
+    let Some(e) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)) else { return String::new() };
+    let text = s.session.params.plugin(key).and_then(|p| {
         let p = p.lock().ok()?;
         let v = p.param_value(e.id)?;
         p.param_text(e.id, v)
@@ -270,8 +270,8 @@ const SET_STEPS: u32 = 32;
 /// stepped parameter with up to `SET_STEPS` steps, named by the plugin's text; otherwise the default, then minimum,
 /// 25 %, 50 %, 75 % and maximum with the plugin's text after them. The current value has the radio mark.
 fn set_items(s: &State, key: usize, index: usize) -> Vec<PItem> {
-    let Some(e) = s.params.lists.get(&key).and_then(|l| l.params.get(index)) else { return Vec::new() };
-    let plugin = s.params.plugin(key);
+    let Some(e) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)) else { return Vec::new() };
+    let plugin = s.session.params.plugin(key);
     let p = plugin.as_ref().and_then(|p| p.lock().ok());
     let now = p.as_ref().and_then(|p| p.param_value(e.id));
     let text = |v: f64| p.as_ref().and_then(|p| p.param_text(e.id, v)).filter(|t| !t.trim().is_empty());
@@ -305,7 +305,7 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         None => PItem::new("Edit automation clip...", Cmd::Nothing).off(),
     };
     // spec: ui/event-editor.md §1
-    let range = param.and_then(|(key, index)| s.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index))).map(|i| (i.min, i.max));
+    let range = param.and_then(|(key, index)| s.session.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index))).map(|i| (i.min, i.max));
     let events = crate::events::menu_item(create.as_ref(), range);
     let window = crate::events::window_item(create.as_ref(), range);
     let create = match create {
@@ -392,7 +392,7 @@ pub enum MenuEntry {
 impl App {
     /// Every plugin tick: keeps the parameter lists of hosted instances and records the parameters their editors moved.
     pub(crate) fn params_tick(&mut self) {
-        let ui = &mut self.state.params;
+        let ui = &mut self.state.session.params;
         ui.lists.retain(|k, _| self.state.session.plugins.hosted.contains_key(k));
         let mut moved = None;
         let mut edited = Vec::new();
@@ -526,7 +526,7 @@ impl App {
             }
         }
         if let Some(t) = moved {
-            self.state.params.note(t);
+            self.state.session.params.note(t);
             self.tweak_hint();
         }
         for (key, index, range, v) in recorded {
@@ -543,7 +543,7 @@ impl App {
     /// A plugin parameter set from outside its window (a remote control) to `level`, for automation recording.
     pub(crate) fn record_plugin_param(&mut self, key: usize, index: usize, level: f64) {
         let Some(target) = target_of(&self.state.session, key, index) else { return };
-        let range = self.state.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index)).map(|i| (i.min, i.max));
+        let range = self.state.session.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index)).map(|i| (i.min, i.max));
         if let Some(range) = range {
             self.record_param(target, range, level);
         }
@@ -552,7 +552,7 @@ impl App {
     /// A press on a host control: it becomes the last tweaked parameter when it has an automation target.
     pub(crate) fn note_host_tweak(&mut self, a: &Action) {
         if self.automation_target(a).is_some() {
-            self.state.params.note(Tweak::Host(a.clone()));
+            self.state.session.params.note(Tweak::Host(a.clone()));
         }
     }
 
@@ -566,11 +566,11 @@ impl App {
 
     /// The hint bar shows the plugin parameter that just moved: "<owner> - <parameter>: <value>" (spec §5).
     fn tweak_hint(&mut self) {
-        let Some(Tweak::Plugin { key, index }) = self.state.params.last.first().cloned() else { return };
+        let Some(Tweak::Plugin { key, index }) = self.state.session.params.last.first().cloned() else { return };
         let s = &self.state;
         let Some(v) = value_of(s, key, index) else { return };
-        let Some(id) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
-        let text = s.params.plugin(key).and_then(|p| p.lock().ok()?.param_text(id, v)).unwrap_or_else(|| format!("{:.0}%", v * 100.0));
+        let Some(id) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
+        let text = s.session.params.plugin(key).and_then(|p| p.lock().ok()?.param_text(id, v)).unwrap_or_else(|| format!("{:.0}%", v * 100.0));
         self.hint = std::borrow::Cow::Owned(format!("{}: {text}", clip_name(s, key, index)));
         self.damage_band(crate::app::HINT_RECT);
     }
@@ -578,7 +578,7 @@ impl App {
     /// ADD / TOOLS menu entries for the last tweaked parameters (spec §5); returns a message.
     pub(crate) fn params_menu(&mut self, entry: MenuEntry) -> Option<String> {
         let nth = usize::from(entry == MenuEntry::NextToLast);
-        let tweak = self.state.params.last.get(nth).cloned();
+        let tweak = self.state.session.params.last.get(nth).cloned();
         let create = tweak.as_ref().and_then(|t| self.tweak_automation(t));
         if entry == MenuEntry::Automation {
             let Some((tgt, name, v)) = create else {
@@ -652,7 +652,7 @@ impl App {
     pub(crate) fn browse_params(&mut self, key: usize) -> Option<String> {
         self.params_tick();
         let s = &mut self.state;
-        if !s.params.has_params(key) {
+        if !s.session.params.has_params(key) {
             return Some("This plugin has no parameters to browse".into());
         }
         let node = node_key(s, key)?;
@@ -708,10 +708,10 @@ mod tests {
         assert_eq!(key_of(&s.session, Target::ChannelParam(ch, 7)), Some((0, 7)));
         assert_eq!(key_of(&s.session, Target::SlotParam(2, 3, 35)), Some((fx_key(2, 3), 35)));
         let cutoff = Entry { id: 9, name: "Cutoff".into(), hidden: false, default: 1.0, steps: 0 };
-        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![cutoff], seen: crate::plugins::Look::never(), values: BTreeMap::new(), open: BTreeMap::new(), read_at: std::time::Instant::now(), reread: false });
+        s.session.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![cutoff], seen: crate::plugins::Look::never(), values: BTreeMap::new(), open: BTreeMap::new(), read_at: std::time::Instant::now(), reread: false });
         assert_eq!(clip_name(s, 0, 0), "Lead - Cutoff");
         // Last tweaked keeps the two newest, newest first, without repeats.
-        let p = &mut s.params;
+        let p = &mut s.session.params;
         p.note(Tweak::Plugin { key: 0, index: 0 });
         p.note(Tweak::Host(Action::Tempo));
         p.note(Tweak::Plugin { key: 0, index: 0 });
@@ -733,7 +733,7 @@ mod tests {
         a.sync_effects();
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
-        assert_eq!(a.state.params.visible(key).count(), 36);
+        assert_eq!(a.state.session.params.visible(key).count(), 36);
         let node = "1:Current project/Effects/Lemon Parametric EQ (Bus 2)";
         assert_eq!((a.state.show_browser, a.state.browser_tab, a.state.browser_sel.as_deref()), (true, PROJECT_TAB, Some(node)));
         let list = rows(&a.state);
@@ -776,7 +776,7 @@ mod tests {
         let menu = a.state.playlist.popup.take().unwrap();
         assert_eq!((menu.items[0].label.as_ref(), menu.items[0].head), ("No parameter", true));
         assert!(menu.items.iter().any(|i| i.label == "Create automation clip" && !i.enabled));
-        a.state.params.note(Tweak::Plugin { key, index: 35 });
+        a.state.session.params.note(Tweak::Plugin { key, index: 35 });
         a.params_menu(MenuEntry::Automation);
         let last = a.state.session.project.channels.last().unwrap();
         assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Main level #2"));
@@ -897,7 +897,7 @@ mod tests {
         assert_eq!(set.children.iter().position(|i| i.mark == Mark::Radio(true)), Some(6), "Maximum is marked now");
 
         // A stepped parameter (Band 1 type): one entry per value, named by the plugin.
-        let steps = a.state.params.lists[&key].params[21].steps;
+        let steps = a.state.session.params.lists[&key].params[21].steps;
         assert!((1..=SET_STEPS).contains(&steps), "{steps}");
         let set = entry(&row_menu(&mut a, key, 21), "Set...");
         assert_eq!(set.children.len(), steps as usize + 1);
@@ -954,8 +954,8 @@ mod tests {
 
     /// The plugin's text for value `v` of parameter `index` of instance `key`.
     fn param_text_of(a: &App, key: usize, index: usize, v: f64) -> String {
-        let id = a.state.params.lists[&key].params[index].id;
-        a.state.params.plugin(key).unwrap().lock().unwrap().param_text(id, v).unwrap()
+        let id = a.state.session.params.lists[&key].params[index].id;
+        a.state.session.params.plugin(key).unwrap().lock().unwrap().param_text(id, v).unwrap()
     }
 
     /// Corpus check (OPENSTUDIO_FLP_CORPUS): automation clips made on Parametric EQ 2 slot parameters load as slot
@@ -992,7 +992,7 @@ mod tests {
             for (ch, t) in links {
                 let s = &a.state;
                 let (key, k) = key_of(&s.session, t).unwrap();
-                let param = s.params.lists.get(&key).and_then(|l| l.params.get(k)).map(|e| e.name.clone());
+                let param = s.session.params.lists.get(&key).and_then(|l| l.params.get(k)).map(|e| e.name.clone());
                 assert!(param.is_some(), "{path}: {t:?} has no hosted parameter");
                 let name = s.session.project.channels.iter().find(|c| c.index == ch).and_then(|c| c.name.clone()).unwrap_or_default();
                 let base = name.rsplit_once(" #").filter(|(_, n)| n.parse::<u32>().is_ok()).map_or(name.as_str(), |(b, _)| b);
@@ -1020,7 +1020,7 @@ mod tests {
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
         a.sync_effects();
         a.params_tick();
-        let key = a.state.params.lists.keys().copied().find(|&k| fx_of(k).is_some()).expect("a hosted EQ slot");
+        let key = a.state.session.params.lists.keys().copied().find(|&k| fx_of(k).is_some()).expect("a hosted EQ slot");
         println!("{:?}", a.params_automate(key, k));
         let auto = a.state.session.project.get_mut().automations.last_mut().unwrap();
         println!("target {:#010x}", auto.target().unwrap());

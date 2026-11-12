@@ -356,9 +356,21 @@ pub struct Plugins {
     /// instances left to start.
     pub host_deadline: Option<std::time::Instant>,
     pub host_more: bool,
+    /// Plugins the project names that are not installed or did not start (`project_plugins::sync_wrapped`,
+    /// `host_native`), each once: the missing files box lists them.
+    pub not_found: Vec<String>,
 }
 
 impl Plugins {
+    /// Adds plugin names to `not_found` (each once; "Serum (error text)" counts as its own entry).
+    pub fn add_not_found(&mut self, names: &[String]) {
+        for n in names {
+            if !self.not_found.contains(n) {
+                self.not_found.push(n.clone());
+            }
+        }
+    }
+
     /// While a project loads, the hosting of this tick is over (`host_deadline`): it goes on at the next.
     pub fn past_deadline(&mut self) -> bool {
         let past = self.host_deadline.is_some_and(|d| std::time::Instant::now() >= d);

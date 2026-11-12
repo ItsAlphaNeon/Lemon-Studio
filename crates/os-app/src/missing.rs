@@ -31,24 +31,10 @@ const SEARCH_DEPTH: usize = 16;
 pub struct Missing {
     /// Folders picked with Find samples... (where missing samples were found), searched after the project's own.
     pub picked: Vec<PathBuf>,
-    /// Plugins the project names that are not installed or did not start (`project_plugins::sync_wrapped`,
-    /// `host_native`), each once.
-    pub plugins: Vec<String>,
     /// The project was opened and the box has not been considered yet: it is, once the project has loaded.
     pub pending: bool,
     /// A Find samples... search running.
     pub search: Option<Search>,
-}
-
-impl Missing {
-    /// Adds plugin names (each once; "Serum (error text)" counts as its own entry).
-    pub fn add_plugins(&mut self, names: &[String]) {
-        for n in names {
-            if !self.plugins.contains(n) {
-                self.plugins.push(n.clone());
-            }
-        }
-    }
 }
 
 /// A running Find samples... search: the folders it found missing samples in come back once it is over.
@@ -77,7 +63,7 @@ pub fn search_folders(s: &State, picked: &[PathBuf]) -> Vec<PathBuf> {
 /// forgotten.
 pub fn opened(app: &mut App) {
     app.missing.picked.clear();
-    app.missing.plugins.clear();
+    app.state.session.plugins.not_found.clear();
     app.missing.search = None;
     app.missing.pending = true;
     apply(app);
@@ -123,7 +109,7 @@ pub fn loaded(app: &mut App) {
         return;
     }
     let samples: Vec<String> = missing_samples(&app.state).iter().map(|(_, p)| file_name(p).to_string()).collect();
-    let plugins = app.missing.plugins.clone();
+    let plugins = app.state.session.plugins.not_found.clone();
     if samples.is_empty() && plugins.is_empty() {
         return;
     }

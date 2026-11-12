@@ -654,7 +654,7 @@ fn flip_spare(app: &mut App, key: usize) -> Option<String> {
     }
     app.state.session.plugins.hosted.get_mut(&key)?.spare = Some(now);
     app.state.session.plugins.mark_edited(key);
-    app.state.params.reread(key);
+    app.state.session.params.reread(key);
     if let Some(before) = before.filter(|b| side(app, key).as_ref() != Some(b)) {
         crate::control::state_edit(&mut app.state.session, key, FLIP_SPARE, before);
     }

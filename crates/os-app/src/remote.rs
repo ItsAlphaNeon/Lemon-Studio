@@ -699,7 +699,7 @@ impl App {
             }
             RCmd::LinkAll(key) => {
                 self.params_tick();
-                let params: Vec<usize> = self.state.params.visible(key).map(|(i, _)| i).collect();
+                let params: Vec<usize> = self.state.session.params.visible(key).map(|(i, _)| i).collect();
                 if params.is_empty() {
                     self.state.message = Some("This plugin has no parameters to link".into());
                     return self.invalidate();

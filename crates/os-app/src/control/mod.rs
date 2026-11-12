@@ -443,7 +443,7 @@ pub fn param_edit(s: &mut crate::session::Session, owner: u32, before: &[(u32, f
 /// tweaks is off or the value stays. The step comes from no change the release could judge: a plugin may take the
 /// value on its next idle.
 pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, to: f64) {
-    let Some(param) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
+    let Some(param) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
     if command::key_owner(&s.session, key) == Some(0) {
         s.session.control.settle(s.session.project.get_mut());

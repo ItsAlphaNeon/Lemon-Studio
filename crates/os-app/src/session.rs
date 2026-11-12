@@ -53,6 +53,8 @@ pub struct Session {
     /// Requests for the plugin host, handled on the next tick: (row, `Plugins::available` index) to create, row to open.
     pub pending_plugin: Option<(usize, usize)>,
     pub pending_open: Option<usize>,
+    /// The hosted plugins' parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
+    pub params: crate::params::ParamUi,
 }
 
 /// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
@@ -135,6 +137,7 @@ impl Session {
             hosted_rows: Vec::new(),
             pending_plugin: None,
             pending_open: None,
+            params: Default::default(),
         }
     }
 

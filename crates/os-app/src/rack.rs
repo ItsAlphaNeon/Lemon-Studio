@@ -1584,7 +1584,7 @@ fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
         c.sound.declick = mode;
         if c.kind.is_sampler() {
             app.state.session.plugins.set_param_named(r, SAMPLER_DECLICK, f64::from(mode));
-            app.state.params.reread(r);
+            app.state.session.params.reread(r);
         }
     }
     app.state.session.dirty = true;

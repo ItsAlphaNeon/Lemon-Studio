@@ -1163,8 +1163,6 @@ pub struct State {
     /// Favorite files (spec: ui/browser.md §10) and the index of the browser's disk folders (§11).
     pub browser_favs: Vec<crate::browser::Fav>,
     pub browser_index: crate::browser_index::Index,
-    /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
-    pub params: crate::params::ParamUi,
     /// "Copy value": a normalized value for "Paste value", one for every control and automation point, as in FL
     /// (spec: ui/playlist.md §8 "Point menu").
     pub value_clip: Option<f64>,
@@ -1567,7 +1565,6 @@ impl App {
                 browser_open: views::browser::default_open(),
                 browser_folders: crate::browser::load_folders(),
                 browser_names: crate::browser::load_names(),
-                params: Default::default(),
                 value_clip: None,
                 browser_dirs: Default::default(),
                 cables: std::cell::RefCell::new({
@@ -9405,14 +9402,7 @@ impl App {
     /// Rack rows were renumbered (`m(old) = new`, `None` = deleted): hosted plugins, their windows and playback follow.
     pub(crate) fn remap_rows(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
         self.typing_release_all();
-        self.state.session.plugins.remap(m);
-        // The rows hosted are the instances' rows.
-        self.state.session.hosted_rows = self.state.session.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
-        self.state.session.plugins.sampler_failed = self.state.session.plugins.sampler_failed.iter().filter_map(|&r| m(r)).collect();
-        self.state.session.plugins.wrap_failed = self.state.session.plugins.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
-        self.state.session.plugins.native_failed = self.state.session.plugins.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
-        self.transport.set_instruments(self.state.session.plugins.instruments());
-        self.state.session.dirty = true;
+        self.host(|s, t| remap_rows_in(s, t, m));
     }
 
     /// A row's hosted instrument for cloning: (available plugin index, saved state).
@@ -9435,12 +9425,7 @@ impl App {
 
     /// Host a copy of an instrument (`plugin_copy`) on row `row`.
     pub(crate) fn plugin_paste(&mut self, row: usize, index: usize, blob: &[u8]) {
-        if self.state.session.plugins.create_with(row, index, Some(blob)).is_ok() {
-            if !self.state.session.hosted_rows.contains(&row) {
-                self.state.session.hosted_rows.push(row);
-            }
-            self.transport.set_instruments(self.state.session.plugins.instruments());
-        }
+        self.host(|s, t| plugin_paste_in(s, t, row, index, blob));
     }
 
     /// A PATTERNS command from the menu bar, the pattern menu or its key: the ones that open dialogs here, the others
@@ -23673,7 +23658,7 @@ mod tests {
         pl::arr_mut(&mut a.state.session).clips.push(os_model::Clip::new(0, 8 * ppq, 0, os_model::ClipSource::Pattern(1)));
         // The EQ's master gain automated from its lowest to its highest over the eight beats.
         a.params_tick();
-        let master = a.state.params.lists[&key].params.iter().position(|p| p.name == "Master").expect("a Master parameter");
+        let master = a.state.session.params.lists[&key].params.iter().position(|p| p.name == "Master").expect("a Master parameter");
         println!("automate: {:?}", a.params_automate(key, master));
         let auto = a.state.session.project.channels.last().unwrap().index;
         {
@@ -23845,8 +23830,8 @@ mod tests {
         // Kars' copy edited by the user (Paste value onto its last parameter, Volume, in the parameter menu): saved as
         // that copy with its state.
         assert_eq!(v.browse_params(row), None);
-        let last = v.state.params.lists[&row].params.len() - 1;
-        let id = v.state.params.lists[&row].params[last].id;
+        let last = v.state.session.params.lists[&row].params.len() - 1;
+        let id = v.state.session.params.lists[&row].params[last].id;
         let x = v.state.session.plugins.hosted[&row].plugin.lock().unwrap().param_value(id).unwrap();
         v.state.value_clip = Some(if x > 0.5 { 0.25 } else { 0.75 });
         assert_eq!(crate::playlist::run(&mut v, crate::playlist::Cmd::Param(crate::params::PCmd::Paste(row, last))), None);
@@ -24640,5 +24625,28 @@ mod detach_tests {
         assert_ne!(probe(&app), before, "it scrolled");
         app.mouse_up_from(Some(Win::Mixer));
         assert!(!app.cursor_locked());
+    }
+}
+
+/// `App::remap_rows` in the session: the instances follow rows that moved (`m` gives each row's new row), after the
+/// notes held from the keyboard ended.
+pub(crate) fn remap_rows_in(s: &mut crate::session::Session, transport: &crate::transport::Transport, m: &dyn Fn(usize) -> Option<usize>) {
+    s.plugins.remap(m);
+    // The rows hosted are the instances' rows.
+    s.hosted_rows = s.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
+    s.plugins.sampler_failed = s.plugins.sampler_failed.iter().filter_map(|&r| m(r)).collect();
+    s.plugins.wrap_failed = s.plugins.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+    s.plugins.native_failed = s.plugins.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+    transport.set_instruments(s.plugins.instruments());
+    s.dirty = true;
+}
+
+/// `App::plugin_paste` in the session: row `row` hosts available plugin `index` from saved state `blob`.
+pub(crate) fn plugin_paste_in(s: &mut crate::session::Session, transport: &crate::transport::Transport, row: usize, index: usize, blob: &[u8]) {
+    if s.plugins.create_with(row, index, Some(blob)).is_ok() {
+        if !s.hosted_rows.contains(&row) {
+            s.hosted_rows.push(row);
+        }
+        transport.set_instruments(s.plugins.instruments());
     }
 }
