@@ -242,6 +242,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             clip_paint(ui, s, &g, i, c);
         }
     }
+    stack_edges(ui, s, &g, grid);
     ripples(ui, s, &g);
     // Performance mode: the part of the zone the MIDI channel's notes reach (spec: ui/performance-mode.md §3).
     if let Some((tr, n, a, b)) = crate::perform::grid_area(s) {
@@ -901,6 +902,42 @@ fn ripples(ui: &mut Ui, s: &State, g: &PGeom) {
 
 /// One clip (§2): a near-black outline with rounded top corners, the title strip (pattern clips neutral, audio and
 /// automation clips in their channel's colour), the body in the track's colour, then the content.
+/// Clips of one track at once (a copy laid on another, or two overlapping in part): each lies on the ones before it,
+/// whose edges show as a stack above it over the time they share, a 2 px layer for each clip under it, three at most,
+/// as the piano roll's notes. The clips keep their places; only the layers tell that more lie there.
+fn stack_edges(ui: &mut Ui, s: &State, g: &PGeom, grid: Rect) {
+    const LAYER: f32 = 2.0;
+    const MOST: usize = 3;
+    let t = ui.t;
+    // Clips in view, by track, in painting order (a collapsed group's strip shows none).
+    let mut tracks: std::collections::BTreeMap<u16, Vec<Rect>> = std::collections::BTreeMap::new();
+    for c in pl::clips(s).iter().filter(|c| !g.rows.strip(c.track)) {
+        let r = g.clip_rect(c);
+        if r.right() > grid.x && r.x < grid.right() && r.bottom() > grid.y && r.y < grid.bottom() {
+            tracks.entry(c.track).or_default().push(r);
+        }
+    }
+    let (rim, face) = (cc(t, CLIP_BORDER), cc(t, TITLE_TOP));
+    for rects in tracks.values().filter(|v| v.len() > 1) {
+        for (a, r) in rects.iter().enumerate() {
+            let mut layer = 0;
+            for under in rects[..a].iter().rev() {
+                let (x0, x1) = (r.x.max(under.x) + 1.0, r.right().min(under.right()) - 1.0);
+                if x1 - x0 < 1.0 {
+                    continue;
+                }
+                layer += 1;
+                let y = r.y - LAYER * layer as f32;
+                ui.c.fill_rect(Rect::new(x0, y, x1 - x0, 1.0), rim);
+                ui.c.fill_rect(Rect::new(x0, y + 1.0, x1 - x0, LAYER - 1.0), face);
+                if layer == MOST {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let t = ui.t;
     let (r, clip_x) = g.clip_draw_rect(c);
