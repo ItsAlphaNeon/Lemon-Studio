@@ -71,6 +71,8 @@ pub struct Touched {
     pub rack_step: Option<u64>,
     /// What the views follow in this order, before the rest above.
     pub views: Vec<View>,
+    /// The window has to be drawn again (`App::host`).
+    pub repaint: bool,
 }
 
 /// A change the interface's views follow, in order (`Touched::views`).

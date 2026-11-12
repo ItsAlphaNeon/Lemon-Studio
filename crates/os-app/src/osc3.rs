@@ -127,51 +127,7 @@ impl crate::app::App {
     /// instance's state when the channel has none). A row waiting for the picker's own instance is left to it; a row
     /// whose instance failed is not tried again.
     pub(crate) fn sync_osc3(&mut self) {
-        // The installed 3x Osc plays these channels instead (`host_native`).
-        if crate::project_plugins::native_first() {
-            return;
-        }
-        let Some(index) = self.state.session.plugins.index_of(LEMON_TRIO) else { return };
-        let pending = self.state.session.pending_plugin.map(|(r, _)| r);
-        let rows: Vec<usize> = (0..self.state.session.project.channels.len())
-            .filter(|&r| is_osc3(&self.state.session.project.channels[r]))
-            .filter(|&r| !self.state.session.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && Some(r) != pending)
-            .collect();
-        if rows.is_empty() {
-            return;
-        }
-        let mut added = false;
-        for row in rows {
-            if self.past_deadline() {
-                break;
-            }
-            let ch = &self.state.session.project.channels[row];
-            let fl = ch.plugin_state.clone().unwrap_or_else(lemon_3x_osc::params::default_state);
-            let mut st = lemon_3x_osc::params::plugin_state_from_fl(&channel_voicing(ch, &fl));
-            // The channel's sample is the custom shape's (spec: plugins/3x-osc.md §1); the plugin opens the file
-            // directly, so factory placeholders become real paths.
-            let sample = crate::plugins::resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
-            if !sample.is_empty()
-                && let Some(b) = crate::plugins::with_sample_path(&st, &sample)
-            {
-                st = b;
-            }
-            match self.state.session.plugins.create_with(row, index, Some(&st)) {
-                Ok(_) => {
-                    self.state.session.hosted_rows.push(row);
-                    added = true;
-                }
-                Err(e) => {
-                    self.wrap_failed.push(row);
-                    self.state.message = Some(format!("{LEMON_TRIO}: {e}"));
-                }
-            }
-        }
-        if added {
-            self.transport.set_instruments(self.state.session.plugins.instruments());
-            self.state.session.dirty = true;
-        }
-        self.invalidate();
+        self.host(sync_osc3);
     }
 
     /// Every half second: a sample a hosted Lemon Trio loaded for its custom shape (its own file dialog) becomes its
@@ -191,6 +147,57 @@ impl crate::app::App {
             self.invalidate();
         }
     }
+}
+
+/// Hosts Lemon Trio on every 3x Osc channel without an instance, started from the channel's saved state (a new
+/// instance's state when the channel has none). A row waiting for the picker's own instance is left to it; a row
+/// whose instance failed is not tried again.
+pub(crate) fn sync_osc3(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    // The installed 3x Osc plays these channels instead (`host_native`).
+    if crate::project_plugins::native_first() {
+        return;
+    }
+    let Some(index) = s.plugins.index_of(LEMON_TRIO) else { return };
+    let pending = s.pending_plugin.map(|(r, _)| r);
+    let rows: Vec<usize> = (0..s.project.channels.len())
+        .filter(|&r| is_osc3(&s.project.channels[r]))
+        .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let mut added = false;
+    for row in rows {
+        if s.plugins.past_deadline() {
+            break;
+        }
+        let ch = &s.project.channels[row];
+        let fl = ch.plugin_state.clone().unwrap_or_else(lemon_3x_osc::params::default_state);
+        let mut st = lemon_3x_osc::params::plugin_state_from_fl(&channel_voicing(ch, &fl));
+        // The channel's sample is the custom shape's (spec: plugins/3x-osc.md §1); the plugin opens the file
+        // directly, so factory placeholders become real paths.
+        let sample = crate::plugins::resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
+        if !sample.is_empty()
+            && let Some(b) = crate::plugins::with_sample_path(&st, &sample)
+        {
+            st = b;
+        }
+        match s.plugins.create_with(row, index, Some(&st)) {
+            Ok(_) => {
+                s.hosted_rows.push(row);
+                added = true;
+            }
+            Err(e) => {
+                s.plugins.wrap_failed.push(row);
+                s.touched.views.push(crate::session::View::Message(format!("{LEMON_TRIO}: {e}")));
+            }
+        }
+    }
+    if added {
+        transport.set_instruments(s.plugins.instruments());
+        s.dirty = true;
+    }
+    s.touched.repaint = true;
 }
 
 #[cfg(test)]

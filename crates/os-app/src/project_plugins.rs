@@ -325,7 +325,7 @@ impl crate::app::App {
         let mut added = (false, false);
         let (mut missing, mut switched) = (Vec::new(), Vec::new());
         for row in 0..self.state.session.project.channels.len() {
-            if self.state.session.hosted_rows.contains(&row) || self.wrap_failed.contains(&row) {
+            if self.state.session.hosted_rows.contains(&row) || self.state.session.plugins.wrap_failed.contains(&row) {
                 continue;
             }
             let Some(r) = wrapped_channel(&self.state.session.project.channels[row]) else { continue };
@@ -351,11 +351,11 @@ impl crate::app::App {
                     switched.extend(other);
                 }
                 Some((_, Err(e))) => {
-                    self.wrap_failed.push(row);
+                    self.state.session.plugins.wrap_failed.push(row);
                     missing.push(format!("{} ({e})", r.name));
                 }
                 None => {
-                    self.wrap_failed.push(row);
+                    self.state.session.plugins.wrap_failed.push(row);
                     missing.push(r.name);
                 }
             }
@@ -367,7 +367,7 @@ impl crate::app::App {
             .iter()
             .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((m.index, k as u8, s.as_ref()?))))
             // Hosted and failed slots first: decoding a slot copies its whole saved state, and this runs every tick.
-            .filter(|&(t, k, _)| !self.state.session.plugins.hosted.contains_key(&fx_key(t, k)) && !self.wrap_failed.contains(&fx_key(t, k)))
+            .filter(|&(t, k, _)| !self.state.session.plugins.hosted.contains_key(&fx_key(t, k)) && !self.state.session.plugins.wrap_failed.contains(&fx_key(t, k)))
             .filter_map(|(t, k, s)| Some((t, k, wrapped_slot(s)?)))
             .collect();
         for (t, k, r) in slots {
@@ -388,11 +388,11 @@ impl crate::app::App {
                     switched.extend(other);
                 }
                 Some((_, Err(e))) => {
-                    self.wrap_failed.push(fx_key(t, k));
+                    self.state.session.plugins.wrap_failed.push(fx_key(t, k));
                     missing.push(format!("{} ({e})", r.name));
                 }
                 None => {
-                    self.wrap_failed.push(fx_key(t, k));
+                    self.state.session.plugins.wrap_failed.push(fx_key(t, k));
                     missing.push(r.name);
                 }
             }
@@ -442,7 +442,7 @@ impl crate::app::App {
         let mut added = (false, false);
         let (mut hosted, mut kept, mut missing, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let rows: Vec<(usize, String, Option<Vec<u8>>)> = (0..self.state.session.project.channels.len())
-            .filter(|&r| !self.state.session.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && !self.native_failed.contains(&r) && Some(r) != pending)
+            .filter(|&r| !self.state.session.hosted_rows.contains(&r) && !self.state.session.plugins.wrap_failed.contains(&r) && !self.state.session.plugins.native_failed.contains(&r) && Some(r) != pending)
             .filter_map(|r| {
                 let ch = &self.state.session.project.channels[r];
                 // Lemon MIDI Out plays MIDI Out channels (`lemon_midi_out`), a container's chain a container's
@@ -460,7 +460,7 @@ impl crate::app::App {
             }
             let Some(i) = find_native(&self.state.session.plugins.available, &name) else {
                 if !scanning {
-                    self.native_failed.push(row);
+                    self.state.session.plugins.native_failed.push(row);
                     missing.push(name);
                 }
                 continue;
@@ -478,7 +478,7 @@ impl crate::app::App {
                     hosted.push(name);
                 }
                 Err(e) => {
-                    self.native_failed.push(row);
+                    self.state.session.plugins.native_failed.push(row);
                     failed.push(format!("{name} ({e})"));
                 }
             }
@@ -492,7 +492,7 @@ impl crate::app::App {
             // Before the states are copied: this runs every tick, and an Edison slot's can be tens of megabytes.
             .filter(|&(t, k, s)| {
                 let key = fx_key(t, k);
-                !s.name.is_empty() && s.name != WRAPPER && s.name != crate::container::CONTAINER && !self.state.session.plugins.hosted.contains_key(&key) && !self.native_failed.contains(&key)
+                !s.name.is_empty() && s.name != WRAPPER && s.name != crate::container::CONTAINER && !self.state.session.plugins.hosted.contains_key(&key) && !self.state.session.plugins.native_failed.contains(&key)
             })
             .map(|(t, k, s)| (t, k, s.name.clone(), s.state.clone()))
             .collect();
@@ -503,7 +503,7 @@ impl crate::app::App {
             let key = fx_key(t, k);
             let Some(i) = find_native(&self.state.session.plugins.effects, &name) else {
                 if !scanning {
-                    self.native_failed.push(key);
+                    self.state.session.plugins.native_failed.push(key);
                     missing.push(name);
                 }
                 continue;
@@ -520,7 +520,7 @@ impl crate::app::App {
                     hosted.push(name);
                 }
                 Err(e) => {
-                    self.native_failed.push(key);
+                    self.state.session.plugins.native_failed.push(key);
                     failed.push(format!("{name} ({e})"));
                 }
             }
@@ -588,8 +588,8 @@ impl crate::app::App {
         }
         // Either side may try the moved channels and slots again (a recreation that failed before, or a missing
         // native plugin); so may any other channel or slot a recreation plays.
-        let all: Vec<usize> = self.wrap_failed.iter().chain(&self.fx_failed).chain(&self.native_failed).copied().filter(|&k| id_of_key(&self.state.session.project, k).is_some_and(|id| has_recreation(&id))).collect();
-        for list in [&mut self.wrap_failed, &mut self.fx_failed, &mut self.native_failed] {
+        let all: Vec<usize> = self.state.session.plugins.wrap_failed.iter().chain(&self.state.session.plugins.fx_failed).chain(&self.state.session.plugins.native_failed).copied().filter(|&k| id_of_key(&self.state.session.project, k).is_some_and(|id| has_recreation(&id))).collect();
+        for list in [&mut self.state.session.plugins.wrap_failed, &mut self.state.session.plugins.fx_failed, &mut self.state.session.plugins.native_failed] {
             list.retain(|k| !all.contains(k));
         }
         if !swap.is_empty() {
@@ -975,7 +975,7 @@ mod tests {
         assert_eq!(a.state.session.plugins.state(gross), Some(vec![7, 8, 9, 0xEE]));
         assert!(!a.state.session.plugins.hosted[&harmor].keep_file_state && !a.state.session.plugins.hosted[&balance].keep_file_state);
         assert!(a.state.session.plugins.hosted[&gross].keep_file_state);
-        assert!(!a.state.session.hosted_rows.contains(&sytrus) && a.native_failed.contains(&sytrus));
+        assert!(!a.state.session.hosted_rows.contains(&sytrus) && a.state.session.plugins.native_failed.contains(&sytrus));
         let msg = a.state.message.clone().unwrap_or_default();
         assert!(msg.contains("Harmor") && msg.contains("Gross Beat") && msg.contains("not installed") && msg.contains("Sytrus"), "{msg}");
         // Another tick changes nothing.
@@ -1062,7 +1062,7 @@ mod tests {
         let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), "Harmor");
         a.sweep = Some(crate::plugin_scan::Sweep::idle());
         a.host_native();
-        assert!(!a.state.session.hosted_rows.contains(&row) && a.native_failed.is_empty());
+        assert!(!a.state.session.hosted_rows.contains(&row) && a.state.session.plugins.native_failed.is_empty());
         a.sweep = None;
         a.state.session.plugins.available = vec![native_stand_in("Harmor", os_host::Kind::Instrument, true)];
         a.host_native();
@@ -1105,7 +1105,7 @@ mod tests {
         assert_ne!(defaults, Some(fl.clone()));
         assert_eq!(a.state.session.plugins.eq_file_state(fx_key(2, 0)), defaults, "the VST2 copy's state is not given to the CLAP plugin");
         assert_eq!(a.state.session.plugins.eq_file_state(fx_key(3, 0)), Some(fl), "the CLAP state is");
-        assert!(a.wrap_failed.contains(&row));
+        assert!(a.state.session.plugins.wrap_failed.contains(&row));
         let told = format!(
             "Plugins not found (kept in the project): Nowhere; Played by a copy in another format, from its default settings \
              (saved as the original until edited): {LEMON_EQ} (VST2 as CLAP)"

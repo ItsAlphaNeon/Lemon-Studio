@@ -88,40 +88,7 @@ impl crate::app::App {
     /// (a new instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose
     /// instance failed is not tried again.
     pub(crate) fn sync_slicer(&mut self) {
-        if crate::project_plugins::native_first() {
-            return;
-        }
-        let Some(index) = self.state.session.plugins.index_of(LEMON_SLICER) else { return };
-        let pending = self.state.session.pending_plugin.map(|(r, _)| r);
-        let rows: Vec<usize> = (0..self.state.session.project.channels.len())
-            .filter(|&r| is_slicer(&self.state.session.project.channels[r]))
-            .filter(|&r| !self.state.session.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && Some(r) != pending)
-            .collect();
-        if rows.is_empty() {
-            return;
-        }
-        let mut added = false;
-        for row in rows {
-            if self.past_deadline() {
-                break;
-            }
-            let fl = self.state.session.project.channels[row].plugin_state.clone().unwrap_or_default();
-            match self.state.session.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
-                Ok(_) => {
-                    self.state.session.hosted_rows.push(row);
-                    added = true;
-                }
-                Err(e) => {
-                    self.wrap_failed.push(row);
-                    self.state.message = Some(format!("{LEMON_SLICER}: {e}"));
-                }
-            }
-        }
-        if added {
-            self.transport.set_instruments(self.state.session.plugins.instruments());
-            self.state.session.dirty = true;
-        }
-        self.invalidate();
+        self.host(sync_slicer);
     }
 
     /// Notes a plugin sent for channel row `row` (Lemon Slicer's dump): they replace the channel's notes in the
@@ -148,6 +115,46 @@ impl crate::app::App {
         s.message = Some(format!("Dumped {} notes to the piano roll", notes.len()));
         self.invalidate();
     }
+}
+
+/// Hosts Lemon Slicer on every Fruity Slicer channel without an instance, started from the channel's saved state
+/// (a new instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose
+/// instance failed is not tried again.
+pub(crate) fn sync_slicer(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    if crate::project_plugins::native_first() {
+        return;
+    }
+    let Some(index) = s.plugins.index_of(LEMON_SLICER) else { return };
+    let pending = s.pending_plugin.map(|(r, _)| r);
+    let rows: Vec<usize> = (0..s.project.channels.len())
+        .filter(|&r| is_slicer(&s.project.channels[r]))
+        .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let mut added = false;
+    for row in rows {
+        if s.plugins.past_deadline() {
+            break;
+        }
+        let fl = s.project.channels[row].plugin_state.clone().unwrap_or_default();
+        match s.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
+            Ok(_) => {
+                s.hosted_rows.push(row);
+                added = true;
+            }
+            Err(e) => {
+                s.plugins.wrap_failed.push(row);
+                s.touched.views.push(crate::session::View::Message(format!("{LEMON_SLICER}: {e}")));
+            }
+        }
+    }
+    if added {
+        transport.set_instruments(s.plugins.instruments());
+        s.dirty = true;
+    }
+    s.touched.repaint = true;
 }
 
 #[cfg(test)]

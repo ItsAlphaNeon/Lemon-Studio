@@ -536,32 +536,7 @@ impl crate::app::App {
     /// Every MIDI Out channel has its instrument, with the channel's settings and levels; rows that are no longer MIDI
     /// Out channels lose theirs. Runs every tick.
     pub(crate) fn sync_midi_outs(&mut self) {
-        let rows: Vec<(usize, Live)> = self.state.session.project.channels.iter().enumerate().filter(|(_, c)| is_midi_out(c)).map(|(r, c)| (r, Live::of(c))).collect();
-        let outs = &mut self.state.session.plugins.midi_outs;
-        if rows.is_empty() && outs.is_empty() {
-            return;
-        }
-        let before = outs.len();
-        outs.retain(|r, _| rows.iter().any(|(x, _)| x == r));
-        let mut changed = outs.len() != before;
-        for (row, live) in rows {
-            match outs.get(&row) {
-                Some(i) => {
-                    if let Ok(mut i) = i.lock() {
-                        if i.live != live {
-                            i.live = live;
-                        }
-                    }
-                }
-                None => {
-                    outs.insert(row, Arc::new(std::sync::Mutex::new(MidiOutInstrument::new(live, queue().clone()))));
-                    changed = true;
-                }
-            }
-        }
-        if changed {
-            self.transport.set_instruments(self.state.session.plugins.instruments());
-        }
+        self.host(sync_midi_outs);
     }
 
     /// ADD ▸ MIDI Out (spec §6.2): a MIDI Out channel on the master track, its window open. One undo step, "Add
@@ -601,9 +576,9 @@ impl crate::app::App {
                 app.state.session.plugins.drop_key(row);
             }
             app.state.session.hosted_rows.retain(|r| !rows.contains(r));
-            app.sampler_failed.retain(|r| !rows.contains(r));
-            app.native_failed.retain(|r| !rows.contains(r));
-            app.wrap_failed.retain(|r| !rows.contains(r));
+            app.state.session.plugins.sampler_failed.retain(|r| !rows.contains(r));
+            app.state.session.plugins.native_failed.retain(|r| !rows.contains(r));
+            app.state.session.plugins.wrap_failed.retain(|r| !rows.contains(r));
             let s = &mut app.state;
             let groups = cut_groups(&rows.iter().map(|&r| s.session.project.channels[r].misc.cut).collect::<Vec<_>>());
             for (i, &row) in rows.iter().enumerate() {
@@ -621,6 +596,37 @@ impl crate::app::App {
         });
         let n = rows.len();
         format!("Set up for MIDI export: {n} channel{} now play{} Lemon MIDI Out", if n == 1 { "" } else { "s" }, if n == 1 { "s" } else { "" })
+    }
+}
+
+/// Every MIDI Out channel has its instrument, with the channel's settings and levels; rows that are no longer MIDI
+/// Out channels lose theirs. Runs every tick.
+pub(crate) fn sync_midi_outs(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    let rows: Vec<(usize, Live)> = s.project.channels.iter().enumerate().filter(|(_, c)| is_midi_out(c)).map(|(r, c)| (r, Live::of(c))).collect();
+    let outs = &mut s.plugins.midi_outs;
+    if rows.is_empty() && outs.is_empty() {
+        return;
+    }
+    let before = outs.len();
+    outs.retain(|r, _| rows.iter().any(|(x, _)| x == r));
+    let mut changed = outs.len() != before;
+    for (row, live) in rows {
+        match outs.get(&row) {
+            Some(i) => {
+                if let Ok(mut i) = i.lock() {
+                    if i.live != live {
+                        i.live = live;
+                    }
+                }
+            }
+            None => {
+                outs.insert(row, Arc::new(std::sync::Mutex::new(MidiOutInstrument::new(live, queue().clone()))));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        transport.set_instruments(s.plugins.instruments());
     }
 }
 

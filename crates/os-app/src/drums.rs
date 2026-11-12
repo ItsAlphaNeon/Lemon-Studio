@@ -67,41 +67,48 @@ impl crate::app::App {
     /// instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose instance
     /// failed is not tried again.
     pub(crate) fn sync_drums(&mut self) {
-        if crate::project_plugins::native_first() {
-            return;
-        }
-        let Some(index) = self.state.session.plugins.index_of(LEMON_DRUMS) else { return };
-        let pending = self.state.session.pending_plugin.map(|(r, _)| r);
-        let rows: Vec<usize> = (0..self.state.session.project.channels.len())
-            .filter(|&r| is_fpc(&self.state.session.project.channels[r]))
-            .filter(|&r| !self.state.session.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && Some(r) != pending)
-            .collect();
-        if rows.is_empty() {
-            return;
-        }
-        let mut added = false;
-        for row in rows {
-            if self.past_deadline() {
-                break;
-            }
-            let fl = self.state.session.project.channels[row].plugin_state.clone().unwrap_or_default();
-            match self.state.session.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
-                Ok(_) => {
-                    self.state.session.hosted_rows.push(row);
-                    added = true;
-                }
-                Err(e) => {
-                    self.wrap_failed.push(row);
-                    self.state.message = Some(format!("{LEMON_DRUMS}: {e}"));
-                }
-            }
-        }
-        if added {
-            self.transport.set_instruments(self.state.session.plugins.instruments());
-            self.state.session.dirty = true;
-        }
-        self.invalidate();
+        self.host(sync_drums);
     }
+}
+
+/// Hosts Lemon Drum Sampler on every FPC channel without an instance, started from the channel's saved state (a new
+/// instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose instance
+/// failed is not tried again.
+pub(crate) fn sync_drums(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    if crate::project_plugins::native_first() {
+        return;
+    }
+    let Some(index) = s.plugins.index_of(LEMON_DRUMS) else { return };
+    let pending = s.pending_plugin.map(|(r, _)| r);
+    let rows: Vec<usize> = (0..s.project.channels.len())
+        .filter(|&r| is_fpc(&s.project.channels[r]))
+        .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let mut added = false;
+    for row in rows {
+        if s.plugins.past_deadline() {
+            break;
+        }
+        let fl = s.project.channels[row].plugin_state.clone().unwrap_or_default();
+        match s.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
+            Ok(_) => {
+                s.hosted_rows.push(row);
+                added = true;
+            }
+            Err(e) => {
+                s.plugins.wrap_failed.push(row);
+                s.touched.views.push(crate::session::View::Message(format!("{LEMON_DRUMS}: {e}")));
+            }
+        }
+    }
+    if added {
+        transport.set_instruments(s.plugins.instruments());
+        s.dirty = true;
+    }
+    s.touched.repaint = true;
 }
 
 #[cfg(test)]

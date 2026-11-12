@@ -343,6 +343,28 @@ pub struct Plugins {
     pub next_member: usize,
     /// The Lemon MIDI Out instruments, by rack row (`App::sync_midi_outs`; spec: plugins/midi-out.md §6).
     pub midi_outs: BTreeMap<usize, std::sync::Arc<std::sync::Mutex<crate::lemon_midi_out::MidiOutInstrument>>>,
+    /// Sampler channel rows whose Lemon Sampler instance could not be created (not retried).
+    pub sampler_failed: Vec<usize>,
+    /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ could not start (not retried).
+    pub fx_failed: Vec<usize>,
+    /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
+    pub wrap_failed: Vec<usize>,
+    /// Plugin channels (rows) and slots (`fx_key`) naming a native plugin that is not installed or did not start
+    /// (not retried; spec: plugins/fruity-abi.md "Opened projects").
+    pub native_failed: Vec<usize>,
+    /// While a project loads: when the plugin hosts stop for this tick (`host_plugins`), and whether one stopped with
+    /// instances left to start.
+    pub host_deadline: Option<std::time::Instant>,
+    pub host_more: bool,
+}
+
+impl Plugins {
+    /// While a project loads, the hosting of this tick is over (`host_deadline`): it goes on at the next.
+    pub fn past_deadline(&mut self) -> bool {
+        let past = self.host_deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        self.host_more |= past;
+        past
+    }
 }
 
 /// How many gone instances `Plugins::stash` keeps.

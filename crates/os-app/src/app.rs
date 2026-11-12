@@ -1488,32 +1488,19 @@ pub struct App {
     piano_win: Option<Rect>,
     pub(crate) piano_grid: Option<Rect>,
     piano_panel: Option<Rect>,
-    /// Sampler channel rows whose Lemon Sampler instance could not be created (not retried).
-    pub(crate) sampler_failed: Vec<usize>,
     /// The control plane's socket (`--control`), when it listens.
     pub rpc_server: Option<crate::control::server::Server>,
-    /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ could not start (not retried).
-    pub(crate) fx_failed: Vec<usize>,
     /// The running plugin scan, and the scan asked for while it runs (spec: ui/plugin-manager.md §4).
     pub(crate) sweep: Option<crate::plugin_scan::Sweep>,
     pub(crate) scan_queued: Option<crate::plugin_db::Mode>,
-    /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
-    pub(crate) wrap_failed: Vec<usize>,
     /// When the Lemon Trio instances were last looked at for a sample they loaded (`follow_osc3_samples`).
     pub(crate) osc3_look: Option<std::time::Instant>,
-    /// Plugin channels (rows) and slots (`fx_key`) naming a native plugin that is not installed or did not start
-    /// (not retried; spec: plugins/fruity-abi.md "Opened projects").
-    pub(crate) native_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
     /// The opened project's missing samples and plugins (`crate::missing`).
     pub(crate) missing: crate::missing::Missing,
     /// A zipped project being unzipped or written (`crate::zipped`): its panel shows, input waits.
     pub(crate) zipping: Option<crate::zipped::Zipping>,
-    /// While a project loads: when the plugin hosts stop for this tick (`host_plugins`), and whether one stopped with
-    /// instances left to start.
-    host_deadline: Option<std::time::Instant>,
-    host_more: bool,
     /// An export is rendering (FILE > Export): its first file's name and progress (0..1); the same panel shows, input
     /// waits.
     pub(crate) export: Option<(String, f32)>,
@@ -1720,19 +1707,13 @@ impl App {
             piano_win: None,
             piano_grid: None,
             piano_panel: None,
-            sampler_failed: Vec::new(),
             rpc_server: None,
-            fx_failed: Vec::new(),
             sweep: None,
             scan_queued: None,
-            wrap_failed: Vec::new(),
             osc3_look: None,
-            native_failed: Vec::new(),
             loading: None,
             missing: Default::default(),
             zipping: None,
-            host_deadline: None,
-            host_more: false,
             export: None,
             export_reveal: false,
             pattern_render: None,
@@ -2543,10 +2524,10 @@ impl App {
         self.loading = None;
         self.state.session.samples.wait = false;
         self.state.session.hosted_rows.clear();
-        self.sampler_failed.clear();
-        self.fx_failed.clear();
-        self.wrap_failed.clear();
-        self.native_failed.clear();
+        self.state.session.plugins.sampler_failed.clear();
+        self.state.session.plugins.fx_failed.clear();
+        self.state.session.plugins.wrap_failed.clear();
+        self.state.session.plugins.native_failed.clear();
         self.transport.set_instruments(Vec::new());
         self.transport.set_effects(Vec::new());
     }
@@ -2561,7 +2542,7 @@ impl App {
         let mut done = true;
         for row in 0..self.state.session.project.channels.len() {
             let ch = &self.state.session.project.channels[row];
-            if !ch.kind.is_sampler() || self.state.session.hosted_rows.contains(&row) || self.sampler_failed.contains(&row) {
+            if !ch.kind.is_sampler() || self.state.session.hosted_rows.contains(&row) || self.state.session.plugins.sampler_failed.contains(&row) {
                 continue;
             }
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -2584,7 +2565,7 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    self.sampler_failed.push(row);
+                    self.state.session.plugins.sampler_failed.push(row);
                     self.state.message = Some(format!("Lemon Sampler: {e}"));
                 }
             }
@@ -2619,8 +2600,8 @@ impl App {
     /// Starts the opened project's plugin channels and mixer effects until `deadline` (`project_plugins::sync_wrapped`
     /// and the other hosts stop after the instance that passes it): true when none is left to start.
     fn host_plugins(&mut self, deadline: std::time::Instant) -> bool {
-        self.host_deadline = Some(deadline);
-        self.host_more = false;
+        self.state.session.plugins.host_deadline = Some(deadline);
+        self.state.session.plugins.host_more = false;
         self.sync_effects();
         self.sync_wrapped();
         self.sync_osc3();
@@ -2629,10 +2610,10 @@ impl App {
         self.sync_slicer();
         self.sync_drums();
         self.sync_native();
-        self.host_deadline = None;
+        self.state.session.plugins.host_deadline = None;
         let samplers = self.state.session.hosted_rows.iter().filter(|&&r| self.state.session.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
-        let done = (self.state.session.plugins.hosted.len() + self.wrap_failed.len() + self.fx_failed.len() + self.native_failed.len()).saturating_sub(samplers);
-        let more = self.host_more;
+        let done = (self.state.session.plugins.hosted.len() + self.state.session.plugins.wrap_failed.len() + self.state.session.plugins.fx_failed.len() + self.state.session.plugins.native_failed.len()).saturating_sub(samplers);
+        let more = self.state.session.plugins.host_more;
         if let Some(l) = &mut self.loading {
             l.label.clear();
             l.plugins_done = done;
@@ -2646,9 +2627,18 @@ impl App {
 
     /// Whether the plugin hosts' time this tick is over (`host_plugins`): the host that asks stops and goes on next tick.
     pub(crate) fn past_deadline(&mut self) -> bool {
-        let past = self.host_deadline.is_some_and(|d| std::time::Instant::now() >= d);
-        self.host_more |= past;
-        past
+        self.state.session.plugins.past_deadline()
+    }
+
+    /// `f`, the plugin host's part of a tick on the session and the transport, with the views following it and the
+    /// window drawn again when it asks.
+    pub(crate) fn host<R>(&mut self, f: impl FnOnce(&mut crate::session::Session, &crate::transport::Transport) -> R) -> R {
+        let b = crate::follow::before(&self.state);
+        let r = f(&mut self.state.session, &self.transport);
+        if crate::follow::after(&mut self.state, b) | std::mem::take(&mut self.state.session.touched.repaint) {
+            self.invalidate();
+        }
+        r
     }
 
     /// A project is loading or an export is rendering: the window shows the progress and takes no input (spec:
@@ -2670,71 +2660,7 @@ impl App {
     /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6), and the FL effects
     /// another Lemon effect recreates (`plugins::FL_RECREATIONS`: Reeverb 2, Balance, Chorus, ...) by that effect.
     pub(crate) fn sync_effects(&mut self) {
-        use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
-        // The installed EQ plays these slots instead (`host_native`).
-        if crate::project_plugins::native_first() {
-            return;
-        }
-        // Runs every tick: the slots already hosted are passed over before their states are read, as an Edison slot's
-        // can hold tens of megabytes of audio.
-        let todo: Vec<(u16, u8, String)> = self
-            .state
-            .session.project
-            .mixer
-            .iter()
-            .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
-            .filter(|&(t, k, _)| !self.state.session.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
-            .filter_map(|(t, k, s)| {
-                s.as_ref()
-                    .filter(|s| {
-                        [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str())
-                            || crate::plugins::recreation_of(&s.name).is_some()
-                    })
-                    .map(|s| (t, k, s.name.clone()))
-            })
-            .collect();
-        let mut made = false;
-        for (t, k, file) in todo {
-            if self.past_deadline() {
-                break;
-            }
-            let recreation = crate::plugins::recreation_of(&file);
-            let name = match file.as_str() {
-                EQ_FILE_NAME => LEMON_EQ,
-                LOVE_PHILTER_FILE_NAME => PULP_FILTER,
-                MAXIMUS_FILE_NAME => PRESS,
-                _ => recreation.unwrap_or(TESLA),
-            };
-            let Some(index) = self.state.session.plugins.effect_index(name) else { continue };
-            let track = self.state.session.project.mixer.iter().find(|m| m.index == t);
-            let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
-            let st = if file == EQ_FILE_NAME {
-                Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
-            } else if file == LOVE_PHILTER_FILE_NAME {
-                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
-                Some(pulp_filter::plugin_state_from_fl(fl))
-            } else if file == MAXIMUS_FILE_NAME {
-                // Bytes that are not a Maximus state open Press's starting state.
-                Some(press::plugin_state_from_fl(fl))
-            } else if let Some(lemon) = recreation {
-                // A state shorter than the original's, or of a later version, opens the defaults (spec:
-                // plugins/lemon-small-effects.md §5).
-                crate::plugins::recreation_state_from_fl(lemon, fl)
-            } else {
-                // Bytes that are not an Edison state open an empty Tesla.
-                tesla::plugin_state_from_edison(fl)
-            };
-            made = true;
-            if let Err(e) = self.state.session.plugins.create_effect(t, k, index, st.as_deref()) {
-                self.fx_failed.push(fx_key(t, k));
-                self.state.message = Some(format!("{name}: {e}"));
-            }
-        }
-        if !made {
-            return;
-        }
-        self.transport.set_effects(self.state.session.plugins.effects());
-        self.state.session.dirty = true;
+        self.host(sync_effects);
     }
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
@@ -9241,7 +9167,7 @@ impl App {
         } else if s.session.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
             // Not hosted yet (just added): Lemon Sampler starts on the next tick and its window opens then.
             s.session.pending_open = Some(i);
-            self.sampler_failed.retain(|&r| r != i);
+            self.state.session.plugins.sampler_failed.retain(|&r| r != i);
         } else {
             if !s.shown(Win::Plugin) && !s.plugin_moved {
                 s.plugin_pos = crate::arrange::channel_home(s);
@@ -9482,9 +9408,9 @@ impl App {
         self.state.session.plugins.remap(m);
         // The rows hosted are the instances' rows.
         self.state.session.hosted_rows = self.state.session.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
-        self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();
-        self.wrap_failed = self.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
-        self.native_failed = self.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+        self.state.session.plugins.sampler_failed = self.state.session.plugins.sampler_failed.iter().filter_map(|&r| m(r)).collect();
+        self.state.session.plugins.wrap_failed = self.state.session.plugins.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+        self.state.session.plugins.native_failed = self.state.session.plugins.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
         self.transport.set_instruments(self.state.session.plugins.instruments());
         self.state.session.dirty = true;
     }
@@ -9707,6 +9633,78 @@ impl App {
         self.state.playlist.popup = Some(crate::playlist::Popup { x: at.right(), y: at.y - 2.0, items, sub: None, scroll: [0; 2] });
         self.state.menu_sub = Some(i);
     }
+}
+
+/// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ, started
+/// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
+/// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
+/// settings (spec: plugins/tesla/README.md "Opening Edison slots"), Love Philter's as Pulp Filter and Maximus's as
+/// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6), and the FL effects
+/// another Lemon effect recreates (`plugins::FL_RECREATIONS`: Reeverb 2, Balance, Chorus, ...) by that effect.
+pub(crate) fn sync_effects(ses: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
+    // The installed EQ plays these slots instead (`host_native`).
+    if crate::project_plugins::native_first() {
+        return;
+    }
+    // Runs every tick: the slots already hosted are passed over before their states are read, as an Edison slot's
+    // can hold tens of megabytes of audio.
+    let todo: Vec<(u16, u8, String)> = ses.project
+        .mixer
+        .iter()
+        .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
+        .filter(|&(t, k, _)| !ses.plugins.hosted.contains_key(&fx_key(t, k)) && !ses.plugins.fx_failed.contains(&fx_key(t, k)))
+        .filter_map(|(t, k, s)| {
+            s.as_ref()
+                .filter(|s| {
+                    [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str())
+                        || crate::plugins::recreation_of(&s.name).is_some()
+                })
+                .map(|s| (t, k, s.name.clone()))
+        })
+        .collect();
+    let mut made = false;
+    for (t, k, file) in todo {
+        if ses.plugins.past_deadline() {
+            break;
+        }
+        let recreation = crate::plugins::recreation_of(&file);
+        let name = match file.as_str() {
+            EQ_FILE_NAME => LEMON_EQ,
+            LOVE_PHILTER_FILE_NAME => PULP_FILTER,
+            MAXIMUS_FILE_NAME => PRESS,
+            _ => recreation.unwrap_or(TESLA),
+        };
+        let Some(index) = ses.plugins.effect_index(name) else { continue };
+        let track = ses.project.mixer.iter().find(|m| m.index == t);
+        let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
+        let st = if file == EQ_FILE_NAME {
+            Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
+        } else if file == LOVE_PHILTER_FILE_NAME {
+            // Bytes that are not a Love Philter state open Pulp Filter's starting state.
+            Some(pulp_filter::plugin_state_from_fl(fl))
+        } else if file == MAXIMUS_FILE_NAME {
+            // Bytes that are not a Maximus state open Press's starting state.
+            Some(press::plugin_state_from_fl(fl))
+        } else if let Some(lemon) = recreation {
+            // A state shorter than the original's, or of a later version, opens the defaults (spec:
+            // plugins/lemon-small-effects.md §5).
+            crate::plugins::recreation_state_from_fl(lemon, fl)
+        } else {
+            // Bytes that are not an Edison state open an empty Tesla.
+            tesla::plugin_state_from_edison(fl)
+        };
+        made = true;
+        if let Err(e) = ses.plugins.create_effect(t, k, index, st.as_deref()) {
+            ses.plugins.fx_failed.push(fx_key(t, k));
+            ses.touched.views.push(crate::session::View::Message(format!("{name}: {e}")));
+        }
+    }
+    if !made {
+        return;
+    }
+    transport.set_effects(ses.plugins.effects());
+    ses.dirty = true;
 }
 
 impl App {
