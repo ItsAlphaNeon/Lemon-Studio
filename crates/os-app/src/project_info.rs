@@ -98,11 +98,11 @@ fn work_time_now() -> WorkTime {
     os_flp::project::work_time_now()
 }
 
-/// The project as it is saved (`App::save_to`): its time spent includes the session's clock (spec:
-/// flp/events/project-info.md "Writer notes": "then adds the time spent").
-pub(crate) fn stamp(s: &State, p: &mut Project) {
+/// The time spent on the project as a save writes it (`App::write_project`): the file's start, and what was spent
+/// before plus the session's clock (spec: flp/events/project-info.md "Writer notes": "then adds the time spent").
+pub(crate) fn saved_work_time(s: &State) -> WorkTime {
     let started = s.session.project.work_time.map_or_else(|| work_time_now().started, |w| w.started);
-    p.work_time = Some(WorkTime { started, spent: spent_days(s, crate::anim::now()) });
+    WorkTime { started, spent: spent_days(s, crate::anim::now()) }
 }
 
 /// A project was opened (`App::open`): one whose file has no start is started now, as a writer creating a project does

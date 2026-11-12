@@ -119,17 +119,15 @@ pub fn can_rename(s: &State) -> bool {
     s.session.path.is_some() && choice(&s.session.project) != DataFolder::NONE && folder(s).is_some()
 }
 
-/// Before the project is written as `proj`: event 202 gets the data folder in use, which for "relative" is the project
-/// file's folder, whatever 202 said (spec: ui/data-folder.md §2: "the next save wrote that folder into 202"). The
-/// folder is the one of the file the project was opened from or last saved as, so Save as writes the folder it leaves
-/// (flp/events/project-info.md, event 202). Other choices keep 202 as it is.
-pub fn stamp(s: &State, proj: &mut Project) {
+/// What a save writes into event 202 (`App::write_project`): the data folder in use, which for "relative" is the
+/// project file's folder, whatever 202 said (spec: ui/data-folder.md §2: "the next save wrote that folder into 202").
+/// The folder is the one of the file the project was opened from or last saved as, so Save as writes the folder it
+/// leaves (flp/events/project-info.md, event 202). Other choices keep 202 as it is (`None`).
+pub(crate) fn saved_folder(s: &State) -> Option<String> {
     if choice(&s.session.project) != DataFolder::RELATIVE {
-        return;
+        return None;
     }
-    if let (Some(dir), Some(df)) = (folder(s), proj.data_folder.as_mut()) {
-        df.folder = folder_text(&dir);
-    }
+    folder(s).map(|dir| folder_text(&dir))
 }
 
 /// Where a backup of the open project, saved as `path`, goes: with File ▸ Backup ▸ Location's "Save to the project data

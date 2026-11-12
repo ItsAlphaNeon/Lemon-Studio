@@ -1942,104 +1942,30 @@ impl App {
     fn write_project(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<u64> {
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
-        // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
-        // them.
-        for row in self.state.session.hosted_rows.clone() {
-            if self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
-                let lemon = self.state.session.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
-                if let Some(st) = self.state.session.plugins.state(row).filter(|_| lemon) {
-                    crate::plugins::store_sampler(&mut self.state.session.project.get_mut().channels[row], &st);
-                }
-                if let Some(p) = self.state.session.plugins.sampler_path(row) {
-                    // A placeholder path that still names the same file is kept as the project wrote it.
-                    let ch = &mut self.state.session.project.get_mut().channels[row];
-                    if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
-                        continue;
-                    }
-                    // An empty path: the sample was taken out (spec: flp/events/channels.md "Loop points (event 251)").
-                    if !p.is_empty() {
-                        ch.sample_path = Some(p);
-                    } else if ch.sample_path.is_some() {
-                        ch.clear_sample();
-                    }
-                }
-            }
-        }
+        crate::save::store_samplers(&mut self.state.session);
         // What the save writes into the project from the interface (below) reaches playback like any edit: the engine
         // holds the project as it is.
         let before = self.state.session.project.clone();
-        self.store_builtin_states();
         let s = &mut self.state;
-        let tempo = s.tempo();
-        s.session.project.write_if(|p| p.tempo.replace(tempo) != Some(tempo));
-        // Kept as the project says, or pattern mode, as a new project's (an unsaved change of none).
-        s.session.project.write_if(|p| {
-            let unset = p.song_mode.is_none();
-            p.song_mode.get_or_insert(false);
-            unset
-        });
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
         crate::playlist::store_view(s);
-        if s.session.project != before {
-            s.session.dirty = true;
-        }
-        // A file Lemon Studio made before the project had a playlist has no arrangement block (FL's files always have
-        // one): build it again from the model, which holds everything that file stored.
-        let lacks_playlist = s.session.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_some_and(|p| p.arrangements.is_empty())
-            && !s.session.project.arrangements.is_empty();
-        // A project that was not opened from a file gets a new FLP built from the model.
-        let mut file = if s.session.file.is_none() || lacks_playlist {
-            // The new file's blocks are the model's channels and mixer tracks in order.
-            settle_origins(s.session.project.get_mut());
-            // FL's files always have a playlist, and the mixer is stored after it (spec: flp/events/mixer.md).
-            if s.session.project.arrangements.is_empty() {
-                s.session.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
-            }
-            let mut first = s.session.project.clone();
-            crate::rack::as_saved(&mut first);
-            crate::project_plugins::store_hosted(&mut first, &s.session.plugins);
-            match os_flp::project::create(&first) {
-                Ok(f) => f,
-                Err(e) => {
-                    s.message = Some(format!("Save failed: {e}"));
-                    return None;
-                }
-            }
-        } else {
-            s.session.file.clone().expect("checked")
-        };
-        // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a
-        // failed save leaves the loaded file as it was.
-        let lost = os_flp::project::unsaved_parts(&s.session.project, &file);
-        // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
-        // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
-        let mut proj = s.session.project.clone();
-        crate::rack::as_saved(&mut proj);
-        // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`).
+        // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`); the time spent on the
+        // project and its data folder go into the copy written.
         let extra = crate::lemon_state::events(s, &s.session.plugins);
-        crate::project_info::stamp(s, &mut proj);
-        crate::data_folder::stamp(s, &mut proj);
-        crate::project_plugins::store_hosted(&mut proj, &s.session.plugins);
-        edit(&mut proj);
-        // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
-        let result = os_flp::project::apply(&proj, &mut file)
-            .map_err(|e| e.to_string())
-            .and_then(|()| lemon_or_flp(&mut file, &target, extra))
-            .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
-            .and_then(|b| crate::replace_file::replace(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
-        s.message = Some(match &result {
-            Ok(_) if lost.is_empty() => format!("Saved {}", target.display()),
-            Ok(_) => format!("Saved {} (not stored yet: {})", target.display(), lost.join(", ")),
-            Err(e) => format!("Save failed: {e}"),
-        });
-        if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
-            // The saved file now holds the channels and mixer tracks in model order, and the plugins as written.
-            settle_origins(s.session.project.get_mut());
-            crate::project_plugins::adopt_saved(s.session.project.get_mut(), &proj);
-            s.session.file = Some(file);
+        let work = crate::project_info::saved_work_time(s);
+        let folder = crate::data_folder::saved_folder(s);
+        let mut stamp = |p: &mut os_model::Project| {
+            p.work_time = Some(work);
+            if let (Some(dir), Some(df)) = (&folder, p.data_folder.as_mut()) {
+                df.folder = dir.clone();
+            }
+            edit(p);
+        };
+        let (result, message) = crate::save::write_in(&mut s.session, &target, before, extra, &mut stamp);
+        s.message = Some(message);
+        if result.is_ok() {
             crate::templates::remember(&target);
             crate::recent::add(&target);
-            s.session.path = Some(target);
             self.mark_saved();
         }
         result.ok()
@@ -2459,26 +2385,7 @@ impl App {
     /// EQ, Tesla (as Edison), Pulp Filter (as Love Philter) and Press (as Maximus) into their slots, Lemon Trio into its
     /// channels.
     pub(crate) fn store_builtin_states(&mut self) {
-        use crate::plugins::{EDISON_FILE_NAME, EQ_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME};
-        for key in self.state.session.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
-            let Some((t, k)) = crate::plugins::fx_of(key) else { continue };
-            let Some(slot) = self.state.session.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
-            let st = match slot.name.as_str() {
-                EQ_FILE_NAME => self.state.session.plugins.eq_file_state(key),
-                EDISON_FILE_NAME => self.state.session.plugins.edison_file_state(key),
-                LOVE_PHILTER_FILE_NAME => self.state.session.plugins.love_philter_file_state(key),
-                MAXIMUS_FILE_NAME => self.state.session.plugins.maximus_file_state(key),
-                file => self.state.session.plugins.recreation_file_state(key, file),
-            };
-            if let Some(st) = st {
-                slot.state = st;
-            }
-        }
-        crate::osc3::store(self.state.session.project.get_mut(), &self.state.session.plugins);
-        crate::citrus::store(self.state.session.project.get_mut(), &self.state.session.plugins);
-        crate::smith::store(self.state.session.project.get_mut(), &self.state.session.plugins);
-        crate::slicer::store(self.state.session.project.get_mut(), &self.state.session.plugins);
-        crate::drums::store(self.state.session.project.get_mut(), &self.state.session.plugins);
+        crate::save::store_builtin_states(&mut self.state.session);
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
@@ -9878,7 +9785,7 @@ fn typing_semitone(code: KeyCode) -> Option<i32> {
 /// Makes the file written to `target` a `.lemon` file (Lemon Studio's chunks around the FLP's, saved by this version,
 /// with `extra`: Lemon Studio's own state, `crate::lemon_state`), or a plain FLP for a target named `.flp`, which has no
 /// place for `extra` (spec: flp/lemon-format.md).
-fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra: Vec<os_flp::Event>) -> Result<(), String> {
+pub(crate) fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra: Vec<os_flp::Event>) -> Result<(), String> {
     if crate::project_files::is_flp(target) {
         os_flp::lemon::to_flp(file);
         return Ok(());
@@ -9887,7 +9794,7 @@ fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra:
     os_flp::lemon::to_lemon(file, &extra).map_err(|e| e.to_string())
 }
 
-fn settle_origins(p: &mut Project) {
+pub(crate) fn settle_origins(p: &mut Project) {
     for (i, c) in p.channels.iter_mut().enumerate() {
         c.rack.origin = Some(i as u16);
     }
