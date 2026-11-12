@@ -327,6 +327,9 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
 /// `Command::Put`, as a command's own undo is.
 pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
     s.link_moves.clear();
+    // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
+    // its region may name other things (tracks renumbered by a delete).
+    crate::history::settle(s);
     let before = command::Taken::of(s, region);
     let r = f(s);
     if let Some(before) = before {
@@ -354,6 +357,9 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
         return f(s);
     }
     s.link_moves.clear();
+    // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
+    // its region may name other things (tracks renumbered by a delete).
+    crate::history::settle(s);
     let before = command::Taken::of(s, region);
     let r = f(s);
     if let Some(before) = before {
@@ -368,7 +374,6 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
 /// Records an interface edit's step. A step of the same press that changed nothing goes first (a text box's playlist
 /// step when the box named a mixer track), as the press's release would have dropped it.
 fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
-    crate::history::settle(s);
     let mut undo = vec![Command::Put(Box::new(before))];
     // The remote control links the edit moved with what they drive (`remote::follow`) go back with it.
     let links: Vec<_> = std::mem::take(&mut s.link_moves).into_iter().map(|(from, to)| (to, from)).collect();
@@ -382,6 +387,7 @@ fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
 /// `edit` for an edit that needs the app (a mixer menu command hosting or dropping plugins).
 pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
     app.state.link_moves.clear();
+    crate::history::settle(&mut app.state);
     let before = command::Taken::of(&app.state, region);
     let r = f(app);
     let s = &mut app.state;
@@ -463,6 +469,7 @@ pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: comman
         return f(app);
     }
     app.state.link_moves.clear();
+    crate::history::settle(&mut app.state);
     let before = command::Taken::of(&app.state, region);
     let r = f(app);
     let s = &mut app.state;

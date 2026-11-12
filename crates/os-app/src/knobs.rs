@@ -334,7 +334,8 @@ impl State {
             }
             KnobId::MixSep(t) => {
                 if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
-                    m.stereo_separation = Some(f64::from((v - 0.5) * 2.0));
+                    // In 64ths, as the file keeps it and FL's knob sets it (12% merged is 8, a typed 1% is 1).
+                    m.stereo_separation = Some((f64::from((v - 0.5) * 2.0) * 64.0).round() / 64.0);
                     self.piano.dirty = true;
                 }
             }
@@ -551,6 +552,20 @@ mod tests {
         assert_eq!(LfoKnob::Amount.text(&d), "LFO amount: 50%");
         assert_eq!(LfoKnob::Speed.text(&ClipLfo { speed: 26259, ..d.clone() }), "LFO speed: 1 cycle per 16.00 beats");
         assert_eq!(LfoKnob::Pulse.text(&ClipLfo { pulse_width: -64, ..d }), "LFO pulse width: -50%");
+    }
+
+    /// Stereo separation moves in 64ths, the steps the file keeps, as FL's knob does (measured on FL 24.1.1: a
+    /// typed 1% is 1/64, shown as 2% merged), so what is set is what reopens.
+    #[test]
+    fn stereo_separation_moves_in_64ths() {
+        let mut app = crate::app::App::new(None);
+        app.state.project = crate::app::test_project();
+        app.state.set_knob(KnobId::MixSep(1), 0.5 + 0.01 / 2.0);
+        let sep = |app: &crate::app::App| crate::mixer::track(&app.state, 1).unwrap().stereo_separation;
+        assert_eq!(sep(&app), Some(1.0 / 64.0));
+        assert_eq!(app.state.knob_text(KnobId::MixSep(1)), "Stereo separation: 2% merged");
+        app.state.set_knob(KnobId::MixSep(1), 0.5 - 0.125 / 2.0);
+        assert_eq!(sep(&app), Some(-8.0 / 64.0));
     }
 
     #[test]

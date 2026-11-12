@@ -61,8 +61,9 @@ pub enum Snap {
     Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32> },
     /// The playlist (`playlist::capture`).
     Playlist(Box<crate::playlist::Snapshot>),
-    /// A knob's value: the model's own for the channel knobs, else the knob's 0..1.
-    Knob(KnobId, f64),
+    /// A knob's value: the model's own for the channel knobs, else the knob's 0..1; `None` for a send with no level
+    /// record (at unity), so undo leaves none behind.
+    Knob(KnobId, Option<f64>),
     /// Mixer track `.0`'s audio input, output, record source and monitor mode (`MixerTrack::audio_in` ...); its armed
     /// state is no part of it (spec: audio/track-io.md §2.3).
     TrackIo(u16, [i32; 4]),
@@ -217,11 +218,11 @@ impl Snap {
         }
     }
 
-    /// Puts this into the project. A pattern's step also shows that pattern, as the piano roll's undo always did.
+    /// Puts this into the project. A pattern's step leaves the pattern shown as it is, as in FL (24.1.1, 2026-11-09: a
+    /// step sequencer and a piano roll edit in one pattern, undone and redone while another was shown, kept that one).
     fn put(self, s: &mut State) {
         match self {
             Snap::Pattern { number, notes, controls, length } => {
-                s.pattern = number;
                 let p = crate::patterns::pat_mut(s, number);
                 (p.notes, p.controls, p.length) = (notes, controls, length);
                 s.piano.clear_selection();
@@ -292,17 +293,28 @@ fn put_rack(s: &mut State, r: RackSide) {
 }
 
 /// The model's value of a knob: the channels' volume and pan as stored (exact), the others as the knob reads them.
-fn knob_value(s: &State, id: KnobId) -> f64 {
-    match id {
+fn knob_value(s: &State, id: KnobId) -> Option<f64> {
+    Some(match id {
         KnobId::ChanVol(i) => s.project.channels.get(i).map_or(0.0, |c| c.volume),
         KnobId::ChanPan(i) => s.project.channels.get(i).map_or(0.0, |c| c.pan),
         // The level the container's list holds (the knob shows the chain's, an automated one included).
         KnobId::Member(t, k, id, wet) => crate::container::level(s, t, k, id, wet).map_or(0.0, f64::from),
+        // A route with no level record: the knob shows unity, and the record is what the step must put back.
+        KnobId::Send(a, b) => return crate::mixer::track(s, a).map_or(Some(0.8), |m| m.send_levels.iter().find(|(d, _)| *d == b).map(|&(_, l)| l)),
         _ => f64::from(s.knob(id)),
-    }
+    })
 }
 
-fn set_knob_value(s: &mut State, id: KnobId, v: f64) {
+fn set_knob_value(s: &mut State, id: KnobId, v: Option<f64>) {
+    let Some(v) = v else {
+        if let KnobId::Send(a, b) = id {
+            if let Some(m) = crate::mixer::track_mut(s, a) {
+                m.send_levels.retain(|&(d, _)| d != b);
+                s.piano.dirty = true;
+            }
+        }
+        return;
+    };
     match id {
         KnobId::ChanVol(i) => s.project.channels.get_mut(i).into_iter().for_each(|c| c.volume = v),
         KnobId::ChanPan(i) => s.project.channels.get_mut(i).into_iter().for_each(|c| c.pan = v),
@@ -962,6 +974,59 @@ mod tests {
     fn edit_menu_with_no_history() {
         let app = App::new(None);
         assert_eq!(edit_menu(&app), [entry("Undo", "Ctrl+Z", false)]);
+    }
+
+    #[test]
+    fn undoing_a_send_level_leaves_no_level_record() {
+        // A route with no level record plays at unity; turning its send knob writes one, and undo takes it away again
+        // instead of leaving one at unity (equivalence harness, System/Render tests/Hardcore.flp).
+        let mut app = App::new(None);
+        let s = &mut app.state;
+        let t = s.project.mixer.iter().position(|m| m.index == 1).expect("track 1");
+        s.project.mixer[t].routes = vec![0];
+        s.project.mixer[t].send_levels.clear();
+        let id = KnobId::Send(1, 0);
+        knob(s, id, true);
+        s.set_knob(id, 0.5);
+        assert_eq!(s.project.mixer[t].send_levels, vec![(0, 0.5)]);
+        assert!(undo(s).is_some());
+        assert_eq!(s.project.mixer[t].send_levels, vec![], "no record left behind");
+        assert!(redo(s).is_some());
+        assert_eq!(s.project.mixer[t].send_levels, vec![(0, 0.5)]);
+    }
+
+    #[test]
+    fn undo_and_redo_of_a_pattern_edit_leave_the_pattern_shown() {
+        // As in FL 24.1.1 (2026-11-09): a note added in pattern 1, pattern 2 shown, undo and redo change pattern 1's
+        // notes and leave pattern 2 shown (equivalence harness, redo to the end showed the pattern edited).
+        let mut app = App::new(None);
+        let s = &mut app.state;
+        s.pattern = 1;
+        crate::piano::snapshot_as(s, "Piano roll edit");
+        crate::patterns::pat_mut(s, 1).notes.push(os_model::Note::step(0, 0));
+        let edited = s.project.pattern(1).map(|p| p.notes.clone());
+        s.pattern = 2;
+        assert!(undo(s).is_some());
+        assert_eq!((s.pattern, s.project.pattern(1).map(|p| p.notes.len())), (2, Some(0)));
+        assert!(redo(s).is_some());
+        assert_eq!((s.pattern, s.project.pattern(1).map(|p| p.notes.clone())), (2, edited));
+    }
+
+    #[test]
+    fn a_knob_turn_stays_a_step_when_a_track_before_it_is_deleted() {
+        // Track 3's separation wheeled, then track 2 deleted: track 3's place now holds track 4's separation, the
+        // value track 3 had before the wheel. The wheel's step was judged on that and dropped as a no-op; both steps
+        // stay, and undoing them gives the project back (equivalence harness, nucleon - Fruity Delay 3).
+        let mut app = App::new(None);
+        let id = KnobId::MixSep(3);
+        let start = app.state.project.clone();
+        knob(&mut app.state, id, true);
+        app.state.set_knob(id, 0.25);
+        let steps = app.state.history.len();
+        crate::mixer::run(&mut app, crate::mixer::MCmd::Delete(2));
+        assert_eq!(app.state.history.len(), steps + 1, "the wheel's step stays");
+        while undo(&mut app.state).is_some() {}
+        assert_eq!(app.state.project.mixer, start.mixer);
     }
 
     /// Undo knob tweaks: on, a turn of a channel knob is a step and Ctrl+Z puts the knob back, the click before it

@@ -73,7 +73,8 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
   arpeggiate, flam, claw machine (trash, stretch, time distribution), flip, scale levels, limit (key / scale, range,
   transpose), LFO (sine, triangle or square into any event lane, Start to End ramps, a channel lane's control points)
   and randomize (a new melody from a key or scale, or random levels, each with its own seed)
-- Vertical zoom and ghost channels
+- Vertical zoom and ghost channels; a double right-click on a ghost note opens its channel. Notes of one key that lie
+  over each other show a stack of edges above the top one (Lemon Studio's own)
 - Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project
 - Step edit (toolbar, OPTIONS menu, Ctrl+E): with the transport stopped, typing-keyboard and MIDI notes are
@@ -82,12 +83,20 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
 
 ## 🚧 Song arrangement
 
-- Not yet: a clip properties window, per-clip pitch, pan and reverse, chop and merge, Make unique for audio and
-  automation clips, fade and gain right-click menus, per-track height. The playlist's bars, ruler and Bar snap are
+- Not yet: a clip properties window, per-clip pitch, pan and reverse, chop and merge, Make unique for automation
+  clips, fade and gain right-click menus, per-track height. The playlist's bars, ruler and Bar snap are
   always 4 beats, whatever the time signature or time signature markers say. Consolidate and Export all playlist tracks
   render without hosted instruments and effects, so plugin channels come out silent (Consolidate still mutes the source
   clips)
 - Playlist with pattern, audio and automation clips
+- Clips of one track that lie over each other show a stack of edges above the top one, as the piano roll's notes
+  (Lemon Studio's own)
+- Tools as FL's: the wheel with the right button held picks the next tool (also in the piano roll); the Select tool's
+  drag is a box wherever it starts (Ctrl adds, Shift toggles); a right click on empty grid clears the selection;
+  Alt+click on a track's mute switch mutes its whole group, Alt+right-click solos it
+- An automation clip's body lets the clips under it show through
+- An audio clip's menu: Make unique (a copy of its channel) and Make unique as sample (the clip as heard, rendered to
+  a new sample beside the project). A pattern clip opened from the arranger shows its first channel with notes
 - Clip groups, markers and several arrangements
 - Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause
   play in SONG mode; exports start at the Start marker and jump at skips, and the clock's bars count from the Start
@@ -140,6 +149,8 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
 ## ✅ Mixing and routing
 
 - Mixer tracks, sends, effect slots and meters
+- Several tracks selected (Ctrl+click, or Ctrl+Shift+drag across strips, which adds to the selection) move their
+  faders together, each by the same number of dB; Shift+wheel over a strip moves its track
 - Polarity and stereo swap, main volume and main pitch
 - Sidechain inputs: a project's Fruity Limiter slot listens to the track routed into its track that its sidechain
   number names (Sidechain to this track routes count), heard after that track's fader and delayed to line up

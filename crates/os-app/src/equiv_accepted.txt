@@ -1,0 +1,29 @@
+# What the equivalence harness's invariants report and Lemon Studio does on purpose, with why. A finding whose
+# normalized form (indices as [], an undo count dropped) starts with an entry's first field is reported as accepted.
+undo-to-start(mixer[].enabled	A mixer track's mute and solo make no undo step, as in FL 24.1.1 (specs: ui/undo-steps.md); FL's change log says 24.2.99 added one, not measured here.
+undo-to-start(patterns[].length	The pattern length box makes no undo step, as in FL (specs: ui/undo-steps.md).
+undo-to-start(patterns:	The first edit of a project without patterns makes pattern 1, which no step takes back.
+roundtrip(mixer[].slots[][].name	A plugin Lemon Studio hosts is saved as a wrapped plugin (specs: flp/events/plugins.md).
+undo-to-start(mixer[].armed	Arming a track makes no undo step and is not saved, as in FL (measured on FL 24.1.1, 2026-11-08).
+roundtrip(mixer[].armed	Arming a track is not saved, as in FL (measured on FL 24.1.1, 2026-11-08: a save differs only in its time).
+undo-to-start(performance	Performance mode on or off makes no undo step, as in FL (measured on FL 24.1.1, 2026-11-08).
+resave(tempo	A tempo with an initial value opens at that value, not the saved tempo, as in FL (measured on FL 24.1.1).
+undo-to-start(tempo	Save writes the interface's tempo into the project, and no undo step takes a save back; the tempo moves into the project in control-plane step 5.
+undo-to-start(song_mode	Save writes the interface's song mode into the project, and no undo step takes a save back (control-plane step 5).
+undo-to-start(current_pattern	Save writes the pattern shown into the project, and no undo step takes a save back (control-plane step 5).
+undo-to-start(mixer[].slots[][].name	Save writes the plugins' states into the project (a slot's plugin as the file stores it, Edison as its wrapper), and no undo step takes a save back (control-plane step 15: plugin states in the model).
+undo-to-start(playlist_view	Save writes the playlist's view (scroll, zoom) into the project, and no undo step takes a save back.
+undo-to-start(work_time	The time spent on the project counts on while it is open; no undo step takes it back.
+roundtrip(channels[].rack.origin	A channel's origin is the file block it was read from: a channel made in Lemon Studio has none until it is saved and opened, and blocks are numbered anew in each file.
+roundtrip(channels[].rack.stored_color	The colour event a channel was opened with is a display copy: saving writes Channel::color, so a channel made or recoloured here reads back with the new one.
+roundtrip(saved_by:	A save writes the version FL 26 opens without a warning (flp/events/project-info.md), whatever version the project was opened with.
+resave(mixer[].volume	A mixer volume with an initial value (event 216) opens at that value in song mode, and moving the fader leaves the initial value as it was (flp/engine-events.md, measured on FL 24.1.1 and 26).
+roundtrip(side:loop_mode:true->false	Open (specs REQUESTS 13): loop mode switched on in a pattern with no loop lengths is stored nowhere, and reads back off; whether FL keeps it is not measured.
+redo-to-end(side:loop_mode:true->false	Open (specs REQUESTS 13): loop mode with no loop lengths is not part of the pattern undo puts back, so it reads back off; whether FL keeps it is not measured.
+roundtrip(side:tempo:	A song-mode project with an initial tempo (event 216) opens at it, not at the saved tempo, as in FL (flp/engine-events.md "Event 216"; the resave entry above).
+roundtrip(mixer[].armed	Arming a track is not saved, as in FL (measured on FL 24.1.1, 2026-11-08; the undo entry above).
+undo-to-start(show_info	Show info on opening makes no undo step, as in FL (measured on FL 24.1.1, 2026-11-09: the box switched on, EDIT still offered no Undo).
+roundtrip(mixer[].volume	A mixer volume with an initial value (event 216) opens at that value in song mode, and moving the fader leaves the initial value as it was (flp/engine-events.md; the resave entry above).
+engine-behind(show_info	Show info on opening is not handed to playback, which plays nothing of it; control-plane step 4 reports every change from the one entry point.
+engine-behind(info.	The project info (title, genre, author, comments, link) is not handed to playback, which plays nothing of it; control-plane step 4 reports every change from the one entry point.
+engine-behind(work_time	The project info's work time (reset on its page) is not handed to playback, which plays nothing of it; control-plane step 4 reports every change from the one entry point.
