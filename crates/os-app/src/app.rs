@@ -4070,23 +4070,7 @@ impl App {
             self.state.playlist.pos = t;
             self.damage_win(Win::Playlist);
         }
-        // Edits reach playback right away, also during a drag (at most once per tick): every write to the project
-        // (`locked::Locked`), and the flag for what playback reads outside it (the tempo, song mode, the pattern shown;
-        // control-plane step 5 moves those into the project).
-        let written = self.state.session.project.take_written();
-        // A write alone that changes nothing playback reads (the project's info, a plugin state stored for a save) builds
-        // no new engine.
-        let play = (written.is_some() && !self.state.session.dirty).then(|| crate::rack::play_project(&self.state));
-        if self.state.session.dirty || play.as_ref().is_some_and(|p| !self.state.session.transport.holds(p)) {
-            self.state.session.dirty = false;
-            // An edit in the interface (a command's change is its event already; an undo or redo is one too).
-            let s = &mut self.state;
-            if s.session.control.changed_since_seen(&s.session.project, s.tempo()) {
-                s.session.control.event(&crate::control::By::User, "edit", "", Vec::new());
-            }
-            // Also while Play is still starting (not `playing` yet); ignored when stopped.
-            self.state.session.transport.update(&play.unwrap_or_else(|| crate::rack::play_project(&self.state)));
-        }
+        crate::rack::sync_playback(&mut self.state.session);
         self.playback_damage();
         self.has_damage()
     }

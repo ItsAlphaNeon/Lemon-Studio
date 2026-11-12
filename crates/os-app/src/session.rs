@@ -77,6 +77,8 @@ pub struct Session {
     pub(crate) saved: (os_model::Project, f64, Vec<u8>),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
     pub(crate) backup: crate::backup::Backup,
+    /// Performance mode's launched clips (spec: ui/performance-mode.md): what plays besides the arrangement.
+    pub perform: crate::perform::Perform,
     /// Playback: the audio thread and what it plays (`crate::transport`). Last, so it goes after the plugins it plays.
     pub transport: crate::transport::Transport,
 }
@@ -172,6 +174,7 @@ impl Session {
             saved: (os_model::Project::default(), 0.0, Vec::new()),
             backup: Default::default(),
             rpc_server: None,
+            perform: Default::default(),
             transport,
         }
     }
