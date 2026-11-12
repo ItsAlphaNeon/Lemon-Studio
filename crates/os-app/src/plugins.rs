@@ -3582,6 +3582,7 @@ mod tests {
     /// the reopened project hosts the same classes with the saved state (spec: plugins/vst3-hosting.md §8,
     /// flp/events/plugins.md §4).
     #[test]
+    #[allow(deprecated)]
     fn vst3_plugins_save_and_reopen() {
         let (Some(smp), Some(eq)) = (bundled("Lemon Sampler.vst3"), bundled("Lemon Parametric EQ.vst3")) else { return };
         let load = |p: &std::path::Path| {
@@ -3592,21 +3593,21 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-vst3-save-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 4800]).unwrap();
         let mut a = crate::app::App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.file = None;
-        a.state.path = None;
-        a.plugins.available = vec![load(&smp)];
-        a.plugins.effects = vec![load(&eq)];
-        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), "Lemon Sampler");
-        a.plugins.create(row, 0).unwrap();
-        a.state.hosted_rows.push(row);
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
+        a.state.session.plugins.available = vec![load(&smp)];
+        a.state.session.plugins.effects = vec![load(&eq)];
+        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), "Lemon Sampler");
+        a.state.session.plugins.create(row, 0).unwrap();
+        a.state.session.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
-        assert!(a.plugins.set_state(row, json.as_bytes()));
-        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Lemon Parametric EQ".into(), state: Vec::new() });
-        a.plugins.create_effect(3, 2, 0, None).unwrap();
+        assert!(a.state.session.plugins.set_state(row, json.as_bytes()));
+        a.state.session.project.get_mut().mixer[3].slots[2] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Lemon Parametric EQ".into(), state: Vec::new() });
+        a.state.session.plugins.create_effect(3, 2, 0, None).unwrap();
         // An edit of the effect, through the hosting layer, flushed into its processor.
         {
-            let mut fx = a.plugins.hosted[&fx_key(3, 2)].plugin.lock().unwrap();
+            let mut fx = a.state.session.plugins.hosted[&fx_key(3, 2)].plugin.lock().unwrap();
             let id = (0..fx.param_count()).filter_map(|i| fx.param_info(i)).find(|p| !p.read_only && !p.hidden && p.automatable).unwrap().id;
             assert!(fx.set_param(id, 0.3));
             assert!(fx.activate(48000));
@@ -3614,7 +3615,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(60));
             fx.idle();
         }
-        let (ch_state, fx_state) = (a.plugins.state(row).unwrap(), a.plugins.state(fx_key(3, 2)).unwrap());
+        let (ch_state, fx_state) = (a.state.session.plugins.state(row).unwrap(), a.state.session.plugins.state(fx_key(3, 2)).unwrap());
         let fl = |b: &[u8]| os_vst3::fl_state::FlState::parse(b).is_some();
         assert!(fl(&ch_state) && fl(&fx_state), "saved in FL Studio's wrapper layout");
         a.save_to(path.clone());
@@ -3623,10 +3624,10 @@ mod tests {
         // The file names each class by its id.
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let r = crate::project_plugins::wrapped_channel(&saved.channels[row]).unwrap();
-        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst3", a.plugins.available[0].desc.id.as_str(), "Lemon Sampler"));
+        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst3", a.state.session.plugins.available[0].desc.id.as_str(), "Lemon Sampler"));
         assert_eq!(r.state, ch_state);
         let s = crate::project_plugins::wrapped_slot(saved.mixer[3].slots[2].as_ref().unwrap()).unwrap();
-        assert_eq!((s.format.as_str(), s.id.as_str()), ("vst3", a.plugins.effects[0].desc.id.as_str()));
+        assert_eq!((s.format.as_str(), s.id.as_str()), ("vst3", a.state.session.plugins.effects[0].desc.id.as_str()));
         assert_eq!(s.state, fx_state);
 
         // Reopened: found by class id even when the plugin file is named differently now.
@@ -3634,15 +3635,15 @@ mod tests {
         let (mut i, mut e) = (load(&smp), load(&eq));
         i.desc.path = "D:/moved/Renamed.vst3".into();
         e.desc.path = "D:/moved/Other.vst3".into();
-        b.plugins.available = vec![i];
-        b.plugins.effects = vec![e];
+        b.state.session.plugins.available = vec![i];
+        b.state.session.plugins.effects = vec![e];
         b.open(path.clone());
         b.sync_wrapped();
         let _ = std::fs::remove_file(&path);
-        assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
-        assert_eq!(b.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
-        assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
-        assert_eq!(b.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
+        assert!(b.state.session.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert_eq!(b.state.session.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
+        assert_eq!(b.state.session.plugins.state(row).as_deref(), Some(&ch_state[..]));
+        assert_eq!(b.state.session.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
         assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ"));
     }
 
@@ -3798,8 +3799,8 @@ mod tests {
         let Some(flp) = std::env::var_os("OS_NATIVE_FLP").map(PathBuf::from) else { return };
         os_native::set_enabled(true);
         let mut app = crate::app::App::new(None);
-        app.plugins = Plugins::scan();
-        eprintln!("STEP {} native plugins listed", app.plugins.available.iter().chain(&app.plugins.effects).filter(|a| a.desc.format == os_host::Format::Native).count());
+        app.state.session.plugins = Plugins::scan();
+        eprintln!("STEP {} native plugins listed", app.state.session.plugins.available.iter().chain(&app.state.session.plugins.effects).filter(|a| a.desc.format == os_host::Format::Native).count());
         app.open(flp);
         eprintln!("STEP opened: {:?}", app.state.message);
         // The app's order: the built-in Lemon plugins take their channels and slots first.
@@ -3809,20 +3810,20 @@ mod tests {
             app.host_native();
         }
         eprintln!("STEP {:?}", app.state.message);
-        let proj = app.state.project.clone();
+        let proj = app.state.session.project.clone();
         let mut keys: Vec<(usize, String)> = proj.channels.iter().enumerate().filter_map(|(r, c)| Some((r, format!("channel {r} {}", c.plugin.clone()?)))).collect();
         keys.extend(proj.mixer.iter().flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((fx_key(m.index, k as u8), format!("track {} slot {k} {}", m.index, s.as_ref()?.name))))));
         for (key, label) in &keys {
-            let what = match app.plugins.hosted.get(key) {
+            let what = match app.state.session.plugins.hosted.get(key) {
                 Some(h) if h.keep_file_state => "hosted, keeps the file's state",
                 Some(_) => "hosted",
-                None if app.native_failed.contains(key) => "not installed or did not start",
+                None if app.state.session.plugins.native_failed.contains(key) => "not installed or did not start",
                 None => "not hosted (built-in or wrapped)",
             };
             eprintln!("RESULT {label:50} {what}");
         }
         let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
-        for (row, inst) in app.plugins.instruments() {
+        for (row, inst) in app.state.session.plugins.instruments() {
             let mut p = inst.lock().unwrap();
             p.note_on(0, 60, 0.8);
             for _ in 0..20 {
@@ -3831,7 +3832,7 @@ mod tests {
             p.note_off(0, 60);
             eprintln!("RESULT channel {row} renders, peak {:.3}", l.iter().chain(&r).fold(0.0f32, |m, s| m.max(s.abs())));
         }
-        for (t, k, fx) in app.plugins.effects() {
+        for (t, k, fx) in app.state.session.plugins.effects() {
             let mut p = fx.lock().unwrap();
             for _ in 0..20 {
                 p.process_fx(48000, &mut l, &mut r);
@@ -3852,40 +3853,41 @@ mod tests {
     /// created them has ended (here the test's thread; the app creates them on its main thread, spec "Threads").
     #[test]
     #[ignore]
+    #[allow(deprecated)]
     fn native_generator_from_the_rack_menu_plays_in_an_export() {
         let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
         // SAFETY: test-only, run alone; `OPENSTUDIO_NATIVE` is read only by the scan.
         unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
         let mut a = crate::app::App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.plugins = Plugins::scan();
-        a.state.plugdb.rebuild(&a.plugins);
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.plugins = Plugins::scan();
+        a.state.plugdb.rebuild(&a.state.session.plugins);
         use crate::plugin_menu::PlugCmd;
-        let fx = a.plugins.effects.iter().position(|e| e.desc.format == os_host::Format::Native).expect("a native effect");
+        let fx = a.state.session.plugins.effects.iter().position(|e| e.desc.format == os_host::Format::Native).expect("a native effect");
         let fx_menu = crate::plugin_menu::items(&a.state, crate::plugin_menu::Target::Fx(Some(0)), true);
         let fx_cmd = crate::playlist::Cmd::Plugin(PlugCmd::Effect { index: fx, slot: Some(0) });
         assert!(fx_menu.iter().any(|it| it.cmd == fx_cmd), "the slot's list has it");
-        let pick = a.plugins.available.iter().position(|x| x.desc.name == name).expect("the plugin is found");
+        let pick = a.state.session.plugins.available.iter().position(|x| x.desc.name == name).expect("the plugin is found");
         let add = crate::rack::add_one_items(&a.state).into_iter().find(|it| it.label == name).expect("Add one lists it");
         assert!(add.cmd == crate::playlist::Cmd::Plugin(PlugCmd::Generator { index: pick, after: None }));
-        let row = a.state.project.channels.len();
+        let row = a.state.session.project.channels.len();
         crate::playlist::run(&mut a, add.cmd);
-        assert_eq!(a.state.pending_plugin, Some((row, pick)));
+        assert_eq!(a.state.session.pending_plugin, Some((row, pick)));
         for _ in 0..100 {
             a.tick();
-            if a.state.pending_plugin.is_none() {
+            if a.state.session.pending_plugin.is_none() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(a.state.hosted_rows.contains(&row), "hosted: {:?}", a.state.message);
-        assert_eq!(a.plugins.descriptor(row).map(|d| d.format), Some(os_host::Format::Native));
+        assert!(a.state.session.hosted_rows.contains(&row), "hosted: {:?}", a.state.message);
+        assert_eq!(a.state.session.plugins.descriptor(row).map(|d| d.format), Some(os_host::Format::Native));
         eprintln!("MESSAGE {:?}", a.state.message);
         // One C5 at velocity 100, a beat long, on the new channel.
-        let channel = a.state.project.channels[row].index;
-        a.state.project.patterns[0].notes = vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(channel, 0) }];
+        let channel = a.state.session.project.channels[row].index;
+        a.state.session.project.get_mut().patterns[0].notes = vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(channel, 0) }];
         let path = std::env::temp_dir().join(format!("openstudio-native-gen-{}.wav", std::process::id()));
-        a.transport.export(&a.state.project, os_engine::PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
+        a.transport.export(&a.state.session.project, os_engine::PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
         let t0 = std::time::Instant::now();
         let secs = loop {
             match a.transport.export_status() {

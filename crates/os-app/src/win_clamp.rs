@@ -179,7 +179,7 @@ impl App {
             }
         }
         #[cfg(all(plugin_windows, windows))]
-        self.plugins.move_into_workspace();
+        self.state.session.plugins.move_into_workspace();
         self.invalidate();
     }
 }

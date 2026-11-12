@@ -786,7 +786,7 @@ impl ApplicationHandler for Shell {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(h) = window.window_handle() {
                 if let RawWindowHandle::Win32(w) = h.as_raw() {
-                    self.app.plugins.owner = w.hwnd.get();
+                    self.app.state.session.plugins.owner = w.hwnd.get();
                     // Docked plugin windows are children: our own painting must not draw over them.
                     use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_STYLE, WS_CLIPCHILDREN};
                     let hwnd = w.hwnd.get() as windows_sys::Win32::Foundation::HWND;
@@ -810,7 +810,7 @@ impl ApplicationHandler for Shell {
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(RawWindowHandle::AppKit(h)) = window.window_handle().map(|h| h.as_raw()) {
-                self.app.plugins.owner = h.ns_view.as_ptr() as isize;
+                self.app.state.session.plugins.owner = h.ns_view.as_ptr() as isize;
             }
         }
         #[cfg(target_os = "macos")]
@@ -860,7 +860,7 @@ impl ApplicationHandler for Shell {
             if os_host::guard::tripped() {
                 return;
             }
-            self.app.plugins.clear();
+            self.app.state.session.plugins.clear();
             plugins::sweep_retired();
         }
     }

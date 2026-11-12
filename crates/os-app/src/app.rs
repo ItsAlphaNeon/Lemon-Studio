@@ -2736,7 +2736,7 @@ impl App {
         }
         // Without plugin windows opening one says so.
         #[cfg(not(plugin_windows))]
-        if self.state.pending_open.take().is_some_and(|r| self.state.hosted_rows.contains(&r)) {
+        if self.state.session.pending_open.take().is_some_and(|r| self.state.session.hosted_rows.contains(&r)) {
             self.state.message = Some(off_text(PLUGIN_WINDOWS));
             self.invalidate();
         }
@@ -2772,7 +2772,7 @@ impl App {
         };
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
-        self.plugins.idle(|_| None);
+        self.state.session.plugins.idle(|_| None);
         // What was hosted on this tick takes the id of its channel or slot now, before anything moves rows.
         self.follow_ids(false, false);
         // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
@@ -3015,8 +3015,8 @@ impl App {
     fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
         let mut p = windows_sys::Win32::Foundation::POINT { x, y };
         // SAFETY: plain coordinate conversion against our own window.
-        unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(self.plugins.owner as _, &mut p) };
-        let k = self.plugins.scale;
+        unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(self.state.session.plugins.owner as _, &mut p) };
+        let k = self.state.session.plugins.scale;
         ((p.x - self.canvas_off.0) as f32 / k, (p.y - self.canvas_off.1) as f32 / k)
     }
 
@@ -4968,7 +4968,7 @@ impl App {
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn plugin_window_under_cursor(&self) -> Option<usize> {
         let (x, y) = Self::pointer_on_screen()?;
-        self.plugins.row_at_screen(x, y)
+        self.state.session.plugins.row_at_screen(x, y)
     }
 
     /// A browser sample released over a hosted plugin window (it sits above the main window, which keeps the mouse
@@ -4977,12 +4977,12 @@ impl App {
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn sample_to_plugin_window(&mut self, path: &str) -> bool {
         let Some((x, y)) = Self::pointer_on_screen() else { return false };
-        let Some(row) = self.plugins.row_at_screen(x, y) else { return false };
+        let Some(row) = self.state.session.plugins.row_at_screen(x, y) else { return false };
         if self.loop_to_slicer(row, path) {
             return true;
         }
-        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
-        let taken = self.plugins.drop_file(row, x, y, path, sampler);
+        let sampler = self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
+        let taken = self.state.session.plugins.drop_file(row, x, y, path, sampler);
         self.sample_taken(row, path, sampler, taken);
         true
     }

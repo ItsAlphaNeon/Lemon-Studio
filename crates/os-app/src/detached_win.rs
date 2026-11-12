@@ -101,7 +101,7 @@ fn open(el: &ActiveEventLoop, main: &Window, app: &App, w: Win) -> Option<DetWin
     #[cfg(windows)]
     let attrs = {
         use winit::platform::windows::WindowAttributesExtWindows;
-        if app.plugins.owner != 0 { attrs.with_owner_window(app.plugins.owner) } else { attrs }
+        if app.state.session.plugins.owner != 0 { attrs.with_owner_window(app.state.session.plugins.owner) } else { attrs }
     };
     #[cfg(target_os = "macos")]
     let attrs = {
