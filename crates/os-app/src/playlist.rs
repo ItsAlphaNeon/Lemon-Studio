@@ -2155,6 +2155,11 @@ pub fn toggle_track(s: &mut State, t: u16) {
 /// Ctrl+click / right-click on the LED: solo the track (others muted); again ends the solo (see [`end_solo`]). A solo
 /// moved to another track keeps the states from before the first one.
 pub fn toggle_solo(s: &mut State, t: u16) {
+    // A solo no longer in effect (another arrangement shown, tracks moved or an undo since) is over: its saved states
+    // belong to the tracks as they were, as in the channel rack and the mixer.
+    if !solo_in_effect(s) {
+        s.playlist.solo = None;
+    }
     if let Some((was, _)) = s.playlist.solo {
         end_solo(s);
         if was == t {
@@ -2168,6 +2173,13 @@ pub fn toggle_solo(s: &mut State, t: u16) {
     }
     s.playlist.solo = Some((t, states));
     s.piano.dirty = true;
+}
+
+/// Whether the last solo still holds: its track alone on, in a playlist of as many tracks as when it started.
+fn solo_in_effect(s: &mut State) -> bool {
+    let Some((t, states)) = s.playlist.solo.clone() else { return false };
+    let arr = arr_mut(s);
+    arr.tracks.len() == states.len() && arr.tracks.iter().enumerate().all(|(k, tr)| tr.enabled == (k == usize::from(t)))
 }
 
 /// Unsolo: every track on, or, with "Restore previous state after solo" on, the states from before the solo (spec:
@@ -5693,6 +5705,28 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::app::test_project();
         app
+    }
+
+    /// A solo belongs to the arrangement it was made in: shown another one, soloing there starts afresh rather than
+    /// putting the first arrangement's track states on this one's tracks.
+    #[test]
+    fn a_solo_stays_with_its_arrangement() {
+        use crate::prefs::{set_check, RESTORE_AFTER_SOLO};
+        set_check(&RESTORE_AFTER_SOLO, true);
+        let mut app = app();
+        let s = &mut app.state;
+        arr_mut(s).tracks[3].enabled = false;
+        toggle_solo(s, 0);
+        let mut other = s.project.arrangement().cloned().expect("an arrangement");
+        other.tracks.iter_mut().for_each(|t| t.enabled = true);
+        other.number += 1;
+        let n = other.number;
+        s.project.arrangements.push(other);
+        show_arrangement(s, n);
+        toggle_solo(s, 5);
+        assert!(arr_mut(s).tracks.iter().enumerate().all(|(k, t)| t.enabled == (k == 5)), "a fresh solo of track 5");
+        toggle_solo(s, 5);
+        assert!(arr_mut(s).tracks.iter().all(|t| t.enabled), "this arrangement's own states come back, track 3 on");
     }
 
     /// Rename... on an audio or automation clip renames its channel in the rack's name box; a pattern clip still edits

@@ -2028,14 +2028,23 @@ impl App {
                 }
             }
         }
+        // What the save writes into the project from the interface (below) reaches playback like any edit: the engine
+        // holds the project as it is.
+        let before = self.state.project.clone();
         self.store_builtin_states();
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
         s.project.song_mode = Some(s.song_mode);
+        // The pattern shown is saved, so the project opens on it again with the loops the rack stores into it (event
+        // 67, spec: flp/engine-events.md).
+        s.project.current_pattern = Some(s.pattern);
         // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
         crate::rack::to_model(s);
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
         crate::playlist::store_view(s);
+        if s.project != before {
+            s.piano.dirty = true;
+        }
         // A file Lemon Studio made before the project had a playlist has no arrangement block (FL's files always have
         // one): build it again from the model, which holds everything that file stored.
         let lacks_playlist = s.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_some_and(|p| p.arrangements.is_empty())
@@ -4271,6 +4280,9 @@ impl App {
     pub fn tick(&mut self) -> bool {
         // Things the interface added get their ids before anything looks them up (`control::ids`).
         let s = &mut self.state;
+        // The rack's loops follow the pattern shown: a file holds them per pattern (spec: flp/events/patterns.md "Loop
+        // lengths").
+        crate::rack::follow_pattern(s);
         s.control.settle_tick(&mut s.project, s.piano.dirty);
         self.control_tick();
         self.plugin_tick();
@@ -5001,7 +5013,7 @@ impl App {
         let start = s.playlist.pos;
         let secs = s.playlist.wave(&path).map_or(0.0, |w| w.secs());
         let p = &s.project;
-        let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+        let tempo = p.tick_tempo(s.tempo.max(1.0));
         let len = (secs * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
         let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
         let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -9396,6 +9408,7 @@ impl App {
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
             Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state, i) }),
             Action::RackGraphArea => {
+                crate::rack::graph_step(&mut self.state);
                 self.rack_graph_at(mouse);
                 self.drag = Some(Drag::RackGraph);
             }
@@ -9433,6 +9446,7 @@ impl App {
                 return true;
             }
             Action::RackGraphArea => {
+                crate::rack::graph_step(&mut self.state);
                 self.rack_graph_at((x, y));
                 self.drag = Some(Drag::RackGraph);
                 return true;
@@ -13260,6 +13274,41 @@ mod tests {
         assert_eq!(app.rows_get(Scroll::RackY), None);
     }
 
+    /// A drag in the channel rack's graph editor is one undo step, "Graph editor change velocity" on the velocity tab;
+    /// a press that changes nothing leaves none (spec: ui/undo-steps.md; FL parity audit 2026-11-08 found it missing).
+    #[test]
+    fn a_graph_editor_drag_is_one_undo_step() {
+        let mut app = App::new(None);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        app.state.raise(Win::ChannelRack);
+        app.state.rack.graph_open = true;
+        app.state.selected_channel = 0;
+        let ch = app.state.project.channels[0].index;
+        let n = app.state.pattern.max(1);
+        crate::patterns::pat_mut(&mut app.state, n).notes.push(os_model::Note::step(ch, 0));
+        frame(&mut app, &mut c, None);
+        let area = hit_rect(&app, &Action::RackGraphArea);
+        let x = hit_rect(&app, &Action::Step(0, 0)).cx();
+        let vel = |app: &App| app.state.project.pattern(n).map(|p| p.notes[0].velocity);
+        let (before, steps) = (vel(&app), app.state.history.done());
+        app.mouse_move(x, area.y + area.h * 0.9);
+        app.mouse_down();
+        app.mouse_move(x, area.y + area.h * 0.6);
+        app.mouse_move(x, area.y + area.h * 0.4);
+        app.mouse_up();
+        assert_ne!(vel(&app), before);
+        assert_eq!((app.state.history.done(), app.state.history.newest_done()), (steps + 1, Some("Graph editor change velocity")));
+        assert!(crate::history::undo(&mut app.state).is_some());
+        assert_eq!(vel(&app), before, "one step takes the whole drag back");
+        app.state.pattern = n + 1;
+        frame(&mut app, &mut c, None);
+        let steps = app.state.history.done();
+        app.mouse_move(x, area.y + area.h * 0.5);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!((app.state.history.done(), vel(&app)), (steps, before), "a press in a pattern without steps changes nothing");
+    }
+
     fn hit_rect(app: &App, a: &Action) -> Rect {
         app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect).unwrap_or_else(|| panic!("no hit for {a:?}"))
     }
@@ -16842,6 +16891,10 @@ mod tests {
         app.wheel(0.0, 1.0, true, false);
         assert_eq!(order(&app)[..5], rows([0, 2, 1, 3, 4]), "the same channel, two rows up");
         assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([1]));
+        // Each move is a "Move channel" step, as the menu's: undo puts them back.
+        assert_eq!(app.state.history.newest_done(), Some("Move channel"));
+        while crate::history::undo(&mut app.state).is_some() {}
+        assert_eq!(order(&app), b, "undone back to the start");
         frame(&mut app, &mut c, None);
         let moved = order(&app);
         let name = hit_rect(&app, &Action::ChannelSelect(4));
@@ -19230,6 +19283,34 @@ mod tests {
             assert_ne!(mine(&app), before);
             app.act(Action::CloseWin(Win::PianoDlg));
             assert_eq!(mine(&app), before, "× puts the notes back");
+        }
+        frame(&mut app, &mut c, None);
+
+        // Another pattern shown while a dialog previews (New pattern, the pattern selector): the pattern previewed on
+        // gets its notes back on ×, on Accept and when the preview starts again on the new pattern, as no undo step
+        // holds the preview.
+        {
+            use crate::piano_dlg::Act as DAct;
+            let pat = app.state.pattern;
+            let notes_of = |app: &App, n: u16| app.state.project.patterns.iter().find(|p| p.number == n).map(|p| p.notes.clone()).unwrap_or_default();
+            put(&mut app, &[(0, 96, 60), (96, 48, 62)]);
+            let before = notes_of(&app, pat);
+            for close in [Action::CloseWin(Win::PianoDlg), Action::PianoDlg(DAct::Accept)] {
+                key(&mut app, "u", false, true, false);
+                assert_ne!(notes_of(&app, pat), before, "previewed");
+                app.state.pattern = pat + 1;
+                app.act(close.clone());
+                assert_eq!(notes_of(&app, pat), before, "{close:?} puts back the pattern previewed on");
+                assert!(!app.state.shown(Win::PianoDlg));
+                app.state.pattern = pat;
+            }
+            key(&mut app, "u", false, true, false);
+            app.state.pattern = pat + 1;
+            app.act(Action::PianoDlg(DAct::Group));
+            assert_eq!(notes_of(&app, pat), before, "a preview on the new pattern puts the old one back");
+            app.act(Action::CloseWin(Win::PianoDlg));
+            app.state.pattern = pat;
+            assert_eq!(notes_of(&app, pat), before);
         }
         frame(&mut app, &mut c, None);
 

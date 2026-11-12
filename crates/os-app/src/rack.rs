@@ -237,6 +237,9 @@ pub struct RackUi {
     /// Advanced looping's loop points (§15, loop type 2): a row with one loops at the end of its last used step, beat
     /// or bar; a row without one does not loop.
     pub loop_unit: BTreeMap<usize, LoopUnit>,
+    /// The pattern `loop_len`, `loop_mode` and `loop_type` belong to: the one shown when they were last loaded.
+    /// [`follow_pattern`] stores them into it and loads the shown one's when another is shown.
+    pub loops_of: u16,
     pub loop_type: u8,
     /// Position of "Unsorted" in the file's group list (`None` = last; see [`to_model`]).
     pub unsorted_at: Option<usize>,
@@ -313,6 +316,8 @@ impl Default for RackUi {
             loop_mode: false,
             loop_len: BTreeMap::new(),
             loop_unit: BTreeMap::new(),
+            // The pattern a new project shows (`State`'s `pattern`).
+            loops_of: 1,
             loop_type: 0,
             unsorted_at: None,
             clipboard: None,
@@ -1379,9 +1384,12 @@ pub fn wheel_move(app: &mut App, r: usize, notches: i32) {
         _ => r,
     };
     app.state.rack.select_only(r);
-    for _ in 0..notches.unsigned_abs() {
-        move_selected(app, -notches.signum());
-    }
+    // A "Move channel" step, as the menu's and Alt+Up / Down's moves are.
+    crate::control::edit_app(app, "Move channel", crate::control::command::Region::Project, |app| {
+        for _ in 0..notches.unsigned_abs() {
+            move_selected(app, -notches.signum());
+        }
+    });
     let now = app.state.rack.sel.first().copied().unwrap_or(r);
     app.state.rack.wheel_grab = Some((now, at));
 }
@@ -2653,6 +2661,8 @@ fn tempo_fitted(c: &os_model::Channel) -> bool {
 pub fn play_project(s: &State) -> Project {
     let mut p = s.project.clone();
     p.tempo = Some(s.tempo);
+    // The pattern shown: a song with no clips plays it (os-engine), not the one the project was opened or saved on.
+    p.current_pattern = Some(s.pattern.max(1));
     let rows = loop_rows(s);
     if s.rack.loop_mode && !rows.is_empty() {
         expand_loops(&mut p, s, &rows);
@@ -2888,6 +2898,14 @@ pub fn fill_hit(s: &mut State, h: FillHit) {
     f.rebuild();
 }
 
+/// A press in the graph editor (§14): one undo step for the drag, dropped on release when it changed nothing (spec:
+/// ui/undo-steps.md, "Graph editor change velocity", one per drag). Only the velocity tab's name was measured.
+pub fn graph_step(s: &mut State) {
+    let name = if s.rack.graph_tab == Tab::Vel { "Graph editor change velocity" } else { "Graph editor change" };
+    let snap = crate::history::Snap::pattern(s, s.pattern.max(1));
+    crate::history::record(s, name, snap);
+}
+
 /// Graph editor (§14): set step `k`'s value of the focused channel from 0..1; a column without a step edits the
 /// nearest step note to its left.
 pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
@@ -2949,6 +2967,14 @@ pub fn from_model(s: &mut State) {
             None => Filter::All,
         },
     };
+    load_loops(s);
+}
+
+/// The shown pattern's loop lengths, loop type and loop mode into the rack (they are the pattern's, in the file).
+fn load_loops(s: &mut State) {
+    let p = &s.project;
+    let rack = &mut s.rack;
+    rack.loops_of = s.pattern;
     let pat = p.pattern(s.pattern);
     let loops = pat.map(|p| p.loops.clone()).unwrap_or_default();
     rack.loop_len = loops
@@ -2968,12 +2994,21 @@ pub fn from_model(s: &mut State) {
     rack.loop_mode = !loops.is_empty() && off.is_none();
 }
 
+/// What a pattern's loops say, as `from_model` reads them: the lengths by channel, the loop type, loop mode on.
+fn loop_state(loops: &[(u16, u32)], off: Option<u32>) -> (BTreeSet<(u16, u32)>, u8, bool) {
+    let lengths = loops.iter().filter(|&&(_, l)| l != 0 && l != os_model::Pattern::LOOP_FOLLOW).copied().collect();
+    let all = loops.iter().any(|&(_, l)| l == os_model::Pattern::LOOP_FOLLOW);
+    let kind = match off {
+        Some(2) => 1,
+        Some(_) => 0,
+        None => u8::from(all),
+    };
+    (lengths, kind, !loops.is_empty() && off.is_none())
+}
+
 /// Writes the rack state into the project before a save (the inverse of [`from_model`]).
 pub fn to_model(s: &mut State) {
-    // Advanced looping's loop points are saved as the lengths they give in the current pattern (Lemon Studio's choice:
-    // the file's own form for them is not known); a row with no notes there has none.
-    let lens: BTreeMap<usize, u32> =
-        if advanced(s) { s.rack.loop_unit.keys().filter_map(|&r| unit_len(s, r).map(|l| (r, l))).collect() } else { s.rack.loop_len.clone() };
+    follow_pattern(s);
     let rack = &s.rack;
     let p = &mut s.project;
     // Groups in file order: the user groups, with "Unsorted" where the file had it (else last, like FL's Alt+G).
@@ -2999,18 +3034,48 @@ pub fn to_model(s: &mut State) {
     if p.groups.is_empty() {
         p.current_group = None;
     }
-    // Loop lengths belong to the current pattern.
+    store_loops(s);
+}
+
+/// When another pattern is shown than the one the rack's loops belong to: they go into theirs (unless it is gone),
+/// and the shown pattern's are loaded. Before, a save wrote them into whichever pattern was shown, over its own.
+pub(crate) fn follow_pattern(s: &mut State) {
+    let (shown, of) = (s.pattern, s.rack.loops_of);
+    if shown == of {
+        return;
+    }
+    if s.project.pattern(of).is_some() {
+        s.pattern = of;
+        store_loops(s);
+        s.pattern = shown;
+    }
+    load_loops(s);
+    // Playback follows: the pattern's loops, and a song with no clips plays the pattern shown (`play_project`).
+    s.piano.dirty = true;
+}
+
+/// The rack's loop lengths, type and mode into the pattern they belong to (the shown one: `follow_pattern` first).
+fn store_loops(s: &mut State) {
+    // Advanced looping's loop points are saved as the lengths they give in the pattern (Lemon Studio's choice: the
+    // file's own form for them is not known); a row with no notes there has none.
+    let lens: BTreeMap<usize, u32> =
+        if advanced(s) { s.rack.loop_unit.keys().filter_map(|&r| unit_len(s, r).map(|l| (r, l))).collect() } else { s.rack.loop_len.clone() };
+    let rack = &s.rack;
+    let p = &mut s.project;
     let mut loops: Vec<(u16, u32)> = lens.iter().filter_map(|(&r, &l)| p.channels.get(r).map(|c| (c.index, l))).collect();
-    if rack.loop_type == 1 && !loops.is_empty() {
+    // Loop mode on with every channel following the pattern and none of its own length: FL's file says so with a
+    // follow entry for each channel (and no loop_off), which is what `from_model` reads back as loop mode on.
+    let all_follow = rack.loop_mode && rack.loop_type == 1 && loops.is_empty();
+    if rack.loop_type == 1 && (!loops.is_empty() || all_follow) {
         let set: BTreeSet<u16> = loops.iter().map(|l| l.0).collect();
         loops.extend(p.channels.iter().filter(|c| !set.contains(&c.index)).map(|c| (c.index, os_model::Pattern::LOOP_FOLLOW)));
     }
     loops.sort_by_key(|l| l.0);
     let loop_off = (!rack.loop_mode && !loops.is_empty()).then(|| LOOP_TYPE_CODES[usize::from(rack.loop_type.min(2))]);
     let n = s.pattern;
-    // Pairs with no length (0) carry nothing: a file that has them is unchanged.
-    let set = |l: &[(u16, u32)]| l.iter().filter(|x| x.1 != 0).copied().collect::<BTreeSet<_>>();
-    let changed = p.pattern(n).map_or(!loops.is_empty(), |pat| set(&pat.loops) != set(&loops) || pat.loop_off != loop_off);
+    // A pattern whose loops already say what the rack holds is left as the file has it (pairs of no length, or a
+    // follow entry for only some channels, say the same).
+    let changed = p.pattern(n).map_or(!loops.is_empty(), |pat| loop_state(&pat.loops, pat.loop_off) != loop_state(&loops, loop_off));
     if changed {
         let pat = crate::patterns::pat_mut(s, n);
         pat.loops = loops;
@@ -3021,6 +3086,142 @@ pub fn to_model(s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Loop mode on with every channel following the pattern (follow entries, no lengths) is still on after a save.
+    #[test]
+    fn loop_mode_with_every_channel_following_survives_a_save() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.pattern = 1;
+        let ch = a.state.project.channels[0].index;
+        let follow = os_model::Pattern::LOOP_FOLLOW;
+        let pat = crate::patterns::pat_mut(&mut a.state, 1);
+        (pat.loops, pat.loop_off) = (vec![(ch, follow)], None);
+        from_model(&mut a.state);
+        assert!(a.state.rack.loop_mode);
+        to_model(&mut a.state);
+        let p = a.state.project.pattern(1).expect("pattern 1");
+        assert_eq!((p.loops.clone(), p.loop_off), (vec![(ch, follow)], None), "the file's form is kept");
+        // Switched on in a pattern that had none: written so that it reads back on.
+        let pat = crate::patterns::pat_mut(&mut a.state, 1);
+        (pat.loops, pat.loop_off) = (Vec::new(), None);
+        (a.state.rack.loop_mode, a.state.rack.loop_type) = (true, 1);
+        to_model(&mut a.state);
+        from_model(&mut a.state);
+        assert!(a.state.rack.loop_mode && a.state.rack.loop_type == 1);
+    }
+
+    /// Each pattern keeps its own loop lengths: showing another pattern loads its lengths, and a save there no longer
+    /// writes the first one's over them (equivalence harness, Electroconductor - Inner Days - Original.flp).
+    #[test]
+    fn loop_lengths_follow_the_pattern_shown() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        let ch = a.state.project.channels[0].index;
+        for (n, len) in [(1, 3), (2, 5)] {
+            let pat = crate::patterns::pat_mut(&mut a.state, n);
+            (pat.loops, pat.loop_off) = (vec![(ch, len)], None);
+        }
+        a.state.pattern = 1;
+        from_model(&mut a.state);
+        assert_eq!(a.state.rack.loop_len, [(0, 3)].into());
+        a.state.rack.loop_len.insert(0, 4);
+        a.state.pattern = 2;
+        follow_pattern(&mut a.state);
+        assert_eq!(a.state.rack.loop_len, [(0, 5)].into(), "pattern 2's own");
+        to_model(&mut a.state);
+        let loops = |a: &crate::app::App, n| a.state.project.pattern(n).map(|p| p.loops.clone());
+        assert_eq!(loops(&a, 2), Some(vec![(ch, 5)]), "pattern 2 keeps its lengths");
+        assert_eq!(loops(&a, 1), Some(vec![(ch, 4)]), "pattern 1 keeps the length set while it was shown");
+        a.state.pattern = 1;
+        follow_pattern(&mut a.state);
+        assert_eq!(a.state.rack.loop_len, [(0, 4)].into());
+    }
+
+    /// Undo of a whole-project step leaves the pattern shown as it is (as in FL) and puts the loop mode back with the
+    /// lengths: a pattern whose loops say "no length, mode off" keeps them when patterns are switched afterwards
+    /// (equivalence harness, DEDZII - NIGHT TERROR: they were rewritten with another pattern's mode, without a step).
+    #[test]
+    fn undo_of_a_project_step_keeps_the_pattern_shown_and_its_loops() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        let ch = a.state.project.channels[0].index;
+        let pat = crate::patterns::pat_mut(&mut a.state, 1);
+        pat.notes.push(os_model::Note::step(ch, 0));
+        (pat.loops, pat.loop_off) = (vec![(ch, 0)], Some(LOOP_TYPE_CODES[0]));
+        let before = a.state.project.pattern(1).cloned();
+        a.state.pattern = 1;
+        from_model(&mut a.state);
+        let p2 = crate::patterns::pat_mut(&mut a.state, 2);
+        p2.notes.push(os_model::Note::step(ch, 0));
+        (p2.loops, p2.loop_off) = (vec![(ch, 4)], None);
+        crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.project.main_volume = Some(50));
+        a.state.pattern = 2;
+        follow_pattern(&mut a.state);
+        assert!(crate::history::undo(&mut a.state).is_some());
+        assert_eq!(a.state.pattern, 2, "the pattern shown stays");
+        assert_eq!((a.state.rack.loop_len.clone(), a.state.rack.loop_mode), ([(0, 4)].into(), true), "pattern 2's own loops");
+        a.state.pattern = 3;
+        follow_pattern(&mut a.state);
+        assert_eq!(a.state.project.pattern(1).cloned(), before, "pattern 1's loops as they were");
+    }
+
+    /// A song with no clips plays the pattern shown: the engine is handed it, and a switch reaches playback
+    /// (equivalence harness, I'll Be Your Madonna: the engine held the pattern the project was opened on).
+    #[test]
+    fn the_engine_gets_the_pattern_shown() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.pattern = 1;
+        from_model(&mut a.state);
+        a.state.piano.dirty = false;
+        a.state.pattern = 2;
+        follow_pattern(&mut a.state);
+        assert!(a.state.piano.dirty, "playback follows the switch");
+        assert_eq!(play_project(&a.state).current_pattern, Some(2));
+    }
+
+    /// What a save writes into the project from the interface (the tempo, the pattern shown) reaches playback: the
+    /// engine holds the project as it is after the save (equivalence harness, I'll Be Your Madonna and Electro).
+    #[test]
+    fn a_save_hands_what_it_writes_in_to_playback() {
+        let file = std::env::temp_dir().join(format!("openstudio-save-dirty-{}.flp", std::process::id()));
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        (a.state.file, a.state.path) = (None, None);
+        a.state.pattern = 3;
+        a.state.piano.dirty = false;
+        a.save_to(file.clone());
+        assert_eq!(a.state.project.current_pattern, Some(3));
+        assert!(a.state.piano.dirty, "playback gets the project as saved");
+        a.state.piano.dirty = false;
+        a.save_to(file.clone());
+        assert!(!a.state.piano.dirty, "a save that writes nothing new changes nothing");
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// A project opens on the pattern it was saved on, with the loop lengths saved into that pattern.
+    #[test]
+    fn the_current_pattern_and_its_loops_reopen() {
+        let file = std::env::temp_dir().join(format!("openstudio-current-pattern-{}.flp", std::process::id()));
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        // A pattern with nothing in it is not saved: pattern 2 gets a note.
+        let ch = a.state.project.channels[0].index;
+        let note = os_model::Note { position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
+        crate::patterns::pat_mut(&mut a.state, 2).notes.push(note);
+        a.state.pattern = 2;
+        follow_pattern(&mut a.state);
+        a.state.rack.loop_len.insert(0, 8);
+        a.save_to(file.clone());
+        let mut b = crate::app::App::new(None);
+        b.open(file.clone());
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(b.state.pattern, 2);
+        assert_eq!(b.state.rack.loop_len.get(&0), Some(&8));
+    }
 
     /// A knob's Edit automation clip... is greyed until a clip drives the control, then shows that clip (§19, as on a
     /// plugin parameter).

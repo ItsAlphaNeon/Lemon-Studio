@@ -2561,6 +2561,7 @@ impl App {
     /// Tesla on track `t`: the toolbar's audio editor button puts it on the master, as FL opens Edison there (spec:
     /// plugins/tesla/requests.md #5); the track menu's "Open audio editor" on that track. It shows the track's first
     /// Tesla, adding one when it has none; `new` (the button's right click) always adds one, in the first free slot.
+    /// An added Tesla is an "Add effect" step, as FL's Edison is one ("insert effect plugin").
     pub(crate) fn audio_editor(&mut self, t: u16, new: bool) {
         if !new {
             if let Some(k) = first_tesla(&self.state, t) {
@@ -2568,20 +2569,20 @@ impl App {
                 return self.invalidate();
             }
         }
-        self.add_tesla(t, None);
+        crate::control::edit_app(self, "Add effect", Region::Project, |app| app.add_tesla(t, None));
     }
 
     /// Open audio editor and record: a Tesla on track `t` set up as an audio logger, as FL's quick load sets Edison
     /// (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"): records on the host's play, for 5
     /// minutes, appended, slaved to the transport, armed.
     pub(crate) fn audio_logger(&mut self, t: u16) {
-        self.tesla_for_recording(t, |s| {
+        crate::control::edit_app(self, "Add effect", Region::Project, |app| app.tesla_for_recording(t, |s| {
             s.rec.when = tesla::state::WHEN_ON_PLAY;
             s.rec.max = AUDIO_LOG_5_MINUTES;
             s.rec.append = true;
             s.rec.slave = true;
             s.rec.armed = true;
-        });
+        }));
     }
 
     /// A Tesla on track `t` to record into (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"):
@@ -2929,7 +2930,7 @@ mod tests {
     fn latency_settings_are_typed_in_and_undo() {
         use crate::typein::{accept, parse, LatUnit, Target};
         let mut a = app();
-        a.state.project.tempo = Some(120.0);
+        a.state.tempo = 120.0;
         // The app's tick gives the tracks their ids, which the undo steps name them by.
         a.state.control.settle(&mut a.state.project);
         let labels = |p: &Popup| p.items.iter().map(|i| (i.label.to_string(), i.enabled)).collect::<Vec<_>>();
@@ -3102,6 +3103,22 @@ mod tests {
         assert!(!track(&a.state, 6).unwrap().routes.contains(&1));
         assert_eq!(level_text("Volume", 0.8), "Volume: 100%  0.0dB  1.00");
         assert_eq!(level_text("To Bus 11", 0.0), "To Bus 11: 0%  -INFdB  0.00");
+    }
+
+    #[test]
+    fn undoing_a_track_delete_puts_back_its_slots_colours_and_icons() {
+        use crate::playlist::IconOwner;
+        let mut a = app();
+        let red = Rgb { r: 200, g: 0, b: 0 };
+        a.state.mixer.slot_colors.insert((3, 0), red);
+        a.state.playlist.icons.insert(IconOwner::Track(3), crate::icons::Icon::Play);
+        run(&mut a, MCmd::Delete(2));
+        assert_eq!(a.state.mixer.slot_colors.get(&(2, 0)), Some(&red), "the colour follows its track left");
+        crate::history::undo(&mut a.state);
+        assert_eq!(a.state.mixer.slot_colors.get(&(3, 0)), Some(&red));
+        assert_eq!(a.state.mixer.slot_colors.get(&(2, 0)), None);
+        assert_eq!(a.state.playlist.icons.get(&IconOwner::Track(3)), Some(&crate::icons::Icon::Play));
+        assert_eq!(a.state.playlist.icons.get(&IconOwner::Track(2)), None);
     }
 
     #[test]
@@ -3489,6 +3506,25 @@ mod tests {
         run(&mut a, MCmd::AudioEditorRecord(2));
         assert!(matches!(a.state.mixer.pending.as_slice(), [FxReq::Create { track: 2, slot: 1, state: Some(_), .. }]));
         assert_eq!(from_plugin_state(&a.plugins.state(key).unwrap()).map(|s| s.sample.frames()), Some(100), "left alone");
+    }
+
+    /// Open audio editor adds a Tesla as one step that undo takes away, as FL's adds Edison ("insert effect plugin",
+    /// measured on FL 24.1.1); showing the track's Tesla again is no step.
+    #[test]
+    fn an_added_audio_editor_is_an_undo_step() {
+        let mut a = app();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let steps = a.state.history.at();
+        run(&mut a, MCmd::AudioEditor(2));
+        assert_eq!(teslas(&a.state), [(2, 0)]);
+        assert_eq!(a.state.history.at(), steps + 1);
+        run(&mut a, MCmd::AudioEditor(2));
+        assert_eq!(a.state.history.at(), steps + 1, "shown again: no step");
+        run(&mut a, MCmd::AudioEditorRecord(3));
+        assert_eq!(a.state.history.at(), steps + 2);
+        crate::history::undo(&mut a.state);
+        crate::history::undo(&mut a.state);
+        assert!(teslas(&a.state).is_empty());
     }
 
     /// Remove all (audio editor) instances, in Mixer options and TOOLS > Macros: every Tesla (a project's Edison slots

@@ -711,12 +711,16 @@ pub fn preview(s: &mut State) {
         None if s.piano_dlg.on_events => 0,
         None => return,
     };
-    let (now, now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
+    let (mut now, mut now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
     let fresh = match &s.piano_dlg.session {
         Some(se) => se.pattern != s.pattern || se.channel != ch || se.last != now || se.last_ctl != now_ctl,
         None => true,
     };
     if fresh {
+        // The last preview goes first: on another pattern or channel it would stay, with no undo step.
+        if restore(s) {
+            (now, now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
+        }
         let base_sel = s.piano.selection(s.pattern, Some(ch));
         let se = Session { pattern: s.pattern, channel: ch, base: now, base_sel, base_ctl: now_ctl, last: Vec::new(), last_ctl: Vec::new(), shown: false };
         s.piano_dlg.session = Some(se);
@@ -729,19 +733,22 @@ pub fn preview(s: &mut State) {
     }
 }
 
-/// The session's notes, selection and control points back, when they are still what its last preview left.
+/// The session's notes, selection and control points back in the pattern it previewed on (the one shown may be another
+/// by now: New pattern, the pattern selector), when they are still what its last preview left.
 fn restore(s: &mut State) -> bool {
     let Some(se) = &s.piano_dlg.session else { return false };
-    if se.pattern != s.pattern || se.shown && (piano::notes(s) != se.last.as_slice() || piano::controls(s) != se.last_ctl.as_slice()) {
+    let Some(i) = s.project.patterns.iter().position(|p| p.number == se.pattern) else { return false };
+    let p = &s.project.patterns[i];
+    if se.shown && (p.notes != se.last || p.controls != se.last_ctl) {
         return false;
     }
-    let (base, base_ctl, sel, ch) = (se.base.clone(), se.base_ctl.clone(), se.base_sel.clone(), se.channel);
-    let p = piano::pattern_mut(s);
+    let (base, base_ctl, sel, ch, number) = (se.base.clone(), se.base_ctl.clone(), se.base_sel.clone(), se.channel, se.pattern);
+    let p = &mut s.project.patterns[i];
     (p.notes, p.controls) = (base, base_ctl);
     if sel.is_empty() {
         s.piano.clear_selection();
     } else {
-        s.piano.select(s.pattern, ch, sel);
+        s.piano.select(number, ch, sel);
     }
     s.piano.dirty = true;
     true
@@ -751,7 +758,9 @@ fn restore(s: &mut State) -> bool {
 pub fn accept(s: &mut State) -> String {
     let (tool, on_events) = (s.piano_dlg.tool, s.piano_dlg.on_events);
     let who = if on_events { "Event editor" } else { "Piano roll" };
-    if !restore(s) {
+    // Accept applies what was previewed: after a switch to another pattern, the previewed one only gets its notes back.
+    let here = s.piano_dlg.session.as_ref().is_some_and(|se| se.pattern == s.pattern);
+    if !restore(s) || !here {
         s.piano_dlg.session = None;
         return format!("{who}: nothing to change");
     }

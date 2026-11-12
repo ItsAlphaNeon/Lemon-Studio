@@ -1762,8 +1762,15 @@ impl Clip {
         r
     };
 
+    /// A clip showing its source from the start. Its offsets are "none" in its source's encoding: `ff ff ff ff`
+    /// for a pattern clip (the template's), float −1.0 for any other (spec: flp/events/playlist.md, clip offsets).
     pub fn new(position: u32, length: u32, track: u16, source: ClipSource) -> Clip {
-        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw: Clip::TEMPLATE }
+        let mut raw = Clip::TEMPLATE;
+        if let ClipSource::Channel(_) = source {
+            raw[24..28].copy_from_slice(&(-1.0f32).to_le_bytes());
+            raw[28..32].copy_from_slice(&(-1.0f32).to_le_bytes());
+        }
+        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw }
     }
 
     pub fn end(&self) -> u32 {
