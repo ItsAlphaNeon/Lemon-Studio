@@ -147,7 +147,7 @@ pub fn key_of(s: &State, t: Target) -> Option<(usize, usize)> {
         return Some((crate::container::member_key(s, crate::container::place_key(track, slot), id)?, usize::from(item)));
     }
     match t {
-        Target::ChannelParam(ch, k) => Some((s.project.channels.iter().position(|c| c.index == ch)?, usize::from(k))),
+        Target::ChannelParam(ch, k) => Some((s.session.project.channels.iter().position(|c| c.index == ch)?, usize::from(k))),
         Target::SlotParam(track, slot, k) => Some((fx_key(track, slot), usize::from(k))),
         _ => None,
     }
@@ -163,7 +163,7 @@ pub fn target_of(s: &State, key: usize, index: usize) -> Option<u32> {
     }
     Some(match fx_of(key) {
         Some((track, slot)) => target::slot_param(track, slot, k),
-        None => target::channel_param(s.project.channels.get(key)?.index, k),
+        None => target::channel_param(s.session.project.channels.get(key)?.index, k),
     })
 }
 
@@ -193,7 +193,7 @@ pub(crate) fn owner_name(s: &State, key: usize) -> String {
             format!("{} - {}", crate::plugins::slot_label(&plugin), crate::mixer::name(s, track))
         }
         None => {
-            let ch = s.project.channels.get(key);
+            let ch = s.session.project.channels.get(key);
             ch.and_then(|c| c.name.clone().or_else(|| c.plugin.clone())).unwrap_or_else(|| format!("Channel {}", key + 1))
         }
     }
@@ -262,7 +262,7 @@ pub fn row_hint(s: &State, key: usize, index: usize) -> String {
 
 /// The automation clip channel that drives target `t`: the first in rack order whose clip is linked to it.
 pub(crate) fn driving_clip(s: &State, t: u32) -> Option<u16> {
-    s.project.channels.iter().map(|c| c.index).find(|&ch| s.project.automation(ch).is_some_and(|a| a.targets.contains(&t)))
+    s.session.project.channels.iter().map(|c| c.index).find(|&ch| s.session.project.automation(ch).is_some_and(|a| a.targets.contains(&t)))
 }
 
 /// Stepped parameters with up to this many steps list every value under "Set..." (a Lemon Studio choice).
@@ -502,7 +502,7 @@ impl App {
         // begin to its end, values sent without one joined while they come in a row.
         for (owner, id, v) in seen {
             if !owner.is_none() {
-                self.state.control.saw_param(owner.0, id, v);
+                self.state.session.control.saw_param(owner.0, id, v);
             }
         }
         for (owner, changed, run) in steps {
@@ -516,15 +516,15 @@ impl App {
         // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
         // So are its root note page's: the engine applies the main pitch switch.
         for (row, name, v) in stretch {
-            let Some(ch) = self.state.project.get_mut().channels.get_mut(row) else { continue };
+            let Some(ch) = self.state.session.project.get_mut().channels.get_mut(row) else { continue };
             let mut st = ch.sound.stretch;
             let mut misc = ch.misc;
             if crate::plugins::stretch_param(&name, v, &mut st) && st != ch.sound.stretch {
                 ch.sound.stretch = st;
-                self.state.piano.dirty = true;
+                self.state.session.dirty = true;
             } else if crate::plugins::misc_param(&name, v, &mut misc) && misc != ch.misc {
                 ch.misc = misc;
-                self.state.piano.dirty = true;
+                self.state.session.dirty = true;
             }
         }
         if let Some(t) = moved {
@@ -631,7 +631,7 @@ impl App {
             PCmd::EditClip(ch) => {
                 let found = crate::playlist::reveal_source(&mut self.state, ch);
                 self.invalidate();
-                let name = self.state.project.channel(ch).and_then(|c| c.name.clone()).unwrap_or_else(|| "the automation clip".into());
+                let name = self.state.session.project.channel(ch).and_then(|c| c.name.clone()).unwrap_or_else(|| "the automation clip".into());
                 (!found).then(|| format!("No clip of \"{name}\" in this arrangement"))
             }
         }
@@ -690,7 +690,7 @@ impl App {
             c.position = tick;
             c.track = track;
         }
-        s.piano.dirty = true;
+        s.session.dirty = true;
         Some(format!("Created automation clip \"{name}\""))
     }
 }
@@ -703,8 +703,8 @@ mod tests {
     fn targets_and_names() {
         let mut app = App::new(None);
         let s = &mut app.state;
-        s.project.get_mut().channels[0].name = Some("Lead".into());
-        let ch = s.project.channels[0].index;
+        s.session.project.get_mut().channels[0].name = Some("Lead".into());
+        let ch = s.session.project.channels[0].index;
         assert_eq!(target_of(s, 0, 7), Some(target::channel_param(ch, 7)));
         assert_eq!(target_of(s, fx_key(2, 3), 35), Some(target::slot_param(2, 3, 35)));
         assert_eq!(key_of(s, Target::ChannelParam(ch, 7)), Some((0, 7)));
@@ -727,11 +727,11 @@ mod tests {
     fn slot_plugin_parameters_browse_and_automate() {
         use crate::views::browser::{rows, Item};
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
-        a.state.project.get_mut().mixer[2].slots[1] = Some(eq);
+        a.state.session.project.get_mut().mixer[2].slots[1] = Some(eq);
         a.sync_effects();
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
@@ -765,8 +765,8 @@ mod tests {
         // Dropped on the playlist: a clip there, aimed at the parameter.
         let msg = a.params_drop(key, 35, 3, 384);
         assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ - Bus 2 - Main level\""));
-        let ch = a.state.project.channels.last().unwrap().index;
-        assert_eq!(a.state.project.automations.last().map(|x| (x.channel, x.target())), Some((ch, Some(tgt))));
+        let ch = a.state.session.project.channels.last().unwrap().index;
+        assert_eq!(a.state.session.project.automations.last().map(|x| (x.channel, x.target())), Some((ch, Some(tgt))));
         let clip = crate::playlist::arr_mut(&mut a.state).clips.last().cloned().unwrap();
         assert_eq!((clip.position, clip.track, clip.source), (384, 3, os_model::ClipSource::Channel(ch)));
         assert_eq!(value_text(&a.state, Target::SlotParam(2, 1, 0), 1.0).as_deref(), Some("18.0dB"));
@@ -780,13 +780,13 @@ mod tests {
         assert!(menu.items.iter().any(|i| i.label == "Create automation clip" && !i.enabled));
         a.state.params.note(Tweak::Plugin { key, index: 35 });
         a.params_menu(MenuEntry::Automation);
-        let last = a.state.project.channels.last().unwrap();
+        let last = a.state.session.project.channels.last().unwrap();
         assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Main level #2"));
         // A plugin's own knob menu (host link): a clip on band 1 frequency.
         a.params_automate(key, 7);
-        let last = a.state.project.channels.last().unwrap();
+        let last = a.state.session.project.channels.last().unwrap();
         assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Band 1 freq"));
-        assert_eq!(a.state.project.automations.last().and_then(|x| x.target()), Some(target::slot_param(2, 1, 7)));
+        assert_eq!(a.state.session.project.automations.last().and_then(|x| x.target()), Some(target::slot_param(2, 1, 7)));
         a.note_host_tweak(&Action::Tempo);
         assert_eq!(a.params_menu(MenuEntry::NextToLast), None);
         let menu = a.state.playlist.popup.take().unwrap();
@@ -796,11 +796,11 @@ mod tests {
     /// The app with the built-in EQ hosted in mixer track 2's slot 2, its parameters listed in the browser.
     fn eq_app() -> (App, usize) {
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
-        a.state.project.get_mut().mixer[2].slots[1] = Some(eq);
+        a.state.session.project.get_mut().mixer[2].slots[1] = Some(eq);
         a.sync_effects();
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
@@ -848,11 +848,11 @@ mod tests {
         let (mut a, key) = eq_app();
         let idle = |a: &App| a.plugins.hosted[&key].plugin.lock().unwrap().idle();
         let v0 = value_of(&a.state, key, 35).unwrap();
-        a.state.history.reset();
+        a.state.session.history.reset();
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
         idle(&a);
         assert!((value_of(&a.state, key, 35).unwrap() - 1.0).abs() < 1e-6);
-        assert_eq!(a.state.history.entries().last().map(|e| e.1), Some(crate::control::command::PLUGIN_PARAMETER));
+        assert_eq!(a.state.session.history.entries().last().map(|e| e.1), Some(crate::control::command::PLUGIN_PARAMETER));
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::control::command::PLUGIN_PARAMETER));
         a.host_commands();
         idle(&a);
@@ -862,7 +862,7 @@ mod tests {
         idle(&a);
         assert!((value_of(&a.state, key, 35).unwrap() - 1.0).abs() < 1e-6, "redone");
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
-        assert_eq!(a.state.history.len(), 1, "the same value again");
+        assert_eq!(a.state.session.history.len(), 1, "the same value again");
     }
 
     #[test]
@@ -913,7 +913,7 @@ mod tests {
         // A clip on Main level: Edit automation clip... is enabled and Link to controller... ticked.
         let (tgt, name, v) = automation(&a.state, key, 35).unwrap();
         crate::playlist::run(&mut a, Cmd::CreateAutomation(tgt, name, v));
-        let ch = a.state.project.channels.last().unwrap().index;
+        let ch = a.state.session.project.channels.last().unwrap().index;
         let m = row_menu(&mut a, key, 35);
         assert_eq!(entry(&m, "MIDI learn...").mark, Mark::Check(true));
         let edit = entry(&m, "Edit automation clip...");
@@ -949,7 +949,7 @@ mod tests {
         crate::playlist::run(&mut a, Cmd::CreateAutomation(tgt, name, v));
         assert_eq!(a.params_menu(MenuEntry::Last), None);
         let m = a.state.playlist.popup.take().unwrap();
-        let tempo = a.state.project.channels.last().unwrap().index;
+        let tempo = a.state.session.project.channels.last().unwrap().index;
         assert_eq!(entry(&m, "Edit automation clip...").cmd, Cmd::Param(PCmd::EditClip(tempo)));
         assert!(!entry(&m, "Set...").enabled, "no plugin parameter");
     }
@@ -986,7 +986,7 @@ mod tests {
                 continue;
             }
             let mut a = App::new(None);
-            a.state.project = crate::locked::Locked::new(project);
+            a.state.session.project = crate::locked::Locked::new(project);
             a.reset_hosted();
             a.plugins.effects = crate::plugins::builtin_effects();
             a.sync_effects();
@@ -996,7 +996,7 @@ mod tests {
                 let (key, k) = key_of(s, t).unwrap();
                 let param = s.params.lists.get(&key).and_then(|l| l.params.get(k)).map(|e| e.name.clone());
                 assert!(param.is_some(), "{path}: {t:?} has no hosted parameter");
-                let name = s.project.channels.iter().find(|c| c.index == ch).and_then(|c| c.name.clone()).unwrap_or_default();
+                let name = s.session.project.channels.iter().find(|c| c.index == ch).and_then(|c| c.name.clone()).unwrap_or_default();
                 let base = name.rsplit_once(" #").filter(|(_, n)| n.parse::<u32>().is_ok()).map_or(name.as_str(), |(b, _)| b);
                 let Some((_, tail)) = base.rsplit_once(" - ").filter(|(_, t)| t.starts_with("Band ") || t.starts_with("Main ")) else { continue };
                 checked += 1;
@@ -1024,7 +1024,7 @@ mod tests {
         a.params_tick();
         let key = a.state.params.lists.keys().copied().find(|&k| fx_of(k).is_some()).expect("a hosted EQ slot");
         println!("{:?}", a.params_automate(key, k));
-        let auto = a.state.project.get_mut().automations.last_mut().unwrap();
+        let auto = a.state.session.project.get_mut().automations.last_mut().unwrap();
         println!("target {:#010x}", auto.target().unwrap());
         let end = auto.points.last().map_or(16.0, |p| p.beat.max(16.0));
         auto.points = vec![os_model::AutoPoint::new(0.0, 0.0), os_model::AutoPoint::new(end, 1.0)];

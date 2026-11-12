@@ -119,7 +119,7 @@ impl App {
                 if let Some(n) = piano::pattern_mut(&mut self.state).notes.get_mut(i) {
                     NoteType::after(periods).apply(n);
                 }
-                self.state.piano.dirty = true;
+                self.state.session.dirty = true;
                 self.hold = Some(Hold { periods, ..h });
                 self.damage_piano();
             }
@@ -156,9 +156,9 @@ impl App {
         if selected {
             s.piano.select(s.pattern(), ch, (first..first + copies.len()).collect());
         }
-        let unit = crate::piano_snap::unit(s).unwrap_or(u32::from(s.project.ppq.max(4)) / 4);
+        let unit = crate::piano_snap::unit(s).unwrap_or(u32::from(s.session.project.ppq.max(4)) / 4);
         let x0 = if step { x0 - unit as f32 * g.ppt } else { x0 };
-        s.piano.dirty = true;
+        s.session.dirty = true;
         self.drag = Some(Drag::NoteMove { x0, y0, orig: copies.clone() });
         self.drag_notes(x0, y0, &copies, false);
         self.damage_piano();
@@ -310,7 +310,7 @@ mod tests {
         app.paint(&mut c, None);
         let unit = crate::piano_snap::unit(&app.state).expect("a snap");
         // Held, with a wobble under the slop: copied at 0.75 s, not before.
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         press(&mut app, x, y);
         app.mouse_move(x + 2.0, y - 1.0);
         let now = at(&app, 700);
@@ -325,8 +325,8 @@ mod tests {
         assert_eq!(ns[0], orig, "the original stays");
         assert_eq!((ns[1].position, ns[1].key), (orig.position + unit, orig.key), "one snap step later");
         assert_eq!(Note { position: orig.position, ..ns[1] }, orig, "a copy of it");
-        assert_eq!(app.state.history.len(), steps + 1, "one step");
-        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some("Piano roll clone note"));
+        assert_eq!(app.state.session.history.len(), steps + 1, "one step");
+        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some("Piano roll clone note"));
         undo(&mut app);
         assert_eq!(notes(&app), vec![orig], "one undo step");
         // A move after the pick-up: a semitone up and three steps later than the copy's start.
@@ -365,14 +365,14 @@ mod tests {
         press(&mut app, x, y);
         app.mouse_up();
         assert_eq!(notes(&app), vec![a], "a Shift+click copies nothing");
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         press(&mut app, x, y);
         app.mouse_move(x + 4.0 * step, y + 2.0 * g.row);
         app.mouse_up();
         app.shift = false;
         assert_eq!(notes(&app), vec![a, Note { position: a.position + 4 * unit, ..a }], "a copy, on the original's key");
-        assert_eq!(app.state.history.len(), steps + 1, "one step");
-        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some("Piano roll clone note"));
+        assert_eq!(app.state.session.history.len(), steps + 1, "one step");
+        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some("Piano roll clone note"));
         undo(&mut app);
         assert_eq!(notes(&app), vec![a], "one undo step");
         // Two notes selected: both are copied, and the copies are the selection.
@@ -472,7 +472,7 @@ mod tests {
         app.state.z = vec![Win::Playlist];
         app.paint(c, None);
         pl::arr_mut(&mut app.state).clips.clear();
-        let bar = 4 * u32::from(app.state.project.ppq);
+        let bar = 4 * u32::from(app.state.session.project.ppq);
         pl::place(&mut app.state, 0, bar);
         app.paint(c, None);
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
@@ -491,7 +491,7 @@ mod tests {
         let orig = pl::clips(&app.state)[0];
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
         let unit = pl::grid_snap(&app.state).ticks(g.ppq, g.bar_w);
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         press(&mut app, x, y);
         let now = at(&app, 700);
         app.hold_tick(now);
@@ -503,8 +503,8 @@ mod tests {
         assert_eq!(cs.len(), 2, "a copy");
         assert_eq!(cs[0], orig, "the original stays");
         assert_eq!((cs[1].position, cs[1].track, cs[1].source), (orig.position + unit, orig.track, orig.source), "one snap step later");
-        assert_eq!(app.state.history.len(), steps + 1, "one step");
-        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some("Arranger clone clip"));
+        assert_eq!(app.state.session.history.len(), steps + 1, "one step");
+        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some("Arranger clone clip"));
         undo(&mut app);
         assert_eq!(pl::clips(&app.state).to_vec(), vec![orig], "one undo step");
         // Empty grid: the usual new clip, and nothing more while held.

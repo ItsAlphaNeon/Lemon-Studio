@@ -36,7 +36,7 @@ pub fn is_state_file(p: &Path) -> bool {
 
 /// Whether channel `row` can be saved as a channel state: a plugin, sampler or audio clip channel.
 pub fn savable(app: &App, row: usize) -> bool {
-    app.state.project.channels.get(row).is_some_and(|c| matches!(c.kind, ChannelKind::Plugin | ChannelKind::Sampler | ChannelKind::AudioClip))
+    app.state.session.project.channels.get(row).is_some_and(|c| matches!(c.kind, ChannelKind::Plugin | ChannelKind::Sampler | ChannelKind::AudioClip))
 }
 
 /// The commands of the plugin window menu's Channel column and the browser.
@@ -94,7 +94,7 @@ pub fn state_bytes(app: &mut App, row: usize) -> Result<Vec<u8>, String> {
     }
     // As a project save does: the built-in plugins' and the hosted plugins' states into a copy of the model.
     app.store_builtin_states();
-    let mut proj = app.state.project.clone();
+    let mut proj = app.state.session.project.clone();
     crate::project_plugins::store_hosted(&mut proj, &app.plugins);
     let mut ch = proj.channels.swap_remove(row);
     if ch.kind.is_sampler() {
@@ -135,12 +135,12 @@ pub fn add(app: &mut App, path: &Path) -> Option<String> {
         ch.name = Some(shown.clone());
     }
     let s = &mut app.state;
-    let row = s.project.channels.len();
+    let row = s.session.project.channels.len();
     crate::history::record(s, LOAD, crate::history::Snap::Channel { row, ch: None });
     crate::rack::push_channel(s, ch);
     s.selected_channel = row;
     s.rack.select_only(row);
-    s.piano.dirty = true;
+    s.session.dirty = true;
     app.invalidate();
     Some(format!("Loaded channel state {shown}"))
 }
@@ -186,10 +186,10 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         ROOT.with(|r| *r.borrow_mut() = Some(dir.clone()));
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         let row = 1;
         {
-            let ch = &mut app.state.project.get_mut().channels[row];
+            let ch = &mut app.state.session.project.get_mut().channels[row];
             ch.name = Some("Snare top".into());
             ch.volume = 0.25;
             ch.misc.cpu.smart_disable = true;
@@ -200,17 +200,17 @@ pub(crate) mod tests {
         let file = path.with_extension(EXT);
         assert!(file.exists());
         let back = read(&file).unwrap();
-        assert_eq!((back.name.as_deref(), back.kind, back.volume), (Some("Snare top"), app.state.project.channels[row].kind, 0.25));
+        assert_eq!((back.name.as_deref(), back.kind, back.volume), (Some("Snare top"), app.state.session.project.channels[row].kind, 0.25));
 
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         let m = run(&mut app, CsCmd::Add(file.clone())).unwrap();
         assert_eq!(m, "Loaded channel state Snare top");
-        assert_eq!(app.state.project.channels.len(), n + 1);
-        let added = &app.state.project.channels[n];
+        assert_eq!(app.state.session.project.channels.len(), n + 1);
+        let added = &app.state.session.project.channels[n];
         assert_eq!((added.index as usize, added.name.as_deref(), added.volume), (n, Some("Snare top"), 0.25));
         assert_eq!(app.state.selected_channel, n);
         crate::history::undo(&mut app.state);
-        assert_eq!(app.state.project.channels.len(), n, "one undo step");
+        assert_eq!(app.state.session.project.channels.len(), n, "one undo step");
 
         assert!(read(&dir.join("missing.oschannel")).is_err());
         run(&mut app, CsCmd::Browse);

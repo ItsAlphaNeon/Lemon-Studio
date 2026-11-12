@@ -39,7 +39,7 @@ pub fn step(s: &State) -> u32 {
         Snap::Line | Snap::Cell | Snap::None => Snap::Step,
         sn => sn,
     };
-    unit.ticks(u32::from(s.project.ppq.max(4)), 0.0)
+    unit.ticks(u32::from(s.session.project.ppq.max(4)), 0.0)
 }
 
 /// Where a held note comes from.
@@ -159,7 +159,7 @@ impl App {
             new.push(i);
         }
         s.piano.select(s.pattern(), ch, new);
-        s.piano.dirty = true;
+        s.session.dirty = true;
         let to = pos + len;
         if s.song_mode() {
             s.playlist.pos = to;
@@ -191,7 +191,7 @@ mod tests {
         app.state.z = vec![Win::PianoRoll];
         app.state.set_song_mode(false);
         app.state.selected_channel = 0;
-        app.state.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
+        app.state.session.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         assert!(app.typing_on() && !on(), "the typing keyboard is on and step edit off at start");
         ctrl_e(&mut app);
         assert!(on());
@@ -224,7 +224,7 @@ mod tests {
 
     /// One step in ticks.
     fn one_step(app: &App) -> u32 {
-        u32::from(app.state.project.ppq) / 4
+        u32::from(app.state.session.project.ppq) / 4
     }
 
     /// The chord is written on the last release only, with every key pressed since the first (spec "Entering notes").
@@ -267,7 +267,7 @@ mod tests {
         // In SONG mode the song position is the playlist's, and the notes go where the pattern plays there, as the
         // piano roll shows it: a clip of it at bar 3, the position a beat into it.
         app.state.set_song_mode(true);
-        let bar = app.state.project.bar_ticks();
+        let bar = app.state.session.project.bar_ticks();
         let clip = os_model::Clip::new(2 * bar, bar, 0, os_model::ClipSource::Pattern(app.state.pattern()));
         crate::playlist::arr_mut(&mut app.state).clips = vec![clip];
         app.state.playlist.pos = 2 * bar + 4 * st;
@@ -293,7 +293,7 @@ mod tests {
     fn a_chord_is_one_write_on_the_last_release_and_one_undo() {
         let mut app = app();
         let st = one_step(&app);
-        let at = app.state.history.at();
+        let at = app.state.session.history.at();
         typed(&mut app, KeyCode::KeyZ, true);
         typed(&mut app, KeyCode::KeyC, true);
         typed(&mut app, KeyCode::KeyZ, false);
@@ -306,12 +306,12 @@ mod tests {
         app.midi_notes(vec![Msg::Off { ch: 0, key: 67, vel: 64 }]);
         assert_eq!(notes(&app), [(0, st, 48, 100), (0, st, 52, 100), (0, st, 67, 90), (0, st, 53, 100)]);
         assert_eq!((app.state.piano.marker, selected(&app)), (st, vec![0, 1, 2, 3]));
-        let h = &app.state.history;
+        let h = &app.state.session.history;
         assert_eq!(h.at(), at + 1, "one undo step");
         assert_eq!(h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1), Some("Step edit"));
         app.key(&Key::Character("z".into()), true, false);
         assert!(notes(&app).is_empty(), "one undo removes the chord");
-        assert_eq!(app.state.history.at(), at);
+        assert_eq!(app.state.session.history.at(), at);
     }
 
     /// At Beat each note is a beat long and the position moves a beat; the start is where the position was, not
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn beat_snap_gives_beat_long_notes_from_where_the_position_was() {
         let mut app = app();
-        let (ppq, st) = (u32::from(app.state.project.ppq), one_step(&app));
+        let (ppq, st) = (u32::from(app.state.session.project.ppq), one_step(&app));
         tap(&mut app, KeyCode::KeyZ);
         tap(&mut app, KeyCode::KeyX);
         assert_eq!(app.state.piano.marker, 2 * st, "1:03");

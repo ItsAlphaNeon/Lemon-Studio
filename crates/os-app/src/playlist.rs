@@ -762,6 +762,7 @@ pub fn icon_of(p: &os_model::Project, owner: IconOwner) -> Option<crate::icons::
 }
 
 /// Every icon chosen, by owner.
+#[cfg(test)]
 pub fn icons(p: &os_model::Project) -> HashMap<IconOwner, crate::icons::Icon> {
     let mut v = HashMap::new();
     for c in &p.channels {
@@ -785,7 +786,7 @@ pub fn icons(p: &os_model::Project) -> HashMap<IconOwner, crate::icons::Icon> {
 /// Sets (`None`: clears) the icon `owner` shows; the project is written only when it changes.
 pub fn put_icon(s: &mut State, owner: IconOwner, icon: Option<crate::icons::Icon>) {
     let name = icon.and_then(|i| ICONS.iter().find(|(_, x)| *x == i)).map(|&(n, _)| n.to_string());
-    s.project.write_if(|p| {
+    s.session.project.write_if(|p| {
         let slot = match owner {
             IconOwner::Channel(id) => p.channels.iter_mut().find(|c| c.id.0 == id).map(|c| &mut c.lemon_icon),
             IconOwner::Track(t) => p.mixer.iter_mut().find(|m| m.index == t).map(|m| &mut m.lemon_icon),
@@ -801,7 +802,7 @@ pub fn icon_items(s: &State, key: usize) -> Vec<PItem> {
     // A container's member: its own icon, saved with the container (`crate::container::Member::icon`).
     let cur = match crate::container::of_key(s, key) {
         Some((t, k, id)) => crate::container::member(s, t, k, id).and_then(|m| m.icon),
-        None => window_icon(&s.project, key),
+        None => window_icon(&s.session.project, key),
     };
     let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];
     v.extend(ICONS.iter().enumerate().map(|(i, &(name, icon))| PItem::new(name, Cmd::SetIcon(key, Some(i))).mark(Mark::Check(cur == Some(icon)))));
@@ -816,7 +817,7 @@ fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
         crate::container::edit_own(s, t, k, id, crate::container::ICON, |m| m.icon = icon);
         return;
     }
-    let Some(owner) = icon_owner(&s.project, key) else { return };
+    let Some(owner) = icon_owner(&s.session.project, key) else { return };
     put_icon(s, owner, icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i));
 }
 
@@ -945,7 +946,7 @@ pub struct Rows {
 
 impl Rows {
     pub fn new(s: &State) -> Rows {
-        let tracks = s.project.arrangement().map(|a| a.tracks.as_slice()).unwrap_or(&[]);
+        let tracks = s.session.project.arrangement().map(|a| a.tracks.as_slice()).unwrap_or(&[]);
         // On the drawing grid, so tops and heights add up exactly (`PGeom::xs64`).
         let row_h = snap(f64::from(s.playlist.row_h.clamp(ROW_MIN, ROW_MAX)));
         let mut top = Vec::with_capacity(usize::from(TRACKS) + 1);
@@ -1017,7 +1018,7 @@ pub fn snap(v: f64) -> f32 {
 
 impl PGeom {
     pub fn new(s: &State, grid: Rect) -> PGeom {
-        let ppq = u32::from(s.project.ppq.max(4));
+        let ppq = u32::from(s.session.project.ppq.max(4));
         let bar_w = s.playlist_bar_w;
         let rows = std::rc::Rc::new(Rows::new(s));
         PGeom { grid, ppt: bar_w / (ppq * 4) as f32, scroll_x: s.playlist_scroll.0, scroll_y: s.playlist_scroll.1, ppq, bar_w, rows }
@@ -1090,10 +1091,10 @@ impl PGeom {
 
 /// The arrangement being edited, created (with FL's 500 default tracks) when the project has none.
 pub fn arr_mut(s: &mut State) -> &mut Arrangement {
-    if s.project.arrangements.is_empty() {
-        s.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
+    if s.session.project.arrangements.is_empty() {
+        s.session.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
     }
-    let a = s.project.get_mut().arrangement_mut().expect("not empty");
+    let a = s.session.project.get_mut().arrangement_mut().expect("not empty");
     while a.tracks.len() < usize::from(TRACKS) {
         let n = a.tracks.len() as u32 + 1;
         a.tracks.push(PlaylistTrack::new(n));
@@ -1102,11 +1103,11 @@ pub fn arr_mut(s: &mut State) -> &mut Arrangement {
 }
 
 pub fn clips(s: &State) -> &[Clip] {
-    s.project.arrangement().map(|a| a.clips.as_slice()).unwrap_or(&[])
+    s.session.project.arrangement().map(|a| a.clips.as_slice()).unwrap_or(&[])
 }
 
 pub fn markers(s: &State) -> &[TimeMarker] {
-    s.project.arrangement().map(|a| a.markers.as_slice()).unwrap_or(&[])
+    s.session.project.arrangement().map(|a| a.markers.as_slice()).unwrap_or(&[])
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1119,13 +1120,13 @@ pub fn add_marker(s: &mut State, m: TimeMarker) -> usize {
     let list = &mut arr_mut(s).markers;
     let i = list.partition_point(|o| o.position <= m.position);
     list.insert(i, m);
-    s.piano.dirty = true;
+    s.session.dirty = true;
     i
 }
 
 /// Puts the markers in position order (markers on one tick keep theirs).
 pub fn sort_markers(s: &mut State) {
-    if let Some(a) = s.project.get_mut().arrangement_mut() {
+    if let Some(a) = s.session.project.get_mut().arrangement_mut() {
         a.markers.sort_by_key(|m| m.position);
     }
 }
@@ -1143,7 +1144,7 @@ fn place_loop(s: &mut State, tick: u32) {
     if list.len() == before {
         add_marker(s, TimeMarker { kind: TimeMarker::LOOP, ..TimeMarker::new(tick, " ") });
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Add one every `n` bars (§7a): "<base> #1", "<base> #2" … every `n` bars from the time selection's start until its
@@ -1198,7 +1199,7 @@ pub fn move_content(s: &mut State, i: usize, right: bool) -> bool {
         }
     }
     sort_markers(s);
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 
@@ -1216,7 +1217,7 @@ pub fn is_group_track(s: &State, t: u16) -> bool {
 }
 
 pub fn track_info(s: &State, t: u16) -> Option<&PlaylistTrack> {
-    s.project.arrangement().and_then(|a| a.tracks.get(usize::from(t)))
+    s.session.project.arrangement().and_then(|a| a.tracks.get(usize::from(t)))
 }
 
 pub fn track_on(s: &State, t: u16) -> bool {
@@ -1266,7 +1267,7 @@ pub fn unlock_tracks(s: &mut State) -> usize {
 }
 
 fn ppq(s: &State) -> u32 {
-    u32::from(s.project.ppq.max(4))
+    u32::from(s.session.project.ppq.max(4))
 }
 
 fn bar(s: &State) -> u32 {
@@ -1274,25 +1275,25 @@ fn bar(s: &State) -> u32 {
 }
 
 fn channel_of(s: &State, ch: u16) -> Option<&Channel> {
-    s.project.channel(ch)
+    s.session.project.channel(ch)
 }
 
 /// The rack row of the channel an audio clip plays (`None` for pattern and automation clips).
 fn audio_clip_row(s: &State, c: &Clip) -> Option<usize> {
     let ClipSource::Channel(ch) = c.source else { return None };
-    s.project.channels.iter().position(|x| x.index == ch && x.kind.is_sampler())
+    s.session.project.channels.iter().position(|x| x.index == ch && x.kind.is_sampler())
 }
 
 pub fn source_name(s: &State, src: ClipSource) -> String {
     match src {
-        ClipSource::Pattern(n) => s.project.pattern(n).and_then(|p| p.name.clone()).unwrap_or_else(|| format!("Pattern {n}")),
+        ClipSource::Pattern(n) => s.session.project.pattern(n).and_then(|p| p.name.clone()).unwrap_or_else(|| format!("Pattern {n}")),
         ClipSource::Channel(c) => channel_of(s, c).and_then(|ch| ch.name.clone()).unwrap_or_else(|| format!("Channel {}", c + 1)),
     }
 }
 
 pub fn source_color(s: &State, src: ClipSource) -> Option<Rgb> {
     match src {
-        ClipSource::Pattern(n) => s.project.pattern(n).and_then(|p| p.color),
+        ClipSource::Pattern(n) => s.session.project.pattern(n).and_then(|p| p.color),
         ClipSource::Channel(c) => channel_of(s, c).and_then(|ch| ch.color),
     }
 }
@@ -1354,13 +1355,13 @@ pub fn audio_speed(s: &State, src: ClipSource) -> f64 {
     } else {
         // A fitted time needs the sample's duration (the multiplier alone does not).
         let duration = if sound.stretch_time().is_some() { sample_secs(s, ch) } else { 0.0 };
-        1.0 / sound.stretch_factor(duration, s.project.tick_tempo(s.tempo()))
+        1.0 / sound.stretch_factor(duration, s.session.project.tick_tempo(s.tempo()))
     };
     let pitched = sound.channel_pitch_applies() && !os_model::stretch_mode::realtime(sound.stretch_mode());
     if !pitched {
         return stretch;
     }
-    let main = ch.misc.main_pitch.then(|| i32::from(s.project.main_pitch.unwrap_or(0)));
+    let main = ch.misc.main_pitch.then(|| i32::from(s.session.project.main_pitch.unwrap_or(0)));
     let cents = f64::from(os_engine::laws::channel_pitch(f64::from(ch.pitch_cents), ch.misc.fine, ch.misc.root, main)) + 6000.0;
     stretch * os_engine::laws::cents_rate(cents)
 }
@@ -1371,7 +1372,7 @@ pub fn audio_speed(s: &State, src: ClipSource) -> f64 {
 /// loaded keep their length. Returns whether a length changed. (The app's tick uses `audio_fits` + `fit_clips`.)
 #[cfg(test)]
 pub fn fit_audio(s: &mut State) -> bool {
-    audio_fits(s).is_some_and(|fits| fit_clips(&mut s.project.get_mut().arrangements, &fits))
+    audio_fits(s).is_some_and(|fits| fit_clips(&mut s.session.project.get_mut().arrangements, &fits))
 }
 
 /// Per audio channel, the whole sample in ticks and in ms; `None` for a channel whose sample is not loaded.
@@ -1383,7 +1384,7 @@ pub fn audio_fits(s: &State) -> Option<Fits> {
         return None;
     }
     let mut per = Fits::new();
-    for a in &s.project.arrangements {
+    for a in &s.session.project.arrangements {
         for c in &a.clips {
             let ClipSource::Channel(ch) = c.source else { continue };
             if per.contains_key(&ch) {
@@ -1407,7 +1408,7 @@ pub fn audio_fits(s: &State) -> Option<Fits> {
 /// not an unsaved change.
 pub fn follow_crossfades(app: &mut App) {
     let tempo = app.state.tempo();
-    if !(app.state.piano.dirty || app.state.project.written_at().is_some()) || !app.state.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
+    if !(app.state.session.dirty || app.state.session.project.written_at().is_some()) || !app.state.session.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
         return;
     }
     os_model::crossfade::derive(&mut app.saved.0, app.saved.1);
@@ -1417,10 +1418,10 @@ pub fn follow_crossfades(app: &mut App) {
 /// The project's automatic crossfades were switched (`App::toggle_auto_crossfades`): turned off, the crossfades'
 /// lengths go to 0 and their tensions stay; turned on, they are set from the overlaps on the next tick.
 pub fn crossfades_switched(s: &mut State) {
-    if !os_model::crossfade::on(&s.project) {
-        os_model::crossfade::clear(s.project.get_mut());
+    if !os_model::crossfade::on(&s.session.project) {
+        os_model::crossfade::clear(s.session.project.get_mut());
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Gives the audio clips of `arrangements` their lengths from `fits` (`fit_audio`). Returns whether one changed.
@@ -1455,13 +1456,13 @@ fn audio_ticks(s: &State, ch: &os_model::Channel) -> f64 {
     let ppq = f64::from(ppq(s));
     let base = match sound.stretch_time() {
         Some(_) => f64::from(f32::from_bits(sound.stretch[0])) * ppq / 192.0,
-        None => secs * s.project.tick_tempo(s.tempo().max(1.0)) / 60.0 * ppq,
+        None => secs * s.session.project.tick_tempo(s.tempo().max(1.0)) / 60.0 * ppq,
     };
     let ticks = base * sound.stretch_multiplier();
     if !sound.channel_pitch_applies() || os_model::stretch_mode::realtime(sound.stretch_mode()) {
         return ticks;
     }
-    let main = ch.misc.main_pitch.then(|| i32::from(s.project.main_pitch.unwrap_or(0)));
+    let main = ch.misc.main_pitch.then(|| i32::from(s.session.project.main_pitch.unwrap_or(0)));
     let cents = f64::from(os_engine::laws::channel_pitch(f64::from(ch.pitch_cents), ch.misc.fine, ch.misc.root, main)) + 6000.0;
     ticks / os_engine::laws::cents_rate(cents)
 }
@@ -1473,7 +1474,7 @@ fn sample_secs(s: &State, ch: &os_model::Channel) -> f64 {
 
 /// Seconds per tick at the project tempo (the ticks run at `Project::tick_tempo`).
 fn secs_per_tick(s: &State) -> f64 {
-    60.0 / s.project.tick_tempo(s.tempo().max(1.0)) / f64::from(ppq(s))
+    60.0 / s.session.project.tick_tempo(s.tempo().max(1.0)) / f64::from(ppq(s))
 }
 
 /// Natural length of a source in ticks: a pattern's length (its bars, the engine's rule: `Project::pattern_length`,
@@ -1481,9 +1482,9 @@ fn secs_per_tick(s: &State) -> f64 {
 pub fn source_len(s: &State, src: ClipSource) -> u32 {
     let bar = bar(s);
     match src {
-        ClipSource::Pattern(n) => s.project.pattern_length(n),
+        ClipSource::Pattern(n) => s.session.project.pattern_length(n),
         ClipSource::Channel(c) => {
-            if let Some(a) = s.project.automation(c) {
+            if let Some(a) = s.session.project.automation(c) {
                 let beats = a.points.last().map_or(0.0, |p| p.beat);
                 return ((beats * f64::from(ppq(s))).round() as u32).max(bar / 4);
             }
@@ -1497,13 +1498,13 @@ pub fn source_len(s: &State, src: ClipSource) -> u32 {
 /// Pattern `n`'s length changed from `old` (its time signature, spec: ui/pattern-time-signature.md §5): its clips that
 /// were not resized by hand (uncut, at the old natural length) take the new one, in every arrangement.
 pub fn refit_pattern_clips(s: &mut State, n: u16, old: u32) {
-    let new = s.project.pattern_length(n);
-    for a in &mut s.project.get_mut().arrangements {
+    let new = s.session.project.pattern_length(n);
+    for a in &mut s.session.project.get_mut().arrangements {
         for c in a.clips.iter_mut().filter(|c| c.source == ClipSource::Pattern(n) && c.window.is_none() && c.length == old) {
             c.length = new;
         }
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// A clip's window in its source's unit (pattern ticks, audio ms, automation beats), filled in when unset.
@@ -1543,9 +1544,9 @@ pub fn snapshot_with(s: &mut State, name: &'static str, extra: crate::history::S
 
 /// The playlist's undo state now (`snapshot`).
 pub(crate) fn capture(s: &State) -> Snapshot {
-    let (clips, markers, tracks) = s.project.arrangement().map(|a| (a.clips.clone(), a.markers.clone(), a.tracks.clone())).unwrap_or_default();
-    let stretch = s.project.channels.iter().map(|c| (c.sound.stretch, c.mixer_track)).collect();
-    (clips, markers, tracks, s.project.automations.clone(), stretch)
+    let (clips, markers, tracks) = s.session.project.arrangement().map(|a| (a.clips.clone(), a.markers.clone(), a.tracks.clone())).unwrap_or_default();
+    let stretch = s.session.project.channels.iter().map(|c| (c.sound.stretch, c.mixer_track)).collect();
+    (clips, markers, tracks, s.session.project.automations.clone(), stretch)
 }
 
 /// Puts an undo state back (undo and redo, `crate::history`).
@@ -1554,13 +1555,13 @@ pub(crate) fn restore(s: &mut State, (c, m, t, a, st): Snapshot) {
     arr.clips = c;
     arr.markers = m;
     arr.tracks = t;
-    s.project.get_mut().automations = a;
-    for (ch, (v, m)) in s.project.get_mut().channels.iter_mut().zip(st) {
+    s.session.project.get_mut().automations = a;
+    for (ch, (v, m)) in s.session.project.get_mut().channels.iter_mut().zip(st) {
         ch.sound.stretch = v;
         ch.mixer_track = m;
     }
     s.playlist.sel.clear();
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Topmost clip under (x, y): the last one in the list (drawn on top).
@@ -1650,7 +1651,7 @@ pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
         c.set_gain(1.0);
     }
     a.clips.push(c);
-    s.piano.dirty = true;
+    s.session.dirty = true;
     clips(s).len() - 1
 }
 
@@ -1658,7 +1659,7 @@ pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
 pub fn delete(s: &mut State, mut idx: Vec<usize>) {
     idx.sort_unstable();
     idx.dedup();
-    let arrangement = s.project.current_arrangement;
+    let arrangement = s.session.project.current_arrangement;
     for &i in &idx {
         if let Some(c) = clips(s).get(i).copied() {
             let selected = s.playlist.sel.contains(&i);
@@ -1680,7 +1681,7 @@ fn remove(s: &mut State, idx: Vec<usize>) {
     let sel = std::mem::take(&mut s.playlist.sel);
     s.playlist.sel = sel.into_iter().filter(|i| !idx.contains(i)).map(|i| i - idx.iter().filter(|&&d| d < i).count()).collect();
     s.playlist.hover_clip = None;
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Clips an edit applies to: the selection, else all.
@@ -1722,7 +1723,7 @@ pub fn group_clips(s: &mut State) -> usize {
         }
     }
     s.playlist.sel = idx.clone();
-    s.piano.dirty = true;
+    s.session.dirty = true;
     idx.len()
 }
 
@@ -1740,7 +1741,7 @@ pub fn ungroup_clips(s: &mut State) -> usize {
     }
     if n > 0 {
         s.playlist.sel.retain(|i| !idx.contains(i));
-        s.piano.dirty = true;
+        s.session.dirty = true;
     }
     n
 }
@@ -1788,7 +1789,7 @@ pub fn clone_clips(s: &mut State, orig: &[(usize, Clip)]) -> Vec<(usize, Clip)> 
         arr.clips.push(cp);
     }
     regroup_copies(s, first);
-    s.piano.dirty = true;
+    s.session.dirty = true;
     clips(s).iter().enumerate().skip(first).map(|(i, c)| (i, *c)).collect()
 }
 
@@ -1830,7 +1831,7 @@ pub fn set_pick_row(s: &mut State, view: f32, row: f32) {
 pub fn load_view(s: &mut State) {
     s.playlist.pos = start_marker(s).unwrap_or(0);
     s.playlist.row_h = ROW_H;
-    let Some(v) = s.project.playlist_view else { return };
+    let Some(v) = s.session.project.playlist_view else { return };
     s.playlist.row_h = (v.row_px() as f32).clamp(ROW_MIN, ROW_MAX);
     let tpp = v.ticks_per_px();
     if tpp.is_finite() && tpp > 0.0 {
@@ -1844,14 +1845,14 @@ pub fn load_view(s: &mut State) {
 
 /// Write the playlist's track height, time zoom and scroll into the project for saving (event 242).
 pub fn store_view(s: &mut State) {
-    let mut v = s.project.playlist_view.unwrap_or_else(|| os_model::PlaylistView::new(s.project.ppq));
+    let mut v = s.session.project.playlist_view.unwrap_or_else(|| os_model::PlaylistView::new(s.session.project.ppq));
     let tpp = f64::from(bar(s)) / f64::from(s.playlist_bar_w.max(1.0));
     v.set_ticks_per_px(tpp);
     v.set_left(f64::from(s.playlist_scroll.0) * tpp);
     v.set_scroll_y(s.playlist_scroll.1.max(0.0).round() as u32);
     v.set_height(((s.playlist.row_h.clamp(ROW_MIN, ROW_MAX) - ROW_MIN) / 2.0).round() as u32);
-    if s.project.playlist_view != Some(v) {
-        s.project.get_mut().playlist_view = Some(v);
+    if s.session.project.playlist_view != Some(v) {
+        s.session.project.get_mut().playlist_view = Some(v);
     }
 }
 
@@ -1886,7 +1887,7 @@ pub fn split(s: &mut State, i: usize, tick: u32) -> Option<usize> {
     a.clips[i] = left;
     a.clips.push(right);
     let n = a.clips.len();
-    s.piano.dirty = true;
+    s.session.dirty = true;
     Some(n - 1)
 }
 
@@ -1908,7 +1909,7 @@ pub fn slip(s: &mut State, i: usize, orig: &Clip, dt: i64) {
     if let Some(c) = arr_mut(s).clips.get_mut(i) {
         c.window = Some((a, b));
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Resize from the right: the window end follows the length.
@@ -1928,7 +1929,7 @@ pub fn resize_right(s: &mut State, i: usize, orig: &Clip, len: u32) {
             c.window = Some((w0, end));
         }
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Stretch mode (§9b): an audio clip resized to `len` ticks at `pos` keeps showing the same part of its sample: its
@@ -1939,7 +1940,7 @@ pub fn stretch_clip(s: &mut State, i: usize, orig: &Clip, pos: u32, len: u32) ->
     let Some(&(_, base)) = s.playlist.stretch_base.iter().find(|b| b.0 == ch) else { return false };
     // Up to Lemon Sampler's longest TIME.
     let beats = (base * f64::from(len) / f64::from(orig.length.max(1))).clamp(1.0 / 192.0, 4096.0);
-    if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
+    if let Some(c) = s.session.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
         c.sound.set_stretch_time(beats);
     }
     // The length that time allows (clamped), the window unchanged.
@@ -1949,7 +1950,7 @@ pub fn stretch_clip(s: &mut State, i: usize, orig: &Clip, pos: u32, len: u32) ->
         c.length = len;
         c.position = if pos != orig.position { end.saturating_sub(len) } else { pos };
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 
@@ -1965,7 +1966,7 @@ pub fn resize_left(s: &mut State, i: usize, orig: &Clip, dt: i64) {
         c.length = (i64::from(orig.length) - dt) as u32;
         c.window = Some(((w0 + d).max(0.0), w1));
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// What clip `i` of `count` is known by as it glides (`Motion::clip_glide`). Clips deleted or added change the count,
@@ -2020,7 +2021,7 @@ pub fn duplicate(s: &mut State) {
     if let Some((r0, r1)) = s.playlist.range {
         s.playlist.range = Some((r0 + span, r1 + span));
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 pub fn copy(s: &mut State) {
@@ -2044,7 +2045,7 @@ pub fn paste(s: &mut State) {
     let n = arr.clips.len();
     regroup_copies(s, start);
     s.playlist.sel = (start..n).collect();
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Ctrl+Insert: insert the time selection's length of empty space at its start (all tracks); without a time
@@ -2067,7 +2068,7 @@ pub fn insert_space(s: &mut State) -> (u32, u32) {
             m.position += len;
         }
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     (r0, r1)
 }
 
@@ -2097,7 +2098,7 @@ pub fn delete_space(s: &mut State) -> bool {
         }
     }
     s.playlist.sel.clear();
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 
@@ -2117,7 +2118,7 @@ pub fn shift_tracks(s: &mut State, d: i32) {
                 c.track = (i32::from(c.track) + d) as u16;
             }
         }
-        s.piano.dirty = true;
+        s.session.dirty = true;
         return;
     }
     let t = i32::from(s.playlist.track);
@@ -2142,7 +2143,7 @@ pub fn swap_tracks(s: &mut State, a: u16, b: u16) {
             c.track = a;
         }
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Insert an empty track at `t` (the rest move down; the last track's clips stay on it).
@@ -2159,7 +2160,7 @@ pub fn insert_track(s: &mut State, t: u16) {
         arr.tracks[k] = PlaylistTrack { number: arr.tracks[k].number, ..prev };
     }
     arr.tracks[usize::from(t)] = PlaylistTrack::new(u32::from(t) + 1);
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Delete track `t` with its clips (the rest move up).
@@ -2178,7 +2179,7 @@ pub fn delete_track(s: &mut State, t: u16) {
         arr.tracks[k] = PlaylistTrack { number: arr.tracks[k].number, ..next };
     }
     arr.tracks[n - 1] = PlaylistTrack::new(n as u32);
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Track LED: mute / unmute only this track. During a solo the other tracks stay as they are and the solo is over (its
@@ -2190,7 +2191,7 @@ pub fn toggle_track(s: &mut State, t: u16) {
     if let Some(tr) = arr.tracks.get_mut(usize::from(t)) {
         tr.enabled = !tr.enabled;
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Ctrl+click / right-click on the LED: solo the track (others muted); again ends the solo (see [`end_solo`]). A solo
@@ -2213,7 +2214,7 @@ pub fn toggle_solo(s: &mut State, t: u16) {
         tr.enabled = k == usize::from(t);
     }
     s.playlist.solo = Some((t, states));
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Whether the last solo still holds: its track alone on, in a playlist of as many tracks as when it started.
@@ -2232,7 +2233,7 @@ fn end_solo(s: &mut State) {
         for (k, tr) in arr.tracks.iter_mut().enumerate() {
             tr.enabled = !back || states.get(k).copied().unwrap_or(tr.enabled);
         }
-        s.piano.dirty = true;
+        s.session.dirty = true;
     }
 }
 
@@ -2240,18 +2241,18 @@ fn end_solo(s: &mut State) {
 pub fn make_unique(s: &mut State, i: usize) -> Option<u16> {
     let c = *clips(s).get(i)?;
     let ClipSource::Pattern(n) = c.source else { return None };
-    let mut p = s.project.pattern(n).cloned().unwrap_or(os_model::Pattern { number: n, ..Default::default() });
-    let next = s.project.patterns.iter().map(|p| p.number).max().unwrap_or(0).max(n) + 1;
+    let mut p = s.session.project.pattern(n).cloned().unwrap_or(os_model::Pattern { number: n, ..Default::default() });
+    let next = s.session.project.patterns.iter().map(|p| p.number).max().unwrap_or(0).max(n) + 1;
     let base = p.name.clone().unwrap_or_else(|| format!("Pattern {n}"));
     p.number = next;
     p.name = Some(format!("{base} #2"));
-    s.project.get_mut().patterns.push(p);
+    s.session.project.get_mut().patterns.push(p);
     if let Some(cl) = arr_mut(s).clips.get_mut(i) {
         cl.source = ClipSource::Pattern(next);
     }
     s.playlist.source = Some(ClipSource::Pattern(next));
     s.set_pattern(next);
-    s.piano.dirty = true;
+    s.session.dirty = true;
     Some(next)
 }
 
@@ -2277,20 +2278,20 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     // ui/settings-choices.md "Advanced: Initialize controls automatically").
     let init = crate::init::automatic(tgt, value);
     arr_mut(s);
-    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
     let mut snaps = vec![crate::history::Snap::Playlist(Box::new(capture(s))), rack];
     if init.is_some() {
         snaps.push(crate::history::Snap::Init(tgt, crate::init::entry(s, tgt)));
     }
     crate::history::record(s, crate::history::CREATE_AUTOMATION, crate::history::Snap::Several(snaps));
     let name = &unique_channel_name(s, name);
-    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
         Some((r0, r1)) if r1 > r0 => (r0, r1),
         _ => automation_span(s),
     };
     let beats = f64::from(b - a) / f64::from(ppq(s));
-    s.project.get_mut().channels.push(Channel {
+    s.session.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,
         kind: ChannelKind::Automation,
@@ -2311,8 +2312,8 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         lemon_icon: None,
     });
-    s.project.get_mut().automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
-    let row = s.project.channels.len() - 1;
+    s.session.project.get_mut().automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
+    let row = s.session.project.channels.len() - 1;
     s.selected_channel = row;
     s.rack.select_only(row);
     crate::rack::join_group(s, row, "Automation");
@@ -2326,7 +2327,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     if init.is_some() {
         crate::init::put(s, tgt, init);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     index
 }
 
@@ -2335,12 +2336,12 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
 /// source, as ADD > Automation clip makes one. One undo step, which also holds the selected pattern (whose events
 /// the caller then takes away). Returns its rack row.
 pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os_model::AutoPoint>) -> usize {
-    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
     let before = crate::history::Snap::Several(vec![rack, crate::history::Snap::pattern(s, s.pattern())]);
     snapshot_with(s, crate::events::TURN_INTO_CLIP, before);
     let name = unique_channel_name(s, name);
-    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    s.project.get_mut().channels.push(Channel {
+    let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    s.session.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,
         kind: ChannelKind::Automation,
@@ -2362,12 +2363,12 @@ pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os
     let beats = points.last().map_or(0.0, |p| p.beat);
     let mut a = os_flp::project::new_automation(index, target, points.first().map_or(0.0, |p| p.value), beats);
     a.points = points;
-    s.project.get_mut().automations.push(a);
-    let row = s.project.channels.len() - 1;
+    s.session.project.get_mut().automations.push(a);
+    let row = s.session.project.channels.len() - 1;
     crate::rack::join_group(s, row, "Automation");
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Automation;
-    s.piano.dirty = true;
+    s.session.dirty = true;
     row
 }
 
@@ -2384,7 +2385,7 @@ pub fn automation_span(s: &State) -> (u32, u32) {
 
 /// `name`, or `name #2`, `name #3`... when a channel already has it (spec: plugins/plugin-parameters.md §4).
 pub fn unique_channel_name(s: &State, name: &str) -> String {
-    let taken = |n: &str| s.project.channels.iter().any(|c| c.name.as_deref() == Some(n));
+    let taken = |n: &str| s.session.project.channels.iter().any(|c| c.name.as_deref() == Some(n));
     if !taken(name) {
         return name.to_string();
     }
@@ -2398,11 +2399,11 @@ pub fn unique_channel_name(s: &State, name: &str) -> String {
 /// two default points and no target. One undo step. Returns the rack row.
 pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     let audio = kind == ChannelKind::AudioClip;
-    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
     snapshot_with(s, if audio { "Add audio clip" } else { "Add automation clip" }, before);
     let name = unique_channel_name(s, if audio { "Audio Clip" } else { "Automation Clip" });
-    s.project.get_mut().channels.push(Channel {
+    s.session.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,
         kind,
@@ -2423,15 +2424,15 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     });
     if !audio {
         // Two points, at 0 and at 4 beats (one 4/4 bar), both 0.5, single curve without tension (§2).
-        s.project.get_mut().automations.push(os_flp::project::untargeted_automation(index, 0.5, 4.0));
+        s.session.project.get_mut().automations.push(os_flp::project::untargeted_automation(index, 0.5, 4.0));
     }
-    let row = s.project.channels.len() - 1;
+    let row = s.session.project.channels.len() - 1;
     s.selected_channel = row;
     s.rack.select_only(row);
     crate::rack::join_group(s, row, if audio { "Audio" } else { "Automation" });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = if audio { PickKind::Audio } else { PickKind::Automation };
-    s.piano.dirty = true;
+    s.session.dirty = true;
     row
 }
 
@@ -2440,12 +2441,12 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
 /// channels selected in the rack, in rack order (FL's Set children, done at once). It becomes the only selected
 /// channel. One undo step. Returns the rack row.
 pub fn add_layer_channel(s: &mut State) -> usize {
-    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let children: Vec<u16> = s.rack.sel.iter().filter_map(|&r| s.project.channels.get(r)).map(|c| c.index).collect();
-    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let children: Vec<u16> = s.rack.sel.iter().filter_map(|&r| s.session.project.channels.get(r)).map(|c| c.index).collect();
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
     snapshot_with(s, "Add layer", before);
     let name = unique_channel_name(s, "Layer");
-    s.project.get_mut().channels.push(Channel {
+    s.session.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,
         kind: ChannelKind::Layer,
@@ -2463,10 +2464,10 @@ pub fn add_layer_channel(s: &mut State) -> usize {
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
         lemon_icon: None,
     });
-    let row = s.project.channels.len() - 1;
+    let row = s.session.project.channels.len() - 1;
     s.selected_channel = row;
     s.rack.select_only(row);
-    s.piano.dirty = true;
+    s.session.dirty = true;
     row
 }
 
@@ -2490,10 +2491,10 @@ pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer
     // Not on an instrument track: the next free track below it (§6c); on an audio track, through its mixer track.
     let track = crate::track_links::audio_drop_track(s, track, tick, tick + 1);
     let mixer = mixer.or_else(|| crate::track_links::audio_mixer(s, track));
-    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
-    let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project)));
-    s.project.get_mut().channels.push(Channel {
+    let mixer_track = mixer.unwrap_or_else(|| (s.session.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.session.project)));
+    s.session.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,
         kind: ChannelKind::AudioClip,
@@ -2548,7 +2549,7 @@ pub fn beat_at(s: &State, g: &PGeom, c: &Clip, x: f32) -> f64 {
 pub fn point_near(s: &State, g: &PGeom, ci: usize, x: f32, y: f32) -> Option<usize> {
     let c = clips(s).get(ci)?;
     let ClipSource::Channel(ch) = c.source else { return None };
-    let a = s.project.automation(ch)?;
+    let a = s.session.project.automation(ch)?;
     let body = g.body(c);
     a.points
         .iter()
@@ -2563,7 +2564,7 @@ pub fn point_near(s: &State, g: &PGeom, ci: usize, x: f32, y: f32) -> Option<usi
 pub fn handle_near(s: &State, g: &PGeom, ci: usize, x: f32, y: f32) -> Option<usize> {
     let c = clips(s).get(ci)?;
     let ClipSource::Channel(ch) = c.source else { return None };
-    let a = s.project.automation(ch)?;
+    let a = s.session.project.automation(ch)?;
     let body = g.body(c);
     (1..a.points.len()).find(|&i| {
         let (p, q) = (a.points[i - 1], a.points[i]);
@@ -2581,26 +2582,26 @@ pub fn handle_near(s: &State, g: &PGeom, ci: usize, x: f32, y: f32) -> Option<us
 pub fn curve_dist(s: &State, g: &PGeom, ci: usize, x: f32, y: f32) -> Option<f32> {
     let c = clips(s).get(ci)?;
     let ClipSource::Channel(ch) = c.source else { return None };
-    let a = s.project.automation(ch)?;
+    let a = s.session.project.automation(ch)?;
     let v = a.value_at(beat_at(s, g, c, x))?;
     Some((value_y(g.body(c), v) - y).abs())
 }
 
 /// Add a point to automation channel `ch` at `beat` with `value`; returns its index.
 pub fn add_point(s: &mut State, ch: u16, beat: f64, value: f64) -> Option<usize> {
-    let a = s.project.get_mut().automation_mut(ch)?;
+    let a = s.session.project.get_mut().automation_mut(ch)?;
     let i = a.points.partition_point(|p| p.beat <= beat);
     // A new point takes the mode / tension of the segment it splits ("new segments use the last tension").
     let (mode, tension) = a.points.get(i).map_or((AutoMode::Single, 0.0), |q| (q.mode, q.tension));
     let flag = if mode.has_tension() { 2 } else { 0 };
     a.points.insert(i, AutoPoint { beat: beat.max(0.0), value: value.clamp(0.0, 1.0), tension, mode, flag });
-    s.piano.dirty = true;
+    s.session.dirty = true;
     Some(i)
 }
 
 /// Move point `i` to (beat, value), kept between its neighbours; the first point stays at beat 0.
 pub fn move_point(s: &mut State, ch: u16, i: usize, beat: f64, value: f64) {
-    let Some(a) = s.project.get_mut().automation_mut(ch) else { return };
+    let Some(a) = s.session.project.get_mut().automation_mut(ch) else { return };
     let n = a.points.len();
     if i >= n {
         return;
@@ -2609,15 +2610,15 @@ pub fn move_point(s: &mut State, ch: u16, i: usize, beat: f64, value: f64) {
     let hi = if i + 1 < n { a.points[i + 1].beat } else { f64::MAX };
     a.points[i].beat = if i == 0 { 0.0 } else { beat.clamp(lo, hi) };
     a.points[i].value = value.clamp(0.0, 1.0);
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 pub fn delete_point(s: &mut State, ch: u16, i: usize) {
-    let Some(a) = s.project.get_mut().automation_mut(ch) else { return };
+    let Some(a) = s.session.project.get_mut().automation_mut(ch) else { return };
     // The first and a lone second point stay (a clip needs a curve).
     if a.points.len() > 2 && i > 0 && i < a.points.len() {
         a.points.remove(i);
-        s.piano.dirty = true;
+        s.session.dirty = true;
     }
 }
 
@@ -2635,7 +2636,7 @@ pub fn tempo_value(bpm: f64) -> f64 {
 /// The text shown for an automation value: the target's own unit where known (spec: audio/voice-levels.md "Values
 /// from automation").
 pub fn value_text(s: &State, ch: u16, v: f64) -> String {
-    let tgt = s.project.automation(ch).and_then(|a| a.target()).map(target::decode);
+    let tgt = s.session.project.automation(ch).and_then(|a| a.target()).map(target::decode);
     match tgt {
         Some(target::Target::Tempo) => format!("{:.3} BPM", auto_tempo(v)),
         Some(target::Target::ChannelPan(_) | target::Target::MixerPan(_)) => crate::knobs::pan_text(((v - 0.5) * 2.0) as f32),
@@ -2644,7 +2645,7 @@ pub fn value_text(s: &State, ch: u16, v: f64) -> String {
         // The rack's swing knob, mixer box and LED as they show the value (spec: flp/events/automation.md "Targets").
         Some(target::Target::MainSwing) => format!("{:.0}%", f64::from(target::swing_of(v)) / 1.28),
         Some(target::Target::MainPitch) => format!("{:+} cents", target::main_pitch_of(v)),
-        Some(target::Target::ChannelMixerTrack(_)) => crate::views::rack::insert_name(target::mixer_track_of(v, crate::mixer::max_insert(&s.project))),
+        Some(target::Target::ChannelMixerTrack(_)) => crate::views::rack::insert_name(target::mixer_track_of(v, crate::mixer::max_insert(&s.session.project))),
         Some(target::Target::ChannelOn(_)) => (if target::channel_on(v) { "On" } else { "Off" }).into(),
         Some(t @ (target::Target::ChannelParam(..) | target::Target::SlotParam(..))) => {
             crate::params::value_text(s, t, v).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
@@ -2657,7 +2658,7 @@ pub fn value_text(s: &State, ch: u16, v: f64) -> String {
 pub fn parse_value(s: &State, ch: u16, text: &str) -> Option<f64> {
     let t = text.trim().trim_end_matches('%').trim_end_matches("BPM").trim();
     let v: f64 = t.parse().ok()?;
-    let tgt = s.project.automation(ch).and_then(|a| a.target()).map(target::decode);
+    let tgt = s.session.project.automation(ch).and_then(|a| a.target()).map(target::decode);
     Some(match tgt {
         Some(target::Target::Tempo) => tempo_value(v),
         _ if v > 1.0 || text.contains('%') => v / 100.0,
@@ -2775,9 +2776,9 @@ const JUMP_UNITS: [&str; 6] = ["Off", "Beats", "Bars", "2 bars", "4 bars", "8 ba
 /// The unit a song position move waits for while the song plays (Quantize song jumps), in ticks; `None` = Off. Bars
 /// are the project's (time signature markers do not change them).
 pub(crate) fn jump_unit(s: &State) -> Option<u32> {
-    let bar = s.project.bar_ticks();
+    let bar = s.session.project.bar_ticks();
     match s.playlist.jump_quantize {
-        1 => Some(u32::from(s.project.ppq.max(1))),
+        1 => Some(u32::from(s.session.project.ppq.max(1))),
         2 => Some(bar),
         3 => Some(bar * 2),
         4 => Some(bar * 4),
@@ -2875,7 +2876,7 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
         it("Rename, color and icon...", PickCmd::Rename),
         it("Change color...", PickCmd::ChangeColor),
         it("Random color", PickCmd::RandomColor),
-        match s.project.channels.iter().position(|c| c.index == ch) {
+        match s.session.project.channels.iter().position(|c| c.index == ch) {
             Some(row) => PItem::sub("Change icon...", icon_items(s, row)),
             None => PItem::not_yet("Change icon..."),
         },
@@ -2884,11 +2885,11 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
     if audio {
         // Greyed while the channel has no sample to open.
         let edit = it("Edit sample...", PickCmd::EditSample);
-        let has = s.project.channel(ch).is_some_and(|c| c.sample_path.as_deref().is_some_and(|p| !p.is_empty()));
+        let has = s.session.project.channel(ch).is_some_and(|c| c.sample_path.as_deref().is_some_and(|p| !p.is_empty()));
         items.extend([it("Load sample...", PickCmd::LoadSample), if has { edit } else { edit.off() }]);
     }
     // Ticked while the channel's cut and cut by are one group, as on the rack's channel menu (ui/channel-rack.md §18).
-    let cuts = s.project.channel(ch).is_some_and(|c| crate::rack::cuts_itself(&c.misc));
+    let cuts = s.session.project.channel(ch).is_some_and(|c| crate::rack::cuts_itself(&c.misc));
     items.extend([it("Chokes itself", PickCmd::CutItself).mark(Mark::Check(cuts)), PItem::sep(), it("Clone", PickCmd::Clone)]);
     if !audio {
         items.push(it("Clone with links", PickCmd::Clone));
@@ -2899,7 +2900,7 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
 
 /// Runs a picker item's command on the channel with index `ch` (§10a).
 fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
-    let row = app.state.project.channels.iter().position(|x| x.index == ch)?;
+    let row = app.state.session.project.channels.iter().position(|x| x.index == ch)?;
     let src = ClipSource::Channel(ch);
     let at = crate::patterns::box_at_mouse(app.mouse);
     let s = &mut app.state;
@@ -2921,7 +2922,7 @@ fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
         }
         PickCmd::RandomColor => {
             crate::rack::random_color(s, row, u64::from(ch));
-            s.piano.dirty = true;
+            s.session.dirty = true;
         }
         PickCmd::LoadSample => return crate::rack::run(app, crate::rack::RCmd::LoadSample(row)),
         PickCmd::EditSample => return edit_sample(app, row),
@@ -2938,7 +2939,7 @@ fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
 /// free slot, as Open capture in audio editor puts the retro audio capture there (spec: plugins/tesla/README.md
 /// "Recording into Tesla from Lemon Studio"). Tesla keeps the file's path; the channel keeps its sample as it was.
 fn edit_sample(app: &mut App, row: usize) -> Option<String> {
-    let path = app.state.project.channels.get(row)?.sample_path.clone().filter(|p| !p.is_empty())?;
+    let path = app.state.session.project.channels.get(row)?.sample_path.clone().filter(|p| !p.is_empty())?;
     let file = std::path::PathBuf::from(crate::plugins::resolve_sample(&path));
     let name = file.file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
     // A WAV keeps its own sample format; other files are decoded as the engine plays them.
@@ -2977,7 +2978,7 @@ pub fn reveal_source(s: &mut State, ch: u16) -> bool {
 }
 
 pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
-    let a = s.project.automation(ch);
+    let a = s.session.project.automation(ch);
     let n = a.map_or(0, |a| a.points.len());
     let mode = a.and_then(|a| a.points.get(i)).map(|p| p.mode);
     let title = PItem { head: true, ..PItem::new(format!("Point {}/{}", i + 1, n), Cmd::Nothing) };
@@ -3222,7 +3223,7 @@ pub fn fade_xs(s: &State, g: &PGeom, c: &Clip) -> (f32, f32) {
 /// edge's bit is clear. Its length follows the overlaps, and a fade-out's tension too (spec: audio/audio-clips.md
 /// "Automatic crossfades"), so it has no tension handle of its own.
 pub fn managed(s: &State, c: &Clip, out: bool) -> bool {
-    os_model::crossfade::on(&s.project) && !if out { c.fade_out_set() } else { c.fade_in_set() }
+    os_model::crossfade::on(&s.session.project) && !if out { c.fade_out_set() } else { c.fade_in_set() }
 }
 
 /// A crossfade as drawn (§9a): later clip `b`'s fade-in and earlier clip `a`'s fade-out across their overlap, from `x0`
@@ -3242,7 +3243,7 @@ pub struct Xfade {
 pub fn crossfade(s: &State, g: &PGeom, b: usize) -> Option<Xfade> {
     let all = clips(s);
     let c = all.get(b).filter(|c| !c.muted && is_audio_clip(s, g, c))?;
-    let a = os_model::crossfade::partner_before(&s.project, all, b).filter(|&a| !all[a].muted)?;
+    let a = os_model::crossfade::partner_before(&s.session.project, all, b).filter(|&a| !all[a].muted)?;
     let (_, t_in) = c.stored_fade_in()?;
     let t_out = all[a].fade_out_tension();
     Some(Xfade { a, b, x0: g.body(c).x, x1: fade_xs(s, g, c).0, t_in, t_out })
@@ -3417,7 +3418,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 }
             }
         }
-        let auto_clip = matches!(c.source, ClipSource::Channel(ch) if s.project.automation(ch).is_some());
+        let auto_clip = matches!(c.source, ClipSource::Channel(ch) if s.session.project.automation(ch).is_some());
         if auto_clip && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) && !app.ctrl && g.body(&c).contains(x, y) {
             let ClipSource::Channel(ch) = c.source else { return };
             if let Some(i) = point_near(s, &g, ci, x, y) {
@@ -3426,7 +3427,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     return;
                 }
                 snapshot(s);
-                let p = s.project.automation(ch).map(|a| a.points[i]).unwrap_or(AutoPoint::new(0.0, 0.0));
+                let p = s.session.project.automation(ch).map(|a| a.points[i]).unwrap_or(AutoPoint::new(0.0, 0.0));
                 app.drag = Some(Drag::Pl(PlDrag::Point { ch, clip: ci, i, x0: x, y0: y, beat0: p.beat, v0: p.value, lock: None }));
                 app.hint = Cow::Owned(value_text(s, ch, p.value));
                 return;
@@ -3434,7 +3435,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             if !right {
                 if let Some(i) = handle_near(s, &g, ci, x, y) {
                     snapshot(s);
-                    let t0 = s.project.automation(ch).map_or(0.0, |a| a.points[i].tension);
+                    let t0 = s.session.project.automation(ch).map_or(0.0, |a| a.points[i].tension);
                     app.drag = Some(Drag::Pl(PlDrag::Tension { ch, i, y0: y, t0 }));
                     return;
                 }
@@ -3602,7 +3603,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     }
                     group = (first..arr.clips.len()).collect();
                     regroup_copies(s, first);
-                    s.piano.dirty = true;
+                    s.session.dirty = true;
                 }
                 let orig: Vec<(usize, Clip)> = group.iter().filter_map(|&j| clips(s).get(j).map(|c| (j, *c))).collect();
                 s.playlist.stretch_base = if s.playlist.stretch && e != 0 {
@@ -3664,7 +3665,7 @@ fn mute_at(app: &mut App, grid: Rect, on: bool) {
         if let Some(c) = arr_mut(s).clips.get_mut(i) {
             if c.muted != on {
                 c.muted = on;
-                s.piano.dirty = true;
+                s.session.dirty = true;
                 app.invalidate();
             }
         }
@@ -3742,7 +3743,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
                     c.track = t;
                 }
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
         }
         PlDrag::ResizeR { x0, orig } => {
             let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
@@ -3786,7 +3787,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
                 let taken = clips(s).iter().any(|c| c.track == track && c.position < pos + len && c.end() > pos);
                 if !taken {
                     arr_mut(s).clips.push(Clip::new(pos, len, track, src));
-                    s.piano.dirty = true;
+                    s.session.dirty = true;
                 }
             }
         }
@@ -3854,13 +3855,13 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
                 None => {}
             }
             move_point(s, ch, i, beat, v);
-            let v = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(v, |p| p.value);
+            let v = s.session.project.automation(ch).and_then(|a| a.points.get(i)).map_or(v, |p| p.value);
             app.hint = Cow::Owned(value_text(&app.state, ch, v));
         }
         PlDrag::Tension { ch, i, y0, t0 } => {
-            if let Some(p) = s.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
+            if let Some(p) = s.session.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
                 p.tension = (t0 + (y0 - y) / 80.0).clamp(-1.0, 1.0);
-                s.piano.dirty = true;
+                s.session.dirty = true;
             }
         }
         PlDrag::Fade { clip, out } => {
@@ -3883,7 +3884,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             }
             let c = *c;
             app.hint = Cow::Owned(handle_hint(&c, if out { Handle::FadeOut } else { Handle::FadeIn }));
-            app.state.piano.dirty = true;
+            app.state.session.dirty = true;
         }
         PlDrag::FadeTension { clip, out, y0, t0 } => {
             let t = (t0 + (y0 - y) * TENSION_PER_PX).clamp(-40.0, 40.0);
@@ -3898,7 +3899,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             }
             let c = *c;
             app.hint = Cow::Owned(handle_hint(&c, if out { Handle::TensionOut } else { Handle::TensionIn }));
-            app.state.piano.dirty = true;
+            app.state.session.dirty = true;
         }
         PlDrag::Gain { clip, y0, db0 } => {
             let db = (db0 + (y0 - y) * DB_PER_PX).clamp(-60.0, 24.0);
@@ -3906,7 +3907,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             c.set_gain(10f32.powf(db / 20.0));
             let c = *c;
             app.hint = Cow::Owned(handle_hint(&c, Handle::Gain));
-            app.state.piano.dirty = true;
+            app.state.session.dirty = true;
         }
         PlDrag::Crossfade { a, b, y0, m0 } => {
             // The later clip's gain at the middle moves 1/120 per logical pixel; its fade-in takes the tension that
@@ -3918,7 +3919,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
                 arr.clips[a].set_fade_out_tension(os_model::crossfade::opposite(t));
                 let c = arr.clips[b];
                 app.hint = Cow::Owned(handle_hint(&c, Handle::Crossfade));
-                app.state.piano.dirty = true;
+                app.state.session.dirty = true;
             }
         }
     }
@@ -4014,8 +4015,8 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
         PlDrag::ResizeL { .. } | PlDrag::ResizeR { .. } if !s.playlist.stretch_base.is_empty() => {
             // Stretched channels: their Lemon Sampler takes the new stretch settings (§9b).
             for (ch, _) in std::mem::take(&mut s.playlist.stretch_base) {
-                let Some(row) = s.project.channels.iter().position(|c| c.index == ch) else { continue };
-                app.plugins.set_sampler_stretch(row, &s.project.channels[row].sound);
+                let Some(row) = s.session.project.channels.iter().position(|c| c.index == ch) else { continue };
+                app.plugins.set_sampler_stretch(row, &s.session.project.channels[row].sound);
             }
         }
         PlDrag::Marker { i, t0, .. } => {
@@ -4024,7 +4025,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
                 crate::history::unrecord(s);
             } else {
                 sort_markers(s);
-                s.piano.dirty = true;
+                s.session.dirty = true;
             }
             // The song position went to the marker: playback follows, as from the ruler (§7a).
             if app.transport.playing() && (app.transport.song() || !app.transport.paused()) {
@@ -4098,7 +4099,7 @@ pub fn zoom_on(s: &mut State, grid: (f32, f32), idx: &[usize]) {
 
 /// The current arrangement's name.
 pub fn arrangement_name(s: &State) -> String {
-    s.project.arrangement().and_then(|a| a.name.clone()).unwrap_or_else(|| "Arrangement".into())
+    s.session.project.arrangement().and_then(|a| a.name.clone()).unwrap_or_else(|| "Arrangement".into())
 }
 
 fn cmd_is_clone(c: &Cmd) -> bool {
@@ -4108,25 +4109,25 @@ fn cmd_is_clone(c: &Cmd) -> bool {
 /// Shows arrangement number `n` (event 100, spec: flp/events/playlist.md): selection and undo belong to the one
 /// left; a playing song continues with the new one.
 pub fn show_arrangement(s: &mut State, n: u16) {
-    s.project.get_mut().current_arrangement = Some(n);
+    s.session.project.get_mut().current_arrangement = Some(n);
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
     s.playlist.hover_handle = None;
     crate::history::forget_playlist(s);
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// The arrangement menu of the playlist title (§12, as FL 26 shows it): the arrangements (the current one ticked),
 /// then Clone, Rename, Delete, Merge with, Add one.
 pub fn arrangement_menu(s: &State, x: f32, y: f32) -> Popup {
-    let cur = s.project.arrangement().map(|a| a.number);
+    let cur = s.session.project.arrangement().map(|a| a.number);
     let mut items = vec![PItem::head("Arrangements")];
-    for a in &s.project.arrangements {
+    for a in &s.session.project.arrangements {
         let name = a.name.clone().unwrap_or_else(|| "Arrangement".into());
         items.push(PItem::new(name, Cmd::ArrSelect(a.number)).mark(Mark::Radio(Some(a.number) == cur)));
     }
     let others: Vec<PItem> = s
-        .project
+        .session.project
         .arrangements
         .iter()
         .filter(|a| Some(a.number) != cur)
@@ -4136,7 +4137,7 @@ pub fn arrangement_menu(s: &State, x: f32, y: f32) -> Popup {
     items.push(PItem::new("Clone...", Cmd::ArrClone));
     items.push(PItem::new("Rename...", Cmd::ArrRename));
     let delete = PItem::new("Delete", Cmd::ArrDelete);
-    items.push(if s.project.arrangements.len() > 1 { delete } else { delete.off() });
+    items.push(if s.session.project.arrangements.len() > 1 { delete } else { delete.off() });
     items.push(if others.is_empty() { PItem::new("Merge with...", Cmd::Nothing).off() } else { PItem::sub("Merge with...", others) });
     items.push(PItem::sep());
     items.push(PItem::new("Add one...", Cmd::ArrAdd));
@@ -4283,8 +4284,8 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::MarkerName(i) => markers(s).get(i).map(|m| m.name.clone()).unwrap_or_default(),
         EditTarget::NewMarker(_) | EditTarget::MarkerBase(_) | EditTarget::MarkerTwo(..) => String::new(),
         EditTarget::PointValue(ch, i) => {
-            let v = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.value);
-            match s.project.automation(ch).and_then(|a| a.target()).map(target::decode) {
+            let v = s.session.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.value);
+            match s.session.project.automation(ch).and_then(|a| a.target()).map(target::decode) {
                 Some(target::Target::Tempo) => format!("{:.3}", auto_tempo(v)),
                 _ => format!("{:.1}%", v * 100.0),
             }
@@ -4340,14 +4341,14 @@ pub fn commit_edit(s: &mut State) {
         }
         EditTarget::PointValue(ch, i) => {
             if let Some(v) = parse_value(s, ch, &text) {
-                let beat = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.beat);
+                let beat = s.session.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.beat);
                 move_point(s, ch, i, beat, v);
             }
         }
         EditTarget::MixerName(n) => {
             let def = if n == 0 { "Master".to_string() } else { format!("Bus {n}") };
             crate::control::edit(s, "Mixer track name", crate::control::command::Region::Track(n), |s| {
-                if let Some(m) = s.project.get_mut().mixer.iter_mut().find(|m| m.index == n) {
+                if let Some(m) = s.session.project.get_mut().mixer.iter_mut().find(|m| m.index == n) {
                     m.name = (!text.is_empty() && text != def).then_some(text);
                 }
             });
@@ -4369,14 +4370,14 @@ pub fn commit_edit(s: &mut State) {
         }
         EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
         EditTarget::PatternName(n) => crate::control::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
-            if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
+            if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
                 p.name = (!text.is_empty()).then_some(text);
             } else if !text.is_empty() {
-                s.project.get_mut().patterns.push(os_model::Pattern { number: n, name: Some(text), ..Default::default() });
+                s.session.project.get_mut().patterns.push(os_model::Pattern { number: n, name: Some(text), ..Default::default() });
             }
         }),
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -4735,7 +4736,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                     c.position = (i64::from(c.position) + dt) as u32;
                 }
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::ShiftTracks(d) => {
@@ -4752,7 +4753,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                     c.muted = on;
                 }
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::MakeUnique => {
@@ -4907,7 +4908,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             } else {
                 arr.markers.iter_mut().filter(|m| inside(m)).for_each(|m| m.kind = TimeMarker::MARKER_LOOP);
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::MoveContent(i, right) => {
@@ -4921,7 +4922,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             if markers(s).get(i).is_some_and(|m| m.kind != kind) {
                 snapshot(s);
                 arr_mut(s).markers[i].kind = kind;
-                s.piano.dirty = true;
+                s.session.dirty = true;
             }
             None
         }
@@ -4931,7 +4932,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             if i < arr.markers.len() {
                 arr.markers.remove(i);
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::RenameMarker(i) => {
@@ -4944,7 +4945,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             if let Some(c) = arr_mut(s).clips.get_mut(i) {
                 c.muted = !c.muted;
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::ClipDelete(i) => {
@@ -4979,7 +4980,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                 Some(ClipSource::Pattern(n)) => start_edit(s, EditTarget::PatternName(n), at),
                 // An audio or automation clip is named after its channel: the rack's Rename, color and icon... box
                 // (spec: ui/playlist.md §10a, the picker's clip entries open their channel's menu).
-                Some(ClipSource::Channel(ch)) => match s.project.channels.iter().position(|c| c.index == ch) {
+                Some(ClipSource::Channel(ch)) => match s.session.project.channels.iter().position(|c| c.index == ch) {
                     Some(r) => crate::rack::open_box(s, crate::rack::RBox::Channel(r), at),
                     None => return Some("Rename: the clip's channel is not in the rack".into()),
                 },
@@ -4994,14 +4995,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                 let rgb = hsl_rgb((seed % 360) as f32, 0.45, 0.45);
                 match src {
                     ClipSource::Pattern(n) => {
-                        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
+                        if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
                             p.color = Some(rgb);
                         } else {
-                            s.project.get_mut().patterns.push(os_model::Pattern { number: n, color: Some(rgb), ..Default::default() });
+                            s.session.project.get_mut().patterns.push(os_model::Pattern { number: n, color: Some(rgb), ..Default::default() });
                         }
                     }
                     ClipSource::Channel(ch) => {
-                        if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
+                        if let Some(c) = s.session.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
                             c.color = Some(rgb);
                             c.rack.stored_color = Some(rgb);
                         }
@@ -5016,22 +5017,22 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::PointCopy(ch, i) => {
-            s.value_clip = s.project.automation(ch).and_then(|a| a.points.get(i)).map(|p| p.value);
+            s.value_clip = s.session.project.automation(ch).and_then(|a| a.points.get(i)).map(|p| p.value);
             None
         }
         Cmd::PointPaste(ch, i) => {
-            let (Some(v), Some(beat)) = (s.value_clip, s.project.automation(ch).and_then(|a| a.points.get(i)).map(|p| p.beat)) else { return None };
+            let (Some(v), Some(beat)) = (s.value_clip, s.session.project.automation(ch).and_then(|a| a.points.get(i)).map(|p| p.beat)) else { return None };
             snapshot(s);
             move_point(s, ch, i, beat, v);
             None
         }
         Cmd::PointMode(ch, i, m) => {
             snapshot(s);
-            if let Some(p) = s.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
+            if let Some(p) = s.session.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
                 p.mode = m;
                 p.flag = if m.has_tension() && !matches!(m, AutoMode::Stairs | AutoMode::SmoothStairs | AutoMode::Pulse | AutoMode::Wave) { 2 } else { 0 };
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::TrackRename(t) => {
@@ -5068,15 +5069,15 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::ArrAdd | Cmd::ArrClone => crate::control::edit(s, "Add arrangement", crate::control::command::Region::Project, |s| {
-            let n = s.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
+            let n = s.session.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
             let mut a = if cmd_is_clone(&cmd) { arr_mut(s).clone() } else { os_flp::project::default_arrangement() };
             a.number = n;
             a.name = Some(if cmd_is_clone(&cmd) {
                 format!("{} #2", arrangement_name(s))
             } else {
-                format!("Arrangement {}", s.project.arrangements.len() + 1)
+                format!("Arrangement {}", s.session.project.arrangements.len() + 1)
             });
-            s.project.get_mut().arrangements.push(a);
+            s.session.project.get_mut().arrangements.push(a);
             show_arrangement(s, n);
             // FL's "Add one..." / "Clone..." ask for the name.
             start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
@@ -5086,21 +5087,21 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
             None
         }
-        Cmd::ArrDelete if s.project.arrangements.len() > 1 => crate::control::edit(s, "Delete arrangement", crate::control::command::Region::Project, |s| {
-            let i = s.project.arrangement_index();
-            s.project.get_mut().arrangements.remove(i);
-            let n = s.project.arrangements[i.saturating_sub(1)].number;
+        Cmd::ArrDelete if s.session.project.arrangements.len() > 1 => crate::control::edit(s, "Delete arrangement", crate::control::command::Region::Project, |s| {
+            let i = s.session.project.arrangement_index();
+            s.session.project.get_mut().arrangements.remove(i);
+            let n = s.session.project.arrangements[i.saturating_sub(1)].number;
             show_arrangement(s, n);
             None
         }),
         Cmd::ArrDelete => Some("The only arrangement cannot be deleted".into()),
         Cmd::ArrMerge(n) => {
-            let Some(other) = s.project.arrangements.iter().find(|a| a.number == n).cloned() else { return None };
+            let Some(other) = s.session.project.arrangements.iter().find(|a| a.number == n).cloned() else { return None };
             snapshot(s);
             let a = arr_mut(s);
             a.clips.extend(other.clips.iter().copied());
             a.clips.sort_by_key(|c| c.position);
-            s.piano.dirty = true;
+            s.session.dirty = true;
             Some(format!("Merged the clips of {}", other.name.unwrap_or_else(|| "Arrangement".into())))
         }
         Cmd::TrackUp(t) if t > 0 => {
@@ -5135,7 +5136,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                     tr.name = Some(format!("Track {}", t + 1));
                 }
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::TrackMuteClips(t, on) => {
@@ -5143,7 +5144,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             for c in arr_mut(s).clips.iter_mut().filter(|c| c.track == t) {
                 c.muted = on;
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::CreateAutomation(tgt, name, v) => {
@@ -5188,7 +5189,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                 4 => p.queue = v != 0,
                 _ => p.tolerant = v != 0,
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::ResetEmptyTracks => {
@@ -5199,11 +5200,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                     *tr = PlaylistTrack::new(tr.number);
                 }
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
             None
         }
         Cmd::LockClips(on) => {
-            let before = s.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect::<Vec<_>>());
+            let before = s.session.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect::<Vec<_>>());
             snapshot_as(s, if on { "Lock tracks to clips" } else { "Unlock tracks from clips" });
             let m = if on {
                 match lock_tracks(s) {
@@ -5217,7 +5218,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
                     n => format!("Unlocked {n} track(s)"),
                 }
             };
-            if s.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect::<Vec<_>>()) == before {
+            if s.session.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect::<Vec<_>>()) == before {
                 crate::history::unrecord(s);
             }
             Some(m)
@@ -5281,7 +5282,7 @@ pub fn quantize_starts(s: &mut State) -> String {
             c.position = (c.position + unit / 2) / unit * unit;
         }
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     format!("Quick quantize: moved {moved} clip start{}", if moved == 1 { "" } else { "s" })
 }
 
@@ -5295,18 +5296,18 @@ pub fn export_tracks(app: &mut App) -> String {
     let mut tracks: Vec<u16> = audible.iter().map(|c| c.track).collect();
     tracks.sort_unstable();
     tracks.dedup();
-    let stem = s.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
-    let base = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
+    let stem = s.session.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
+    let base = s.session.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
     let dir = base.join(format!("{stem} tracks"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return format!("Export tracks: {e}");
     }
     let rate = 44100;
     let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
-    let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.project.ppq, s.project.tick_tempo(s.tempo()), rate) as usize;
+    let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.session.project.ppq, s.session.project.tick_tempo(s.tempo()), rate) as usize;
     let mut written = 0;
     for &t in &tracks {
-        let mut p = s.project.clone();
+        let mut p = s.session.project.clone();
         p.tempo = Some(s.tempo());
         if let Some(arr) = p.arrangement_mut() {
             arr.clips = audible.iter().filter(|c| c.track == t).copied().collect();
@@ -5353,7 +5354,7 @@ pub fn consolidate(app: &mut App) -> String {
         sel.clone()
     };
     // A project with just those clips, shifted to start at 0 (clips crossing the start are cut there).
-    let mut p = s.project.clone();
+    let mut p = s.session.project.clone();
     p.tempo = Some(s.tempo());
     let mut parts = Vec::new();
     for &i in &use_idx {
@@ -5381,7 +5382,7 @@ pub fn consolidate(app: &mut App) -> String {
     let mut audio = e.render_all(512);
     let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo()), rate) as usize) * 2;
     audio.resize(want.max(2), 0.0);
-    let dir = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
+    let dir = s.session.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return format!("Consolidate: {e}");
     }
@@ -5600,10 +5601,10 @@ pub fn plugin_cpu(s: &State, key: usize) -> Option<os_model::PluginCpu> {
     }
     match crate::plugins::fx_of(key) {
         Some((t, k)) => {
-            let m = s.project.mixer.iter().find(|m| m.index == t)?;
+            let m = s.session.project.mixer.iter().find(|m| m.index == t)?;
             m.slots.get(usize::from(k))?.as_ref().map(|_| m.slot_cpu[usize::from(k)])
         }
-        None => s.project.channels.get(key).filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| c.misc.cpu),
+        None => s.session.project.channels.get(key).filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| c.misc.cpu),
     }
 }
 
@@ -5625,13 +5626,13 @@ pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
     }
     match crate::plugins::fx_of(key) {
         Some((t, k)) => crate::control::edit(s, name, Region::Track(t), |s| {
-            if let Some(m) = s.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
+            if let Some(m) = s.session.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
                 flip(&mut m.slot_cpu[usize::from(k)]);
             }
         }),
-        None => crate::control::edit(s, name, Region::Channel(key), |s| flip(&mut s.project.get_mut().channels[key].misc.cpu)),
+        None => crate::control::edit(s, name, Region::Channel(key), |s| flip(&mut s.session.project.get_mut().channels[key].misc.cpu)),
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Enables the window menu's entries that act on the window's channel or slot (`key`, a rack row or a `fx_key`; spec:
@@ -5708,7 +5709,7 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
         fill_cpu(s, key, menu);
         return;
     }
-    let Some(ch) = s.project.channels.get(key).map(|c| c.index) else { return };
+    let Some(ch) = s.session.project.channels.get(key).map(|c| c.index) else { return };
     for it in menu.items.iter_mut() {
         match &*it.label {
             "Piano roll" => set(it, Cmd::Rack(RCmd::PianoRoll(key))),
@@ -5745,7 +5746,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         app
     }
 
@@ -5759,11 +5760,11 @@ mod tests {
         let s = &mut app.state;
         arr_mut(s).tracks[3].enabled = false;
         toggle_solo(s, 0);
-        let mut other = s.project.arrangement().cloned().expect("an arrangement");
+        let mut other = s.session.project.arrangement().cloned().expect("an arrangement");
         other.tracks.iter_mut().for_each(|t| t.enabled = true);
         other.number += 1;
         let n = other.number;
-        s.project.get_mut().arrangements.push(other);
+        s.session.project.get_mut().arrangements.push(other);
         show_arrangement(s, n);
         toggle_solo(s, 5);
         assert!(arr_mut(s).tracks.iter().enumerate().all(|(k, t)| t.enabled == (k == 5)), "a fresh solo of track 5");
@@ -5776,7 +5777,7 @@ mod tests {
     #[test]
     fn renaming_a_channel_clip_renames_its_channel() {
         let mut app = app();
-        let ch = app.state.project.channels[1].index;
+        let ch = app.state.session.project.channels[1].index;
         arr_mut(&mut app.state).clips.push(Clip::new(0, 96, 0, ClipSource::Channel(ch)));
         let i = clips(&app.state).len() - 1;
         assert_eq!(run(&mut app, Cmd::ClipRename(i)), None);
@@ -5784,7 +5785,7 @@ mod tests {
         assert_eq!(b.target, crate::patterns::BoxTarget::Rack(crate::rack::RBox::Channel(1)));
         b.text = "Vocals".into();
         crate::patterns::accept(&mut app.state);
-        assert_eq!(app.state.project.channels[1].name.as_deref(), Some("Vocals"));
+        assert_eq!(app.state.session.project.channels[1].name.as_deref(), Some("Vocals"));
         assert_eq!(source_name(&app.state, ClipSource::Channel(ch)), "Vocals");
     }
 
@@ -5799,7 +5800,7 @@ mod tests {
         let (p1, p2) = (ClipSource::Pattern(1), ClipSource::Pattern(2));
         arr_mut(s).clips.extend([Clip::new(0, 96, 0, p1), Clip::new(384, 96, 0, p1), Clip::new(0, 96, 1, p1), Clip::new(96, 96, 1, p2)]);
         s.playlist.source = Some(p2);
-        let steps = s.history.len();
+        let steps = s.session.history.len();
         assert_eq!(run(&mut app, Cmd::LockClips(true)).as_deref(), Some("Locked 1 track(s) to their clips; 1 with clips of several sources left unlocked"));
         let s = &mut app.state;
         assert_eq!((track_info(s, 0).unwrap().clip_lock, track_info(s, 1).unwrap().clip_lock), (Some(p1), None));
@@ -5808,12 +5809,12 @@ mod tests {
         assert_eq!(clips(s)[i].source, p1, "Draw on a locked track places its source");
         let i = place(s, 2, 0);
         assert_eq!(clips(s)[i].source, p2);
-        assert_eq!(s.history.len(), steps + 1);
+        assert_eq!(s.session.history.len(), steps + 1);
         assert_eq!(run(&mut app, Cmd::LockClips(false)).as_deref(), Some("Unlocked 1 track(s)"));
         assert!(track_info(&app.state, 0).unwrap().clip_lock.is_none());
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         assert_eq!(run(&mut app, Cmd::LockClips(false)).as_deref(), Some("No track is locked to a clip"));
-        assert_eq!(app.state.history.len(), steps, "nothing to unlock: no step");
+        assert_eq!(app.state.session.history.len(), steps, "nothing to unlock: no step");
         crate::history::undo(&mut app.state);
         assert_eq!(track_info(&app.state, 0).unwrap().clip_lock, Some(p1), "undo brings the lock back");
     }
@@ -5827,19 +5828,19 @@ mod tests {
     #[test]
     fn picker_cut_itself() {
         let mut app = app();
-        app.state.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
-        let ch = app.state.project.channels[0].index;
+        app.state.session.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
+        let ch = app.state.session.project.channels[0].index;
         let it = |app: &App| entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Chokes itself").clone();
         assert!(it(&app).enabled);
         assert_eq!(it(&app).mark, Mark::Check(false));
         let cmd = it(&app).cmd;
         run(&mut app, cmd);
-        let m = &app.state.project.channels[0].misc;
+        let m = &app.state.session.project.channels[0].misc;
         assert_eq!((m.cut, m.cut_by), (1, 1));
         assert_eq!(it(&app).mark, Mark::Check(true));
         let cmd = it(&app).cmd;
         run(&mut app, cmd);
-        let m = &app.state.project.channels[0].misc;
+        let m = &app.state.session.project.channels[0].misc;
         assert_eq!((m.cut, m.cut_by), (0, 0));
         crate::history::undo(&mut app.state);
         assert_eq!(it(&app).mark, Mark::Check(true), "one undo step");
@@ -5851,16 +5852,16 @@ mod tests {
     fn picker_edit_sample_opens_tesla() {
         let mut app = app();
         app.plugins.effects = crate::plugins::builtin_effects();
-        app.state.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
-        app.state.project.get_mut().channels[0].sample_path = None;
-        let ch = app.state.project.channels[0].index;
+        app.state.session.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
+        app.state.session.project.get_mut().channels[0].sample_path = None;
+        let ch = app.state.session.project.channels[0].index;
         assert!(!entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Edit sample...").enabled, "no sample");
         let dir = std::env::temp_dir().join(format!("ls_edit_sample_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("Tone.wav");
         let tone = tesla::sample::Sample::from_channels(44100, vec![vec![0.25; 4410], vec![-0.25; 4410]], tesla::sample::Format::Int16);
         std::fs::write(&file, tesla::wav::write(&tone, tesla::wav::Depth::Own)).unwrap();
-        app.state.project.get_mut().channels[0].sample_path = Some(file.to_string_lossy().into_owned());
+        app.state.session.project.get_mut().channels[0].sample_path = Some(file.to_string_lossy().into_owned());
         let it = entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Edit sample...").clone();
         assert!(it.enabled);
         assert_eq!(run(&mut app, it.cmd).as_deref(), Some("Tone.wav is in the audio editor"));
@@ -5870,7 +5871,7 @@ mod tests {
         let saved = tesla::state::from_plugin_state(&st).unwrap();
         assert_eq!((saved.sample.frames(), saved.sample.rate), (4410, 44100));
         assert_eq!(std::path::PathBuf::from(&saved.path), file);
-        assert_eq!(app.state.project.channels[0].sample_path.as_deref(), Some(file.to_string_lossy().as_ref()), "the channel keeps its sample");
+        assert_eq!(app.state.session.project.channels[0].sample_path.as_deref(), Some(file.to_string_lossy().as_ref()), "the channel keeps its sample");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5893,9 +5894,9 @@ mod tests {
         run(&mut app, entry(&m, "Piano roll").cmd.clone());
         assert!(app.state.shown(Win::PianoRoll));
         assert_eq!(app.state.selected_channel, 1);
-        let before = app.state.project.channels[1].color;
+        let before = app.state.session.project.channels[1].color;
         run(&mut app, entry(&m, "Random color").cmd.clone());
-        assert_ne!(app.state.project.channels[1].color, before);
+        assert_ne!(app.state.session.project.channels[1].color, before);
         run(&mut app, entry(&m, "Rename, color and icon...").cmd.clone());
         assert!(app.state.pat_ui.name_box.is_some(), "the name box opens");
         app.state.pat_ui.name_box = None;
@@ -5928,16 +5929,16 @@ mod tests {
         // Change icon... ▸: the slot's icon, its window's title draws it.
         let star = entry(&m, "Change icon...").children.iter().find(|i| i.label == "Star").unwrap().cmd.clone();
         run(&mut app, star);
-        assert_eq!(window_icon(&app.state.project, key), Some(crate::icons::Icon::Star));
+        assert_eq!(window_icon(&app.state.session.project, key), Some(crate::icons::Icon::Star));
         // Change color... ▸ and Random color: the slot's colour, on that slot.
         let change = entry(&m, "Change color...");
         assert!(change.enabled && change.children.len() > 1);
         let red = change.children.iter().find(|i| i.cmd != Cmd::Nothing && i.label != change.children[0].label).unwrap().cmd.clone();
         run(&mut app, red);
-        let c = crate::mixer::slot_colors_of(&app.state.project).get(&(t, k)).copied();
+        let c = crate::mixer::slot_colors_of(&app.state.session.project).get(&(t, k)).copied();
         assert!(c.is_some(), "a colour on slot {k} of track {t}");
         run(&mut app, entry(&m, "Random color").cmd.clone());
-        assert!(crate::mixer::slot_colors_of(&app.state.project).get(&(t, k)).is_some_and(|&r| Some(r) != c));
+        assert!(crate::mixer::slot_colors_of(&app.state.session.project).get(&(t, k)).is_some_and(|&r| Some(r) != c));
         app.state.selected_mixer = 5;
         // Replace ▸: the effects, into this slot.
         fn leaf(items: &[PItem]) -> Option<&PItem> {
@@ -5963,26 +5964,26 @@ mod tests {
     #[test]
     fn change_icon() {
         let mut app = app();
-        app.state.control.settle(app.state.project.get_mut());
-        app.state.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
-        let ch = app.state.project.channels[0].index;
+        app.state.session.control.settle(app.state.session.project.get_mut());
+        app.state.session.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
+        let ch = app.state.session.project.channels[0].index;
         let menu = |app: &App| entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Change icon...").clone();
         let m = menu(&app);
         assert!(m.enabled && m.children[0].label == "None" && m.children[0].mark == Mark::Check(true));
         let keys = m.children.iter().find(|i| i.label == "Keys").unwrap().cmd.clone();
         run(&mut app, keys);
-        assert_eq!(window_icon(&app.state.project, 0), Some(crate::icons::Icon::PianoRoll));
+        assert_eq!(window_icon(&app.state.session.project, 0), Some(crate::icons::Icon::PianoRoll));
         assert_eq!(menu(&app).children.iter().find(|i| i.label == "Keys").unwrap().mark, Mark::Check(true));
         // The window menu shows the same choice.
         let mut w = plugin_window_menu(0, false, 0.0, 0.0);
         fill_plugin_window_menu(&app.state, 0, &mut w);
         assert_eq!(entry(&w, "Change icon...").children.iter().find(|i| i.label == "Keys").unwrap().mark, Mark::Check(true));
         // It belongs to the channel, not the row.
-        app.state.project.get_mut().channels.swap(0, 1);
-        assert_eq!(window_icon(&app.state.project, 1), Some(crate::icons::Icon::PianoRoll));
-        assert_eq!(window_icon(&app.state.project, 0), None);
+        app.state.session.project.get_mut().channels.swap(0, 1);
+        assert_eq!(window_icon(&app.state.session.project, 1), Some(crate::icons::Icon::PianoRoll));
+        assert_eq!(window_icon(&app.state.session.project, 0), None);
         run(&mut app, Cmd::SetIcon(1, None));
-        assert!(crate::playlist::icons(&app.state.project).is_empty());
+        assert!(crate::playlist::icons(&app.state.session.project).is_empty());
     }
 
     /// The window menu's CPU entries (ui/plugin-window.md "CPU"): ticked from the plugin's switches, each flip one undo
@@ -5995,22 +5996,22 @@ mod tests {
             fill_plugin_window_menu(&app.state, key, &mut m);
             m
         };
-        app.state.control.settle(app.state.project.get_mut());
-        app.state.project.get_mut().channels[1].kind = os_model::ChannelKind::Sampler;
+        app.state.session.control.settle(app.state.session.project.get_mut());
+        app.state.session.project.get_mut().channels[1].kind = os_model::ChannelKind::Sampler;
         for label in ["Allow threaded processing", "Auto-bypass when silent"] {
             assert!(!entry(&menu(&app, 1), label).enabled, "{label}: a sampler hosts no plugin");
         }
-        app.state.project.get_mut().channels[1].kind = os_model::ChannelKind::Plugin;
+        app.state.session.project.get_mut().channels[1].kind = os_model::ChannelKind::Plugin;
         let m = menu(&app, 1);
         assert_eq!(entry(&m, "Allow threaded processing").mark, Mark::Check(true));
         assert_eq!(entry(&m, "Auto-bypass when silent").mark, Mark::Check(false));
         run(&mut app, entry(&m, "Auto-bypass when silent").cmd.clone());
-        let cpu = app.state.project.channels[1].misc.cpu;
+        let cpu = app.state.session.project.channels[1].misc.cpu;
         assert_eq!((cpu.threaded, cpu.smart_disable), (true, true));
         assert_eq!(entry(&menu(&app, 1), "Auto-bypass when silent").mark, Mark::Check(true));
         assert!(crate::history::edit_label(&app.state, false).to_lowercase().contains("auto-bypass when silent"), "the step's name");
         crate::history::undo(&mut app.state);
-        assert!(!app.state.project.channels[1].misc.cpu.smart_disable, "one undo step");
+        assert!(!app.state.session.project.channels[1].misc.cpu.smart_disable, "one undo step");
 
         let (t, k) = (3u16, 2u8);
         crate::mixer::track_mut(&mut app.state, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));

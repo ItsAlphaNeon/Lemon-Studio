@@ -292,7 +292,7 @@ pub fn preview(s: &mut State) {
         s.strum.session = Some(Session { pattern: s.pattern(), channel: ch, base: now, base_sel, last: Vec::new() });
     }
     restore(s);
-    let (set, ppq) = (s.strum.set, u32::from(s.project.ppq.max(4)));
+    let (set, ppq) = (s.strum.set, u32::from(s.session.project.ppq.max(4)));
     crate::piano_tools::apply_as(s, |_, ns| strum(ns, &set, ppq), None);
     let last = piano::notes(s).to_vec();
     if let Some(se) = &mut s.strum.session {
@@ -313,7 +313,7 @@ fn restore(s: &mut State) -> bool {
     } else {
         s.piano.select(s.pattern(), ch, sel);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 
@@ -325,7 +325,7 @@ pub fn accept(s: &mut State) -> String {
     }
     s.strum.session = None;
     s.strum.kept = s.strum.set;
-    let (set, ppq) = (s.strum.set, u32::from(s.project.ppq.max(4)));
+    let (set, ppq) = (s.strum.set, u32::from(s.session.project.ppq.max(4)));
     if crate::piano_tools::apply_as(s, |_, ns| strum(ns, &set, ppq), Some("Piano roll strum")) {
         "Piano roll: strummed".into()
     } else {

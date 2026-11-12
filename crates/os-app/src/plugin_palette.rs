@@ -637,9 +637,9 @@ mod tests {
         let mut app = app();
         app.open_plugin_palette(Target::Gen(None), (0.0, 0.0), None);
         type_text(&mut app, "test synth");
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         app.key(&Key::Named(NamedKey::Enter), false, false);
-        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.session.project.channels.len(), n + 1);
         assert!(!is_open(&app.state));
 
         crate::mixer::select(&mut app.state, 1, false);

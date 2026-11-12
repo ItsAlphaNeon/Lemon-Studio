@@ -39,7 +39,7 @@ pub fn unit_of(snap: EditorSnap, global: Snap, ppq: u32, px_per_beat: f32) -> Op
 }
 
 fn ppq(s: &State) -> u32 {
-    u32::from(s.project.ppq.max(4))
+    u32::from(s.session.project.ppq.max(4))
 }
 
 /// The current setting's unit at the piano roll's zoom.
@@ -60,7 +60,7 @@ fn targets(s: &State, skip: &[usize]) -> Vec<u32> {
                 .flat_map(|(_, n)| [n.position, n.position + piano::shown_len(s, n)])
                 .collect()
         }
-        EditorSnap::Markers => s.project.pattern(s.pattern()).map_or(Vec::new(), |p| p.markers.iter().map(|m| m.position).collect()),
+        EditorSnap::Markers => s.session.project.pattern(s.pattern()).map_or(Vec::new(), |p| p.markers.iter().map(|m| m.position).collect()),
         _ => Vec::new(),
     }
 }

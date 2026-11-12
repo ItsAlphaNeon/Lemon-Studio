@@ -67,7 +67,7 @@ pub fn wheel_step(range: u32) -> u32 {
 
 /// "Song position: B:S:T" in the time panel's format.
 pub fn hint(s: &State, pos: u32) -> String {
-    let (bar, step, tick) = crate::views::toolbar::bst_ticks(f64::from(pos) * 96.0 / f64::from(s.project.ppq.max(1)));
+    let (bar, step, tick) = crate::views::toolbar::bst_ticks(f64::from(pos) * 96.0 / f64::from(s.session.project.ppq.max(1)));
     format!("Song position: {bar}:{step:02}:{tick:02}")
 }
 
@@ -144,7 +144,7 @@ impl App {
         let Some(range) = range(&self.state) else { return };
         let now = self.song_pos_now();
         let target = tick_at(self.panel_mouse(crate::toolbar::Panel::SongPos).0, range);
-        let step = click_step(range, self.state.project.ppq);
+        let step = click_step(range, self.state.session.project.ppq);
         let next = if target > now { (now + step).min(target) } else { now.saturating_sub(step).max(target) };
         if next != now {
             self.set_song_pos(next, true);

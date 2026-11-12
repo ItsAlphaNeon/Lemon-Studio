@@ -125,9 +125,9 @@ pub fn paint(ui: &mut Ui, s: &State) {
         };
         ui.c.text_clip(Font::new(12), x + 44.0, row + 2.0, r.right() - x - 74.0, t.glyph_dim, &caption);
         let tab_col = match b.target {
-            BoxTarget::Name(n) => Some(s.project.pattern(n).and_then(|p| p.color)),
-            BoxTarget::Rack(crate::rack::RBox::Channel(r)) => Some(s.project.channels.get(r).and_then(|c| c.color)),
-            BoxTarget::Rack(crate::rack::RBox::ColorSel) => Some(s.rack.sel.first().and_then(|&r| s.project.channels.get(r)).and_then(|c| c.color)),
+            BoxTarget::Name(n) => Some(s.session.project.pattern(n).and_then(|p| p.color)),
+            BoxTarget::Rack(crate::rack::RBox::Channel(r)) => Some(s.session.project.channels.get(r).and_then(|c| c.color)),
+            BoxTarget::Rack(crate::rack::RBox::ColorSel) => Some(s.rack.sel.first().and_then(|&r| s.session.project.channels.get(r)).and_then(|c| c.color)),
             _ => None,
         };
         if let Some(col) = tab_col {

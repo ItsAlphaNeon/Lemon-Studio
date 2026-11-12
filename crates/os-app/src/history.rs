@@ -104,7 +104,7 @@ pub struct Timebase {
 impl Timebase {
     /// The project's timebase and ticks now.
     pub fn now(s: &State) -> Timebase {
-        let p = &s.project;
+        let p = &s.session.project;
         Timebase { ppq: p.ppq, patterns: p.patterns.clone(), arrangements: p.arrangements.clone() }
     }
 }
@@ -130,8 +130,8 @@ impl RackSide {
         let r = &s.rack;
         RackSide {
             row,
-            ch: s.project.channels.get(row).cloned(),
-            groups: (s.project.groups.clone(), s.project.channels.iter().map(|c| c.rack.group).collect(), s.project.current_group),
+            ch: s.session.project.channels.get(row).cloned(),
+            groups: (s.session.project.groups.clone(), s.session.project.channels.iter().map(|c| c.rack.group).collect(), s.session.project.current_group),
             sel: r.sel.clone(),
             selected: s.selected_channel,
             source: s.playlist.source,
@@ -143,7 +143,7 @@ impl RackSide {
 impl Snap {
     /// Pattern `number` as it is now.
     pub fn pattern(s: &State, number: u16) -> Snap {
-        let p = s.project.pattern(number);
+        let p = s.session.project.pattern(number);
         Snap::Pattern {
             number,
             notes: p.map(|p| p.notes.clone()).unwrap_or_default(),
@@ -156,7 +156,7 @@ impl Snap {
 
     /// Channel `row`'s side of a sample load as it is now (`Snap::Sample`).
     pub fn sample(s: &State, row: usize) -> Option<Snap> {
-        let ch = s.project.channels.get(row)?;
+        let ch = s.session.project.channels.get(row)?;
         let (path, name) = (ch.sample_path.clone(), ch.name.clone());
         Some(Snap::Sample { row, path, name, root: ch.misc.root, stretch: ch.sound.stretch, flags: ch.sound.sampler_flags })
     }
@@ -171,9 +171,9 @@ impl Snap {
             Snap::TrackIo(t, _) => crate::mixer::track(s, *t).map_or_else(|| self.clone(), |m| Snap::TrackIo(*t, track_io_of(m))),
             // A channel gone since is left as the step has it (`put` does nothing then).
             Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
-            Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
+            Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.session.project.channels.get(*row).cloned().map(Box::new) },
             Snap::Init(t, _) => Snap::Init(*t, crate::init::entry(s, *t)),
-            Snap::Patterns { .. } => Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern() },
+            Snap::Patterns { .. } => Snap::Patterns { patterns: s.session.project.patterns.clone(), current: s.pattern() },
             Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(s, r.row))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
             // What each command would put back, as it is now (`swap` applies them).
@@ -236,23 +236,23 @@ impl Snap {
                 }
             }
             Snap::Sample { row, path, name, root, stretch, flags } => {
-                if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
+                if let Some(ch) = s.session.project.get_mut().channels.get_mut(row) {
                     (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (path.clone(), name, root, stretch);
                     ch.sound.sampler_flags = flags;
                     // Its Lemon Sampler follows on the next tick: the sample (none: cleared), root note, stretch and
                     // Keep on disk.
-                    s.sample_loads.push((row, path.unwrap_or_default()));
+                    s.session.sample_loads.push((row, path.unwrap_or_default()));
                 }
             }
             // The channel goes or comes back only as the last row: rows below it would move.
             Snap::Channel { row, ch } => match ch {
-                None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
-                Some(c) if row == s.project.channels.len() => crate::rack::push_channel(s, *c),
+                None if row + 1 == s.session.project.channels.len() => crate::rack::remove_last(s),
+                Some(c) if row == s.session.project.channels.len() => crate::rack::push_channel(s, *c),
                 _ => {}
             },
             Snap::Init(t, e) => crate::init::put(s, t, e),
             Snap::Patterns { patterns, current } => {
-                s.project.get_mut().patterns = patterns;
+                s.session.project.get_mut().patterns = patterns;
                 s.set_pattern(current);
                 s.piano.clear_selection();
             }
@@ -263,14 +263,14 @@ impl Snap {
             }
             Snap::Timebase(t) => {
                 let Timebase { ppq, patterns, arrangements } = *t;
-                let from = s.project.ppq.max(1);
+                let from = s.session.project.ppq.max(1);
                 crate::app::retime(s, from, ppq.max(1));
-                (s.project.get_mut().patterns, s.project.get_mut().arrangements) = (patterns, arrangements);
+                (s.session.project.get_mut().patterns, s.session.project.get_mut().arrangements) = (patterns, arrangements);
                 // Playback stops on the next tick, as for the change (`App::set_timebase`).
-                s.retimed = true;
+                s.session.retimed = true;
             }
         }
-        s.piano.dirty = true;
+        s.session.dirty = true;
     }
 }
 
@@ -284,11 +284,11 @@ pub fn timebase(s: &mut State) {
 fn put_rack(s: &mut State, r: RackSide) {
     let RackSide { row, ch, groups: (names, of, shown), sel, selected, source, picker } = r;
     match ch {
-        None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
-        Some(c) if row == s.project.channels.len() => crate::rack::push_channel(s, c),
+        None if row + 1 == s.session.project.channels.len() => crate::rack::remove_last(s),
+        Some(c) if row == s.session.project.channels.len() => crate::rack::push_channel(s, c),
         _ => {}
     }
-    s.project.write_if(|p| {
+    s.session.project.write_if(|p| {
         let before = (p.groups.clone(), p.current_group, p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>());
         (p.groups, p.current_group) = (names, shown);
         for (c, g) in p.channels.iter_mut().zip(of) {
@@ -303,8 +303,8 @@ fn put_rack(s: &mut State, r: RackSide) {
 /// The model's value of a knob: the channels' volume and pan as stored (exact), the others as the knob reads them.
 fn knob_value(s: &State, id: KnobId) -> Option<f64> {
     Some(match id {
-        KnobId::ChanVol(i) => s.project.channels.get(i).map_or(0.0, |c| c.volume),
-        KnobId::ChanPan(i) => s.project.channels.get(i).map_or(0.0, |c| c.pan),
+        KnobId::ChanVol(i) => s.session.project.channels.get(i).map_or(0.0, |c| c.volume),
+        KnobId::ChanPan(i) => s.session.project.channels.get(i).map_or(0.0, |c| c.pan),
         // The level the container's list holds (the knob shows the chain's, an automated one included).
         KnobId::Member(t, k, id, wet) => crate::container::level(s, t, k, id, wet).map_or(0.0, f64::from),
         // A route with no level record: the knob shows unity, and the record is what the step must put back.
@@ -318,14 +318,14 @@ fn set_knob_value(s: &mut State, id: KnobId, v: Option<f64>) {
         if let KnobId::Send(a, b) = id {
             if let Some(m) = crate::mixer::track_mut(s, a) {
                 m.send_levels.retain(|&(d, _)| d != b);
-                s.piano.dirty = true;
+                s.session.dirty = true;
             }
         }
         return;
     };
     match id {
-        KnobId::ChanVol(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.volume = v),
-        KnobId::ChanPan(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.pan = v),
+        KnobId::ChanVol(i) => s.session.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.volume = v),
+        KnobId::ChanPan(i) => s.session.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.pan = v),
         _ => s.set_knob(id, v as f32),
     }
 }
@@ -486,7 +486,7 @@ pub fn record(s: &mut State, name: &'static str, snap: Snap) {
 
 /// `record` with a name made at run time (a client's step: "Assistant: build drum kit").
 pub fn record_named(s: &mut State, name: Cow<'static, str>, snap: Snap) {
-    let h = &mut s.history;
+    let h = &mut s.session.history;
     h.steps.truncate(h.done);
     h.steps.push(Step { name, snap });
     h.done = h.steps.len();
@@ -499,7 +499,7 @@ pub fn record_named(s: &mut State, name: Cow<'static, str>, snap: Snap) {
 /// Adds to the newest step's commands (a plugin's values joining its step, `control::param_edit`), when it is done
 /// and holds commands.
 pub fn extend_newest(s: &mut State, f: impl FnOnce(&mut Vec<crate::control::Command>)) {
-    let h = &mut s.history;
+    let h = &mut s.session.history;
     if h.done > 0 && h.done == h.steps.len() {
         if let Snap::Commands(c) = &mut h.steps[h.done - 1].snap {
             f(c);
@@ -511,7 +511,7 @@ pub fn extend_newest(s: &mut State, f: impl FnOnce(&mut Vec<crate::control::Comm
 /// the app found in the plugin as it put the other side in (`App::host_commands`).
 pub fn fill_plugin_side(s: &mut State, fill: u64, state: &[u8], preset: Option<&std::path::Path>) {
     use crate::control::command::Taken;
-    for st in &mut s.history.steps {
+    for st in &mut s.session.history.steps {
         let Snap::Commands(v) = &mut st.snap else { continue };
         for c in v {
             if let crate::control::Command::Put(t) = c {
@@ -528,13 +528,13 @@ pub fn fill_plugin_side(s: &mut State, fill: u64, state: &[u8], preset: Option<&
 
 /// The newest step is done with: no button release drops it (`settle`), a client's change, made without a press.
 pub fn done_with(s: &mut State) {
-    s.history.fresh = false;
+    s.session.history.fresh = false;
 }
 
 /// Names the newest step `name` while its press is held (recorded since the last release): a gesture that turned into
 /// another edit, as a held click's clone (`crate::hold`). The step keeps what it holds.
 pub fn rename(s: &mut State, name: &'static str) {
-    let h = &mut s.history;
+    let h = &mut s.session.history;
     if h.fresh && h.done > 0 && h.done == h.steps.len() {
         h.steps[h.done - 1].name = Cow::Borrowed(name);
     }
@@ -542,7 +542,7 @@ pub fn rename(s: &mut State, name: &'static str) {
 
 /// Drops the newest step: its edit changed nothing after all.
 pub fn unrecord(s: &mut State) {
-    let h = &mut s.history;
+    let h = &mut s.session.history;
     if h.done > 0 && h.done == h.steps.len() {
         h.steps.pop();
         h.done -= 1;
@@ -553,17 +553,17 @@ pub fn unrecord(s: &mut State) {
 /// A button was released: the step recorded since the last release goes when its edit changed nothing (a click on a
 /// note that did not move it, a knob clicked without a turn).
 pub fn settle(s: &mut State) {
-    let h = &s.history;
+    let h = &s.session.history;
     if h.fresh && h.done > 0 && h.done == h.steps.len() && h.steps[h.done - 1].snap.now(s) == h.steps[h.done - 1].snap {
         unrecord(s);
     }
-    s.history.fresh = false;
+    s.session.history.fresh = false;
 }
 
 /// Before a sample loads into channel `row` (the file dialog, a drop, the browser's send): one step, "Load channel
 /// sample(s)", holding what the load changes. `row` past the last channel: the load makes that channel.
 pub fn load_sample(s: &mut State, row: usize) {
-    let snap = Snap::sample(s, row).unwrap_or(Snap::Channel { row: s.project.channels.len(), ch: None });
+    let snap = Snap::sample(s, row).unwrap_or(Snap::Channel { row: s.session.project.channels.len(), ch: None });
     record(s, LOAD_SAMPLE, snap);
 }
 
@@ -587,34 +587,34 @@ pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
     if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) || matches!(id, KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_)) {
         return;
     }
-    let h = &s.history;
+    let h = &s.session.history;
     if wheel && h.joins(Run::Wheel(id)) {
         return;
     }
     let snap = Snap::Knob(id, knob_value(s, id));
     record(s, knob_name(id), snap);
     if wheel {
-        s.history.run = Some(Run::Wheel(id));
+        s.session.history.run = Some(Run::Wheel(id));
     }
 }
 
 fn swap(s: &mut State, i: usize) {
     s.motion.borrow_mut().ripples_over();
-    if let Snap::Commands(v) = &mut s.history.steps[i].snap {
+    if let Snap::Commands(v) = &mut s.session.history.steps[i].snap {
         let v = std::mem::take(v);
         let other = crate::control::take_back(s, v);
-        s.history.steps[i].snap = Snap::Commands(other);
-        s.piano.dirty = true;
+        s.session.history.steps[i].snap = Snap::Commands(other);
+        s.session.dirty = true;
         return;
     }
-    let now = s.history.steps[i].snap.now(s);
-    let old = std::mem::replace(&mut s.history.steps[i].snap, now);
+    let now = s.session.history.steps[i].snap.now(s);
+    let old = std::mem::replace(&mut s.session.history.steps[i].snap, now);
     old.put(s);
 }
 
 /// Undoes the newest done step; its name, or `None` when nothing is done.
 pub fn undo(s: &mut State) -> Option<String> {
-    let h = &mut s.history;
+    let h = &mut s.session.history;
     if h.done == 0 {
         return None;
     }
@@ -622,18 +622,18 @@ pub fn undo(s: &mut State) -> Option<String> {
     (h.undid, h.run, h.fresh) = (true, None, false);
     let i = h.done;
     swap(s, i);
-    Some(s.history.steps[i].name.to_string())
+    Some(s.session.history.steps[i].name.to_string())
 }
 
 /// Redoes the oldest undone step; its name, or `None` when nothing is undone.
 pub fn redo(s: &mut State) -> Option<String> {
-    let h = &mut s.history;
+    let h = &mut s.session.history;
     if h.done == h.steps.len() {
         return None;
     }
     let i = h.done;
     swap(s, i);
-    let h = &mut s.history;
+    let h = &mut s.session.history;
     h.done += 1;
     (h.undid, h.run, h.fresh) = (false, None, false);
     Some(h.steps[i].name.to_string())
@@ -657,7 +657,7 @@ fn did(s: &mut State, redo_it: bool) -> String {
 /// (undo, redo, undo). With Show undo history in the browser when undoing changes on, the browser shows the history.
 /// Returns the hint bar's message.
 pub fn ctrl_z(s: &mut State) -> Option<String> {
-    let m = did(s, s.history.ctrl_z_redoes());
+    let m = did(s, s.session.history.ctrl_z_redoes());
     shown_in_browser(s);
     Some(m)
 }
@@ -685,14 +685,14 @@ fn shown_in_browser(s: &mut State) {
 
 /// A click on entry `p` of the browser's History folder: undoes or redoes up to it.
 pub fn go_to(s: &mut State, p: usize) -> Option<String> {
-    let p = p.min(s.history.steps.len());
-    while s.history.done > p {
+    let p = p.min(s.session.history.steps.len());
+    while s.session.history.done > p {
         undo(s);
     }
-    while s.history.done < p {
+    while s.session.history.done < p {
         redo(s);
     }
-    let name = if p == 0 { LAST_RESET } else { &s.history.steps[p - 1].name };
+    let name = if p == 0 { LAST_RESET } else { &s.session.history.steps[p - 1].name };
     Some(format!("History: {}", lower(name)))
 }
 
@@ -700,7 +700,7 @@ pub fn go_to(s: &mut State, p: usize) -> Option<String> {
 /// "Redo step seq edit" with Alternate undo mode off after an undo), `redo` the second (Ctrl+Alt+Z's redo, Alternate
 /// undo mode only). Without a step to act on, plain "Undo" / "Redo".
 pub fn edit_label(s: &State, redo_entry: bool) -> String {
-    let h = &s.history;
+    let h = &s.session.history;
     let redo_it = redo_entry || h.ctrl_z_redoes();
     let (verb, step) = if redo_it { ("Redo", h.steps.get(h.done)) } else { ("Undo", h.done.checked_sub(1).and_then(|i| h.steps.get(i))) };
     match step {
@@ -711,23 +711,23 @@ pub fn edit_label(s: &State, redo_entry: bool) -> String {
 
 /// Whether EDIT's entry has a step to act on.
 pub fn edit_enabled(s: &State, redo_entry: bool) -> bool {
-    let h = &s.history;
+    let h = &s.session.history;
     if redo_entry || h.ctrl_z_redoes() { h.done < h.steps.len() } else { h.done > 0 }
 }
 
 /// Whether EDIT shows its Redo entry: Alternate undo mode on and a history to act on (only Undo while it is empty).
 pub fn redo_shown(s: &State) -> bool {
-    prefs::check(&prefs::ALTERNATE_UNDO) && !s.history.steps.is_empty()
+    prefs::check(&prefs::ALTERNATE_UNDO) && !s.session.history.steps.is_empty()
 }
 
 /// Maximum undo levels changed: the history keeps that many.
 pub fn trim(s: &mut State) {
-    s.history.trim();
+    s.session.history.trim();
 }
 
 /// Another arrangement is shown: the playlist's steps belong to the one left (spec: ui/playlist.md §10).
 pub fn forget_playlist(s: &mut State) {
-    let h = &mut s.history;
+    let h = &mut s.session.history;
     let mut done = 0;
     let mut kept = Vec::with_capacity(h.steps.len());
     for (i, st) in std::mem::take(&mut h.steps).into_iter().enumerate() {
@@ -742,7 +742,7 @@ pub fn forget_playlist(s: &mut State) {
 /// The timebase changed from `from` to `to` ticks per quarter: the steps' notes, control points, lengths, clips and
 /// markers follow, so no undo brings back ticks of the old timebase (a timebase step keeps its own, `Timebase`).
 pub fn rescale(s: &mut State, from: u16, to: u16) {
-    for st in &mut s.history.steps {
+    for st in &mut s.session.history.steps {
         st.snap.rescale(from, to);
     }
 }
@@ -753,7 +753,7 @@ mod tests {
     use crate::app::App;
 
     fn note_count(s: &State) -> usize {
-        s.project.pattern(s.pattern()).map_or(0, |p| p.notes.len())
+        s.session.project.pattern(s.pattern()).map_or(0, |p| p.notes.len())
     }
 
     /// Two recorded edits: undo and redo swap them back and forth; a new action drops the undone branch; past
@@ -773,12 +773,12 @@ mod tests {
         assert_eq!((undo(s).as_deref(), note_count(s)), (Some(STEP_SEQ_EDIT), start));
         assert_eq!(undo(s), None);
         assert_eq!((redo(s).as_deref(), note_count(s)), (Some(STEP_SEQ_EDIT), start + 1));
-        assert!(s.history.undone(2) && s.history.current(1) && !s.history.undone(1));
+        assert!(s.session.history.undone(2) && s.session.history.current(1) && !s.session.history.undone(1));
         // A new action: the undone step is gone.
         let snap = Snap::pattern(s, s.pattern());
         record(s, "Piano roll add note", snap);
         crate::rack::set_step(s, 0, 14, true);
-        assert_eq!(s.history.entries().iter().map(|e| e.1).collect::<Vec<_>>(), [LAST_RESET, STEP_SEQ_EDIT, "Piano roll add note"]);
+        assert_eq!(s.session.history.entries().iter().map(|e| e.1).collect::<Vec<_>>(), [LAST_RESET, STEP_SEQ_EDIT, "Piano roll add note"]);
         assert_eq!(redo(s), None);
         // Three levels kept: the oldest go.
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, 3);
@@ -787,11 +787,11 @@ mod tests {
             record(s, "Piano roll edit", snap);
             crate::rack::set_step(s, 0, 20 + k, true);
         }
-        assert_eq!(s.history.len(), 3);
-        assert!(s.history.entries().iter().skip(1).all(|e| e.1 == "Piano roll edit"), "{:?}", s.history.entries());
+        assert_eq!(s.session.history.len(), 3);
+        assert!(s.session.history.entries().iter().skip(1).all(|e| e.1 == "Piano roll edit"), "{:?}", s.session.history.entries());
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, 2);
         trim(s);
-        assert_eq!((s.history.len(), s.history.done), (2, 2));
+        assert_eq!((s.session.history.len(), s.session.history.done), (2, 2));
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, prefs::MAX_UNDO_LEVELS.default);
     }
 
@@ -804,25 +804,25 @@ mod tests {
         let snap = Snap::pattern(s, s.pattern());
         record(s, "Piano roll edit", snap);
         settle(s);
-        assert_eq!(s.history.len(), 0, "nothing changed");
+        assert_eq!(s.session.history.len(), 0, "nothing changed");
         let snap = Snap::pattern(s, s.pattern());
         record(s, "Piano roll edit", snap);
         crate::rack::set_step(s, 0, 9, !crate::rack::row_steps(s, 0, 10)[9]);
         settle(s);
         crate::rack::set_step(s, 0, 9, !crate::rack::row_steps(s, 0, 10)[9]);
         settle(s);
-        assert_eq!(s.history.len(), 1, "an earlier press's step stays");
-        s.history.reset();
+        assert_eq!(s.session.history.len(), 1, "an earlier press's step stays");
+        s.session.history.reset();
         let id = KnobId::ChanVol(0);
-        let v0 = s.project.channels[0].volume;
+        let v0 = s.session.project.channels[0].volume;
         for _ in 0..3 {
             knob(s, id, true);
             let v = s.knob(id) - 0.03;
             s.set_knob(id, v);
         }
-        assert_eq!(s.history.len(), 1, "one step for the notches");
+        assert_eq!(s.session.history.len(), 1, "one step for the notches");
         assert_eq!(undo(s).as_deref(), Some("Channel volume"));
-        assert_eq!(s.project.channels[0].volume, v0, "exactly back");
+        assert_eq!(s.session.project.channels[0].volume, v0, "exactly back");
     }
 
     // ---------------------------------------------------------------------------------------------------------------
@@ -882,7 +882,7 @@ mod tests {
     fn history_rows(app: &mut App) -> Vec<(String, bool, bool, bool)> {
         app.state.browser_tab = 1;
         app.state.browser_open.extend(["1:Current project".to_string(), "1:Current project/History".to_string()]);
-        let h = &app.state.history;
+        let h = &app.state.session.history;
         crate::views::browser::rows(&app.state)
             .into_iter()
             .filter_map(|r| match r.item {
@@ -990,17 +990,17 @@ mod tests {
         // instead of leaving one at unity (equivalence harness, System/Render tests/Hardcore.flp).
         let mut app = App::new(None);
         let s = &mut app.state;
-        let t = s.project.mixer.iter().position(|m| m.index == 1).expect("track 1");
-        s.project.get_mut().mixer[t].routes = vec![0];
-        s.project.get_mut().mixer[t].send_levels.clear();
+        let t = s.session.project.mixer.iter().position(|m| m.index == 1).expect("track 1");
+        s.session.project.get_mut().mixer[t].routes = vec![0];
+        s.session.project.get_mut().mixer[t].send_levels.clear();
         let id = KnobId::Send(1, 0);
         knob(s, id, true);
         s.set_knob(id, 0.5);
-        assert_eq!(s.project.mixer[t].send_levels, vec![(0, 0.5)]);
+        assert_eq!(s.session.project.mixer[t].send_levels, vec![(0, 0.5)]);
         assert!(undo(s).is_some());
-        assert_eq!(s.project.mixer[t].send_levels, vec![], "no record left behind");
+        assert_eq!(s.session.project.mixer[t].send_levels, vec![], "no record left behind");
         assert!(redo(s).is_some());
-        assert_eq!(s.project.mixer[t].send_levels, vec![(0, 0.5)]);
+        assert_eq!(s.session.project.mixer[t].send_levels, vec![(0, 0.5)]);
     }
 
     #[test]
@@ -1012,12 +1012,12 @@ mod tests {
         s.set_pattern(1);
         crate::piano::snapshot_as(s, "Piano roll edit");
         crate::patterns::pat_mut(s, 1).notes.push(os_model::Note::step(0, 0));
-        let edited = s.project.pattern(1).map(|p| p.notes.clone());
+        let edited = s.session.project.pattern(1).map(|p| p.notes.clone());
         s.set_pattern(2);
         assert!(undo(s).is_some());
-        assert_eq!((s.pattern(), s.project.pattern(1).map(|p| p.notes.len())), (2, Some(0)));
+        assert_eq!((s.pattern(), s.session.project.pattern(1).map(|p| p.notes.len())), (2, Some(0)));
         assert!(redo(s).is_some());
-        assert_eq!((s.pattern(), s.project.pattern(1).map(|p| p.notes.clone())), (2, edited));
+        assert_eq!((s.pattern(), s.session.project.pattern(1).map(|p| p.notes.clone())), (2, edited));
     }
 
     #[test]
@@ -1027,14 +1027,14 @@ mod tests {
         // stay, and undoing them gives the project back (equivalence harness, nucleon - Fruity Delay 3).
         let mut app = App::new(None);
         let id = KnobId::MixSep(3);
-        let start = app.state.project.clone();
+        let start = app.state.session.project.clone();
         knob(&mut app.state, id, true);
         app.state.set_knob(id, 0.25);
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         crate::mixer::run(&mut app, crate::mixer::MCmd::Delete(2));
-        assert_eq!(app.state.history.len(), steps + 1, "the wheel's step stays");
+        assert_eq!(app.state.session.history.len(), steps + 1, "the wheel's step stays");
         while undo(&mut app.state).is_some() {}
-        assert_eq!(app.state.project.mixer, start.mixer);
+        assert_eq!(app.state.session.project.mixer, start.mixer);
     }
 
     /// Undo knob tweaks: on, a turn of a channel knob is a step and Ctrl+Z puts the knob back, the click before it
@@ -1049,13 +1049,13 @@ mod tests {
             let start = steps(&app);
             click_step(&mut app, 0, 0);
             let clicked = steps(&app);
-            let v0 = app.state.project.channels[0].volume;
+            let v0 = app.state.session.project.channels[0].volume;
             turn(&mut app, id, 40.0);
-            let v1 = app.state.project.channels[0].volume;
+            let v1 = app.state.session.project.channels[0].volume;
             assert_ne!(v1, v0, "the knob turned");
-            assert_eq!(app.state.history.len(), if on { 2 } else { 1 });
+            assert_eq!(app.state.session.history.len(), if on { 2 } else { 1 });
             ctrl_z(&mut app);
-            let vol = app.state.project.channels[0].volume;
+            let vol = app.state.session.project.channels[0].volume;
             if on {
                 assert_eq!((vol, steps(&app)), (v0, clicked), "the knob back, the click kept");
             } else {
@@ -1097,11 +1097,11 @@ mod tests {
         app.act(Action::BrowserRow(first));
         app.mouse_up();
         assert_eq!(steps(&app), start);
-        assert!(app.state.history.undone(1) && app.state.history.undone(2) && app.state.history.current(0));
+        assert!(app.state.session.history.undone(1) && app.state.session.history.undone(2) && app.state.session.history.current(0));
         assert!(app.drag.is_none(), "a history entry is not dragged");
         app.act(Action::BrowserRow(last));
         app.mouse_up();
-        assert!(app.state.history.current(2));
+        assert!(app.state.session.history.current(2));
     }
 
     /// Show undo history in the browser when undoing changes: off, Ctrl+Z leaves the browser where it is; on, the
@@ -1142,7 +1142,7 @@ mod tests {
         for k in 0..5 {
             click_step(&mut app, 0, k);
         }
-        assert_eq!(app.state.history.len(), 3);
+        assert_eq!(app.state.session.history.len(), 3);
         for _ in 0..4 {
             ctrl_z(&mut app);
         }
@@ -1161,7 +1161,7 @@ mod tests {
     }
 
     fn names(s: &State) -> Vec<&str> {
-        s.history.entries().into_iter().map(|e| e.1).collect()
+        s.session.history.entries().into_iter().map(|e| e.1).collect()
     }
 
     /// A mixer fader drag is one step, "Mixer track volume", as EDIT names it; Ctrl+Z puts the fader back exactly and
@@ -1182,11 +1182,11 @@ mod tests {
         ctrl_alt_z(&mut app);
         assert_eq!(vol(&app), v1, "redone");
         fade(&mut app, 1, 0.0);
-        assert_eq!(app.state.history.len(), 1, "a click without a move");
+        assert_eq!(app.state.session.history.len(), 1, "a click without a move");
         prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
         fade(&mut app, 1, 20.0);
         assert_ne!(vol(&app), v1);
-        assert_eq!(app.state.history.len(), 1, "Undo knob tweaks off");
+        assert_eq!(app.state.session.history.len(), 1, "Undo knob tweaks off");
         prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
     }
 
@@ -1370,7 +1370,7 @@ mod tests {
     fn mixer_group_fader_drag_is_one_step() {
         let mut app = App::new(None);
         spread(&mut app, 1, &[1, 2, 3]);
-        let (before, steps) = (volumes(&app, [1, 2, 3, 4]), app.state.history.len());
+        let (before, steps) = (volumes(&app, [1, 2, 3, 4]), app.state.session.history.len());
         fade(&mut app, 2, 40.0);
         let after = volumes(&app, [1, 2, 3, 4]);
         assert!(after[1] < before[1], "the pressed fader moved");
@@ -1382,7 +1382,7 @@ mod tests {
         }
         assert_eq!(app.state.selected_mixer, 2, "the pressed track is current");
         assert_eq!(crate::mixer::selected(&app.state), [2, 1, 3], "the selection stays");
-        assert_eq!(app.state.history.len(), steps + 1, "one step");
+        assert_eq!(app.state.session.history.len(), steps + 1, "one step");
         assert_eq!(edit_menu(&app)[0], entry("Undo mixer track volume", "Ctrl+Z", true));
         ctrl_z(&mut app);
         assert_eq!(volumes(&app, [1, 2, 3, 4]), before, "exactly back");
@@ -1396,17 +1396,17 @@ mod tests {
     fn mixer_group_fader_click_and_no_undo_knob_tweaks() {
         let mut app = App::new(None);
         spread(&mut app, 1, &[1, 2, 3]);
-        let (before, steps) = (volumes(&app, [1, 2, 3]), app.state.history.len());
+        let (before, steps) = (volumes(&app, [1, 2, 3]), app.state.session.history.len());
         fade(&mut app, 3, 0.0);
         assert_eq!(volumes(&app, [1, 2, 3]), before, "nothing moved");
-        assert_eq!(app.state.history.len(), steps, "no step");
+        assert_eq!(app.state.session.history.len(), steps, "no step");
         assert_eq!((app.state.selected_mixer, crate::mixer::selected(&app.state)), (3, vec![3, 1, 2]));
         prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
         fade(&mut app, 3, 20.0);
         prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
         let after = volumes(&app, [1, 2, 3]);
         assert!((0..3).all(|i| after[i] < before[i]), "all moved");
-        assert_eq!(app.state.history.len(), steps, "Undo knob tweaks off");
+        assert_eq!(app.state.session.history.len(), steps, "Undo knob tweaks off");
     }
 
     /// A drag on a fader outside the selection moves that one alone, and it alone is selected now.
@@ -1463,9 +1463,9 @@ mod tests {
         assert_eq!(vol(&app, 1), v1);
         ctrl_alt_z(&mut app);
         assert_eq!(vol(&app, 1), UNITY, "redone");
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         alt_click_fader(&mut app, 1);
-        assert_eq!(app.state.history.len(), steps, "nothing changed");
+        assert_eq!(app.state.session.history.len(), steps, "nothing changed");
         fade(&mut app, 2, -30.0);
         assert!(vol(&app, 2) > UNITY, "above unity");
         alt_click_fader(&mut app, 2);
@@ -1475,11 +1475,11 @@ mod tests {
         alt_click_fader(&mut app, 0);
         assert_eq!(vol(&app, 0), UNITY, "the Master's too");
         fade(&mut app, 3, 40.0);
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
         alt_click_fader(&mut app, 3);
         assert_eq!(vol(&app, 3), UNITY);
-        assert_eq!(app.state.history.len(), steps, "Undo knob tweaks off");
+        assert_eq!(app.state.session.history.len(), steps, "Undo knob tweaks off");
         prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
     }
 
@@ -1495,15 +1495,15 @@ mod tests {
         let vols = |app: &App| [1, 2, 3].map(|t| crate::mixer::track(&app.state, t).and_then(|m| m.volume).unwrap());
         app.state.selected_mixer = 1;
         app.state.mixer.sel = vec![1, 2];
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         alt_click_fader(&mut app, 2);
         assert_eq!(vols(&app), [0.2, 0.3, 0.4], "nothing resets");
-        assert_eq!(app.state.history.len(), steps, "no step");
+        assert_eq!(app.state.session.history.len(), steps, "no step");
         assert_eq!(app.state.selected_mixer, 2, "the pressed track is current");
         assert_eq!(crate::mixer::selected(&app.state), [2, 1], "the selection stays");
         alt_click_fader(&mut app, 3);
         assert_eq!(vols(&app), [0.2, 0.3, 0.8], "only the one outside the selection");
-        assert_eq!(app.state.history.len(), steps + 1);
+        assert_eq!(app.state.session.history.len(), steps + 1);
         assert_eq!(crate::mixer::selected(&app.state), [3], "it alone is selected now");
     }
 
@@ -1550,9 +1550,9 @@ mod tests {
             assert_eq!(text(&app, k), moved);
             ctrl_alt_z(&mut app);
             assert_eq!(text(&app, k), default, "redone");
-            let steps = app.state.history.len();
+            let steps = app.state.session.history.len();
             alt_click_knob(&mut app, k);
-            assert_eq!(app.state.history.len(), steps, "nothing changed");
+            assert_eq!(app.state.session.history.len(), steps, "nothing changed");
             turn(&mut app, knob(2), -30.0);
             assert_ne!(text(&app, knob(2)), default, "the other side");
             alt_click_knob(&mut app, knob(2));
@@ -1562,11 +1562,11 @@ mod tests {
             alt_click_knob(&mut app, knob(0));
             assert_eq!(app.state.knob(knob(0)), 0.5, "the Master's too");
             turn(&mut app, knob(3), 40.0);
-            let steps = app.state.history.len();
+            let steps = app.state.session.history.len();
             prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
             alt_click_knob(&mut app, knob(3));
             assert_eq!(app.state.knob(knob(3)), 0.5);
-            assert_eq!(app.state.history.len(), steps, "Undo knob tweaks off");
+            assert_eq!(app.state.session.history.len(), steps, "Undo knob tweaks off");
             prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
         }
     }
@@ -1585,14 +1585,14 @@ mod tests {
         let at = |app: &App| [1, 2, 3, 4].map(|t| [app.state.knob(KnobId::MixPan(t)), app.state.knob(KnobId::MixSep(t))]);
         app.state.selected_mixer = 1;
         app.state.mixer.sel = vec![1, 2, 3];
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         assert_eq!(alt_click_knob(&mut app, KnobId::MixPan(2)), "Panning: Centered");
         assert_eq!(at(&app), [[OFF, OFF], [DEFAULT, OFF], [OFF, OFF], [OFF, OFF]], "a selected track's pan, only that one");
-        assert_eq!(app.state.history.len(), steps + 1);
+        assert_eq!(app.state.session.history.len(), steps + 1);
         assert_eq!(crate::mixer::selected(&app.state), [1, 2, 3], "the selection stays");
         assert_eq!(alt_click_knob(&mut app, KnobId::MixSep(1)), "Stereo separation: Original");
         assert_eq!(at(&app), [[OFF, DEFAULT], [DEFAULT, OFF], [OFF, OFF], [OFF, OFF]], "the current track's separation, only that one");
-        assert_eq!(app.state.history.len(), steps + 2);
+        assert_eq!(app.state.session.history.len(), steps + 2);
         assert_eq!(crate::mixer::selected(&app.state), [1, 2, 3], "the selection stays");
         alt_click_knob(&mut app, KnobId::MixPan(4));
         assert_eq!(at(&app), [[OFF, DEFAULT], [DEFAULT, OFF], [OFF, OFF], [DEFAULT, OFF]], "a knob outside the selection");
@@ -1608,27 +1608,27 @@ mod tests {
         let mut a = App::new(None);
         a.plugins = crate::plugins::Plugins::default();
         a.plugins.available = crate::plugins::builtin();
-        let n = a.state.project.channels.len();
+        let n = a.state.session.project.channels.len();
         let sampler = a.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
         let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         crate::plugin_menu::add_generator(&mut a, sampler, None);
         crate::plugin_menu::add_generator(&mut a, trio, None);
-        assert_eq!(a.state.project.channels.len(), n + 2);
+        assert_eq!(a.state.session.project.channels.len(), n + 2);
         assert_eq!(names(&a.state), [LAST_RESET, ADD_CHANNEL, ADD_CHANNEL]);
         a.plugin_tick();
         assert!(a.plugins.hosted.contains_key(&(n + 1)), "the Trio is hosted");
         assert_eq!(undo(&mut a.state).as_deref(), Some(ADD_CHANNEL));
         a.plugin_tick();
-        assert_eq!((a.state.project.channels.len(), a.state.selected_channel), (n + 1, n), "the Trio channel went");
+        assert_eq!((a.state.session.project.channels.len(), a.state.selected_channel), (n + 1, n), "the Trio channel went");
         assert!(!a.plugins.hosted.contains_key(&(n + 1)), "and its instance");
         assert_eq!(redo(&mut a.state).as_deref(), Some(ADD_CHANNEL));
         a.plugin_tick();
-        assert_eq!(a.state.project.channels.len(), n + 2);
+        assert_eq!(a.state.session.project.channels.len(), n + 2);
         assert!(a.plugins.hosted.contains_key(&(n + 1)), "its instance is back");
-        assert_eq!(a.state.project.channels[n + 1].plugin, Some(crate::osc3::file_name(crate::osc3::LEMON_TRIO).to_string()));
+        assert_eq!(a.state.session.project.channels[n + 1].plugin, Some(crate::osc3::file_name(crate::osc3::LEMON_TRIO).to_string()));
         undo(&mut a.state);
         undo(&mut a.state);
-        assert_eq!(a.state.project.channels.len(), n, "both gone");
+        assert_eq!(a.state.session.project.channels.len(), n, "both gone");
     }
 
     /// A channel delete is one step, "Delete channel": undone, the channel is back in its row with its notes and the
@@ -1636,17 +1636,17 @@ mod tests {
     #[test]
     fn a_channel_delete_is_one_step() {
         let mut app = App::new(None);
-        assert!(app.state.project.channels.len() >= 3);
-        app.state.project.get_mut().patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
-        let (chans, pats) = (app.state.project.channels.clone(), app.state.project.patterns.clone());
+        assert!(app.state.session.project.channels.len() >= 3);
+        app.state.session.project.get_mut().patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
+        let (chans, pats) = (app.state.session.project.channels.clone(), app.state.session.project.patterns.clone());
         crate::rack::delete_step(&mut app, &[1]);
-        let (gone_chans, gone_pats) = (app.state.project.channels.clone(), app.state.project.patterns.clone());
+        let (gone_chans, gone_pats) = (app.state.session.project.channels.clone(), app.state.session.project.patterns.clone());
         assert_eq!(gone_chans.len(), chans.len() - 1);
         assert_eq!(names(&app.state), [LAST_RESET, DELETE_CHANNEL]);
         ctrl_z(&mut app);
-        assert_eq!((&app.state.project.channels, &app.state.project.patterns), (&chans, &pats), "all back");
+        assert_eq!((&app.state.session.project.channels, &app.state.session.project.patterns), (&chans, &pats), "all back");
         ctrl_alt_z(&mut app);
-        assert_eq!((&app.state.project.channels, &app.state.project.patterns), (&gone_chans, &gone_pats), "deleted again");
+        assert_eq!((&app.state.session.project.channels, &app.state.session.project.patterns), (&gone_chans, &gone_pats), "deleted again");
     }
 
     /// Settings > Project: the bar, its mode and the panning law are steps, named as the control plane's commands
@@ -1655,25 +1655,25 @@ mod tests {
     fn project_settings_are_steps() {
         let mut app = App::new(None);
         let now = |app: &App| {
-            let p = &app.state.project;
+            let p = &app.state.session.project;
             (p.bar, p.bar_as_signature, p.panning_law)
         };
         let start = now(&app);
         app.set_panning_law(2);
         app.set_bar(3, 4);
-        app.set_time_mode(!app.state.project.bar_is_signature());
+        app.set_time_mode(!app.state.session.project.bar_is_signature());
         let sig = crate::control::command::TIME_SIGNATURE;
         assert_eq!(names(&app.state), [LAST_RESET, "Panning law", sig, sig]);
         app.set_panning_law(2);
-        assert_eq!(app.state.history.len(), 3, "the same value again makes no step");
+        assert_eq!(app.state.session.history.len(), 3, "the same value again makes no step");
         assert_eq!(edit_menu(&app)[0], entry("Undo time signature", "Ctrl+Z", true));
         ctrl_z(&mut app);
-        assert_eq!(app.state.project.bar(), (3, 4), "the mode back");
+        assert_eq!(app.state.session.project.bar(), (3, 4), "the mode back");
         ctrl_z(&mut app);
         ctrl_z(&mut app);
         assert_eq!(now(&app), start);
         ctrl_alt_z(&mut app);
-        assert_eq!(app.state.project.panning_law, Some(2));
+        assert_eq!(app.state.session.project.panning_law, Some(2));
     }
 
     /// The timebase is a "Project settings" step: undone, the ticks a lower timebase rounded come back exactly; redone,
@@ -1682,21 +1682,21 @@ mod tests {
     fn a_timebase_change_is_a_step() {
         let mut app = App::new(None);
         app.set_timebase(96);
-        app.state.project.get_mut().patterns[0].notes = vec![os_model::Note { length: 7, ..os_model::Note::step(0, 5) }];
-        let before = app.state.project.clone();
+        app.state.session.project.get_mut().patterns[0].notes = vec![os_model::Note { length: 7, ..os_model::Note::step(0, 5) }];
+        let before = app.state.session.project.clone();
         app.set_timebase(24);
         app.set_timebase(24);
         assert_eq!(names(&app.state), [LAST_RESET, PROJECT_SETTINGS]);
-        let n = app.state.project.patterns[0].notes[0];
+        let n = app.state.session.project.patterns[0].notes[0];
         assert_eq!((n.position, n.length), (1, 2), "rounded to the new ticks");
-        let after = app.state.project.clone();
+        let after = app.state.session.project.clone();
         ctrl_z(&mut app);
-        assert_eq!(app.state.project, before, "every tick back");
-        assert!(app.state.retimed, "playback stops");
+        assert_eq!(app.state.session.project, before, "every tick back");
+        assert!(app.state.session.retimed, "playback stops");
         ctrl_alt_z(&mut app);
-        assert_eq!(app.state.project, after);
+        assert_eq!(app.state.session.project, after);
         app.plugin_tick();
-        assert!(!app.state.retimed);
+        assert!(!app.state.session.retimed);
     }
 
     /// Settings > Info: an accepted box edit and a genre picked are each one step (`control::edit`); an edit that changes
@@ -1706,7 +1706,7 @@ mod tests {
         use crate::views::settings::InfoField;
         use winit::keyboard::{Key, NamedKey};
         let mut app = App::new(None);
-        let start = app.state.project.info.clone();
+        let start = app.state.session.project.info.clone();
         let type_in = |app: &mut App, field: InfoField, text: &str| {
             app.info_act(field);
             app.state.settings.info_edit.as_mut().unwrap().text.set(text);
@@ -1724,13 +1724,13 @@ mod tests {
         app.set_genre(Some(crate::project_info::GENRES[0]));
         let info = crate::control::command::SONG_INFO;
         assert_eq!(names(&app.state), [LAST_RESET, info, info]);
-        assert_eq!(app.state.project.info.title.as_deref(), Some("Song"));
+        assert_eq!(app.state.session.project.info.title.as_deref(), Some("Song"));
         ctrl_z(&mut app);
-        assert_eq!(app.state.project.info.genre, start.genre, "the genre back");
+        assert_eq!(app.state.session.project.info.genre, start.genre, "the genre back");
         ctrl_z(&mut app);
-        assert_eq!(app.state.project.info, start);
+        assert_eq!(app.state.session.project.info, start);
         ctrl_alt_z(&mut app);
-        assert_eq!(app.state.project.info.title.as_deref(), Some("Song"));
+        assert_eq!(app.state.session.project.info.title.as_deref(), Some("Song"));
     }
 
     /// A generator inserted higher up the rack is one step, "Add channel": undone, it goes and the rows under it move
@@ -1741,24 +1741,24 @@ mod tests {
         a.plugins = crate::plugins::Plugins::default();
         a.plugins.available = crate::plugins::builtin();
         let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
-        assert!(a.state.project.channels.len() >= 3);
-        a.state.project.get_mut().patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
-        let (chans, pats) = (a.state.project.channels.clone(), a.state.project.patterns.clone());
+        assert!(a.state.session.project.channels.len() >= 3);
+        a.state.session.project.get_mut().patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
+        let (chans, pats) = (a.state.session.project.channels.clone(), a.state.session.project.patterns.clone());
         crate::plugin_menu::add_generator(&mut a, trio, Some(0));
         a.plugin_tick();
         let trio_name = Some(crate::osc3::LEMON_TRIO.to_string());
         assert_eq!(a.plugins.descriptor(1).map(|d| d.name), trio_name, "hosted in its row");
-        let (more, moved) = (a.state.project.channels.clone(), a.state.project.patterns.clone());
+        let (more, moved) = (a.state.session.project.channels.clone(), a.state.session.project.patterns.clone());
         assert_eq!((more.len(), a.state.selected_channel), (chans.len() + 1, 1));
         assert_ne!(moved, pats, "the notes follow their rows");
         assert_eq!(names(&a.state), [LAST_RESET, ADD_CHANNEL]);
         ctrl_z(&mut a);
         a.plugin_tick();
-        assert_eq!((&a.state.project.channels, &a.state.project.patterns), (&chans, &pats), "all as before");
+        assert_eq!((&a.state.session.project.channels, &a.state.session.project.patterns), (&chans, &pats), "all as before");
         assert_ne!(a.plugins.descriptor(1).map(|d| d.name), trio_name, "the instance goes");
         ctrl_alt_z(&mut a);
         a.plugin_tick();
-        assert_eq!((&a.state.project.channels, &a.state.project.patterns), (&more, &moved), "inserted again");
+        assert_eq!((&a.state.session.project.channels, &a.state.session.project.patterns), (&more, &moved), "inserted again");
         assert_eq!(a.plugins.descriptor(1).map(|d| d.name), trio_name, "with its instance");
     }
 
@@ -1773,22 +1773,22 @@ mod tests {
         a.plugin_tick();
         let ticks = |a: &mut App| (0..3).for_each(|_| a.plugin_tick());
         let name = |a: &App| a.plugins.descriptor(0).map(|d| d.name);
-        let (old, old_name) = (a.state.project.channels[0].clone(), name(&a));
+        let (old, old_name) = (a.state.session.project.channels[0].clone(), name(&a));
         assert!(old_name.is_some());
         let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         crate::plugin_menu::replace_generator(&mut a, trio, 0);
         ticks(&mut a);
-        let new = a.state.project.channels[0].clone();
+        let new = a.state.session.project.channels[0].clone();
         assert_ne!(new, old);
         assert_eq!(names(&a.state), [LAST_RESET, REPLACE_CHANNEL]);
         assert_eq!(name(&a), Some(crate::osc3::LEMON_TRIO.to_string()));
         for _ in 0..2 {
             ctrl_z(&mut a);
             ticks(&mut a);
-            assert_eq!((&a.state.project.channels[0], name(&a)), (&old, old_name.clone()), "the old instrument back");
+            assert_eq!((&a.state.session.project.channels[0], name(&a)), (&old, old_name.clone()), "the old instrument back");
             ctrl_alt_z(&mut a);
             ticks(&mut a);
-            assert_eq!((&a.state.project.channels[0], name(&a)), (&new, Some(crate::osc3::LEMON_TRIO.to_string())));
+            assert_eq!((&a.state.session.project.channels[0], name(&a)), (&new, Some(crate::osc3::LEMON_TRIO.to_string())));
             assert_eq!(a.state.hosted_rows.iter().filter(|&&r| r == 0).count(), 1);
         }
     }

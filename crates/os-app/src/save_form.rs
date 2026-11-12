@@ -136,7 +136,7 @@ impl SaveForm {
         let mut name = Field::default();
         name.set(&free_name(&root));
         name.select_all();
-        let p = &s.project;
+        let p = &s.session.project;
         let info = [&p.info.title, &p.info.author, &p.info.url, &p.info.genre].map(|v| {
             let mut f = Field::default();
             f.set(v.as_deref().unwrap_or(""));
@@ -271,7 +271,7 @@ impl App {
     /// The program has started: with Ask for data folder's first choice, the New project form over the startup project,
     /// when that is a new one (Lemon Studio rule: a project opened from its file is not asked about).
     pub fn startup_form(&mut self) {
-        if asks_on_startup() && self.state.path.is_none() {
+        if asks_on_startup() && self.state.session.path.is_none() {
             self.open_new_form();
         }
     }
@@ -403,7 +403,7 @@ impl App {
         }
         // One undo step when the text changed (`control::edit`).
         crate::control::edit(&mut self.state, crate::control::command::SONG_INFO, crate::control::command::Region::Settings, |s| {
-            let info = &mut s.project.get_mut().info;
+            let info = &mut s.session.project.get_mut().info;
             for (value, field) in [&mut info.title, &mut info.author, &mut info.url, &mut info.genre].into_iter().zip(&f.info) {
                 let text = field.text.trim();
                 if value.as_deref().unwrap_or("") != text {
@@ -418,7 +418,7 @@ impl App {
         if f.copy {
             self.state.message = Some(self.copy_used_samples_to(&dir));
         }
-        self.state.project.get_mut().data_folder.get_or_insert_with(DataFolder::default).folder = df::folder_text(&dir);
+        self.state.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default).folder = df::folder_text(&dir);
         let file = f.file();
         self.dialog_done(Then::SaveProject(f.next), Reply::File(Some(file)));
         df::reread(&self.state);
@@ -484,7 +484,7 @@ mod tests {
         let kick = dir.join("lib").join("kick.wav");
         std::fs::create_dir_all(kick.parent().unwrap()).unwrap();
         std::fs::write(&kick, [7u8; 12]).unwrap();
-        app.state.project.get_mut().channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
+        app.state.session.project.get_mut().channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
         app.act(Action::MenuItem(0, crate::views::menus::FILE_SAVE));
         let f = form(&app).expect("the Save as form").clone();
         assert_eq!((f.title(), f.name.text.as_str(), f.name.all, f.new_folder, f.copy, f.files), (SAVE_TITLE, "Project_1", true, true, false, 0));
@@ -499,18 +499,18 @@ mod tests {
         let folder = root.join("Project_1");
         let file = folder.join("Project_1.lemon");
         let copy = folder.join(df::SAMPLES_DIR).join("kick.wav");
-        assert_eq!(app.state.path, Some(file.clone()));
+        assert_eq!(app.state.session.path, Some(file.clone()));
         assert!(file.is_file() && copy.is_file());
         let opened = App::new(Some(file.clone()));
-        assert_eq!(opened.state.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
-        assert_eq!(opened.state.project.data_folder, Some(DataFolder { choice: DataFolder::NONE, folder: df::folder_text(&folder) }));
+        assert_eq!(opened.state.session.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
+        assert_eq!(opened.state.session.project.data_folder, Some(DataFolder { choice: DataFolder::NONE, folder: df::folder_text(&folder) }));
         // A new project: the form remembers the root and Copy, and offers the next free name.
         let mut other = App::new(None);
         other.act(Action::MenuItem(0, crate::views::menus::FILE_SAVE_AS));
         let f = form(&other).expect("the form again");
         assert_eq!((f.name.text.as_str(), f.root.clone(), f.copy), ("Project_2", root.clone(), true));
         other.dialog_key(&Key::Named(NamedKey::Escape), false, false);
-        assert!(other.state.dialogs.is_empty() && other.state.path.is_none(), "Cancel saves nothing");
+        assert!(other.state.dialogs.is_empty() && other.state.session.path.is_none(), "Cancel saves nothing");
         // Save as on a saved project: the file dialog (answered at once in tests: cancelled).
         let saves = crate::dialog::fake::shown().1;
         app.act(Action::MenuItem(0, crate::views::menus::FILE_SAVE_AS));
@@ -558,8 +558,8 @@ mod tests {
         type_text(&mut app, "Song");
         app.dialog_key(&Key::Named(NamedKey::Enter), false, false);
         assert!(app.state.dialogs.is_empty());
-        assert_eq!(app.state.path, Some(root.join("Song.lemon")), "into the root");
-        let info = &app.state.project.info;
+        assert_eq!(app.state.session.path, Some(root.join("Song.lemon")), "into the root");
+        let info = &app.state.session.project.info;
         assert_eq!((info.title.as_deref(), info.author.as_deref(), info.url.as_deref(), info.genre.as_deref()), (Some("My song"), Some("Me"), None, Some("Lo-fi")));
         done(&dir);
     }
@@ -583,7 +583,7 @@ mod tests {
         let saves = crate::dialog::fake::shown().1;
         click(&mut app, FHit::Skip);
         assert_eq!(crate::dialog::fake::shown().1, saves + 1);
-        assert!(app.state.dialogs.is_empty() && app.state.path.is_none());
+        assert!(app.state.dialogs.is_empty() && app.state.session.path.is_none());
         // Don't show, then Cancel.
         app.open_save_form(None);
         click(&mut app, FHit::Check(2));
@@ -606,11 +606,11 @@ mod tests {
         let mut app = App::new(None);
         app.act(Action::MenuItem(0, crate::views::menus::FILE_NEW));
         let f = form(&app).expect("the New project form").clone();
-        assert_eq!((f.title(), f.main(), f.ppq, f.num, f.den), (NEW_TITLE, CREATE, app.state.project.ppq, 4, 4));
+        assert_eq!((f.title(), f.main(), f.ppq, f.num, f.den), (NEW_TITLE, CREATE, app.state.session.project.ppq, 4, 4));
         click(&mut app, FHit::Skip);
         assert!(form(&app).is_some(), "no Skip");
         app.dialog_click(DHit::Cancel);
-        assert!(app.state.dialogs.is_empty() && app.state.path.is_none());
+        assert!(app.state.dialogs.is_empty() && app.state.session.path.is_none());
         // Saving a project never saved does not ask with this choice.
         app.act(Action::MenuItem(0, crate::views::menus::FILE_SAVE));
         assert!(app.state.dialogs.is_empty());
@@ -632,9 +632,9 @@ mod tests {
         assert_eq!((f.list, f.ppq, f.num, f.den), (None, 192, 3, 8));
         click(&mut app, FHit::Main);
         assert!(app.state.dialogs.is_empty());
-        assert_eq!((app.state.project.ppq, app.state.project.bar()), (192, (3, 2)));
+        assert_eq!((app.state.session.project.ppq, app.state.session.project.bar()), (192, (3, 2)));
         let file = dir.join("Projects").join("Project_1").join("Project_1.lemon");
-        assert_eq!(app.state.path, Some(file.clone()));
+        assert_eq!(app.state.session.path, Some(file.clone()));
         assert!(!app.unsaved());
         done(&dir);
         prefs::set_choice(&prefs::ASK_DATA_FOLDER, 3);

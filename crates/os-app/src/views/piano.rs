@@ -87,7 +87,7 @@ pub fn grid_rect(s: &State) -> Rect {
 
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
-    let channel = s.project.channels.get(s.selected_channel);
+    let channel = s.session.project.channels.get(s.selected_channel);
     let name = channel.and_then(|c| c.name.clone()).unwrap_or_else(|| "(none)".into());
     let title = "Piano roll - ";
     window_body(ui, r);
@@ -123,7 +123,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let l = layout(r, s.piano.split);
     let g = Geom::new(s, l.grid);
     let ch = channel.map(|c| c.index);
-    let pat = s.project.patterns.iter().find(|p| p.number == s.pattern());
+    let pat = s.session.project.patterns.iter().find(|p| p.number == s.pattern());
     let notes: &[Note] = pat.map_or(&[], |p| &p.notes);
     let sel = s.piano.selection(s.pattern(), ch);
     // Only a ruler time selection shades the grid, and only its columns (§10).
@@ -151,7 +151,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     overview(ui, s, &l, &g, notes, ch);
     // A time-signature marker shows its signature (spec: ui/pattern-time-signature.md §2).
     let markers: Vec<(u32, String)> =
-        s.project.pattern(s.pattern()).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, super::playlist::marker_label(m))).collect();
+        s.session.project.pattern(s.pattern()).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, super::playlist::marker_label(m))).collect();
     ruler(ui, &l, &g, range, s.piano.marker, &markers);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
@@ -204,7 +204,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             ui.c.fill_rect(Rect::new(body.right() - 1.0, body.y + 1.0, 1.0, body.h - 2.0), hi);
         }
         // A repeating note shows a tick at every repeat interval inside its body (spec §7a).
-        if let Some(iv) = n.repeat_ticks(s.project.ppq) {
+        if let Some(iv) = n.repeat_ticks(s.session.project.ppq) {
             let end = n.position + piano::shown_len(s, n);
             let mut at = n.position + iv;
             let px = g.x_of((n.position + iv) as f32) - g.x_of(n.position as f32);

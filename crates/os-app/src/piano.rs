@@ -81,9 +81,6 @@ pub struct PianoState {
     /// The last note clicked or edited in the event panel: new notes take its controls (velocity, pan, release, cutoff,
     /// resonance, fine pitch, repeat, colour), as FL does; `None` = the defaults.
     pub last_controls: Option<Note>,
-    /// The project changed since the playing engine last got it (notes, steps, mixer, channel
-    /// settings, tempo); `App::tick` sends it to the transport.
-    pub dirty: bool,
     /// Key held with the mouse (keyboard press or a dragged note), lit on the keyboard (§4).
     pub held: Option<i32>,
     /// Keys held on the typing keyboard as (channel index, key), lit too (ui/typing-keyboard.md).
@@ -133,7 +130,6 @@ impl Default for PianoState {
             bar_span: None,
             last_len: 0,
             last_controls: None,
-            dirty: false,
             held: None,
             typed: Vec::new(),
             tool: Tool::Draw,
@@ -203,10 +199,10 @@ pub struct Geom {
 
 impl Geom {
     pub fn new(s: &State, grid: Rect) -> Geom {
-        let ppq = u32::from(s.project.ppq.max(4));
+        let ppq = u32::from(s.session.project.ppq.max(4));
         // A beat is the signature's note value: a quarter in 4/4, an eighth in 3/8.
         let bars: Vec<(u32, u32, u32)> =
-            s.project.pattern_bars(s.pattern()).into_iter().map(|(start, bar, (num, _))| (start, bar, (bar / u32::from(num.max(1))).max(1))).collect();
+            s.session.project.pattern_bars(s.pattern()).into_iter().map(|(start, bar, (num, _))| (start, bar, (bar / u32::from(num.max(1))).max(1))).collect();
         Geom {
             grid,
             ppt: s.piano.px_per_beat / ppq as f32,
@@ -283,7 +279,7 @@ impl Geom {
 /// (no window) lasts the pattern's length.
 pub fn song_spans(s: &State) -> Vec<(u32, u32, u32)> {
     let whole = pattern_length(s, s.pattern());
-    let track_on = |t: u16| s.project.arrangement().and_then(|a| a.tracks.get(usize::from(t))).is_none_or(|t| t.enabled);
+    let track_on = |t: u16| s.session.project.arrangement().and_then(|a| a.tracks.get(usize::from(t))).is_none_or(|t| t.enabled);
     let mut v: Vec<(u32, u32, u32)> = crate::playlist::clips(s)
         .iter()
         .filter(|c| c.source == os_model::ClipSource::Pattern(s.pattern()) && !c.muted && track_on(c.track))
@@ -339,13 +335,13 @@ pub fn scrub_keys(s: &State, ch: u16, from: f32, to: f32) -> Vec<(u16, u8)> {
 
 /// Length used for drawing: a plain step (length 0) is shown one step long (Lemon Studio choice).
 pub fn shown_len(s: &State, n: &Note) -> u32 {
-    if n.length == 0 { u32::from(s.project.ppq.max(4)) / 4 } else { n.length }
+    if n.length == 0 { u32::from(s.session.project.ppq.max(4)) / 4 } else { n.length }
 }
 
 /// Pattern `n`'s length in ticks as the engine loops it: the rack's explicit length, else its last note's end rounded
 /// up to a bar line of its own time signature (`Project::pattern_length`, spec: audio/song-structure.md).
 pub fn pattern_length(s: &State, n: u16) -> u32 {
-    s.project.pattern_length(n)
+    s.session.project.pattern_length(n)
 }
 
 /// What the event panel edits (spec: ui/piano-roll.md §7a, §7b). The first seven are note properties, the
@@ -528,27 +524,27 @@ pub fn velocity_at(panel: Rect, y: f32) -> u8 {
 /// The current pattern, created if it has no data yet.
 pub fn pattern_mut(s: &mut State) -> &mut Pattern {
     let number = s.pattern();
-    match s.project.patterns.iter().position(|p| p.number == number) {
-        Some(i) => &mut s.project.get_mut().patterns[i],
+    match s.session.project.patterns.iter().position(|p| p.number == number) {
+        Some(i) => &mut s.session.project.get_mut().patterns[i],
         None => {
-            s.project.get_mut().patterns.push(Pattern { number, ..Pattern::default() });
-            s.project.get_mut().patterns.last_mut().expect("pushed")
+            s.session.project.get_mut().patterns.push(Pattern { number, ..Pattern::default() });
+            s.session.project.get_mut().patterns.last_mut().expect("pushed")
         }
     }
 }
 
 pub fn notes(s: &State) -> &[Note] {
-    s.project.patterns.iter().find(|p| p.number == s.pattern()).map_or(&[], |p| &p.notes)
+    s.session.project.patterns.iter().find(|p| p.number == s.pattern()).map_or(&[], |p| &p.notes)
 }
 
 /// The channel index (`Note::channel`) the piano roll edits.
 pub fn channel(s: &State) -> Option<u16> {
-    s.project.channels.get(s.selected_channel).map(|c| c.index)
+    s.session.project.channels.get(s.selected_channel).map(|c| c.index)
 }
 
 /// The current pattern's channel control points.
 pub fn controls(s: &State) -> &[ControlPoint] {
-    s.project.patterns.iter().find(|p| p.number == s.pattern()).map_or(&[], |p| &p.controls)
+    s.session.project.patterns.iter().find(|p| p.number == s.pattern()).map_or(&[], |p| &p.controls)
 }
 
 /// Set (or replace) the control point of `channel`/`param` at `tick`, keeping the list ordered by
@@ -563,7 +559,7 @@ pub fn set_control(s: &mut State, channel: u16, param: u16, tick: u32, value: i3
             p.controls.insert(at, point);
         }
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Delete the lane's points whose position lies in `from..=to`; returns how many went.
@@ -573,7 +569,7 @@ pub fn erase_controls(s: &mut State, channel: u16, param: u16, from: u32, to: u3
     let before = p.controls.len();
     p.controls.retain(|c| !(c.kind == kind && (from..=to).contains(&c.position)));
     let gone = before - p.controls.len();
-    s.piano.dirty = true;
+    s.session.dirty = true;
     gone
 }
 
@@ -586,7 +582,7 @@ pub fn snapshot(s: &mut State) {
 /// `snapshot`, the step named `name` (as the browser's History lists it; spec: ui/settings-choices.md "Undo history:
 /// the four checks (2026-10-16)").
 pub fn snapshot_as(s: &mut State, name: &'static str) {
-    s.piano.dirty = true;
+    s.session.dirty = true;
     let snap = crate::history::Snap::pattern(s, s.pattern());
     crate::history::record(s, name, snap);
 }
@@ -616,7 +612,7 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
 
 /// Add a note with the defaults of a step (patterns.md) at `tick`/`key`; returns its index.
 pub fn add_note(s: &mut State, channel: u16, tick: u32, key: i32) -> usize {
-    let ppq = u32::from(s.project.ppq.max(4));
+    let ppq = u32::from(s.session.project.ppq.max(4));
     let length = if s.piano.last_len > 0 { s.piano.last_len } else { ppq / 2 };
     let mut note = Note { length, key: key.clamp(0, TOP_KEY) as u16, ..Note::step(channel, tick) };
     if let Some(t) = s.piano.last_controls {
@@ -652,7 +648,7 @@ pub fn paint_mono(s: &mut State, i: usize) -> usize {
         p.notes.remove(j);
     }
     s.piano.clear_selection();
-    s.piano.dirty = true;
+    s.session.dirty = true;
     i - gone.iter().filter(|&&j| j < i).count()
 }
 
@@ -788,12 +784,12 @@ pub fn slice(s: &mut State, tick: u32) -> usize {
 /// The end of the current pattern: its length rounded up to whole bars of its own grid, at least one bar. Ctrl+A's
 /// time selection, Ctrl+L's last notes and Ctrl+Shift+Left / Right's rotation stop there (spec: ui/piano-keys.md §4).
 pub fn pattern_end(s: &State) -> u32 {
-    s.project.pattern_bar_end(s.pattern(), pattern_length(s, s.pattern()))
+    s.session.project.pattern_bar_end(s.pattern(), pattern_length(s, s.pattern()))
 }
 
 /// Where the bar holding `tick` starts, on the current pattern's own bar grid.
 pub fn bar_start(s: &State, tick: u32) -> u32 {
-    let regions = s.project.pattern_bars(s.pattern());
+    let regions = s.session.project.pattern_bars(s.pattern());
     let (start, bar, _) = regions.iter().rev().find(|r| r.0 <= tick).copied().unwrap_or(regions[0]);
     start + (tick.saturating_sub(start) / bar.max(1)) * bar.max(1)
 }
@@ -880,8 +876,8 @@ pub fn open_tick(s: &mut State) -> bool {
 /// range plus four spare rows, whole pixels between [`MIN_ROW`] and the default × 1.25, and the range is centred. A
 /// channel without notes: C5 centred at [`MIN_ROW`] rows.
 pub fn auto_zoom(s: &mut State, grid: Rect) {
-    let ppq = f32::from(s.project.ppq.max(4));
-    let span = pattern_length(s, s.pattern()) as f32 + s.project.bar_ticks() as f32 / 2.0;
+    let ppq = f32::from(s.session.project.ppq.max(4));
+    let span = pattern_length(s, s.pattern()) as f32 + s.session.project.bar_ticks() as f32 / 2.0;
     s.piano.px_per_beat = (grid.w / span * ppq).clamp(6.0, 1600.0);
     let ch = channel(s);
     let keys = notes(s).iter().filter(|n| Some(n.channel) == ch).map(|n| i32::from(n.key));
@@ -926,7 +922,7 @@ pub fn zoom_time(s: &mut State, g: &Geom, x: f32, from: f32, notches: f32) {
     let tick = g.tick_at(x);
     let p = &mut s.piano;
     p.px_per_beat = (from * 1.25f32.powf(notches)).clamp(6.0, 1600.0);
-    let ppt = p.px_per_beat / f32::from(s.project.ppq.max(4));
+    let ppt = p.px_per_beat / f32::from(s.session.project.ppq.max(4));
     p.scroll_x = (tick - (x - g.grid.x) / ppt).max(0.0);
 }
 
@@ -1091,7 +1087,7 @@ mod tests {
         let mut a = app();
         add_note(&mut a.state, 4, 0, 72);
         let mut lib = os_engine::SampleLibrary::new(None);
-        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+        let mut e = os_engine::Engine::new(&a.state.session.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
         let mut buf = vec![0.0f32; 2 * 512];
         e.process(&mut buf);
         assert_eq!(e.sounding().collect::<Vec<_>>(), vec![(4, 72)], "the note is reported while it plays");
@@ -1113,14 +1109,14 @@ mod tests {
         let mut lib = os_engine::SampleLibrary::new(None);
         let mode = os_engine::PlayMode::Pattern(1);
         add_note(&mut a.state, 4, 0, 60);
-        let mut old = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+        let mut old = os_engine::Engine::new(&a.state.session.project, &mut lib, 48000, mode);
         let mut buf = vec![0.0f32; 2 * 512];
         for _ in 0..40 {
             old.process(&mut buf); // ~0.43 s: past beat 1 (0.46 s at 130 BPM is beat 2)
         }
         let pos = old.position();
         add_note(&mut a.state, 4, 96, 72); // beat 2, ahead of the playhead
-        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+        let mut e = os_engine::Engine::new(&a.state.session.project, &mut lib, 48000, mode);
         e.continue_from(&mut old);
         assert_eq!(e.position(), pos);
         let mut keys = Vec::new();
@@ -1142,7 +1138,7 @@ mod tests {
         let mut a = app();
         add_note(&mut a.state, 4, 0, 60);
         let mut lib = os_engine::SampleLibrary::new(None);
-        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+        let mut e = os_engine::Engine::new(&a.state.session.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
         e.set_looping(true);
         let mut buf = vec![0.0f32; 2 * 512];
         let mut retriggered = false;
@@ -1167,12 +1163,12 @@ mod tests {
         for edit in 0..3 {
             let mut a = app();
             add_note(&mut a.state, 4, 0, 60);
-            let mut old = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+            let mut old = os_engine::Engine::new(&a.state.session.project, &mut lib, 48000, mode);
             for _ in 0..4 {
                 old.process(&mut buf);
             }
             assert!(peak(&buf) > 0.05, "pluck rings");
-            let p = a.state.project.get_mut();
+            let p = a.state.session.project.get_mut();
             match edit {
                 0 => p.channels[4].volume = 0.0,
                 1 => p.channels[4].enabled = false,
@@ -1181,7 +1177,7 @@ mod tests {
                     p.mixer.iter_mut().find(|m| m.index == t).unwrap().volume = Some(0.0);
                 }
             }
-            let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+            let mut e = os_engine::Engine::new(&a.state.session.project, &mut lib, 48000, mode);
             e.continue_from(&mut old);
             // The rest of the tick already rendered, then the ramp down: a mixer gain moves at most 0.001 per sample at
             // 44.1 kHz (about 1000 samples from unity to silence; spec: audio/mixer.md "Gains ramp").
@@ -1201,15 +1197,15 @@ mod tests {
         add_note(&mut a.state, 4, 0, 60);
         let mut lib = os_engine::SampleLibrary::new(None);
         let mode = os_engine::PlayMode::Pattern(1);
-        a.state.project.get_mut().tempo = Some(130.0);
-        let mut old = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+        a.state.session.project.get_mut().tempo = Some(130.0);
+        let mut old = os_engine::Engine::new(&a.state.session.project, &mut lib, 48000, mode);
         let mut buf = vec![0.0f32; 2 * 500];
         for _ in 0..10 {
             old.process(&mut buf);
         }
         let (tick, frame) = (old.tick_position(), old.position());
-        a.state.project.get_mut().tempo = Some(65.0);
-        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, mode);
+        a.state.session.project.get_mut().tempo = Some(65.0);
+        let mut e = os_engine::Engine::new(&a.state.session.project, &mut lib, 48000, mode);
         e.continue_from(&mut old);
         assert_eq!((e.tick_position(), e.position()), (tick, frame), "same tick, same frame");
         // Past the tick already rendered, ticks are 48000 * 60 / (65 * 96) = 461.5 frames long.
@@ -1227,7 +1223,7 @@ mod tests {
     fn live_note_on_off() {
         let a = app();
         let mut lib = os_engine::SampleLibrary::new(None);
-        let mut e = os_engine::Engine::new(&a.state.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
+        let mut e = os_engine::Engine::new(&a.state.session.project, &mut lib, 48000, os_engine::PlayMode::Pattern(1));
         e.clear_schedule();
         assert!(e.finished());
         let mut buf = vec![0.0f32; 2 * 256];
@@ -1279,13 +1275,13 @@ mod tests {
         use crate::knobs::KnobId;
         let mut a = app();
         for id in [KnobId::MixPan(1), KnobId::ChanVol(0), KnobId::ChanPan(0), KnobId::MasterVol, KnobId::MasterPitch] {
-            a.state.piano.dirty = false;
+            a.state.session.dirty = false;
             a.state.set_knob(id, 0.2);
-            assert!(a.state.piano.dirty, "{id:?}");
+            assert!(a.state.session.dirty, "{id:?}");
         }
-        a.state.piano.dirty = false;
+        a.state.session.dirty = false;
         a.act(crate::app::Action::ChannelEnable(0));
-        assert!(a.state.piano.dirty, "channel mute");
+        assert!(a.state.session.dirty, "channel mute");
     }
 
     fn key_name_check(k: i32) -> String {
@@ -1304,7 +1300,7 @@ mod tests {
         for on in [false, true] {
             set_check(&AUTO_ZOOM_PIANO, on);
             let mut app = App::new(None);
-            app.state.project = crate::locked::Locked::new(crate::app::test_project());
+            app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
             app.state.selected_channel = 0;
             // A floating window: a grid about 300 px tall.
             let ws = &mut app.state.wins[Win::PianoRoll.slot().expect("a window")];
@@ -1326,7 +1322,7 @@ mod tests {
                 assert_eq!((app.state.piano.px_per_beat, app.state.piano.row_h), before, "off: the zoom stays");
                 continue;
             }
-            let bar = app.state.project.bar_ticks() as f32;
+            let bar = app.state.session.project.bar_ticks() as f32;
             assert!((grid.w / g.ppt / bar - 2.5).abs() < 0.01, "2 bars + half a bar fill the grid: {}", grid.w / g.ppt / bar);
             assert_eq!(g.scroll_x, 0.0, "from bar 1");
             assert_eq!(g.row, (grid.h / 23.0).floor(), "19 keys + 4 spare rows in {} px", grid.h);

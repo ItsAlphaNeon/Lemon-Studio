@@ -222,7 +222,7 @@ fn set_value(s: &mut State, tick: u32, v: i32) {
 
 /// What Copy and Duplicate take without a selection: the pattern's length, or to the last event when that lies later.
 fn whole(s: &State) -> (u32, u32) {
-    (0, s.project.pattern_length(s.pattern()).max(points(s).last().map_or(0, |p| p.0 + 1)).max(1))
+    (0, s.session.project.pattern_length(s.pattern()).max(points(s).last().map_or(0, |p| p.0 + 1)).max(1))
 }
 
 /// Deletes the control's events from `from` to `to` (both included); returns how many went.
@@ -247,7 +247,7 @@ pub fn draw(s: &mut State, a: (u32, f64), b: (u32, f64), unit: u32) {
         set(s, t, level);
         t += unit;
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// The Interpolate tool (spec §1): the control's events from `a` to `b` (tick, level) keep their times and take the
@@ -261,7 +261,7 @@ pub fn interpolate(s: &mut State, a: (u32, f64), b: (u32, f64), smooth: bool) ->
         let k = if smooth { (1.0 - (k * std::f64::consts::PI).cos()) / 2.0 } else { k };
         set(s, t, l0 + (l1 - l0) * k);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     under.len()
 }
 
@@ -302,7 +302,7 @@ pub fn replace(s: &mut State, from: u32, to: u32, points: &[(u32, i32)]) {
     for &(t, v) in points {
         set_value(s, t, v);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Edit ▸ Select previous (Ctrl+Left) / Select next (Ctrl+Right): the selection moves back or on by its length (the
@@ -339,7 +339,7 @@ pub const ZOOM_STEP: f32 = 1.5;
 pub fn zoom_selection(s: &mut State) -> bool {
     let Some((a, b)) = s.events.sel.filter(|(a, b)| b > a) else { return false };
     let w = crate::views::events::graph(s).w;
-    let ppq = f32::from(s.project.ppq.max(4));
+    let ppq = f32::from(s.session.project.ppq.max(4));
     s.events.px_per_beat = (w * ppq / (b - a) as f32).clamp(ZOOM.0, ZOOM.1);
     s.events.scroll = f64::from(a);
     true
@@ -364,7 +364,7 @@ pub fn delete(s: &mut State) -> usize {
 
 /// Edit ▸ Select all: the pattern's whole length, or to the last event when that lies later.
 pub fn select_all(s: &mut State) {
-    let end = s.project.pattern_length(s.pattern()).max(points(s).last().map_or(0, |p| p.0 + 1));
+    let end = s.session.project.pattern_length(s.pattern()).max(points(s).last().map_or(0, |p| p.0 + 1));
     s.events.sel = Some((0, end.max(1)));
 }
 
@@ -488,7 +488,7 @@ pub fn unit(s: &State, alt: bool) -> u32 {
     if alt {
         return 1;
     }
-    let ppq = u32::from(s.project.ppq.max(4));
+    let ppq = u32::from(s.session.project.ppq.max(4));
     crate::piano_snap::unit_of(crate::snap::EditorSnap::Main, s.global_snap.now, ppq, s.events.px_per_beat).unwrap_or(1).max(1)
 }
 
@@ -692,7 +692,7 @@ impl App {
         // Zoom: a drag of 4 px or more zooms on its stretch, a click zooms in about it; the selection comes back.
         if let Stroke::Zoom(anchor, kept) = stroke {
             let dragged = s.events.sel.take().filter(|(a, b)| {
-                let px = f64::from(s.events.px_per_beat) / f64::from(s.project.ppq.max(4));
+                let px = f64::from(s.events.px_per_beat) / f64::from(s.session.project.ppq.max(4));
                 f64::from(b - a) * px >= 4.0
             });
             match dragged {
@@ -855,7 +855,7 @@ impl App {
     pub(crate) fn events_wheel(&mut self, d: f32, ctrl: bool) {
         let x = self.mouse.0;
         let s = &mut self.state;
-        let ppq = f64::from(s.project.ppq.max(4));
+        let ppq = f64::from(s.session.project.ppq.max(4));
         if ctrl {
             let at = crate::views::events::tick_at(s, x);
             s.events.px_per_beat = (s.events.px_per_beat * 1.25f32.powf(d)).clamp(ZOOM.0, ZOOM.1);
@@ -880,13 +880,13 @@ pub fn turn_into_clip(s: &mut State) -> Option<String> {
     if points.is_empty() {
         return None;
     }
-    let ppq = u32::from(s.project.ppq.max(4));
+    let ppq = u32::from(s.session.project.ppq.max(4));
     let clip = clip_points(&points, s.events.range, ppq, s.events.value, CLIP_TOLERANCE);
     let (target, name) = (s.events.target, s.events.name.clone());
     let row = crate::playlist::automation_channel(s, target, &name, clip);
     erase(s, 0, u32::MAX);
     close(s);
-    let name = s.project.channels.get(row).and_then(|c| c.name.clone()).unwrap_or(name);
+    let name = s.session.project.channels.get(row).and_then(|c| c.name.clone()).unwrap_or(name);
     Some(format!("Created automation clip \"{name}\""))
 }
 
@@ -912,7 +912,7 @@ mod tests {
     #[test]
     fn draw_erase_and_delete() {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let s = &mut app.state;
         assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         draw(s, (0, 0.0), (96, 1.0), 24);
@@ -952,7 +952,7 @@ mod tests {
     #[test]
     fn interpolate_duplicate_and_space() {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let s = &mut app.state;
         assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         for t in [0, 24, 48, 72, 96] {
@@ -984,7 +984,7 @@ mod tests {
     fn scale_levels_and_lfo() {
         use crate::piano_dlg::{self as dlg, Tool as DTool};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let s = &mut app.state;
         assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         for t in [0, 24, 48] {
@@ -1019,7 +1019,7 @@ mod tests {
         app.state.events.sel = None;
         app.events_cmd(EvCmd::Lfo);
         let s = &mut app.state;
-        let bar = 4 * u32::from(s.project.ppq);
+        let bar = 4 * u32::from(s.session.project.ppq);
         assert!(points(s).iter().filter(|p| p.0 < bar).count() > 10);
         assert_eq!(point(s, 400.max(bar)), if bar > 400 { None } else { Some(3200) });
         dlg::accept(s);
@@ -1031,13 +1031,13 @@ mod tests {
     fn zoom_tool() {
         use crate::app::Drag;
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         assert!(open(&mut app.state, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         app.state.z.push(Win::Events);
         assert!(app.events_key(&winit::keyboard::Key::Character("z".into()), false, false));
         assert_eq!(app.state.events.tool, Tool::Zoom);
         let g = crate::views::events::graph(&app.state);
-        let ppq = f64::from(app.state.project.ppq);
+        let ppq = f64::from(app.state.session.project.ppq);
         app.state.events.sel = Some((0, 10));
         // A click: in, the tick under it stays.
         app.mouse = (g.x + 200.0, g.y + 20.0);
@@ -1072,7 +1072,7 @@ mod tests {
     #[test]
     fn select_step_relocate_and_zoom() {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let s = &mut app.state;
         assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         assert!(!select_step(s, true), "needs a selection");
@@ -1101,7 +1101,7 @@ mod tests {
         let px = s.events.px_per_beat;
         zoom(s, 2.0);
         assert_eq!(s.events.px_per_beat, px * 2.0);
-        let end = 96 + 8 * u32::from(s.project.ppq);
+        let end = 96 + 8 * u32::from(s.session.project.ppq);
         s.events.sel = Some((96, end));
         assert!(zoom_selection(s));
         assert_eq!(s.events.scroll, 96.0);
@@ -1137,7 +1137,7 @@ mod tests {
     fn edit_events_draw_and_turn_into_clip() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let knob = Action::Knob(KnobId::ChanVol(0));
         let auto = app.automation_target(&knob);
         let menu = crate::rack::knob_menu(&app.state, KnobId::ChanVol(0), auto, 0.0, 0.0);
@@ -1157,18 +1157,18 @@ mod tests {
         assert!(pts.len() >= 3, "{pts:?}");
         assert!(pts[0].1 < 200 && pts.last().unwrap().1 > 12600, "{pts:?}");
 
-        let rows = app.state.project.channels.len();
+        let rows = app.state.session.project.channels.len();
         let m = app.events_cmd(EvCmd::TurnIntoClip);
         assert_eq!(m.as_deref(), Some("Created automation clip \"Kick - Channel volume\""), "{m:?}");
-        let ch = app.state.project.channels.last().expect("clip channel");
-        assert_eq!((app.state.project.channels.len(), ch.kind), (rows + 1, os_model::ChannelKind::Automation));
-        let a = app.state.project.automation(ch.index).expect("clip");
+        let ch = app.state.session.project.channels.last().expect("clip channel");
+        assert_eq!((app.state.session.project.channels.len(), ch.kind), (rows + 1, os_model::ChannelKind::Automation));
+        let a = app.state.session.project.automation(ch.index).expect("clip");
         assert_eq!(a.targets, vec![os_model::target::channel(0, 0)]);
         assert!(a.points.len() >= 2 && a.points[0].value < 0.02);
         assert!(points(&app.state).is_empty(), "the events leave the pattern");
         assert!(!app.state.shown(Win::Events));
         crate::history::undo(&mut app.state);
-        assert_eq!(app.state.project.channels.len(), rows);
+        assert_eq!(app.state.session.project.channels.len(), rows);
         assert_eq!(points(&app.state), pts, "undo brings the events back");
     }
 
@@ -1181,7 +1181,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut d = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let item = |app: &App, k: KnobId| {
             let auto = app.automation_target(&Action::Knob(k));
             crate::rack::knob_menu(&app.state, k, auto, 0.0, 0.0).items.into_iter().find(|i| i.label == "Edit automation in a window").expect("the entry")

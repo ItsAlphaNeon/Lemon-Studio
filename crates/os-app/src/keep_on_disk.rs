@@ -71,11 +71,11 @@ mod tests {
 
     /// The default project's sampler row.
     fn sampler_row(app: &App) -> usize {
-        (0..app.state.project.channels.len()).find(|&r| app.state.project.channels[r].kind == os_model::ChannelKind::Sampler).unwrap()
+        (0..app.state.session.project.channels.len()).find(|&r| app.state.session.project.channels[r].kind == os_model::ChannelKind::Sampler).unwrap()
     }
 
     fn flags(app: &App, r: usize) -> Option<u32> {
-        app.state.project.channels[r].sound.sampler_flags
+        app.state.session.project.channels[r].sound.sampler_flags
     }
 
     // spec: ui/settings-choices.md "Advanced: Fast sample preview, Auto keep long audio on disk, Threaded project
@@ -105,10 +105,10 @@ mod tests {
             let _ = std::fs::remove_file(p);
         }
         let mut app = App::new(None);
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         let p = wav("new-row", 44100, 2, 1_323_000);
         app.sample_to_rack(p.to_string_lossy().into_owned(), crate::views::rack::rect(&app.state).bottom() + 40.0);
-        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.session.project.channels.len(), n + 1);
         assert_eq!(flags(&app, n), KEPT, "a channel a drop made");
         let _ = std::fs::remove_file(p);
     }
@@ -118,7 +118,7 @@ mod tests {
     fn a_short_file_after_a_long_one_keeps_it() {
         let mut app = App::new(None);
         let r = sampler_row(&app);
-        app.state.project.get_mut().channels[r].sound.sampler_flags = Some(ChannelSound::RESAMPLE);
+        app.state.session.project.get_mut().channels[r].sound.sampler_flags = Some(ChannelSound::RESAMPLE);
         let (long, short) = (wav("long", 44100, 1, 31 * 44100), wav("short", 44100, 1, 5 * 44100));
         sample_chosen(&mut app, r, long.clone());
         assert_eq!(flags(&app, r), Some(ChannelSound::RESAMPLE | ChannelSound::KEEP_ON_DISK));
@@ -147,12 +147,12 @@ mod tests {
     fn undo_restores_the_flag() {
         let mut app = App::new(None);
         let r = sampler_row(&app);
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         let p = wav("undo", 44100, 1, 30 * 44100);
         sample_chosen(&mut app, r, p.clone());
         assert_eq!(flags(&app, r), KEPT);
-        assert_eq!(app.state.history.len(), steps + 1, "one step");
-        assert_eq!(app.state.history.entries().last(), Some(&(steps + 1, LOAD_SAMPLE)));
+        assert_eq!(app.state.session.history.len(), steps + 1, "one step");
+        assert_eq!(app.state.session.history.entries().last(), Some(&(steps + 1, LOAD_SAMPLE)));
         ctrl_z(&mut app.state);
         assert_eq!(flags(&app, r), None, "undone");
         ctrl_alt_z(&mut app.state);

@@ -81,6 +81,6 @@ pub fn items(_: &State) -> Vec<PItem> {
 
 /// Ticks a second at the project's tempo.
 pub fn ticks_per_second(s: &State) -> f64 {
-    let p = &s.project;
+    let p = &s.session.project;
     f64::from(p.ppq.max(1)) * p.tick_tempo(s.tempo().max(1.0)) / 60.0
 }

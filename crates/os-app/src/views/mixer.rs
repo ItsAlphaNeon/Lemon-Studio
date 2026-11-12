@@ -496,7 +496,7 @@ fn meter_bar(ui: &mut Ui, x: f32, w: f32, bottom: f32, db: f32, hold: f32, cfg: 
 /// name and small controls at +12 (spec §7).
 fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, ly: &Ly) {
     let t = ui.t;
-    let track = s.project.mixer.iter().find(|m| m.index == n);
+    let track = s.session.project.mixer.iter().find(|m| m.index == n);
     let selected = s.selected_mixer == n;
     let also = !selected && mx::is_selected(s, n);
     let (kx, mx, sx) = (left + 22.0, left + 32.0, left + 12.0);
@@ -596,7 +596,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
             if also { c.mix(ui.t.tx(0xffffff), 0.5) } else { c.mix(ui.t.s(0x7f868a), 0.4) }
         });
     // Change icon... (Lemon Studio's design): the icon at the bottom of the name's column, the name above it.
-    let icon = crate::playlist::window_icon(&s.project, crate::playlist::TRACK_ICON_KEY + usize::from(n));
+    let icon = crate::playlist::window_icon(&s.session.project, crate::playlist::TRACK_ICON_KEY + usize::from(n));
     if let Some(ic) = icon {
         icons::draw(ui.c, ic, Rect::new(sx - 9.0, meter.bottom() - 12.0, 12.0, 12.0), name_c);
     }
@@ -799,7 +799,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     ui.c.fill_rect(Rect::new(r.x - 1.0, r.y, 1.0, r.h), ui.t.s(0x1b1e20));
     ui.hit(r, Action::Swallow, "");
     let n = s.selected_mixer;
-    let track = s.project.mixer.iter().find(|m| m.index == n);
+    let track = s.session.project.mixer.iter().find(|m| m.index == n);
     let title = match track.and_then(|m| m.name.clone()) {
         Some(nm) => format!("Mixer - {nm}"),
         None if n == 0 => "Mixer - Master".into(),
@@ -891,7 +891,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         // one has its own ascent). Classic keeps FL's place.
         let ty = if super::lemon(ui) { (row.cy() + 0.36 * f32::from(fs) - ui.c.ascent(f)).round() } else { row.y + 4.0 * kp };
         // Change icon... (Lemon Studio's design): the icon before the name.
-        let icon = crate::playlist::window_icon(&s.project, crate::plugins::fx_key(n, k));
+        let icon = crate::playlist::window_icon(&s.session.project, crate::plugins::fx_key(n, k));
         if let Some(ic) = icon {
             let sz = (12.0 * kp.max(0.62)).round();
             icons::draw(ui.c, ic, Rect::new(row.x + 19.0 + shift, row.cy() - sz / 2.0, sz, sz), ink);

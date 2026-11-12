@@ -374,10 +374,10 @@ fn kind_icon(kind: PickKind) -> Icon {
 /// The icon of clip source `src` (of kind `kind`): its channel's Change icon... choice, else its kind's.
 fn source_icon(s: &State, src: ClipSource, kind: PickKind) -> Icon {
     let row = match src {
-        ClipSource::Channel(ch) => s.project.channels.iter().position(|c| c.index == ch),
+        ClipSource::Channel(ch) => s.session.project.channels.iter().position(|c| c.index == ch),
         ClipSource::Pattern(_) => None,
     };
-    row.and_then(|r| pl::window_icon(&s.project, r)).unwrap_or_else(|| kind_icon(kind))
+    row.and_then(|r| pl::window_icon(&s.session.project, r)).unwrap_or_else(|| kind_icon(kind))
 }
 
 /// Picker panel: kind tabs, then the list of clip sources of that kind (§1).
@@ -528,19 +528,19 @@ pub fn pick_items(s: &State) -> Vec<ClipSource> {
             if v.is_empty() { vec![ClipSource::Pattern(1)] } else { v.into_iter().map(ClipSource::Pattern).collect() }
         }
         PickKind::Audio => s
-            .project
+            .session.project
             .channels
             .iter()
             .filter(|c| c.kind == os_model::ChannelKind::AudioClip)
             .map(|c| ClipSource::Channel(c.index))
             .collect(),
-        PickKind::Automation => s.project.automations.iter().map(|a| ClipSource::Channel(a.channel)).collect(),
+        PickKind::Automation => s.session.project.automations.iter().map(|a| ClipSource::Channel(a.channel)).collect(),
     }
 }
 
 fn pick_used(s: &State, src: ClipSource) -> bool {
     match src {
-        ClipSource::Pattern(n) => s.project.pattern(n).is_some_and(|p| !p.notes.is_empty()),
+        ClipSource::Pattern(n) => s.session.project.pattern(n).is_some_and(|p| !p.notes.is_empty()),
         _ => true,
     }
 }
@@ -555,7 +555,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
     let t = ui.t;
     match (pl::source_kind(s, src), src) {
         (PickKind::Pattern, ClipSource::Pattern(n)) => {
-            let Some(p) = s.project.pattern(n) else { return };
+            let Some(p) = s.session.project.pattern(n) else { return };
             let len = crate::piano::pattern_length(s, n).max(1) as f32;
             let lo = p.notes.iter().map(|n| n.key).min().unwrap_or(0);
             let hi = p.notes.iter().map(|n| n.key).max().unwrap_or(0);
@@ -563,13 +563,13 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
             let c = if tall { cc(t, NOTE) } else { t.s(0x5a6268) };
             for note in &p.notes {
                 let x = r.x + note.position as f32 / len * r.w;
-                let w = (note.length.max(s.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
+                let w = (note.length.max(s.session.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
                 let y = r.bottom() - 2.0 - f32::from(note.key - lo + 1) / span * (r.h - 2.0);
                 ui.c.fill_rect(Rect::new(x, y, w.min(r.right() - x).max(0.0), 2.0), c);
             }
         }
         (PickKind::Audio, ClipSource::Channel(ch)) if tall => {
-            let Some(path) = s.project.channel(ch).and_then(|c| c.sample_path.clone()) else { return };
+            let Some(path) = s.session.project.channel(ch).and_then(|c| c.sample_path.clone()) else { return };
             let Some(w) = s.playlist.wave(&path) else { return };
             if w.peaks.is_empty() {
                 return;
@@ -592,7 +592,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
             ui.c.fill_polygon(&top, wave);
         }
         (PickKind::Automation, ClipSource::Channel(ch)) if tall => {
-            let Some(a) = s.project.automation(ch) else { return };
+            let Some(a) = s.session.project.automation(ch) else { return };
             // Over its points' span.
             let Some(end) = a.points.last().map(|p| p.beat).filter(|&b| b > 0.0) else { return };
             let pts: Vec<(f32, f32)> = (0..=(r.w / 2.0).ceil() as usize)
@@ -868,7 +868,7 @@ fn ripples(ui: &mut Ui, s: &State, g: &PGeom) {
     let t = ui.t;
     let corner = if super::lemon(ui) { lk::r_btn(t) } else { 3.0 };
     for d in list {
-        if d.arrangement != s.project.current_arrangement {
+        if d.arrangement != s.session.project.current_arrangement {
             continue;
         }
         let c = &d.clip;
@@ -1086,7 +1086,7 @@ struct Body {
 }
 
 fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body, col: Color) {
-    let Some(p) = s.project.pattern(n) else { return };
+    let Some(p) = s.session.project.pattern(n) else { return };
     if p.notes.is_empty() {
         return;
     }
@@ -1126,7 +1126,7 @@ fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body
 /// setting, and how the clip dims its colours) each column takes the colour of the frames behind it.
 #[allow(clippy::too_many_arguments)]
 fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color, colours: Option<(&Waves, &dyn Fn(Color) -> Color)>) {
-    let Some(path) = s.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
+    let Some(path) = s.session.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
     let Some(w) = s.playlist.wave(&path) else { return };
     let Some(area) = ui.c.paint_bounds() else { return };
     let (w0, _) = pl::window(s, c);
@@ -1255,7 +1255,7 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     };
     // This clip's crossfade with an earlier clip, and whether a later clip draws this clip's fade-out in its own.
     let xf = pl::crossfade(s, g, i);
-    let later = os_model::crossfade::partner_after(&s.project, pl::clips(s), i).filter(|&b| pl::crossfade(s, g, b).is_some());
+    let later = os_model::crossfade::partner_after(&s.session.project, pl::clips(s), i).filter(|&b| pl::crossfade(s, g, b).is_some());
     if let Some((_, t)) = c.stored_fade_in() {
         if xf.is_none() {
             curve(ui, edges.x, f64::from(fx_in), t, false);
@@ -1361,7 +1361,7 @@ fn with_points(mut pts: Vec<(f32, f32)>, a: &os_model::Automation, (x0, x1): (f3
 
 #[allow(clippy::too_many_arguments)]
 fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: Body, bg: Color, col: Color) {
-    let Some(a) = s.project.automation(ch) else { return };
+    let Some(a) = s.session.project.automation(ch) else { return };
     if a.points.is_empty() {
         return;
     }

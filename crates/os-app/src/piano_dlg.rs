@@ -495,7 +495,7 @@ pub fn open_events(s: &mut State, tool: Tool) {
 /// the wave's stored value changes, in place of the events there.
 fn events_run(s: &mut State, step: Option<&'static str>) -> bool {
     use crate::events::{level, value};
-    let (range, ppq) = (s.events.range, u32::from(s.project.ppq.max(4)));
+    let (range, ppq) = (s.events.range, u32::from(s.session.project.ppq.max(4)));
     let pts = crate::events::points(s);
     let sel = s.events.sel.filter(|(a, b)| b > a);
     let ((a, b), new): ((u32, u32), Vec<(u32, i32)>) = match s.piano_dlg.tool {
@@ -507,7 +507,7 @@ fn events_run(s: &mut State, step: Option<&'static str>) -> bool {
         }
         Tool::Lfo => {
             let set = s.piano_dlg.lfo;
-            let (num, den) = s.project.signature().unwrap_or((s.project.bar().0, 4));
+            let (num, den) = s.session.project.signature().unwrap_or((s.session.project.bar().0, 4));
             let bar = (u32::from(num.max(1)) * ppq * 4 / u32::from(den.max(1))).max(1);
             let (a, b) = sel.unwrap_or((0, bar));
             let mut new: Vec<(u32, i32)> = Vec::new();
@@ -584,7 +584,7 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
     match d.tool {
         Tool::Flam => {
             let set = d.flam;
-            let off = set.offset(u32::from(s.project.ppq.max(4)), s.tempo());
+            let off = set.offset(u32::from(s.session.project.ppq.max(4)), s.tempo());
             let mut used: Vec<u16> = piano::notes(s).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
             used.sort_unstable();
             used.dedup();
@@ -611,11 +611,11 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
         }
         // The periods count from tick 0 with a selection too (piano-claw.md §2).
         Tool::Claw => {
-            let (set, ppq) = (d.claw, u32::from(s.project.ppq.max(4)));
+            let (set, ppq) = (d.claw, u32::from(s.session.project.ppq.max(4)));
             crate::piano_tools::apply_as(s, |_, ns| claw::claw(ns, &set, ppq), step)
         }
         Tool::Lfo => {
-            let (set, lane, ppq) = (d.lfo, s.piano.lane, u32::from(s.project.ppq.max(4)));
+            let (set, lane, ppq) = (d.lfo, s.piano.lane, u32::from(s.session.project.ppq.max(4)));
             let len = piano::pattern_length(s, s.pattern());
             if lane.is_channel() {
                 return lfo_points(s, &set, lane, ppq, len, step);
@@ -639,12 +639,12 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
             )
         }
         Tool::Quantize => {
-            let (set, tpl, ppq) = (d.quant, d.quant_tpl.clone(), u32::from(s.project.ppq.max(4)));
+            let (set, tpl, ppq) = (d.quant, d.quant_tpl.clone(), u32::from(s.session.project.ppq.max(4)));
             crate::piano_tools::apply_as(s, |_, ns| quantize::quantize(ns, &tpl.0, &set, ppq), step)
         }
         // The new groups skip the numbers in use (piano-chop.md §6).
         Tool::Chop => {
-            let (set, pat, ppq) = (d.chop, d.chop_pat.clone(), u32::from(s.project.ppq.max(4)));
+            let (set, pat, ppq) = (d.chop, d.chop_pat.clone(), u32::from(s.session.project.ppq.max(4)));
             let mut used: Vec<u16> = piano::notes(s).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
             used.sort_unstable();
             used.dedup();
@@ -680,7 +680,7 @@ fn randomize_notes(s: &mut State, step: Option<&'static str>) -> bool {
     p.notes = notes;
     s.piano.select(s.pattern(), ch, (start..end).collect());
     piano::finish_edit(s);
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 
@@ -699,7 +699,7 @@ fn lfo_points(s: &mut State, set: &lfo::Settings, lane: Lane, ppq: u32, len: u32
         piano::snapshot_as(s, name);
     }
     piano::pattern_mut(s).controls = ctl;
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 
@@ -738,20 +738,20 @@ pub fn preview(s: &mut State) {
 /// by now: New pattern, the pattern selector), when they are still what its last preview left.
 fn restore(s: &mut State) -> bool {
     let Some(se) = &s.piano_dlg.session else { return false };
-    let Some(i) = s.project.patterns.iter().position(|p| p.number == se.pattern) else { return false };
-    let p = &s.project.patterns[i];
+    let Some(i) = s.session.project.patterns.iter().position(|p| p.number == se.pattern) else { return false };
+    let p = &s.session.project.patterns[i];
     if se.shown && (p.notes != se.last || p.controls != se.last_ctl) {
         return false;
     }
     let (base, base_ctl, sel, ch, number) = (se.base.clone(), se.base_ctl.clone(), se.base_sel.clone(), se.channel, se.pattern);
-    let p = &mut s.project.get_mut().patterns[i];
+    let p = &mut s.session.project.get_mut().patterns[i];
     (p.notes, p.controls) = (base, base_ctl);
     if sel.is_empty() {
         s.piano.clear_selection();
     } else {
         s.piano.select(number, ch, sel);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 

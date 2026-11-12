@@ -28,7 +28,7 @@ pub const DELETE_LABEL: &str = "Remove start value";
 
 /// Control `t`'s entry in the list.
 pub fn entry(s: &State, t: u32) -> Option<InitControl> {
-    s.project.init_controls.iter().find(|c| c.target == t).copied()
+    s.session.project.init_controls.iter().find(|c| c.target == t).copied()
 }
 
 /// Whether control `t` is in the list (the check mark of "Set as song start value").
@@ -38,7 +38,7 @@ pub fn listed(s: &State, t: u32) -> bool {
 
 /// Puts control `t`'s entry in the list (`None`: takes it out). An entry already there keeps its place.
 pub(crate) fn put(s: &mut State, t: u32, e: Option<InitControl>) {
-    let list = &mut s.project.get_mut().init_controls;
+    let list = &mut s.session.project.get_mut().init_controls;
     match e {
         Some(c) => match list.iter_mut().find(|x| x.target == t) {
             Some(x) => *x = c,
@@ -47,7 +47,7 @@ pub(crate) fn put(s: &mut State, t: u32, e: Option<InitControl>) {
         None => list.retain(|x| x.target != t),
     }
     // Playback gets the list (the engine sets it where a song loops).
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// "Set as song start value": control `t`, at its value `v` (0..1), goes in the list, replacing an earlier value.
@@ -90,11 +90,11 @@ pub fn apply(s: &mut State) -> bool {
         return false;
     }
     let mut changed = false;
-    for c in s.project.init_controls.clone() {
+    for c in s.session.project.init_controls.clone() {
         changed |= set_value(s, c);
     }
     if changed {
-        s.piano.dirty = true;
+        s.session.dirty = true;
     }
     changed
 }
@@ -116,7 +116,7 @@ fn set_value(s: &mut State, c: InitControl) -> bool {
         s.set_tempo(bpm);
         return changed;
     }
-    s.project.write_if(|p| set_in_project(p, c))
+    s.session.project.write_if(|p| set_in_project(p, c))
 }
 
 /// `set_value` for a control the project holds.
@@ -171,8 +171,8 @@ fn set_in_project(p: &mut os_model::Project, c: InitControl) -> bool {
 /// A list entry's name in the browser: "<owner> - <setting>", as the automation clip on the control is named
 /// ("808 Kick - Channel volume", "Bus 1 - Volume", "Tempo").
 pub fn name(s: &State, t: u32) -> String {
-    let channel = |ch: u16| match s.project.channels.iter().position(|c| c.index == ch) {
-        Some(row) => s.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1)),
+    let channel = |ch: u16| match s.session.project.channels.iter().position(|c| c.index == ch) {
+        Some(row) => s.session.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1)),
         None => format!("Channel {}", ch + 1),
     };
     let mix = |t: u16| crate::mixer::name(s, t);
@@ -235,7 +235,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app
     }
 
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!((init.enabled, init.mark, &init.cmd), (true, Mark::Check(false), &Cmd::InitControl(vol, 10000.0 / 12800.0)));
         assert!(!delete.enabled);
         pl::run(&mut a, init.cmd);
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 10000)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 10000)]);
         let (init, delete) = pair(&rack_menu(&a));
         assert_eq!((init.enabled, init.mark), (true, Mark::Check(true)));
         assert_eq!((delete.enabled, &delete.cmd), (true, &Cmd::DeleteInit(vol)));
@@ -296,7 +296,7 @@ mod tests {
         // "Remove start value": the control leaves the list.
         let delete = pair(&rack_menu(&a)).1.cmd;
         pl::run(&mut a, delete);
-        assert!(a.state.project.init_controls.is_empty());
+        assert!(a.state.session.project.init_controls.is_empty());
         assert_eq!(pair(&rack_menu(&a)).0.mark, Mark::Check(false));
     }
 
@@ -307,20 +307,20 @@ mod tests {
         let vol = target::channel(0, target::CHANNEL_VOLUME);
         pl::run(&mut a, Cmd::InitControl(vol, 0.5));
         pl::run(&mut a, Cmd::InitControl(vol, 0.25));
-        assert_eq!(a.state.history.len(), 2);
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 3200)], "a new value replaces the old one");
+        assert_eq!(a.state.session.history.len(), 2);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 3200)], "a new value replaces the old one");
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 6400)]);
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED));
-        assert!(a.state.project.init_controls.is_empty());
+        assert!(a.state.session.project.init_controls.is_empty());
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(INITIALIZED));
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(INITIALIZED));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 3200)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 3200)]);
         pl::run(&mut a, Cmd::DeleteInit(vol));
-        assert!(a.state.project.init_controls.is_empty());
-        assert_eq!(a.state.history.len(), 2, "no step");
+        assert!(a.state.session.project.init_controls.is_empty());
+        assert_eq!(a.state.session.history.len(), 2, "no step");
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED), "undo goes back past the delete");
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 6400)]);
     }
 
     /// "Set start values automatically" (on by default): "Create automation clip" also lists the control at its
@@ -332,37 +332,37 @@ mod tests {
         let vol = target::channel(0, target::CHANNEL_VOLUME);
         let (t, name, v) = a.automation_target(&Action::Knob(KnobId::ChanVol(0))).unwrap();
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 10000)]);
-        assert_eq!((a.state.history.len(), pl::clips(&a.state).len()), (1, 1));
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 10000)]);
+        assert_eq!((a.state.session.history.len(), pl::clips(&a.state).len()), (1, 1));
         // The clip's channel: the only selected one, in the "Automation" group with the filter on it, as the original's
         // rack shows after every Create automation clip.
-        let row = a.state.project.channels.len() - 1;
-        let g = crate::rack::groups(&a.state.project).iter().position(|g| g.name == "Automation").expect("the group");
-        assert_eq!((a.state.selected_channel, crate::rack::filter(&a.state.project)), (row, crate::rack::Filter::Group(g)));
-        assert!(crate::rack::groups(&a.state.project)[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
-        let channels = a.state.project.channels.len();
+        let row = a.state.session.project.channels.len() - 1;
+        let g = crate::rack::groups(&a.state.session.project).iter().position(|g| g.name == "Automation").expect("the group");
+        assert_eq!((a.state.selected_channel, crate::rack::filter(&a.state.session.project)), (row, crate::rack::Filter::Group(g)));
+        assert!(crate::rack::groups(&a.state.session.project)[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
+        let channels = a.state.session.project.channels.len();
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert!(a.state.project.init_controls.is_empty() && pl::clips(&a.state).is_empty());
-        assert_eq!(a.state.project.channels.len(), channels - 1, "the clip's channel goes with the undo");
-        assert!(crate::rack::groups(&a.state.project).iter().all(|g| g.name != "Automation") && crate::rack::filter(&a.state.project) == crate::rack::Filter::All);
+        assert!(a.state.session.project.init_controls.is_empty() && pl::clips(&a.state).is_empty());
+        assert_eq!(a.state.session.project.channels.len(), channels - 1, "the clip's channel goes with the undo");
+        assert!(crate::rack::groups(&a.state.session.project).iter().all(|g| g.name != "Automation") && crate::rack::filter(&a.state.session.project) == crate::rack::Filter::All);
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert_eq!((a.state.project.channels.len(), crate::rack::filter(&a.state.project)), (channels, crate::rack::Filter::Group(g)));
-        assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 10000)], 1));
+        assert_eq!((a.state.session.project.channels.len(), crate::rack::filter(&a.state.session.project)), (channels, crate::rack::Filter::Group(g)));
+        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 10000)], 1));
         // A second clip on the moved knob: its new value replaces the old one; undo brings that back.
-        a.state.project.get_mut().channels[0].volume = 0.5;
+        a.state.session.project.get_mut().channels[0].volume = 0.5;
         pl::run(&mut a, Cmd::CreateAutomation(vol, "Kick - Channel volume".into(), 0.5));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 6400)]);
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 10000)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 10000)]);
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
 
         // Off: the clip only.
         prefs::set_check(&prefs::INIT_CONTROLS, false);
         let (t, name, v) = a.automation_target(&Action::Tempo).unwrap();
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
-        assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 3));
+        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 3));
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 2));
+        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 2));
         prefs::set_check(&prefs::INIT_CONTROLS, true);
     }
 
@@ -370,19 +370,19 @@ mod tests {
     fn song_app() -> App {
         let mut a = app();
         pl::arr_mut(&mut a.state).clips.push(Clip::new(0, 4 * 384, 0, ClipSource::Pattern(1)));
-        a.state.project.get_mut().init_controls = vec![rec(target::channel(0, target::CHANNEL_VOLUME), 6400), rec(target::TEMPO, 140_000)];
+        a.state.session.project.get_mut().init_controls = vec![rec(target::channel(0, target::CHANNEL_VOLUME), 6400), rec(target::TEMPO, 140_000)];
         a
     }
 
     /// The listed controls moved away from their initial values.
     fn moved(a: &mut App) {
-        a.state.project.get_mut().channels[0].volume = 1.0;
+        a.state.session.project.get_mut().channels[0].volume = 1.0;
         a.state.set_tempo(90.0);
     }
 
     /// (channel 1's volume, tempo).
     fn controls(a: &App) -> (f64, f64) {
-        (a.state.project.channels[0].volume, a.state.tempo())
+        (a.state.session.project.channels[0].volume, a.state.tempo())
     }
 
     /// Playback at tick 900, then back at tick 12 (the song looped), then stopped.
@@ -425,9 +425,9 @@ mod tests {
         a.show_playback(Shown::default());
         loop_back(&mut a, true);
         assert_eq!(controls(&a), INIT);
-        assert_eq!(a.state.history.len(), 0, "no undo step");
+        assert_eq!(a.state.session.history.len(), 0, "no undo step");
         // An entry for a control the project doesn't have, or whose units aren't known, is left alone.
-        a.state.project.get_mut().init_controls.extend([rec(target::channel(40, target::CHANNEL_VOLUME), 0), rec(target::channel_param(0, 2), 5)]);
+        a.state.session.project.get_mut().init_controls.extend([rec(target::channel(40, target::CHANNEL_VOLUME), 0), rec(target::channel_param(0, 2), 5)]);
         moved(&mut a);
         a.set_song_pos(0, false);
         assert_eq!(controls(&a), INIT);
@@ -458,7 +458,7 @@ mod tests {
         b.open(path.clone());
         assert!(b.state.song_mode());
         assert_eq!(controls(&b), INIT);
-        assert!(!b.unsaved() && b.state.history.len() == 0, "opened, not changed");
+        assert!(!b.unsaved() && b.state.session.history.len() == 0, "opened, not changed");
         b.save_to(resaved.clone());
         assert_eq!(stored(&resaved), INIT, "saved as the stored values");
 
@@ -498,7 +498,7 @@ mod tests {
         let folder = format!("1:Current project/{INITIALIZED_CONTROLS}");
         a.state.browser_open.extend(["1:Current project".to_string(), folder.clone()]);
         assert!(!rows(&a.state).iter().any(|r| r.key == folder), "no folder while the list is empty");
-        a.state.project.get_mut().init_controls = vec![
+        a.state.session.project.get_mut().init_controls = vec![
             rec(target::channel(1, target::CHANNEL_VOLUME), 10000),
             rec(target::mixer(1, target::MIXER_VOLUME), 12800),
             rec(target::TEMPO, 140_000),

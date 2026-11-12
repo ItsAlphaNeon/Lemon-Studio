@@ -287,16 +287,16 @@ impl App {
         if mp3 {
             o.formats = [false, false, true, false];
         }
-        let name = s.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
+        let name = s.session.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
         let folder = match crate::settings_file::get("export_folder").map(PathBuf::from).filter(|d| d.is_dir()) {
             // The project's folder first, else the last one used.
-            _ if s.path.as_ref().and_then(|p| p.parent()).is_some_and(|d| d.is_dir()) => s.path.as_ref().and_then(|p| p.parent()).unwrap().to_path_buf(),
+            _ if s.session.path.as_ref().and_then(|p| p.parent()).is_some_and(|d| d.is_dir()) => s.session.path.as_ref().and_then(|p| p.parent()).unwrap().to_path_buf(),
             Some(d) => d,
             None => crate::save_form::default_root().unwrap_or_else(std::env::temp_dir),
         };
         let device_rate = crate::transport::Transport::device_rate().unwrap_or(44100);
-        let tempo = s.project.tick_tempo(s.tempo());
-        let secs_per_tick = 60.0 / tempo.max(1.0) / f64::from(s.project.ppq.max(1));
+        let tempo = s.session.project.tick_tempo(s.tempo());
+        let secs_per_tick = 60.0 / tempo.max(1.0) / f64::from(s.session.project.ppq.max(1));
         let song_end = crate::playlist::clips(s).iter().map(|c| c.end()).max().unwrap_or(0);
         let pat_len = crate::piano::pattern_length(s, s.pattern());
         let sel = |r: Option<(u32, u32)>| r.filter(|(a, b)| b > a);
@@ -432,15 +432,15 @@ impl App {
         let s = &self.state;
         let o = f.o.clone();
         let rate = f.device_rate;
-        let tempo = s.project.tick_tempo(s.tempo());
-        let ppq = s.project.ppq;
+        let tempo = s.session.project.tick_tempo(s.tempo());
+        let ppq = s.session.project.ppq;
         let song_end = crate::playlist::clips(s).iter().map(|c| c.end()).max().unwrap_or(0);
         // The spans of ticks the file plays, in order: the export's span; a whole song from its start marker, broken at
         // skips (spec: audio/song-structure.md "Time markers"); else everything. A tick is placed in the file through
         // them, or is not in it.
         let spans: Vec<(u64, u64)> = match f.span() {
             Some((a, b)) => vec![(u64::from(a), u64::from(b))],
-            None if f.song => os_engine::engine::rendered_spans(s.project.arrangement().map_or(&[], |a| a.markers.as_slice()), u64::from(song_end)),
+            None if f.song => os_engine::engine::rendered_spans(s.session.project.arrangement().map_or(&[], |a| a.markers.as_slice()), u64::from(song_end)),
             None => vec![(0, u64::MAX)],
         };
         let place = |tick: u32| {
@@ -457,7 +457,7 @@ impl App {
         let frame = |t: u64| os_engine::laws::tick_to_frame(t as f64, ppq, tempo, rate) as u64;
         let mut markers = Vec::new();
         if o.markers {
-            let list = if f.song { s.project.arrangement().map(|a| a.markers.clone()) } else { s.project.pattern(s.pattern()).map(|p| p.markers.clone()) };
+            let list = if f.song { s.session.project.arrangement().map(|a| a.markers.clone()) } else { s.session.project.pattern(s.pattern()).map(|p| p.markers.clone()) };
             for m in list.unwrap_or_default().iter().filter(|m| m.kind == 0) {
                 if let Some(t) = place(m.position) {
                     markers.push(ex::Marker { frame: frame(t), name: m.name.clone() });
@@ -465,7 +465,7 @@ impl App {
             }
         }
         if o.note_markers && !f.song {
-            let mut starts: Vec<u64> = s.project.pattern(s.pattern()).map(|p| p.notes.iter().filter_map(|n| place(n.position)).collect()).unwrap_or_default();
+            let mut starts: Vec<u64> = s.session.project.pattern(s.pattern()).map(|p| p.notes.iter().filter_map(|n| place(n.position)).collect()).unwrap_or_default();
             starts.sort_unstable();
             starts.dedup();
             markers.extend(starts.into_iter().map(|t| ex::Marker { frame: frame(t), name: String::new() }));
@@ -483,7 +483,7 @@ impl App {
             None if f.song => spans.iter().map(|&(a, b)| b - a).sum::<u64>().min(u64::from(u32::MAX)) as u32,
             None => crate::piano::pattern_length(s, s.pattern()),
         };
-        let tracks = s.project.mixer.iter().map(|m| m.index).max().unwrap_or(0);
+        let tracks = s.session.project.mixer.iter().map(|m| m.index).max().unwrap_or(0);
         // Render to wave file... renders the tracks' outputs, as Split mixer tracks does.
         let o = if f.tracks.is_empty() { o } else { Options { split: true, ..o } };
         ex::Job {
@@ -544,8 +544,8 @@ mod tests {
     /// A pattern with notes, played in PAT mode.
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
-        app.state.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
         app.state.set_song_mode(false);
         app
     }
@@ -555,8 +555,8 @@ mod tests {
     #[test]
     fn opens_with_the_last_choices() {
         let mut empty = App::new(None);
-        empty.state.project = crate::locked::Locked::new(crate::app::test_project());
-        empty.state.project.get_mut().patterns[0].notes.clear();
+        empty.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        empty.state.session.project.get_mut().patterns[0].notes.clear();
         empty.state.set_song_mode(false);
         empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));
         assert!(form(&empty).is_none());

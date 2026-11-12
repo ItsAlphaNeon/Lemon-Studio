@@ -539,7 +539,7 @@ pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
 pub fn active(s: &State, menu: usize, item: &Item) -> bool {
     works(menu, item)
         && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo"))
-        && (s.path.is_some() || !needs_file(menu, item.label))
+        && (s.session.path.is_some() || !needs_file(menu, item.label))
         && (!matches!(item.cmd, MenuCmd::SaveMidiClip) || !s.piano.clipboard.is_empty())
         && (!matches!(item.cmd, MenuCmd::SaveAudioClip) || crate::audio_clipboard::has_audio())
 }
@@ -1127,7 +1127,7 @@ mod tests {
         assert_eq!(playlist.mark, Mark::Check(app.state.shown(Win::Playlist)));
         // Patterns in use head PATTERNS, the current one marked.
         assert_eq!(bar[PATTERNS].rows[0].label, "New empty pattern...", "a new project uses no pattern yet");
-        app.state.project.get_mut().patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
+        app.state.session.project.get_mut().patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
         let first = bar_model(&app.state)[PATTERNS].rows[0].clone();
         assert_eq!((first.label.as_str(), first.mark, first.pick), ("Intro", Mark::Radio(true), Some((PATTERNS, PATTERN_PICK + 1))));
         // Live state: hiding the playlist unticks it.

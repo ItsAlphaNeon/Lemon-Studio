@@ -49,12 +49,12 @@ pub fn set_song(s: &mut State, at: SongSig, num: u8, den: u8) {
             }
         }
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Index of pattern `n`'s time-signature marker at its start.
 pub fn start_marker(s: &State, n: u16) -> Option<usize> {
-    s.project.pattern(n)?.markers.iter().position(|m| m.kind == TimeMarker::SIGNATURE && m.position == 0)
+    s.session.project.pattern(n)?.markers.iter().position(|m| m.kind == TimeMarker::SIGNATURE && m.position == 0)
 }
 
 /// Accept: pattern `n` gets `num` / `den` at its start, first among its markers (they stay sorted by position), named
@@ -68,7 +68,7 @@ pub fn set_start(s: &mut State, n: u16, num: u8, den: u8) {
 const STEP: &str = "Pattern time signature";
 
 fn set_start_now(s: &mut State, n: u16, num: u8, den: u8) {
-    let old = s.project.pattern_length(n);
+    let old = s.session.project.pattern_length(n);
     let markers = &mut crate::patterns::pat_mut(s, n).markers;
     markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && m.position == 0));
     markers.insert(0, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(0, &format!("{num}/{den}")) });
@@ -79,7 +79,7 @@ fn set_start_now(s: &mut State, n: u16, num: u8, den: u8) {
 pub fn remove_start(s: &mut State, n: u16) {
     let Some(i) = start_marker(s, n) else { return };
     crate::control::edit(s, STEP, crate::control::command::Region::Project, |s| {
-        let old = s.project.pattern_length(n);
+        let old = s.session.project.pattern_length(n);
         crate::patterns::pat_mut(s, n).markers.remove(i);
         crate::playlist::refit_pattern_clips(s, n, old);
     });

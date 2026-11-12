@@ -133,8 +133,8 @@ impl crate::app::App {
         }
         let Some(index) = self.plugins.index_of(LEMON_TRIO) else { return };
         let pending = self.state.pending_plugin.map(|(r, _)| r);
-        let rows: Vec<usize> = (0..self.state.project.channels.len())
-            .filter(|&r| is_osc3(&self.state.project.channels[r]))
+        let rows: Vec<usize> = (0..self.state.session.project.channels.len())
+            .filter(|&r| is_osc3(&self.state.session.project.channels[r]))
             .filter(|&r| !self.state.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && Some(r) != pending)
             .collect();
         if rows.is_empty() {
@@ -145,7 +145,7 @@ impl crate::app::App {
             if self.past_deadline() {
                 break;
             }
-            let ch = &self.state.project.channels[row];
+            let ch = &self.state.session.project.channels[row];
             let fl = ch.plugin_state.clone().unwrap_or_else(lemon_3x_osc::params::default_state);
             let mut st = lemon_3x_osc::params::plugin_state_from_fl(&channel_voicing(ch, &fl));
             // The channel's sample is the custom shape's (spec: plugins/3x-osc.md §1); the plugin opens the file
@@ -169,7 +169,7 @@ impl crate::app::App {
         }
         if added {
             self.transport.set_instruments(self.plugins.instruments());
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
         }
         self.invalidate();
     }
@@ -185,7 +185,7 @@ impl crate::app::App {
         let mut changed = false;
         for row in self.state.hosted_rows.clone() {
             let plugins = &self.plugins;
-            changed |= self.state.project.write_if(|p| follow_sample(p, plugins, row, false));
+            changed |= self.state.session.project.write_if(|p| follow_sample(p, plugins, row, false));
         }
         if changed {
             self.invalidate();
@@ -242,13 +242,13 @@ mod tests {
     fn osc3_channels_save_and_reopen() {
         let path = std::env::temp_dir().join(format!("openstudio-osc3-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.plugins.available = crate::plugins::builtin();
         // Added as the picker adds it: a plugin channel storing the file id, shown with the built-in name.
-        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), LEMON_TRIO);
-        let ch = &a.state.project.channels[row];
+        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
+        let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_TRIO));
         // Hosted with a new instance's settings, then one is edited.
@@ -288,13 +288,13 @@ mod tests {
     #[test]
     fn an_older_osc3_state_takes_the_channels_voicing() {
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.plugins.available = crate::plugins::builtin();
-        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), LEMON_TRIO);
+        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
         let mut old = default_state()[..92].to_vec();
         set_field(&mut old, 0, 12);
         set_field(&mut old, op::osc(0) + op::COARSE + 1, 5);
-        let ch = &mut a.state.project.get_mut().channels[row];
+        let ch = &mut a.state.session.project.get_mut().channels[row];
         ch.plugin_state = Some(old.clone());
         ch.envelopes[os_model::Envelope::PITCH].enabled = true;
         ch.envelopes[os_model::Envelope::PITCH].amount = 1200;
@@ -327,17 +327,17 @@ mod tests {
         let square = wav("Square cycle", &[0.9, 0.9, 0.9, 0.9, -0.9, -0.9, -0.9, -0.9]);
         let saw = wav("Saw cycle", &[-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75]);
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.plugins.available = crate::plugins::builtin();
         a.plugins.set_rate(48000);
-        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), LEMON_TRIO);
+        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
         let mut fl = default_state();
         set_field(&mut fl, op::osc(0) + op::SHAPE + 1, 6); // osc 1: custom
         set_field(&mut fl, op::MIX2 + 1, 0); // osc 2 and 3 silent
         set_field(&mut fl, op::MIX3 + 1, 0);
-        let ch = &mut a.state.project.get_mut().channels[row];
+        let ch = &mut a.state.session.project.get_mut().channels[row];
         (ch.plugin_state, ch.sample_path) = (Some(fl.clone()), Some(square.clone()));
         a.sync_osc3();
         assert!(a.state.hosted_rows.contains(&row), "{:?}", a.state.message);
@@ -358,12 +358,12 @@ mod tests {
         drop(i);
         // Nothing to follow while the channel names the plugin's sample.
         a.follow_osc3_samples();
-        assert_eq!(a.state.project.channels[row].name.as_deref(), Some(LEMON_TRIO));
+        assert_eq!(a.state.session.project.channels[row].name.as_deref(), Some(LEMON_TRIO));
         // A sample the plugin loads itself (its file dialog): the channel takes its path and its name.
         assert!(a.plugins.load_sample(row, &saw));
         a.osc3_look = None;
         a.follow_osc3_samples();
-        let ch = &a.state.project.channels[row];
+        let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.sample_path.as_deref(), ch.name.as_deref()), (Some(saw.as_str()), Some("Saw cycle")));
         // Saved as the channel's sample; reopened, the plugin starts with it.
         let path = dir.join("custom.flp");
@@ -388,19 +388,19 @@ mod tests {
     fn plugin_menus_add_lemon_3x_osc_channels() {
         use crate::plugin_menu::Target;
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.plugins.available = crate::plugins::builtin();
         a.state.plugdb.rebuild(&a.plugins);
         let index = a.plugins.index_of(LEMON_TRIO).unwrap();
         let pick = |a: &App, target| crate::plugin_menu::items(&a.state, target, true).into_iter().find(|it| it.label == LEMON_TRIO).map(|it| it.cmd);
-        let n = a.state.project.channels.len();
+        let n = a.state.session.project.channels.len();
         assert!(crate::rack::add_one_items(&a.state).iter().any(|it| it.label == LEMON_TRIO), "Add one lists Lemon Trio");
         let cmd = pick(&a, Target::Gen(None)).expect("the generator menu lists Lemon Trio");
         crate::playlist::run(&mut a, cmd);
-        assert_eq!(a.state.project.channels.len(), n + 1);
+        assert_eq!(a.state.session.project.channels.len(), n + 1);
         assert_eq!(a.state.pending_plugin, Some((n, index)));
-        assert!(is_osc3(&a.state.project.channels[n]));
-        assert_eq!(a.state.project.channels[n].name.as_deref(), Some(LEMON_TRIO));
+        assert!(is_osc3(&a.state.session.project.channels[n]));
+        assert_eq!(a.state.session.project.channels[n].name.as_deref(), Some(LEMON_TRIO));
         assert_eq!(a.plugins.available[index].desc.name, LEMON_TRIO);
         a.state.pending_plugin = None;
         a.sync_osc3();
@@ -410,7 +410,7 @@ mod tests {
         let cmd = pick(&a, Target::Gen(Some(0))).unwrap();
         crate::playlist::run(&mut a, cmd);
         assert_eq!(a.state.pending_plugin, Some((1, index)));
-        assert!(is_osc3(&a.state.project.channels[1]));
+        assert!(is_osc3(&a.state.session.project.channels[1]));
         assert_eq!(a.state.selected_channel, 1);
         assert!(a.state.hosted_rows.contains(&(n + 1)), "the channel hosted before moved down one row");
     }
@@ -421,16 +421,16 @@ mod tests {
     fn replace_puts_another_generator_on_a_channel() {
         use crate::plugin_menu::Target;
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.project.get_mut().channels[2].sample_path = Some("C:/Samples/Kick.wav".into());
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project.get_mut().channels[2].sample_path = Some("C:/Samples/Kick.wav".into());
         a.plugins.available = crate::plugins::builtin();
         a.state.plugdb.rebuild(&a.plugins);
         let index = a.plugins.index_of(LEMON_TRIO).unwrap();
-        let (n, before) = (a.state.project.channels.len(), a.state.project.channels[2].clone());
+        let (n, before) = (a.state.session.project.channels.len(), a.state.session.project.channels[2].clone());
         let cmd = crate::plugin_menu::items(&a.state, Target::Replace(2), true).into_iter().find(|it| it.label == LEMON_TRIO).map(|it| it.cmd).unwrap();
         crate::playlist::run(&mut a, cmd);
-        let after = &a.state.project.channels[2];
-        assert_eq!(a.state.project.channels.len(), n, "no channel added");
+        let after = &a.state.session.project.channels[2];
+        assert_eq!(a.state.session.project.channels.len(), n, "no channel added");
         assert!(is_osc3(after));
         assert_eq!(after.name.as_deref(), Some(LEMON_TRIO));
         assert_eq!((after.index, after.mixer_track, after.volume, after.pan), (before.index, before.mixer_track, before.volume, before.pan));
@@ -476,7 +476,7 @@ mod tests {
                 }
                 channels += 1;
             }
-            let before = a.state.project.clone();
+            let before = a.state.session.project.clone();
             a.save_to(out.clone());
             assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{path}: {:?}", a.state.message);
             let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&out).unwrap()).unwrap()).unwrap();

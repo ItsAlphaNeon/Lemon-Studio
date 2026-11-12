@@ -123,9 +123,9 @@ fn project_hash(p: &os_model::Project) -> u64 {
 fn side(app: &App) -> String {
     let s = &app.state;
     // Since step 5 the project's (`rack::groups`, `rack::filter`, `rack::unsorted_at`), read as the rack held them.
-    let groups = crate::rack::groups(&s.project);
+    let groups = crate::rack::groups(&s.session.project);
     // "Unsorted" at the end of the group list reads as None (last) or as its place there: the same thing.
-    let unsorted = crate::rack::unsorted_at(&s.project).filter(|&u| u < groups.len());
+    let unsorted = crate::rack::unsorted_at(&s.session.project).filter(|&u| u < groups.len());
     let mut out = String::new();
     let mut f = |name: &str, v: &dyn fmt::Debug| {
         let _ = writeln!(out, "{name}: {v:#?}");
@@ -133,11 +133,11 @@ fn side(app: &App) -> String {
     f("tempo", &s.tempo().to_bits());
     f("pattern", &s.pattern());
     f("song_mode", &s.song_mode());
-    f("filter", &crate::rack::filter(&s.project));
+    f("filter", &crate::rack::filter(&s.session.project));
     f("groups", &groups);
-    f("zipped", &crate::rack::zipped_rows(&s.project));
+    f("zipped", &crate::rack::zipped_rows(&s.session.project));
     // Since step 5 a channel's own (`rack.locked`); read the same way as when the rack kept the rows.
-    f("locked", &crate::rack::locked_rows(&s.project));
+    f("locked", &crate::rack::locked_rows(&s.session.project));
     // Since step 5 the shown pattern's (`rack::loop_mode` and the rest), read as the rack held them.
     f("loop_mode", &crate::rack::loop_mode(s));
     f("loop_len", &crate::rack::loop_lens(s));
@@ -155,9 +155,9 @@ impl Fp {
     fn of(app: &App) -> Fp {
         let s = &app.state;
         let side = hash(&side(app));
-        let history = hash(&(s.history.entries(), s.history.at()));
+        let history = hash(&(s.session.history.entries(), s.session.history.at()));
         Fp(vec![
-            ("project", project_hash(&s.project)),
+            ("project", project_hash(&s.session.project)),
             ("side", side),
             ("lemon", hash(&crate::lemon_state::saved_form(s, &app.plugins))),
             ("history", history),
@@ -448,10 +448,10 @@ impl Rig {
             let dir = traces_dir().join("dumps");
             let _ = std::fs::create_dir_all(&dir);
             let n = std::fs::read_dir(&dir).map_or(0, |d| d.count());
-            let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}", self.app.state.project, side(&self.app)));
+            let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}", self.app.state.session.project, side(&self.app)));
         }
         if self.id_fault.is_none() {
-            self.id_fault = ids_fault(&self.app.state.project).map(|f| format!("step {}: {f}", self.step));
+            self.id_fault = ids_fault(&self.app.state.session.project).map(|f| format!("step {}: {f}", self.step));
         }
         self.step += 1;
         let fp = Fp::of(&self.app);
@@ -552,8 +552,8 @@ impl Rig {
 
     /// With no steps in the history (just opened, or a project opened or made by a step), undo starts from here.
     fn undo_start(&self, start: &mut os_model::Project) {
-        if self.app.state.history.entries().len() <= 1 {
-            start.clone_from(&self.app.state.project);
+        if self.app.state.session.history.entries().len() <= 1 {
+            start.clone_from(&self.app.state.session.project);
         }
     }
 
@@ -591,7 +591,7 @@ impl Rig {
         if let Some(f) = &self.id_fault {
             bad.push(format!("ids({f})"));
         }
-        let last = self.app.state.project.clone();
+        let last = self.app.state.session.project.clone();
         let last_side = side(&self.app);
         // Undo back to the start, then redo to where the trace ended.
         let mut undone = 0;
@@ -601,7 +601,7 @@ impl Rig {
         }
         self.after_step(self.app.transport.generation_for_tests());
         // The project's part only: what `side` holds is compared there (the end only: what undo leaves, as FL does).
-        if let Some(d) = difference(&canonical(&project_part(opened)), &canonical(&project_part(&self.app.state.project)), false) {
+        if let Some(d) = difference(&canonical(&project_part(opened)), &canonical(&project_part(&self.app.state.session.project)), false) {
             bad.push(format!("undo-to-start({undone}:{d})"));
         }
         // Redo as many steps as were done at the end: steps the trace itself undid stay undone.
@@ -612,7 +612,7 @@ impl Rig {
             self.tick();
         }
         self.after_step(self.app.transport.generation_for_tests());
-        if let Some(d) = difference(&canonical(&project_part(&last)), &canonical(&project_part(&self.app.state.project)), false) {
+        if let Some(d) = difference(&canonical(&project_part(&last)), &canonical(&project_part(&self.app.state.session.project)), false) {
             bad.push(format!("redo-to-end({d})"));
         }
         let now_side = side(&self.app);
@@ -627,11 +627,11 @@ impl Rig {
         // The project as the save wrote it: with what the interface holds written in (the tempo, the pattern shown,
         // the rack's loops and groups, the playlist's view) and the plugins' states; the interface's part is compared
         // on its own below.
-        let mut written = self.app.state.project.clone();
+        let mut written = self.app.state.session.project.clone();
         match self.app.save_copy_with(copy.clone(), &mut |p| written = p.clone()) {
             Some(Ok(())) => {
                 let mut again = open_app(&copy);
-                let back = again.state.project.clone();
+                let back = again.state.session.project.clone();
                 if let Some(d) = difference(&canonical(&written), &canonical(&back), true) {
                     bad.push(format!("roundtrip({d})"));
                 }
@@ -909,7 +909,7 @@ fn record(root: &Path, project: &str, seed: u64, steps: usize) -> Trace {
     let work = work_dir(&trace_name(project, seed));
     let mut rig = Rig::open(&root.join(project), &work);
     let opened = Fp::of(&rig.app);
-    let mut opened_project = rig.app.state.project.clone();
+    let mut opened_project = rig.app.state.session.project.clone();
     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let mut out = Vec::new();
     let mut before = opened.clone();
@@ -936,7 +936,7 @@ fn replay(root: &Path, t: &Trace) -> Option<String> {
     // The folder the recording used: paths the project stores (a render, a save as) must be the same.
     let work = work_dir(&trace_name(&t.project, t.seed));
     let mut rig = Rig::open(&root.join(&t.project), &work);
-    let mut opened_project = rig.app.state.project.clone();
+    let mut opened_project = rig.app.state.session.project.clone();
     let fp = Fp::of(&rig.app);
     if fp != t.opened {
         return Some(format!("opening differs in {:?}", fp.differs(&t.opened)));
@@ -1174,7 +1174,7 @@ fn fails(_root: &Path, project: &str, seed: u64, steps: &[Vec<Input>], kind: &st
 fn fails_here(root: &Path, project: &str, seed: u64, steps: &[Vec<Input>], kind: &str) -> Option<String> {
     let work = work_dir(&trace_name(project, seed));
     let mut rig = Rig::open(&root.join(project), &work);
-    let mut start = rig.app.state.project.clone();
+    let mut start = rig.app.state.session.project.clone();
     for s in steps {
         rig.run(s);
         rig.undo_start(&mut start);
@@ -1248,17 +1248,17 @@ fn equiv_show() {
     let t = Trace::read(&std::fs::read_to_string(&path).expect("read")).expect("a trace");
     let work = work_dir(&trace_name(&t.project, t.seed));
     let mut rig = Rig::open(&root.join(&t.project), &work);
-    let mut start = rig.app.state.project.clone();
+    let mut start = rig.app.state.session.project.clone();
     for (i, (inputs, _)) in t.steps.iter().enumerate() {
         let line: Vec<String> = inputs.iter().map(ToString::to_string).collect();
         eprintln!("step {i}: {}", line.join("; "));
-        let before = rig.app.state.project.clone();
+        let before = rig.app.state.session.project.clone();
         let sent = rig.app.transport.sent_for_tests();
         rig.run(inputs);
         rig.undo_start(&mut start);
         let s = &rig.app.state;
-        eprintln!("  undo: {:?} ({} steps), message: {:?}", s.history.newest_done(), s.history.done(), s.message);
-        for d in differences(&before, &s.project, false).iter().take(8) {
+        eprintln!("  undo: {:?} ({} steps), message: {:?}", s.session.history.newest_done(), s.session.history.done(), s.message);
+        for d in differences(&before, &s.session.project, false).iter().take(8) {
             eprintln!("  changed: {d}");
         }
         // What playback was handed (the engine's part of the fingerprint).
@@ -1280,11 +1280,11 @@ fn equiv_show() {
     // every difference).
     if std::env::var("OS_EQUIV_SHOW").as_deref() == Ok("save") {
         let copy = work.join("roundtrip.flp");
-        let mut written = rig.app.state.project.clone();
+        let mut written = rig.app.state.session.project.clone();
         match rig.app.save_copy_with(copy.clone(), &mut |p| written = p.clone()) {
             Some(Ok(())) => {
                 let again = open_app(&copy);
-                for d in differences(&canonical(&written), &canonical(&again.state.project), true).iter().take(60) {
+                for d in differences(&canonical(&written), &canonical(&again.state.session.project), true).iter().take(60) {
                     eprintln!("saved and opened: {d}");
                 }
                 let (a, b) = (leaves(&side(&rig.app)), leaves(&side(&again)));

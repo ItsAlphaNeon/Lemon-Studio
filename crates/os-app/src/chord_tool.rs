@@ -191,7 +191,7 @@ pub fn write(s: &mut State, text: &str) -> String {
     if let Ok(mut l) = LAST.lock() {
         *l = text.trim().to_string();
     }
-    let bar = s.project.bar_ticks();
+    let bar = s.session.project.bar_ticks();
     let end = crate::piano::notes(s).iter().filter(|n| n.channel == ch).map(|n| n.position + n.length.max(1)).max();
     let at = end.map_or(0, |e| e.div_ceil(bar) * bar);
     let new = notes(&chords, ch, at, bar);
@@ -247,16 +247,16 @@ mod tests {
         let mut app = crate::app::App::new(None);
         let s = &mut app.state;
         let ch = crate::piano::channel(s).unwrap();
-        let bar = s.project.bar_ticks();
+        let bar = s.session.project.bar_ticks();
         crate::piano::pattern_mut(s).notes = vec![Note { length: 10, ..Note::step(ch, bar / 2) }];
-        let steps = s.history.at();
+        let steps = s.session.history.at();
         assert_eq!(write(s, "C/E G"), "Wrote 2 chords into the pattern");
         let notes: Vec<(u32, u16, u32)> = crate::piano::notes(s).iter().skip(1).map(|n| (n.position, n.key, n.length)).collect();
         assert_eq!(notes, vec![(bar, 40, bar), (bar, 48, bar), (bar, 52, bar), (bar, 55, bar), (2 * bar, 55, bar), (2 * bar, 59, bar), (2 * bar, 62, bar)]);
-        assert_eq!(s.history.at(), steps + 1);
+        assert_eq!(s.session.history.at(), steps + 1);
         assert_eq!(last(), "C/E G");
         assert_eq!(write(s, "C X"), "Chord progression: \"X\" is not a chord");
-        assert_eq!(s.history.at(), steps + 1, "nothing written");
+        assert_eq!(s.session.history.at(), steps + 1, "nothing written");
         crate::history::undo(s);
         assert_eq!(crate::piano::notes(s).len(), 1);
     }

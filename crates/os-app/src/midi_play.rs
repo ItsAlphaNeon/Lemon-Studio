@@ -224,7 +224,7 @@ impl App {
                 }
                 Msg::Bend { .. } => {
                     let row = self.state.selected_channel;
-                    if row < self.state.project.channels.len() {
+                    if row < self.state.session.project.channels.len() {
                         self.sync_live();
                         if let Some(b) = ev.msg.bytes() {
                             self.transport.midi(row, b, 200.0);
@@ -250,19 +250,19 @@ impl App {
     /// A message for the selected channel's hosted instrument, on MIDI channel 1 (spec §4).
     fn midi_forward(&mut self, m: Msg) {
         let row = self.state.selected_channel;
-        let Some(b) = m.bytes().filter(|_| row < self.state.project.channels.len()) else { return };
+        let Some(b) = m.bytes().filter(|_| row < self.state.session.project.channels.len()) else { return };
         self.sync_live();
         self.transport.midi(row, b, 200.0);
     }
 
     fn midi_note_on(&mut self, ch: u8, key: u8, vel: u8) {
         self.key_tap();
-        let n = self.state.project.channels.len();
+        let n = self.state.session.project.channels.len();
         let (vel, mut extra) = linked(vel);
         // The channels set on Settings > MIDI (spec §3): their notes are not played on the selected channel.
         if Some(ch) == channel_of(&prefs::OMNI_CHANNEL) {
             let Some(row) = white_index(key).filter(|&r| r < n) else { return };
-            extra.channel = Some(self.state.project.channels[row].index);
+            extra.channel = Some(self.state.session.project.channels[row].index);
             return self.midi_start(Src::Omni(key), key, row, 60, vel, extra, 0);
         }
         if Some(ch) == channel_of(&prefs::MARKER_CHANNEL) {
@@ -378,7 +378,7 @@ impl App {
         }
         let mut at: Vec<u32> = self
             .state
-            .project
+            .session.project
             .arrangement()
             .map(|a| a.markers.iter().filter(|m| m.kind != os_model::TimeMarker::SIGNATURE).map(|m| m.position).collect())
             .unwrap_or_default();
@@ -410,7 +410,7 @@ impl App {
     /// `ahead_ms` starts that far into the song (a negative offset).
     fn ext_apply(&mut self, m: Msg, ahead_ms: u32) {
         use crate::transport::State as T;
-        let ppq = u32::from(self.state.project.ppq.max(1));
+        let ppq = u32::from(self.state.session.project.ppq.max(1));
         let ahead = (f64::from(ahead_ms) / 1000.0 * self.state.tempo() / 60.0 * f64::from(ppq)).round() as u32;
         match m {
             Msg::Start => {
@@ -513,7 +513,7 @@ impl App {
             ports_off,
             kind: crate::midi_out::SyncKind::of(prefs::index(&prefs::SYNC_TYPE)),
             offset_ms: cfg::offset(Offset::MasterSync),
-            ppq: self.state.project.ppq.max(1),
+            ppq: self.state.session.project.ppq.max(1),
             tempo: self.state.tempo(),
         };
         self.midi_out.configure(c);
@@ -734,7 +734,7 @@ mod tests {
     fn app() -> App {
         let mut app = App::new(None);
         app.state.selected_channel = 0;
-        assert!(app.state.project.channels.len() >= 2, "the new project has channels");
+        assert!(app.state.session.project.channels.len() >= 2, "the new project has channels");
         app
     }
 
@@ -768,14 +768,14 @@ mod tests {
         app.midi_notes(vec![Msg::Off { ch: 2, key: 50, vel: 64 }, Msg::On { ch: 2, key: 49, vel: 90 }]);
         assert!(app.midi_play.held.is_empty(), "black keys do nothing");
         prefs::set_number(&prefs::MUTING_CHANNEL, 4);
-        let was = app.state.project.channels[0].enabled;
+        let was = app.state.session.project.channels[0].enabled;
         app.midi_notes(vec![Msg::On { ch: 3, key: 48, vel: 90 }, Msg::Off { ch: 3, key: 48, vel: 64 }]);
-        assert_eq!(app.state.project.channels[0].enabled, !was, "toggled");
+        assert_eq!(app.state.session.project.channels[0].enabled, !was, "toggled");
         prefs::set_check(&prefs::TOGGLE_ON_RELEASE, true);
         app.midi_notes(vec![Msg::On { ch: 3, key: 48, vel: 90 }]);
-        assert_eq!(app.state.project.channels[0].enabled, was);
+        assert_eq!(app.state.session.project.channels[0].enabled, was);
         app.midi_notes(vec![Msg::Off { ch: 3, key: 48, vel: 64 }]);
-        assert_eq!(app.state.project.channels[0].enabled, !was, "momentary");
+        assert_eq!(app.state.session.project.channels[0].enabled, !was, "momentary");
         assert!(app.midi_play.held.is_empty(), "nothing played on the selected channel");
     }
 

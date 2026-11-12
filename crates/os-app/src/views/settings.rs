@@ -882,7 +882,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // The project's data folder (events 167 and 202) and two program settings (spec: ui/data-folder.md §1);
             // drawn by `super::data_folder`.
             g(super::data_folder::GROUP, vec![
-                combo(crate::data_folder::choice_text(&s.project), 306.0, crate::data_folder::COMBO),
+                combo(crate::data_folder::choice_text(&s.session.project), 306.0, crate::data_folder::COMBO),
                 DataFolder,
                 combo(crate::prefs::choice(&crate::prefs::ASK_DATA_FOLDER), 444.0, crate::prefs::ASK_DATA_FOLDER.label),
                 Check(crate::prefs::COPY_USED_SAMPLES.label, false),
@@ -890,10 +890,10 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("Time settings", {
                 // The bar as the project holds it (4/4 when the file has none), in the mode of event 35: a time
                 // signature's two combos or a time division's two value boxes (spec: ui/settings-choices.md "Project").
-                let (beats, steps) = s.project.bar();
-                let sig = s.project.bar_is_signature();
+                let (beats, steps) = s.session.project.bar();
+                let sig = s.session.project.bar_is_signature();
                 let mut rows = vec![
-                    combo(&s.project.ppq.to_string(), 44.0, TIMEBASE),
+                    combo(&s.session.project.ppq.to_string(), 44.0, TIMEBASE),
                     combo(if sig { SET_AS_SIGNATURE } else { SET_AS_DIVISION }, 196.0, SET_AS),
                 ];
                 if sig {
@@ -908,15 +908,15 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // The panning law (event 23) and the check show what the engine plays. Fast declick shows the project's
             // value, greyed: its sound is not played yet (event 40; spec: flp/engine-events.md "Project").
             gf("Advanced", true, vec![
-                combo(&panning_text(s.project.panning_law), 82.0, PANNING_LAW),
-                Check(TRUNCATED_CHECK, s.project.play_truncated),
-                Check("Fast fade for choke groups", s.project.fast_declick.unwrap_or(false)),
+                combo(&panning_text(s.session.project.panning_law), 82.0, PANNING_LAW),
+                Check(TRUNCATED_CHECK, s.session.project.play_truncated),
+                Check("Fast fade for choke groups", s.session.project.fast_declick.unwrap_or(false)),
             ]),
             // The project's automatic crossfades (event 44; off when the file has none) and the program setting new
             // projects take it from (`prefs::AUTO_CROSSFADES_NEW`, which the check shows).
             gf("Arranger", false, vec![Check2(
                 CROSSFADES_CHECK,
-                s.project.auto_crossfades.unwrap_or(false),
+                s.session.project.auto_crossfades.unwrap_or(false),
                 crate::prefs::AUTO_CROSSFADES_NEW.label,
                 true,
             )]),
@@ -927,7 +927,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         INFO => {
             vec![g("Project credits", vec![
                 Text("Title".into(), true),
-                pair(Edit(InfoField::Title, 288.0), Check(SHOW_INFO_CHECK, s.project.show_info.unwrap_or(false))),
+                pair(Edit(InfoField::Title, 288.0), Check(SHOW_INFO_CHECK, s.session.project.show_info.unwrap_or(false))),
                 Text("Author".into(), true),
                 Edit(InfoField::Author, 0.0),
                 Text("Genre".into(), true),
@@ -944,10 +944,10 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         DEBUG => {
             let mut lines = vec![
                 format!("Lemon Studio {}", crate::version::text()),
-                format!("Project: {}", s.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
-                format!("Saved by: {}", s.project.saved_by),
-                format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo()),
-                format!("Channels {}, patterns {}, mixer tracks {}", s.project.channels.len(), s.project.patterns.len(), s.project.mixer.len()),
+                format!("Project: {}", s.session.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
+                format!("Saved by: {}", s.session.project.saved_by),
+                format!("PPQ {}, tempo {:.3}", s.session.project.ppq, s.tempo()),
+                format!("Channels {}, patterns {}, mixer tracks {}", s.session.project.channels.len(), s.session.project.patterns.len(), s.session.project.mixer.len()),
                 format!("Output device: {}", st.device),
                 format!("Device rate: {:?}", st.rate),
                 format!("Instruments listed: {}, effects listed: {}", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()),
@@ -1815,7 +1815,7 @@ fn info_box(ui: &mut Ui, s: &State, field: InfoField, b: Rect) {
     let hov = ui.hit(b, Action::Settings(SAct::Info(field)), hint);
     let well = if edit.is_some() { t.s(0x141516) } else if hov { t.s(0x1d1f21) } else { t.s(0x191b1c) };
     kit::sunken(ui.c, t, b, well);
-    let shown = field.get(&s.project.info).as_deref().unwrap_or("");
+    let shown = field.get(&s.session.project.info).as_deref().unwrap_or("");
     let (text, caret, all) = match edit {
         Some(e) => (e.text.as_str(), Some(e.caret), e.all && !e.text.is_empty()),
         None => (shown, None, false),

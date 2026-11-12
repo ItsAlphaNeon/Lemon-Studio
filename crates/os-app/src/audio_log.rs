@@ -202,7 +202,7 @@ mod tests {
     fn a_dump_goes_into_the_audio_editor() {
         use crate::mixer::FxReq;
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         app.plugins.effects = crate::plugins::builtin_effects();
         crate::settings_file::set_flag(ON, false);
         assert!(app.dump_audio_log().contains("off"));

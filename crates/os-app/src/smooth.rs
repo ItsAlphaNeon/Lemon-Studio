@@ -262,7 +262,7 @@ impl App {
     }
 
     fn ppq(&self) -> f64 {
-        f64::from(self.state.project.ppq.max(4))
+        f64::from(self.state.session.project.ppq.max(4))
     }
 
     /// The grid `w`'s time is drawn in, at the last paint.
@@ -785,7 +785,7 @@ mod tests {
         assert_eq!(app.time_view(w), mid);
         let target = app.smooth.zoom(w).expect("still easing").target;
         assert_eq!(target.0, two.0, "a notch on from the target");
-        let ppt = two.0 / f32::from(app.state.project.ppq.max(4));
+        let ppt = two.0 / f32::from(app.state.session.project.ppq.max(4));
         assert!((target.1 - two.1).abs() * ppt <= 1.0, "the tick under the mouse stays: {target:?}, {two:?}");
         zoom_eases(&mut app, w);
         assert_eq!(app.time_view(w), target);

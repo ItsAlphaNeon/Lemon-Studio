@@ -303,7 +303,7 @@ impl PluginSide {
         Some(match crate::plugins::fx_of(key) {
             // A container's effect has no name of its own (a preset renames nothing).
             None if key >= crate::plugins::MEMBER_KEY => None,
-            None => s.project.channels[key].name.clone(),
+            None => s.session.project.channels[key].name.clone(),
             Some((t, k)) => crate::mixer::slot_label(s, t, k),
         })
     }
@@ -312,7 +312,7 @@ impl PluginSide {
     fn put_name(&self, s: &mut State, owner: u32) {
         let Some(key) = owner_key(s, owner).filter(|&k| k < crate::plugins::MEMBER_KEY) else { return };
         match crate::plugins::fx_of(key) {
-            None => s.project.get_mut().channels[key].name = self.name.clone(),
+            None => s.session.project.get_mut().channels[key].name = self.name.clone(),
             Some((t, k)) => crate::mixer::set_slot_label(s, t, k, self.name.clone()),
         }
     }
@@ -336,7 +336,7 @@ pub struct Settings {
 
 impl Settings {
     fn of(s: &State) -> Settings {
-        let p = &s.project;
+        let p = &s.session.project;
         Settings {
             tempo: s.tempo(),
             swing: p.swing,
@@ -352,7 +352,7 @@ impl Settings {
 
     fn put(self, s: &mut State) {
         s.set_tempo(self.tempo);
-        let p = s.project.get_mut();
+        let p = s.session.project.get_mut();
         (p.swing, p.main_volume, p.main_pitch, p.bar, p.bar_as_signature, p.info) =
             (self.swing, self.main_volume, self.main_pitch, self.bar, self.bar_as_signature, self.info);
         (p.panning_law, p.play_truncated) = (self.panning_law, self.play_truncated);
@@ -370,12 +370,11 @@ pub struct Side {
 
 impl Side {
     fn of(s: &State) -> Side {
-        let r = &s.rack;
         Side {
-            project: s.project.clone(),
+            project: s.session.project.clone(),
             tempo: s.tempo(),
             pattern: s.pattern(),
-            loop_type: (r.loop_type, r.type_of),
+            loop_type: (s.session.loop_type, s.session.loop_type_of),
         }
     }
 }
@@ -396,7 +395,7 @@ pub enum Region {
 impl Taken {
     /// `region` as it is now (`None`: it names nothing).
     pub fn of(s: &State, region: Region) -> Option<Taken> {
-        let p = &s.project;
+        let p = &s.session.project;
         Some(match region {
             Region::Settings => Taken::Settings(Box::new(Settings::of(s))),
             Region::Channel(row) => Taken::Channel(Box::new(p.channels.get(row)?.clone())),
@@ -451,7 +450,7 @@ fn clip_place(p: &Project, id: u32) -> Result<usize, Error> {
 
 /// The channel or slot plugin with id `owner`: its `Plugins::hosted` key.
 pub fn owner_key(s: &State, owner: u32) -> Option<usize> {
-    let p = &s.project;
+    let p = &s.session.project;
     let slot = |owner: u32| {
         p.mixer.iter().find_map(|m| {
             let k = m.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.id.0 == owner))?;
@@ -472,7 +471,7 @@ pub fn owner_key(s: &State, owner: u32) -> Option<usize> {
 /// The id of the channel or slot plugin hosted under `Plugins::hosted` key `key` (`owner_key`'s other way); for a
 /// container's effect, its `member_owner` (0 while its container's slot has no id yet).
 pub fn key_owner(s: &State, key: usize) -> Option<u32> {
-    let p = &s.project;
+    let p = &s.session.project;
     let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t)?.slots.get(usize::from(k))?.as_ref().map(|s| s.id.0);
     if key >= crate::plugins::MEMBER_KEY {
         let &(t, k, id) = s.params.members.get(&key)?;
@@ -581,7 +580,7 @@ impl Command {
 
     /// What this command is about to change, taken from the project as it is now.
     fn take(&self, s: &State) -> Result<Taken, Error> {
-        let p = &s.project;
+        let p = &s.session.project;
         Ok(match self {
             Command::SetTempo { .. }
             | Command::SetSwing { .. }
@@ -665,13 +664,13 @@ impl Command {
             // A parameter's undo: its other side is the value it moves from.
             Command::Put(t) => match &**t {
                 Taken::Param(owner, param, v) => {
-                    let now = s.control.param_value(*owner, *param).ok_or("the parameter's value is not known")?;
+                    let now = s.session.control.param_value(*owner, *param).ok_or("the parameter's value is not known")?;
                     Taken::Param(*owner, *param, now).then_set(s, *v)
                 }
                 // A plugin's state: its other side is the state it replaces, which the app fills in as it puts this in.
                 Taken::Plugin(owner, side) => {
                     let name = PluginSide::name_of(s, *owner).ok_or_else(|| format!("no plugin {owner}"))?;
-                    let fill = s.control.put_state(*owner, (**side).clone());
+                    let fill = s.session.control.put_state(*owner, (**side).clone());
                     side.put_name(s, *owner);
                     Taken::Plugin(*owner, Box::new(PluginSide { state: Vec::new(), preset: None, name, fill }))
                 }
@@ -680,7 +679,7 @@ impl Command {
             _ => self.take(s)?,
         };
         let result = self.change(s)?;
-        s.piano.dirty = true;
+        s.session.dirty = true;
         Ok(Done { undo: Command::Put(Box::new(taken)), result })
     }
 
@@ -694,28 +693,28 @@ impl Command {
                 none
             }
             Command::SetSwing { swing } => {
-                s.project.get_mut().swing = Some((unit("swing", swing, 0.0, 1.0)? * 128.0).round() as u8);
+                s.session.project.get_mut().swing = Some((unit("swing", swing, 0.0, 1.0)? * 128.0).round() as u8);
                 none
             }
             Command::SetMainVolume { volume } => {
-                s.project.get_mut().main_volume = Some((unit("volume", volume, 0.0, 1.0)? * 16000.0).round() as u16);
+                s.session.project.get_mut().main_volume = Some((unit("volume", volume, 0.0, 1.0)? * 16000.0).round() as u16);
                 none
             }
             Command::SetMainPitch { cents } => {
                 unit("cents", f64::from(cents), -1200.0, 1200.0)?;
-                s.project.get_mut().main_pitch = Some(cents);
+                s.session.project.get_mut().main_pitch = Some(cents);
                 none
             }
             Command::SetTimeSignature { numerator, denominator } => {
                 if !(1..=16).contains(&numerator) || ![2, 4, 8, 16].contains(&denominator) {
                     return Err(format!("not a time signature: {numerator}/{denominator}"));
                 }
-                s.project.get_mut().bar = Some((numerator, 16 / denominator));
-                s.project.get_mut().bar_as_signature = Some(true);
+                s.session.project.get_mut().bar = Some((numerator, 16 / denominator));
+                s.session.project.get_mut().bar_as_signature = Some(true);
                 none
             }
             Command::SetInfo { title, author, genre, comments, url } => {
-                let i = &mut s.project.get_mut().info;
+                let i = &mut s.session.project.get_mut().info;
                 for (field, v) in [(&mut i.title, title), (&mut i.author, author), (&mut i.genre, genre), (&mut i.comments, comments), (&mut i.url, url)] {
                     if let Some(v) = v {
                         *field = text(&v);
@@ -725,38 +724,38 @@ impl Command {
             }
 
             Command::AddChannel { name, plugin, sample, track } => {
-                let track = track.map(|t| track_number(&s.project, t)).transpose()?;
+                let track = track.map(|t| track_number(&s.session.project, t)).transpose()?;
                 let sampler = plugin.as_deref().is_none_or(|p| p == crate::plugins::LEMON_SAMPLER);
                 if !sampler && sample.is_some() {
                     return Err("a sample goes into a sampler channel (no plugin)".into());
                 }
                 let row = match &plugin {
-                    Some(p) if !sampler => crate::app::add_plugin_channel(s.project.get_mut(), p),
-                    _ => crate::app::add_channel(s.project.get_mut()),
+                    Some(p) if !sampler => crate::app::add_plugin_channel(s.session.project.get_mut(), p),
+                    _ => crate::app::add_channel(s.session.project.get_mut()),
                 };
-                let ch = &mut s.project.get_mut().channels[row];
+                let ch = &mut s.session.project.get_mut().channels[row];
                 if let Some(t) = track {
                     ch.mixer_track = t;
                 }
                 if let Some(path) = sample.filter(|p| !p.is_empty()) {
                     crate::rack::auto_name(ch, std::path::Path::new(&path));
                     ch.sample_path = Some(path.clone());
-                    s.sample_loads.push((row, path));
+                    s.session.sample_loads.push((row, path));
                 }
                 if let Some(n) = name {
-                    s.project.get_mut().channels[row].name = text(&n);
+                    s.session.project.get_mut().channels[row].name = text(&n);
                 }
                 crate::rack::autosize(s);
-                s.control.settle(s.project.get_mut());
-                let id = s.project.channels[row].id;
+                s.session.control.settle(s.session.project.get_mut());
+                let id = s.session.project.channels[row].id;
                 if !sampler {
-                    s.control.host.push(super::HostReq::Instrument { channel: id, plugin: plugin.unwrap_or_default() });
+                    s.session.control.host.push(super::HostReq::Instrument { channel: id, plugin: plugin.unwrap_or_default() });
                 }
                 Ok(id_result("channel", id))
             }
             Command::DeleteChannel { channel } => {
-                let row = channel_row(&s.project, channel)?;
-                let n = s.project.channels.len();
+                let row = channel_row(&s.session.project, channel)?;
+                let n = s.session.project.channels.len();
                 if n < 2 {
                     return Err("a project keeps at least one channel".into());
                 }
@@ -765,8 +764,8 @@ impl Command {
                 none
             }
             Command::MoveChannel { channel, row: to } => {
-                let row = channel_row(&s.project, channel)?;
-                let n = s.project.channels.len();
+                let row = channel_row(&s.session.project, channel)?;
+                let n = s.session.project.channels.len();
                 if to >= n {
                     return Err(format!("row {to} is past the last ({})", n - 1));
                 }
@@ -781,12 +780,12 @@ impl Command {
                 none
             }
             Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track } => {
-                let track = track.map(|t| track_number(&s.project, t)).transpose()?;
+                let track = track.map(|t| track_number(&s.session.project, t)).transpose()?;
                 let color = color.map(|c| parse_color(&c)).transpose()?;
                 let volume = volume.map(|v| unit("volume", v, 0.0, 1.0)).transpose()?;
                 let pan = pan.map(|v| unit("pan", v, -1.0, 1.0)).transpose()?;
-                let row = channel_row(&s.project, channel)?;
-                let ch = &mut s.project.get_mut().channels[row];
+                let row = channel_row(&s.session.project, channel)?;
+                let ch = &mut s.session.project.get_mut().channels[row];
                 if let Some(n) = name {
                     ch.name = text(&n);
                 }
@@ -811,8 +810,8 @@ impl Command {
                 none
             }
             Command::LoadSample { channel, path } => {
-                let row = channel_row(&s.project, channel)?;
-                let ch = &mut s.project.get_mut().channels[row];
+                let row = channel_row(&s.session.project, channel)?;
+                let ch = &mut s.session.project.get_mut().channels[row];
                 if !ch.kind.is_sampler() {
                     return Err(format!("channel {channel} is not a sampler channel"));
                 }
@@ -823,7 +822,7 @@ impl Command {
                     crate::rack::read_tags(ch, std::path::Path::new(&path));
                     ch.sample_path = Some(path.clone());
                 }
-                s.sample_loads.push((row, path));
+                s.session.sample_loads.push((row, path));
                 none
             }
 
@@ -833,13 +832,13 @@ impl Command {
                     return Err(format!("a new track goes at 1..={last}"));
                 }
                 let n = crate::mixer::add_track(s, at);
-                let place = s.project.mixer.iter().position(|m| m.index == n).unwrap_or(0);
-                s.control.settle(s.project.get_mut());
-                let id = s.project.mixer[place].id;
+                let place = s.session.project.mixer.iter().position(|m| m.index == n).unwrap_or(0);
+                s.session.control.settle(s.session.project.get_mut());
+                let id = s.session.project.mixer[place].id;
                 Ok(id_result("track", id))
             }
             Command::DeleteTrack { track } => {
-                let n = track_number(&s.project, track)?;
+                let n = track_number(&s.session.project, track)?;
                 if n == 0 {
                     return Err("the master track can't be deleted".into());
                 }
@@ -851,8 +850,8 @@ impl Command {
                 let volume = volume.map(|v| unit("volume", v, 0.0, 1.0)).transpose()?;
                 let pan = pan.map(|v| unit("pan", v, -1.0, 1.0)).transpose()?;
                 let stereo = stereo.map(|v| unit("stereo", v, -1.0, 1.0)).transpose()?;
-                let place = track_place(&s.project, track)?;
-                let m = &mut s.project.get_mut().mixer[place];
+                let place = track_place(&s.session.project, track)?;
+                let m = &mut s.session.project.get_mut().mixer[place];
                 if let Some(n) = name {
                     m.name = text(&n);
                 }
@@ -883,7 +882,7 @@ impl Command {
                 none
             }
             Command::SetSend { from, to, level } => {
-                let (a, b) = (track_number(&s.project, from)?, track_number(&s.project, to)?);
+                let (a, b) = (track_number(&s.session.project, from)?, track_number(&s.session.project, to)?);
                 if a == b {
                     return Err("a track can't send to itself".into());
                 }
@@ -891,8 +890,8 @@ impl Command {
                 if level.is_some() && crate::mixer::makes_loop(s, a, b) {
                     return Err("that route would make a loop".into());
                 }
-                let place = track_place(&s.project, from)?;
-                let m = &mut s.project.get_mut().mixer[place];
+                let place = track_place(&s.session.project, from)?;
+                let m = &mut s.session.project.get_mut().mixer[place];
                 m.send_levels.retain(|(d, _)| *d != b);
                 match level {
                     Some(l) => {
@@ -917,8 +916,8 @@ impl Command {
                         return Err(format!("{name} must be {lo}..={hi}"));
                     }
                 }
-                let place = track_place(&s.project, track)?;
-                let b = &mut s.project.get_mut().mixer[place].eq[usize::from(band)];
+                let place = track_place(&s.session.project, track)?;
+                let b = &mut s.session.project.get_mut().mixer[place].eq[usize::from(band)];
                 for (k, v) in [gain, frequency, width].into_iter().enumerate() {
                     if let Some(v) = v {
                         b[k] = v;
@@ -927,27 +926,27 @@ impl Command {
                 none
             }
             Command::AddEffect { track, slot, plugin } => {
-                let place = track_place(&s.project, track)?;
-                let m = &s.project.mixer[place];
+                let place = track_place(&s.session.project, track)?;
+                let m = &s.session.project.mixer[place];
                 let k = match slot {
                     Some(k) if k < 10 => usize::from(k),
                     Some(k) => return Err(format!("slots are 0..=9, not {k}")),
                     None => m.slots.iter().position(Option::is_none).ok_or("the track has no empty slot")?,
                 };
-                let m = &mut s.project.get_mut().mixer[place];
+                let m = &mut s.session.project.get_mut().mixer[place];
                 m.slots[k] = Some(crate::plugins::new_slot(&plugin));
                 m.slot_on[k] = true;
                 m.slot_mix[k] = 1.0;
                 m.slot_cpu[k] = os_model::PluginCpu::default();
                 m.slot_names[k] = None;
-                s.control.settle(s.project.get_mut());
-                let id = s.project.mixer[place].slots[k].as_ref().map_or(Id::NONE, |x| x.id);
-                s.control.host.push(super::HostReq::Effect { slot: id, plugin });
+                s.session.control.settle(s.session.project.get_mut());
+                let id = s.session.project.mixer[place].slots[k].as_ref().map_or(Id::NONE, |x| x.id);
+                s.session.control.host.push(super::HostReq::Effect { slot: id, plugin });
                 Ok(id_result("slot", id))
             }
             Command::RemoveEffect { track, slot } => {
-                let place = track_place(&s.project, track)?;
-                let m = &mut s.project.get_mut().mixer[place];
+                let place = track_place(&s.session.project, track)?;
+                let m = &mut s.session.project.get_mut().mixer[place];
                 let k = usize::from(slot);
                 if m.slots.get(k).is_none_or(Option::is_none) {
                     return Err(format!("slot {slot} is empty"));
@@ -963,8 +962,8 @@ impl Command {
                 if slot > 9 {
                     return Err(format!("slots are 0..=9, not {slot}"));
                 }
-                let place = track_place(&s.project, track)?;
-                let m = &mut s.project.get_mut().mixer[place];
+                let place = track_place(&s.session.project, track)?;
+                let m = &mut s.session.project.get_mut().mixer[place];
                 if let Some(v) = enabled {
                     m.slot_on[usize::from(slot)] = v;
                 }
@@ -976,25 +975,25 @@ impl Command {
 
             Command::AddPattern { name, color } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;
-                let n = s.project.patterns.iter().map(|p| p.number).max().unwrap_or(0) + 1;
+                let n = s.session.project.patterns.iter().map(|p| p.number).max().unwrap_or(0) + 1;
                 let p = crate::patterns::pat_mut(s, n);
                 p.name = name.as_deref().and_then(text);
                 p.color = color.flatten();
-                let place = s.project.patterns.iter().position(|p| p.number == n).unwrap_or(0);
-                s.control.settle(s.project.get_mut());
-                let id = s.project.patterns[place].id;
+                let place = s.session.project.patterns.iter().position(|p| p.number == n).unwrap_or(0);
+                s.session.control.settle(s.session.project.get_mut());
+                let id = s.session.project.patterns[place].id;
                 Ok(id_result("pattern", id))
             }
             Command::DeletePattern { pattern } => {
-                let n = s.project.patterns[pattern_place(&s.project, pattern)?].number;
+                let n = s.session.project.patterns[pattern_place(&s.session.project, pattern)?].number;
                 crate::patterns::renumber(s, |m| if m == n { None } else if m > n { Some(m - 1) } else { Some(m) });
                 none
             }
             Command::SetPattern { pattern, name, color, length } => {
                 length.map(|l| ticks("length", l)).transpose()?;
                 let color = color.map(|c| parse_color(&c)).transpose()?;
-                let place = pattern_place(&s.project, pattern)?;
-                let p = &mut s.project.get_mut().patterns[place];
+                let place = pattern_place(&s.session.project, pattern)?;
+                let p = &mut s.session.project.get_mut().patterns[place];
                 if let Some(n) = name {
                     p.name = text(&n);
                 }
@@ -1007,19 +1006,19 @@ impl Command {
                 none
             }
             Command::SetNotes { pattern, channel, notes } => {
-                let notes = notes_of(&s.project, &notes)?;
-                let only = channel.map(|c| channel_row(&s.project, c).map(|r| s.project.channels[r].index)).transpose()?;
-                let place = pattern_place(&s.project, pattern)?;
-                let p = &mut s.project.get_mut().patterns[place];
+                let notes = notes_of(&s.session.project, &notes)?;
+                let only = channel.map(|c| channel_row(&s.session.project, c).map(|r| s.session.project.channels[r].index)).transpose()?;
+                let place = pattern_place(&s.session.project, pattern)?;
+                let p = &mut s.session.project.get_mut().patterns[place];
                 p.notes.retain(|n| only.is_some_and(|c| n.channel != c));
                 p.notes.extend(notes);
                 p.notes.sort_by_key(|n| n.position);
                 none
             }
             Command::AddNotes { pattern, notes } => {
-                let notes = notes_of(&s.project, &notes)?;
-                let place = pattern_place(&s.project, pattern)?;
-                let p = &mut s.project.get_mut().patterns[place];
+                let notes = notes_of(&s.session.project, &notes)?;
+                let place = pattern_place(&s.session.project, pattern)?;
+                let p = &mut s.session.project.get_mut().patterns[place];
                 p.notes.extend(notes);
                 p.notes.sort_by_key(|n| n.position);
                 none
@@ -1029,10 +1028,10 @@ impl Command {
                 ticks("position", position)?;
                 length.map(|l| ticks("length", l)).transpose()?;
                 let source = match (pattern, channel) {
-                    (Some(p), None) => ClipSource::Pattern(s.project.patterns[pattern_place(&s.project, p)?].number),
+                    (Some(p), None) => ClipSource::Pattern(s.session.project.patterns[pattern_place(&s.session.project, p)?].number),
                     (None, Some(c)) => {
-                        let row = channel_row(&s.project, c)?;
-                        let ch = &s.project.channels[row];
+                        let row = channel_row(&s.session.project, c)?;
+                        let ch = &s.session.project.channels[row];
                         if !matches!(ch.kind, ChannelKind::AudioClip | ChannelKind::Automation) {
                             return Err(format!("channel {c} is not an audio or automation clip channel"));
                         }
@@ -1049,13 +1048,13 @@ impl Command {
                 let a = crate::playlist::arr_mut(s);
                 let at = a.clips.partition_point(|c| c.position <= position);
                 a.clips.insert(at, Clip::new(position, length, track - 1, source));
-                s.control.settle(s.project.get_mut());
+                s.session.control.settle(s.session.project.get_mut());
                 let id = crate::playlist::clips(s)[at].id;
                 reselect_clips(s, &sel);
                 Ok(id_result("clip", id))
             }
             Command::DeleteClip { clip } => {
-                let i = clip_place(&s.project, clip)?;
+                let i = clip_place(&s.session.project, clip)?;
                 let sel = selected_clips(s);
                 crate::playlist::arr_mut(s).clips.remove(i);
                 reselect_clips(s, &sel);
@@ -1064,7 +1063,7 @@ impl Command {
             Command::SetClip { clip, position, track, length, muted } => {
                 position.map(|v| ticks("position", v)).transpose()?;
                 length.map(|v| ticks("length", v)).transpose()?;
-                let i = clip_place(&s.project, clip)?;
+                let i = clip_place(&s.session.project, clip)?;
                 if track.is_some_and(|t| t == 0 || t > crate::playlist::TRACKS) {
                     return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
                 }
@@ -1104,7 +1103,7 @@ impl Command {
             Command::SetParam { owner, param, value, .. } => {
                 unit("value", value, 0.0, 1.0)?;
                 owner_key(s, owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
-                s.control.set_param(owner, param, value);
+                s.session.control.set_param(owner, param, value);
                 none
             }
 
@@ -1120,7 +1119,7 @@ impl Taken {
     /// A parameter's undo: sets the value and keeps this (the value before) as the other side.
     fn then_set(self, s: &mut State, v: f64) -> Taken {
         if let Taken::Param(owner, param, _) = self {
-            s.control.set_param(owner, param, v);
+            s.session.control.set_param(owner, param, v);
         }
         self
     }
@@ -1131,15 +1130,15 @@ fn put(s: &mut State, t: Taken) {
     match t {
         Taken::Settings(v) => v.put(s),
         Taken::Channel(c) => {
-            if let Ok(row) = channel_row(&s.project, c.id.0) {
-                let ch = &mut s.project.get_mut().channels[row];
+            if let Ok(row) = channel_row(&s.session.project, c.id.0) {
+                let ch = &mut s.session.project.get_mut().channels[row];
                 // A sampler's sample: its Lemon Sampler follows.
                 if ch.sample_path != c.sample_path && c.kind.is_sampler() {
-                    s.sample_loads.push((row, c.sample_path.clone().unwrap_or_default()));
+                    s.session.sample_loads.push((row, c.sample_path.clone().unwrap_or_default()));
                 }
                 // And its Misc values it plays.
                 if ch.misc != c.misc && c.kind.is_sampler() {
-                    s.control.misc.push(row);
+                    s.session.control.misc.push(row);
                 }
                 // Muting is a step of its own, a lock and a zip none: the channel stays as it is in those (`Mutes`).
                 let (on, locked, zipped) = (ch.enabled, ch.rack.locked, ch.rack.zipped);
@@ -1148,20 +1147,20 @@ fn put(s: &mut State, t: Taken) {
             }
         }
         Taken::Track(m) => {
-            if let Ok(place) = track_place(&s.project, m.id.0) {
-                let on = s.project.mixer[place].enabled;
-                s.project.get_mut().mixer[place] = *m;
-                s.project.get_mut().mixer[place].enabled = on;
+            if let Ok(place) = track_place(&s.session.project, m.id.0) {
+                let on = s.session.project.mixer[place].enabled;
+                s.session.project.get_mut().mixer[place] = *m;
+                s.session.project.get_mut().mixer[place].enabled = on;
             }
         }
         Taken::Pattern(p) => {
-            if let Ok(place) = pattern_place(&s.project, p.id.0) {
-                s.project.get_mut().patterns[place] = *p;
+            if let Ok(place) = pattern_place(&s.session.project, p.id.0) {
+                s.session.project.get_mut().patterns[place] = *p;
             }
         }
         Taken::Arrangement(a) => {
             let sel = selected_clips(s);
-            if let Some(cur) = s.project.get_mut().arrangements.iter_mut().find(|x| x.id.0 == a.id.0) {
+            if let Some(cur) = s.session.project.get_mut().arrangements.iter_mut().find(|x| x.id.0 == a.id.0) {
                 *cur = *a;
             }
             reselect_clips(s, &sel);
@@ -1172,11 +1171,11 @@ fn put(s: &mut State, t: Taken) {
         Taken::Links(pairs) => crate::remote::retarget(&pairs),
         Taken::Mutes(on) => {
             for (id, v) in on {
-                if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.id.0 == id) {
+                if let Some(c) = s.session.project.get_mut().channels.iter_mut().find(|c| c.id.0 == id) {
                     c.enabled = v;
                 }
             }
-            s.piano.dirty = true;
+            s.session.dirty = true;
         }
     }
 }
@@ -1189,24 +1188,24 @@ fn mutes(p: &Project) -> Taken {
 /// The whole project back (an undo of adding or deleting channels, tracks or patterns): the rack's own state with it,
 /// the selections kept where their things still are.
 fn restore(s: &mut State, side: Side) {
-    let old: Vec<u32> = s.project.channels.iter().map(|c| c.id.0).collect();
+    let old: Vec<u32> = s.session.project.channels.iter().map(|c| c.id.0).collect();
     let sel_clips = selected_clips(s);
     let new_row: std::collections::HashMap<u32, usize> = side.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
     let Side { project, tempo, pattern, loop_type } = side;
     let shown = s.pattern();
     let numbers = |p: &Project| p.patterns.iter().map(|q| q.number).collect::<std::collections::BTreeSet<_>>();
-    let patterns_before = numbers(&s.project);
-    let mutes = Mutes::of(&s.project);
-    s.project = crate::locked::Locked::new(project);
-    mutes.keep(s.project.get_mut());
+    let patterns_before = numbers(&s.session.project);
+    let mutes = Mutes::of(&s.session.project);
+    s.session.project = crate::locked::Locked::new(project);
+    mutes.keep(s.session.project.get_mut());
     s.set_tempo(tempo);
     s.set_pattern(pattern);
     crate::rack::remap_ui(s, &map);
-    (s.rack.loop_type, s.rack.type_of) = loop_type;
+    (s.session.loop_type, s.session.loop_type_of) = loop_type;
     // The pattern shown now stays shown, as in FL (an undo leaves the pattern shown); a step that made or removed
     // patterns (a clone, a delete) shows the pattern it showed. Each pattern's loops are its own, put back with it.
-    if numbers(&s.project) == patterns_before {
+    if numbers(&s.session.project) == patterns_before {
         s.set_pattern(shown);
     }
     let tracks = crate::mixer::inserts(s);

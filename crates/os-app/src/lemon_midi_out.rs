@@ -536,7 +536,7 @@ impl crate::app::App {
     /// Every MIDI Out channel has its instrument, with the channel's settings and levels; rows that are no longer MIDI
     /// Out channels lose theirs. Runs every tick.
     pub(crate) fn sync_midi_outs(&mut self) {
-        let rows: Vec<(usize, Live)> = self.state.project.channels.iter().enumerate().filter(|(_, c)| is_midi_out(c)).map(|(r, c)| (r, Live::of(c))).collect();
+        let rows: Vec<(usize, Live)> = self.state.session.project.channels.iter().enumerate().filter(|(_, c)| is_midi_out(c)).map(|(r, c)| (r, Live::of(c))).collect();
         let outs = &mut self.plugins.midi_outs;
         if rows.is_empty() && outs.is_empty() {
             return;
@@ -569,9 +569,9 @@ impl crate::app::App {
     pub(crate) fn add_midi_out(&mut self) -> Option<String> {
         crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
-            let row = crate::app::add_plugin_channel(s.project.get_mut(), LEMON_MIDI_OUT);
-            make_midi_out(&mut s.project.get_mut().channels[row], &Settings::default());
-            s.piano.dirty = true;
+            let row = crate::app::add_plugin_channel(s.session.project.get_mut(), LEMON_MIDI_OUT);
+            make_midi_out(&mut s.session.project.get_mut().channels[row], &Settings::default());
+            s.session.dirty = true;
             s.selected_channel = row;
             s.rack.select_only(row);
             crate::rack::autosize(s);
@@ -591,7 +591,7 @@ impl crate::app::App {
     /// group of its own (§4); names, places and notes stay. One undo step: the channels take new ids, so their old
     /// instruments, kept by the old ones (`Plugins::keep`), come back with an undo (`control::host`).
     pub(crate) fn prepare_midi_export(&mut self) -> String {
-        let rows: Vec<usize> = self.state.project.channels.iter().enumerate().filter(|(_, c)| matches!(c.kind, ChannelKind::Sampler | ChannelKind::Plugin)).map(|(r, _)| r).collect();
+        let rows: Vec<usize> = self.state.session.project.channels.iter().enumerate().filter(|(_, c)| matches!(c.kind, ChannelKind::Sampler | ChannelKind::Plugin)).map(|(r, _)| r).collect();
         if rows.is_empty() {
             return "No channels to set up for MIDI export".into();
         }
@@ -605,16 +605,16 @@ impl crate::app::App {
             app.native_failed.retain(|r| !rows.contains(r));
             app.wrap_failed.retain(|r| !rows.contains(r));
             let s = &mut app.state;
-            let groups = cut_groups(&rows.iter().map(|&r| s.project.channels[r].misc.cut).collect::<Vec<_>>());
+            let groups = cut_groups(&rows.iter().map(|&r| s.session.project.channels[r].misc.cut).collect::<Vec<_>>());
             for (i, &row) in rows.iter().enumerate() {
-                let ch = &mut s.project.get_mut().channels[row];
+                let ch = &mut s.session.project.get_mut().channels[row];
                 // A new id at once, before anything is hosted on the row and takes its channel's.
                 ch.id = os_model::Id::NONE;
                 make_midi_out(ch, &Settings { channel: (i % 16) as u8, ..Settings::default() });
                 (ch.misc.cut, ch.misc.cut_by) = (groups[i], groups[i]);
             }
-            s.control.settle(s.project.get_mut());
-            s.piano.dirty = true;
+            s.session.control.settle(s.session.project.get_mut());
+            s.session.dirty = true;
             app.sync_midi_outs();
             app.transport.set_instruments(app.plugins.instruments());
             app.open_channel_window(rows[0]);
@@ -746,9 +746,9 @@ mod tests {
 
     fn app() -> App {
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.plugins = crate::plugins::Plugins::default();
         a.plugins.available = crate::plugins::builtin();
         a
@@ -761,8 +761,8 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lemon-midi-out-{}.flp", std::process::id()));
         let mut a = app();
         a.add_midi_out();
-        let row = a.state.project.channels.len() - 1;
-        let ch = &a.state.project.channels[row];
+        let row = a.state.session.project.channels.len() - 1;
+        let ch = &a.state.session.project.channels[row];
         assert!(is_midi_out(ch));
         assert_eq!((ch.name.as_deref(), ch.plugin.as_deref(), ch.mixer_track, ch.color), (Some(LEMON_MIDI_OUT), Some(FILE_NAME), 0, Some(COLOR)));
         assert_eq!(ch.plugin_state.as_deref(), Some(default_state().as_slice()));
@@ -778,12 +778,12 @@ mod tests {
         assert_eq!(a.state.knob_text(KnobId::MidiOut(row, MoKnob::Channel)), "MIDI Out channel: 10");
         assert_eq!(a.state.knob_text(KnobId::MidiOut(row, MoKnob::Bank)), "MIDI Out bank: ---");
         let want = Settings { channel: 9, port: 5, patch: 34, bank: [-1, 2], ..Settings::default() };
-        assert_eq!(row_settings(&a.state.project, row), Some(want));
+        assert_eq!(row_settings(&a.state.session.project, row), Some(want));
         // Its instrument follows the settings.
         a.sync_midi_outs();
         assert_eq!(a.plugins.midi_outs.get(&row).map(|i| i.lock().unwrap().live.settings), Some(want));
         assert!(a.plugins.instruments().iter().any(|(r, _)| *r == row));
-        let state = a.state.project.channels[row].plugin_state.clone().unwrap();
+        let state = a.state.session.project.channels[row].plugin_state.clone().unwrap();
         assert_eq!(state.len(), 967);
 
         a.save_to(path.clone());
@@ -799,7 +799,7 @@ mod tests {
         b.sync_native();
         b.sync_midi_outs();
         assert!(b.plugins.midi_outs.contains_key(&row) && !b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
-        assert_eq!(row_settings(&b.state.project, row), Some(want));
+        assert_eq!(row_settings(&b.state.session.project, row), Some(want));
         b.save_to(path.clone());
         let again = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -811,14 +811,14 @@ mod tests {
     fn midi_out_settings_undo() {
         let mut a = app();
         a.add_midi_out();
-        let row = a.state.project.channels.len() - 1;
+        let row = a.state.session.project.channels.len() - 1;
         let id = KnobId::MidiOut(row, MoKnob::SendLevels);
         crate::history::knob(&mut a.state, id, false);
         a.state.set_knob(id, 0.0);
-        assert!(!row_settings(&a.state.project, row).unwrap().send_levels);
+        assert!(!row_settings(&a.state.session.project, row).unwrap().send_levels);
         a.undo_key(false);
-        assert!(row_settings(&a.state.project, row).unwrap().send_levels);
-        assert_eq!(a.state.project.channels[row].plugin_state.as_deref(), Some(default_state().as_slice()));
+        assert!(row_settings(&a.state.session.project, row).unwrap().send_levels);
+        assert_eq!(a.state.session.project.channels[row].plugin_state.as_deref(), Some(default_state().as_slice()));
     }
 
     /// TOOLS ▸ Set up for MIDI export (spec: ui/menus.md, plugins/midi-out.md §6.6): the question, then every sampler
@@ -828,15 +828,15 @@ mod tests {
     fn set_up_for_midi_export() {
         let mut a = app();
         // The five samplers, then a Lemon Trio and an automation clip channel.
-        let trio = crate::app::add_plugin_channel(a.state.project.get_mut(), crate::osc3::LEMON_TRIO);
-        let auto = crate::app::add_channel(a.state.project.get_mut());
-        a.state.project.get_mut().channels[auto].kind = ChannelKind::Automation;
-        a.state.project.get_mut().channels[1].misc.cut = 4;
+        let trio = crate::app::add_plugin_channel(a.state.session.project.get_mut(), crate::osc3::LEMON_TRIO);
+        let auto = crate::app::add_channel(a.state.session.project.get_mut());
+        a.state.session.project.get_mut().channels[auto].kind = ChannelKind::Automation;
+        a.state.session.project.get_mut().channels[1].misc.cut = 4;
         for _ in 0..4 {
             a.plugin_tick();
         }
         assert!(a.state.hosted_rows.contains(&0) && a.state.hosted_rows.contains(&trio), "{:?}", a.state.hosted_rows);
-        let before = a.state.project.channels.clone();
+        let before = a.state.session.project.channels.clone();
 
         a.ask_midi_export();
         let Some(crate::dialog::Body::Msg(m)) = a.state.dialogs.last().map(|d| &d.body) else { panic!("the question") };
@@ -845,7 +845,7 @@ mod tests {
 
         let msg = a.prepare_midi_export();
         assert_eq!(msg, "Set up for MIDI export: 6 channels now play Lemon MIDI Out");
-        let p = &a.state.project;
+        let p = &a.state.session.project;
         for (i, ch) in p.channels[..=trio].iter().enumerate() {
             assert!(is_midi_out(ch), "row {i}");
             assert_eq!(ch.name, before[i].name);
@@ -858,13 +858,13 @@ mod tests {
         assert!(!a.state.hosted_rows.iter().any(|&r| r <= trio), "the instruments went");
         assert_eq!(a.plugins.midi_outs.len(), 6);
         assert!(a.state.shown(crate::app::Win::Plugin) && a.state.plugin_channel == 0);
-        assert_eq!(a.state.history.entries().last().map(|e| e.1), Some(PREP_LABEL));
+        assert_eq!(a.state.session.history.entries().last().map(|e| e.1), Some(PREP_LABEL));
 
         a.undo_key(false);
         for _ in 0..4 {
             a.plugin_tick();
         }
-        for (i, ch) in a.state.project.channels.iter().enumerate() {
+        for (i, ch) in a.state.session.project.channels.iter().enumerate() {
             assert_eq!(ch, &before[i], "row {i} back");
         }
         assert!(a.state.hosted_rows.contains(&0) && a.state.hosted_rows.contains(&trio), "the instruments back: {:?}", a.state.hosted_rows);
@@ -879,14 +879,14 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let (first, second) = (dir.join("a.flp"), dir.join("b.flp"));
         let mut a = app();
-        a.state.project.get_mut().patterns[0].notes.push(os_model::Note { length: 48, key: 60, ..os_model::Note::step(2, 0) });
+        a.state.session.project.get_mut().patterns[0].notes.push(os_model::Note { length: 48, key: 60, ..os_model::Note::step(2, 0) });
         a.save_to(first.clone());
         let mut b = App::new(None);
         b.plugins.available = crate::plugins::builtin();
         b.open(first.clone());
-        assert!(b.state.project.channels.iter().all(|c| c.rack.origin.is_some()));
+        assert!(b.state.session.project.channels.iter().all(|c| c.rack.origin.is_some()));
         b.prepare_midi_export();
-        let states: Vec<Option<Vec<u8>>> = b.state.project.channels.iter().map(|c| c.plugin_state.clone()).collect();
+        let states: Vec<Option<Vec<u8>>> = b.state.session.project.channels.iter().map(|c| c.plugin_state.clone()).collect();
         b.save_to(second.clone());
         assert!(b.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", b.state.message);
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&second).unwrap()).unwrap()).unwrap();

@@ -134,7 +134,7 @@ pub fn layout(s: &State) -> Vec<RowPos> {
     rk::shown(s)
         .into_iter()
         .map(|row| {
-            let zipped = s.project.channels.get(row).is_some_and(|c| c.rack.zipped);
+            let zipped = s.session.project.channels.get(row).is_some_and(|c| c.rack.zipped);
             let p = RowPos { row, top: y, zipped };
             y += p.pitch();
             p
@@ -198,7 +198,7 @@ fn sx(s: &State) -> f32 {
 
 /// Name width that fits the longest channel name (Options > Channel button width > Size to fit).
 pub fn fit_name_w(s: &State) -> f32 {
-    let longest = s.project.channels.iter().map(|c| c.name.as_deref().unwrap_or("Channel 00").chars().count()).max().unwrap_or(8);
+    let longest = s.session.project.channels.iter().map(|c| c.name.as_deref().unwrap_or("Channel 00").chars().count()).max().unwrap_or(8);
     (longest as f32 * 7.5 + 14.0).max(40.0)
 }
 
@@ -296,7 +296,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let first_step = (sx / STEP_W).floor() as u32;
     let per_step = rk::per_step(s);
     let (group, bars) = (rk::beat_steps(s), rk::pattern_bars(s, len * per_step));
-    let pat = s.project.pattern(s.pattern());
+    let pat = s.session.project.pattern(s.pattern());
     let notes: &[os_model::Note] = pat.map_or(&[], |p| &p.notes);
     // Playback position (pattern mode): the current step (§16).
     let cur_step = (f.playing && !f.song).then(|| (f.tick / f64::from(per_step)).floor() as u32);
@@ -310,7 +310,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         if ry + p.pitch() < rows_clip.y - 4.0 || ry - 4.0 > rows_clip.bottom() {
             continue;
         }
-        let ch = &s.project.channels[i];
+        let ch = &s.session.project.channels[i];
         let focused = i == s.selected_channel;
         let selected = s.rack.sel.contains(&i);
         let nb = Rect::new(x + c.name_x, ry, c.name_w, 26.0);
@@ -382,7 +382,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         // A channel locked to a note source shows a padlock at the button's right end (§18 Receive notes from ▸).
         let locked = s.rack.note_lock.contains(&Some(i));
         // Change icon... (§18, Lemon Studio's design): the icon at the button's left end, the name moved right of it.
-        let icon = crate::playlist::window_icon(&s.project, i);
+        let icon = crate::playlist::window_icon(&s.session.project, i);
         let icon_lead = if icon.is_some() { 16.0 } else { 0.0 };
         // A channel with an instrument track (playlist §6c): the "I" disc before the name, as on the track header.
         let inst = crate::track_links::instrument_track_of(s, ch.index).is_some();
@@ -554,9 +554,9 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         ui.c.fill_rect(Rect::new(cf.x, cf.y + 1.0, cf.w, cf.h / 2.0), ui.t.s(0x202122));
         ui.c.fill_rect(Rect::span(cf.x, cf.right(), cf.y + 1.0 + cf.h / 2.0, cf.bottom()), ui.t.s(0x1b1c1d));
     }
-    let label = match rk::filter(&s.project) {
+    let label = match rk::filter(&s.session.project) {
         rk::Filter::All => "All".to_string(),
-        rk::Filter::Group(g) => rk::groups(&s.project).get(g).map_or("All".to_string(), |g| g.name.clone()),
+        rk::Filter::Group(g) => rk::groups(&s.session.project).get(g).map_or("All".to_string(), |g| g.name.clone()),
         rk::Filter::Unsorted => "Unsorted".to_string(),
     };
     let lf = Font::new(17);
@@ -732,7 +732,7 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
     ui.c.fill_rect(g, ui.t.s(0x15181a));
     ui.c.stroke_rrect(g, 0.0, 1.0, ui.t.s(0x0c0e0f));
     ui.hit(g, Action::Swallow, "");
-    let ch = s.project.channels.get(s.selected_channel).map(|c| c.index);
+    let ch = s.session.project.channels.get(s.selected_channel).map(|c| c.index);
     let notes = rk::row_notes(s, s.selected_channel);
     ui.c.push_clip(bars);
     let x0 = s.rack_pos.0 + cols(s).step_x;
@@ -903,7 +903,7 @@ pub fn paint_fill(ui: &mut Ui, s: &State) {
     let hov = super::close_button(ui, close, close, Action::RackFill(FillHit::Close), "Close");
     icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
     // Preview row: the channel.
-    let name = s.project.channels.get(fd.row).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default();
+    let name = s.session.project.channels.get(fd.row).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default();
     ui.c.text(font, r.x + 12.0, r.y + 34.0, t.text_dim, "Preview");
     ui.c.fill_polygon(&[(r.x + 70.0, r.y + 38.0), (r.x + 75.0, r.y + 42.0), (r.x + 70.0, r.y + 46.0)], t.glyph);
     ui.c.text_clip(font, r.x + 82.0, r.y + 34.0, r.w - 94.0, t.text, &name);

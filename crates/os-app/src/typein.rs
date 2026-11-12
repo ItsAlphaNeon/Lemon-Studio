@@ -231,8 +231,8 @@ pub(crate) fn get(s: &State, t: Target) -> Option<f64> {
         Target::Fader(m) => Some(crate::mixer::track(s, m)?.volume.unwrap_or(0.8)),
         Target::Param(key, index) => crate::params::param_value(s, key, index),
         Target::Latency(m, input, _) => crate::mixer::track(s, m).map(|t| f64::from(if input { t.latency_in } else { t.latency_out })),
-        Target::RackTrack(r) => s.project.channels.get(r).map(|c| f64::from(c.mixer_track)),
-        Target::RackLed(r) => s.project.channels.get(r).map(|c| if c.enabled { 1.0 } else { 0.0 }),
+        Target::RackTrack(r) => s.session.project.channels.get(r).map(|c| f64::from(c.mixer_track)),
+        Target::RackLed(r) => s.session.project.channels.get(r).map(|c| if c.enabled { 1.0 } else { 0.0 }),
         Target::Member(m, k, id, wet) => crate::container::level(s, m, k, id, wet).map(f64::from),
         Target::MemberParam(..) => match resolved(s, t)? {
             p @ Target::Param(..) => get(s, p),
@@ -250,7 +250,7 @@ fn set(s: &mut State, t: Target, v: f64) {
         Target::Fader(m) => crate::control::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(m), |s| {
             if let Some(t) = crate::mixer::track_mut(s, m) {
                 t.volume = Some(v.clamp(0.0, 1.0));
-                s.piano.dirty = true;
+                s.session.dirty = true;
             }
         }),
         Target::Param(key, index) => {
@@ -265,18 +265,18 @@ fn set(s: &mut State, t: Target, v: f64) {
         Target::Latency(m, input, u) => crate::mixer::set_latency(s, m, input, (v * u.ms(s)).clamp(-LATENCY_MAX_MS, LATENCY_MAX_MS) as f32),
         // One undo step, as the box's own menu commands.
         Target::RackTrack(r) => {
-            let track = v.round().clamp(0.0, f64::from(crate::mixer::max_insert(&s.project))) as u16;
-            if s.project.channels.get(r).is_some_and(|c| c.mixer_track != track) {
+            let track = v.round().clamp(0.0, f64::from(crate::mixer::max_insert(&s.session.project))) as u16;
+            if s.session.project.channels.get(r).is_some_and(|c| c.mixer_track != track) {
                 crate::control::edit(s, "Channel mixer track", crate::control::command::Region::Channel(r), |s| {
-                    if let Some(c) = s.project.get_mut().channels.get_mut(r) {
+                    if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
                         c.mixer_track = track;
                     }
                 });
-                s.piano.dirty = true;
+                s.session.dirty = true;
             }
         }
         Target::RackLed(r) => {
-            if s.project.channels.get(r).is_some_and(|c| c.enabled != (v >= 0.5)) {
+            if s.session.project.channels.get(r).is_some_and(|c| c.enabled != (v >= 0.5)) {
                 crate::rack::toggle_mute(s, r);
             }
         }
@@ -293,7 +293,7 @@ fn set(s: &mut State, t: Target, v: f64) {
 pub(crate) fn position(s: &State, t: Target) -> Option<f64> {
     let v = get(s, t)?;
     match t {
-        Target::RackTrack(_) => Some(v / f64::from(crate::mixer::max_insert(&s.project).max(1))),
+        Target::RackTrack(_) => Some(v / f64::from(crate::mixer::max_insert(&s.session.project).max(1))),
         Target::RackLed(_) => Some(v),
         _ => None,
     }
@@ -304,7 +304,7 @@ pub(crate) fn position(s: &State, t: Target) -> Option<f64> {
 pub(crate) fn at_position(s: &State, t: Target, p: f64) -> f64 {
     let p = p.clamp(0.0, 1.0);
     match t {
-        Target::RackTrack(_) => (p * f64::from(crate::mixer::max_insert(&s.project))).round(),
+        Target::RackTrack(_) => (p * f64::from(crate::mixer::max_insert(&s.session.project))).round(),
         _ => if p >= 0.5 { 1.0 } else { 0.0 },
     }
 }

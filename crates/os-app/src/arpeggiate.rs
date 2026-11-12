@@ -633,7 +633,7 @@ pub fn open(s: &mut State) {
 
 /// Arpeggiate the targets with the dialog's settings; `step` names the undo step (none for a preview).
 fn run(s: &mut State, step: Option<&'static str>) -> bool {
-    let (set, pat, ppq) = (s.arp.set, s.arp.pattern.clone(), u32::from(s.project.ppq.max(4)));
+    let (set, pat, ppq) = (s.arp.set, s.arp.pattern.clone(), u32::from(s.session.project.ppq.max(4)));
     let mut used: Vec<u16> = piano::notes(s).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
     used.sort_unstable();
     used.dedup();
@@ -675,7 +675,7 @@ fn restore(s: &mut State) -> bool {
     } else {
         s.piano.select(s.pattern(), ch, sel);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 

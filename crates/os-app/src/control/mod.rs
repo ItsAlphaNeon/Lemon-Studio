@@ -259,9 +259,9 @@ fn op(c: &Command) -> &'static str {
 /// Applies `commands` in order, all or none; returns each one's result and the commands that undo them all (in the
 /// order to apply them). Records nothing.
 pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
-    s.control.settle(s.project.get_mut());
+    s.session.control.settle(s.session.project.get_mut());
     let queues = Queues::of(s);
-    let known = s.control.known.clone();
+    let known = s.session.control.known.clone();
     let mut undo = Vec::with_capacity(commands.len());
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
@@ -269,14 +269,14 @@ pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Val
             Ok(done) => {
                 undo.push(done.undo);
                 results.push(done.result);
-                s.control.settle(s.project.get_mut());
+                s.session.control.settle(s.session.project.get_mut());
             }
             Err(e) => {
                 // Back to where the list started.
                 undo.reverse();
                 take_back(s, undo);
                 queues.put(s);
-                s.control.known = known;
+                s.session.control.known = known;
                 return Err(format!("command {i}: {e}"));
             }
         }
@@ -297,7 +297,7 @@ pub fn take_back(s: &mut State, undo: Vec<Command>) -> Vec<Command> {
                 break;
             }
         }
-        s.control.settle(s.project.get_mut());
+        s.session.control.settle(s.session.project.get_mut());
     }
     redo.reverse();
     redo
@@ -318,8 +318,8 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
     };
     crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
     crate::history::done_with(s);
-    s.control.saw(&s.project, s.tempo());
-    s.control.event(by, "apply", step, ops);
+    s.session.control.saw(&s.session.project, s.tempo());
+    s.session.control.event(by, "apply", step, ops);
     Ok(results)
 }
 
@@ -354,7 +354,7 @@ pub fn knob_edit<R>(s: &mut State, name: &'static str, region: command::Region, 
 /// first change records the step holding `region` as it was, the others go into it. `knob`: a knob-like control, no
 /// step while Undo knob tweaks is off.
 pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, run: crate::history::Run, knob: bool, f: impl FnOnce(&mut State) -> R) -> R {
-    if (knob && !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) || s.history.joins(run) {
+    if (knob && !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) || s.session.history.joins(run) {
         return f(s);
     }
     s.link_moves.clear();
@@ -366,7 +366,7 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
     if let Some(before) = before {
         if command::Taken::of(s, region).as_ref() != Some(&before) {
             record_edit(s, name, before);
-            s.history.set_run(run);
+            s.session.history.set_run(run);
         }
     }
     r
@@ -405,13 +405,13 @@ pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: comman
 /// of the plugin's values just before them, as a knob's wheel notches do; a parameter not in that step yet joins it
 /// with its value before. The step comes from no press of the app's, so no release looks at it.
 pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
-    s.plugin_edited = true;
+    s.session.plugin_edited = true;
     if !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
         return;
     }
     let put = |&(param, v): &(u32, f64)| Command::Put(Box::new(command::Taken::Param(owner, param, v)));
     let r = crate::history::Run::Param(owner);
-    if run && s.history.joins(r) {
+    if run && s.session.history.joins(r) {
         crate::history::extend_newest(s, |cmds| {
             for b in before {
                 let has = cmds.iter().any(|c| matches!(c, Command::Put(t) if matches!(**t, command::Taken::Param(_, p, _) if p == b.0)));
@@ -425,7 +425,7 @@ pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
     crate::history::record(s, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(before.iter().map(put).collect()));
     crate::history::done_with(s);
     if run {
-        s.history.set_run(r);
+        s.session.history.set_run(r);
     }
 }
 
@@ -437,12 +437,12 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     let Some(param) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
     if command::key_owner(s, key) == Some(0) {
-        s.control.settle(s.project.get_mut());
+        s.session.control.settle(s.session.project.get_mut());
     }
     let Some(owner) = command::key_owner(s, key) else { return };
     // Known for the undo's other side (`Command::apply`).
-    s.control.saw_param(owner, param, to);
-    s.plugin_edited |= before.is_some_and(|v| v != to);
+    s.session.control.saw_param(owner, param, to);
+    s.session.plugin_edited |= before.is_some_and(|v| v != to);
     let Some(v) = before.filter(|&v| v != to && crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) else { return };
     let put = Command::Put(Box::new(command::Taken::Param(owner, param, v)));
     crate::history::record(s, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));
@@ -455,7 +455,7 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
 /// release could judge.
 pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command::PluginSide) {
     if command::key_owner(s, key) == Some(0) {
-        s.control.settle(s.project.get_mut());
+        s.session.control.settle(s.session.project.get_mut());
     }
     let Some(owner) = command::key_owner(s, key).filter(|&o| o != 0) else { return };
     crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(command::Taken::Plugin(owner, Box::new(before))))]));
@@ -466,7 +466,7 @@ pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command
 /// that joins the newest step of run `run` (`History::joins`) records none, as that step holds the region from before
 /// the run.
 pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, run: crate::history::Run, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
-    if app.state.history.joins(run) {
+    if app.state.session.history.joins(run) {
         return f(app);
     }
     app.state.link_moves.clear();
@@ -477,7 +477,7 @@ pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: comman
     if let Some(before) = before {
         if command::Taken::of(s, region).as_ref() != Some(&before) {
             record_edit(s, name, before);
-            s.history.set_run(run);
+            s.session.history.set_run(run);
         }
     }
     r
@@ -529,13 +529,13 @@ struct Queues {
 impl Queues {
     fn of(s: &State) -> Queues {
         Queues {
-            host: s.control.host.len(),
-            params: s.control.params.len(),
-            states: s.control.states.len(),
-            sample_loads: s.sample_loads.len(),
+            host: s.session.control.host.len(),
+            params: s.session.control.params.len(),
+            states: s.session.control.states.len(),
+            sample_loads: s.session.sample_loads.len(),
             fx: s.mixer.pending.len(),
-            dirty: s.piano.dirty,
-            written: s.project.written_at(),
+            dirty: s.session.dirty,
+            written: s.session.project.written_at(),
             message: s.message.clone(),
             hosted_rows: s.hosted_rows.clone(),
             selected_channel: s.selected_channel,
@@ -550,18 +550,18 @@ impl Queues {
     }
 
     fn put(self, s: &mut State) {
-        s.control.host.truncate(self.host);
-        s.control.params.truncate(self.params);
-        s.control.states.truncate(self.states);
-        s.sample_loads.truncate(self.sample_loads);
+        s.session.control.host.truncate(self.host);
+        s.session.control.params.truncate(self.params);
+        s.session.control.states.truncate(self.states);
+        s.session.sample_loads.truncate(self.sample_loads);
         s.mixer.pending.truncate(self.fx);
         s.message = self.message;
         s.hosted_rows = self.hosted_rows;
         (s.selected_channel, s.rack.sel, s.selected_mixer, s.mixer.sel) = (self.selected_channel, self.rack_sel, self.selected_mixer, self.mixer_sel);
         (s.z, s.plugin_channel, s.playlist.sel) = (self.windows, self.plugin_channel, self.clips);
         s.piano = self.piano;
-        s.piano.dirty = self.dirty;
-        s.project.rewind_written(self.written);
+        s.session.dirty = self.dirty;
+        s.session.project.rewind_written(self.written);
     }
 }
 
@@ -569,20 +569,20 @@ impl Queues {
 /// changes; an error when the list can't be applied.
 pub fn dry_run(s: &mut State, commands: Vec<Command>) -> Result<Vec<query::Change>, String> {
     let queues = Queues::of(s);
-    let known = s.control.known.clone();
+    let known = s.session.control.known.clone();
     let before = query::project(s);
     let (_, undo) = run(s, commands)?;
     let after = query::project(s);
     take_back(s, undo);
     queues.put(s);
-    s.control.known = known;
+    s.session.control.known = known;
     Ok(query::changes(&before, &after))
 }
 
 /// A proposal: `commands` checked by a dry run and kept for `accept` or `discard`. Returns its number and changes.
 pub fn propose(s: &mut State, by: &By, name: &str, commands: Vec<Command>) -> Result<(u64, Vec<query::Change>), String> {
     let changes = dry_run(s, commands.clone())?;
-    let c = &mut s.control;
+    let c = &mut s.session.control;
     c.proposal_seq += 1;
     let n = c.proposal_seq;
     c.proposals.push(Proposal { n, by: by.clone(), name: name.to_string(), commands, changes: changes.clone() });
@@ -593,16 +593,16 @@ pub fn propose(s: &mut State, by: &By, name: &str, commands: Vec<Command>) -> Re
 
 /// Accepts proposal `n`: applied as one step named after it and its client.
 pub fn accept(s: &mut State, n: u64) -> Result<Vec<serde_json::Value>, String> {
-    let i = s.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
-    let p = s.control.proposals.remove(i);
+    let i = s.session.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
+    let p = s.session.control.proposals.remove(i);
     match apply(s, &p.by, Some(&p.name), p.commands.clone()) {
         Ok(r) => {
-            s.control.event(&p.by, "accepted", p.name, Vec::new());
+            s.session.control.event(&p.by, "accepted", p.name, Vec::new());
             Ok(r)
         }
         // The project changed since it was proposed: it waits on, for the client to discard or the user to see why.
         Err(e) => {
-            s.control.proposals.insert(i, p);
+            s.session.control.proposals.insert(i, p);
             Err(e)
         }
     }
@@ -610,9 +610,9 @@ pub fn accept(s: &mut State, n: u64) -> Result<Vec<serde_json::Value>, String> {
 
 /// Discards proposal `n`.
 pub fn discard(s: &mut State, n: u64) -> Result<(), String> {
-    let i = s.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
-    let p = s.control.proposals.remove(i);
-    s.control.event(&p.by, "discarded", p.name, Vec::new());
+    let i = s.session.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
+    let p = s.session.control.proposals.remove(i);
+    s.session.control.event(&p.by, "discarded", p.name, Vec::new());
     Ok(())
 }
 

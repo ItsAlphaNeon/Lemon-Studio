@@ -215,7 +215,7 @@ impl Rec {
 fn unit(s: &State) -> Option<u32> {
     match s.global_snap.now {
         Snap::Line | Snap::Cell | Snap::None => None,
-        sn => Some(sn.ticks(u32::from(s.project.ppq.max(4)), 0.0).max(1)),
+        sn => Some(sn.ticks(u32::from(s.session.project.ppq.max(4)), 0.0).max(1)),
     }
 }
 
@@ -322,14 +322,14 @@ impl App {
         use crate::playlist::{Cmd, PItem, Popup};
         let s = &mut self.state;
         let tps = crate::score_log::ticks_per_second(s);
-        let channels: Vec<u16> = s.project.channels.iter().map(|c| c.index).collect();
+        let channels: Vec<u16> = s.session.project.channels.iter().map(|c| c.index).collect();
         let mut new = s.rec.log.notes(minutes, std::time::Instant::now(), tps);
         new.retain(|n| channels.contains(&n.channel));
         if new.is_empty() {
             return Some(format!("The score log has no notes from the last {minutes} minutes"));
         }
         let pattern = s.pattern();
-        let full = s.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty());
+        let full = s.session.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty());
         let replace = match replace {
             Some(r) => r,
             None if full => {
@@ -348,15 +348,15 @@ impl App {
         let snap = crate::history::Snap::pattern(s, pattern);
         crate::history::record(s, crate::score_log::DUMPED, snap);
         let n = new.len();
-        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
+        if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
             if replace {
                 p.notes.clear();
             }
             p.notes.extend(new);
         } else {
-            s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
+            s.session.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
         }
-        s.piano.dirty = true;
+        s.session.dirty = true;
         Some(format!("Captured {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
     }
 
@@ -395,7 +395,7 @@ impl App {
         let bars = if self.state.rec.armed && Opt::Precount.on() { precount_bars() } else { 0 };
         self.start_playback_counted(bars);
         if bars > 0 && self.transport.playing() {
-            let p = &self.state.project;
+            let p = &self.state.session.project;
             let tempo = p.tick_tempo(self.state.tempo().max(1.0));
             let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
             let beats = bars * u32::from(p.bar().0.max(1));
@@ -534,7 +534,7 @@ impl App {
             p.controls.retain(|c| !(c.kind == kind && c.position > last && c.position < tick));
         }
         crate::piano::set_control(s, (kind >> 16) as u16, kind as u16, tick, value);
-        s.piano.dirty = true;
+        s.session.dirty = true;
     }
 
     /// A note went down (typing keyboard, MIDI, Touch controller): recorded from the playback position while
@@ -590,7 +590,7 @@ impl App {
             snap
         };
         crate::history::record(s, RECORDED, snap);
-        let before = s.project.pattern(pattern).map(|p| p.notes.clone()).unwrap_or_default();
+        let before = s.session.project.pattern(pattern).map(|p| p.notes.clone()).unwrap_or_default();
         s.rec.take = Some(Take { pattern, before, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new(), clip: None });
     }
 
@@ -606,7 +606,7 @@ impl App {
         if let Some((p, _)) = grow_take_clip(s, t) {
             return Some(p);
         }
-        let bar = s.project.bar_ticks().max(1);
+        let bar = s.session.project.bar_ticks().max(1);
         let pattern = s.pattern();
         let whole = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none();
         let ti = t.max(0.0) as u32;
@@ -644,7 +644,7 @@ impl App {
         if let Some(k) = s.rec.take.as_mut() {
             k.clip = Some((track, at));
         }
-        s.piano.dirty = true;
+        s.session.dirty = true;
         crate::piano::pattern_tick_in_song(s, t)
     }
 
@@ -656,7 +656,7 @@ impl App {
         let start = h.at.max(0.0).round() as u32;
         let end = match now {
             Some(n) if n >= h.start => (h.at + (n - h.start)).round() as u32,
-            Some(_) => s.project.pattern_length(take.pattern).max(start),
+            Some(_) => s.session.project.pattern_length(take.pattern).max(start),
             None => start,
         };
         let pattern = take.pattern;
@@ -681,16 +681,16 @@ impl App {
             .chain(take.new.iter())
             .cloned()
             .collect();
-        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
+        if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
             p.notes = notes;
         } else {
-            s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
+            s.session.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
         }
         // The time selection stays (it may be looping, spec §5).
         let range = s.piano.range;
         s.piano.select(pattern, h.channel, Vec::new());
         s.piano.range = range;
-        s.piano.dirty = true;
+        s.session.dirty = true;
         self.invalidate();
     }
 
@@ -807,7 +807,7 @@ impl App {
             self.state.rec.last = None;
         }
         if live && !self.state.rec.was_live {
-            self.state.rec.since = self.state.rec.armed.then(|| self.state.history.done());
+            self.state.rec.since = self.state.rec.armed.then(|| self.state.session.history.done());
         }
         self.state.rec.was_live = live;
     }
@@ -827,12 +827,12 @@ impl App {
         self.state.rec.count = None;
         self.act(crate::app::Action::Stop);
         let mut undone = 0;
-        while since.is_some_and(|k| self.state.history.done() > k) && self.state.history.newest_done() == Some(RECORDED) {
+        while since.is_some_and(|k| self.state.session.history.done() > k) && self.state.session.history.newest_done() == Some(RECORDED) {
             crate::history::undo(&mut self.state);
             undone += 1;
         }
         self.state.rec.since = None;
-        self.state.piano.dirty = true;
+        self.state.session.dirty = true;
         self.invalidate();
         match undone {
             0 => "Recording canceled".into(),
@@ -865,7 +865,7 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
     if ti < at {
         return None;
     }
-    let bar = s.project.bar_ticks().max(1);
+    let bar = s.session.project.bar_ticks().max(1);
     let pattern = s.pattern();
     let c = crate::playlist::arr_mut(s)
         .clips
@@ -874,7 +874,7 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
     let grow = ti >= at + c.length;
     if grow {
         c.length = (ti / bar + 1) * bar - at;
-        s.piano.dirty = true;
+        s.session.dirty = true;
     }
     Some((t - f64::from(at), grow))
 }
@@ -885,12 +885,12 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
 fn point_of(s: &State, a: &crate::app::Action) -> Option<(u32, i32)> {
     use crate::app::Action;
     use os_model::target;
-    let track = |t: u16| s.project.mixer.iter().find(|m| m.index == t);
+    let track = |t: u16| s.session.project.mixer.iter().find(|m| m.index == t);
     let r = |v: f64| v.round() as i32;
     Some(match *a {
         Action::Knob(id @ (KnobId::ChanVol(row) | KnobId::ChanPan(row))) => {
             let param = if matches!(id, KnobId::ChanVol(_)) { target::CHANNEL_VOLUME } else { target::CHANNEL_PAN };
-            (target::channel(s.project.channels.get(row)?.index, param), r(f64::from(s.knob(id)) * 12800.0))
+            (target::channel(s.session.project.channels.get(row)?.index, param), r(f64::from(s.knob(id)) * 12800.0))
         }
         Action::Fader(t) => (target::mixer(t, target::MIXER_VOLUME), r(track(t)?.volume.unwrap_or(0.8) * 16000.0)),
         Action::Knob(KnobId::MixPan(t)) => (target::mixer(t, target::MIXER_PAN), r(track(t)?.pan.unwrap_or(0.0) * 6400.0)),
@@ -919,10 +919,10 @@ mod tests {
     fn app() -> App {
         crate::settings_file::set_flag("rec_ask", false);
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.selected_channel = 0;
         app.state.set_pattern(1);
-        app.state.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
+        app.state.session.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         app.state.global_snap.now = Snap::Step;
         app
     }
@@ -942,7 +942,7 @@ mod tests {
     /// Pattern 1's notes as (position, length, channel).
     fn notes(app: &App) -> Vec<(u32, u32, u16)> {
         let mut v: Vec<_> =
-            app.state.project.pattern(1).map_or(vec![], |p| p.notes.iter().map(|n| (n.position, n.length, n.channel)).collect());
+            app.state.session.project.pattern(1).map_or(vec![], |p| p.notes.iter().map(|n| (n.position, n.length, n.channel)).collect());
         v.sort_unstable();
         v
     }
@@ -1043,15 +1043,15 @@ mod tests {
         stop(&mut app);
         assert_eq!(notes(&app), [(24, 72, 0), (192, 24, 0)]);
         assert!(!app.state.rec.recording() && app.state.rec.armed, "a stop ends the take and keeps Record armed");
-        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some(RECORDED));
+        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some(RECORDED));
 
         // Another take from 170 to 260: the note starting at 192 goes, the one at 24 (before the take) stays.
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         key(&mut app, KeyCode::KeyC, true, 170.0, false);
         key(&mut app, KeyCode::KeyC, false, 260.0, false);
         stop(&mut app);
         assert_eq!(notes(&app), [(24, 72, 0), (168, 96, 0)]);
-        assert_eq!(app.state.history.len(), steps + 1);
+        assert_eq!(app.state.session.history.len(), steps + 1);
         crate::history::undo(&mut app.state);
         assert_eq!(notes(&app), [(24, 72, 0), (192, 24, 0)]);
 
@@ -1071,7 +1071,7 @@ mod tests {
         use crate::midi_in::Msg;
         let mut app = app();
         app.toggle_record();
-        let groups = |app: &App| -> Vec<u8> { app.state.project.pattern(1).map_or(vec![], |p| p.notes.iter().map(|n| n.group & 0x0F).collect()) };
+        let groups = |app: &App| -> Vec<u8> { app.state.session.project.pattern(1).map_or(vec![], |p| p.notes.iter().map(|n| n.group & 0x0F).collect()) };
         app.transport.pretend_at(0.0, false);
         app.record_tick();
         app.midi_notes(vec![Msg::On { ch: 4, key: 60, vel: 100 }]);
@@ -1099,7 +1099,7 @@ mod tests {
         let mut app = app();
         crate::playlist::arr_mut(&mut app.state).clips.clear();
         app.toggle_record();
-        let bar = f64::from(app.state.project.bar_ticks());
+        let bar = f64::from(app.state.session.project.bar_ticks());
         key(&mut app, KeyCode::KeyZ, true, bar + 48.0, true);
         key(&mut app, KeyCode::KeyZ, false, bar + 96.0, true);
         stop(&mut app);
@@ -1119,7 +1119,7 @@ mod tests {
         let mut app = app();
         crate::playlist::arr_mut(&mut app.state).clips.clear();
         app.toggle_record();
-        let bar = app.state.project.bar_ticks();
+        let bar = app.state.session.project.bar_ticks();
         let b = f64::from(bar);
         key(&mut app, KeyCode::KeyZ, true, 48.0, true);
         key(&mut app, KeyCode::KeyZ, false, 96.0, true);
@@ -1143,7 +1143,7 @@ mod tests {
             let mut app = app();
             crate::playlist::arr_mut(&mut app.state).clips.clear();
             crate::playlist::place(&mut app.state, 0, 0);
-            let bar = app.state.project.bar_ticks();
+            let bar = app.state.session.project.bar_ticks();
             if other {
                 let c = os_model::Clip::new(bar + bar / 2, bar, 0, ClipSource::Pattern(2));
                 crate::playlist::arr_mut(&mut app.state).clips.push(c);
@@ -1170,7 +1170,7 @@ mod tests {
         let mut app = app();
         crate::playlist::arr_mut(&mut app.state).clips.clear();
         crate::playlist::place(&mut app.state, 0, 0);
-        let bar = app.state.project.bar_ticks();
+        let bar = app.state.session.project.bar_ticks();
         app.toggle_record();
         key(&mut app, KeyCode::KeyW, true, 50.0, true);
         assert!(app.state.rec.holding());
@@ -1292,7 +1292,7 @@ mod tests {
         assert_eq!(msg.as_deref(), Some("Captured 2 notes into the pattern"));
         let t = |s: f64| (s * tps).round() as u32;
         assert_eq!(notes(&app), [(0, t(0.3), 0), (t(0.7), t(0.3), 0)]);
-        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some(crate::score_log::DUMPED));
+        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some(crate::score_log::DUMPED));
         // A full pattern: asks first.
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Dump(2)));
         let Some(Popup { items, .. }) = app.state.playlist.popup.clone() else { panic!("no question") };
@@ -1309,7 +1309,7 @@ mod tests {
 
     /// Pattern 1's control points as (position, channel, param, value).
     fn controls(app: &App) -> Vec<(u32, u16, u16, i32)> {
-        app.state.project.pattern(1).map_or(vec![], |p| p.controls.iter().map(|c| (c.position, c.channel(), c.param(), c.value)).collect())
+        app.state.session.project.pattern(1).map_or(vec![], |p| p.controls.iter().map(|c| (c.position, c.channel(), c.param(), c.value)).collect())
     }
 
     /// A channel volume knob dragged while recording becomes the pattern's control points at the playback position;
@@ -1320,7 +1320,7 @@ mod tests {
         use os_model::ControlPoint;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = app();
-        let ch = app.state.project.channels[1].index;
+        let ch = app.state.session.project.channels[1].index;
         crate::piano::set_control(&mut app.state, ch, ControlPoint::VOLUME, 70, 1000);
         crate::piano::set_control(&mut app.state, ch, ControlPoint::VOLUME, 200, 2000);
         app.paint(&mut c, None);
@@ -1366,9 +1366,9 @@ mod tests {
     #[test]
     fn timing_follows_the_tempo_playing() {
         let mut app = app();
-        app.state.project.get_mut().tempo = Some(140.0);
+        app.state.session.project.get_mut().tempo = Some(140.0);
         app.state.set_tempo(70.0);
-        let p = &app.state.project;
+        let p = &app.state.session.project;
         let at_70 = f64::from(p.ppq) * p.tick_tempo(70.0) / 60.0;
         assert!((crate::score_log::ticks_per_second(&app.state) - at_70).abs() < 1e-9);
     }
@@ -1378,7 +1378,7 @@ mod tests {
         use os_model::target;
         let mut app = app();
         if crate::mixer::track(&app.state, 1).is_none() {
-            app.state.project.get_mut().mixer = (0..3).map(os_model::MixerTrack::new).collect();
+            app.state.session.project.get_mut().mixer = (0..3).map(os_model::MixerTrack::new).collect();
         }
         app.toggle_record();
         app.transport.pretend_at(24.0, false);
@@ -1394,7 +1394,7 @@ mod tests {
         app.record_param(target::slot_param(1, 2, 1), (0.0, 1.0), 0.25);
         app.record_knob(KnobId::Swing);
         let points = |app: &App| {
-            let p = app.state.project.pattern(app.state.pattern()).map(|p| p.controls.clone()).unwrap_or_default();
+            let p = app.state.session.project.pattern(app.state.pattern()).map(|p| p.controls.clone()).unwrap_or_default();
             p.into_iter().map(|c| (c.position, c.kind, c.value)).collect::<Vec<_>>()
         };
         assert_eq!(
@@ -1514,7 +1514,7 @@ mod tests {
         app.act(Action::Stop);
         app.toggle_record();
         app.act(Action::Play);
-        let beats = u32::from(app.state.project.bar().0);
+        let beats = u32::from(app.state.session.project.bar().0);
         assert_eq!(app.state.rec.count.map(|c| c.left()), Some(beats));
         assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
         assert!(app.typing_key(KeyCode::KeyZ, false, false, false));
@@ -1538,8 +1538,8 @@ mod tests {
         app.toggle_record_option(Opt::Loop);
         app.record_tick();
         assert!(!crate::transport::run_on_flag().load(Ordering::Relaxed), "Loop record on: loops");
-        let len = f64::from(app.state.project.pattern_length(1).max(1));
-        let steps = app.state.history.len();
+        let len = f64::from(app.state.session.project.pattern_length(1).max(1));
+        let steps = app.state.session.history.len();
         key(&mut app, KeyCode::KeyZ, true, 48.0, false);
         key(&mut app, KeyCode::KeyZ, false, 96.0, false);
         key(&mut app, KeyCode::KeyX, true, len - 24.0, false);
@@ -1549,7 +1549,7 @@ mod tests {
         stop(&mut app);
         let l = len as u32;
         assert_eq!(notes(&app), [(48, 24, 0), (l - 24, 24, 0)], "the second pass replaced the first's note at 48");
-        assert_eq!(app.state.history.len(), steps + 2, "one undo step per pass");
+        assert_eq!(app.state.session.history.len(), steps + 2, "one undo step per pass");
         crate::history::undo(&mut app.state);
         assert_eq!(notes(&app), [(48, 48, 0), (l - 24, 24, 0)]);
     }
@@ -1579,7 +1579,7 @@ mod tests {
         app.record_tick();
         assert_eq!(notes(&app), [(24, 72, 0)]);
         assert!(!app.transport.playing() && !app.state.rec.recording() && app.state.rec.armed);
-        assert_eq!(app.state.history.newest_done(), Some(RECORDED), "the earlier take is still in the history");
+        assert_eq!(app.state.session.history.newest_done(), Some(RECORDED), "the earlier take is still in the history");
     }
 
     /// Blend recorded notes: a second take keeps the notes it overlaps (spec §3).

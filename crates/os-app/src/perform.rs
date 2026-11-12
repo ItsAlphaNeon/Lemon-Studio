@@ -74,7 +74,7 @@ impl Live {
 }
 
 pub fn on(s: &State) -> bool {
-    s.project.performance == Some(true)
+    s.session.project.performance == Some(true)
 }
 
 /// The performance zone's end (the Start marker), while performance mode is on (§2).
@@ -83,7 +83,7 @@ pub fn zone(s: &State) -> Option<u32> {
 }
 
 fn ppq(s: &State) -> u32 {
-    u32::from(s.project.ppq.max(4))
+    u32::from(s.session.project.ppq.max(4))
 }
 
 /// The zone's columns: where each starts (§2). The time markers before the Start marker start them; without any,
@@ -297,7 +297,7 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     if matches!(set.press, 1 | 2) {
         s.playlist.perform.held = Some(track);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     let (bar, step, _) = crate::views::toolbar::bst_ticks(f64::from(at) * 96.0 / f64::from(p));
     Some(format!("{}: {} at {bar}:{step:02}", crate::playlist::track_name(s, track), PerfSettings::PRESSES[usize::from(set.press)]))
 }
@@ -426,7 +426,7 @@ pub fn stop(s: &mut State, track: u16, now: Option<u32>, instant: bool) -> bool 
     let Some(l) = s.playlist.perform.live.get(&track) else { return false };
     let Some(t) = now else {
         s.playlist.perform.live.remove(&track);
-        s.piano.dirty = true;
+        s.session.dirty = true;
         return true;
     };
     let set = settings(s, track);
@@ -442,7 +442,7 @@ pub fn stop(s: &mut State, track: u16, now: Option<u32>, instant: bool) -> bool 
     } else if let Some(l) = s.playlist.perform.live.get_mut(&track) {
         (l.passes, l.end) = (passes, Some(at));
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 
@@ -532,7 +532,7 @@ fn scroll(s: &mut State, key: u8) -> Option<String> {
     }
     let (t, c) = (p.origin.0 + 1, p.origin.1 + 1);
     let paging = if p.paging { ", paging" } else { "" };
-    s.piano.dirty = true;
+    s.session.dirty = true;
     Some(format!("Performance MIDI grid: tracks {t}–{}, columns {c}–{}{paging}", t + GRID.0 - 1, c + GRID.1 - 1))
 }
 
@@ -567,7 +567,7 @@ fn release_track(s: &mut State, track: u16, now: Option<u32>) {
                 }
             }
             s.playlist.perform.live.insert(track, Live { passes: kept, column, end: None, ..l });
-            s.piano.dirty = true;
+            s.session.dirty = true;
         }
         _ => {}
     }
@@ -611,7 +611,7 @@ pub fn record(s: &mut State, stop: u32) -> usize {
     crate::playlist::snapshot_as(s, crate::record::RECORDED);
     arr_mut(s).clips = all;
     s.playlist.perform.live.retain(|_, l| l.armed);
-    s.piano.dirty = true;
+    s.session.dirty = true;
     made
 }
 
@@ -628,13 +628,13 @@ pub fn starting(s: &mut State) {
 /// Ctrl+P and the Arranger ▸ menu's Performance mode (§1): switching it on switches to SONG. Off, nothing is launched.
 pub fn toggle(s: &mut State) -> String {
     let on = !on(s);
-    s.project.get_mut().performance = Some(on);
+    s.session.project.get_mut().performance = Some(on);
     if on {
         s.set_song_mode(true);
     } else {
         s.playlist.perform = Perform::default();
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     format!("Performance mode: {}", if on { "on" } else { "off" })
 }
 
@@ -671,10 +671,10 @@ pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
     }
     a.markers.push(TimeMarker { kind: TimeMarker::START, ..TimeMarker::new(start, "Start") });
     a.markers.sort_by_key(|m| m.position);
-    s.project.get_mut().performance = Some(true);
+    s.session.project.get_mut().performance = Some(true);
     s.set_song_mode(true);
     s.playlist.pos = start;
-    s.piano.dirty = true;
+    s.session.dirty = true;
     format!("Prepared for performance mode: {count} columns, Start marker at bar {}", start / bar + 1)
 }
 
@@ -785,7 +785,7 @@ mod tests {
     fn app() -> App {
         let mut app = App::new(None);
         let s = &mut app.state;
-        s.project.get_mut().ppq = 96;
+        s.session.project.get_mut().ppq = 96;
         let a = arr_mut(s);
         // Two columns of 4 bars on track 0: pattern 1 (1 bar) in column 0, pattern 2 (2 bars) in column 1. After the
         // Start marker at bar 9, pattern 3 on track 0 and 1.
@@ -796,7 +796,7 @@ mod tests {
             Clip::new(3072, 1536, 1, ClipSource::Pattern(3)),
         ];
         a.markers = vec![TimeMarker::new(0, ""), TimeMarker::new(1536, ""), TimeMarker { kind: TimeMarker::START, ..TimeMarker::new(3072, "Start") }];
-        s.project.get_mut().performance = Some(true);
+        s.session.project.get_mut().performance = Some(true);
         app
     }
 
@@ -846,7 +846,7 @@ mod tests {
         assert!(app.state.playlist.perform.live.contains_key(&2), "+Scene keeps the other tracks");
         assert_eq!(app.state.playlist.perform.scene, None);
         app.state.playlist.perform = Perform::default();
-        app.state.project.get_mut().performance = Some(false);
+        app.state.session.project.get_mut().performance = Some(false);
         app.midi_notes(vec![note(0, true)]);
         assert!(app.state.playlist.perform.live.is_empty(), "off: nothing is triggered");
         prefs::set_number(&prefs::PERFORMANCE_CHANNEL, 0);
@@ -944,7 +944,7 @@ mod tests {
         assert_eq!(on0, vec![(z, 128), (z + 128, 384), (z + 512, 384), (z + 896, 132)], "the clip there ends where the recording starts");
         assert_eq!(clips(s).iter().filter(|c| c.track == 1).count(), 1, "track 2 is left alone");
         assert!(s.playlist.perform.live.is_empty());
-        assert_eq!(s.history.newest_done(), Some(crate::record::RECORDED));
+        assert_eq!(s.session.history.newest_done(), Some(crate::record::RECORDED));
         assert_eq!(record(s, z + 2000), 0, "nothing launched");
         // A stretch over a clip that starts in it: the clip goes.
         trigger(s, 0, Some(z), true, false);
@@ -1030,10 +1030,10 @@ mod tests {
         app.typing_release_all();
         assert!(!app.state.playlist.perform.live.contains_key(&0), "focus lost: the key is released");
         // Out of Performance mode the keys are the piano layout's again.
-        app.state.project.get_mut().performance = Some(false);
+        app.state.session.project.get_mut().performance = Some(false);
         assert!(!app.typing_key(Digit1, true, false, false), "1 is no note key there");
         assert!(app.typing_key(KeyQ, true, false, false));
-        assert_eq!(app.typing_held.len(), usize::from(!app.state.project.channels.is_empty()));
+        assert_eq!(app.typing_held.len(), usize::from(!app.state.session.project.channels.is_empty()));
         app.typing_release_all();
     }
 
@@ -1046,7 +1046,7 @@ mod tests {
         // Without markers, every bar is a column.
         arr_mut(s).markers.retain(|m| m.kind == TimeMarker::START);
         assert_eq!(columns(s).len(), 8);
-        s.project.get_mut().performance = Some(false);
+        s.session.project.get_mut().performance = Some(false);
         assert_eq!((zone(s), slot_of(&s, 0)), (None, None));
     }
 
@@ -1059,7 +1059,7 @@ mod tests {
         assert!(hint.contains("Retrigger"), "{hint}");
         let l = &s.playlist.perform.live[&0];
         assert_eq!((l.start(), l.passes[1].position, l.passes.len() as u32), (3456, 3840, AHEAD_BARS));
-        let mut p = s.project.clone();
+        let mut p = s.session.project.clone();
         apply(&s, &mut p);
         let a = p.arrangement().unwrap();
         assert!(a.clips.iter().filter(|c| c.position < 3072).all(|c| c.muted), "the zone is silent");
@@ -1168,13 +1168,13 @@ mod tests {
     fn prepare_and_toggle() {
         let mut app = App::new(None);
         let s = &mut app.state;
-        s.project.get_mut().ppq = 96;
+        s.session.project.get_mut().ppq = 96;
         let msg = prepare_with(s, MarkerForm::default());
         assert!(msg.contains("bar 66"), "{msg}");
         let m = markers(s);
         assert_eq!(m.len(), 17);
         assert_eq!((m[1].position, m[15].position, m[16].kind, m[16].position), (1536, 23040, TimeMarker::START, 24960));
-        assert_eq!((s.project.performance, s.song_mode(), s.playlist.pos), (Some(true), true, 24960));
+        assert_eq!((s.session.project.performance, s.song_mode(), s.playlist.pos), (Some(true), true, 24960));
         assert_eq!(columns(s).len(), 16);
         assert_eq!(toggle(s), "Performance mode: off");
         assert_eq!(zone(s), None);
@@ -1188,7 +1188,7 @@ mod tests {
     fn prepare_asks_and_takes_marker_settings() {
         use crate::dialog::{Body, DHit};
         let mut app = App::new(None);
-        app.state.project.get_mut().ppq = 96;
+        app.state.session.project.get_mut().ppq = 96;
         crate::playlist::run(&mut app, crate::playlist::Cmd::PerfPrepare);
         assert_eq!(app.top_message().map(|m| m.1), Some(CONFIRM.to_string()));
         app.act(crate::app::Action::Dlg(DHit::Button(1)));
