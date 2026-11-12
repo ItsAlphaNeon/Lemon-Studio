@@ -372,8 +372,8 @@ mod tests {
         assert!(msg.starts_with("Recorded ") && msg.ends_with(" into the audio editor"), "{msg}");
         assert_eq!(app.state.session.project.channels.len(), channels, "no channel");
         assert_eq!(app.state.session.project.arrangement().map_or(0, |a| a.clips.len()), clips, "no clip");
-        let Some(FxReq::Create { track: 0, state: Some(st), .. }) = app.state.mixer.pending.last().cloned() else {
-            panic!("{:?}", app.state.mixer.pending)
+        let Some(FxReq::Create { track: 0, state: Some(st), .. }) = app.state.session.fx_requests.last().cloned() else {
+            panic!("{:?}", app.state.session.fx_requests)
         };
         let saved = tesla::state::from_plugin_state(&st).unwrap();
         assert!(saved.sample.frames() > 0);

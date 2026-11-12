@@ -37,11 +37,16 @@ pub struct Session {
     pub touched: Touched,
     /// The project's samples as decoded (`playlist::Samples`).
     pub samples: crate::playlist::Samples,
+    /// Requests for the mixer's slot plugins, handled on the next tick (`mixer::FxReq`).
+    pub fx_requests: Vec<crate::mixer::FxReq>,
+    /// The remote control links the edit under way moved with what they drive (`remote::follow`), as (target before
+    /// the edit, target now): its undo step puts them back (`control::edit`).
+    pub link_moves: Vec<(crate::typein::Target, crate::typein::Target)>,
 }
 
 /// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
 /// did; the interface knows what that means for its selections and windows.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Touched {
     /// The project was put back whole: the channels' ids by row before, the rows the views pointed at.
     pub rows: Option<Vec<u32>>,
@@ -53,6 +58,33 @@ pub struct Touched {
     pub notes: bool,
     /// Undo step `.0`, which holds the rack's side of adding a channel, was undone or redone.
     pub rack_step: Option<u64>,
+    /// What the views follow in this order, before the rest above.
+    pub views: Vec<View>,
+}
+
+/// A change the interface's views follow, in order (`Touched::views`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum View {
+    /// Mixer places moved: each track's new number by its old one, and each slot's new place, `None` for what went
+    /// (what is not listed stays where it is).
+    Places { tracks: Vec<Option<u16>>, slots: std::collections::HashMap<(u16, u8), Option<(u16, u8)>> },
+    /// The mixer's selection follows tracks renumbered (`tracks` as in `Places`).
+    MixerRenumbered(Vec<Option<u16>>),
+    /// Mixer track `.0` becomes the current one, the only one selected.
+    MixerSelect(u16),
+    /// Patterns were renumbered: the clip and note selections go.
+    PatternsRenumbered,
+}
+
+impl View {
+    /// `Places` for mixer places moved by `track` and `slot` (as `os_model::target::moved` takes them), over the
+    /// project's tracks.
+    pub fn places(p: &os_model::Project, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) -> View {
+        let n = p.mixer.len() as u16 + 1;
+        let tracks = (0..n).map(track).collect();
+        let slots = (0..n).flat_map(|t| (0..10u8).map(move |k| (t, k))).map(|(t, k)| ((t, k), slot(t, k))).filter(|&(at, to)| to != Some(at)).collect();
+        View::Places { tracks, slots }
+    }
 }
 
 impl Session {
@@ -71,6 +103,8 @@ impl Session {
             loop_type_of: 0,
             touched: Touched::default(),
             samples: Default::default(),
+            fx_requests: Vec::new(),
+            link_moves: Vec::new(),
         }
     }
 

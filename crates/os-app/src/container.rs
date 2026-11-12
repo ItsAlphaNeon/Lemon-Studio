@@ -1017,7 +1017,7 @@ impl App {
         let icon = crate::playlist::icon_of(&self.state.session.project, crate::playlist::IconOwner::Slot(t, slot));
         for &k in &taken {
             // The hosted instances go with an undo kept (`FxReq::Delete`), the slots' names, colours and icons too.
-            crate::mixer::clear_slot(&mut self.state, t, k);
+            crate::mixer::clear_slot(&mut self.state.session, t, k);
         }
         if let Some(m) = crate::mixer::track_mut(&mut self.state.session, t) {
             m.slots[usize::from(slot)] = Some(SlotPlugin { id: Id::NONE, name: CONTAINER.into(), state: encode(&list) });

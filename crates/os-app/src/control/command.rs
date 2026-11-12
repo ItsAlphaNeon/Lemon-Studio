@@ -831,7 +831,7 @@ impl Command {
                 if at.is_some_and(|a| a == 0 || a > last) {
                     return Err(format!("a new track goes at 1..={last}"));
                 }
-                let n = crate::mixer::add_track(s, at);
+                let n = crate::mixer::add_track_in(&mut s.session, at);
                 let place = s.session.project.mixer.iter().position(|m| m.index == n).unwrap_or(0);
                 s.session.control.settle(s.session.project.get_mut());
                 let id = s.session.project.mixer[place].id;
@@ -842,7 +842,7 @@ impl Command {
                 if n == 0 {
                     return Err("the master track can't be deleted".into());
                 }
-                crate::mixer::delete_track(s, n);
+                crate::mixer::delete_track_in(&mut s.session, n);
                 none
             }
             Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled } => {
@@ -986,7 +986,7 @@ impl Command {
             }
             Command::DeletePattern { pattern } => {
                 let n = s.session.project.patterns[pattern_place(&s.session.project, pattern)?].number;
-                crate::patterns::renumber(s, |m| if m == n { None } else if m > n { Some(m - 1) } else { Some(m) });
+                crate::patterns::renumber_in(&mut s.session, |m| if m == n { None } else if m > n { Some(m - 1) } else { Some(m) });
                 none
             }
             Command::SetPattern { pattern, name, color, length } => {

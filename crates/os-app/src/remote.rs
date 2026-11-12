@@ -250,7 +250,7 @@ pub fn retarget(pairs: &[(Target, Target)]) {
 /// The links follow what they drive as it moves (mixer places, rack rows): `f` gives a target's new one, `None` when
 /// what it drove went, and the link with it. The moves join the edit's (`State::link_moves`), so its undo step puts
 /// them back; a link that went does not come back.
-pub fn follow(s: &mut State, f: impl Fn(Target) -> Option<Target>) {
+pub fn follow(s: &mut crate::session::Session, f: impl Fn(Target) -> Option<Target>) {
     let old = links();
     let mut all = old.clone();
     let before = std::mem::take(&mut s.link_moves);
@@ -713,7 +713,7 @@ impl App {
                 self.state.message = Some("Move the MIDI controller for the first parameter".into());
             }
             RCmd::LinkTrack(t) => {
-                let targets = track_targets(&self.state, t);
+                let targets = track_targets(&self.state.session, t);
                 if targets.is_empty() {
                     return self.invalidate();
                 }
@@ -842,15 +842,15 @@ pub fn group_name(s: &State, b: &LinkBox) -> String {
 /// The mixer's Link all parameters... (Lemon Studio's design): track `t`'s own controls in the strip's order: volume,
 /// pan, stereo separation, the equaliser's three bands (gain, frequency, width each), the send levels of its routes,
 /// then the mix levels of its filled slots.
-pub fn track_targets(s: &State, t: u16) -> Vec<Target> {
-    let Some(track) = crate::mixer::track(&s.session, t) else { return Vec::new() };
+pub fn track_targets(s: &crate::session::Session, t: u16) -> Vec<Target> {
+    let Some(track) = crate::mixer::track(s, t) else { return Vec::new() };
     let mut v = vec![Target::Fader(t), Target::Knob(KnobId::MixPan(t)), Target::Knob(KnobId::MixSep(t))];
     v.extend((0..3).flat_map(|b| (0..3).map(move |f| Target::Knob(KnobId::Eq(t, b, f)))));
     let mut routes: Vec<u16> = track.routes.iter().copied().filter(|&d| d != t).collect();
     routes.sort_unstable();
     routes.dedup();
     v.extend(routes.into_iter().map(|d| Target::Knob(KnobId::Send(t, d))));
-    v.extend((0..10u8).filter(|&k| crate::mixer::slot_name(&s.session, t, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(t, k))));
+    v.extend((0..10u8).filter(|&k| crate::mixer::slot_name(s, t, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(t, k))));
     v
 }
 

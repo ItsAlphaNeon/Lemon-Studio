@@ -1189,9 +1189,6 @@ pub struct State {
     /// The Remote control settings box, while open, and Multilink to controllers (`crate::remote`).
     pub link_box: Option<crate::remote::LinkBox>,
     pub multilink: crate::remote::Multi,
-    /// The remote control links the edit under way moved with what they drive (`remote::follow`), as (target before
-    /// the edit, target now): its undo step puts them back (`control::edit`).
-    pub link_moves: Vec<(crate::typein::Target, crate::typein::Target)>,
     pub maximized: bool,
     pub piano: PianoState,
     pub playlist: crate::playlist::PlaylistState,
@@ -1641,7 +1638,6 @@ impl App {
                 midi: Default::default(),
                 link_box: None,
                 multilink: Default::default(),
-                link_moves: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
@@ -4290,6 +4286,8 @@ impl App {
 
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
+        // Whatever the session reported has been followed by the views where it happened (`crate::follow::around`).
+        debug_assert_eq!(self.state.session.touched, Default::default(), "views left to follow");
         // Things the interface added get their ids before anything looks them up (`control::ids`).
         let s = &mut self.state;
         let edited = s.session.dirty || s.session.project.written_at().is_some();
@@ -10701,11 +10699,11 @@ mod tests {
         let first = a.state.session.project.mixer[0].slots.iter().position(Option::is_none).unwrap() as u8;
         a.audio_editor(0, false);
         assert_eq!(slot_name(&a.state.session, 0, first).as_deref(), Some(TESLA));
-        assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 0, slot, .. } if *slot == first)));
-        a.state.mixer.pending.clear();
+        assert!(a.state.session.fx_requests.iter().any(|r| matches!(r, FxReq::Create { track: 0, slot, .. } if *slot == first)));
+        a.state.session.fx_requests.clear();
         a.audio_editor(0, false);
-        assert_eq!(a.state.mixer.pending, vec![FxReq::Show { track: 0, slot: first }]);
-        a.state.mixer.pending.clear();
+        assert_eq!(a.state.session.fx_requests, vec![FxReq::Show { track: 0, slot: first }]);
+        a.state.session.fx_requests.clear();
         a.audio_editor(0, true);
         let teslas = (0..10).filter(|&k| slot_name(&a.state.session, 0, k).as_deref() == Some(TESLA)).count();
         assert_eq!(teslas, 2);

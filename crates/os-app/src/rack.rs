@@ -1371,7 +1371,7 @@ pub fn reorder(app: &mut App, order: &[usize]) {
     }
     let m = |r: usize| map.get(r).copied().flatten();
     remap_state(&mut app.state, &map);
-    crate::remote::follow(&mut app.state, |l| moved_link(l, &m));
+    crate::remote::follow(&mut app.state.session, |l| moved_link(l, &m));
     app.remap_rows(&m);
     app.invalidate();
 }

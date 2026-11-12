@@ -181,8 +181,13 @@ pub fn pat_mut(s: &mut crate::session::Session, n: u16) -> &mut Pattern {
 /// Renumber patterns (`None` removes one): playlist clips follow (clips of removed patterns go). Numbers that
 /// end up without a pattern keep an empty entry so saving clears their blocks.
 pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
-    let old: Vec<u16> = s.session.project.patterns.iter().map(|p| p.number).collect();
-    let mut pats: Vec<Pattern> = std::mem::take(&mut s.session.project.get_mut().patterns)
+    crate::follow::around(s, |s| renumber_in(&mut s.session, map));
+}
+
+/// `renumber` in the session; the views drop the clip and note selections.
+pub(crate) fn renumber_in(s: &mut crate::session::Session, map: impl Fn(u16) -> Option<u16>) {
+    let old: Vec<u16> = s.project.patterns.iter().map(|p| p.number).collect();
+    let mut pats: Vec<Pattern> = std::mem::take(&mut s.project.get_mut().patterns)
         .into_iter()
         .filter_map(|mut p| {
             let n = map(p.number)?;
@@ -196,8 +201,8 @@ pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
         }
     }
     pats.sort_by_key(|p| p.number);
-    s.session.project.get_mut().patterns = pats;
-    if let Some(a) = s.session.project.get_mut().arrangement_mut() {
+    s.project.get_mut().patterns = pats;
+    if let Some(a) = s.project.get_mut().arrangement_mut() {
         a.clips.retain_mut(|c| match c.source {
             ClipSource::Pattern(n) => match map(n) {
                 Some(m) => {
@@ -209,10 +214,8 @@ pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
             _ => true,
         });
     }
-    s.playlist.sel.clear();
-    s.playlist.hover_clip = None;
-    s.piano.clear_selection();
-    s.session.dirty = true;
+    s.touched.views.push(crate::session::View::PatternsRenumbered);
+    s.dirty = true;
 }
 
 /// "<name> #k" with the lowest free k >= 2 (§3 Clone).

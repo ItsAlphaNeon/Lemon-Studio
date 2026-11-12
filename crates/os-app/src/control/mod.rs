@@ -335,7 +335,7 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
 /// when nothing changed). The interface's edits thus have the commands' undo: what was taken is put back by
 /// `Command::Put`, as a command's own undo is.
 pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
-    s.link_moves.clear();
+    s.session.link_moves.clear();
     // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
     // its region may name other things (tracks renumbered by a delete).
     crate::history::settle(s);
@@ -343,7 +343,7 @@ pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: im
     let r = f(s);
     if let Some(before) = before {
         if command::Taken::of(s, region).as_ref() != Some(&before) {
-            record_edit(s, name, before);
+            record_edit(&mut s.session, name, before);
         }
     }
     r
@@ -365,7 +365,7 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
     if (knob && !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) || s.session.history.joins(run) {
         return f(s);
     }
-    s.link_moves.clear();
+    s.session.link_moves.clear();
     // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
     // its region may name other things (tracks renumbered by a delete).
     crate::history::settle(s);
@@ -373,7 +373,7 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
     let r = f(s);
     if let Some(before) = before {
         if command::Taken::of(s, region).as_ref() != Some(&before) {
-            record_edit(s, name, before);
+            record_edit(&mut s.session, name, before);
             s.session.history.set_run(run);
         }
     }
@@ -382,27 +382,27 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
 
 /// Records an interface edit's step. A step of the same press that changed nothing goes first (a text box's playlist
 /// step when the box named a mixer track), as the press's release would have dropped it.
-fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
+fn record_edit(s: &mut crate::session::Session, name: &'static str, before: command::Taken) {
     let mut undo = vec![Command::Put(Box::new(before))];
     // The remote control links the edit moved with what they drive (`remote::follow`) go back with it.
     let links: Vec<_> = std::mem::take(&mut s.link_moves).into_iter().map(|(from, to)| (to, from)).collect();
     if !links.is_empty() {
         undo.push(Command::Put(Box::new(command::Taken::Links(links))));
     }
-    crate::history::record(&mut s.session, name, crate::history::Snap::Commands(undo));
-    crate::history::done_with(&mut s.session);
+    crate::history::record(s, name, crate::history::Snap::Commands(undo));
+    crate::history::done_with(s);
 }
 
 /// `edit` for an edit that needs the app (a mixer menu command hosting or dropping plugins).
 pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
-    app.state.link_moves.clear();
+    app.state.session.link_moves.clear();
     crate::history::settle(&mut app.state);
     let before = command::Taken::of(&app.state, region);
     let r = f(app);
     let s = &mut app.state;
     if let Some(before) = before {
         if command::Taken::of(s, region).as_ref() != Some(&before) {
-            record_edit(s, name, before);
+            record_edit(&mut s.session, name, before);
         }
     }
     r
@@ -477,14 +477,14 @@ pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: comman
     if app.state.session.history.joins(run) {
         return f(app);
     }
-    app.state.link_moves.clear();
+    app.state.session.link_moves.clear();
     crate::history::settle(&mut app.state);
     let before = command::Taken::of(&app.state, region);
     let r = f(app);
     let s = &mut app.state;
     if let Some(before) = before {
         if command::Taken::of(s, region).as_ref() != Some(&before) {
-            record_edit(s, name, before);
+            record_edit(&mut s.session, name, before);
             s.session.history.set_run(run);
         }
     }
@@ -541,7 +541,7 @@ impl Queues {
             params: s.session.control.params.len(),
             states: s.session.control.states.len(),
             sample_loads: s.session.sample_loads.len(),
-            fx: s.mixer.pending.len(),
+            fx: s.session.fx_requests.len(),
             dirty: s.session.dirty,
             written: s.session.project.written_at(),
             message: s.message.clone(),
@@ -562,7 +562,7 @@ impl Queues {
         s.session.control.params.truncate(self.params);
         s.session.control.states.truncate(self.states);
         s.session.sample_loads.truncate(self.sample_loads);
-        s.mixer.pending.truncate(self.fx);
+        s.session.fx_requests.truncate(self.fx);
         s.message = self.message;
         s.hosted_rows = self.hosted_rows;
         (s.selected_channel, s.rack.sel, s.selected_mixer, s.mixer.sel) = (self.selected_channel, self.rack_sel, self.selected_mixer, self.mixer_sel);

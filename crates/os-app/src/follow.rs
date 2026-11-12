@@ -45,6 +45,9 @@ pub fn before(s: &State) -> Before {
 /// The views brought in line with what the session changed since `b`.
 pub fn after(s: &mut State, b: Before) {
     let t = std::mem::take(&mut s.session.touched);
+    for v in t.views {
+        view(s, v);
+    }
     let whole = t.rows.is_some();
     if let Some(old) = t.rows {
         let row: std::collections::HashMap<u32, usize> = s.session.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
@@ -68,6 +71,34 @@ pub fn after(s: &mut State, b: Before) {
     if let Some(id) = t.rack_step {
         if let Some(v) = s.rack_views.insert(id, b.rack) {
             v.put(s);
+        }
+    }
+}
+
+fn view(s: &mut State, v: crate::session::View) {
+    use crate::session::View;
+    let at = |map: &[Option<u16>], t: u16| map.get(usize::from(t)).copied().unwrap_or(Some(t));
+    match v {
+        View::Places { tracks, slots } => {
+            let track = |t: u16| at(&tracks, t);
+            let slot = |t: u16, k: u8| slots.get(&(t, k)).copied().unwrap_or(Some((t, k)));
+            if let Some(t) = os_model::target::moved(s.events.target, &track, &slot) {
+                s.events.target = t;
+            }
+        }
+        View::MixerRenumbered(tracks) => {
+            let m = |t: u16| at(&tracks, t).unwrap_or(t);
+            s.selected_mixer = m(s.selected_mixer);
+            s.mixer.sel = s.mixer.sel.iter().map(|&t| m(t)).collect();
+        }
+        View::MixerSelect(n) => {
+            s.mixer.sel.clear();
+            s.selected_mixer = n;
+        }
+        View::PatternsRenumbered => {
+            s.playlist.sel.clear();
+            s.playlist.hover_clip = None;
+            s.piano.clear_selection();
         }
     }
 }
