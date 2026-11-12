@@ -21,6 +21,8 @@ pub const BAR_W: f32 = 60.0;
 // Clip colours (spec: ui/playlist.md §2).
 const CLIP_BORDER: u32 = 0x353c41;
 const TITLE_TOP: u32 = 0x50595e;
+/// How much of an automation clip's body covers what lies under it (`clip_paint`).
+const AUTO_ALPHA: u8 = 130;
 const TITLE_BOTTOM: u32 = 0x3f494d;
 const TITLE_TEXT: u32 = 0xd6dfe4;
 const SEL_TITLE: u32 = 0x75201f;
@@ -949,11 +951,13 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let outline = dim(t.s(0x03090d));
     let narrow = r.w < 8.0;
     let lemon = super::lemon(ui);
+    // An automation clip's body lets the clips under it show through; its title strip stays solid.
+    let see = |col: Color| if kind == PickKind::Automation { col.with_alpha(AUTO_ALPHA) } else { col };
     // Rect fills with the top corners knocked out (cheaper than rounded paths for hundreds of clips).
     if lemon {
-        ui.c.fill_rrect(r, lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0), outline);
+        ui.c.fill_rrect(r, lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0), see(outline));
     } else {
-        ui.c.fill_rect(r, outline);
+        ui.c.fill_rect(r, see(outline));
     }
     let row = if track_on { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
     if !narrow && !lemon {
@@ -984,7 +988,10 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let body_r = Rect::new(inner.x, body_r.y, inner.w, inner.bottom() - body_r.y);
     // The content is measured from the body's true edges (the drawn ones may be pulled in, `clip_draw_rect`).
     let body_at = Body { r: body_r, x: clip_x + f64::from(side), w: f64::from((full_w - 2.0 * side).max(1.0)) };
-    if lemon {
+    if kind == PickKind::Automation {
+        // One see-through fill: the outline under it is see-through too, and two would darken the clip behind.
+        ui.c.fill_rect(body_r, see(dim(body)));
+    } else if lemon {
         ui.c.fill_rrect(body_r, ir, dim(body));
         ui.c.fill_rect(Rect::new(body_r.x, body_r.y, body_r.w, ir.min(body_r.h)), dim(body));
     } else {
@@ -1033,7 +1040,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
             }
             (PickKind::Automation, ClipSource::Channel(ch)) => {
                 let col = if c.muted { content } else { dim(cc(t, CURVE)) };
-                curve(ui, s, g, i, c, ch, body_at, dim(body), col);
+                curve(ui, s, g, i, c, ch, body_at, dim(body).with_alpha(70), col);
             }
             _ => {}
         }
@@ -1403,7 +1410,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
                 continue;
             }
             let py = pl::value_y(body, p.value);
-            ui.c.fill_circle(px, py, 4.0, bg);
+            ui.c.fill_circle(px, py, 4.0, bg.with_alpha(255));
             ui.c.stroke_circle(px, py, 4.0, 1.5, col);
             if k > 0 {
                 let q = a.points[k - 1];
@@ -1466,7 +1473,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     // rows drop the "…" and keep the name clear of the LED.
     let short = g.rows.row_h < pl::ROW_H - 8.0;
     let led = Rect::new(hr.right() - 19.0, (h - gap - 15.0).max(1.0) + hr.y, 14.0, 14.0);
-    ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo)");
+    ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo; with Alt: the whole group)");
     // An audio or instrument track (§6c): a light disc with "A" / "I" before its name, which is drawn bright.
     let link = crate::track_links::link(s, row);
     let badge = match link.kind {

@@ -27,6 +27,9 @@ pub enum Tool {
 }
 
 impl Tool {
+    /// The tools in the title bar's order.
+    pub const ALL: [Tool; 8] = [Tool::Draw, Tool::Paint, Tool::Delete, Tool::Mute, Tool::Slice, Tool::Select, Tool::Zoom, Tool::Playback];
+
     pub fn from_letter(c: &str) -> Option<Tool> {
         Some(match c.to_ascii_lowercase().as_str() {
             "p" => Tool::Draw,

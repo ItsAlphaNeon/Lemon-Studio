@@ -80,7 +80,7 @@ impl PlTool {
             PlTool::Mute => "Mute (T) - click or drag mutes / unmutes clips",
             PlTool::Slip => "Slip (S) - drag moves a clip's content inside it",
             PlTool::Slice => "Slice (C) - drag a line to cut clips",
-            PlTool::Select => "Select (E) - drag a box to select (Ctrl adds)",
+            PlTool::Select => "Select (E) - drag a box to select (Ctrl adds, Shift toggles), right-click clears",
             PlTool::Zoom => "Zoom (Z) - drag a box to zoom, right-click toggles",
             PlTool::Playback => "Playback (Y) - hold to play from the mouse",
         }
@@ -290,6 +290,8 @@ pub enum Cmd {
     ClipMute(usize),
     ClipDelete(usize),
     ClipUnique(usize),
+    /// An audio clip as heard (trims, fades, gain, the channel's settings) rendered to a new sample, which it then plays.
+    ClipUniqueSample(usize),
     ClipEditSource(usize),
     ClipSelectSimilar(usize),
     ClipRename(usize),
@@ -2202,6 +2204,113 @@ pub fn make_unique(s: &mut State, i: usize) -> Option<u16> {
     Some(next)
 }
 
+/// One undo step named `name` for an edit that changes the playlist and adds a channel at the end of the rack.
+fn snapshot_new_channel(s: &mut State, name: &'static str) {
+    arr_mut(s);
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    crate::history::record(s, name, crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(capture(s))), rack]));
+}
+
+/// A new channel at the end of the rack: `ch` under the next free index. Returns its index.
+fn push_channel(s: &mut State, mut ch: Channel) -> u16 {
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    ch.id = os_model::Id::NONE;
+    ch.index = index;
+    s.project.channels.push(ch);
+    index
+}
+
+/// Make unique on an audio clip: the clip gets a copy of its channel (sample and settings), named as a clone, so a
+/// change to one channel no longer reaches the other's clips. One undo step.
+pub fn make_unique_audio(s: &mut State, i: usize) -> Option<String> {
+    let ClipSource::Channel(ch) = clips(s).get(i)?.source else { return None };
+    let row = s.project.channels.iter().position(|c| c.index == ch)?;
+    snapshot_new_channel(s, "Make unique");
+    let name = crate::rack::clone_name(s, row);
+    let mut copy = s.project.channels[row].clone();
+    copy.name = Some(name.clone());
+    let index = push_channel(s, copy);
+    arr_mut(s).clips[i].source = ClipSource::Channel(index);
+    s.playlist.source = Some(ClipSource::Channel(index));
+    s.piano.dirty = true;
+    Some(format!("Made unique: {name}"))
+}
+
+/// Make unique as sample on an audio clip: the clip as it sounds alone (its part of the sample, fades, gain and the
+/// channel's settings) is rendered to a new WAV file beside the project (`Rendered/`, as Consolidate), with a channel of
+/// its own; the clip plays all of it from then on, with no trims, fades or gain of its own. One undo step.
+pub fn make_unique_sample(s: &mut State, i: usize) -> String {
+    let Some(c) = clips(s).get(i).copied() else { return "Make unique as sample: no clip".into() };
+    let ClipSource::Channel(ch) = c.source else { return "Make unique as sample: not an audio clip".into() };
+    let Some(row) = s.project.channels.iter().position(|x| x.index == ch) else { return "Make unique as sample: the clip's channel is gone".into() };
+    // The clip alone, at the start of a playing track; a fade the automatic crossfades derived from its neighbours
+    // (no handle bit) is theirs, not the clip's.
+    let mut p = s.project.clone();
+    p.tempo = Some(s.tempo);
+    let mut alone = c;
+    alone.position = 0;
+    alone.track = 0;
+    alone.muted = false;
+    if !alone.fade_in_set() {
+        alone.set_fade_in_length(0.0);
+    }
+    if !alone.fade_out_set() {
+        alone.set_fade_out_length(0.0);
+    }
+    if let Some(arr) = p.arrangement_mut() {
+        arr.clips = vec![alone];
+        for t in &mut arr.tracks {
+            t.enabled = true;
+        }
+    }
+    let rate = 44100;
+    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
+    let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
+    let mut audio = e.render_all(512);
+    let want = (os_engine::laws::tick_to_frame(f64::from(c.length), p.ppq, p.tick_tempo(s.tempo), rate) as usize) * 2;
+    audio.resize(want.max(2), 0.0);
+    let dir = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return format!("Make unique as sample: {e}");
+    }
+    let base: String = crate::rack::channel_name(s, row).chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
+    let file = (1..).map(|k| dir.join(if k == 1 { format!("{base} (unique).wav") } else { format!("{base} (unique {k}).wav") })).find(|f| !f.exists()).expect("unbounded");
+    let written = std::fs::File::create(&file).and_then(|f| {
+        let mut w = std::io::BufWriter::new(f);
+        os_engine::wav::write_f32_stereo(&mut w, rate, &audio)
+    });
+    if let Err(e) = written {
+        return format!("Make unique as sample: {e}");
+    }
+    let path = file.to_string_lossy().into_owned();
+    if s.playlist.wave(&path).is_none() {
+        return format!("Make unique as sample: could not read back {}", file.display());
+    }
+    snapshot_new_channel(s, "Make unique as sample");
+    // A plain audio clip channel for the new sample, on the old one's mixer track and in its colour.
+    let old = &s.project.channels[row];
+    let ch = Channel {
+        name: std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()),
+        color: old.color,
+        mixer_track: old.mixer_track,
+        sample_path: Some(path.clone()),
+        ..audio_clip_channel()
+    };
+    let index = push_channel(s, ch);
+    if let Some(cl) = arr_mut(s).clips.get_mut(i) {
+        cl.source = ClipSource::Channel(index);
+        cl.window = None;
+        cl.set_gain(1.0);
+        cl.set_fade_in(None);
+        cl.set_fade_out(None);
+        cl.set_fade_in_tension(0.0);
+        cl.set_fade_out_tension(0.0);
+    }
+    s.playlist.source = Some(ClipSource::Channel(index));
+    s.piano.dirty = true;
+    format!("Made unique as sample: {}", file.display())
+}
+
 /// First track at or below `from` with no clips overlapping `[a, b)`.
 pub fn free_track(s: &State, from: u16, a: u32, b: u32) -> u16 {
     (from..TRACKS).find(|&t| !clips(s).iter().any(|c| c.track == t && c.position < b && c.end() > a)).unwrap_or(from)
@@ -2426,6 +2535,30 @@ pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name:
     add_audio_clip_in(s, path, track, tick, None)
 }
 
+/// An audio clip's channel as one is made: no sample, name or colour yet, on the master, FL's sampler flags.
+fn audio_clip_channel() -> Channel {
+    Channel {
+        id: os_model::Id::NONE,
+        index: 0,
+        kind: ChannelKind::AudioClip,
+        name: None,
+        plugin: None,
+        plugin_state: None,
+        color: None,
+        enabled: true,
+        volume: 0.78125,
+        pan: 0.0,
+        pitch_cents: 0,
+        mixer_track: 0,
+        sample_path: None,
+        layer_children: Vec::new(),
+        envelopes: Default::default(),
+        rack: Default::default(),
+        misc: Default::default(),
+        sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
+    }
+}
+
 /// `add_audio_clip_as` with no undo step of its own (the caller took one), its channel on mixer track `mixer` (`None`:
 /// the track after the highest any channel uses).
 pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer: Option<u16>) -> Option<usize> {
@@ -2437,23 +2570,13 @@ pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
     let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project)));
     s.project.channels.push(Channel {
-        id: os_model::Id::NONE,
         index,
-        kind: ChannelKind::AudioClip,
         name: Some(name),
-        plugin: None,
-        plugin_state: None,
         // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
         color: Some(s.clip_colors.new_channel(index)),
-        enabled: true,
-        volume: 0.78125,
-        pan: 0.0,
-        pitch_cents: 0,
         mixer_track,
         sample_path: Some(path.to_string()),
-        layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
-        sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
+        ..audio_clip_channel()
     });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Audio;
@@ -2777,9 +2900,16 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
         PItem::new("Random color", Cmd::ClipRandomColor(i)),
         PItem::sep(),
     ];
-    if let ClipSource::Pattern(_) = c.source {
-        items.push(PItem::new("Edit pattern", Cmd::ClipEditSource(i)));
-        items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
+    match source_kind(s, c.source) {
+        PickKind::Pattern => {
+            items.push(PItem::new("Edit pattern", Cmd::ClipEditSource(i)));
+            items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
+        }
+        PickKind::Audio => {
+            items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
+            items.push(PItem::new("Make unique as sample", Cmd::ClipUniqueSample(i)));
+        }
+        PickKind::Automation => {}
     }
     items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
     items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
@@ -3092,7 +3222,9 @@ pub enum PlDrag {
     Erase,
     Mute { on: bool },
     Paint { track: u16, start: u32, len: u32 },
-    Marquee { x0: f32, y0: f32, base: Vec<usize> },
+    /// A box from (x0, y0): the clips it touches join `base`, or with `toggle` (Shift, the Select tool) change from how
+    /// they are in `base`.
+    Marquee { x0: f32, y0: f32, base: Vec<usize>, toggle: bool },
     Slice { y0: f32 },
     /// Right button held on empty grid: a horizontal drag turns into a slice (§3).
     RightPending { x0: f32, y0: f32 },
@@ -3416,13 +3548,19 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
             None => {
                 let base = s.playlist.sel.clone();
-                app.drag = Some(Drag::Pl(PlDrag::Marquee { x0: x, y0: y, base }));
+                app.drag = Some(Drag::Pl(PlDrag::Marquee { x0: x, y0: y, base, toggle: false }));
             }
         }
         app.invalidate();
         return;
     }
 
+    // A right click on empty grid clears the selection, in any tool (as FL's).
+    if right && hit.is_none() && !app.state.playlist.sel.is_empty() {
+        app.state.playlist.sel.clear();
+        app.invalidate();
+    }
+    let s = &mut app.state;
     if right {
         match tool {
             // Alt+right plays the clip as its menu's Preview does, in any tool that deletes with this button.
@@ -3432,7 +3570,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 }
                 return;
             }
-            PlTool::Select => {}
+            PlTool::Select => return,
             PlTool::Zoom => {
                 zoom_toggle(app);
                 return;
@@ -3483,11 +3621,25 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             app.drag = Some(Drag::Pl(PlDrag::Playback));
             app.play_song_from(t);
         }
-        PlTool::Select if hit.is_none() => {
-            s.playlist.sel.clear();
-            app.drag = Some(Drag::Pl(PlDrag::Marquee { x0: x, y0: y, base: Vec::new() }));
+        // The Select tool's drag is a box wherever it starts, on a clip too (it moves nothing, as FL's): plain, the box
+        // is the selection; with Shift, the clips it touches change from selected to not and back.
+        PlTool::Select => {
+            let toggle = app.shift;
+            let base = if toggle { s.playlist.sel.clone() } else { Vec::new() };
+            let under = hit.map(|i| with_groups(s, vec![i])).unwrap_or_default();
+            s.playlist.sel = base.clone();
+            for i in under {
+                match s.playlist.sel.iter().position(|&j| j == i) {
+                    Some(k) if toggle => {
+                        s.playlist.sel.remove(k);
+                    }
+                    Some(_) => {}
+                    None => s.playlist.sel.push(i),
+                }
+            }
+            app.drag = Some(Drag::Pl(PlDrag::Marquee { x0: x, y0: y, base, toggle }));
         }
-        PlTool::Draw | PlTool::Paint | PlTool::Select => match hit {
+        PlTool::Draw | PlTool::Paint => match hit {
             // Right-Shift+drag on empty grid with Draw / Paint: a quick slice line, as the Slice tool (§3).
             None if app.rshift => {
                 app.drag = Some(Drag::Pl(PlDrag::Slice { y0: y }));
@@ -3526,7 +3678,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 let grouped = clips(s)[i].group() != 0;
                 let mut group = with_groups(s, if s.playlist.sel.contains(&i) { s.playlist.sel.clone() } else { vec![i] });
                 if !s.playlist.sel.contains(&i) {
-                    s.playlist.sel = if tool == PlTool::Select || grouped { group.clone() } else { Vec::new() };
+                    s.playlist.sel = if grouped { group.clone() } else { Vec::new() };
                 }
                 // The clicked clip first.
                 group.retain(|&j| j != i);
@@ -3732,13 +3884,21 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
                 }
             }
         }
-        PlDrag::Marquee { x0, y0, base } => {
+        PlDrag::Marquee { x0, y0, base, toggle } => {
             let r = Rect::span(x0.min(x), x0.max(x), y0.min(y), y0.max(y));
             s.playlist.overlay = Some(Overlay::Marquee(r));
             let mut sel = base.clone();
             for (i, c) in clips(s).iter().enumerate() {
-                if !sel.contains(&i) && g.clip_rect(c).intersect(&r).w > 0.0 && g.clip_rect(c).intersect(&r).h > 0.0 {
-                    sel.push(i);
+                let cr = g.clip_rect(c).intersect(&r);
+                if cr.w <= 0.0 || cr.h <= 0.0 {
+                    continue;
+                }
+                match sel.iter().position(|&j| j == i) {
+                    Some(k) if toggle && base.contains(&i) => {
+                        sel.remove(k);
+                    }
+                    Some(_) => {}
+                    None => sel.push(i),
                 }
             }
             s.playlist.sel = sel;
@@ -4210,12 +4370,56 @@ pub fn press_header(app: &mut App, t: u16, right: bool, at: (f32, f32)) {
 /// Track LED: click mutes, Ctrl+click or right-click solos (§6).
 pub fn press_led(app: &mut App, t: u16, right: bool) {
     snapshot(&mut app.state);
-    if right || app.ctrl {
-        toggle_solo(&mut app.state, t);
-    } else {
-        toggle_track(&mut app.state, t);
+    // Alt: the whole group the track is in (its group track and the tracks grouped under it).
+    let group = if app.alt { group_span(&app.state, t) } else { None };
+    match group {
+        Some(g) if right || app.ctrl => toggle_group_solo(&mut app.state, g),
+        Some(g) => {
+            let on = !track_on(&app.state, t);
+            set_tracks_on(&mut app.state, g, on);
+        }
+        None if right || app.ctrl => toggle_solo(&mut app.state, t),
+        None => toggle_track(&mut app.state, t),
     }
     app.invalidate();
+}
+
+/// The tracks of the group track `t` is in or leads (§6a): its group track to its last grouped track.
+pub fn group_span(s: &State, t: u16) -> Option<(u16, u16)> {
+    let lead = group_track(s, t).or_else(|| is_group_track(s, t).then_some(t))?;
+    let mut last = lead;
+    while track_info(s, last + 1).is_some_and(|x| x.grouped) {
+        last += 1;
+    }
+    Some((lead, last))
+}
+
+/// Alt+click on a group's LED: every track of the group on or off.
+fn set_tracks_on(s: &mut State, (a, b): (u16, u16), on: bool) {
+    s.playlist.solo = None;
+    let arr = arr_mut(s);
+    for tr in arr.tracks.iter_mut().take(usize::from(b) + 1).skip(usize::from(a)) {
+        tr.enabled = on;
+    }
+    s.piano.dirty = true;
+}
+
+/// Alt+right-click on a group's LED: solo the group (its tracks on, the others muted); again ends the solo, as
+/// [`toggle_solo`] does for one track.
+fn toggle_group_solo(s: &mut State, (a, b): (u16, u16)) {
+    if let Some((was, _)) = s.playlist.solo {
+        end_solo(s);
+        if was == a {
+            return;
+        }
+    }
+    let arr = arr_mut(s);
+    let states: Vec<bool> = arr.tracks.iter().map(|t| t.enabled).collect();
+    for (k, tr) in arr.tracks.iter_mut().enumerate() {
+        tr.enabled = (usize::from(a)..=usize::from(b)).contains(&k);
+    }
+    s.playlist.solo = Some((a, states));
+    s.piano.dirty = true;
 }
 
 pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
@@ -4898,13 +5102,22 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             delete(s, vec![i]);
             None
         }
+        Cmd::ClipUnique(i) if clips(s).get(i).is_some_and(|c| source_kind(s, c.source) == PickKind::Audio) => make_unique_audio(s, i),
         Cmd::ClipUnique(i) => {
             snapshot(s);
             make_unique(s, i).map(|n| format!("Made unique: pattern {n}"))
         }
+        Cmd::ClipUniqueSample(i) => Some(make_unique_sample(s, i)),
         Cmd::ClipEditSource(i) => {
             if let Some(ClipSource::Pattern(n)) = clips(s).get(i).map(|c| c.source) {
                 s.pattern = n;
+                // The piano roll shows the pattern's first channel with notes in it (in the rack's order), not the one
+                // shown last.
+                let notes = crate::piano::notes(s);
+                let first = s.project.channels.iter().position(|c| notes.iter().any(|nt| nt.channel == c.index));
+                if let Some(row) = first {
+                    crate::piano_tools::target(s, row);
+                }
                 s.raise(crate::app::Win::PianoRoll);
             }
             None
