@@ -173,6 +173,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             ui.c.stroke_rrect(nr.inset(1.5), if lemon { 3.0 } else { 2.0 }, 1.0, ghost);
         }
     }
+    stack_edges(ui, &g, &l.grid, notes, ch);
     let label_font = Font::new(11);
     for (i, n) in notes.iter().enumerate().filter(|(_, n)| Some(n.channel) == ch) {
         let Some(nr) = g.note_rect(n) else { continue };
@@ -313,6 +314,40 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.scaled(super::popup_scale(ui.c.scale), |ui, k| lane_menu(ui, s, &l, k));
     }
     resize_zones(ui, s, Win::PianoRoll, outer);
+}
+
+/// Notes of one key at once (a copy laid on another, or two overlapping in part): each lies on the ones before it,
+/// whose edges show as a stack above it over the time they share, a 2 px layer for each note under it, three at most.
+/// The notes keep their places; only the layers tell that more lie there.
+fn stack_edges(ui: &mut Ui, g: &Geom, grid: &Rect, notes: &[Note], ch: Option<u16>) {
+    const LAYER: f32 = 2.0;
+    const MOST: usize = 3;
+    let t = ui.t;
+    // This channel's notes in view, by key, in painting order.
+    let mut keys: std::collections::BTreeMap<u16, Vec<Rect>> = std::collections::BTreeMap::new();
+    for n in notes.iter().filter(|n| Some(n.channel) == ch) {
+        if let Some(r) = g.note_rect(n).filter(|r| r.right() > grid.x && r.x < grid.right()) {
+            keys.entry(n.key).or_default().push(r);
+        }
+    }
+    for rects in keys.values().filter(|v| v.len() > 1) {
+        for (a, r) in rects.iter().enumerate() {
+            let mut layer = 0;
+            for under in rects[..a].iter().rev() {
+                let (x0, x1) = (r.x.max(under.x) + 1.0, r.right().min(under.right()) - 1.0);
+                if x1 - x0 < 1.0 {
+                    continue;
+                }
+                layer += 1;
+                let y = r.y - LAYER * layer as f32;
+                ui.c.fill_rect(Rect::new(x0, y, x1 - x0, 1.0), t.note_rim);
+                ui.c.fill_rect(Rect::new(x0, y + 1.0, x1 - x0, LAYER - 1.0), t.note_bottom);
+                if layer == MOST {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Scroll arrow button (§1a): raised face with a 1 px dark rim and a chevron pointing `dir`

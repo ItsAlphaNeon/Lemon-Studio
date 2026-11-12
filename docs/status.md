@@ -73,7 +73,8 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
   arpeggiate, flam, claw machine (trash, stretch, time distribution), flip, scale levels, limit (key / scale, range,
   transpose), LFO (sine, triangle or square into any event lane, Start to End ramps, a channel lane's control points)
   and randomize (a new melody from a key or scale, or random levels, each with its own seed)
-- Vertical zoom and ghost channels
+- Vertical zoom and ghost channels. Notes of one key that lie over each other show a stack of edges above the top one
+  (Lemon Studio's own)
 - Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project
 - Step edit (toolbar, OPTIONS menu, Ctrl+E): with the transport stopped, typing-keyboard and MIDI notes are
@@ -88,6 +89,8 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
   render without hosted instruments and effects, so plugin channels come out silent (Consolidate still mutes the source
   clips)
 - Playlist with pattern, audio and automation clips
+- Clips of one track that lie over each other show a stack of edges above the top one, as the piano roll's notes
+  (Lemon Studio's own)
 - Clip groups, markers and several arrangements
 - Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause
   play in SONG mode; exports start at the Start marker and jump at skips, and the clock's bars count from the Start
