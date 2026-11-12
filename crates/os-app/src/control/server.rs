@@ -127,7 +127,7 @@ impl crate::app::App {
     /// Answers `server`'s clients from now on.
     pub fn listen(&mut self, server: Server) {
         self.rpc_server = Some(server);
-        self.state.control.watched = true;
+        self.state.session.control.watched = true;
     }
 
     /// Answers the requests waiting (on every tick).

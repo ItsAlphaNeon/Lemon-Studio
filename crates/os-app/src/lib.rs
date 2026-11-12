@@ -124,6 +124,9 @@ mod ppi;
 mod prefs;
 mod settings_window;
 pub mod locked;
+pub mod session;
+pub mod edit;
+mod follow;
 mod preview_track;
 mod project_files;
 mod project_forms;
@@ -1639,7 +1642,7 @@ fn screenshot(args: &[String]) {
         app.state.rack_size.1 = h;
     }
     if rack_all {
-        rack::set_filter(&mut app.state, rack::Filter::All);
+        rack::set_filter(&mut app.state.session, rack::Filter::All);
     }
     if let Some(r) = rack_scroll {
         app.state.rack_scroll = r * views::rack::ROW_H;

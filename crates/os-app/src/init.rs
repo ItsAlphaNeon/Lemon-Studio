@@ -27,17 +27,17 @@ pub const INIT_LABEL: &str = "Set as song start value";
 pub const DELETE_LABEL: &str = "Remove start value";
 
 /// Control `t`'s entry in the list.
-pub fn entry(s: &State, t: u32) -> Option<InitControl> {
+pub fn entry(s: &crate::session::Session, t: u32) -> Option<InitControl> {
     s.project.init_controls.iter().find(|c| c.target == t).copied()
 }
 
 /// Whether control `t` is in the list (the check mark of "Set as song start value").
-pub fn listed(s: &State, t: u32) -> bool {
+pub fn listed(s: &crate::session::Session, t: u32) -> bool {
     entry(s, t).is_some()
 }
 
 /// Puts control `t`'s entry in the list (`None`: takes it out). An entry already there keeps its place.
-pub(crate) fn put(s: &mut State, t: u32, e: Option<InitControl>) {
+pub(crate) fn put(s: &mut crate::session::Session, t: u32, e: Option<InitControl>) {
     let list = &mut s.project.get_mut().init_controls;
     match e {
         Some(c) => match list.iter_mut().find(|x| x.target == t) {
@@ -47,19 +47,20 @@ pub(crate) fn put(s: &mut State, t: u32, e: Option<InitControl>) {
         None => list.retain(|x| x.target != t),
     }
     // Playback gets the list (the engine sets it where a song loops).
-    s.piano.dirty = true;
+    s.dirty = true;
 }
 
 /// "Set as song start value": control `t`, at its value `v` (0..1), goes in the list, replacing an earlier value.
 /// One undo step, "Initialized control". Nothing for a control whose stored units aren't known (a plugin parameter).
-pub fn init(s: &mut State, t: u32, v: f64) {
+pub fn init(s: &mut crate::session::Session, t: u32, v: f64) {
     let Some(c) = InitControl::from_unit(t, v) else { return };
-    history::record(s, INITIALIZED, Snap::Init(t, entry(s, t)));
+    let snap = Snap::Init(t, entry(s, t));
+    history::record(s, INITIALIZED, snap);
     put(s, t, Some(c));
 }
 
 /// "Remove start value": control `t` leaves the list. No undo step (FL makes none).
-pub fn delete(s: &mut State, t: u32) {
+pub fn delete(s: &mut crate::session::Session, t: u32) {
     put(s, t, None);
 }
 
@@ -76,7 +77,7 @@ pub fn items(s: &State, control: Option<(u32, f64)>) -> [PItem; 2] {
     let Some((t, v)) = control else {
         return [PItem::new(INIT_LABEL, Cmd::Nothing).off(), PItem::new(DELETE_LABEL, Cmd::Nothing).off()];
     };
-    let on = listed(s, t);
+    let on = listed(&s.session, t);
     let init = if InitControl::from_unit(t, v).is_some() { PItem::new(INIT_LABEL, Cmd::InitControl(t, v)) } else { PItem::not_yet(INIT_LABEL) };
     let delete = if on { PItem::new(DELETE_LABEL, Cmd::DeleteInit(t)) } else { PItem::new(DELETE_LABEL, Cmd::Nothing).off() };
     [init.mark(Mark::Check(on)), delete]
@@ -85,7 +86,7 @@ pub fn items(s: &State, control: Option<(u32, f64)>) -> [PItem; 2] {
 /// In song mode: every control in the list takes its value at once (where playback starts, the song position moves
 /// or playback loops back to the song's start). Not an undo step. A record whose units aren't known, or whose control
 /// the project doesn't have, is left alone. Returns whether a value changed; the project then goes to playback.
-pub fn apply(s: &mut State) -> bool {
+pub fn apply(s: &mut crate::session::Session) -> bool {
     if !s.song_mode() {
         return false;
     }
@@ -94,7 +95,7 @@ pub fn apply(s: &mut State) -> bool {
         changed |= set_value(s, c);
     }
     if changed {
-        s.piano.dirty = true;
+        s.dirty = true;
     }
     changed
 }
@@ -108,7 +109,7 @@ fn set<T: PartialEq>(x: &mut T, v: T) -> bool {
 
 /// Control `c.target` set to `c.value` (stored units) in the model. The project counts as written only when a value
 /// changed.
-fn set_value(s: &mut State, c: InitControl) -> bool {
+fn set_value(s: &mut crate::session::Session, c: InitControl) -> bool {
     let main = matches!(c.target, InitControl::MAIN_VOLUME | InitControl::MAIN_SWING | InitControl::MAIN_PITCH);
     if !main && matches!(target::decode(c.target), Target::Tempo) {
         let bpm = (f64::from(c.value) / 1000.0).clamp(10.0, 522.0);
@@ -171,11 +172,11 @@ fn set_in_project(p: &mut os_model::Project, c: InitControl) -> bool {
 /// A list entry's name in the browser: "<owner> - <setting>", as the automation clip on the control is named
 /// ("808 Kick - Channel volume", "Bus 1 - Volume", "Tempo").
 pub fn name(s: &State, t: u32) -> String {
-    let channel = |ch: u16| match s.project.channels.iter().position(|c| c.index == ch) {
-        Some(row) => s.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1)),
+    let channel = |ch: u16| match s.session.project.channels.iter().position(|c| c.index == ch) {
+        Some(row) => s.session.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1)),
         None => format!("Channel {}", ch + 1),
     };
-    let mix = |t: u16| crate::mixer::name(s, t);
+    let mix = |t: u16| crate::mixer::name(&s.session, t);
     match t {
         InitControl::MAIN_VOLUME => return "Main volume".into(),
         InitControl::MAIN_SWING => return "Main swing".into(),
@@ -183,8 +184,8 @@ pub fn name(s: &State, t: u32) -> String {
         _ => {}
     }
     // A container member's wet or dry level (spec: plugins/patcher/README.md §4.2).
-    if let Some((m, k, id, wet)) = crate::container::level_of(s, target::decode(t)) {
-        return crate::container::level_name(s, m, k, id, wet);
+    if let Some((m, k, id, wet)) = crate::container::level_of(&s.session, target::decode(t)) {
+        return crate::container::level_name(&s.session, m, k, id, wet);
     }
     match target::decode(t) {
         Target::Tempo => "Tempo".into(),
@@ -215,7 +216,7 @@ pub fn name(s: &State, t: u32) -> String {
         Target::SlotOn(m, k) => format!("{} - Slot {} switch", mix(m), k + 1),
         Target::SlotMix(m, k) => format!("{} - Slot {} mix level", mix(m), k + 1),
         // A plugin that isn't hosted: its parameter by number.
-        p @ (Target::ChannelParam(..) | Target::SlotParam(..)) => match (crate::params::key_of(s, p), p) {
+        p @ (Target::ChannelParam(..) | Target::SlotParam(..)) => match (crate::params::key_of(&s.session, p), p) {
             (Some((key, index)), _) => crate::params::clip_name(s, key, index),
             (None, Target::SlotParam(m, k, i)) => format!("{} - Slot {} - Parameter {}", mix(m), k + 1, i + 1),
             (None, _) => format!("{} - Parameter {}", channel((t >> 16) as u16), (t & 0x7FFF) + 1),
@@ -235,7 +236,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app
     }
 
@@ -266,7 +267,7 @@ mod tests {
         assert_eq!((init.enabled, init.mark, &init.cmd), (true, Mark::Check(false), &Cmd::InitControl(vol, 10000.0 / 12800.0)));
         assert!(!delete.enabled);
         pl::run(&mut a, init.cmd);
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 10000)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 10000)]);
         let (init, delete) = pair(&rack_menu(&a));
         assert_eq!((init.enabled, init.mark), (true, Mark::Check(true)));
         assert_eq!((delete.enabled, &delete.cmd), (true, &Cmd::DeleteInit(vol)));
@@ -296,7 +297,7 @@ mod tests {
         // "Remove start value": the control leaves the list.
         let delete = pair(&rack_menu(&a)).1.cmd;
         pl::run(&mut a, delete);
-        assert!(a.state.project.init_controls.is_empty());
+        assert!(a.state.session.project.init_controls.is_empty());
         assert_eq!(pair(&rack_menu(&a)).0.mark, Mark::Check(false));
     }
 
@@ -307,20 +308,20 @@ mod tests {
         let vol = target::channel(0, target::CHANNEL_VOLUME);
         pl::run(&mut a, Cmd::InitControl(vol, 0.5));
         pl::run(&mut a, Cmd::InitControl(vol, 0.25));
-        assert_eq!(a.state.history.len(), 2);
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 3200)], "a new value replaces the old one");
+        assert_eq!(a.state.session.history.len(), 2);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 3200)], "a new value replaces the old one");
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 6400)]);
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED));
-        assert!(a.state.project.init_controls.is_empty());
+        assert!(a.state.session.project.init_controls.is_empty());
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(INITIALIZED));
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(INITIALIZED));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 3200)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 3200)]);
         pl::run(&mut a, Cmd::DeleteInit(vol));
-        assert!(a.state.project.init_controls.is_empty());
-        assert_eq!(a.state.history.len(), 2, "no step");
+        assert!(a.state.session.project.init_controls.is_empty());
+        assert_eq!(a.state.session.history.len(), 2, "no step");
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED), "undo goes back past the delete");
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 6400)]);
     }
 
     /// "Set start values automatically" (on by default): "Create automation clip" also lists the control at its
@@ -332,57 +333,57 @@ mod tests {
         let vol = target::channel(0, target::CHANNEL_VOLUME);
         let (t, name, v) = a.automation_target(&Action::Knob(KnobId::ChanVol(0))).unwrap();
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 10000)]);
-        assert_eq!((a.state.history.len(), pl::clips(&a.state).len()), (1, 1));
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 10000)]);
+        assert_eq!((a.state.session.history.len(), pl::clips(&a.state.session).len()), (1, 1));
         // The clip's channel: the only selected one, in the "Automation" group with the filter on it, as the original's
         // rack shows after every Create automation clip.
-        let row = a.state.project.channels.len() - 1;
-        let g = crate::rack::groups(&a.state.project).iter().position(|g| g.name == "Automation").expect("the group");
-        assert_eq!((a.state.selected_channel, crate::rack::filter(&a.state.project)), (row, crate::rack::Filter::Group(g)));
-        assert!(crate::rack::groups(&a.state.project)[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
-        let channels = a.state.project.channels.len();
+        let row = a.state.session.project.channels.len() - 1;
+        let g = crate::rack::groups(&a.state.session.project).iter().position(|g| g.name == "Automation").expect("the group");
+        assert_eq!((a.state.selected_channel, crate::rack::filter(&a.state.session.project)), (row, crate::rack::Filter::Group(g)));
+        assert!(crate::rack::groups(&a.state.session.project)[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
+        let channels = a.state.session.project.channels.len();
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert!(a.state.project.init_controls.is_empty() && pl::clips(&a.state).is_empty());
-        assert_eq!(a.state.project.channels.len(), channels - 1, "the clip's channel goes with the undo");
-        assert!(crate::rack::groups(&a.state.project).iter().all(|g| g.name != "Automation") && crate::rack::filter(&a.state.project) == crate::rack::Filter::All);
+        assert!(a.state.session.project.init_controls.is_empty() && pl::clips(&a.state.session).is_empty());
+        assert_eq!(a.state.session.project.channels.len(), channels - 1, "the clip's channel goes with the undo");
+        assert!(crate::rack::groups(&a.state.session.project).iter().all(|g| g.name != "Automation") && crate::rack::filter(&a.state.session.project) == crate::rack::Filter::All);
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert_eq!((a.state.project.channels.len(), crate::rack::filter(&a.state.project)), (channels, crate::rack::Filter::Group(g)));
-        assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 10000)], 1));
+        assert_eq!((a.state.session.project.channels.len(), crate::rack::filter(&a.state.session.project)), (channels, crate::rack::Filter::Group(g)));
+        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 10000)], 1));
         // A second clip on the moved knob: its new value replaces the old one; undo brings that back.
-        a.state.project.get_mut().channels[0].volume = 0.5;
+        a.state.session.project.get_mut().channels[0].volume = 0.5;
         pl::run(&mut a, Cmd::CreateAutomation(vol, "Kick - Channel volume".into(), 0.5));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 6400)]);
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert_eq!(a.state.project.init_controls, vec![rec(vol, 10000)]);
+        assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 10000)]);
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
 
         // Off: the clip only.
         prefs::set_check(&prefs::INIT_CONTROLS, false);
         let (t, name, v) = a.automation_target(&Action::Tempo).unwrap();
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
-        assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 3));
+        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 6400)], 3));
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 2));
+        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 6400)], 2));
         prefs::set_check(&prefs::INIT_CONTROLS, true);
     }
 
     /// A song (pattern 1, empty, on track 1) with channel 1's volume and the tempo listed.
     fn song_app() -> App {
         let mut a = app();
-        pl::arr_mut(&mut a.state).clips.push(Clip::new(0, 4 * 384, 0, ClipSource::Pattern(1)));
-        a.state.project.get_mut().init_controls = vec![rec(target::channel(0, target::CHANNEL_VOLUME), 6400), rec(target::TEMPO, 140_000)];
+        pl::arr_mut(&mut a.state.session).clips.push(Clip::new(0, 4 * 384, 0, ClipSource::Pattern(1)));
+        a.state.session.project.get_mut().init_controls = vec![rec(target::channel(0, target::CHANNEL_VOLUME), 6400), rec(target::TEMPO, 140_000)];
         a
     }
 
     /// The listed controls moved away from their initial values.
     fn moved(a: &mut App) {
-        a.state.project.get_mut().channels[0].volume = 1.0;
+        a.state.session.project.get_mut().channels[0].volume = 1.0;
         a.state.set_tempo(90.0);
     }
 
     /// (channel 1's volume, tempo).
     fn controls(a: &App) -> (f64, f64) {
-        (a.state.project.channels[0].volume, a.state.tempo())
+        (a.state.session.project.channels[0].volume, a.state.tempo())
     }
 
     /// Playback at tick 900, then back at tick 12 (the song looped), then stopped.
@@ -425,9 +426,9 @@ mod tests {
         a.show_playback(Shown::default());
         loop_back(&mut a, true);
         assert_eq!(controls(&a), INIT);
-        assert_eq!(a.state.history.len(), 0, "no undo step");
+        assert_eq!(a.state.session.history.len(), 0, "no undo step");
         // An entry for a control the project doesn't have, or whose units aren't known, is left alone.
-        a.state.project.get_mut().init_controls.extend([rec(target::channel(40, target::CHANNEL_VOLUME), 0), rec(target::channel_param(0, 2), 5)]);
+        a.state.session.project.get_mut().init_controls.extend([rec(target::channel(40, target::CHANNEL_VOLUME), 0), rec(target::channel_param(0, 2), 5)]);
         moved(&mut a);
         a.set_song_pos(0, false);
         assert_eq!(controls(&a), INIT);
@@ -458,7 +459,7 @@ mod tests {
         b.open(path.clone());
         assert!(b.state.song_mode());
         assert_eq!(controls(&b), INIT);
-        assert!(!b.unsaved() && b.state.history.len() == 0, "opened, not changed");
+        assert!(!b.unsaved() && b.state.session.history.len() == 0, "opened, not changed");
         b.save_to(resaved.clone());
         assert_eq!(stored(&resaved), INIT, "saved as the stored values");
 
@@ -468,10 +469,10 @@ mod tests {
         let mut c = App::new(None);
         c.state.set_song_mode(true);
         c.open(path.clone());
-        assert!(!c.state.song_mode() && !pl::clips(&c.state).is_empty());
+        assert!(!c.state.song_mode() && !pl::clips(&c.state.session).is_empty());
         assert_eq!(controls(&c), MOVED);
         // Without event 9 (a file from before Lemon Studio wrote it): song mode, even with no clips.
-        pl::arr_mut(&mut a.state).clips.clear();
+        pl::arr_mut(&mut a.state.session).clips.clear();
         a.save_to(path.clone());
         let mut f = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
         for c in &mut f.chunks {
@@ -498,7 +499,7 @@ mod tests {
         let folder = format!("1:Current project/{INITIALIZED_CONTROLS}");
         a.state.browser_open.extend(["1:Current project".to_string(), folder.clone()]);
         assert!(!rows(&a.state).iter().any(|r| r.key == folder), "no folder while the list is empty");
-        a.state.project.get_mut().init_controls = vec![
+        a.state.session.project.get_mut().init_controls = vec![
             rec(target::channel(1, target::CHANNEL_VOLUME), 10000),
             rec(target::mixer(1, target::MIXER_VOLUME), 12800),
             rec(target::TEMPO, 140_000),

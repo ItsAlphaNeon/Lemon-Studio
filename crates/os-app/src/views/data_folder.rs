@@ -38,7 +38,7 @@ pub fn paint_row(ui: &mut Ui, s: &State, row: &Row, g: Rect, x0: f32, y: f32, h:
         Row::Combo(_, w, label) if *label == COMBO => {
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
             let hov = ui.hit(b, Action::Settings(SAct::Combo(COMBO, b.x, b.bottom())), COMBO_HINT);
-            kit::combo(ui.c, t, b, df::choice_text(&s.project), f, kit::State::hover(hov));
+            kit::combo(ui.c, t, b, df::choice_text(&s.session.project), f, kit::State::hover(hov));
         }
         // Ask for data folder: the program setting's choice, its label on the right.
         Row::Combo(_, w, label) => {

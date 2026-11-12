@@ -68,7 +68,7 @@ pub fn file_name(project: &str, now: chrono::NaiveDateTime, track: &str) -> Stri
 
 /// The file an armed track would record into now (the disk-record button's hint).
 pub fn armed_file(s: &State, track: u16) -> String {
-    file_name(&crate::backup::project_name(s.path.as_deref()), chrono::Local::now().naive_local(), &crate::mixer::name(s, track))
+    file_name(&crate::backup::project_name(s.session.path.as_deref()), chrono::Local::now().naive_local(), &crate::mixer::name(&s.session, track))
 }
 
 pub(crate) fn folder(s: &State) -> std::path::PathBuf {
@@ -97,20 +97,20 @@ impl App {
     /// A take of the tracks armed now (none armed: nothing starts, and a track armed later starts one).
     fn track_rec_begin(&mut self) {
         let s = &self.state;
-        let armed: Vec<u16> = s.project.mixer.iter().filter(|m| m.armed).map(|m| m.index).collect();
+        let armed: Vec<u16> = s.session.project.mixer.iter().filter(|m| m.armed).map(|m| m.index).collect();
         if armed.is_empty() {
             return;
         }
         let rate = self.transport.opened().map_or(48000, |d| d.rate);
         let dir = folder(s);
         let now = chrono::Local::now().naive_local();
-        let project = crate::backup::project_name(s.path.as_deref());
+        let project = crate::backup::project_name(s.session.path.as_deref());
         let tracks = armed.iter().map(|&t| TrackRing { track: usize::from(t), ring: Ring::new(RING), first: AtomicU64::new(u64::MAX), dropped: AtomicU64::new(0) }).collect();
         let takes = Arc::new(Takes { on: AtomicBool::new(true), tracks });
         let mut names: Vec<String> = Vec::new();
         for &t in &armed {
             // Two tracks of one name get files of their own.
-            let name = crate::mixer::name(s, t);
+            let name = crate::mixer::name(&s.session, t);
             names.push(if names.contains(&name) { format!("{name} ({t})") } else { name });
         }
         let mut recs = Vec::new();
@@ -134,7 +134,7 @@ impl App {
     /// track that records an input (spec: audio/track-io.md §2.5 "Where the take goes").
     fn track_rec_end(&mut self) {
         self.transport.record_tracks(None);
-        let p = &self.state.project;
+        let p = &self.state.session.project;
         let tempo = p.tick_tempo(self.state.tempo().max(1.0));
         let Some(r) = self.track_rec.as_mut() else { return };
         r.takes.on.store(false, Ordering::Release);
@@ -182,8 +182,8 @@ impl App {
             (_, false) => format!("Recorded {} file(s) into the Recorded folder", made.len()),
             (_, true) => {
                 let s = &mut self.state;
-                crate::playlist::snapshot_as(s, crate::one_click::RECORDED);
-                let p = &s.project;
+                crate::playlist::snapshot_as(&mut s.session, crate::one_click::RECORDED);
+                let p = &s.session.project;
                 let tempo = p.tick_tempo(s.tempo().max(1.0));
                 let ppq = f64::from(p.ppq.max(1));
                 let mut placed = 0;
@@ -195,7 +195,7 @@ impl App {
                         placed += 1;
                     }
                 }
-                s.piano.dirty = true;
+                s.session.dirty = true;
                 match (placed, made.first()) {
                     (1, Some((_, path, ..))) => format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
                     (n, _) => format!("Recorded {n} mixer tracks"),
@@ -214,12 +214,12 @@ impl App {
     pub(crate) fn arm_tracks(&mut self, tracks: &[u16], on: bool) -> Option<String> {
         let mut n = 0;
         for &t in tracks {
-            if let Some(m) = crate::mixer::track_mut(&mut self.state, t).filter(|m| m.armed != on) {
+            if let Some(m) = crate::mixer::track_mut(&mut self.state.session, t).filter(|m| m.armed != on) {
                 m.armed = on;
                 n += 1;
             }
         }
-        self.state.piano.dirty = true;
+        self.state.session.dirty = true;
         self.invalidate();
         (on && n > 0 && !Opt::Audio.on()).then(|| {
             Opt::Audio.toggle();
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn an_armed_track_records_into_the_playlist() {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.set_song_mode(true);
         if Opt::Audio.on() {
             Opt::Audio.toggle();
@@ -255,7 +255,7 @@ mod tests {
         takes.push(2, 90, &[0.5; 96]);
         takes.push(1, 96, &vec![0.25; 9600]);
         takes.push(1, 97, &vec![0.25; 9600]);
-        let channels = app.state.project.channels.len();
+        let channels = app.state.session.project.channels.len();
         app.transport.stop();
         for _ in 0..500 {
             app.track_rec_tick();
@@ -265,17 +265,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(app.track_rec.is_none(), "{:?}", app.state.message);
-        assert_eq!(app.state.project.channels.len(), channels + 1, "{:?}", app.state.message);
-        let ch = app.state.project.channels.last().unwrap();
+        assert_eq!(app.state.session.project.channels.len(), channels + 1, "{:?}", app.state.message);
+        let ch = app.state.session.project.channels.last().unwrap();
         assert_eq!(ch.mixer_track, 1);
         let path = std::path::PathBuf::from(ch.sample_path.clone().unwrap());
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(path.parent().unwrap().ends_with("Recorded") && name.ends_with("_Bus 1.wav"), "{name}");
-        let clip = app.state.project.arrangement().unwrap().clips.last().unwrap().clone();
+        let clip = app.state.session.project.arrangement().unwrap().clips.last().unwrap().clone();
         assert_eq!(clip.position, 96);
-        assert!(app.state.history.entries().iter().any(|e| e.1 == crate::one_click::RECORDED));
+        assert!(app.state.session.history.entries().iter().any(|e| e.1 == crate::one_click::RECORDED));
         assert_eq!(app.arm_tracks(&[1], false), None);
-        assert!(!app.state.project.mixer.iter().any(|m| m.armed));
+        assert!(!app.state.session.project.mixer.iter().any(|m| m.armed));
         let _ = std::fs::remove_file(&path);
     }
 

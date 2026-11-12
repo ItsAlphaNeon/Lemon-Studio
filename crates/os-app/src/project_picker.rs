@@ -25,24 +25,24 @@ pub enum ProjCmd {
 
 /// The entries (spec §2 Content): Patterns, a column break, Channels.
 pub fn items(s: &State) -> Vec<PItem> {
-    let mut nums: Vec<u16> = s.project.patterns.iter().map(|p| p.number).collect();
+    let mut nums: Vec<u16> = s.session.project.patterns.iter().map(|p| p.number).collect();
     nums.sort_unstable();
     nums.dedup();
     let mut v = vec![PItem::head("Patterns")];
     v.extend(nums.into_iter().map(|n| {
-        PItem::new(crate::patterns::name_of(s, n), Cmd::Project(ProjCmd::Pattern(n))).mark(Mark::Radio(n == s.pattern()))
+        PItem::new(crate::patterns::name_of(&s.session, n), Cmd::Project(ProjCmd::Pattern(n))).mark(Mark::Radio(n == s.pattern()))
     }));
     v.push(PItem::sep());
     v.push(PItem::new("New pattern", Cmd::Project(ProjCmd::NewPattern)));
     v.push(PItem::col());
     v.push(PItem::head("Channels"));
     // Automation clip channels are left out: they are the playlist's clips, not instruments.
-    let rows: Vec<usize> = (0..s.project.channels.len()).filter(|&r| s.project.channels[r].kind != ChannelKind::Automation).collect();
+    let rows: Vec<usize> = (0..s.session.project.channels.len()).filter(|&r| s.session.project.channels[r].kind != ChannelKind::Automation).collect();
     if rows.is_empty() {
         v.push(PItem::new("(no channels)", Cmd::Nothing).off());
     }
     v.extend(rows.into_iter().map(|r| {
-        PItem::new(crate::rack::channel_name(s, r), Cmd::Project(ProjCmd::Channel(r))).mark(Mark::Radio(r == s.selected_channel))
+        PItem::new(crate::rack::channel_name(&s.session, r), Cmd::Project(ProjCmd::Channel(r))).mark(Mark::Radio(r == s.selected_channel))
     }));
     v
 }
@@ -75,7 +75,7 @@ impl App {
 pub fn run(app: &mut App, c: ProjCmd) -> Option<String> {
     match c {
         ProjCmd::Pattern(n) => app.state.set_pattern(n),
-        ProjCmd::Channel(r) if r < app.state.project.channels.len() => {
+        ProjCmd::Channel(r) if r < app.state.session.project.channels.len() => {
             app.state.selected_channel = r;
             app.state.rack.select_only(r);
             app.open_channel_window(r);
@@ -105,8 +105,8 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().patterns.push(Pattern { number: 3, name: Some("Drop".into()), ..Pattern::default() });
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().patterns.push(Pattern { number: 3, name: Some("Drop".into()), ..Pattern::default() });
         app.state.set_pattern(1);
         app
     }
@@ -126,9 +126,9 @@ mod tests {
         assert!(v[0].head && v.iter().any(|i| i.col));
         let marked: Vec<String> = v.iter().filter(|i| i.mark == Mark::Radio(true)).map(|i| i.label.to_string()).collect();
         assert_eq!(marked, ["Pattern 1", "Hat"]);
-        app.state.project.get_mut().channels[4].kind = ChannelKind::Automation;
+        app.state.session.project.get_mut().channels[4].kind = ChannelKind::Automation;
         assert!(!labels(&items(&app.state)).contains(&"Pluck".to_string()), "automation clip channels are left out");
-        app.state.project.get_mut().channels.clear();
+        app.state.session.project.get_mut().channels.clear();
         let v = items(&app.state);
         assert!(v.iter().any(|i| i.label == "(no channels)" && !i.enabled));
     }

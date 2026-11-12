@@ -69,8 +69,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     window_body(ui, r);
     let outer = r;
-    let arr = pl::arrangement_name(s);
-    let title = format!("Arranger - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
+    let arr = pl::arrangement_name(&s.session);
+    let title = format!("Arranger - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(&s.session, pl::source(s)));
     // The grid covers most of the window and is painted all over (rows and gaps): the frame skips it.
     let (fr, fc) = super::frame_rects(s, Win::Playlist, r);
     let cover = grid_rect(s, fr, fc);
@@ -154,7 +154,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let grid = grid_rect(s, r, client);
     debug_assert_eq!(grid, cover);
     let (grid_x, grid_y, grid_w) = (grid.x, grid.y, grid.w);
-    let has_markers = !pl::markers(s).is_empty();
+    let has_markers = !pl::markers(&s.session).is_empty();
     let lane_y = client.y + 42.0;
     let g = PGeom::new(s, grid);
     let (sx, sy) = s.playlist_scroll;
@@ -163,7 +163,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
     // Overview (horizontal scroll bar with a miniature of the clips) + ruler. The song extends 16 bars past
     // its last clip, at least 100 bars; 500 tracks.
-    let last = pl::clips(s).iter().map(|c| c.end() as f32 / bar_t).fold(0.0, f32::max);
+    let last = pl::clips(&s.session).iter().map(|c| c.end() as f32 / bar_t).fold(0.0, f32::max);
     let bars = (last.ceil() + 16.0).max(100.0);
     let (hbar, vbar) = bar_sizes();
     let over = Rect::new(grid_x, client.y + 1.0, grid_w, hbar);
@@ -206,13 +206,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     for &row in &visible {
         let (y, h) = (g.y_of(row), g.rows.height(row));
-        let c = if pl::track_on(s, row) { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
+        let c = if pl::track_on(&s.session, row) { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
         let c = if g.rows.strip(row) { c.mix(t.grid_gap, 0.5) } else { c };
         ui.c.fill_rect(Rect::new(grid_x, y, grid_w, h - gap_of(row)), c);
         // Under the gap line, which a theme's line strength may make see-through.
         ui.c.fill_rect(Rect::new(grid_x, y + h - gap_of(row), grid_w, gap_of(row)), t.grid);
     }
-    let start = pl::start_marker(s);
+    let start = pl::start_marker(&s.session);
     if let Some(p) = start {
         let x = g.x_of(p as f32).clamp(grid_x, grid.right());
         ui.c.fill_rect(Rect::span(grid_x, x, grid.y, grid.bottom()), t.s(0x000000).with_alpha(70));
@@ -233,8 +233,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // Clips reaching the painted part of the grid (a scrolled-in strip is a small part, see `App::playlist_scrolled`);
     // a clip draws inside its own rect.
     let gliding = s.motion.borrow().clips_gliding();
-    let count = pl::clips(s).len();
-    for (i, c) in pl::clips(s).iter().enumerate() {
+    let count = pl::clips(&s.session).len();
+    for (i, c) in pl::clips(&s.session).iter().enumerate() {
         let glide = if gliding { s.motion.borrow_mut().clip_glide(pl::glide_key(i, count)) } else { None };
         if let Some(at) = glide {
             clip_gliding(ui, s, &g, i, c, at);
@@ -252,7 +252,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // ui/performance-mode.md §3).
     if f.playing && f.song && s.playlist.perf_clip_progress {
         for (i, k) in crate::perform::progress(s, f.tick.max(0.0) as u32) {
-            let r = g.clip_rect(&pl::clips(s)[i]);
+            let r = g.clip_rect(&pl::clips(&s.session)[i]);
             ui.c.fill_rect(Rect::new(r.x, r.y, r.w * k, r.h), t.playhead.with_alpha(60));
             ui.c.stroke_rrect(r, 0.0, 1.0, t.playhead);
         }
@@ -306,7 +306,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
 /// The overview bar above `grid` (a miniature of the clips that is also the horizontal scroll bar, §1).
 pub fn overview_rect(s: &State, grid: Rect) -> Rect {
-    let lane_y = grid.y - if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
+    let lane_y = grid.y - if pl::markers(&s.session).is_empty() { 0.0 } else { MARKER_H };
     Rect::new(grid.x, lane_y - 41.0, grid.w, bar_sizes().0)
 }
 
@@ -346,7 +346,7 @@ pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
     ScrollParts {
         grid,
         ruler: ruler_rect(s, grid),
-        lane: (!pl::markers(s).is_empty()).then(|| Rect::new(grid.x, overview.y + 41.0, grid.w, MARKER_H)),
+        lane: (!pl::markers(&s.session).is_empty()).then(|| Rect::new(grid.x, overview.y + 41.0, grid.w, MARKER_H)),
         heads: Rect::new(grid.x - 110.0, grid.y, 98.0, grid.h),
         vbar: Rect::new(grid.right(), overview.y, 4.0 + bar_sizes().1, grid.bottom() - overview.y),
         overview,
@@ -357,7 +357,7 @@ pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
 fn grid_rect(s: &State, r: Rect, client: Rect) -> Rect {
     let grid_x = r.x + 162.0 + 98.0 + 12.0;
     let grid_w = (r.right() - grid_x - 4.0 - bar_sizes().1).max(1.0);
-    let grid_y = client.y + 42.0 + if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
+    let grid_y = client.y + 42.0 + if pl::markers(&s.session).is_empty() { 0.0 } else { MARKER_H };
     Rect::new(grid_x, grid_y, grid_w, (r.bottom() - grid_y).max(0.0))
 }
 
@@ -374,10 +374,10 @@ fn kind_icon(kind: PickKind) -> Icon {
 /// The icon of clip source `src` (of kind `kind`): its channel's Change icon... choice, else its kind's.
 fn source_icon(s: &State, src: ClipSource, kind: PickKind) -> Icon {
     let row = match src {
-        ClipSource::Channel(ch) => s.project.channels.iter().position(|c| c.index == ch),
+        ClipSource::Channel(ch) => s.session.project.channels.iter().position(|c| c.index == ch),
         ClipSource::Pattern(_) => None,
     };
-    row.and_then(|r| pl::window_icon(&s.project, r)).unwrap_or_else(|| kind_icon(kind))
+    row.and_then(|r| pl::window_icon(&s.session.project, r)).unwrap_or_else(|| kind_icon(kind))
 }
 
 /// Picker panel: kind tabs, then the list of clip sources of that kind (§1).
@@ -430,8 +430,8 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         // The source's colour, as its clips' titles take it (§2): an audio or automation clip's channel colour, a
         // pattern's own colour when it has one; an unused source a darker shade of it.
         let tint = match src {
-            ClipSource::Pattern(_) => pl::source_color(s, src),
-            ClipSource::Channel(_) => pl::clip_tint(s, src),
+            ClipSource::Pattern(_) => pl::source_color(&s.session, src),
+            ClipSource::Channel(_) => pl::clip_tint(&s.session, src),
         }
         .map(rgb);
         let (edge, face) = match tint {
@@ -462,10 +462,10 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.0, ui.t.a(0xa8e44a));
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
-        icons::draw(ui.c, source_icon(s, src, pl::source_kind(s, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
+        icons::draw(ui.c, source_icon(s, src, pl::source_kind(&s.session, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
         let nf = Font::new(14);
         let ty = title.cy() - ui.c.cap_mid(nf);
-        ui.c.text_clip(nf, row.x + 20.0, ty, row.w - 23.0, ic, &pl::source_name(s, src));
+        ui.c.text_clip(nf, row.x + 20.0, ty, row.w - 23.0, ic, &pl::source_name(&s.session, src));
         if src == cur {
             let ax = list.x - 1.0;
             let mark = if lemon { ui.t.accent } else { Color::rgb(0xe64363) };
@@ -528,19 +528,19 @@ pub fn pick_items(s: &State) -> Vec<ClipSource> {
             if v.is_empty() { vec![ClipSource::Pattern(1)] } else { v.into_iter().map(ClipSource::Pattern).collect() }
         }
         PickKind::Audio => s
-            .project
+            .session.project
             .channels
             .iter()
             .filter(|c| c.kind == os_model::ChannelKind::AudioClip)
             .map(|c| ClipSource::Channel(c.index))
             .collect(),
-        PickKind::Automation => s.project.automations.iter().map(|a| ClipSource::Channel(a.channel)).collect(),
+        PickKind::Automation => s.session.project.automations.iter().map(|a| ClipSource::Channel(a.channel)).collect(),
     }
 }
 
 fn pick_used(s: &State, src: ClipSource) -> bool {
     match src {
-        ClipSource::Pattern(n) => s.project.pattern(n).is_some_and(|p| !p.notes.is_empty()),
+        ClipSource::Pattern(n) => s.session.project.pattern(n).is_some_and(|p| !p.notes.is_empty()),
         _ => true,
     }
 }
@@ -553,29 +553,29 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
         return;
     }
     let t = ui.t;
-    match (pl::source_kind(s, src), src) {
+    match (pl::source_kind(&s.session, src), src) {
         (PickKind::Pattern, ClipSource::Pattern(n)) => {
-            let Some(p) = s.project.pattern(n) else { return };
-            let len = crate::piano::pattern_length(s, n).max(1) as f32;
+            let Some(p) = s.session.project.pattern(n) else { return };
+            let len = crate::piano::pattern_length(&s.session, n).max(1) as f32;
             let lo = p.notes.iter().map(|n| n.key).min().unwrap_or(0);
             let hi = p.notes.iter().map(|n| n.key).max().unwrap_or(0);
             let span = f32::from(hi - lo + 1).max(6.0);
             let c = if tall { cc(t, NOTE) } else { t.s(0x5a6268) };
             for note in &p.notes {
                 let x = r.x + note.position as f32 / len * r.w;
-                let w = (note.length.max(s.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
+                let w = (note.length.max(s.session.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
                 let y = r.bottom() - 2.0 - f32::from(note.key - lo + 1) / span * (r.h - 2.0);
                 ui.c.fill_rect(Rect::new(x, y, w.min(r.right() - x).max(0.0), 2.0), c);
             }
         }
         (PickKind::Audio, ClipSource::Channel(ch)) if tall => {
-            let Some(path) = s.project.channel(ch).and_then(|c| c.sample_path.clone()) else { return };
-            let Some(w) = s.playlist.wave(&path) else { return };
+            let Some(path) = s.session.project.channel(ch).and_then(|c| c.sample_path.clone()) else { return };
+            let Some(w) = s.session.samples.wave(&path) else { return };
             if w.peaks.is_empty() {
                 return;
             }
             // The whole sample: each pixel column spans its peaks' minimum to maximum.
-            let wave = pl::clip_tint(s, src).map(rgb).map_or(cc(t, WAVE), |c| offset(c, 80));
+            let wave = pl::clip_tint(&s.session, src).map(rgb).map_or(cc(t, WAVE), |c| offset(c, 80));
             let (mid, amp) = (r.cy(), r.h / 2.0 - 1.0);
             let n = r.w.floor().max(1.0) as usize;
             let per = w.peaks.len() as f32 / n as f32;
@@ -592,7 +592,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
             ui.c.fill_polygon(&top, wave);
         }
         (PickKind::Automation, ClipSource::Channel(ch)) if tall => {
-            let Some(a) = s.project.automation(ch) else { return };
+            let Some(a) = s.session.project.automation(ch) else { return };
             // Over its points' span.
             let Some(end) = a.points.last().map(|p| p.beat).filter(|&b| b > 0.0) else { return };
             let pts: Vec<(f32, f32)> = (0..=(r.w / 2.0).ceil() as usize)
@@ -615,7 +615,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
 
 /// Miniature of the arrangement inside the overview bar (§1).
 fn overview(ui: &mut Ui, s: &State, over: Rect, total_ticks: f32) {
-    let cs = pl::clips(s);
+    let cs = pl::clips(&s.session);
     let k = over.w / total_ticks.max(1.0);
     if !cs.is_empty() {
         let top = cs.iter().map(|c| c.track).min().unwrap_or(0);
@@ -623,14 +623,14 @@ fn overview(ui: &mut Ui, s: &State, over: Rect, total_ticks: f32) {
         let span = f32::from(bottom - top + 1).max(1.0);
         let row_h = ((over.h - 6.0) / span).clamp(1.0, 3.0);
         for c in cs {
-            let col = pl::source_color(s, c.source).map(rgb).unwrap_or(ui.t.clip).shade(0.2);
+            let col = pl::source_color(&s.session, c.source).map(rgb).unwrap_or(ui.t.clip).shade(0.2);
             let y = over.y + 3.0 + f32::from(c.track - top) / span * (over.h - 6.0);
             ui.c.fill_rect(Rect::new(over.x + c.position as f32 * k, y, (c.length as f32 * k).max(1.0), row_h), col.with_alpha(170));
         }
     }
     // A flag per time marker (§7a "Look"): a 5 x 5 px right triangle with its upright edge on the marker's place, in its
     // action's colour, the edge a darker shade.
-    for m in pl::markers(s) {
+    for m in pl::markers(&s.session) {
         let x = (over.x + m.position as f32 * k).round();
         let col = Color::rgb(match m.kind {
             TimeMarker::PLAIN | TimeMarker::LOOP | TimeMarker::SKIP => 0xffffa9,
@@ -661,7 +661,7 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
     }
     // Bars count from the Start marker (§7a): "1" on its bar; before it the ruler is darker and the bars have no
     // numbers.
-    let start = pl::start_marker(s);
+    let start = pl::start_marker(&s.session);
     let sb = start_bar(g, start);
     if let Some(p) = start {
         let x = g.x_of(p as f32).clamp(ruler.x, ruler.right());
@@ -709,7 +709,7 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     ui.c.push_clip(lane);
     // A tab per marker (§7a): flat left edge on its position, rounded top-right corner, slanted right edge; its action's
     // icon, then its name.
-    for m in pl::markers(s) {
+    for m in pl::markers(&s.session) {
         let x64 = g.x64(f64::from(m.position));
         let x = x64 as f32;
         let w = pl::marker_w(s, m);
@@ -854,7 +854,7 @@ fn clip_gliding(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, (left, ri
         at.scroll_x -= left;
         clip_paint(ui, s, &at, i, c);
     } else {
-        clip_paint(ui, s, &at, i, &pl::with_edges(s, g, c, left, right));
+        clip_paint(ui, s, &at, i, &pl::with_edges(&s.session, g, c, left, right));
     }
 }
 
@@ -868,7 +868,7 @@ fn ripples(ui: &mut Ui, s: &State, g: &PGeom) {
     let t = ui.t;
     let corner = if super::lemon(ui) { lk::r_btn(t) } else { 3.0 };
     for d in list {
-        if d.arrangement != s.project.current_arrangement {
+        if d.arrangement != s.session.project.current_arrangement {
             continue;
         }
         let c = &d.clip;
@@ -883,12 +883,12 @@ fn ripples(ui: &mut Ui, s: &State, g: &PGeom) {
         } else if c.muted {
             cc(t, MUTED_TITLE)
         } else {
-            match (pl::source_kind(s, c.source), pl::clip_tint(s, c.source).map(rgb)) {
+            match (pl::source_kind(&s.session, c.source), pl::clip_tint(&s.session, c.source).map(rgb)) {
                 (PickKind::Audio | PickKind::Automation, Some(tint)) => offset(tint, -17),
                 _ => cc(t, TITLE_TOP),
             }
         };
-        let top = if pl::track_on(s, c.track) { top } else { top.mix(t.grid, 0.5) };
+        let top = if pl::track_on(&s.session, c.track) { top } else { top.mix(t.grid, 0.5) };
         let col = top.mix(t.tx(0xffffff), 0.45);
         let r = base.outset(d.grow);
         let radius = (corner + d.grow).min(r.w / 2.0).min(r.h / 2.0);
@@ -910,24 +910,24 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         let col = if s.playlist.sel.contains(&i) {
             cc(t, SEL_TITLE)
         } else {
-            pl::clip_tint(s, c.source)
-                .or_else(|| pl::source_color(s, c.source))
-                .or_else(|| pl::track_info(s, c.track).and_then(|t| t.color))
+            pl::clip_tint(&s.session, c.source)
+                .or_else(|| pl::source_color(&s.session, c.source))
+                .or_else(|| pl::track_info(&s.session, c.track).and_then(|t| t.color))
                 .map_or(cc(t, TITLE_TOP), rgb)
         };
-        let col = if c.muted || !pl::track_on(s, c.track) { col.mix(t.grid, 0.6) } else { col };
+        let col = if c.muted || !pl::track_on(&s.session, c.track) { col.mix(t.grid, 0.6) } else { col };
         ui.c.fill_rrect(r, 1.5, col);
         flash(ui, s, g, c, r, 1.5);
         return;
     }
-    let kind = pl::source_kind(s, c.source);
+    let kind = pl::source_kind(&s.session, c.source);
     let selected = s.playlist.sel.contains(&i);
-    let track_on = pl::track_on(s, c.track);
+    let track_on = pl::track_on(&s.session, c.track);
     let dim = |col: Color| if track_on { col } else { col.mix(t.grid, 0.5) };
     // Body colour: the track's colour, else the source's (§2 "Body colour source").
-    let color = pl::track_info(s, c.track).and_then(|t| t.color).or_else(|| pl::source_color(s, c.source)).map(rgb);
+    let color = pl::track_info(&s.session, c.track).and_then(|t| t.color).or_else(|| pl::source_color(&s.session, c.source)).map(rgb);
     let darken = |c: Color| c.mix(ui.t.s(0x000000), 0.55);
-    let tint = pl::clip_tint(s, c.source).map(rgb);
+    let tint = pl::clip_tint(&s.session, c.source).map(rgb);
 
     // Title strip: (edge rows, highlight row, gradient top, gradient bottom, text).
     let (edge, high, top, bottom, text, body) = if selected {
@@ -1010,7 +1010,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         // Level with the icon (its middle is iy + 5).
         let nf = Font::new(12);
         let ty = iy + 5.0 - ui.c.cap_mid(nf);
-        ui.c.text_clip(nf, inner.x + 14.0, ty, inner.w - 16.0, ic, &pl::source_name(s, c.source));
+        ui.c.text_clip(nf, inner.x + 14.0, ty, inner.w - 16.0, ic, &pl::source_name(&s.session, c.source));
     }
     // Content.
     let content = if c.muted { dim(text).with_alpha(90) } else { dim(cc(t, NOTE)) };
@@ -1027,7 +1027,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 if !c.muted {
                     fades(ui, s, g, i, c, body_at, dim(wave));
                 }
-                if s.playlist.wave_wait {
+                if s.session.samples.wait {
                     loading(ui, s, body_at.r);
                 }
             }
@@ -1086,12 +1086,12 @@ struct Body {
 }
 
 fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body, col: Color) {
-    let Some(p) = s.project.pattern(n) else { return };
+    let Some(p) = s.session.project.pattern(n) else { return };
     if p.notes.is_empty() {
         return;
     }
     let br = body.r;
-    let (w0, wl) = pl::window(s, c);
+    let (w0, wl) = pl::window(&s.session, c);
     let (lo, hi) = p.notes.iter().fold((u16::MAX, 0u16), |(lo, hi), n| (lo.min(n.key), hi.max(n.key)));
     let span = f32::from(hi - lo + 1);
     let h = ((br.h - 4.0) / span).clamp(1.0, 3.0);
@@ -1126,11 +1126,11 @@ fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body
 /// setting, and how the clip dims its colours) each column takes the colour of the frames behind it.
 #[allow(clippy::too_many_arguments)]
 fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color, colours: Option<(&Waves, &dyn Fn(Color) -> Color)>) {
-    let Some(path) = s.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
-    let Some(w) = s.playlist.wave(&path) else { return };
+    let Some(path) = s.session.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
+    let Some(w) = s.session.samples.wave(&path) else { return };
     let Some(area) = ui.c.paint_bounds() else { return };
-    let (w0, _) = pl::window(s, c);
-    let ms_per_tick = pl::to_src(s, c.source, 1.0);
+    let (w0, _) = pl::window(&s.session, c);
+    let ms_per_tick = pl::to_src(&s.session, c.source, 1.0);
     let frames_per_ms = f64::from(w.rate) / 1000.0;
     let br = body.r;
     let mid = f64::from(br.y) + f64::from(br.h) / 2.0;
@@ -1150,7 +1150,7 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     // From the clip's start (the body starts a pixel in).
     let side = body.x - g.x64(f64::from(c.position));
     // The fades count the song's milliseconds (`pl::ms_px`), the window the sample's.
-    let fade_ms = pl::fade_ms_per_tick(s);
+    let fade_ms = pl::fade_ms_per_tick(&s.session);
     let total_ms = f64::from(c.length) * fade_ms;
     let (fin, fout, gain) = (c.stored_fade_in(), c.stored_fade_out(), f64::from(c.gain()));
     // Gain of the fades `d` px into the body (the engine's law, os_model::fade_curve).
@@ -1213,7 +1213,7 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     outline.extend(bottom.into_iter().rev());
     // Colorful waveforms (spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"): the same shape,
     // each device-pixel column in the colour of the frames it shows; silence keeps the plain colour.
-    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.playlist.tones(&path));
+    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.session.samples.tones(&path));
     match (colours, tones) {
         (Some((waves, dim)), Some(tones)) => {
             let frames = |d: f64| (w0 + d / ppt * ms_per_tick) * frames_per_ms;
@@ -1239,7 +1239,7 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     let white = ui.t.tx(0xffffff);
     let hovered = s.playlist.hover_clip == Some(i);
     let lit = |h: pl::Handle| hovered && s.playlist.hover_handle == Some(h);
-    let (fx_in, fx_out) = pl::fade_xs(s, g, c);
+    let (fx_in, fx_out) = pl::fade_xs(&s.session, g, c);
     // Points on the drawing grid, from the body's true edges (`Body`).
     let (bottom, h) = (f64::from(body.bottom()), f64::from(body.h));
     let curve = |ui: &mut Ui, xa: f64, xb: f64, t: f32, out: bool| {
@@ -1254,8 +1254,8 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
         ui.c.polyline(&pts, 1.4, white.with_alpha(230));
     };
     // This clip's crossfade with an earlier clip, and whether a later clip draws this clip's fade-out in its own.
-    let xf = pl::crossfade(s, g, i);
-    let later = os_model::crossfade::partner_after(&s.project, pl::clips(s), i).filter(|&b| pl::crossfade(s, g, b).is_some());
+    let xf = pl::crossfade(&s.session, g, i);
+    let later = os_model::crossfade::partner_after(&s.session.project, pl::clips(&s.session), i).filter(|&b| pl::crossfade(&s.session, g, b).is_some());
     if let Some((_, t)) = c.stored_fade_in() {
         if xf.is_none() {
             curve(ui, edges.x, f64::from(fx_in), t, false);
@@ -1276,7 +1276,7 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     // and out (spec: ui/animations.md §4.6).
     let area = body.outset(8.0);
     // Not lasting past a change in the list: the next clip would take this one's place, handles and all.
-    let shown = s.motion.borrow_mut().hover(crate::motion::key(("clip handles", i, crate::playlist::clips(s).len())), hovered, area);
+    let shown = s.motion.borrow_mut().hover(crate::motion::key(("clip handles", i, crate::playlist::clips(&s.session).len())), hovered, area);
     if shown <= 0.0 {
         return;
     }
@@ -1291,7 +1291,7 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
 /// An audio clip's handles (`fades`): `lit` says which is under the mouse.
 #[allow(clippy::too_many_arguments)]
 fn handles(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, body: Rect, xf: Option<pl::Xfade>, lit: &dyn Fn(pl::Handle) -> bool, white: Color) {
-    let (fx_in, fx_out) = pl::fade_xs(s, g, c);
+    let (fx_in, fx_out) = pl::fade_xs(&s.session, g, c);
     let col = |h: pl::Handle| if lit(h) { white } else { white.with_alpha(215) };
     let k = 6.0;
     ui.c.fill_polygon(&[(fx_in, body.y), (fx_in + k, body.y), (fx_in, body.y + k)], col(pl::Handle::FadeIn));
@@ -1314,8 +1314,8 @@ fn handles(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, body: Rect, xf: Option<p
         ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
     }
     for (h, on, xa, xb, out) in [
-        (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
-        (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(s, c, true)), fx_out, body.right(), true),
+        (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(&s.session, c, false)), body.x, fx_in, false),
+        (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(&s.session, c, true)), fx_out, body.right(), true),
     ] {
         let Some((_, t)) = on else { continue };
         if xb - xa <= 10.0 {
@@ -1361,7 +1361,7 @@ fn with_points(mut pts: Vec<(f32, f32)>, a: &os_model::Automation, (x0, x1): (f3
 
 #[allow(clippy::too_many_arguments)]
 fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: Body, bg: Color, col: Color) {
-    let Some(a) = s.project.automation(ch) else { return };
+    let Some(a) = s.session.project.automation(ch) else { return };
     if a.points.is_empty() {
         return;
     }
@@ -1377,7 +1377,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
         return;
     }
     // The beat under content x (measured from the clip's start, as `pl::beat_at`).
-    let (w0, _) = pl::window(s, c);
+    let (w0, _) = pl::window(&s.session, c);
     let clip_x = g.x64(f64::from(c.position));
     let beat = |x: f64| w0 + (x - clip_x) / f64::from(g.ppt) / f64::from(g.ppq);
     let point = |x: f64| (pl::snap(x), pl::value_y(body, a.value_at(beat(x)).unwrap_or(0.0)));
@@ -1388,7 +1388,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
         k += 1.0;
     }
     pts.push(point(x1));
-    let pts = with_points(pts, a, (x0 as f32, x1 as f32), |b| pl::point_x(s, g, c, b), |v| pl::value_y(body, v));
+    let pts = with_points(pts, a, (x0 as f32, x1 as f32), |b| pl::point_x(&s.session, g, c, b), |v| pl::value_y(body, v));
     let (x0, x1) = (pl::snap(x0), pl::snap(x1));
     let mut area = pts.clone();
     area.push((x1, body.bottom()));
@@ -1398,7 +1398,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
     // Points and tension handles while the mouse is over the clip (§8).
     if s.playlist.hover_clip == Some(i) {
         for (k, p) in a.points.iter().enumerate() {
-            let px = pl::point_x(s, g, c, p.beat);
+            let px = pl::point_x(&s.session, g, c, p.beat);
             if px < body.x - 4.0 || px > body.right() + 4.0 {
                 continue;
             }
@@ -1407,10 +1407,10 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
             ui.c.stroke_circle(px, py, 4.0, 1.5, col);
             if k > 0 {
                 let q = a.points[k - 1];
-                let x_a = pl::point_x(s, g, c, q.beat);
+                let x_a = pl::point_x(&s.session, g, c, q.beat);
                 if p.mode.has_tension() && p.mode != AutoMode::Hold && px - x_a > 16.0 {
                     let mid = (q.beat + p.beat) / 2.0;
-                    let hx = pl::point_x(s, g, c, mid);
+                    let hx = pl::point_x(&s.session, g, c, mid);
                     let hy = pl::value_y(body, a.value_at(mid).unwrap_or(0.0));
                     ui.c.stroke_circle(hx, hy, 2.5, 1.0, col.with_alpha(200));
                 }
@@ -1428,14 +1428,14 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     let t = ui.t;
     let (y, h) = (g.y_of(row), g.rows.height(row));
     let strip = g.rows.strip(row);
-    let leader = pl::group_track(s, row);
-    let lead = pl::is_group_track(s, row);
+    let leader = pl::group_track(&s.session, row);
+    let lead = pl::is_group_track(&s.session, row);
     let member = leader.is_some();
-    let next_member = pl::track_info(s, row + 1).is_some_and(|x| x.grouped);
+    let next_member = pl::track_info(&s.session, row + 1).is_some_and(|x| x.grouped);
     let joins_below = (lead || member) && next_member;
-    let on = pl::track_on(s, row);
+    let on = pl::track_on(&s.session, row);
     // A member takes its group track's colour, so the block reads as one.
-    let colored = pl::track_info(s, leader.unwrap_or(row)).and_then(|i| i.color).map(rgb);
+    let colored = pl::track_info(&s.session, leader.unwrap_or(row)).and_then(|i| i.color).map(rgb);
     let base = colored.unwrap_or(t.track_header);
     let base = if s.playlist.track == row { base.shade(0.1) } else { base };
     let base = if on { base } else { base.mix(t.grid_gap, 0.4) };
@@ -1487,12 +1487,12 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     }
     if !editing {
         let name_w = if short { hr.w - 26.0 } else { hr.w - 4.0 } - (name_x - hr.x - 2.0);
-        ui.c.text_clip(Font::new(16), name_x, hr.y + 1.0, name_w, text, &pl::track_name(s, row));
+        ui.c.text_clip(Font::new(16), name_x, hr.y + 1.0, name_w, text, &pl::track_name(&s.session, row));
     }
     if !short {
         ui.c.text(Font::new(14), hr.x + 14.0, led.y - 6.0, text.shade(-0.2), "...");
     }
-    let info = pl::track_info(s, row);
+    let info = pl::track_info(&s.session, row);
     if info.is_some_and(|i| i.clip_lock.is_some()) {
         // Locked to its clips (Lemon Studio's design, ui/playlist.md "Locking tracks to their clips"): a lock left of
         // the LED, and of the group arrow on a group's lead.

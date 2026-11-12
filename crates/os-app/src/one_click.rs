@@ -158,7 +158,7 @@ impl App {
     pub(crate) fn one_click_begin(&mut self, input: Input, stream: Option<InputStream>, editor: bool) -> Result<(), String> {
         let rate = stream.as_ref().map(|s| s.rate);
         let dir = crate::data_folder::folder(&self.state).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded");
-        let name = capture::file_name(&crate::backup::project_name(self.state.path.as_deref()), chrono::Local::now().naive_local());
+        let name = capture::file_name(&crate::backup::project_name(self.state.session.path.as_deref()), chrono::Local::now().naive_local());
         capture().start(input.first, input.stereo);
         let recorder = match Recorder::start(dir.join(name), rate.unwrap_or(48000)) {
             Ok(r) => r,
@@ -168,7 +168,7 @@ impl App {
             }
         };
         let start_tick = self.state.playlist.pos;
-        let p = &self.state.project;
+        let p = &self.state.session.project;
         let tempo = p.tick_tempo(self.state.tempo().max(1.0));
         let start_secs = os_engine::laws::tick_to_frame(f64::from(start_tick), p.ppq.max(1), tempo, 48000) as f64 / 48000.0;
         self.state.rec.audio = true;
@@ -237,10 +237,10 @@ impl App {
     /// on the take's mixer track: one undo step.
     fn place_take(&mut self, path: &std::path::Path, frames: u64, rate: u32, start: u32) -> String {
         let s = &mut self.state;
-        let p = &s.project;
+        let p = &s.session.project;
         let tempo = p.tick_tempo(s.tempo().max(1.0));
         let len = (frames as f64 / f64::from(rate) * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
-        let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
+        let track = crate::playlist::free_track(&s.session, 0, start, start + len.max(1));
         let text = path.to_string_lossy();
         match crate::playlist::add_audio_clip_as(s, &text, track, start, RECORDED) {
             Some(i) => {
@@ -289,7 +289,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         app
     }
 
@@ -313,7 +313,7 @@ mod tests {
     fn a_take_becomes_a_clip() {
         let _one = RECORDING.lock().unwrap_or_else(|e| e.into_inner());
         let mut app = app();
-        let channels = app.state.project.channels.len();
+        let channels = app.state.session.project.channels.len();
         app.one_click_begin(Input { device: "Test ASIO".into(), asio: true, first: 0, stereo: true }, None, false).unwrap();
         assert!(app.state.rec.audio && capture().on());
         app.transport.pretend_at(0.0, true);
@@ -329,15 +329,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(app.audio_rec.is_none() && !app.state.rec.audio && !capture().on(), "{:?}", app.state.message);
-        assert_eq!(app.state.project.channels.len(), channels + 1);
-        let ch = app.state.project.channels.last().unwrap();
+        assert_eq!(app.state.session.project.channels.len(), channels + 1);
+        let ch = app.state.session.project.channels.last().unwrap();
         let path = std::path::PathBuf::from(ch.sample_path.clone().unwrap());
         assert!(path.parent().unwrap().ends_with("Recorded"));
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("untitled_") && name.ends_with("_REC.wav"), "{name}");
-        let clip = app.state.project.arrangement().unwrap().clips.last().unwrap().clone();
+        let clip = app.state.session.project.arrangement().unwrap().clips.last().unwrap().clone();
         assert_eq!(clip.position, 0);
-        assert!(app.state.history.entries().iter().any(|e| e.1 == RECORDED));
+        assert!(app.state.session.history.entries().iter().any(|e| e.1 == RECORDED));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -353,8 +353,8 @@ mod tests {
         let Some(Popup { items, .. }) = app.state.playlist.popup.take() else { panic!("no input menu") };
         assert!(items.iter().any(|i| matches!(&i.cmd, Cmd::OneClick(_, true))));
         assert!(items.iter().all(|i| !matches!(&i.cmd, Cmd::OneClick(_, false))));
-        let channels = app.state.project.channels.len();
-        let clips = app.state.project.arrangement().map_or(0, |a| a.clips.len());
+        let channels = app.state.session.project.channels.len();
+        let clips = app.state.session.project.arrangement().map_or(0, |a| a.clips.len());
         app.one_click_begin(Input { device: "Test ASIO".into(), asio: true, first: 0, stereo: true }, None, true).unwrap();
         app.transport.pretend_at(0.0, true);
         app.state.rec.armed = true;
@@ -370,10 +370,10 @@ mod tests {
         }
         let msg = app.state.message.clone().unwrap_or_default();
         assert!(msg.starts_with("Recorded ") && msg.ends_with(" into the audio editor"), "{msg}");
-        assert_eq!(app.state.project.channels.len(), channels, "no channel");
-        assert_eq!(app.state.project.arrangement().map_or(0, |a| a.clips.len()), clips, "no clip");
-        let Some(FxReq::Create { track: 0, state: Some(st), .. }) = app.state.mixer.pending.last().cloned() else {
-            panic!("{:?}", app.state.mixer.pending)
+        assert_eq!(app.state.session.project.channels.len(), channels, "no channel");
+        assert_eq!(app.state.session.project.arrangement().map_or(0, |a| a.clips.len()), clips, "no clip");
+        let Some(FxReq::Create { track: 0, state: Some(st), .. }) = app.state.session.fx_requests.last().cloned() else {
+            panic!("{:?}", app.state.session.fx_requests)
         };
         let saved = tesla::state::from_plugin_state(&st).unwrap();
         assert!(saved.sample.frames() > 0);

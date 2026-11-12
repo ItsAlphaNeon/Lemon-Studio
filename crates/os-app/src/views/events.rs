@@ -60,7 +60,7 @@ fn title_of(e: &EventsUi) -> String {
 }
 
 fn ppq(s: &State) -> f64 {
-    f64::from(s.project.ppq.max(4))
+    f64::from(s.session.project.ppq.max(4))
 }
 
 /// The tick under x (unclamped).
@@ -163,7 +163,7 @@ fn paint_one(ui: &mut Ui, s: &State, e: &EventsUi, front: bool) {
     let r = ruler_of(e);
     let ppq = ppq(s);
     let bar = ppq * 4.0;
-    let len = f64::from(s.project.pattern_length(s.pattern()));
+    let len = f64::from(s.session.project.pattern_length(s.pattern()));
     let accent = if lemon { t.brand_lit(brand::MAIN) } else { Color::rgb(0x8fb35c) };
 
     // The ruler: bar numbers.

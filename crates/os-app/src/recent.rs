@@ -152,23 +152,23 @@ mod tests {
         assert_eq!(list()[0], std::path::absolute(&files[11]).unwrap());
         // The second row opens p10.
         app.menu_item(0, RECENT_PICK + 1);
-        assert_eq!(app.state.path.as_deref(), Some(files[10].as_path()));
+        assert_eq!(app.state.session.path.as_deref(), Some(files[10].as_path()));
         assert_eq!(label(&list()[0]), "p10.flp", "opened: on top");
         // Alt+3 opens the third: p9 now (p10, p11, p9 ...).
         app.key(&winit::keyboard::Key::Character("3".into()), false, true);
-        assert_eq!(app.state.path.as_deref().map(|p| label(p)).as_deref(), Some("p9.flp"));
+        assert_eq!(app.state.session.path.as_deref().map(|p| label(p)).as_deref(), Some("p9.flp"));
         // More ▸ lists the two after the tenth.
         let more: Vec<String> = more_items(&app.state).iter().map(|i| i.label.to_string()).collect();
         assert_eq!(more, ["p1.flp", "p0.flp"]);
         crate::playlist::run(&mut app, Cmd::OpenRecent(11));
-        assert_eq!(app.state.path.as_deref().map(|p| label(p)).as_deref(), Some("p0.flp"));
+        assert_eq!(app.state.session.path.as_deref().map(|p| label(p)).as_deref(), Some("p0.flp"));
         // A file that has gone: said, dropped, nothing opened.
         std::fs::remove_file(&files[5]).unwrap();
         let at = list().iter().position(|p| label(p) == "p5.flp").unwrap();
         app.menu_item(0, RECENT_PICK + at);
         assert_eq!(app.top_message().map(|m| m.0).as_deref(), Some("Project not found"));
         assert!(!list().iter().any(|p| label(p) == "p5.flp"));
-        assert_eq!(app.state.path.as_deref().map(|p| label(p)).as_deref(), Some("p0.flp"));
+        assert_eq!(app.state.session.path.as_deref().map(|p| label(p)).as_deref(), Some("p0.flp"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -478,13 +478,13 @@ fn time(ui: &mut Ui, c: &Ctx) {
     // spec: ui/time-display.md §2-3 (the bar's signature is the project's).
     ui.hit(tp, Action::Clock, s.clock.hint());
     ui.live(Live::Clock, tp);
-    let ppq = f64::from(s.project.ppq.max(1));
+    let ppq = f64::from(s.session.project.ppq.max(1));
     // A bar that makes no signature (3 steps per beat) counts its beats as quarters.
-    let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
-    let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo().max(1.0));
+    let sig = s.session.project.signature().unwrap_or((s.session.project.bar().0, 4));
+    let secs = f.tick / ppq * 60.0 / s.session.project.tick_tempo(s.tempo().max(1.0));
     let ticks96 = f.tick * 96.0 / ppq;
     // The bars count from the Start marker's bar (spec: ui/playlist.md §7a, ui/performance-mode.md §1).
-    let start = crate::playlist::start_marker(s).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);
+    let start = crate::playlist::start_marker(&s.session).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);
     let (bar, step, tick) = match start {
         Some(z) => s.clock.bars_from(ticks96, (f64::from(z) * 96.0 / ppq / 384.0).floor() * 384.0, sig),
         None => {
@@ -871,14 +871,14 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
     ui.c.fill_rrect(prev, if lemon { 4.0 } else { 2.0 }, t.button);
     icons::draw(ui.c, Icon::ArrowRight, prev.inset(2.0), t.glyph);
     let pb = a.span(855.0, 948.0, 47.0, 76.0);
-    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(s, s.pattern().max(1)));
+    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(&s.session, s.pattern().max(1)));
     if lemon {
         os_ui::kit::lemon::well(ui.c, t, pb, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
     } else {
         ui.c.fill_rrect(pb, 2.0, t.tempo_box.shade(if hov { 0.16 } else { 0.08 }));
     }
     let name = s
-        .project
+        .session.project
         .patterns
         .iter()
         .find(|p| p.number == s.pattern())

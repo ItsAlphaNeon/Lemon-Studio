@@ -131,17 +131,17 @@ impl App {
             }
             "params" => self.params_of(uint(params, "owner")? as u32),
             "history" => {
-                let h = &self.state.history;
+                let h = &self.state.session.history;
                 let steps: Vec<Value> = h.entries().into_iter().map(|(k, name)| json!({ "step": k, "name": name, "undone": h.undone(k) })).collect();
                 Ok(json!({ "at": h.at(), "steps": steps }))
             }
             "events" => {
                 let since = params.get("since").and_then(Value::as_u64).unwrap_or(0);
-                let (events, last) = self.state.control.events_since(since);
+                let (events, last) = self.state.session.control.events_since(since);
                 Ok(json!({ "events": events, "last": last }))
             }
             "proposals" => {
-                let list: Vec<Value> = self.state.control.proposals.iter().map(|p| json!({ "proposal": p.n, "name": p.name, "changes": p.changes })).collect();
+                let list: Vec<Value> = self.state.session.control.proposals.iter().map(|p| json!({ "proposal": p.n, "name": p.name, "changes": p.changes })).collect();
                 Ok(Value::Array(list))
             }
             "apply" => {
@@ -168,7 +168,7 @@ impl App {
             }
             "discard" => {
                 need(c, Level::Edit)?;
-                super::discard(&mut self.state, uint(params, "proposal")?).map_err(failed)?;
+                super::discard(&mut self.state.session, uint(params, "proposal")?).map_err(failed)?;
                 Ok(Value::Null)
             }
             "undo" | "redo" => {
@@ -176,8 +176,8 @@ impl App {
                 let s = &mut self.state;
                 let name = if m == "undo" { crate::history::undo(s) } else { crate::history::redo(s) };
                 if let Some(n) = &name {
-                    s.control.saw(&s.project, s.tempo());
-                    s.control.event(&by, if m == "undo" { "undo" } else { "redo" }, n.clone(), Vec::new());
+                    s.session.control.saw(&s.session.project, s.tempo());
+                    s.session.control.event(&by, if m == "undo" { "undo" } else { "redo" }, n.clone(), Vec::new());
                 }
                 Ok(json!({ "step": name }))
             }
@@ -185,7 +185,7 @@ impl App {
             // roadmap/control-plane.md "Safety model").
             "save" => {
                 need(c, Level::Edit)?;
-                let path = params.get("path").and_then(Value::as_str).map(std::path::PathBuf::from).or_else(|| self.state.path.clone());
+                let path = params.get("path").and_then(Value::as_str).map(std::path::PathBuf::from).or_else(|| self.state.session.path.clone());
                 let path = path.ok_or_else(|| bad("the project has no file yet: give `path`"))?;
                 if c.saves {
                     self.save_to(path.clone());
@@ -209,7 +209,7 @@ impl App {
 
     /// The parameters of the plugin playing channel or slot `owner`.
     fn params_of(&mut self, owner: u32) -> Result<Value, Fail> {
-        let key = super::command::owner_key(&self.state, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
+        let key = super::command::owner_key(&self.state.session, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
         let h = self.plugins.hosted.get(&key).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
         let p = h.plugin.lock().map_err(|_| failed("the plugin is busy"))?;
         let mut list = Vec::new();
@@ -220,7 +220,7 @@ impl App {
             }
             let v = p.param_value(info.id);
             if let Some(v) = v {
-                self.state.control.saw_param(owner, info.id, v);
+                self.state.session.control.saw_param(owner, info.id, v);
             }
             list.push(json!({
                 "id": info.id,
@@ -245,7 +245,7 @@ impl App {
     pub(crate) fn fill_params(&mut self, cmds: &mut [Command]) -> Result<(), String> {
         for c in cmds.iter_mut() {
             if let Command::SetParam { owner, param, from: from @ None, .. } = c {
-                let key = super::command::owner_key(&self.state, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
+                let key = super::command::owner_key(&self.state.session, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
                 let v = self
                     .plugins
                     .hosted
@@ -253,7 +253,7 @@ impl App {
                     .and_then(|h| h.plugin.lock().ok()?.param_value(*param))
                     .ok_or_else(|| format!("{owner} has no parameter {param}"))?;
                 *from = Some(v);
-                self.state.control.saw_param(*owner, *param, v);
+                self.state.session.control.saw_param(*owner, *param, v);
             }
         }
         Ok(())
@@ -274,7 +274,7 @@ impl App {
     /// "Proposals").
     pub(crate) fn ask_proposal(&mut self, n: u64) {
         use crate::dialog::{Answer, Kind, Msg, Then};
-        let Some(p) = self.state.control.proposals.iter().find(|p| p.n == n) else { return };
+        let Some(p) = self.state.session.control.proposals.iter().find(|p| p.n == n) else { return };
         let who = match &p.by {
             super::By::Client(c) => c.clone(),
             super::By::User => "You".into(),

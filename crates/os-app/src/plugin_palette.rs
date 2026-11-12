@@ -637,9 +637,9 @@ mod tests {
         let mut app = app();
         app.open_plugin_palette(Target::Gen(None), (0.0, 0.0), None);
         type_text(&mut app, "test synth");
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         app.key(&Key::Named(NamedKey::Enter), false, false);
-        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.session.project.channels.len(), n + 1);
         assert!(!is_open(&app.state));
 
         crate::mixer::select(&mut app.state, 1, false);
@@ -649,10 +649,10 @@ mod tests {
         app.key(&Key::Named(NamedKey::Enter), false, false);
         app.shift = false;
         assert!(is_open(&app.state), "Shift keeps it open");
-        assert_eq!(crate::mixer::slot_name(&app.state, 1, 3).as_deref(), Some("Space Reverb"));
+        assert_eq!(crate::mixer::slot_name(&app.state.session, 1, 3).as_deref(), Some("Space Reverb"));
         assert_eq!(app.state.palette.target, Target::Fx(None));
         app.key(&Key::Named(NamedKey::Enter), false, false);
-        assert_eq!(crate::mixer::slot_name(&app.state, 1, 0).as_deref(), Some("Space Reverb"), "the first empty slot");
+        assert_eq!(crate::mixer::slot_name(&app.state.session, 1, 0).as_deref(), Some("Space Reverb"), "the first empty slot");
         assert!(!is_open(&app.state));
     }
 

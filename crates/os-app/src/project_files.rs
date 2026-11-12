@@ -148,7 +148,7 @@ impl App {
     /// FILE ▸ Revert to last backup: the newest backup of the project, after the unsaved changes question as Open asks
     /// it; without one, a box says so.
     pub(crate) fn revert_to_backup(&mut self) {
-        let Some(path) = self.state.path.clone() else { return };
+        let Some(path) = self.state.session.path.clone() else { return };
         let name = crate::backup::project_name(Some(&path));
         let mut dirs: Vec<PathBuf> = crate::data_folder::backup_folder(&self.state, Some(&path)).into_iter().collect();
         dirs.extend(crate::backup::folder().filter(|d| !dirs.contains(d)));
@@ -164,16 +164,16 @@ impl App {
     /// The revert goes on: backup `b` is opened as the project, keeping the project's file and name (Save writes it
     /// over the project file); the project counts as changed. It is not a recent or last used project.
     pub(crate) fn revert_from(&mut self, b: PathBuf) {
-        let Some(own) = self.state.path.clone() else { return };
+        let Some(own) = self.state.session.path.clone() else { return };
         let (kept, recent) = (crate::templates::last_kept(), crate::recent::list());
         self.open(b.clone());
         crate::templates::restore_last(kept);
         crate::recent::restore(&recent);
         // Not opened: `open` said why.
-        if self.state.path.as_deref() != Some(b.as_path()) {
+        if self.state.session.path.as_deref() != Some(b.as_path()) {
             return;
         }
-        self.state.path = Some(own);
+        self.state.session.path = Some(own);
         // The project file still holds the last save: unsaved until saved again.
         self.saved.1 = f64::NAN;
         let n = b.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -189,7 +189,7 @@ impl App {
         };
         let start = root.join(USER_CATEGORY);
         let _ = std::fs::create_dir_all(&start);
-        let name = format!("{}.{EXT}", crate::backup::project_name(self.state.path.as_deref()));
+        let name = format!("{}.{EXT}", crate::backup::project_name(self.state.session.path.as_deref()));
         let dlg = FileDlg::new(Mode::Save, "Save as template", "template", Then::SaveTemplate).filter("Lemon Studio project", &[EXT]).start(Some(&start)).name(&name);
         self.file_dialog(dlg);
     }
@@ -232,7 +232,7 @@ impl App {
     /// folder goes.
     pub(crate) fn new_folder_dialog(&mut self) {
         use crate::filedlg::{FileDlg, Mode};
-        let Some(path) = self.state.path.clone() else { return };
+        let Some(path) = self.state.session.path.clone() else { return };
         let dlg = FileDlg::new(Mode::Folder, "Save to new project folder", "project folder", Then::NewProjectFolder).start(path.parent());
         self.file_dialog(dlg);
     }
@@ -242,7 +242,7 @@ impl App {
     /// project file already there is refused.
     pub(crate) fn new_folder_chosen(&mut self, root: PathBuf) {
         const TITLE: &str = "Save to new project folder";
-        let name = crate::backup::project_name(self.state.path.as_deref());
+        let name = crate::backup::project_name(self.state.session.path.as_deref());
         let dir = root.join(&name);
         let file = dir.join(format!("{name}.{EXT}"));
         if file.exists() {
@@ -254,7 +254,7 @@ impl App {
         if crate::prefs::check(&crate::prefs::COPY_USED_SAMPLES) {
             self.copy_used_samples_to(&dir);
         }
-        let df = self.state.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
+        let df = self.state.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
         if df.choice == DataFolder::NONE {
             df.choice = DataFolder::RELATIVE;
         }
@@ -266,7 +266,7 @@ impl App {
     /// The files the project refers to: its channels' samples (Lemon Sampler's own when hosted).
     fn used_files(&self) -> Vec<PathBuf> {
         let mut used = Vec::new();
-        for (row, ch) in self.state.project.channels.iter().enumerate() {
+        for (row, ch) in self.state.session.project.channels.iter().enumerate() {
             used.extend(self.plugins.sampler_path(row).filter(|p| !p.is_empty()).map(PathBuf::from));
             used.extend(ch.sample_path.as_deref().filter(|p| !p.is_empty()).map(|p| PathBuf::from(crate::plugins::resolve_sample(p))));
         }
@@ -278,7 +278,7 @@ impl App {
     /// data folder that holds other project files is not looked in.
     pub(crate) fn delete_unused_ask(&mut self) {
         const TITLE: &str = "Clean up";
-        let Some(path) = self.state.path.clone() else { return };
+        let Some(path) = self.state.session.path.clone() else { return };
         let dir = crate::data_folder::folder(&self.state).filter(|d| d.is_dir());
         if let Some(d) = dir.as_ref().filter(|d| shared_folder(d, &path)) {
             let text = spans(&["The data folder ", &d.display().to_string(), " holds other projects too: no files were deleted."]);
@@ -307,7 +307,7 @@ impl App {
         if *reply != Reply::Button(Answer::Yes) {
             return;
         }
-        let Some(path) = self.state.path.clone() else { return };
+        let Some(path) = self.state.session.path.clone() else { return };
         let failed = files.iter().filter(|f| std::fs::remove_file(f).is_err()).count();
         self.save_to(path);
         let done = files.len() - failed;
@@ -386,7 +386,7 @@ mod tests {
         app.save_to(song.clone());
         app.revert_to_backup();
         assert_eq!(app.state.tempo(), 123.0, "the backup is open");
-        assert_eq!(app.state.path.as_deref(), Some(song.as_path()), "under the project's own name");
+        assert_eq!(app.state.session.path.as_deref(), Some(song.as_path()), "under the project's own name");
         assert!(app.unsaved(), "the project file still holds the last save");
         crate::backup::TEST_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -410,7 +410,7 @@ mod tests {
         let song = work.join("song.lemon");
         app.save_to(song.clone());
         app.template_chosen(root.join("User").join("Slow.lemon"));
-        assert_eq!(app.state.path.as_deref(), Some(song.as_path()), "the project keeps its file");
+        assert_eq!(app.state.session.path.as_deref(), Some(song.as_path()), "the project keeps its file");
         assert!(root.join("User").join("Slow").join("Slow.lemon").is_file(), "{:?}", app.state.message);
         let rows = template_items(&app.state);
         assert_eq!(rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(), ["User", "Empty"]);
@@ -419,7 +419,7 @@ mod tests {
         app.state.set_tempo(140.0);
         app.save_to(song.clone());
         app.pick_new_template("User/Slow");
-        assert_eq!((app.state.tempo(), app.state.path.clone()), (97.0, None), "an untitled project from the template");
+        assert_eq!((app.state.tempo(), app.state.session.path.clone()), (97.0, None), "an untitled project from the template");
         assert!(!app.unsaved());
         // A template saved by the original (an FLP) is listed and opens too.
         let fl = root.join("User").join("Old");
@@ -428,9 +428,9 @@ mod tests {
         app.save_to(fl.join("Old.flp"));
         assert!(template_items(&app.state)[0].children.iter().any(|r| r.label.as_ref() == "Old"));
         app.pick_new_template("User/Old");
-        assert_eq!((app.state.tempo(), app.state.path.clone()), (88.0, None), "an untitled project from the FLP template");
+        assert_eq!((app.state.tempo(), app.state.session.path.clone()), (88.0, None), "an untitled project from the FLP template");
         app.pick_new_template("Empty");
-        assert_eq!((app.state.tempo(), app.state.path.clone()), (130.0, None), "the built-in project");
+        assert_eq!((app.state.tempo(), app.state.session.path.clone()), (130.0, None), "the built-in project");
         crate::templates::TEST_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&work);
@@ -445,7 +445,7 @@ mod tests {
         app.save_to(dir.join("Tune.flp"));
         app.new_folder_chosen(dir.clone());
         let file = dir.join("Tune").join("Tune.lemon");
-        assert_eq!(app.state.path.as_deref(), Some(file.as_path()), "{:?}", app.state.message);
+        assert_eq!(app.state.session.path.as_deref(), Some(file.as_path()), "{:?}", app.state.message);
         assert!(file.is_file());
         assert_eq!(crate::data_folder::folder(&app.state), Some(dir.join("Tune")));
         app.new_folder_chosen(dir.clone());
@@ -470,9 +470,9 @@ mod tests {
         // The project in the folder, with a channel on old.wav.
         let mut app = App::new(None);
         let song = dir.join("song.flp");
-        app.state.project.get_mut().data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: String::new() });
+        app.state.session.project.get_mut().data_folder = Some(DataFolder { choice: DataFolder::RELATIVE, folder: String::new() });
         app.save_to(song.clone());
-        if let Some(ch) = app.state.project.get_mut().channels.first_mut() {
+        if let Some(ch) = app.state.session.project.get_mut().channels.first_mut() {
             ch.sample_path = Some(dir.join("Samples").join("old.wav").to_string_lossy().into_owned());
         }
         let left = unused_files(&dir, &app.used_files());
@@ -508,7 +508,7 @@ mod tests {
             assert!(!active(&app.state, m, row(m, l)), "{l}: never saved");
         }
         assert!(active(&app.state, 0, row(0, "Save as template...")) && active(&app.state, 0, row(0, "New from template")));
-        app.state.path = Some(std::env::temp_dir().join("song.flp"));
+        app.state.session.path = Some(std::env::temp_dir().join("song.flp"));
         for (m, l) in rows {
             assert!(active(&app.state, m, row(m, l)), "{l}: saved");
         }

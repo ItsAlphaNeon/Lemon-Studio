@@ -282,7 +282,7 @@ pub fn open(s: &mut State) {
 /// preview starts again from them.
 pub fn preview(s: &mut State) {
     let Some(ch) = piano::channel(s) else { return };
-    let now = piano::notes(s).to_vec();
+    let now = piano::notes(&s.session).to_vec();
     let fresh = match &s.strum.session {
         Some(se) => se.pattern != s.pattern() || se.channel != ch || se.last != now,
         None => true,
@@ -292,9 +292,9 @@ pub fn preview(s: &mut State) {
         s.strum.session = Some(Session { pattern: s.pattern(), channel: ch, base: now, base_sel, last: Vec::new() });
     }
     restore(s);
-    let (set, ppq) = (s.strum.set, u32::from(s.project.ppq.max(4)));
+    let (set, ppq) = (s.strum.set, u32::from(s.session.project.ppq.max(4)));
     crate::piano_tools::apply_as(s, |_, ns| strum(ns, &set, ppq), None);
-    let last = piano::notes(s).to_vec();
+    let last = piano::notes(&s.session).to_vec();
     if let Some(se) = &mut s.strum.session {
         se.last = last;
     }
@@ -303,17 +303,17 @@ pub fn preview(s: &mut State) {
 /// The session's notes and selection back, when the notes are still what its last preview left.
 fn restore(s: &mut State) -> bool {
     let Some(se) = &s.strum.session else { return false };
-    if se.pattern != s.pattern() || piano::notes(s) != se.last.as_slice() && !se.last.is_empty() {
+    if se.pattern != s.pattern() || piano::notes(&s.session) != se.last.as_slice() && !se.last.is_empty() {
         return false;
     }
     let (base, sel, ch) = (se.base.clone(), se.base_sel.clone(), se.channel);
-    piano::pattern_mut(s).notes = base;
+    piano::pattern_mut(&mut s.session).notes = base;
     if sel.is_empty() {
         s.piano.clear_selection();
     } else {
         s.piano.select(s.pattern(), ch, sel);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 
@@ -325,7 +325,7 @@ pub fn accept(s: &mut State) -> String {
     }
     s.strum.session = None;
     s.strum.kept = s.strum.set;
-    let (set, ppq) = (s.strum.set, u32::from(s.project.ppq.max(4)));
+    let (set, ppq) = (s.strum.set, u32::from(s.session.project.ppq.max(4)));
     if crate::piano_tools::apply_as(s, |_, ns| strum(ns, &set, ppq), Some("Piano roll strum")) {
         "Piano roll: strummed".into()
     } else {

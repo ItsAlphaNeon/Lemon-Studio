@@ -88,7 +88,7 @@ impl App {
     pub(crate) fn preview_sample(&self, path: &str) {
         let mut p = crate::app::preview_project(path);
         p.tempo = Some(self.state.tempo());
-        crate::preview_track::route(&mut p, &self.state.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
+        crate::preview_track::route(&mut p, &self.state.session.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
         let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
         self.transport.preview_for(p, limit);
     }
@@ -509,7 +509,7 @@ impl App {
         let slot = || {
             let k = match hit.action {
                 Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k)) => k,
-                _ => (0..10).find(|&k| crate::mixer::slot_name(s, s.selected_mixer, k).is_none())?,
+                _ => (0..10).find(|&k| crate::mixer::slot_name(&s.session, s.selected_mixer, k).is_none())?,
             };
             let part = |a: Action| self.hits.iter().rev().find(|h| h.action == a).map(|h| h.rect);
             let name = part(Action::Mix(crate::mixer::MHit::SlotName(k)))?;
@@ -519,7 +519,7 @@ impl App {
         let r = match item {
             Item::Pattern(_) | Item::Sample(_) => track.or(rack),
             Item::Channel(c) => {
-                let clip = s.project.channels.get(*c).is_some_and(|ch| matches!(ch.kind, ChannelKind::AudioClip | ChannelKind::Automation));
+                let clip = s.session.project.channels.get(*c).is_some_and(|ch| matches!(ch.kind, ChannelKind::AudioClip | ChannelKind::Automation));
                 track.filter(|_| clip).or(rack)
             }
             Item::Generator(_) => grid.or(rack),
@@ -587,7 +587,7 @@ impl App {
         match item {
             Item::Pattern(n) => {
                 if let Some((track, tick)) = spot {
-                    pl::snapshot(s);
+                    pl::snapshot(&mut s.session);
                     s.playlist.source = Some(ClipSource::Pattern(n));
                     s.playlist.picker = PickKind::Pattern;
                     let i = pl::place(s, track, tick);
@@ -597,11 +597,11 @@ impl App {
                 }
             }
             Item::Channel(c) => {
-                let Some(ch) = s.project.channels.get(c) else { return };
+                let Some(ch) = s.session.project.channels.get(c) else { return };
                 let (kind, index) = (ch.kind, ch.index);
                 if let Some((track, tick)) = spot {
                     if matches!(kind, ChannelKind::AudioClip | ChannelKind::Automation) {
-                        pl::snapshot(s);
+                        pl::snapshot(&mut s.session);
                         s.playlist.source = Some(ClipSource::Channel(index));
                         s.playlist.picker = if kind == ChannelKind::AudioClip { PickKind::Audio } else { PickKind::Automation };
                         let i = pl::place(s, track, tick);
@@ -1077,7 +1077,7 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         }
         Item::Sample(_) => {
             let send = r("Send to selected channel", RowCmd::Send);
-            let sampler = s.project.channels.get(s.selected_channel).is_some_and(|c| c.kind.is_sampler());
+            let sampler = s.session.project.channels.get(s.selected_channel).is_some_and(|c| c.kind.is_sampler());
             items.extend([r("Preview", RowCmd::Preview), if sampler { send } else { send.off() }, r("Add to instrument rack", RowCmd::NewChannel)]);
         }
         Item::Generator(index) => items.push(PItem::new("Add to instrument rack", Cmd::Plugin(crate::plugin_menu::PlugCmd::Generator { index, after: None }))),
@@ -1189,7 +1189,7 @@ pub(crate) fn show_history(s: &mut crate::app::State) {
     s.browser_search.clear();
     let root = format!("{}:Current project", s.browser_tab);
     let folder = format!("{root}/History");
-    s.browser_sel = Some(format!("{folder}/{}", s.history.at()));
+    s.browser_sel = Some(format!("{folder}/{}", s.session.history.at()));
     s.browser_open.extend([root, folder]);
     reveal(s);
 }
@@ -1248,18 +1248,18 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
 /// is on (`rack::auto_name`). One history step (`history::load_sample`).
 fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<String> {
     let row = s.selected_channel;
-    if !s.project.channels.get(row)?.kind.is_sampler() {
+    if !s.session.project.channels.get(row)?.kind.is_sampler() {
         return Some("The selected channel is not a sampler".into());
     }
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
     let path = crate::data_folder::adopt(s, path);
-    crate::history::load_sample(s, row);
-    let ch = &mut s.project.get_mut().channels[row];
+    crate::history::load_sample(&mut s.session, row);
+    let ch = &mut s.session.project.get_mut().channels[row];
     crate::rack::auto_name(ch, std::path::Path::new(&path));
     crate::rack::read_tags(ch, std::path::Path::new(&path));
     ch.sample_path = Some(path.clone());
-    s.sample_loads.push((row, path));
-    s.piano.dirty = true;
+    s.session.sample_loads.push((row, path));
+    s.session.dirty = true;
     Some(format!("Sent {label} to the selected channel"))
 }
 
@@ -1342,7 +1342,7 @@ mod tests {
         assert_eq!(labels(&app), [crate::plugins::LEMON_SAMPLER]);
         assert!(app.state.browser_favs.is_empty());
         // "Add to plugin database (flag as favorite)" of a hosted plugin toggles the same star.
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         let row = 0;
         app.plugins.create(row, 0).expect("Lemon Sampler hosted");
         assert!(app.browser_cmd(BCmd::Star(row)).is_some_and(|m| m.contains("no longer")));

@@ -125,9 +125,9 @@ pub fn paint(ui: &mut Ui, s: &State) {
         };
         ui.c.text_clip(Font::new(12), x + 44.0, row + 2.0, r.right() - x - 74.0, t.glyph_dim, &caption);
         let tab_col = match b.target {
-            BoxTarget::Name(n) => Some(s.project.pattern(n).and_then(|p| p.color)),
-            BoxTarget::Rack(crate::rack::RBox::Channel(r)) => Some(s.project.channels.get(r).and_then(|c| c.color)),
-            BoxTarget::Rack(crate::rack::RBox::ColorSel) => Some(s.rack.sel.first().and_then(|&r| s.project.channels.get(r)).and_then(|c| c.color)),
+            BoxTarget::Name(n) => Some(s.session.project.pattern(n).and_then(|p| p.color)),
+            BoxTarget::Rack(crate::rack::RBox::Channel(r)) => Some(s.session.project.channels.get(r).and_then(|c| c.color)),
+            BoxTarget::Rack(crate::rack::RBox::ColorSel) => Some(s.rack.sel.first().and_then(|&r| s.session.project.channels.get(r)).and_then(|c| c.color)),
             _ => None,
         };
         if let Some(col) = tab_col {
@@ -189,7 +189,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
             Some(rows) if s.rack.purging => format!("{} unused audio clip channel(s) are about to be deleted.", rows.len()),
             Some(rows) if rows.len() == 1 => "The selected channel is about to be deleted.".to_string(),
             Some(rows) => format!("The {} selected channels are about to be deleted.", rows.len()),
-            None => format!("{} is about to be deleted.", pt::name_of(s, s.pattern().max(1))),
+            None => format!("{} is about to be deleted.", pt::name_of(&s.session, s.pattern().max(1))),
         };
         ui.c.text_clip(font, r.x + 12.0, r.y + 40.0, r.w - 24.0, t.glyph, &msg);
         // spec: ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)"

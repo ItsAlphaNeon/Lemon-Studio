@@ -259,24 +259,28 @@ fn op(c: &Command) -> &'static str {
 /// Applies `commands` in order, all or none; returns each one's result and the commands that undo them all (in the
 /// order to apply them). Records nothing.
 pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
-    s.control.settle(s.project.get_mut());
+    crate::follow::around(s, |s| run_commands(s, commands))
+}
+
+fn run_commands(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
+    s.session.control.settle(s.session.project.get_mut());
     let queues = Queues::of(s);
-    let known = s.control.known.clone();
+    let known = s.session.control.known.clone();
     let mut undo = Vec::with_capacity(commands.len());
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
-        match c.apply(s) {
+        match c.apply(&mut s.session) {
             Ok(done) => {
                 undo.push(done.undo);
                 results.push(done.result);
-                s.control.settle(s.project.get_mut());
+                s.session.control.settle(s.session.project.get_mut());
             }
             Err(e) => {
                 // Back to where the list started.
                 undo.reverse();
                 take_back(s, undo);
                 queues.put(s);
-                s.control.known = known;
+                s.session.control.known = known;
                 return Err(format!("command {i}: {e}"));
             }
         }
@@ -288,12 +292,17 @@ pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Val
 /// Applies undo commands (from `run`, in their order), returning the commands that redo them (in theirs). An undo
 /// that fails (the project was changed under it in a way it can't follow) stops there.
 pub fn take_back(s: &mut State, undo: Vec<Command>) -> Vec<Command> {
+    crate::follow::around(s, |s| take_back_in(&mut s.session, undo))
+}
+
+/// `take_back` in the session; the views follow.
+pub(crate) fn take_back_in(s: &mut crate::session::Session, undo: Vec<Command>) -> Vec<Command> {
     let mut redo = Vec::with_capacity(undo.len());
     for c in undo {
         match c.apply(s) {
             Ok(d) => redo.push(d.undo),
             Err(e) => {
-                s.message = Some(format!("Undo: {e}"));
+                s.touched.views.push(crate::session::View::Message(format!("Undo: {e}")));
                 break;
             }
         }
@@ -316,10 +325,10 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
         By::User => step.clone().into(),
         By::Client(n) => format!("{n}: {}", lower(&step)).into(),
     };
-    crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
-    crate::history::done_with(s);
-    s.control.saw(&s.project, s.tempo());
-    s.control.event(by, "apply", step, ops);
+    crate::history::record_named(&mut s.session, label, crate::history::Snap::Commands(undo));
+    crate::history::done_with(&mut s.session);
+    s.session.control.saw(&s.session.project, s.tempo());
+    s.session.control.event(by, "apply", step, ops);
     Ok(results)
 }
 
@@ -327,15 +336,15 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
 /// when nothing changed). The interface's edits thus have the commands' undo: what was taken is put back by
 /// `Command::Put`, as a command's own undo is.
 pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
-    s.link_moves.clear();
+    s.session.link_moves.clear();
     // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
     // its region may name other things (tracks renumbered by a delete).
-    crate::history::settle(s);
-    let before = command::Taken::of(s, region);
+    crate::history::settle(&mut s.session);
+    let before = command::Taken::of(&s.session, region);
     let r = f(s);
     if let Some(before) = before {
-        if command::Taken::of(s, region).as_ref() != Some(&before) {
-            record_edit(s, name, before);
+        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
+            record_edit(&mut s.session, name, before);
         }
     }
     r
@@ -354,19 +363,19 @@ pub fn knob_edit<R>(s: &mut State, name: &'static str, region: command::Region, 
 /// first change records the step holding `region` as it was, the others go into it. `knob`: a knob-like control, no
 /// step while Undo knob tweaks is off.
 pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, run: crate::history::Run, knob: bool, f: impl FnOnce(&mut State) -> R) -> R {
-    if (knob && !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) || s.history.joins(run) {
+    if (knob && !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) || s.session.history.joins(run) {
         return f(s);
     }
-    s.link_moves.clear();
+    s.session.link_moves.clear();
     // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
     // its region may name other things (tracks renumbered by a delete).
-    crate::history::settle(s);
-    let before = command::Taken::of(s, region);
+    crate::history::settle(&mut s.session);
+    let before = command::Taken::of(&s.session, region);
     let r = f(s);
     if let Some(before) = before {
-        if command::Taken::of(s, region).as_ref() != Some(&before) {
-            record_edit(s, name, before);
-            s.history.set_run(run);
+        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
+            record_edit(&mut s.session, name, before);
+            s.session.history.set_run(run);
         }
     }
     r
@@ -374,7 +383,7 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
 
 /// Records an interface edit's step. A step of the same press that changed nothing goes first (a text box's playlist
 /// step when the box named a mixer track), as the press's release would have dropped it.
-fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
+fn record_edit(s: &mut crate::session::Session, name: &'static str, before: command::Taken) {
     let mut undo = vec![Command::Put(Box::new(before))];
     // The remote control links the edit moved with what they drive (`remote::follow`) go back with it.
     let links: Vec<_> = std::mem::take(&mut s.link_moves).into_iter().map(|(from, to)| (to, from)).collect();
@@ -387,14 +396,14 @@ fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
 
 /// `edit` for an edit that needs the app (a mixer menu command hosting or dropping plugins).
 pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
-    app.state.link_moves.clear();
-    crate::history::settle(&mut app.state);
-    let before = command::Taken::of(&app.state, region);
+    app.state.session.link_moves.clear();
+    crate::history::settle(&mut app.state.session);
+    let before = command::Taken::of(&app.state.session, region);
     let r = f(app);
     let s = &mut app.state;
     if let Some(before) = before {
-        if command::Taken::of(s, region).as_ref() != Some(&before) {
-            record_edit(s, name, before);
+        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
+            record_edit(&mut s.session, name, before);
         }
     }
     r
@@ -404,7 +413,7 @@ pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: comman
 /// tweaks is off. `run`: values the plugin sent outside a gesture (no begin and end of the edit), which join the step
 /// of the plugin's values just before them, as a knob's wheel notches do; a parameter not in that step yet joins it
 /// with its value before. The step comes from no press of the app's, so no release looks at it.
-pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
+pub fn param_edit(s: &mut crate::session::Session, owner: u32, before: &[(u32, f64)], run: bool) {
     s.plugin_edited = true;
     if !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
         return;
@@ -436,24 +445,24 @@ pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
 pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, to: f64) {
     let Some(param) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
-    if command::key_owner(s, key) == Some(0) {
-        s.control.settle(s.project.get_mut());
+    if command::key_owner(&s.session, key) == Some(0) {
+        s.session.control.settle(s.session.project.get_mut());
     }
-    let Some(owner) = command::key_owner(s, key) else { return };
+    let Some(owner) = command::key_owner(&s.session, key) else { return };
     // Known for the undo's other side (`Command::apply`).
-    s.control.saw_param(owner, param, to);
-    s.plugin_edited |= before.is_some_and(|v| v != to);
+    s.session.control.saw_param(owner, param, to);
+    s.session.plugin_edited |= before.is_some_and(|v| v != to);
     let Some(v) = before.filter(|&v| v != to && crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) else { return };
     let put = Command::Put(Box::new(command::Taken::Param(owner, param, v)));
-    crate::history::record(s, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));
-    crate::history::done_with(s);
+    crate::history::record(&mut s.session, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));
+    crate::history::done_with(&mut s.session);
 }
 
 /// Plugin instance `key` took a whole new state at the user's request (a preset from its window's Presets box, ◀ ▶ or
 /// window menu, a preset file dropped on it): one step, `name`, that puts `before` back (the state, the preset shown
 /// and its channel's or slot's name), keyed by the owner's id so it follows moves. The step comes from no change the
 /// release could judge.
-pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command::PluginSide) {
+pub fn state_edit(s: &mut crate::session::Session, key: usize, name: &'static str, before: command::PluginSide) {
     if command::key_owner(s, key) == Some(0) {
         s.control.settle(s.project.get_mut());
     }
@@ -466,18 +475,18 @@ pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command
 /// that joins the newest step of run `run` (`History::joins`) records none, as that step holds the region from before
 /// the run.
 pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, run: crate::history::Run, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
-    if app.state.history.joins(run) {
+    if app.state.session.history.joins(run) {
         return f(app);
     }
-    app.state.link_moves.clear();
-    crate::history::settle(&mut app.state);
-    let before = command::Taken::of(&app.state, region);
+    app.state.session.link_moves.clear();
+    crate::history::settle(&mut app.state.session);
+    let before = command::Taken::of(&app.state.session, region);
     let r = f(app);
     let s = &mut app.state;
     if let Some(before) = before {
-        if command::Taken::of(s, region).as_ref() != Some(&before) {
-            record_edit(s, name, before);
-            s.history.set_run(run);
+        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
+            record_edit(&mut s.session, name, before);
+            s.session.history.set_run(run);
         }
     }
     r
@@ -485,12 +494,12 @@ pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: comman
 
 /// A press that starts an edit of `region` (a fader drag): the step named `name` is recorded now, holding the region
 /// as it is, and goes again at the release when the drag changed nothing (`history::settle`).
-pub fn edit_press(s: &mut State, name: &'static str, region: command::Region) {
+pub fn edit_press(s: &mut crate::session::Session, name: &'static str, region: command::Region) {
     edit_press_all(s, name, [region]);
 }
 
 /// `edit_press` for an edit of several regions (a drag on the fader of a selected track moves them all): one step.
-pub fn edit_press_all(s: &mut State, name: &'static str, regions: impl IntoIterator<Item = command::Region>) {
+pub fn edit_press_all(s: &mut crate::session::Session, name: &'static str, regions: impl IntoIterator<Item = command::Region>) {
     let before: Vec<Command> = regions.into_iter().filter_map(|r| command::Taken::of(s, r)).map(|t| Command::Put(Box::new(t))).collect();
     if !before.is_empty() {
         crate::history::record(s, name, crate::history::Snap::Commands(before));
@@ -529,13 +538,13 @@ struct Queues {
 impl Queues {
     fn of(s: &State) -> Queues {
         Queues {
-            host: s.control.host.len(),
-            params: s.control.params.len(),
-            states: s.control.states.len(),
-            sample_loads: s.sample_loads.len(),
-            fx: s.mixer.pending.len(),
-            dirty: s.piano.dirty,
-            written: s.project.written_at(),
+            host: s.session.control.host.len(),
+            params: s.session.control.params.len(),
+            states: s.session.control.states.len(),
+            sample_loads: s.session.sample_loads.len(),
+            fx: s.session.fx_requests.len(),
+            dirty: s.session.dirty,
+            written: s.session.project.written_at(),
             message: s.message.clone(),
             hosted_rows: s.hosted_rows.clone(),
             selected_channel: s.selected_channel,
@@ -550,18 +559,18 @@ impl Queues {
     }
 
     fn put(self, s: &mut State) {
-        s.control.host.truncate(self.host);
-        s.control.params.truncate(self.params);
-        s.control.states.truncate(self.states);
-        s.sample_loads.truncate(self.sample_loads);
-        s.mixer.pending.truncate(self.fx);
+        s.session.control.host.truncate(self.host);
+        s.session.control.params.truncate(self.params);
+        s.session.control.states.truncate(self.states);
+        s.session.sample_loads.truncate(self.sample_loads);
+        s.session.fx_requests.truncate(self.fx);
         s.message = self.message;
         s.hosted_rows = self.hosted_rows;
         (s.selected_channel, s.rack.sel, s.selected_mixer, s.mixer.sel) = (self.selected_channel, self.rack_sel, self.selected_mixer, self.mixer_sel);
         (s.z, s.plugin_channel, s.playlist.sel) = (self.windows, self.plugin_channel, self.clips);
         s.piano = self.piano;
-        s.piano.dirty = self.dirty;
-        s.project.rewind_written(self.written);
+        s.session.dirty = self.dirty;
+        s.session.project.rewind_written(self.written);
     }
 }
 
@@ -569,20 +578,20 @@ impl Queues {
 /// changes; an error when the list can't be applied.
 pub fn dry_run(s: &mut State, commands: Vec<Command>) -> Result<Vec<query::Change>, String> {
     let queues = Queues::of(s);
-    let known = s.control.known.clone();
+    let known = s.session.control.known.clone();
     let before = query::project(s);
     let (_, undo) = run(s, commands)?;
     let after = query::project(s);
     take_back(s, undo);
     queues.put(s);
-    s.control.known = known;
+    s.session.control.known = known;
     Ok(query::changes(&before, &after))
 }
 
 /// A proposal: `commands` checked by a dry run and kept for `accept` or `discard`. Returns its number and changes.
 pub fn propose(s: &mut State, by: &By, name: &str, commands: Vec<Command>) -> Result<(u64, Vec<query::Change>), String> {
     let changes = dry_run(s, commands.clone())?;
-    let c = &mut s.control;
+    let c = &mut s.session.control;
     c.proposal_seq += 1;
     let n = c.proposal_seq;
     c.proposals.push(Proposal { n, by: by.clone(), name: name.to_string(), commands, changes: changes.clone() });
@@ -593,23 +602,23 @@ pub fn propose(s: &mut State, by: &By, name: &str, commands: Vec<Command>) -> Re
 
 /// Accepts proposal `n`: applied as one step named after it and its client.
 pub fn accept(s: &mut State, n: u64) -> Result<Vec<serde_json::Value>, String> {
-    let i = s.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
-    let p = s.control.proposals.remove(i);
+    let i = s.session.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
+    let p = s.session.control.proposals.remove(i);
     match apply(s, &p.by, Some(&p.name), p.commands.clone()) {
         Ok(r) => {
-            s.control.event(&p.by, "accepted", p.name, Vec::new());
+            s.session.control.event(&p.by, "accepted", p.name, Vec::new());
             Ok(r)
         }
         // The project changed since it was proposed: it waits on, for the client to discard or the user to see why.
         Err(e) => {
-            s.control.proposals.insert(i, p);
+            s.session.control.proposals.insert(i, p);
             Err(e)
         }
     }
 }
 
 /// Discards proposal `n`.
-pub fn discard(s: &mut State, n: u64) -> Result<(), String> {
+pub fn discard(s: &mut crate::session::Session, n: u64) -> Result<(), String> {
     let i = s.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
     let p = s.control.proposals.remove(i);
     s.control.event(&p.by, "discarded", p.name, Vec::new());
