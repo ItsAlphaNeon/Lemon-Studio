@@ -84,11 +84,11 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
 ## 🚧 Song arrangement
 
 - Not yet: a clip properties window, per-clip pitch, pan and reverse, chop and merge, Make unique for automation
-  clips, fade and gain right-click menus, per-track height. The playlist's bars, ruler and Bar snap are
-  always 4 beats, whatever the time signature or time signature markers say. Consolidate and Export all playlist tracks
-  render without hosted instruments and effects, so plugin channels come out silent (Consolidate still mutes the source
-  clips)
+  clips, fade and gain right-click menus, per-track height. Consolidate and Export all playlist tracks render without
+  hosted instruments and effects, so plugin channels come out silent (Consolidate still mutes the source clips)
 - Playlist with pattern, audio and automation clips
+- The playlist's bars, ruler and Bar snap follow the project's time signature; a time signature marker starts bars of
+  its own length from where it sits
 - Clips of one track that lie over each other show a stack of edges above the top one, as the piano roll's notes
   (Lemon Studio's own)
 - Tools as FL's: the wheel with the right button held picks the next tool (also in the piano roll); the Select tool's
