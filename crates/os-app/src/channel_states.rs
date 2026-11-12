@@ -95,14 +95,14 @@ pub fn state_bytes(app: &mut App, row: usize) -> Result<Vec<u8>, String> {
     // As a project save does: the built-in plugins' and the hosted plugins' states into a copy of the model.
     app.store_builtin_states();
     let mut proj = app.state.session.project.clone();
-    crate::project_plugins::store_hosted(&mut proj, &app.plugins);
+    crate::project_plugins::store_hosted(&mut proj, &app.state.session.plugins);
     let mut ch = proj.channels.swap_remove(row);
     if ch.kind.is_sampler() {
-        let lemon = app.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
-        if let Some(st) = app.plugins.state(row).filter(|_| lemon) {
+        let lemon = app.state.session.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
+        if let Some(st) = app.state.session.plugins.state(row).filter(|_| lemon) {
             crate::plugins::store_sampler(&mut ch, &st);
         }
-        if let Some(p) = app.plugins.sampler_path(row).filter(|p| !p.is_empty()) {
+        if let Some(p) = app.state.session.plugins.sampler_path(row).filter(|p| !p.is_empty()) {
             if !ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
                 ch.sample_path = Some(p);
             }

@@ -536,32 +536,7 @@ impl crate::app::App {
     /// Every MIDI Out channel has its instrument, with the channel's settings and levels; rows that are no longer MIDI
     /// Out channels lose theirs. Runs every tick.
     pub(crate) fn sync_midi_outs(&mut self) {
-        let rows: Vec<(usize, Live)> = self.state.session.project.channels.iter().enumerate().filter(|(_, c)| is_midi_out(c)).map(|(r, c)| (r, Live::of(c))).collect();
-        let outs = &mut self.plugins.midi_outs;
-        if rows.is_empty() && outs.is_empty() {
-            return;
-        }
-        let before = outs.len();
-        outs.retain(|r, _| rows.iter().any(|(x, _)| x == r));
-        let mut changed = outs.len() != before;
-        for (row, live) in rows {
-            match outs.get(&row) {
-                Some(i) => {
-                    if let Ok(mut i) = i.lock() {
-                        if i.live != live {
-                            i.live = live;
-                        }
-                    }
-                }
-                None => {
-                    outs.insert(row, Arc::new(std::sync::Mutex::new(MidiOutInstrument::new(live, queue().clone()))));
-                    changed = true;
-                }
-            }
-        }
-        if changed {
-            self.transport.set_instruments(self.plugins.instruments());
-        }
+        self.host(sync_midi_outs);
     }
 
     /// ADD ▸ MIDI Out (spec §6.2): a MIDI Out channel on the master track, its window open. One undo step, "Add
@@ -597,13 +572,13 @@ impl crate::app::App {
         }
         crate::control::edit_app(self, PREP_LABEL, crate::control::command::Region::Project, |app| {
             for &row in &rows {
-                app.plugins.keep(row);
-                app.plugins.drop_key(row);
+                app.state.session.plugins.keep(row);
+                app.state.session.plugins.drop_key(row);
             }
-            app.state.hosted_rows.retain(|r| !rows.contains(r));
-            app.sampler_failed.retain(|r| !rows.contains(r));
-            app.native_failed.retain(|r| !rows.contains(r));
-            app.wrap_failed.retain(|r| !rows.contains(r));
+            app.state.session.hosted_rows.retain(|r| !rows.contains(r));
+            app.state.session.plugins.sampler_failed.retain(|r| !rows.contains(r));
+            app.state.session.plugins.native_failed.retain(|r| !rows.contains(r));
+            app.state.session.plugins.wrap_failed.retain(|r| !rows.contains(r));
             let s = &mut app.state;
             let groups = cut_groups(&rows.iter().map(|&r| s.session.project.channels[r].misc.cut).collect::<Vec<_>>());
             for (i, &row) in rows.iter().enumerate() {
@@ -616,11 +591,42 @@ impl crate::app::App {
             s.session.control.settle(s.session.project.get_mut());
             s.session.dirty = true;
             app.sync_midi_outs();
-            app.transport.set_instruments(app.plugins.instruments());
+            app.transport.set_instruments(app.state.session.plugins.instruments());
             app.open_channel_window(rows[0]);
         });
         let n = rows.len();
         format!("Set up for MIDI export: {n} channel{} now play{} Lemon MIDI Out", if n == 1 { "" } else { "s" }, if n == 1 { "s" } else { "" })
+    }
+}
+
+/// Every MIDI Out channel has its instrument, with the channel's settings and levels; rows that are no longer MIDI
+/// Out channels lose theirs. Runs every tick.
+pub(crate) fn sync_midi_outs(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    let rows: Vec<(usize, Live)> = s.project.channels.iter().enumerate().filter(|(_, c)| is_midi_out(c)).map(|(r, c)| (r, Live::of(c))).collect();
+    let outs = &mut s.plugins.midi_outs;
+    if rows.is_empty() && outs.is_empty() {
+        return;
+    }
+    let before = outs.len();
+    outs.retain(|r, _| rows.iter().any(|(x, _)| x == r));
+    let mut changed = outs.len() != before;
+    for (row, live) in rows {
+        match outs.get(&row) {
+            Some(i) => {
+                if let Ok(mut i) = i.lock() {
+                    if i.live != live {
+                        i.live = live;
+                    }
+                }
+            }
+            None => {
+                outs.insert(row, Arc::new(std::sync::Mutex::new(MidiOutInstrument::new(live, queue().clone()))));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        transport.set_instruments(s.plugins.instruments());
     }
 }
 
@@ -749,8 +755,8 @@ mod tests {
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
-        a.plugins = crate::plugins::Plugins::default();
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins = crate::plugins::Plugins::default();
+        a.state.session.plugins.available = crate::plugins::builtin();
         a
     }
 
@@ -781,8 +787,8 @@ mod tests {
         assert_eq!(row_settings(&a.state.session.project, row), Some(want));
         // Its instrument follows the settings.
         a.sync_midi_outs();
-        assert_eq!(a.plugins.midi_outs.get(&row).map(|i| i.lock().unwrap().live.settings), Some(want));
-        assert!(a.plugins.instruments().iter().any(|(r, _)| *r == row));
+        assert_eq!(a.state.session.plugins.midi_outs.get(&row).map(|i| i.lock().unwrap().live.settings), Some(want));
+        assert!(a.state.session.plugins.instruments().iter().any(|(r, _)| *r == row));
         let state = a.state.session.project.channels[row].plugin_state.clone().unwrap();
         assert_eq!(state.len(), 967);
 
@@ -794,11 +800,11 @@ mod tests {
 
         // Reopened: played again, not looked for as an installed plugin; saved again unchanged.
         let mut b = App::new(None);
-        b.plugins.available = crate::plugins::builtin();
+        b.state.session.plugins.available = crate::plugins::builtin();
         b.open(path.clone());
         b.sync_native();
         b.sync_midi_outs();
-        assert!(b.plugins.midi_outs.contains_key(&row) && !b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert!(b.state.session.plugins.midi_outs.contains_key(&row) && !b.state.session.hosted_rows.contains(&row), "{:?}", b.state.message);
         assert_eq!(row_settings(&b.state.session.project, row), Some(want));
         b.save_to(path.clone());
         let again = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
@@ -835,7 +841,7 @@ mod tests {
         for _ in 0..4 {
             a.plugin_tick();
         }
-        assert!(a.state.hosted_rows.contains(&0) && a.state.hosted_rows.contains(&trio), "{:?}", a.state.hosted_rows);
+        assert!(a.state.session.hosted_rows.contains(&0) && a.state.session.hosted_rows.contains(&trio), "{:?}", a.state.session.hosted_rows);
         let before = a.state.session.project.channels.clone();
 
         a.ask_midi_export();
@@ -855,8 +861,8 @@ mod tests {
         let groups: Vec<u32> = p.channels[..=trio].iter().map(|c| c.misc.cut).collect();
         assert_eq!(groups, vec![1, 4, 2, 3, 5, 6]);
         assert_eq!(p.channels[auto], before[auto]);
-        assert!(!a.state.hosted_rows.iter().any(|&r| r <= trio), "the instruments went");
-        assert_eq!(a.plugins.midi_outs.len(), 6);
+        assert!(!a.state.session.hosted_rows.iter().any(|&r| r <= trio), "the instruments went");
+        assert_eq!(a.state.session.plugins.midi_outs.len(), 6);
         assert!(a.state.shown(crate::app::Win::Plugin) && a.state.plugin_channel == 0);
         assert_eq!(a.state.session.history.entries().last().map(|e| e.1), Some(PREP_LABEL));
 
@@ -867,8 +873,8 @@ mod tests {
         for (i, ch) in a.state.session.project.channels.iter().enumerate() {
             assert_eq!(ch, &before[i], "row {i} back");
         }
-        assert!(a.state.hosted_rows.contains(&0) && a.state.hosted_rows.contains(&trio), "the instruments back: {:?}", a.state.hosted_rows);
-        assert!(a.plugins.midi_outs.is_empty());
+        assert!(a.state.session.hosted_rows.contains(&0) && a.state.session.hosted_rows.contains(&trio), "the instruments back: {:?}", a.state.session.hosted_rows);
+        assert!(a.state.session.plugins.midi_outs.is_empty());
     }
 
     /// Sampler channels of an opened file, set up for MIDI export and saved: the file's channels are MIDI Out channels
@@ -882,7 +888,7 @@ mod tests {
         a.state.session.project.get_mut().patterns[0].notes.push(os_model::Note { length: 48, key: 60, ..os_model::Note::step(2, 0) });
         a.save_to(first.clone());
         let mut b = App::new(None);
-        b.plugins.available = crate::plugins::builtin();
+        b.state.session.plugins.available = crate::plugins::builtin();
         b.open(first.clone());
         assert!(b.state.session.project.channels.iter().all(|c| c.rack.origin.is_some()));
         b.prepare_midi_export();

@@ -166,27 +166,32 @@ pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
     let Some(ch) = app.state.session.project.get_mut().channels.get_mut(row) else { return };
     put(&mut ch.misc, m, v);
-    sync(app, row, &[m]);
+    sync(&mut app.state.session, row, &[m]);
     app.state.session.dirty = true;
     app.invalidate();
 }
 
 /// Rack row `row`'s Lemon Sampler takes the Misc values it plays again (after an undo put them back).
 pub fn follow(app: &mut crate::app::App, row: usize) {
-    sync(app, row, &M::ALL);
-    app.invalidate();
+    app.host(|s, _| follow_in(s, row));
+}
+
+/// `follow` in the session.
+pub fn follow_in(s: &mut crate::session::Session, row: usize) {
+    sync(s, row, &M::ALL);
+    s.touched.repaint = true;
 }
 
 /// Rack row `row`'s Lemon Sampler takes Misc values `ms` it plays.
-fn sync(app: &mut crate::app::App, row: usize, ms: &[M]) {
-    let Some(ch) = app.state.session.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { return };
+fn sync(s: &mut crate::session::Session, row: usize, ms: &[M]) {
+    let Some(ch) = s.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { return };
     let misc = ch.misc;
     for &m in ms {
         if let Some((name, plain)) = sampler_param(&misc, m) {
-            app.plugins.set_param_named(row, name, plain);
+            s.plugins.set_param_named(row, name, plain);
         }
     }
-    app.state.params.reread(row);
+    s.params.reread(row);
 }
 
 /// The list menu of a Misc value (chord list, number boxes) at canvas point (x, y); the current value is ticked. A knob or

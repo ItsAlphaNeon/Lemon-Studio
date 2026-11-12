@@ -205,14 +205,14 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
 }
 
 pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
-    let d = app.plugins.available.get(index)?.desc.clone();
+    let d = app.state.session.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
     let mut ch = if sampler { crate::app::add_channel(s.session.project.get_mut()) } else { crate::app::add_plugin_channel(s.session.project.get_mut(), &d.name) };
     if sampler {
-        s.pending_open = Some(ch);
+        s.session.pending_open = Some(ch);
     } else {
-        s.pending_plugin = Some((ch, index));
+        s.session.pending_plugin = Some((ch, index));
     }
     s.session.dirty = true;
     if let Some(r) = after.filter(|&r| r + 1 < ch) {
@@ -244,13 +244,13 @@ pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<Stri
 }
 
 fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<String> {
-    let d = app.plugins.available.get(index)?.desc.clone();
+    let d = app.state.session.plugins.available.get(index)?.desc.clone();
     app.state.session.project.channels.get(row)?;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
-    app.plugins.keep(row);
-    app.plugins.drop_key(row);
-    app.state.hosted_rows.retain(|&r| r != row);
-    app.transport.set_instruments(app.plugins.instruments());
+    app.state.session.plugins.keep(row);
+    app.state.session.plugins.drop_key(row);
+    app.state.session.hosted_rows.retain(|&r| r != row);
+    app.transport.set_instruments(app.state.session.plugins.instruments());
     let s = &mut app.state;
     let ch = &mut s.session.project.get_mut().channels[row];
     ch.plugin_state = None;
@@ -263,7 +263,7 @@ fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<Stri
         ch.plugin = None;
         ch.clear_sample();
         ch.name = Some(d.name.clone());
-        s.pending_open = Some(row);
+        s.session.pending_open = Some(row);
     } else {
         ch.kind = os_model::ChannelKind::Plugin;
         ch.plugin = Some(crate::osc3::file_name(&d.name).to_string());
@@ -273,7 +273,7 @@ fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<Stri
         if crate::osc3::is_osc3(ch) {
             ch.sample_path = None;
         }
-        s.pending_plugin = Some((row, index));
+        s.session.pending_plugin = Some((row, index));
     }
     s.session.dirty = true;
     s.selected_channel = row;

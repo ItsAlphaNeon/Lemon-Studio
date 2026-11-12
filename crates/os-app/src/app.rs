@@ -1086,11 +1086,6 @@ pub struct State {
     pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
-    /// Rack rows played by a hosted plugin.
-    pub hosted_rows: Vec<usize>,
-    /// Requests for the plugin host, handled on the next tick: (row, `Plugins::available` index) to create, row to open.
-    pub pending_plugin: Option<(usize, usize)>,
-    pub pending_open: Option<usize>,
     /// Open child windows, bottom to top.
     pub z: Vec<Win>,
     /// The empty workspace took the last click: no window has the focus (Ctrl+F12 closes them all,
@@ -1168,8 +1163,6 @@ pub struct State {
     /// Favorite files (spec: ui/browser.md §10) and the index of the browser's disk folders (§11).
     pub browser_favs: Vec<crate::browser::Fav>,
     pub browser_index: crate::browser_index::Index,
-    /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
-    pub params: crate::params::ParamUi,
     /// "Copy value": a normalized value for "Paste value", one for every control and automation point, as in FL
     /// (spec: ui/playlist.md §8 "Point menu").
     pub value_clip: Option<f64>,
@@ -1359,7 +1352,6 @@ impl State {
 
 pub struct App {
     pub state: State,
-    pub plugins: crate::plugins::Plugins,
     pub theme: Theme,
     pub transport: Transport,
     /// The dropout log's watch (`crate::dropout_log`), and whether the transport played at the last tick: a start is
@@ -1494,32 +1486,19 @@ pub struct App {
     piano_win: Option<Rect>,
     pub(crate) piano_grid: Option<Rect>,
     piano_panel: Option<Rect>,
-    /// Sampler channel rows whose Lemon Sampler instance could not be created (not retried).
-    pub(crate) sampler_failed: Vec<usize>,
     /// The control plane's socket (`--control`), when it listens.
     pub rpc_server: Option<crate::control::server::Server>,
-    /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ could not start (not retried).
-    pub(crate) fx_failed: Vec<usize>,
     /// The running plugin scan, and the scan asked for while it runs (spec: ui/plugin-manager.md §4).
     pub(crate) sweep: Option<crate::plugin_scan::Sweep>,
     pub(crate) scan_queued: Option<crate::plugin_db::Mode>,
-    /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
-    pub(crate) wrap_failed: Vec<usize>,
     /// When the Lemon Trio instances were last looked at for a sample they loaded (`follow_osc3_samples`).
     pub(crate) osc3_look: Option<std::time::Instant>,
-    /// Plugin channels (rows) and slots (`fx_key`) naming a native plugin that is not installed or did not start
-    /// (not retried; spec: plugins/fruity-abi.md "Opened projects").
-    pub(crate) native_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
     /// The opened project's missing samples and plugins (`crate::missing`).
     pub(crate) missing: crate::missing::Missing,
     /// A zipped project being unzipped or written (`crate::zipped`): its panel shows, input waits.
     pub(crate) zipping: Option<crate::zipped::Zipping>,
-    /// While a project loads: when the plugin hosts stop for this tick (`host_plugins`), and whether one stopped with
-    /// instances left to start.
-    host_deadline: Option<std::time::Instant>,
-    host_more: bool,
     /// An export is rendering (FILE > Export): its first file's name and progress (0..1); the same panel shows, input
     /// waits.
     pub(crate) export: Option<(String, f32)>,
@@ -1554,14 +1533,10 @@ impl App {
             audio_watch: Default::default(),
             #[cfg(target_os = "linux")]
             audio_playing: false,
-            plugins: crate::plugins::Plugins::default(),
             state: State {
                 session: crate::session::Session::new(project),
                 rack_views: Default::default(),
                 plugdb: Default::default(),
-                hosted_rows: Vec::new(),
-                pending_plugin: None,
-                pending_open: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
                 no_focus: false,
                 show_browser: true,
@@ -1590,7 +1565,6 @@ impl App {
                 browser_open: views::browser::default_open(),
                 browser_folders: crate::browser::load_folders(),
                 browser_names: crate::browser::load_names(),
-                params: Default::default(),
                 value_clip: None,
                 browser_dirs: Default::default(),
                 cables: std::cell::RefCell::new({
@@ -1730,19 +1704,13 @@ impl App {
             piano_win: None,
             piano_grid: None,
             piano_panel: None,
-            sampler_failed: Vec::new(),
             rpc_server: None,
-            fx_failed: Vec::new(),
             sweep: None,
             scan_queued: None,
-            wrap_failed: Vec::new(),
             osc3_look: None,
-            native_failed: Vec::new(),
             loading: None,
             missing: Default::default(),
             zipping: None,
-            host_deadline: None,
-            host_more: false,
             export: None,
             export_reveal: false,
             pattern_render: None,
@@ -1871,7 +1839,7 @@ impl App {
                 // name channels by position, which the ids given here then follow.
                 self.state.session.control.settle(self.state.session.project.get_mut());
                 if let Some(f) = self.state.session.file.take() {
-                    crate::lemon_state::apply(&mut self.state, &mut self.plugins, &f);
+                    crate::lemon_state::apply(&mut self.state, &f);
                     // Saved by a version that has features this one does not: those parts do not play.
                     let unknown = crate::lemon_state::unknown_features(&f);
                     if !unknown.is_empty() {
@@ -1880,7 +1848,8 @@ impl App {
                     self.state.session.file = Some(f);
                 }
                 // The original's Patcher slots that are a plain serial chain open as containers (README.md slice 5).
-                if let Some(m) = crate::container::open_patchers(&mut self.state, &self.plugins.effects) {
+                let effects = self.state.session.plugins.effects.clone();
+                if let Some(m) = crate::container::open_patchers(&mut self.state, &effects) {
                     self.state.message = Some(format!("{}. {m}", self.state.message.take().unwrap_or_default()));
                 }
                 self.mark_saved();
@@ -1952,7 +1921,7 @@ impl App {
         let name = job.file(first).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         let mode = if song { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern()) };
         self.export_reveal = job.options.reveal;
-        self.plugins.set_offline(job.options.hq);
+        self.state.session.plugins.set_offline(job.options.hq);
         // Lemon Sampler voices playing from disk wait for their frames in every export, high quality or not.
         lemon_sampler::stream::export_started();
         self.transport.export(&p, mode, rate, job);
@@ -1972,7 +1941,7 @@ impl App {
             crate::transport::Export::Done(r) => {
                 self.export = None;
                 self.midi_after_export();
-                self.plugins.set_offline(false);
+                self.state.session.plugins.set_offline(false);
                 lemon_sampler::stream::export_finished();
                 if let Some(p) = self.pattern_render.take() {
                     return self.pattern_render_done(p, r);
@@ -2009,13 +1978,13 @@ impl App {
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
         // them.
-        for row in self.state.hosted_rows.clone() {
+        for row in self.state.session.hosted_rows.clone() {
             if self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
-                let lemon = self.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
-                if let Some(st) = self.plugins.state(row).filter(|_| lemon) {
+                let lemon = self.state.session.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
+                if let Some(st) = self.state.session.plugins.state(row).filter(|_| lemon) {
                     crate::plugins::store_sampler(&mut self.state.session.project.get_mut().channels[row], &st);
                 }
-                if let Some(p) = self.plugins.sampler_path(row) {
+                if let Some(p) = self.state.session.plugins.sampler_path(row) {
                     // A placeholder path that still names the same file is kept as the project wrote it.
                     let ch = &mut self.state.session.project.get_mut().channels[row];
                     if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
@@ -2062,7 +2031,7 @@ impl App {
             }
             let mut first = s.session.project.clone();
             crate::rack::as_saved(&mut first);
-            crate::project_plugins::store_hosted(&mut first, &self.plugins);
+            crate::project_plugins::store_hosted(&mut first, &s.session.plugins);
             match os_flp::project::create(&first) {
                 Ok(f) => f,
                 Err(e) => {
@@ -2081,10 +2050,10 @@ impl App {
         let mut proj = s.session.project.clone();
         crate::rack::as_saved(&mut proj);
         // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`).
-        let extra = crate::lemon_state::events(s, &self.plugins);
+        let extra = crate::lemon_state::events(s, &s.session.plugins);
         crate::project_info::stamp(s, &mut proj);
         crate::data_folder::stamp(s, &mut proj);
-        crate::project_plugins::store_hosted(&mut proj, &self.plugins);
+        crate::project_plugins::store_hosted(&mut proj, &s.session.plugins);
         edit(&mut proj);
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
@@ -2147,7 +2116,7 @@ impl App {
         // New things get their ids before the copy, so ids alone are no unsaved change.
         let control = &mut self.state.session.control;
         self.state.session.project.write_if(|p| control.settle(p));
-        self.saved = (self.state.session.project.clone(), self.state.tempo(), crate::lemon_state::saved_form(&self.state, &self.plugins));
+        self.saved = (self.state.session.project.clone(), self.state.tempo(), crate::lemon_state::saved_form(&self.state, &self.state.session.plugins));
         self.state.session.plugin_edited = false;
     }
 
@@ -2155,7 +2124,7 @@ impl App {
     pub fn unsaved(&self) -> bool {
         !same_as_saved(&self.saved.0, &self.state.session.project)
             || self.saved.1 != self.state.tempo()
-            || self.saved.2 != crate::lemon_state::saved_form(&self.state, &self.plugins)
+            || self.saved.2 != crate::lemon_state::saved_form(&self.state, &self.state.session.plugins)
             || self.state.session.plugin_edited
     }
 
@@ -2525,37 +2494,37 @@ impl App {
     /// channels.
     pub(crate) fn store_builtin_states(&mut self) {
         use crate::plugins::{EDISON_FILE_NAME, EQ_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME};
-        for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
+        for key in self.state.session.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
             let Some((t, k)) = crate::plugins::fx_of(key) else { continue };
             let Some(slot) = self.state.session.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
             let st = match slot.name.as_str() {
-                EQ_FILE_NAME => self.plugins.eq_file_state(key),
-                EDISON_FILE_NAME => self.plugins.edison_file_state(key),
-                LOVE_PHILTER_FILE_NAME => self.plugins.love_philter_file_state(key),
-                MAXIMUS_FILE_NAME => self.plugins.maximus_file_state(key),
-                file => self.plugins.recreation_file_state(key, file),
+                EQ_FILE_NAME => self.state.session.plugins.eq_file_state(key),
+                EDISON_FILE_NAME => self.state.session.plugins.edison_file_state(key),
+                LOVE_PHILTER_FILE_NAME => self.state.session.plugins.love_philter_file_state(key),
+                MAXIMUS_FILE_NAME => self.state.session.plugins.maximus_file_state(key),
+                file => self.state.session.plugins.recreation_file_state(key, file),
             };
             if let Some(st) = st {
                 slot.state = st;
             }
         }
-        crate::osc3::store(self.state.session.project.get_mut(), &self.plugins);
-        crate::citrus::store(self.state.session.project.get_mut(), &self.plugins);
-        crate::smith::store(self.state.session.project.get_mut(), &self.plugins);
-        crate::slicer::store(self.state.session.project.get_mut(), &self.plugins);
-        crate::drums::store(self.state.session.project.get_mut(), &self.plugins);
+        crate::osc3::store(self.state.session.project.get_mut(), &self.state.session.plugins);
+        crate::citrus::store(self.state.session.project.get_mut(), &self.state.session.plugins);
+        crate::smith::store(self.state.session.project.get_mut(), &self.state.session.plugins);
+        crate::slicer::store(self.state.session.project.get_mut(), &self.state.session.plugins);
+        crate::drums::store(self.state.session.project.get_mut(), &self.state.session.plugins);
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
     pub(crate) fn reset_hosted(&mut self) {
-        self.plugins.clear();
+        self.state.session.plugins.clear();
         self.loading = None;
         self.state.session.samples.wait = false;
-        self.state.hosted_rows.clear();
-        self.sampler_failed.clear();
-        self.fx_failed.clear();
-        self.wrap_failed.clear();
-        self.native_failed.clear();
+        self.state.session.hosted_rows.clear();
+        self.state.session.plugins.sampler_failed.clear();
+        self.state.session.plugins.fx_failed.clear();
+        self.state.session.plugins.wrap_failed.clear();
+        self.state.session.plugins.native_failed.clear();
         self.transport.set_instruments(Vec::new());
         self.transport.set_effects(Vec::new());
     }
@@ -2565,12 +2534,12 @@ impl App {
     /// (plugin not found) sampler channels keep the engine's own sample playback.
     /// With a `deadline` it stops after the instance that passes it; returns whether every sampler row is done.
     fn sync_samplers(&mut self, deadline: Option<std::time::Instant>) -> bool {
-        let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) else { return true };
+        let Some(index) = self.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER) else { return true };
         let mut added = false;
         let mut done = true;
         for row in 0..self.state.session.project.channels.len() {
             let ch = &self.state.session.project.channels[row];
-            if !ch.kind.is_sampler() || self.state.hosted_rows.contains(&row) || self.sampler_failed.contains(&row) {
+            if !ch.kind.is_sampler() || self.state.session.hosted_rows.contains(&row) || self.state.session.plugins.sampler_failed.contains(&row) {
                 continue;
             }
             if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
@@ -2582,24 +2551,24 @@ impl App {
                 l.hosted += 1;
                 l.label = ch.name.clone().unwrap_or_default();
             }
-            match self.plugins.create_with(row, index, Some(&st)) {
+            match self.state.session.plugins.create_with(row, index, Some(&st)) {
                 Ok(_) => {
-                    self.state.hosted_rows.push(row);
+                    self.state.session.hosted_rows.push(row);
                     added = true;
                     // A channel just added (ADD ▸ Lemon Sampler): its window is about to open (spec:
                     // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
-                    if self.state.pending_open == Some(row) {
-                        self.plugins.added(row);
+                    if self.state.session.pending_open == Some(row) {
+                        self.state.session.plugins.added(row);
                     }
                 }
                 Err(e) => {
-                    self.sampler_failed.push(row);
+                    self.state.session.plugins.sampler_failed.push(row);
                     self.state.message = Some(format!("Lemon Sampler: {e}"));
                 }
             }
         }
         if added {
-            self.transport.set_instruments(self.plugins.instruments());
+            self.transport.set_instruments(self.state.session.plugins.instruments());
             self.state.session.dirty = true;
         }
         done
@@ -2628,8 +2597,8 @@ impl App {
     /// Starts the opened project's plugin channels and mixer effects until `deadline` (`project_plugins::sync_wrapped`
     /// and the other hosts stop after the instance that passes it): true when none is left to start.
     fn host_plugins(&mut self, deadline: std::time::Instant) -> bool {
-        self.host_deadline = Some(deadline);
-        self.host_more = false;
+        self.state.session.plugins.host_deadline = Some(deadline);
+        self.state.session.plugins.host_more = false;
         self.sync_effects();
         self.sync_wrapped();
         self.sync_osc3();
@@ -2638,10 +2607,10 @@ impl App {
         self.sync_slicer();
         self.sync_drums();
         self.sync_native();
-        self.host_deadline = None;
-        let samplers = self.state.hosted_rows.iter().filter(|&&r| self.state.session.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
-        let done = (self.plugins.hosted.len() + self.wrap_failed.len() + self.fx_failed.len() + self.native_failed.len()).saturating_sub(samplers);
-        let more = self.host_more;
+        self.state.session.plugins.host_deadline = None;
+        let samplers = self.state.session.hosted_rows.iter().filter(|&&r| self.state.session.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
+        let done = (self.state.session.plugins.hosted.len() + self.state.session.plugins.wrap_failed.len() + self.state.session.plugins.fx_failed.len() + self.state.session.plugins.native_failed.len()).saturating_sub(samplers);
+        let more = self.state.session.plugins.host_more;
         if let Some(l) = &mut self.loading {
             l.label.clear();
             l.plugins_done = done;
@@ -2655,9 +2624,18 @@ impl App {
 
     /// Whether the plugin hosts' time this tick is over (`host_plugins`): the host that asks stops and goes on next tick.
     pub(crate) fn past_deadline(&mut self) -> bool {
-        let past = self.host_deadline.is_some_and(|d| std::time::Instant::now() >= d);
-        self.host_more |= past;
-        past
+        self.state.session.plugins.past_deadline()
+    }
+
+    /// `f`, the plugin host's part of a tick on the session and the transport, with the views following it and the
+    /// window drawn again when it asks.
+    pub(crate) fn host<R>(&mut self, f: impl FnOnce(&mut crate::session::Session, &crate::transport::Transport) -> R) -> R {
+        let b = crate::follow::before(&self.state);
+        let r = f(&mut self.state.session, &self.transport);
+        if crate::follow::after(&mut self.state, b) | std::mem::take(&mut self.state.session.touched.repaint) {
+            self.invalidate();
+        }
+        r
     }
 
     /// A project is loading or an export is rendering: the window shows the progress and takes no input (spec:
@@ -2679,71 +2657,7 @@ impl App {
     /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6), and the FL effects
     /// another Lemon effect recreates (`plugins::FL_RECREATIONS`: Reeverb 2, Balance, Chorus, ...) by that effect.
     pub(crate) fn sync_effects(&mut self) {
-        use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
-        // The installed EQ plays these slots instead (`host_native`).
-        if crate::project_plugins::native_first() {
-            return;
-        }
-        // Runs every tick: the slots already hosted are passed over before their states are read, as an Edison slot's
-        // can hold tens of megabytes of audio.
-        let todo: Vec<(u16, u8, String)> = self
-            .state
-            .session.project
-            .mixer
-            .iter()
-            .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
-            .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
-            .filter_map(|(t, k, s)| {
-                s.as_ref()
-                    .filter(|s| {
-                        [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str())
-                            || crate::plugins::recreation_of(&s.name).is_some()
-                    })
-                    .map(|s| (t, k, s.name.clone()))
-            })
-            .collect();
-        let mut made = false;
-        for (t, k, file) in todo {
-            if self.past_deadline() {
-                break;
-            }
-            let recreation = crate::plugins::recreation_of(&file);
-            let name = match file.as_str() {
-                EQ_FILE_NAME => LEMON_EQ,
-                LOVE_PHILTER_FILE_NAME => PULP_FILTER,
-                MAXIMUS_FILE_NAME => PRESS,
-                _ => recreation.unwrap_or(TESLA),
-            };
-            let Some(index) = self.plugins.effect_index(name) else { continue };
-            let track = self.state.session.project.mixer.iter().find(|m| m.index == t);
-            let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
-            let st = if file == EQ_FILE_NAME {
-                Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
-            } else if file == LOVE_PHILTER_FILE_NAME {
-                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
-                Some(pulp_filter::plugin_state_from_fl(fl))
-            } else if file == MAXIMUS_FILE_NAME {
-                // Bytes that are not a Maximus state open Press's starting state.
-                Some(press::plugin_state_from_fl(fl))
-            } else if let Some(lemon) = recreation {
-                // A state shorter than the original's, or of a later version, opens the defaults (spec:
-                // plugins/lemon-small-effects.md §5).
-                crate::plugins::recreation_state_from_fl(lemon, fl)
-            } else {
-                // Bytes that are not an Edison state open an empty Tesla.
-                tesla::plugin_state_from_edison(fl)
-            };
-            made = true;
-            if let Err(e) = self.plugins.create_effect(t, k, index, st.as_deref()) {
-                self.fx_failed.push(fx_key(t, k));
-                self.state.message = Some(format!("{name}: {e}"));
-            }
-        }
-        if !made {
-            return;
-        }
-        self.transport.set_effects(self.plugins.effects());
-        self.state.session.dirty = true;
+        self.host(sync_effects);
     }
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
@@ -2755,7 +2669,7 @@ impl App {
         }
         // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
         let len = self.state.session.project.channels.len();
-        if self.plugins.hosted.range(len..crate::plugins::FX_KEY).next().is_some() {
+        if self.state.session.plugins.hosted.range(len..crate::plugins::FX_KEY).next().is_some() {
             self.remap_rows(&|r| (r < len).then_some(r));
         }
         self.scan_tick();
@@ -2782,54 +2696,26 @@ impl App {
             self.sync_drums();
             self.sync_native();
         }
-        for (row, path) in std::mem::take(&mut self.state.session.sample_loads) {
-            if !self.state.hosted_rows.contains(&row) {
-                continue;
-            }
-            // The root note and stretch settings the load may have read from the file (`rack::read_tags`) go with it.
-            let set = self.state.session.project.channels.get(row).map(crate::plugins::tag_params).unwrap_or_default();
-            // A row hosted this tick already started from its channel's sample.
-            let new = self.plugins.sampler_path(row).as_deref() != Some(path.as_str());
-            if !self.plugins.set_sampler(row, new.then_some(path.as_str()), &set) {
-                self.state.message = Some(format!("Lemon Sampler did not take {path}"));
-                self.invalidate();
-            }
-        }
+        self.host(crate::control::host::sample_loads);
         // A native generator waits for its first check in a child process (`Plugins::instrument_ready`).
-        let pending = self.state.pending_plugin;
-        if let Some((_, index)) = pending.filter(|&(_, index)| !self.plugins.instrument_ready(index)) {
-            let name = self.plugins.available.get(index).map(|a| a.desc.name.clone()).unwrap_or_default();
+        if let Some(index) = self.host(crate::control::host::pending_plugin) {
+            let name = self.state.session.plugins.available.get(index).map(|a| a.desc.name.clone()).unwrap_or_default();
             let msg = format!("Trying {name} before its first load...");
             if self.state.message.as_deref() != Some(msg.as_str()) {
                 self.state.message = Some(msg);
                 self.invalidate();
             }
-        } else if let Some((row, index)) = pending {
-            self.state.pending_plugin = None;
-            match self.plugins.create(row, index) {
-                Ok(name) => {
-                    self.plugins.added(row);
-                    self.state.hosted_rows.push(row);
-                    self.transport.set_instruments(self.plugins.instruments());
-                    self.state.session.dirty = true;
-                    let format = self.plugins.descriptor(row).map_or("", |d| crate::plugins::format_name(d.format));
-                    self.state.message = Some(format!("Added {name} (hosted {format} plugin)"));
-                    self.state.pending_open = Some(row);
-                }
-                Err(e) => self.state.message = Some(format!("Plugin: {e}")),
-            }
-            self.invalidate();
         }
         // Without plugin windows opening one says so.
         #[cfg(not(plugin_windows))]
-        if self.state.pending_open.take().is_some_and(|r| self.state.hosted_rows.contains(&r)) {
+        if self.state.session.pending_open.take().is_some_and(|r| self.state.session.hosted_rows.contains(&r)) {
             self.state.message = Some(off_text(PLUGIN_WINDOWS));
             self.invalidate();
         }
         #[cfg(plugin_windows)]
-        if let Some(row) = self.state.pending_open.take().filter(|r| self.state.hosted_rows.contains(r)) {
+        if let Some(row) = self.state.session.pending_open.take().filter(|r| self.state.session.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.session.project, row) {
-                match self.plugins.open_window(row, info) {
+                match self.state.session.plugins.open_window(row, info) {
                     Ok(()) => {
                         self.state.raise(Win::Hosted(row));
                         self.select_window_track(row);
@@ -2847,7 +2733,7 @@ impl App {
         let requests = {
             let members = self.member_infos();
             let project = &self.state.session.project;
-            self.plugins.idle(|row| {
+            self.state.session.plugins.idle(|row| {
                 // A container's member (`crate::container`): its name over its slot's title.
                 if row >= crate::plugins::MEMBER_KEY {
                     return members.get(&row).cloned();
@@ -2858,7 +2744,7 @@ impl App {
         };
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
-        self.plugins.idle(|_| None);
+        self.state.session.plugins.idle(|_| None);
         // What was hosted on this tick takes the id of its channel or slot now, before anything moves rows.
         self.follow_ids(false, false);
         // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
@@ -2868,7 +2754,7 @@ impl App {
         // armed, so the microphone is not held (and shown in use) the rest of the time.
         crate::device::want_inputs(self.state.session.project.mixer.iter().any(|m| m.audio_in >= 0 && (m.monitored() || m.armed)));
         let monitoring = self.state.session.project.mixer.iter().any(|m| m.monitored()) && crate::device::input_source().is_some();
-        let listen = self.plugins.editor_open() || monitoring;
+        let listen = self.state.session.plugins.editor_open() || monitoring;
         if listen {
             self.sync_live();
         }
@@ -2913,14 +2799,14 @@ impl App {
                     }
                     // A native Wayland main window (Linux): the popups cannot be lifted above a plugin window there.
                     #[cfg(not(windows))]
-                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) | Request::KnobMenu(..) if self.plugins.owner == 0 => {
+                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) | Request::KnobMenu(..) if self.state.session.plugins.owner == 0 => {
                         self.state.message = Some(off_text(PLUGIN_POPUPS));
                         self.invalidate();
                         continue;
                     }
                     #[cfg(not(windows))]
-                    Request::PluginMenu(row, m, _) if self.plugins.owner == 0 => {
-                        self.plugins.menu_done(row, m.id, None);
+                    Request::PluginMenu(row, m, _) if self.state.session.plugins.owner == 0 => {
+                        self.state.session.plugins.menu_done(row, m.id, None);
                         self.state.message = Some(off_text(PLUGIN_POPUPS));
                         self.invalidate();
                         continue;
@@ -2928,7 +2814,7 @@ impl App {
                     Request::PluginMenu(row, m, (x, y)) => {
                         // The plugin's own menu (VST 3 context menu) as the app's popup, over its window docked or
                         // detached (spec: plugins/vst3-hosting.md §9).
-                        let detached = self.plugins.window_of(row).is_some_and(|(_, d)| d);
+                        let detached = self.state.session.plugins.window_of(row).is_some_and(|(_, d)| d);
                         let at = self.screen_to_canvas(x, y);
                         if self.show_plugin_menu(row, &m, at) {
                             self.popup_lift = detached.then_some(row);
@@ -2937,7 +2823,7 @@ impl App {
                         continue;
                     }
                     Request::Menu(row, x, y) => {
-                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
                         // A container's member has its presets too (plugins/patcher/README.md §4.2).
@@ -2956,7 +2842,7 @@ impl App {
                         continue;
                     }
                     Request::Presets(row, x, y) => {
-                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::presets::popup(self, row, lx, ly));
                         self.popup_lift = detached.then_some(row);
@@ -2976,7 +2862,7 @@ impl App {
                         continue;
                     }
                     Request::MiscMenu(row, m, x, y) => {
-                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::misc::menu(self, row, m, lx, ly));
                         self.popup_lift = detached.then_some(row);
@@ -2984,7 +2870,7 @@ impl App {
                         continue;
                     }
                     Request::KnobMenu(row, c, x, y) => {
-                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(match c {
                             // The channel's volume and pan: the rack's knob menu (spec: ui/channel-rack.md §19).
@@ -3092,7 +2978,7 @@ impl App {
     #[cfg(all(plugin_windows, not(windows)))]
     fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
         let (x, y) = crate::plugin_window::screen_to_main(x, y).unwrap_or((x, y));
-        let k = self.plugins.scale;
+        let k = self.state.session.plugins.scale;
         ((x - self.canvas_off.0) as f32 / k, (y - self.canvas_off.1) as f32 / k)
     }
 
@@ -3101,8 +2987,8 @@ impl App {
     fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
         let mut p = windows_sys::Win32::Foundation::POINT { x, y };
         // SAFETY: plain coordinate conversion against our own window.
-        unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(self.plugins.owner as _, &mut p) };
-        let k = self.plugins.scale;
+        unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(self.state.session.plugins.owner as _, &mut p) };
+        let k = self.state.session.plugins.scale;
         ((p.x - self.canvas_off.0) as f32 / k, (p.y - self.canvas_off.1) as f32 / k)
     }
 
@@ -3110,7 +2996,7 @@ impl App {
     #[cfg(all(plugin_windows, not(windows)))]
     fn lift_input(&mut self) {
         let input = crate::plugin_window::take_lift_input();
-        let k = self.plugins.scale;
+        let k = self.state.session.plugins.scale;
         let (ox, oy) = self.canvas_off;
         for i in &input {
             match *i {
@@ -3130,7 +3016,7 @@ impl App {
     /// main window, which the detached window covers).
     #[cfg(plugin_windows)]
     pub fn sync_lift(&mut self, canvas: &Canvas) {
-        let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.plugins.window_of(r));
+        let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.state.session.plugins.window_of(r));
         let bounds = self.overlays.iter().copied().reduce(|a, b| a.union(&b));
         match (lifted, bounds) {
             (Some((frame, true)), Some(b)) => {
@@ -3144,7 +3030,7 @@ impl App {
                     }
                 }
                 let origin = (x as i32 + self.canvas_off.0, y as i32 + self.canvas_off.1);
-                crate::plugin_window::lift_show(self.plugins.owner, frame, origin, (w as i32, h as i32), buf);
+                crate::plugin_window::lift_show(self.state.session.plugins.owner, frame, origin, (w as i32, h as i32), buf);
             }
             _ => {
                 self.popup_lift = None;
@@ -3157,21 +3043,21 @@ impl App {
     /// windows above them and the overlays (spec: ui/plugin-window.md "Docking"). Detached windows leave `State::z`.
     #[cfg(plugin_windows)]
     fn clip_docked(&mut self) {
-        let docked = self.plugins.docked();
+        let docked = self.state.session.plugins.docked();
         self.state.z.retain(|w| !matches!(w, Win::Hosted(r) if !docked.contains(r)));
         for &r in &docked {
             if !self.state.z.contains(&Win::Hosted(r)) {
                 self.state.z.push(Win::Hosted(r));
             }
         }
-        let k = self.plugins.scale;
+        let k = self.state.session.plugins.scale;
         let (ox, oy) = self.canvas_off;
         let px = |r: Rect| [(r.x * k).floor() as i32 + ox, (r.y * k).floor() as i32 + oy, (r.right() * k).ceil() as i32 + ox, (r.bottom() * k).ceil() as i32 + oy];
         let work = px(self.state.work_rect());
         let over: Vec<[i32; 4]> = self.overlays.iter().map(|&r| px(r.outset(2.0))).collect();
         let z = self.state.z.clone();
         let stacked: Vec<usize> = z.iter().filter_map(|w| if let Win::Hosted(r) = w { Some(*r) } else { None }).collect();
-        self.plugins.stack(&stacked);
+        self.state.session.plugins.stack(&stacked);
         let docked_at = z.iter().rposition(|&w| self.state.is_max(w));
         for (i, &w) in z.iter().enumerate() {
             let Win::Hosted(row) = w else { continue };
@@ -3185,7 +3071,7 @@ impl App {
             if docked_at.is_some_and(|d| i < d) {
                 covers.push(work);
             }
-            self.plugins.clip(row, work, &covers);
+            self.state.session.plugins.clip(row, work, &covers);
         }
     }
 
@@ -3632,9 +3518,9 @@ impl App {
             self.act(Action::CloseWin(w));
         }
         // Hosted plugin windows (rack rows and mixer slots; detached ones are not in the stack).
-        let rows: Vec<usize> = self.plugins.hosted.keys().copied().collect();
+        let rows: Vec<usize> = self.state.session.plugins.hosted.keys().copied().collect();
         for row in rows.into_iter().filter(|&r| keep != Some(Win::Hosted(r))) {
-            self.plugins.close_if_open(row);
+            self.state.session.plugins.close_if_open(row);
         }
         self.invalidate();
     }
@@ -3642,7 +3528,7 @@ impl App {
     /// Every hosted instance for the monitor, rack rows then mixer slots.
     pub(crate) fn perf_sources(&self) -> Vec<crate::perf::Source> {
         let p = &self.state.session.project;
-        self.plugins
+        self.state.session.plugins
             .hosted
             .iter()
             .map(|(&key, h)| {
@@ -3652,7 +3538,7 @@ impl App {
                     Some((0, slot)) => (false, format!("Master, slot {}", slot + 1)),
                     Some((track, slot)) => (false, format!("Bus {track}, slot {}", slot + 1)),
                 };
-                crate::perf::Source { key, name: h.name.clone(), patch: self.plugins.preset_name(key), place, synth, stopped: h.stopped(), meter: h.meter.clone() }
+                crate::perf::Source { key, name: h.name.clone(), patch: self.state.session.plugins.preset_name(key), place, synth, stopped: h.stopped(), meter: h.meter.clone() }
             })
             .collect()
     }
@@ -3676,7 +3562,7 @@ impl App {
                     match crate::plugins::fx_of(key) {
                         Some((track, slot)) => self.open_fx(track, slot),
                         None if key >= crate::plugins::MEMBER_KEY => self.state.message = self.open_member_key(key),
-                        None => self.state.pending_open = Some(key),
+                        None => self.state.session.pending_open = Some(key),
                     }
                 }
             }
@@ -4220,7 +4106,7 @@ impl App {
         }
         self.device_opens = opens;
         if let Some(rate) = crate::device::last().map(|i| i.rate) {
-            self.plugins.set_rate(rate);
+            self.state.session.plugins.set_rate(rate);
             self.state.settings.rate = Some(rate);
         }
     }
@@ -4341,7 +4227,7 @@ impl App {
             let tp = &self.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
             // Every stream's engine voices and every hosted instrument's (spec: audio/voices.md §5).
-            let voices = tp.engine_voices() + self.plugins.voices();
+            let voices = tp.engine_voices() + self.state.session.plugins.voices();
             // Every dropout, and those heard (over sound), each of which turns the count red for a moment.
             let heard = tp.heard_dropouts();
             let dropouts = tp.underruns().max(heard);
@@ -5054,7 +4940,7 @@ impl App {
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn plugin_window_under_cursor(&self) -> Option<usize> {
         let (x, y) = Self::pointer_on_screen()?;
-        self.plugins.row_at_screen(x, y)
+        self.state.session.plugins.row_at_screen(x, y)
     }
 
     /// A browser sample released over a hosted plugin window (it sits above the main window, which keeps the mouse
@@ -5063,12 +4949,12 @@ impl App {
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn sample_to_plugin_window(&mut self, path: &str) -> bool {
         let Some((x, y)) = Self::pointer_on_screen() else { return false };
-        let Some(row) = self.plugins.row_at_screen(x, y) else { return false };
+        let Some(row) = self.state.session.plugins.row_at_screen(x, y) else { return false };
         if self.loop_to_slicer(row, path) {
             return true;
         }
-        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
-        let taken = self.plugins.drop_file(row, x, y, path, sampler);
+        let sampler = self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
+        let taken = self.state.session.plugins.drop_file(row, x, y, path, sampler);
         self.sample_taken(row, path, sampler, taken);
         true
     }
@@ -5086,7 +4972,7 @@ impl App {
                 ch.sample_path = Some(path.to_string());
                 // The plugin loads the file itself: it takes what the load read alongside.
                 let set = crate::plugins::tag_params(ch);
-                self.plugins.set_sampler(row, None, &set);
+                self.state.session.plugins.set_sampler(row, None, &set);
             }
             self.state.message = Some(format!("{} loaded in the plugin", name.unwrap_or_default()));
         } else {
@@ -5108,7 +4994,7 @@ impl App {
             return;
         }
         let sampler = self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
-        let taken = sampler && self.plugins.load_sample(row, &p);
+        let taken = sampler && self.state.session.plugins.load_sample(row, &p);
         self.sample_taken(row, &p, sampler, taken);
     }
 
@@ -5116,13 +5002,13 @@ impl App {
     /// replaces the loop and is sliced, as the window's own Load does. False when row `row` hosts no Lemon Slicer.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn loop_to_slicer(&mut self, row: usize, path: &str) -> bool {
-        if self.plugins.slicer_file_state(row).is_none() {
+        if self.state.session.plugins.slicer_file_state(row).is_none() {
             return false;
         }
         let stem = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
         let path = crate::data_folder::adopt(&mut self.state, path);
-        self.state.message = Some(match self.plugins.load_slicer_loop(row, &path) {
+        self.state.message = Some(match self.state.session.plugins.load_slicer_loop(row, &path) {
             Some(Ok(n)) => {
                 self.state.session.plugin_edited = true;
                 format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER)
@@ -5494,7 +5380,7 @@ impl App {
             return self.invalidate();
         }
         if let Some(rate) = Transport::device_rate() {
-            self.plugins.set_rate(rate);
+            self.state.session.plugins.set_rate(rate);
         }
         self.transport.reopen();
         self.audio_page();
@@ -9227,9 +9113,9 @@ impl App {
             }
             return;
         }
-        if self.state.hosted_rows.contains(&i) {
-            if !self.plugins.close_if_open(i) {
-                self.state.pending_open = Some(i);
+        if self.state.session.hosted_rows.contains(&i) {
+            if !self.state.session.plugins.close_if_open(i) {
+                self.state.session.pending_open = Some(i);
             }
             return;
         }
@@ -9249,8 +9135,8 @@ impl App {
             crate::container::show(s, i as u16, crate::container::CHANNEL);
         } else if s.session.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
             // Not hosted yet (just added): Lemon Sampler starts on the next tick and its window opens then.
-            s.pending_open = Some(i);
-            self.sampler_failed.retain(|&r| r != i);
+            s.session.pending_open = Some(i);
+            self.state.session.plugins.sampler_failed.retain(|&r| r != i);
         } else {
             if !s.shown(Win::Plugin) && !s.plugin_moved {
                 s.plugin_pos = crate::arrange::channel_home(s);
@@ -9488,14 +9374,7 @@ impl App {
     /// Rack rows were renumbered (`m(old) = new`, `None` = deleted): hosted plugins, their windows and playback follow.
     pub(crate) fn remap_rows(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
         self.typing_release_all();
-        self.plugins.remap(m);
-        // The rows hosted are the instances' rows.
-        self.state.hosted_rows = self.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
-        self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();
-        self.wrap_failed = self.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
-        self.native_failed = self.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
-        self.transport.set_instruments(self.plugins.instruments());
-        self.state.session.dirty = true;
+        self.host(|s, t| remap_rows_in(s, t, m));
     }
 
     /// A row's hosted instrument for cloning: (available plugin index, saved state).
@@ -9505,25 +9384,20 @@ impl App {
             ChannelKind::Sampler | ChannelKind::AudioClip => crate::plugins::LEMON_SAMPLER.to_string(),
             // A hosted plugin is found by its identity (a wrapped channel's plugin name is the wrapper's).
             ChannelKind::Plugin => {
-                let d = self.plugins.descriptor(r)?;
-                let index = self.plugins.index_of_uid(&d.uid())?;
-                return Some((index, self.plugins.state(r)?));
+                let d = self.state.session.plugins.descriptor(r)?;
+                let index = self.state.session.plugins.index_of_uid(&d.uid())?;
+                return Some((index, self.state.session.plugins.state(r)?));
             }
             _ => return None,
         };
-        let index = self.plugins.index_of(&name)?;
-        let blob = self.plugins.hosted.get(&r)?.plugin.lock().ok()?.save_state()?;
+        let index = self.state.session.plugins.index_of(&name)?;
+        let blob = self.state.session.plugins.hosted.get(&r)?.plugin.lock().ok()?.save_state()?;
         Some((index, blob))
     }
 
     /// Host a copy of an instrument (`plugin_copy`) on row `row`.
     pub(crate) fn plugin_paste(&mut self, row: usize, index: usize, blob: &[u8]) {
-        if self.plugins.create_with(row, index, Some(blob)).is_ok() {
-            if !self.state.hosted_rows.contains(&row) {
-                self.state.hosted_rows.push(row);
-            }
-            self.transport.set_instruments(self.plugins.instruments());
-        }
+        self.host(|s, t| plugin_paste_in(s, t, row, index, blob));
     }
 
     /// A PATTERNS command from the menu bar, the pattern menu or its key: the ones that open dialogs here, the others
@@ -9580,7 +9454,7 @@ impl App {
             MenuCmd::ExportZip => crate::zipped::export_dialog(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             MenuCmd::Sampler => {
-                if let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
+                if let Some(index) = self.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
                     self.state.message = crate::plugin_menu::add_generator(self, index, None);
                 }
             }
@@ -9716,6 +9590,78 @@ impl App {
         self.state.playlist.popup = Some(crate::playlist::Popup { x: at.right(), y: at.y - 2.0, items, sub: None, scroll: [0; 2] });
         self.state.menu_sub = Some(i);
     }
+}
+
+/// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ, started
+/// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
+/// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
+/// settings (spec: plugins/tesla/README.md "Opening Edison slots"), Love Philter's as Pulp Filter and Maximus's as
+/// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6), and the FL effects
+/// another Lemon effect recreates (`plugins::FL_RECREATIONS`: Reeverb 2, Balance, Chorus, ...) by that effect.
+pub(crate) fn sync_effects(ses: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
+    // The installed EQ plays these slots instead (`host_native`).
+    if crate::project_plugins::native_first() {
+        return;
+    }
+    // Runs every tick: the slots already hosted are passed over before their states are read, as an Edison slot's
+    // can hold tens of megabytes of audio.
+    let todo: Vec<(u16, u8, String)> = ses.project
+        .mixer
+        .iter()
+        .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
+        .filter(|&(t, k, _)| !ses.plugins.hosted.contains_key(&fx_key(t, k)) && !ses.plugins.fx_failed.contains(&fx_key(t, k)))
+        .filter_map(|(t, k, s)| {
+            s.as_ref()
+                .filter(|s| {
+                    [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str())
+                        || crate::plugins::recreation_of(&s.name).is_some()
+                })
+                .map(|s| (t, k, s.name.clone()))
+        })
+        .collect();
+    let mut made = false;
+    for (t, k, file) in todo {
+        if ses.plugins.past_deadline() {
+            break;
+        }
+        let recreation = crate::plugins::recreation_of(&file);
+        let name = match file.as_str() {
+            EQ_FILE_NAME => LEMON_EQ,
+            LOVE_PHILTER_FILE_NAME => PULP_FILTER,
+            MAXIMUS_FILE_NAME => PRESS,
+            _ => recreation.unwrap_or(TESLA),
+        };
+        let Some(index) = ses.plugins.effect_index(name) else { continue };
+        let track = ses.project.mixer.iter().find(|m| m.index == t);
+        let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
+        let st = if file == EQ_FILE_NAME {
+            Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
+        } else if file == LOVE_PHILTER_FILE_NAME {
+            // Bytes that are not a Love Philter state open Pulp Filter's starting state.
+            Some(pulp_filter::plugin_state_from_fl(fl))
+        } else if file == MAXIMUS_FILE_NAME {
+            // Bytes that are not a Maximus state open Press's starting state.
+            Some(press::plugin_state_from_fl(fl))
+        } else if let Some(lemon) = recreation {
+            // A state shorter than the original's, or of a later version, opens the defaults (spec:
+            // plugins/lemon-small-effects.md §5).
+            crate::plugins::recreation_state_from_fl(lemon, fl)
+        } else {
+            // Bytes that are not an Edison state open an empty Tesla.
+            tesla::plugin_state_from_edison(fl)
+        };
+        made = true;
+        if let Err(e) = ses.plugins.create_effect(t, k, index, st.as_deref()) {
+            ses.plugins.fx_failed.push(fx_key(t, k));
+            ses.touched.views.push(crate::session::View::Message(format!("{name}: {e}")));
+        }
+    }
+    if !made {
+        return;
+    }
+    transport.set_effects(ses.plugins.effects());
+    ses.dirty = true;
 }
 
 impl App {
@@ -10353,18 +10299,18 @@ mod tests {
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let mut fl = lemon_parametric_eq_2::params::default_state();
         lemon_parametric_eq_2::params::set_field(&mut fl, 1, -600);
         a.state.session.project.get_mut().mixer[2].slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: EQ_FILE_NAME.into(), state: fl.clone() });
         a.sync_effects();
-        assert!(a.plugins.hosted.contains_key(&fx_key(2, 1)));
+        assert!(a.state.session.plugins.hosted.contains_key(&fx_key(2, 1)));
         assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some(LEMON_EQ));
-        assert_eq!(a.plugins.eq_file_state(fx_key(2, 1)), Some(fl));
+        assert_eq!(a.state.session.plugins.eq_file_state(fx_key(2, 1)), Some(fl));
         // A second pass changes nothing.
-        let before = a.plugins.hosted.len();
+        let before = a.state.session.plugins.hosted.len();
         a.sync_effects();
-        assert_eq!(a.plugins.hosted.len(), before);
+        assert_eq!(a.state.session.plugins.hosted.len(), before);
         assert_eq!(crate::plugins::new_slot(LEMON_EQ).state, lemon_parametric_eq_2::params::default_state());
     }
 
@@ -10377,7 +10323,7 @@ mod tests {
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let saved = tesla::state::Saved {
             sample: Sample::from_channels(44100, vec![vec![0.25; 4410], vec![-0.25; 4410]], Format::Int16),
             path: "take.wav".into(),
@@ -10388,18 +10334,18 @@ mod tests {
         a.state.session.project.get_mut().mixer[0].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: EDISON_FILE_NAME.into(), state: fl });
         a.sync_effects();
         let key = fx_key(0, 3);
-        assert!(a.plugins.hosted.contains_key(&key));
+        assert!(a.state.session.plugins.hosted.contains_key(&key));
         assert_eq!(crate::mixer::slot_name(&a.state.session, 0, 3).as_deref(), Some(TESLA));
-        let back = tesla::state::from_edison(&a.plugins.edison_file_state(key).expect("an Edison state")).unwrap();
+        let back = tesla::state::from_edison(&a.state.session.plugins.edison_file_state(key).expect("an Edison state")).unwrap();
         assert_eq!((back.sample.frames(), back.sample.channels(), back.path.as_str(), back.rec.armed), (4410, 2, "take.wav", true));
         a.store_builtin_states();
         let slot = a.state.session.project.mixer[0].slots[3].clone().unwrap();
         assert_eq!(slot.name, EDISON_FILE_NAME);
         assert_eq!(tesla::state::from_edison(&slot.state).map(|s| s.sample.frames()), Some(4410));
         // A second pass changes nothing.
-        let before = a.plugins.hosted.len();
+        let before = a.state.session.plugins.hosted.len();
         a.sync_effects();
-        assert_eq!(a.plugins.hosted.len(), before);
+        assert_eq!(a.state.session.plugins.hosted.len(), before);
     }
 
     /// A project's Love Philter slots are opened as Pulp Filter with their state, show Pulp Filter's name and keep the
@@ -10411,7 +10357,7 @@ mod tests {
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let mut st = State::new_default();
         st.globals[MASTER] = 77;
         let fl = st.to_bytes();
@@ -10422,21 +10368,21 @@ mod tests {
         });
         a.sync_effects();
         let key = fx_key(1, 2);
-        assert!(a.plugins.hosted.contains_key(&key));
+        assert!(a.state.session.plugins.hosted.contains_key(&key));
         assert_eq!(
             crate::mixer::slot_name(&a.state.session, 1, 2).as_deref(),
             Some(PULP_FILTER)
         );
-        assert_eq!(a.plugins.love_philter_file_state(key), Some(fl.clone()));
+        assert_eq!(a.state.session.plugins.love_philter_file_state(key), Some(fl.clone()));
         a.store_builtin_states();
         let slot = a.state.session.project.mixer[1].slots[2].clone().unwrap();
         assert_eq!(
             (slot.name.as_str(), slot.state),
             (LOVE_PHILTER_FILE_NAME, fl)
         );
-        let before = a.plugins.hosted.len();
+        let before = a.state.session.plugins.hosted.len();
         a.sync_effects();
-        assert_eq!(a.plugins.hosted.len(), before);
+        assert_eq!(a.state.session.plugins.hosted.len(), before);
         assert_eq!(
             crate::plugins::new_slot(PULP_FILTER).name,
             LOVE_PHILTER_FILE_NAME
@@ -10452,16 +10398,16 @@ mod tests {
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let mut st = State::new_default();
         st.params[P_LMH_MIX] = 500;
         let fl = st.to_bytes();
         a.state.session.project.get_mut().mixer[1].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: MAXIMUS_FILE_NAME.into(), state: fl.clone() });
         a.sync_effects();
         let key = fx_key(1, 3);
-        assert!(a.plugins.hosted.contains_key(&key));
+        assert!(a.state.session.plugins.hosted.contains_key(&key));
         assert_eq!(crate::mixer::slot_name(&a.state.session, 1, 3).as_deref(), Some(PRESS));
-        assert_eq!(a.plugins.maximus_file_state(key), Some(fl.clone()));
+        assert_eq!(a.state.session.plugins.maximus_file_state(key), Some(fl.clone()));
         a.store_builtin_states();
         let slot = a.state.session.project.mixer[1].slots[3].clone().unwrap();
         assert_eq!((slot.name.as_str(), slot.state), (MAXIMUS_FILE_NAME, fl));
@@ -10470,9 +10416,9 @@ mod tests {
         // (spec: plugins/factory-presets.md "Press (Maximus) and Pulp Filter").
         let p = crate::presets::factory(PRESS).into_iter().find(|p| p.name == "Mastering/Max loudness").expect("the preset");
         let Ok((_, crate::presets::Body::State(blob))) = crate::presets::load(&p.path, "clap:org.openstudio.press") else { panic!("a state preset") };
-        assert!(a.plugins.set_state(key, &blob));
+        assert!(a.state.session.plugins.set_state(key, &blob));
         let max = press::fl_from_plugin_state(&blob).unwrap();
-        assert_eq!(a.plugins.maximus_file_state(key), Some(max.clone()));
+        assert_eq!(a.state.session.plugins.maximus_file_state(key), Some(max.clone()));
         a.store_builtin_states();
         assert_eq!(a.state.session.project.mixer[1].slots[3].clone().unwrap().state, max);
     }
@@ -10498,7 +10444,7 @@ mod tests {
         a.state.session.file = None;
         a.state.session.path = None;
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         for (t, k, file, _, fl) in &cases {
             a.state.session.project.get_mut().mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: (*file).into(), state: fl.clone() });
         }
@@ -10507,11 +10453,11 @@ mod tests {
         a.sync_effects();
         for (t, k, file, lemon, fl) in &cases {
             let key = fx_key(*t, *k);
-            assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
+            assert_eq!(a.state.session.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
             assert_eq!(crate::mixer::slot_name(&a.state.session, *t, *k).as_deref(), Some(*lemon));
-            assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
+            assert_eq!(a.state.session.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
         }
-        assert!(!a.plugins.hosted.contains_key(&fx_key(4, 0)), "Stereo Shaper: the engine's");
+        assert!(!a.state.session.plugins.hosted.contains_key(&fx_key(4, 0)), "Stereo Shaper: the engine's");
         let path = std::env::temp_dir().join(format!("lemon-fl-recreations-{}.flp", std::process::id()));
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
@@ -10540,13 +10486,13 @@ mod tests {
         a.state.session.file = None;
         a.state.session.path = None;
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         a.state.session.project.get_mut().mixer[2].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Wave Candy".into(), state: fl.clone() });
         a.sync_effects();
         let key = fx_key(2, 3);
-        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(crate::plugins::LEMON_DROP.to_string()));
+        assert_eq!(a.state.session.plugins.descriptor(key).map(|d| d.name), Some(crate::plugins::LEMON_DROP.to_string()));
         assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 3).as_deref(), Some(crate::plugins::LEMON_DROP));
-        assert_eq!(a.plugins.recreation_file_state(key, "Wave Candy").as_ref(), Some(&fl));
+        assert_eq!(a.state.session.plugins.recreation_file_state(key, "Wave Candy").as_ref(), Some(&fl));
         let path = std::env::temp_dir().join(format!("lemon-wave-candy-{}.flp", std::process::id()));
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
@@ -10572,16 +10518,16 @@ mod tests {
         a.state.session.file = None;
         a.state.session.path = None;
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         for (t, k, file, _, fl) in &cases {
             a.state.session.project.get_mut().mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: (*file).into(), state: fl.clone() });
         }
         a.sync_effects();
         for (t, k, file, lemon, fl) in &cases {
             let key = fx_key(*t, *k);
-            assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
+            assert_eq!(a.state.session.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
             assert_eq!(crate::mixer::slot_name(&a.state.session, *t, *k).as_deref(), Some(*lemon));
-            assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
+            assert_eq!(a.state.session.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
         }
         let path = std::env::temp_dir().join(format!("lemon-fl-modulation-{}.flp", std::process::id()));
         a.save_to(path.clone());
@@ -10607,14 +10553,14 @@ mod tests {
         a.state.session.file = None;
         a.state.session.path = None;
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         a.state.session.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Peak Controller".into(), state: fl.clone() });
         let link = os_model::ControllerLink { formula: Some("1-Input".into()), ..os_model::ControllerLink::new(0x7000 + 64, 1, 0x40_0000) };
         a.state.session.project.get_mut().controller_links = vec![link.clone()];
         a.sync_effects();
         let key = fx_key(1, 0);
-        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_PEAK_CONTROLLER.to_string()));
-        assert_eq!(a.plugins.recreation_file_state(key, "Fruity Peak Controller").as_ref(), Some(&fl), "the state as it was opened");
+        assert_eq!(a.state.session.plugins.descriptor(key).map(|d| d.name), Some(LEMON_PEAK_CONTROLLER.to_string()));
+        assert_eq!(a.state.session.plugins.recreation_file_state(key, "Fruity Peak Controller").as_ref(), Some(&fl), "the state as it was opened");
         let path = std::env::temp_dir().join(format!("lemon-fl-peak-controller-{}.flp", std::process::id()));
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
@@ -10645,13 +10591,13 @@ mod tests {
         a.state.session.file = None;
         a.state.session.path = None;
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         a.state.session.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: VOCODEX_FILE_NAME.into(), state: fl.clone() });
         assert_eq!(crate::project_plugins::slot_ports(&a.state.session.project, 1, 0), (0, 2), "the sidechain bus takes the carrier's input");
         a.sync_effects();
         let key = fx_key(1, 0);
-        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_VOCODER.to_string()));
-        assert_eq!(a.plugins.recreation_file_state(key, VOCODEX_FILE_NAME).as_ref(), Some(&fl), "the state as it was opened");
+        assert_eq!(a.state.session.plugins.descriptor(key).map(|d| d.name), Some(LEMON_VOCODER.to_string()));
+        assert_eq!(a.state.session.plugins.recreation_file_state(key, VOCODEX_FILE_NAME).as_ref(), Some(&fl), "the state as it was opened");
         let path = std::env::temp_dir().join(format!("lemon-vocodex-{}.flp", std::process::id()));
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
@@ -10678,14 +10624,14 @@ mod tests {
         a.state.session.file = None;
         a.state.session.path = None;
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         a.state.session.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Formula Controller".into(), state: fl.clone() });
         let link = os_model::ControllerLink::new(0x7000 + 64, 0, 0x40_0000);
         a.state.session.project.get_mut().controller_links = vec![link.clone()];
         a.sync_effects();
         let key = fx_key(1, 0);
-        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_FORMULA_CONTROLLER.to_string()));
-        assert_eq!(a.plugins.recreation_file_state(key, "Fruity Formula Controller").as_ref(), Some(&fl), "the state as it was opened");
+        assert_eq!(a.state.session.plugins.descriptor(key).map(|d| d.name), Some(LEMON_FORMULA_CONTROLLER.to_string()));
+        assert_eq!(a.state.session.plugins.recreation_file_state(key, "Fruity Formula Controller").as_ref(), Some(&fl), "the state as it was opened");
         let path = std::env::temp_dir().join(format!("lemon-fl-formula-controller-{}.flp", std::process::id()));
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
@@ -10705,7 +10651,7 @@ mod tests {
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let first = a.state.session.project.mixer[0].slots.iter().position(Option::is_none).unwrap() as u8;
         a.audio_editor(0, false);
         assert_eq!(slot_name(&a.state.session, 0, first).as_deref(), Some(TESLA));
@@ -13048,8 +12994,8 @@ mod tests {
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
-        app.plugins.effects = vec![crate::plugin_db::fake("A long effect name", os_host::Kind::Effect)];
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins.effects = vec![crate::plugin_db::fake("A long effect name", os_host::Kind::Effect)];
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.browser_tab = 2;
         app.state.browser_open.extend(["2:Plugin library/Effects".into(), "2:Plugin library/Effects/Other".into()]);
         frame(&mut app, &mut c, None);
@@ -14126,12 +14072,12 @@ mod tests {
         let (Ok(mut c), Ok(mut whole), Ok(mut want)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
         for name in ["Alpha Synth", "Beta Synth"] {
-            app.plugins.available.push(db::fake(name, os_host::Kind::Instrument));
+            app.state.session.plugins.available.push(db::fake(name, os_host::Kind::Instrument));
         }
         for name in ["Gamma Delay", "Delta Reverb"] {
-            app.plugins.effects.push(db::fake(name, os_host::Kind::Effect));
+            app.state.session.plugins.effects.push(db::fake(name, os_host::Kind::Effect));
         }
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.mouse_move(5.0, 790.0);
         frame(&mut app, &mut c, None);
         crate::anim::set_clock(true);
@@ -14780,12 +14726,12 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1366, 768, 1.0) else { return };
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
         for i in 0..300 {
-            app.plugins.available.push(crate::plugin_db::fake(&format!("Test Synth {i}"), os_host::Kind::Instrument));
-            app.plugins.effects.push(crate::plugin_db::fake(&format!("Test FX {i}"), os_host::Kind::Effect));
+            app.state.session.plugins.available.push(crate::plugin_db::fake(&format!("Test Synth {i}"), os_host::Kind::Instrument));
+            app.state.session.plugins.effects.push(crate::plugin_db::fake(&format!("Test FX {i}"), os_host::Kind::Effect));
         }
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         frame(&mut app, &mut c, None);
         app.key(&Key::Named(NamedKey::F8), false, false);
         frame(&mut app, &mut c, None);
@@ -15126,10 +15072,10 @@ mod tests {
         assert!(app.state.cpu.update(t0, None, 0, 0, 0));
         assert!(!app.state.cpu.due(t0 + Duration::from_millis(500)) && app.state.cpu.due(t0 + Duration::from_millis(1000)));
         // Double click: the monitor, with a row for each hosted instance.
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
-        let osc = app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
-        app.plugins.create_with(0, osc, None).unwrap();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
+        let osc = app.state.session.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        app.state.session.plugins.create_with(0, osc, None).unwrap();
         click(&mut app, &mut c, r);
         assert!(!app.state.shown(Win::Perf), "one click does nothing");
         app.mouse_move(r.cx(), r.cy());
@@ -15391,7 +15337,7 @@ mod tests {
         let runs: usize = var("LEMON_RUNS").and_then(|s| s.parse().ok()).unwrap_or(1);
         let Some(song) = var("LEMON_SONG") else { return eprintln!("LEMON_SONG names no song") };
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
         // LEMON_PLUGINS: the plugins the app's last scan found too (the song's FL plugins, hosted as the app hosts them).
         if var("LEMON_PLUGINS").is_some() {
             app.load_plugins();
@@ -15406,12 +15352,12 @@ mod tests {
         if let Some(n) = song.strip_prefix("trio:") {
             // A heavy pattern instead of a song: `n` Lemon Trio channels, each playing four-note chords on every step,
             // a beat long.
-            let index = app.plugins.index_of(crate::osc3::LEMON_TRIO).expect("Lemon Trio");
+            let index = app.state.session.plugins.index_of(crate::osc3::LEMON_TRIO).expect("Lemon Trio");
             let mut notes = Vec::new();
             for c in 0..n.parse::<u16>().unwrap_or(8) {
                 let row = add_plugin_channel(app.state.session.project.get_mut(), crate::osc3::LEMON_TRIO);
-                app.plugins.create(row, index).expect("a Lemon Trio instance");
-                app.state.hosted_rows.push(row);
+                app.state.session.plugins.create(row, index).expect("a Lemon Trio instance");
+                app.state.session.hosted_rows.push(row);
                 let ch = app.state.session.project.channels[row].index;
                 for i in 0..16 {
                     for k in [0, 4, 7, 11] {
@@ -15421,7 +15367,7 @@ mod tests {
             }
             app.state.session.project.get_mut().patterns[0].notes = notes;
             app.state.set_song_mode(false);
-            app.transport.set_instruments(app.plugins.instruments());
+            app.transport.set_instruments(app.state.session.plugins.instruments());
         } else {
             app.open(song.clone().into());
         }
@@ -15436,7 +15382,7 @@ mod tests {
             m.volume = Some(0.0);
         }
         let (tempo, ppq) = (app.state.session.project.tempo.unwrap_or(140.0), app.state.session.project.ppq.max(1));
-        eprintln!("{song}: {tempo} BPM, PPQ {ppq}, {} hosted rows", app.state.hosted_rows.len());
+        eprintln!("{song}: {tempo} BPM, PPQ {ppq}, {} hosted rows", app.state.session.hosted_rows.len());
         eprintln!("driver | block | rate | tick | ahead min / mean / max (frames) | mean ms | driver latency | longest gap ms | load | dropouts");
         for &b in &buffers {
             for _ in 0..runs {
@@ -15459,7 +15405,7 @@ mod tests {
                 let Some(info) = info else { continue };
                 app.act(Action::Play);
                 run(&mut app, 2000);
-                eprintln!("{} instruments and {} effects hosted", app.state.hosted_rows.len(), app.plugins.hosted.len() - app.state.hosted_rows.len());
+                eprintln!("{} instruments and {} effects hosted", app.state.session.hosted_rows.len(), app.state.session.plugins.hosted.len() - app.state.session.hosted_rows.len());
                 let _ = app.transport.take_ahead();
                 let u0 = app.transport.underruns();
                 let (mut min, mut max, mut sum, mut blocks, mut gap, mut load) = (u64::MAX, 0u64, 0.0f64, 0u64, 0u64, 0.0f32);
@@ -15502,13 +15448,13 @@ mod tests {
         use std::time::{Duration, Instant};
         use winit::keyboard::KeyCode;
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         let row = add_plugin_channel(app.state.session.project.get_mut(), crate::osc3::LEMON_TRIO);
-        let index = app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
-        app.plugins.create(row, index).unwrap();
-        app.state.hosted_rows.push(row);
-        app.transport.set_instruments(app.plugins.instruments());
+        let index = app.state.session.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        app.state.session.plugins.create(row, index).unwrap();
+        app.state.session.hosted_rows.push(row);
+        app.transport.set_instruments(app.state.session.plugins.instruments());
         app.state.selected_channel = row;
         app.state.toggles.push("typing");
         let run = |app: &mut App, ms: u64| {
@@ -15548,7 +15494,7 @@ mod tests {
             }
             run(app, 1500);
             let du = app.transport.underruns() - u0;
-            let voices = app.transport.engine_voices() + app.plugins.voices();
+            let voices = app.transport.engine_voices() + app.state.session.plugins.voices();
             eprintln!("{name}: {du} dropouts, {voices} voices after");
             (du, voices)
         };
@@ -15561,7 +15507,7 @@ mod tests {
         let (du, _) = phase(&mut app, "playing");
         app.act(Action::Stop);
         run(&mut app, 500);
-        let v = app.transport.engine_voices() + app.plugins.voices();
+        let v = app.transport.engine_voices() + app.state.session.plugins.voices();
         assert!(du < 5 && v == 0, "while playing: {du} dropouts; {v} voices after Stop");
     }
 
@@ -15612,8 +15558,8 @@ mod tests {
         assert_eq!(crate::playlist::clips(&app.state.session).len(), n0 + 1);
         // Plugin database tab: open Generators and its Sampler category, drag Lemon Sampler onto the playlist -> a new
         // channel.
-        app.plugins = crate::plugins::Plugins::builtins();
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         let r0 = hit_rect(&app, &Action::BrowserTab(2));
         click(&mut app, &mut c, r0);
         for label in ["Generators", "Sampler"] {
@@ -15681,8 +15627,8 @@ mod tests {
     #[test]
     fn audio_clip_channels_use_lemon_sampler() {
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         let wav = std::env::temp_dir().join(format!("os-app-audio-clip-channel-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
         let path = wav.to_string_lossy().into_owned();
@@ -15690,11 +15636,11 @@ mod tests {
         let row = app.state.session.project.channels.len() - 1;
         assert_eq!(app.state.session.project.channels[row].kind, ChannelKind::AudioClip);
         app.plugin_tick();
-        assert!(app.state.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
-        assert_eq!(app.plugins.sampler_path(row).as_deref(), Some(path.as_str()));
+        assert!(app.state.session.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
+        assert_eq!(app.state.session.plugins.sampler_path(row).as_deref(), Some(path.as_str()));
         app.toggle_channel_window(row);
         assert!(!app.state.shown(Win::Plugin), "no information window");
-        assert_eq!(app.state.pending_open, Some(row), "Lemon Sampler's window opens");
+        assert_eq!(app.state.session.pending_open, Some(row), "Lemon Sampler's window opens");
     }
 
     /// An M4A (AAC or ALAC) dropped on the playlist becomes an audio clip there, as a WAV does.
@@ -15727,9 +15673,9 @@ mod tests {
     fn a_long_audio_clip_exports_once() {
         use std::time::Duration;
         let mut a = App::new(None);
-        a.plugins = crate::plugins::Plugins::default();
-        a.plugins.available = crate::plugins::builtin();
-        a.plugins.set_rate(48000);
+        a.state.session.plugins = crate::plugins::Plugins::default();
+        a.state.session.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.set_rate(48000);
         let n = 60 * 48000;
         let level = |f: usize| 0.1 + 0.8 * f as f32 / n as f32;
         let wav = std::env::temp_dir().join(format!("os-app-long-clip-{}.wav", std::process::id()));
@@ -15749,10 +15695,10 @@ mod tests {
         assert_eq!(ch.sound.sampler_flags, Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), "FL's clip channel flags");
         ch.sound.sampler_flags = None;
         a.plugin_tick();
-        a.transport.set_instruments(a.plugins.instruments());
+        a.transport.set_instruments(a.state.session.plugins.instruments());
         let p = crate::rack::play_project(&a.state);
         let out = std::env::temp_dir().join(format!("os-app-long-clip-{}-export.wav", std::process::id()));
-        a.plugins.set_offline(true);
+        a.state.session.plugins.set_offline(true);
         a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
         let t0 = std::time::Instant::now();
         loop {
@@ -15797,26 +15743,26 @@ mod tests {
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &src).unwrap();
         let export = |keep: bool| -> Vec<u8> {
             let mut a = App::new(None);
-            a.plugins = crate::plugins::Plugins::default();
-            a.plugins.available = crate::plugins::builtin();
-            a.plugins.set_rate(48000);
+            a.state.session.plugins = crate::plugins::Plugins::default();
+            a.state.session.plugins.available = crate::plugins::builtin();
+            a.state.session.plugins.set_rate(48000);
             crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
             let row = a.state.session.project.channels.len() - 1;
             a.plugin_tick();
-            assert!(a.state.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
-            let st = crate::plugins::with_params(&a.plugins.state(row).unwrap(), &[("keep_disk", json!({ "bool": keep }))]).unwrap();
-            assert!(a.plugins.set_state(row, &st));
+            assert!(a.state.session.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
+            let st = crate::plugins::with_params(&a.state.session.plugins.state(row).unwrap(), &[("keep_disk", json!({ "bool": keep }))]).unwrap();
+            assert!(a.state.session.plugins.set_state(row, &st));
             if keep {
                 assert!(lemon_sampler::stream::open_files() > 0, "the sample plays from disk");
             }
-            a.transport.set_instruments(a.plugins.instruments());
+            a.transport.set_instruments(a.state.session.plugins.instruments());
             let first = *crate::playlist::arr_mut(&mut a.state.session).clips.last().unwrap();
             let second = os_model::Clip { position: first.position + first.length, length: first.length / 2, window: Some((10_000.0, 20_000.0)), ..first };
             crate::playlist::arr_mut(&mut a.state.session).clips.push(second);
             let p = crate::rack::play_project(&a.state);
             let out = std::env::temp_dir().join(format!("os-app-keep-on-disk-{}-{keep}.wav", std::process::id()));
             // As `start_export` does with high quality off.
-            a.plugins.set_offline(false);
+            a.state.session.plugins.set_offline(false);
             lemon_sampler::stream::export_started();
             a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
             let t0 = std::time::Instant::now();
@@ -15854,16 +15800,16 @@ mod tests {
     fn overlapping_clips_of_one_sample_export_flat() {
         use std::time::Duration;
         let mut a = App::new(None);
-        a.plugins = crate::plugins::Plugins::default();
-        a.plugins.available = crate::plugins::builtin();
-        a.plugins.set_rate(48000);
+        a.state.session.plugins = crate::plugins::Plugins::default();
+        a.state.session.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.set_rate(48000);
         let wav = std::env::temp_dir().join(format!("os-app-crossfade-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
         crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
         let row = a.state.session.project.channels.len() - 1;
         a.plugin_tick();
-        assert!(a.state.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
-        a.transport.set_instruments(a.plugins.instruments());
+        assert!(a.state.session.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
+        a.transport.set_instruments(a.state.session.plugins.instruments());
         let first = *crate::playlist::arr_mut(&mut a.state.session).clips.last().unwrap();
         let second = os_model::Clip { position: first.position + first.length / 2, ..first };
         crate::playlist::arr_mut(&mut a.state.session).clips.push(second);
@@ -15875,7 +15821,7 @@ mod tests {
         assert!(os_model::crossfade::derive(a.state.session.project.get_mut(), tempo), "the overlap makes a crossfade");
         let p = crate::rack::play_project(&a.state);
         let out = std::env::temp_dir().join(format!("os-app-crossfade-{}-export.wav", std::process::id()));
-        a.plugins.set_offline(true);
+        a.state.session.plugins.set_offline(true);
         a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
         let t0 = std::time::Instant::now();
         loop {
@@ -15904,18 +15850,18 @@ mod tests {
     #[test]
     fn added_sampler_channels_take_the_detach_check() {
         let mut a = App::new(None);
-        a.plugins = crate::plugins::Plugins::default();
-        a.plugins.available = crate::plugins::builtin();
-        let sampler = a.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        a.state.session.plugins = crate::plugins::Plugins::default();
+        a.state.session.plugins.available = crate::plugins::builtin();
+        let sampler = a.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
         crate::plugin_menu::add_generator(&mut a, sampler, None);
-        let off = a.state.pending_open.expect("its window opens once hosted");
+        let off = a.state.session.pending_open.expect("its window opens once hosted");
         a.sync_samplers(None);
-        a.state.pending_open = None;
+        a.state.session.pending_open = None;
         crate::prefs::set_check(&crate::prefs::DETACH_NEW, true);
         crate::plugin_menu::add_generator(&mut a, sampler, None);
-        let on = a.state.pending_open.unwrap();
+        let on = a.state.session.pending_open.unwrap();
         a.sync_samplers(None);
-        let detached = |r: usize| a.plugins.hosted[&r].detached;
+        let detached = |r: usize| a.state.session.plugins.editors.get(&r).is_some_and(|e| e.detached);
         assert!(detached(on));
         assert!(!detached(off), "added before: keeps its mode");
         assert!(!detached(0), "the project's channel");
@@ -15929,11 +15875,11 @@ mod tests {
         use serde_json::json;
         let flp = std::env::temp_dir().join(format!("os_sampler_settings_{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.plugins = crate::plugins::Plugins::default();
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins = crate::plugins::Plugins::default();
+        a.state.session.plugins.available = crate::plugins::builtin();
         a.sync_samplers(None);
         let row = (0..a.state.session.project.channels.len()).find(|&r| a.state.session.project.channels[r].kind.is_sampler()).expect("a sampler channel");
-        assert!(a.state.hosted_rows.contains(&row));
+        assert!(a.state.session.hosted_rows.contains(&row));
         let untouched = a.state.session.project.channels[row].clone();
         let edits = [
             ("envvol_on", json!({ "bool": true })),
@@ -15961,8 +15907,8 @@ mod tests {
             ("zone_lo", json!({ "i32": 37 })),
             ("zone_hi", json!({ "i32": 60 })),
         ];
-        let st = crate::plugins::with_params(&a.plugins.state(row).unwrap(), &edits).unwrap();
-        assert!(a.plugins.set_state(row, &st));
+        let st = crate::plugins::with_params(&a.state.session.plugins.state(row).unwrap(), &edits).unwrap();
+        assert!(a.state.session.plugins.set_state(row, &st));
 
         // Saving copies them into the channel, in the file's units.
         a.save_to(flp.clone());
@@ -15988,12 +15934,12 @@ mod tests {
         // Reopened: the file holds them, and the new Lemon Sampler starts with them.
         let saved = ch.clone();
         let mut b = App::new(None);
-        b.plugins = crate::plugins::Plugins::default();
-        b.plugins.available = crate::plugins::builtin();
+        b.state.session.plugins = crate::plugins::Plugins::default();
+        b.state.session.plugins.available = crate::plugins::builtin();
         b.open(flp.clone());
         let _ = std::fs::remove_file(&flp);
         let t0 = std::time::Instant::now();
-        while !b.state.hosted_rows.contains(&row) && t0.elapsed() < std::time::Duration::from_secs(20) {
+        while !b.state.session.hosted_rows.contains(&row) && t0.elapsed() < std::time::Duration::from_secs(20) {
             b.plugin_tick();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -16001,7 +15947,7 @@ mod tests {
         assert_eq!((reopened.envelopes, reopened.sound), (saved.envelopes, saved.sound));
         let (m, n) = (reopened.misc, saved.misc);
         assert_eq!((m.root, m.fine, m.main_pitch, m.add_key, m.key_range), (n.root, n.fine, n.main_pitch, n.add_key, n.key_range));
-        let st = b.plugins.state(row).expect("Lemon Sampler hosted again");
+        let st = b.state.session.plugins.state(row).expect("Lemon Sampler hosted again");
         let v: serde_json::Value = serde_json::from_slice(&st[8..]).unwrap();
         for (id, want) in &edits {
             let got = &v["params"][*id];
@@ -16092,8 +16038,8 @@ mod tests {
         let rows: Vec<usize> = (0..app.state.session.project.channels.len()).filter(|&r| app.state.session.project.channels[r].kind.is_sampler()).collect();
         assert!(rows.len() > 1);
         app.save_to(flp.clone());
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         app.open(flp.clone());
         let _ = std::fs::remove_file(&flp);
         assert!(app.loading(), "opening starts loading");
@@ -16107,8 +16053,8 @@ mod tests {
         }
         assert!(!app.loading(), "loading ends");
         for &r in &rows {
-            assert!(app.state.hosted_rows.contains(&r), "row {r} has its Lemon Sampler");
-            assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(wav.as_str()));
+            assert!(app.state.session.hosted_rows.contains(&r), "row {r} has its Lemon Sampler");
+            assert_eq!(app.state.session.plugins.sampler_path(r).as_deref(), Some(wav.as_str()));
         }
         let _ = std::fs::remove_file(&wav);
     }
@@ -16125,12 +16071,12 @@ mod tests {
             a.save_to(flp.clone());
             assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
             let mut b = App::new(None);
-            b.plugins = crate::plugins::Plugins::default();
+            b.state.session.plugins = crate::plugins::Plugins::default();
             b.open(flp.clone());
             b
         };
         let mut a = App::new(None);
-        a.plugins = crate::plugins::Plugins::default();
+        a.state.session.plugins = crate::plugins::Plugins::default();
         let row = 0;
         let untouched = a.state.session.project.channels[row].misc;
         // Values the file's units hold exactly.
@@ -16223,8 +16169,8 @@ mod tests {
         let mut app = App::new(None);
         assert!(!app.unsaved(), "a fresh project");
         app.save_to(dir.join("Song.lemon"));
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         app.open(dir.join("Song.lemon"));
         let mut canvas = Canvas::new(1920, 1080, 1.0).unwrap();
         let t0 = std::time::Instant::now();
@@ -16495,8 +16441,8 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
-        app.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.z = vec![Win::Mixer];
         app.state.browser_tab = 2;
         app.state.browser_open.extend(["2:Plugin library/Effects".into(), "2:Plugin library/Effects/Other".into()]);
@@ -16524,10 +16470,10 @@ mod tests {
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.reset_hosted();
-        app.plugins.effects = crate::plugins::builtin_effects();
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins.effects = crate::plugins::builtin_effects();
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.z = vec![Win::Mixer];
-        let lim = app.plugins.effects.iter().position(|e| e.desc.name == "Lemon Limiter").unwrap();
+        let lim = app.state.session.plugins.effects.iter().position(|e| e.desc.name == "Lemon Limiter").unwrap();
         run(&mut app, MCmd::AddEffect(0, lim));
         app.state.session.control.settle(app.state.session.project.get_mut());
         app.mixer_tick();
@@ -16566,7 +16512,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
-        app.plugins.effects = vec![crate::plugin_db::fake("FX A", os_host::Kind::Effect), crate::plugin_db::fake("FX B", os_host::Kind::Effect)];
+        app.state.session.plugins.effects = vec![crate::plugin_db::fake("FX A", os_host::Kind::Effect), crate::plugin_db::fake("FX B", os_host::Kind::Effect)];
         app.state.z = vec![Win::Mixer];
         run(&mut app, MCmd::AddEffect(0, 0));
         run(&mut app, MCmd::AddEffect(3, 1));
@@ -16997,7 +16943,7 @@ mod tests {
         // Name button opens the channel's Lemon Sampler (a sampler row never shows the info window); the slot selects.
         let hr = hit_rect(&app, &Action::ChannelSelect(2));
         click(&mut app, &mut a, hr);
-        assert_eq!((app.state.pending_open, app.state.selected_channel), (Some(2), 2));
+        assert_eq!((app.state.session.pending_open, app.state.selected_channel), (Some(2), 2));
         assert!(!app.state.shown(Win::Plugin));
         let hr = hit_rect(&app, &Action::RackSelect(3));
         click(&mut app, &mut a, hr);
@@ -17068,8 +17014,8 @@ mod tests {
 
         // Add channels until the rows overflow: a vertical scroll bar appears. "+" opens the plugin palette of generators
         // (spec: ui/plugin-menu.md §1, §6); Lemon Sampler adds a sampler channel at the bottom.
-        app.plugins = crate::plugins::Plugins::builtins();
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         let n = app.state.session.project.channels.len();
         for _ in 0..6 {
             let hr = hit_rect(&app, &Action::RackAdd);
@@ -18429,7 +18375,7 @@ mod tests {
         let b = hit_rect(&app, &Action::PianoTarget);
         app.mouse_move(b.cx(), b.cy());
         app.mouse_down_right();
-        assert_eq!(app.state.pending_open, Some(1), "Clap's sampler window opens");
+        assert_eq!(app.state.session.pending_open, Some(1), "Clap's sampler window opens");
     }
 
     /// The browser's title-bar arrows (spec: ui/browser.md §4, "Title-bar icons"): Reread keeps open nodes,
@@ -20270,16 +20216,16 @@ mod tests {
             frame(app, c, None);
         };
         tap(&mut app, &mut c, 1);
-        assert_eq!(app.state.pending_open, None, "one click only selects");
+        assert_eq!(app.state.session.pending_open, None, "one click only selects");
         tap(&mut app, &mut c, 1);
-        assert_eq!(app.state.pending_open, Some(row), "a double click opens the clip's sampler");
+        assert_eq!(app.state.session.pending_open, Some(row), "a double click opens the clip's sampler");
         assert_eq!(app.state.selected_channel, row);
         assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([row]));
-        app.state.pending_open = None;
+        app.state.session.pending_open = None;
         app.state.set_pattern(2);
         tap(&mut app, &mut c, 2);
         tap(&mut app, &mut c, 2);
-        assert_eq!(app.state.pending_open, None, "a pattern clip opens no sampler");
+        assert_eq!(app.state.session.pending_open, None, "a pattern clip opens no sampler");
         assert!(app.state.shown(Win::PianoRoll) && app.state.pattern() == 1, "it opens its pattern in the piano roll");
         let _ = std::fs::remove_file(&wav);
     }
@@ -20811,7 +20757,7 @@ mod tests {
                 frame(app, c, None);
             }
             app.alt = false;
-            app.state.pending_open.take()
+            app.state.session.pending_open.take()
         };
         // The defaults: Alt is Show clip properties (no window yet), no modifier Show channel settings.
         assert_eq!(double(&mut app, &mut c, true), None, "Show clip properties opens nothing yet");
@@ -21622,8 +21568,8 @@ mod tests {
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::Mixer];
         app.state.show_browser = false;
-        app.plugins.effects = vec![crate::plugin_db::fake("Test Delay", os_host::Kind::Effect)];
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins.effects = vec![crate::plugin_db::fake("Test Delay", os_host::Kind::Effect)];
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         mx::select(&mut app.state, 3, false);
         mx::route(&mut app.state, 5, false, false);
         mx::route(&mut app.state, 7, false, true);
@@ -21661,9 +21607,9 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
-        app.plugins = crate::plugins::Plugins::builtins();
-        app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
+        app.state.session.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         frame(&mut app, &mut c, None);
         let f8 = Key::Named(NamedKey::F8);
         // Types `label` into the search and clicks its row.
@@ -21705,7 +21651,7 @@ mod tests {
         pick(&mut app, &mut c, crate::osc3::LEMON_TRIO);
         assert_eq!(app.state.session.project.channels.len(), n + 1);
         assert_eq!(app.state.selected_channel, n);
-        assert_eq!(app.state.pending_plugin, Some((n, app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap())));
+        assert_eq!(app.state.session.pending_plugin, Some((n, app.state.session.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap())));
         // An empty mixer slot's palette: effects only, into that slot.
         app.open_plugin_palette(crate::plugin_menu::Target::Fx(Some(4)), (100.0, 100.0), None);
         assert_eq!(pal::title(&app.state.palette), "Add effect");
@@ -21724,11 +21670,11 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         app.sync_samplers(None);
         app.mark_saved();
-        assert!(app.state.hosted_rows.contains(&1), "Lemon Sampler plays the sampler channels");
+        assert!(app.state.session.hosted_rows.contains(&1), "Lemon Sampler plays the sampler channels");
         app.state.rack.sel = [1, 3].into();
         let entry = views::menus::MENUS[TOOLS_MENU].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == DECLICK_LABEL).unwrap();
         frame(&mut app, &mut c, None);
@@ -21762,7 +21708,7 @@ mod tests {
         app.plugin_tick();
         let mut ch = app.state.session.project.channels[1].clone();
         ch.sound.declick = 0;
-        crate::plugins::store_sampler(&mut ch, &app.plugins.state(1).unwrap());
+        crate::plugins::store_sampler(&mut ch, &app.state.session.plugins.state(1).unwrap());
         assert_eq!(ch.sound.declick, 3);
         // Without a selection the modes are greyed out and change nothing.
         app.state.rack.sel.clear();
@@ -21789,19 +21735,19 @@ mod tests {
     fn switch_all_plugin_editors() {
         use views::menus::{submenu, EDITORS_LABEL, TOOLS_MENU};
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
-        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins.effects = crate::plugins::builtin_effects();
         app.sync_samplers(None);
-        app.plugins.create_effect(1, 0, 0, None).expect("an effect in a mixer slot");
-        assert!(app.plugins.hosted.len() >= 2 && app.plugins.hosted.values().all(|h| !h.detached));
+        app.state.session.plugins.create_effect(1, 0, 0, None).expect("an effect in a mixer slot");
+        assert!(app.state.session.plugins.hosted.len() >= 2 && app.state.session.plugins.editors.values().all(|e| !e.detached));
         let items = submenu(TOOLS_MENU, EDITORS_LABEL).unwrap()(&app.state);
         let rack = crate::rack::options_menu(&app.state, 0.0, 0.0);
         assert_eq!(rack.items.iter().find(|i| i.label == EDITORS_LABEL).map(|i| &i.children), Some(&items), "the rack's is the same");
         crate::playlist::run(&mut app, items[1].cmd.clone());
-        assert!(app.plugins.hosted.values().all(|h| h.detached), "Detached");
+        assert!(app.state.session.plugins.hosted.keys().all(|k| app.state.session.plugins.editors.get(k).is_some_and(|e| e.detached)), "Detached");
         crate::playlist::run(&mut app, items[0].cmd.clone());
-        assert!(app.plugins.hosted.values().all(|h| !h.detached), "Attached");
+        assert!(app.state.session.plugins.editors.values().all(|e| !e.detached), "Attached");
     }
 
     /// ADD > Effect ▸: the effect plugin menu as a submenu; a pick goes into the selected mixer track's first empty
@@ -21814,11 +21760,11 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
-        app.plugins = crate::plugins::Plugins::builtins();
-        app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
+        app.state.session.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         crate::mixer::select(&mut app.state, 2, false);
-        let index = app.plugins.effects.len() - 1;
+        let index = app.state.session.plugins.effects.len() - 1;
         let entry = views::menus::MENUS[ADD_MENU].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Effect").unwrap();
         let pick = |app: &mut App, c: &mut Canvas| {
             frame(app, c, None);
@@ -22725,10 +22671,10 @@ mod tests {
         let s = &app.state;
         assert_eq!(crate::rack::groups(&s.session.project)[1].members.iter().copied().collect::<Vec<_>>(), [5]);
         assert_eq!((s.playlist.source, s.playlist.picker, pl::clips(&s.session).len()), (Some(ClipSource::Channel(5)), PickKind::Audio, clips));
-        assert_eq!(s.pending_open, Some(5), "its settings (Lemon Sampler's window) open");
+        assert_eq!(s.session.pending_open, Some(5), "its settings (Lemon Sampler's window) open");
         assert!(app.unsaved());
         // Automation clip.
-        app.state.pending_open = None;
+        app.state.session.pending_open = None;
         app.menu_item(ADD_MENU, entry("Automation clip"));
         let s = &app.state;
         let ch = s.session.project.channels.last().unwrap();
@@ -22739,7 +22685,7 @@ mod tests {
         assert!(a.targets.is_empty() && a.lfo.mode == 1);
         assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.session.project), crate::rack::filter(&app.state.session.project)), (vec!["Drums".into(), "Audio".into(), "Automation".into()], Some(3), Filter::Group(2)));
         let s = &app.state;
-        assert!(s.shown(Win::Plugin) && s.plugin_channel == 6 && s.pending_open.is_none(), "its channel window opens");
+        assert!(s.shown(Win::Plugin) && s.plugin_channel == 6 && s.session.pending_open.is_none(), "its channel window opens");
         assert_eq!((s.playlist.source, s.playlist.picker), (Some(ClipSource::Channel(6)), PickKind::Automation));
         // Another audio clip: a unique name, the same group.
         app.menu_item(ADD_MENU, entry("Audio clip"));
@@ -22909,13 +22855,13 @@ mod tests {
         // TIME 4 beats, PITCH +100 cents, MUL x1.19, Resample.
         let kept = [768f32.to_bits(), 100, 2540];
         app.state.session.project.get_mut().channels[a].sound.stretch = [kept[0], kept[1], kept[2], 0];
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         app.sync_samplers(None);
         app.mark_saved();
-        assert!(app.state.hosted_rows.contains(&a) && app.state.hosted_rows.contains(&b), "Lemon Sampler plays the audio clips");
+        assert!(app.state.session.hosted_rows.contains(&a) && app.state.session.hosted_rows.contains(&b), "Lemon Sampler plays the audio clips");
         let sampler = |app: &App, row: usize| {
-            let p = app.plugins.hosted[&row].plugin.lock().unwrap();
+            let p = app.state.session.plugins.hosted[&row].plugin.lock().unwrap();
             let mut st = [0u32; 4];
             for i in (0..p.param_count()).filter_map(|i| p.param_info(i)) {
                 crate::plugins::stretch_param(&i.name, p.param_value(i.id).unwrap(), &mut st);
@@ -23494,8 +23440,8 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::builtins();
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.open_settings(PLUGINS);
         frame(&mut app, &mut c, None);
         let finish = |app: &mut App| {
@@ -23522,8 +23468,8 @@ mod tests {
         assert!(!row.toggles);
         assert!(app.state.message.as_deref().is_some_and(|m| m.contains("1 file with errors")), "{:?}", app.state.message);
         // Star, then hide, an effect (one no scan found: as if listed before the scan).
-        app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         let row_of = |app: &App| app.state.plugdb.rows.iter().position(|r| r.name == "Test FX").unwrap();
         // Scrolled to its row: the built-in plugins alone can fill the table.
         app.state.plugdb.top = row_of(&app);
@@ -23596,9 +23542,9 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(test_project());
-        a.plugins = crate::plugins::Plugins::builtins();
+        a.state.session.plugins = crate::plugins::Plugins::builtins();
         let rate = crate::transport::Transport::device_rate().unwrap_or(48000);
-        a.state.plugdb.rebuild(&a.plugins);
+        a.state.plugdb.rebuild(&a.state.session.plugins);
         // Only the added folders are scanned: the standard ones hold the user's own plugins.
         a.state.plugdb.prefs.standard_off = crate::plugin_db::search_dirs(&a.state.plugdb.prefs).iter().map(|d| d.path.display().to_string()).collect();
         a.open_settings(PLUGINS);
@@ -23652,17 +23598,17 @@ mod tests {
         pl::run(&mut a, add.cmd);
         for _ in 0..200 {
             a.tick();
-            if a.state.pending_plugin.is_none() {
+            if a.state.session.pending_plugin.is_none() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(a.state.hosted_rows.contains(&row), "Kars hosted: {:?}", a.state.message);
-        assert_eq!(a.plugins.descriptor(row).map(|d| d.format), Some(Format::Vst2));
+        assert!(a.state.session.hosted_rows.contains(&row), "Kars hosted: {:?}", a.state.message);
+        assert_eq!(a.state.session.plugins.descriptor(row).map(|d| d.format), Some(Format::Vst2));
         // 3BandEQ in the first slot of Kars' insert, from the slot's menu.
         let track = a.state.session.project.channels[row].mixer_track;
         crate::mixer::select(&mut a.state, track, false);
-        let eq = a.plugins.effects.iter().position(|e| e.desc.format == Format::Vst2 && e.desc.name.replace(' ', "") == "3BandEQ").expect("3BandEQ");
+        let eq = a.state.session.plugins.effects.iter().position(|e| e.desc.format == Format::Vst2 && e.desc.name.replace(' ', "") == "3BandEQ").expect("3BandEQ");
         let menu = crate::plugin_menu::items(&a.state, crate::plugin_menu::Target::Fx(Some(0)), true);
         let cmd = Cmd::Plugin(PlugCmd::Effect { index: eq, slot: Some(0) });
         assert!(menu.iter().any(|it| it.cmd == cmd), "the slot's list has the VST2 copy");
@@ -23670,12 +23616,12 @@ mod tests {
         let key = fx_key(track, 0);
         for _ in 0..200 {
             a.tick();
-            if a.plugins.hosted.contains_key(&key) {
+            if a.state.session.plugins.hosted.contains_key(&key) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(a.plugins.descriptor(key).map(|d| d.format), Some(Format::Vst2), "the EQ is hosted: {:?}", a.state.message);
+        assert_eq!(a.state.session.plugins.descriptor(key).map(|d| d.format), Some(Format::Vst2), "the EQ is hosted: {:?}", a.state.message);
         // Eight C5 notes, a beat each, on the pattern placed at the song's start.
         let ch = a.state.session.project.channels[row].index;
         let ppq = u32::from(a.state.session.project.ppq);
@@ -23684,7 +23630,7 @@ mod tests {
         pl::arr_mut(&mut a.state.session).clips.push(os_model::Clip::new(0, 8 * ppq, 0, os_model::ClipSource::Pattern(1)));
         // The EQ's master gain automated from its lowest to its highest over the eight beats.
         a.params_tick();
-        let master = a.state.params.lists[&key].params.iter().position(|p| p.name == "Master").expect("a Master parameter");
+        let master = a.state.session.params.lists[&key].params.iter().position(|p| p.name == "Master").expect("a Master parameter");
         println!("automate: {:?}", a.params_automate(key, master));
         let auto = a.state.session.project.channels.last().unwrap().index;
         {
@@ -23745,7 +23691,7 @@ mod tests {
         // clip, far too loud for the speakers, so it plays at Master's default (pattern playback leaves it there).
         if crate::transport::Transport::device_rate().is_some() {
             {
-                let mut p = a.plugins.hosted[&key].plugin.lock().unwrap();
+                let mut p = a.state.session.plugins.hosted[&key].plugin.lock().unwrap();
                 let info = p.param_info(master).unwrap();
                 assert!(p.set_param(info.id, info.default));
             }
@@ -23769,7 +23715,7 @@ mod tests {
         // parameter is first moved off its default, so the state that comes back is known not to be the default one.
         let path = std::env::temp_dir().join(format!("lemon-vst2-{}.flp", std::process::id()));
         let moved = {
-            let mut p = a.plugins.hosted[&row].plugin.lock().unwrap();
+            let mut p = a.state.session.plugins.hosted[&row].plugin.lock().unwrap();
             let info = p.param_info(p.param_count() - 1).unwrap();
             let v = if p.param_value(info.id).is_some_and(|v| v > 0.5) { 0.25 } else { 0.75 };
             assert!(p.set_param(info.id, v));
@@ -23777,7 +23723,7 @@ mod tests {
             println!("Kars {} set to {v} ({:?})", info.name, p.param_text(info.id, v));
             (info.id, v)
         };
-        let (ch_state, fx_state) = (a.plugins.state(row).unwrap(), a.plugins.state(key).unwrap());
+        let (ch_state, fx_state) = (a.state.session.plugins.state(row).unwrap(), a.state.session.plugins.state(key).unwrap());
         a.save_to(path.clone());
         if let Some(keep) = std::env::var_os("OS_VST2_KEEP") {
             std::fs::copy(&path, &keep).unwrap();
@@ -23785,7 +23731,7 @@ mod tests {
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let r = crate::project_plugins::wrapped_channel(&saved.channels[row]).expect("a wrapped channel");
-        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst2", a.plugins.descriptor(row).unwrap().id.as_str(), "Kars"));
+        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst2", a.state.session.plugins.descriptor(row).unwrap().id.as_str(), "Kars"));
         assert_eq!(r.state, ch_state);
         let slot = saved.mixer.iter().find(|m| m.index == track).and_then(|m| m.slots[0].as_ref());
         let s = slot.and_then(crate::project_plugins::wrapped_slot).expect("a wrapped slot");
@@ -23797,20 +23743,20 @@ mod tests {
         // Reopened: found as VST2 again, with the saved state, and sounding the same.
         let lists = |keep: &dyn Fn(Format) -> bool| {
             let mut p = crate::plugins::Plugins::builtins();
-            p.available = a.plugins.available.iter().filter(|x| keep(x.desc.format)).cloned().collect();
-            p.effects = a.plugins.effects.iter().filter(|x| keep(x.desc.format)).cloned().collect();
+            p.available = a.state.session.plugins.available.iter().filter(|x| keep(x.desc.format)).cloned().collect();
+            p.effects = a.state.session.plugins.effects.iter().filter(|x| keep(x.desc.format)).cloned().collect();
             p
         };
         let mut b = App::new(None);
-        b.plugins = lists(&|_| true);
+        b.state.session.plugins = lists(&|_| true);
         b.open(path.clone());
         b.sync_wrapped();
-        assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
-        assert_eq!(b.plugins.descriptor(row).map(|d| d.format), Some(Format::Vst2));
-        assert_eq!(b.plugins.descriptor(key).map(|d| d.format), Some(Format::Vst2));
-        assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
-        assert_eq!(b.plugins.state(key).as_deref(), Some(&fx_state[..]));
-        let back = b.plugins.hosted[&row].plugin.lock().unwrap().param_value(moved.0);
+        assert!(b.state.session.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert_eq!(b.state.session.plugins.descriptor(row).map(|d| d.format), Some(Format::Vst2));
+        assert_eq!(b.state.session.plugins.descriptor(key).map(|d| d.format), Some(Format::Vst2));
+        assert_eq!(b.state.session.plugins.state(row).as_deref(), Some(&ch_state[..]));
+        assert_eq!(b.state.session.plugins.state(key).as_deref(), Some(&fx_state[..]));
+        let back = b.state.session.plugins.hosted[&row].plugin.lock().unwrap().param_value(moved.0);
         assert!(back.is_some_and(|v| (v - moved.1).abs() < 1e-6), "Kars' moved parameter came back as {back:?}");
         b.tick();
         check("reopened", &notes(&export(&mut b, "reopened")));
@@ -23818,22 +23764,22 @@ mod tests {
         // With no VST2 copy listed, the project's VST2 plugins are played by their copies in another format, from those
         // copies' defaults (the saved state is the VST2 plugin's), and the hint bar names them.
         let mut v = App::new(None);
-        v.plugins = lists(&|f| f != Format::Vst2);
+        v.state.session.plugins = lists(&|f| f != Format::Vst2);
         v.open(path.clone());
         v.sync_wrapped();
         let _ = std::fs::remove_file(&path);
         for k in [row, key] {
-            assert!(v.plugins.descriptor(k).is_some_and(|d| d.format != Format::Vst2), "{k} played by a copy: {:?}", v.state.message);
+            assert!(v.state.session.plugins.descriptor(k).is_some_and(|d| d.format != Format::Vst2), "{k} played by a copy: {:?}", v.state.message);
         }
         let msg = v.state.message.clone().unwrap_or_default();
         assert!(msg.contains("from its default settings") && msg.contains("Kars (VST2 as") && msg.contains("3 Band EQ (VST2 as"), "{msg}");
         let fresh = {
             let mut f = lists(&|f| f != Format::Vst2);
-            let i = v.plugins.available.iter().position(|x| Some(&x.desc) == v.plugins.descriptor(row).as_ref()).unwrap();
+            let i = v.state.session.plugins.available.iter().position(|x| Some(&x.desc) == v.state.session.plugins.descriptor(row).as_ref()).unwrap();
             f.create_with(row, i, None).unwrap();
             f.state(row)
         };
-        assert_eq!(v.plugins.state(row), fresh, "Kars' copy starts from its defaults");
+        assert_eq!(v.state.session.plugins.state(row), fresh, "Kars' copy starts from its defaults");
         // Saved untouched: the copies leave both wrappers as the file had them, so the VST2 plugins and their settings
         // stay in the project (spec: flp/events/plugins.md §4).
         let path2 = std::env::temp_dir().join(format!("lemon-vst2-copies-{}.flp", std::process::id()));
@@ -23856,19 +23802,19 @@ mod tests {
         // Kars' copy edited by the user (Paste value onto its last parameter, Volume, in the parameter menu): saved as
         // that copy with its state.
         assert_eq!(v.browse_params(row), None);
-        let last = v.state.params.lists[&row].params.len() - 1;
-        let id = v.state.params.lists[&row].params[last].id;
-        let x = v.plugins.hosted[&row].plugin.lock().unwrap().param_value(id).unwrap();
+        let last = v.state.session.params.lists[&row].params.len() - 1;
+        let id = v.state.session.params.lists[&row].params[last].id;
+        let x = v.state.session.plugins.hosted[&row].plugin.lock().unwrap().param_value(id).unwrap();
         v.state.value_clip = Some(if x > 0.5 { 0.25 } else { 0.75 });
         assert_eq!(crate::playlist::run(&mut v, crate::playlist::Cmd::Param(crate::params::PCmd::Paste(row, last))), None);
-        v.plugins.hosted[&row].plugin.lock().unwrap().idle();
-        let kars = v.plugins.state(row).unwrap();
+        v.state.session.plugins.hosted[&row].plugin.lock().unwrap().idle();
+        let kars = v.state.session.plugins.state(row).unwrap();
         assert_ne!(Some(&kars), fresh.as_ref(), "Kars' copy changed");
         v.save_to(path2.clone());
         let again = reread(&path2);
         let _ = std::fs::remove_file(&path2);
         let r = crate::project_plugins::wrapped_channel(&again.channels[row]).expect("a wrapped channel");
-        let d = v.plugins.descriptor(row).unwrap();
+        let d = v.state.session.plugins.descriptor(row).unwrap();
         assert_eq!((r.format.as_str(), r.name.as_str(), r.state == kars), (d.format.as_str(), d.name.as_str(), true));
         println!("Kars' changed copy saved as {} ({} bytes of state)", r.format, kars.len());
     }
@@ -24557,8 +24503,8 @@ mod detach_tests {
         use crate::views::browser::{rows, Item};
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
-        app.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.browser_tab = 2;
         app.state.browser_open.extend(["2:Plugin library/Effects".into(), "2:Plugin library/Effects/Other".into()]);
         app.state.raise(Win::Mixer);
@@ -24592,9 +24538,9 @@ mod detach_tests {
         use crate::views::browser::{rows, Item};
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
-        app.plugins.available.push(crate::plugin_db::fake("Test Synth", os_host::Kind::Instrument));
-        let synth = app.plugins.available.len() - 1;
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins.available.push(crate::plugin_db::fake("Test Synth", os_host::Kind::Instrument));
+        let synth = app.state.session.plugins.available.len() - 1;
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.browser_tab = 2;
         app.state.browser_open.extend(["2:Plugin library/Generators".into(), "2:Plugin library/Generators/Other".into()]);
         app.state.raise(Win::ChannelRack);
@@ -24651,5 +24597,28 @@ mod detach_tests {
         assert_ne!(probe(&app), before, "it scrolled");
         app.mouse_up_from(Some(Win::Mixer));
         assert!(!app.cursor_locked());
+    }
+}
+
+/// `App::remap_rows` in the session: the instances follow rows that moved (`m` gives each row's new row), after the
+/// notes held from the keyboard ended.
+pub(crate) fn remap_rows_in(s: &mut crate::session::Session, transport: &crate::transport::Transport, m: &dyn Fn(usize) -> Option<usize>) {
+    s.plugins.remap(m);
+    // The rows hosted are the instances' rows.
+    s.hosted_rows = s.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
+    s.plugins.sampler_failed = s.plugins.sampler_failed.iter().filter_map(|&r| m(r)).collect();
+    s.plugins.wrap_failed = s.plugins.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+    s.plugins.native_failed = s.plugins.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+    transport.set_instruments(s.plugins.instruments());
+    s.dirty = true;
+}
+
+/// `App::plugin_paste` in the session: row `row` hosts available plugin `index` from saved state `blob`.
+pub(crate) fn plugin_paste_in(s: &mut crate::session::Session, transport: &crate::transport::Transport, row: usize, index: usize, blob: &[u8]) {
+    if s.plugins.create_with(row, index, Some(blob)).is_ok() {
+        if !s.hosted_rows.contains(&row) {
+            s.hosted_rows.push(row);
+        }
+        transport.set_instruments(s.plugins.instruments());
     }
 }

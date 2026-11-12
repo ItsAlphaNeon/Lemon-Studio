@@ -522,14 +522,14 @@ pub fn channel_label(s: &State, i: usize) -> Option<String> {
 /// A generator / effect row: a leaf, or a node listing its parameters when it is a hosted plugin that has some.
 #[allow(clippy::too_many_arguments)]
 fn plugin_node(s: &State, out: &mut Vec<Row>, parent: &str, label: String, icon: Icon, cat: u8, bright: bool, item: Item, key: usize) {
-    if !s.params.has_params(key) {
+    if !s.session.params.has_params(key) {
         return leaf(out, parent, label, icon, cat, bright, item);
     }
     let k = format!("{parent}/{label}");
     let open = is_open(s, &k);
     out.push(Row { key: k.clone(), depth: 2, label, icon, cat, open: Some(open), bright: bright || open, item, path: None });
     if open {
-        for (index, e) in s.params.visible(key) {
+        for (index, e) in s.session.params.visible(key) {
             out.push(Row { key: format!("{k}/{index}"), depth: 3, label: e.name.clone(), icon: Icon::Slide, cat, open: None, bright: false, item: Item::Param(key, index), path: None });
         }
     }

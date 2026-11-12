@@ -88,40 +88,7 @@ impl crate::app::App {
     /// (a new instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose
     /// instance failed is not tried again.
     pub(crate) fn sync_slicer(&mut self) {
-        if crate::project_plugins::native_first() {
-            return;
-        }
-        let Some(index) = self.plugins.index_of(LEMON_SLICER) else { return };
-        let pending = self.state.pending_plugin.map(|(r, _)| r);
-        let rows: Vec<usize> = (0..self.state.session.project.channels.len())
-            .filter(|&r| is_slicer(&self.state.session.project.channels[r]))
-            .filter(|&r| !self.state.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && Some(r) != pending)
-            .collect();
-        if rows.is_empty() {
-            return;
-        }
-        let mut added = false;
-        for row in rows {
-            if self.past_deadline() {
-                break;
-            }
-            let fl = self.state.session.project.channels[row].plugin_state.clone().unwrap_or_default();
-            match self.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
-                Ok(_) => {
-                    self.state.hosted_rows.push(row);
-                    added = true;
-                }
-                Err(e) => {
-                    self.wrap_failed.push(row);
-                    self.state.message = Some(format!("{LEMON_SLICER}: {e}"));
-                }
-            }
-        }
-        if added {
-            self.transport.set_instruments(self.plugins.instruments());
-            self.state.session.dirty = true;
-        }
-        self.invalidate();
+        self.host(sync_slicer);
     }
 
     /// Notes a plugin sent for channel row `row` (Lemon Slicer's dump): they replace the channel's notes in the
@@ -148,6 +115,46 @@ impl crate::app::App {
         s.message = Some(format!("Dumped {} notes to the piano roll", notes.len()));
         self.invalidate();
     }
+}
+
+/// Hosts Lemon Slicer on every Fruity Slicer channel without an instance, started from the channel's saved state
+/// (a new instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose
+/// instance failed is not tried again.
+pub(crate) fn sync_slicer(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    if crate::project_plugins::native_first() {
+        return;
+    }
+    let Some(index) = s.plugins.index_of(LEMON_SLICER) else { return };
+    let pending = s.pending_plugin.map(|(r, _)| r);
+    let rows: Vec<usize> = (0..s.project.channels.len())
+        .filter(|&r| is_slicer(&s.project.channels[r]))
+        .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let mut added = false;
+    for row in rows {
+        if s.plugins.past_deadline() {
+            break;
+        }
+        let fl = s.project.channels[row].plugin_state.clone().unwrap_or_default();
+        match s.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
+            Ok(_) => {
+                s.hosted_rows.push(row);
+                added = true;
+            }
+            Err(e) => {
+                s.plugins.wrap_failed.push(row);
+                s.touched.views.push(crate::session::View::Message(format!("{LEMON_SLICER}: {e}")));
+            }
+        }
+    }
+    if added {
+        transport.set_instruments(s.plugins.instruments());
+        s.dirty = true;
+    }
+    s.touched.repaint = true;
 }
 
 #[cfg(test)]
@@ -240,30 +247,30 @@ mod tests {
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.available = crate::plugins::builtin();
         let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_SLICER);
         let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_SLICER));
         a.sync_slicer();
-        assert!(a.state.hosted_rows.contains(&row));
+        assert!(a.state.session.hosted_rows.contains(&row));
         a.save_to(file.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&file).unwrap()).unwrap()).unwrap();
         assert_eq!(saved.channels[row].plugin_state.as_deref(), Some(lemon_slicer::params::default_state().as_slice()));
 
         let fl = state_for(&wav);
-        assert!(a.plugins.set_state(row, &plugin_state(&fl)));
+        assert!(a.state.session.plugins.set_state(row, &plugin_state(&fl)));
         a.state.session.project.get_mut().channels[row].plugin = Some("Fruity slicer".into());
         a.save_to(file.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&file).unwrap()).unwrap()).unwrap();
         assert_eq!(saved.channels[row].plugin.as_deref(), Some("Fruity slicer"));
         assert_eq!(saved.channels[row].plugin_state.as_deref(), Some(fl.as_slice()));
         let mut b = App::new(None);
-        b.plugins.available = crate::plugins::builtin();
+        b.state.session.plugins.available = crate::plugins::builtin();
         b.open(file.clone());
         b.sync_slicer();
-        assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
-        assert_eq!(b.plugins.slicer_file_state(row), Some(fl.clone()));
+        assert!(b.state.session.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert_eq!(b.state.session.plugins.slicer_file_state(row), Some(fl.clone()));
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_file(wav);
     }
@@ -281,7 +288,7 @@ mod tests {
         std::fs::write(&path, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.available = crate::plugins::builtin();
         let before = a.state.session.project.channels.len();
         a.sample_from_plugin(path.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
         assert_eq!(a.state.session.project.channels.len(), before + 1, "{:?}", a.state.message);
@@ -293,7 +300,7 @@ mod tests {
         assert_eq!(st.slices.iter().map(|s| s.start).collect::<Vec<_>>(), [0, 11025, 22050]);
         assert_eq!(st.slices[1].name(), "Part 2");
         assert_eq!(a.state.selected_channel, row);
-        assert!(a.state.hosted_rows.contains(&row));
+        assert!(a.state.session.hosted_rows.contains(&row));
         assert!(a.state.message.as_deref().is_some_and(|m| m.contains("3 slices")));
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
         assert_eq!(a.state.session.project.channels.len(), before);
@@ -313,11 +320,11 @@ mod tests {
         std::fs::write(&first, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.available = crate::plugins::builtin();
         a.sample_from_plugin(first.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
         let row = a.state.session.project.channels.len() - 1;
         let channels = a.state.session.project.channels.len();
-        let loaded = |a: &App| State::parse(&a.plugins.slicer_file_state(row).unwrap()).unwrap();
+        let loaded = |a: &App| State::parse(&a.state.session.plugins.slicer_file_state(row).unwrap()).unwrap();
         assert_eq!(loaded(&a).slices.len(), 2);
 
         let dropped = loop_file("dropped");

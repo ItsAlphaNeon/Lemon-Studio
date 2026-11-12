@@ -267,7 +267,7 @@ impl App {
     fn used_files(&self) -> Vec<PathBuf> {
         let mut used = Vec::new();
         for (row, ch) in self.state.session.project.channels.iter().enumerate() {
-            used.extend(self.plugins.sampler_path(row).filter(|p| !p.is_empty()).map(PathBuf::from));
+            used.extend(self.state.session.plugins.sampler_path(row).filter(|p| !p.is_empty()).map(PathBuf::from));
             used.extend(ch.sample_path.as_deref().filter(|p| !p.is_empty()).map(|p| PathBuf::from(crate::plugins::resolve_sample(p))));
         }
         used

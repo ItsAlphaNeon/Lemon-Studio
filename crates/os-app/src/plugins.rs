@@ -41,11 +41,6 @@ pub struct Hosted {
     pub meter: Option<Arc<os_host::Meter>>,
     /// The plugin's name (the performance monitor).
     pub name: String,
-    #[cfg(plugin_windows)]
-    pub window: Option<FrameWindow>,
-    /// Set while the open editor belongs to a Lemon plugin that joined the strip (host link).
-    #[cfg(plugin_windows)]
-    pub link: Option<os_hostlink::Link>,
     /// The app was told that the instance stopped after a crash.
     stop_told: bool,
     /// A native instance started from a project's state that it did not give back byte for byte: a save keeps the
@@ -60,6 +55,26 @@ pub struct Hosted {
     pub attention: Option<Arc<os_host::Attention>>,
     /// The count and time `idle` last looked at it (`Hosted::due`).
     seen: Look,
+    /// Its spare state (window or slot menu ▸ Copy to B; `presets::PCmd::StoreSpare`): a second copy of its
+    /// state that Swap A / B swaps with the one in use. Lemon Studio's choice: kept in memory with the
+    /// instance only, not in the project (spec: ui/plugin-window.md "Spare state").
+    pub spare: Option<Vec<u8>>,
+    /// "Display preset name in preset selector" unticked: its window's Presets box shows no preset name.
+    pub hide_preset: bool,
+}
+
+/// An instance's editor window, and what is kept of it while it is closed (`Plugins::editors`, by the instance's key).
+/// Apart from the instance: the plugin keeps playing whether its editor is open or not.
+#[derive(Default)]
+pub struct Editor {
+    #[cfg(plugin_windows)]
+    pub window: Option<FrameWindow>,
+    /// Set while the open editor belongs to a Lemon plugin that joined the strip (host link).
+    #[cfg(plugin_windows)]
+    pub link: Option<os_hostlink::Link>,
+    /// The instance whose editor is open in `window` (closed through it when the editor goes, `Drop`).
+    #[cfg(plugin_windows)]
+    plugin: Option<SharedPlugin>,
     /// Its window opens detached: set when the user adds it while "Open new plugin windows floating" is on (`Plugins::added`),
     /// or chosen for it (window menu > Detached, Switch all plugin editors to ▸), then the mode its window had when it
     /// last closed (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
@@ -71,12 +86,44 @@ pub struct Hosted {
     /// When its open window opened (`Plugins::opens`): the limit on open editors closes the earliest first.
     #[cfg(plugin_windows)]
     opened: u64,
-    /// Its spare state (window or slot menu ▸ Copy to B; `presets::PCmd::StoreSpare`): a second copy of its
-    /// state that Swap A / B swaps with the one in use. Lemon Studio's choice: kept in memory with the
-    /// instance only, not in the project (spec: ui/plugin-window.md "Spare state").
-    pub spare: Option<Vec<u8>>,
-    /// "Display preset name in preset selector" unticked: its window's Presets box shows no preset name.
-    pub hide_preset: bool,
+}
+
+impl Editor {
+    /// Its window is open.
+    pub fn open(&self) -> bool {
+        #[cfg(plugin_windows)]
+        return self.window.is_some();
+        #[cfg(not(plugin_windows))]
+        false
+    }
+
+    /// The open editor is a Lemon plugin's that joined the strip through the host link.
+    #[cfg(plugin_windows)]
+    fn linked(&self) -> bool {
+        self.link.is_some()
+    }
+
+    /// Closes its window, the editor first (a frame destroyed under an open editor took the editor's window with it,
+    /// and the plugin's own close then crashed at exit).
+    fn close(&mut self) {
+        #[cfg(plugin_windows)]
+        {
+            if let (Some(plugin), true) = (self.plugin.take(), self.window.is_some()) {
+                if let Ok(mut p) = plugin.lock() {
+                    p.close_editor();
+                }
+            }
+            self.window = None;
+            self.link = None;
+        }
+    }
+}
+
+impl Drop for Editor {
+    /// An editor going (its instance gone, the program ending) closes first, before its frame window goes.
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 /// When the UI last locked an instance for one of its per-tick jobs: the attention count it acted on, and when.
@@ -155,20 +202,11 @@ impl Hosted {
             owner: os_model::Id::NONE,
             meter,
             name,
-            #[cfg(plugin_windows)]
-            window: None,
-            #[cfg(plugin_windows)]
-            link: None,
             stop_told: false,
             keep_file_state: false,
             stand_in: false,
             attention,
             seen: Look::never(),
-            detached: false,
-            #[cfg(plugin_windows)]
-            placed: None,
-            #[cfg(plugin_windows)]
-            opened: 0,
             spare: None,
             hide_preset: false,
         }
@@ -195,16 +233,12 @@ impl Hosted {
         self.attention.as_ref().map(|a| a.count())
     }
 
-    pub fn due(&self, last: Look) -> Option<Look> {
+    pub fn due(&self, last: Look, editor: bool) -> Option<Look> {
         let now = Instant::now();
         let Some(a) = &self.attention else {
             return Some(Look { count: 0, at: now });
         };
         let count = a.count();
-        #[cfg(plugin_windows)]
-        let editor = self.window.is_some();
-        #[cfg(not(plugin_windows))]
-        let editor = false;
         (count != last.count || editor || now.duration_since(last.at) >= LOOK_EVERY).then_some(Look { count, at: now })
     }
 
@@ -213,11 +247,6 @@ impl Hosted {
         self.stop_told
     }
 
-    /// The open editor is a Lemon plugin's that joined the strip through the host link.
-    #[cfg(plugin_windows)]
-    fn linked(&self) -> bool {
-        self.link.is_some()
-    }
 }
 
 /// What a plugin window asks of the app.
@@ -308,6 +337,8 @@ pub struct Plugins {
     pub effects: Vec<Available>,
     /// By rack row, or by `fx_key` for mixer slots.
     pub hosted: BTreeMap<usize, Hosted>,
+    /// The instances' editor windows, by `hosted` key; they move and go with their instances.
+    pub editors: BTreeMap<usize, Editor>,
     /// Main window handle (owner of plugin windows).
     pub owner: isize,
     pub scale: f32,
@@ -343,6 +374,40 @@ pub struct Plugins {
     pub next_member: usize,
     /// The Lemon MIDI Out instruments, by rack row (`App::sync_midi_outs`; spec: plugins/midi-out.md §6).
     pub midi_outs: BTreeMap<usize, std::sync::Arc<std::sync::Mutex<crate::lemon_midi_out::MidiOutInstrument>>>,
+    /// Sampler channel rows whose Lemon Sampler instance could not be created (not retried).
+    pub sampler_failed: Vec<usize>,
+    /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ could not start (not retried).
+    pub fx_failed: Vec<usize>,
+    /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
+    pub wrap_failed: Vec<usize>,
+    /// Plugin channels (rows) and slots (`fx_key`) naming a native plugin that is not installed or did not start
+    /// (not retried; spec: plugins/fruity-abi.md "Opened projects").
+    pub native_failed: Vec<usize>,
+    /// While a project loads: when the plugin hosts stop for this tick (`host_plugins`), and whether one stopped with
+    /// instances left to start.
+    pub host_deadline: Option<std::time::Instant>,
+    pub host_more: bool,
+    /// Plugins the project names that are not installed or did not start (`project_plugins::sync_wrapped`,
+    /// `host_native`), each once: the missing files box lists them.
+    pub not_found: Vec<String>,
+}
+
+impl Plugins {
+    /// Adds plugin names to `not_found` (each once; "Serum (error text)" counts as its own entry).
+    pub fn add_not_found(&mut self, names: &[String]) {
+        for n in names {
+            if !self.not_found.contains(n) {
+                self.not_found.push(n.clone());
+            }
+        }
+    }
+
+    /// While a project loads, the hosting of this tick is over (`host_deadline`): it goes on at the next.
+    pub fn past_deadline(&mut self) -> bool {
+        let past = self.host_deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        self.host_more |= past;
+        past
+    }
 }
 
 /// How many gone instances `Plugins::stash` keeps.
@@ -663,8 +728,8 @@ impl Plugins {
     /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
     pub fn added(&mut self, key: usize) {
         let on = crate::prefs::check(&crate::prefs::DETACH_NEW);
-        if let Some(h) = self.hosted.get_mut(&key) {
-            h.detached = on;
+        if self.hosted.contains_key(&key) {
+            self.editors.entry(key).or_default().detached = on;
         }
     }
 
@@ -672,6 +737,7 @@ impl Plugins {
     pub fn drop_key(&mut self, key: usize) {
         #[cfg(plugin_windows)]
         self.close_window(key);
+        self.editors.remove(&key);
         self.hosted.remove(&key);
         self.presets.remove(&key);
     }
@@ -705,7 +771,7 @@ impl Plugins {
             None => self.presets.remove(&key),
         };
         #[cfg(plugin_windows)]
-        if let Some(w) = self.hosted.get(&key).and_then(|h| h.window.as_ref()) {
+        if let Some(w) = self.editors.get(&key).and_then(|e| e.window.as_ref()) {
             w.set_preset(self.shown_preset(key));
         }
     }
@@ -727,7 +793,7 @@ impl Plugins {
         let Some(h) = self.hosted.get_mut(&key) else { return };
         h.hide_preset = !show;
         #[cfg(plugin_windows)]
-        if let Some(w) = self.hosted.get(&key).and_then(|h| h.window.as_ref()) {
+        if let Some(w) = self.editors.get(&key).and_then(|e| e.window.as_ref()) {
             w.set_preset(self.shown_preset(key));
         }
     }
@@ -744,7 +810,7 @@ impl Plugins {
                     if let Some(p) = self.presets.remove(&k) {
                         self.presets.insert(fx_key(nt, ns), p);
                     }
-                    moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap()))
+                    moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap(), self.editors.remove(&k)))
                 }
                 None => {
                     self.keep(k);
@@ -752,8 +818,15 @@ impl Plugins {
                 }
             }
         }
-        for (k, h) in moved {
+        for (k, h, e) in moved {
+            let old_editor = self.editors.remove(&k);
+            if let Some(e) = e {
+                self.editors.insert(k, e);
+            }
             if let Some(old) = self.hosted.insert(k, h) {
+                if let Some(mut e) = old_editor {
+                    e.close();
+                }
                 self.keep_hosted(&old, true);
             }
         }
@@ -961,7 +1034,7 @@ impl Plugins {
         // top-level window.
         let mut w = unsafe { WindowFromPoint(POINT { x, y }) };
         while !w.is_null() {
-            if let Some((&r, _)) = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|f| f.hwnd() == w as isize)) {
+            if let Some((&r, _)) = self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|f| f.hwnd() == w as isize)) {
                 return Some(r);
             }
             w = unsafe { GetAncestor(w, GA_PARENT) };
@@ -974,7 +1047,7 @@ impl Plugins {
     /// through their state. Returns whether the plugin got the file.
     #[cfg(windows)]
     pub fn drop_file(&mut self, row: usize, x: i32, y: i32, path: &str, sampler: bool) -> bool {
-        if self.hosted.get(&row).and_then(|h| h.window.as_ref()).is_some_and(|f| post_drop(x, y, path, f.hwnd())) {
+        if self.editors.get(&row).and_then(|e| e.window.as_ref()).is_some_and(|f| post_drop(x, y, path, f.hwnd())) {
             return true;
         }
         sampler && self.load_sample(row, path)
@@ -984,7 +1057,7 @@ impl Plugins {
     #[cfg(target_os = "macos")]
     pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
         let frame = crate::plugin_window::row_window_at(x, y)?;
-        self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|f| f.hwnd() == frame)).map(|(&r, _)| r)
+        self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|f| f.hwnd() == frame)).map(|(&r, _)| r)
     }
 
     /// Drops file `path` on row `row`'s plugin window: macOS plugins take files only from a drag session of their own,
@@ -1000,6 +1073,7 @@ impl Plugins {
         for row in self.hosted.keys().copied().collect::<Vec<_>>() {
             self.close_window(row);
         }
+        self.editors.clear();
         self.hosted.clear();
         self.containers.clear();
         self.presets.clear();
@@ -1070,7 +1144,7 @@ impl Plugins {
     /// its own (Tesla plays its sample) or show what it hears.
     pub fn editor_open(&self) -> bool {
         #[cfg(plugin_windows)]
-        return self.hosted.values().any(|h| h.window.is_some());
+        return self.editors.values().any(|e| e.window.is_some());
         #[cfg(not(plugin_windows))]
         false
     }
@@ -1079,27 +1153,30 @@ impl Plugins {
     #[cfg(plugin_windows)]
     pub fn open_window(&mut self, row: usize, info: ChannelInfo) -> Result<(), String> {
         let (owner, scale) = (self.owner, self.scale_for(row, self.scale));
-        let h = self.hosted.get(&row).ok_or("not a plugin channel")?;
-        if let Some(w) = &h.window {
+        if !self.hosted.contains_key(&row) {
+            return Err("not a plugin channel".into());
+        }
+        if let Some(w) = self.editors.get(&row).and_then(|e| e.window.as_ref()) {
             w.raise();
             return Ok(());
         }
         // At most `MAX_EDITORS` open: the one opened earliest closes (its plugin keeps running). Spec:
         // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
         if crate::prefs::check(&crate::prefs::LIMIT_EDITORS) {
-            while let Some(k) = earliest_over(self.hosted.iter().filter(|(_, h)| h.window.is_some()).map(|(&k, h)| (k, h.opened)), MAX_EDITORS) {
+            while let Some(k) = earliest_over(self.editors.iter().filter(|(_, e)| e.window.is_some()).map(|(&k, e)| (k, e.opened)), MAX_EDITORS) {
                 self.close_window(k);
             }
         }
-        let Some(h) = self.hosted.get_mut(&row) else { return Err("not a plugin channel".into()) };
+        let Some(h) = self.hosted.get(&row) else { return Err("not a plugin channel".into()) };
+        let e = self.editors.entry(row).or_default();
         // A detached window reopens where it was; the first time, on a monitor as the settings say (spec: as above).
-        let pos = match (h.detached, h.placed) {
+        let pos = match (e.detached, e.placed) {
             (true, Some(at)) => at,
             (true, None) => crate::plugin_window::first_position(owner, scale, crate::prefs::check(&crate::prefs::DETACHED_WITH_MAIN)),
             (false, _) => crate::plugin_window::default_position(owner, scale),
         };
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
-        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached)?;
+        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, e.detached)?;
         // Mixer effects have no channel strip (spec: ui/mixer.md §7).
         if row >= FX_KEY {
             w.set_strip(false);
@@ -1113,15 +1190,16 @@ impl Plugins {
             let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
             p.open_editor(w.area(), k)?
         };
-        h.link = fit_editor(&w, size, k);
+        e.link = fit_editor(&w, size, k);
         // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
         // the open ones.
         w.raise();
-        h.window = Some(w);
+        e.window = Some(w);
+        e.plugin = Some(h.plugin.clone());
         self.opens += 1;
-        h.opened = self.opens;
+        e.opened = self.opens;
         let name = self.shown_preset(row);
-        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+        if let Some(w) = self.editors.get(&row).and_then(|e| e.window.as_ref()) {
             w.set_preset(name);
         }
         Ok(())
@@ -1139,7 +1217,7 @@ impl Plugins {
             None => self.editor_scales.remove(&row),
         };
         #[cfg(any(windows, target_os = "macos"))]
-        if self.hosted.get(&row).is_some_and(|h| h.window.is_some()) {
+        if self.editors.get(&row).is_some_and(|e| e.window.is_some()) {
             let k = self.scale_for(row, self.scale);
             self.rescale_window(row, k);
         }
@@ -1162,7 +1240,7 @@ impl Plugins {
     /// scale when the editor opens (on macOS its sizes are measured at it). The plugin's page is kept.
     #[cfg(any(windows, target_os = "macos"))]
     fn rescale_window(&mut self, row: usize, scale: f32) {
-        let Some(Hosted { plugin, window: Some(w), link, .. }) = self.hosted.get_mut(&row) else { return };
+        let (Some(Hosted { plugin, .. }), Some(Editor { window: Some(w), link, .. })) = (self.hosted.get(&row), self.editors.get_mut(&row)) else { return };
         if w.scale() == scale {
             return;
         }
@@ -1185,37 +1263,34 @@ impl Plugins {
 
     #[cfg(plugin_windows)]
     fn close_window(&mut self, row: usize) {
-        if let Some(h) = self.hosted.get_mut(&row) {
+        if let Some(e) = self.editors.get_mut(&row) {
             // The mode and place it reopens in (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins
             // and startup").
-            if let Some(w) = &h.window {
-                h.detached = w.detached();
+            if let Some(w) = &e.window {
+                e.detached = w.detached();
                 #[cfg(windows)]
-                if h.detached {
-                    h.placed = w.position().or(h.placed);
+                if e.detached {
+                    e.placed = w.position().or(e.placed);
                 }
             }
-            if let Ok(mut p) = h.plugin.lock() {
-                p.close_editor();
-            }
-            h.window = None;
-            h.link = None;
+            e.close();
         }
     }
 
     /// Row `row`'s open window (native frame handle) and whether it is detached.
     #[cfg(plugin_windows)]
     pub fn window_of(&self, row: usize) -> Option<(isize, bool)> {
-        self.hosted.get(&row).and_then(|h| h.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
+        self.editors.get(&row).and_then(|e| e.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
     }
 
     /// Docks or detaches row `row`'s window (window menu > Detached); closed, it opens that way next time.
     #[cfg(plugin_windows)]
     pub fn set_detached(&mut self, row: usize, on: bool) {
         let owner = self.owner;
-        if let Some(h) = self.hosted.get_mut(&row) {
-            h.detached = on;
-            if let Some(w) = &h.window {
+        if self.hosted.contains_key(&row) {
+            let e = self.editors.entry(row).or_default();
+            e.detached = on;
+            if let Some(w) = &e.window {
                 w.set_detached(owner, on);
             }
         }
@@ -1234,7 +1309,7 @@ impl Plugins {
     /// Rows whose plugin window is open and docked in the main window.
     #[cfg(plugin_windows)]
     pub fn docked(&self) -> Vec<usize> {
-        self.hosted.iter().filter(|(_, h)| h.window.as_ref().is_some_and(|w| !w.detached())).map(|(&r, _)| r).collect()
+        self.editors.iter().filter(|(_, e)| e.window.as_ref().is_some_and(|w| !w.detached())).map(|(&r, _)| r).collect()
     }
 
     /// Stacks the docked windows of `rows` (bottom to top, as in `State::z`) in that order: docked windows clip each
@@ -1249,7 +1324,7 @@ impl Plugins {
     /// (`FrameWindow::move_into_workspace`).
     #[cfg(all(plugin_windows, windows))]
     pub fn move_into_workspace(&self) {
-        for w in self.hosted.values().filter_map(|h| h.window.as_ref()) {
+        for w in self.editors.values().filter_map(|e| e.window.as_ref()) {
             w.move_into_workspace();
         }
     }
@@ -1257,7 +1332,7 @@ impl Plugins {
     /// Moves row `row`'s docked window to `(x, y)` (main-window client px; VIEW > Align all channel editors).
     #[cfg(all(plugin_windows, windows))]
     pub fn move_docked(&self, row: usize, x: i32, y: i32) {
-        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+        if let Some(w) = self.editors.get(&row).and_then(|e| e.window.as_ref()) {
             w.move_to(x, y);
         }
     }
@@ -1265,7 +1340,7 @@ impl Plugins {
     /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
     #[cfg(plugin_windows)]
     pub fn clip(&self, row: usize, work: [i32; 4], covers: &[[i32; 4]]) {
-        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+        if let Some(w) = self.editors.get(&row).and_then(|e| e.window.as_ref()) {
             w.clip_to(work, covers);
         }
     }
@@ -1277,24 +1352,38 @@ impl Plugins {
         let rows: Vec<usize> = self.presets.range(..FX_KEY).map(|(&r, _)| r).collect();
         let presets: Vec<(usize, PathBuf)> = rows.into_iter().filter_map(|r| Some((r, self.presets.remove(&r)?))).filter_map(|(r, p)| Some((m(r)?, p))).collect();
         self.presets.extend(presets);
+        // The editors go with their instances; one whose instance goes closes first.
+        let mut editors: BTreeMap<usize, Editor> = self.editors.split_off(&FX_KEY);
+        let mut rows = std::mem::replace(&mut self.editors, BTreeMap::new());
         for (row, h) in std::mem::take(&mut self.hosted) {
             if row >= FX_KEY {
                 self.hosted.insert(row, h);
             } else if let Some(n) = m(row) {
+                let old_editor = editors.remove(&n);
+                if let Some(e) = rows.remove(&row) {
+                    editors.insert(n, e);
+                }
                 // Two instances mapped onto one row: the one there goes, kept.
                 if let Some(old) = self.hosted.insert(n, h) {
+                    if let Some(mut e) = old_editor {
+                        e.close();
+                    }
                     self.keep_hosted(&old, false);
                 }
             } else {
+                if let Some(mut e) = rows.remove(&row) {
+                    e.close();
+                }
                 self.keep_hosted(&h, false);
             }
         }
+        self.editors = editors;
     }
 
     /// Closes row `row`'s plugin window when it is open; returns whether it was.
     pub fn close_if_open(&mut self, row: usize) -> bool {
         #[cfg(plugin_windows)]
-        if self.hosted.get(&row).is_some_and(|h| h.window.is_some()) {
+        if self.editors.get(&row).is_some_and(|e| e.window.is_some()) {
             self.close_window(row);
             return true;
         }
@@ -1320,7 +1409,7 @@ impl Plugins {
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
         #[cfg(plugin_windows)]
         for (area, m) in crate::plugin_window::take_link() {
-            let row = self.hosted.iter().find(|(_, h)| h.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
+            let row = self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
             match (row, m) {
                 (Some(row), crate::plugin_window::LinkMsg::Note(k, v, on)) => out.push(Request::Note(row, k, v, on)),
                 (Some(row), crate::plugin_window::LinkMsg::Automate(i)) => out.push(Request::Automate(row, i)),
@@ -1331,7 +1420,9 @@ impl Plugins {
             }
         }
         for (&row, h) in &mut self.hosted {
-            let look = h.due(h.seen);
+            #[cfg_attr(not(plugin_windows), allow(unused_mut, unused_variables))]
+            let mut ed = self.editors.get_mut(&row);
+            let look = h.due(h.seen, ed.as_ref().is_some_and(|e| e.open()));
             let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
             if let Some(mut p) = look.and_then(|_| lock_for_tick(&h.plugin, h.meter.as_deref())) {
                 let t0 = Instant::now();
@@ -1347,7 +1438,7 @@ impl Plugins {
                 // without a window to show it over (spec: plugins/vst3-hosting.md §9).
                 if let Some(m) = p.take_menu() {
                     #[cfg(plugin_windows)]
-                    let at = h.window.as_ref().map(|w| {
+                    let at = ed.as_ref().and_then(|e| e.window.as_ref()).map(|w| {
                         let k = w.scale();
                         w.editor_to_screen(m.at.0 as f32 / k, m.at.1 as f32 / k)
                     });
@@ -1359,7 +1450,7 @@ impl Plugins {
                     }
                 }
                 #[cfg(plugin_windows)]
-                if let (Some(w), false, Some((ew, eh))) = (&h.window, h.linked(), p.editor_size()) {
+                if let (Some(w), false, Some((ew, eh))) = (ed.as_ref().and_then(|e| e.window.as_ref()), ed.as_ref().is_some_and(|e| e.linked()), p.editor_size()) {
                     let k = w.scale();
                     w.set_editor_size((ew as f32 / k, eh as f32 / k));
                 }
@@ -1370,11 +1461,11 @@ impl Plugins {
                 crate::dropout_log::held(&p.desc().name, "the UI's tick", t0.elapsed());
             }
             #[cfg(plugin_windows)]
-            if let Some(w) = &h.window {
+            if let Some(Editor { window: Some(w), link, .. }) = ed.as_deref_mut() {
                 if let Some(i) = info(row) {
                     w.set_info(i);
                 }
-                if let Some(l) = &mut h.link {
+                if let Some(l) = link.as_mut() {
                     w.set_page(l.page());
                     w.set_hint(l.hint());
                     if let Some((lw, lh)) = l.size() {
@@ -1384,7 +1475,7 @@ impl Plugins {
                     w.set_resizable(l.resizable().map(|(mw, mh)| (mw as f32, mh as f32)));
                 }
                 for e in w.take_events() {
-                    match (&e, &mut h.link) {
+                    match (&e, &mut *link) {
                         (FrameEvent::Page(n), Some(l)) => {
                             l.set_page(*n);
                             continue;
@@ -1482,16 +1573,9 @@ fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_ho
 }
 
 impl Drop for Hosted {
-    /// The editor closes before its frame window goes (a frame destroyed under an open editor took the editor's
-    /// window with it, and the plugin's own close then crashed at exit). The instance itself is retired, not
-    /// destroyed here: see [`sweep_retired`].
+    /// The instance is retired, not destroyed here: see [`sweep_retired`]. Its editor was closed by whatever let it
+    /// go (`Editor::close`).
     fn drop(&mut self) {
-        #[cfg(plugin_windows)]
-        if self.window.is_some() {
-            if let Ok(mut p) = self.plugin.lock() {
-                p.close_editor();
-            }
-        }
         let plugin = self.plugin.clone();
         let _ = RETIRED.try_with(|r| r.borrow_mut().push(plugin));
     }
@@ -2312,14 +2396,14 @@ mod tests {
         let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 200);
-        let w = pl.hosted[&0].window.as_ref().unwrap();
+        let w = pl.editors[&0].window.as_ref().unwrap();
         let (frame, area) = (w.hwnd(), w.area() as isize);
         let editor = || unsafe { GetWindow(area as HWND, GW_CHILD) } as isize;
         // Joined the strip: 560 x 390 logical (spec: plugins/host-link.md), drawn at 150 %.
         assert_eq!(size(editor()), (840, 585), "the editor draws at the window's scale");
         assert_eq!(size(area), (840, 585), "the frame's editor area matches it");
         let page = 1;
-        pl.hosted.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(page);
+        pl.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(page);
         for (k, want) in [(1.0, (560, 390)), (2.0, (1120, 780))] {
             pl.rescale_window(0, k);
             pump(&mut pl, 100);
@@ -2327,8 +2411,8 @@ mod tests {
             assert_eq!(size(area), want, "editor area at scale {k}");
             let (fw, _) = size(frame);
             assert_eq!(fw, want.0 + (2.0 * 7.0 * k) as i32, "frame width at scale {k}");
-            assert!(pl.hosted[&0].link.is_some(), "the reopened editor joins the strip again");
-            assert_eq!(pl.hosted[&0].link.as_ref().unwrap().page_now(), page, "the plugin's page is kept");
+            assert!(pl.editors[&0].link.is_some(), "the reopened editor joins the strip again");
+            assert_eq!(pl.editors[&0].link.as_ref().unwrap().page_now(), page, "the plugin's page is kept");
         }
     }
 
@@ -2344,8 +2428,8 @@ mod tests {
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
-        let hwnd = pl.hosted[&0].window.as_ref().unwrap().hwnd();
-        assert!(pl.hosted[&0].link.is_some(), "Lemon Sampler should join the strip");
+        let hwnd = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        assert!(pl.editors[&0].link.is_some(), "Lemon Sampler should join the strip");
         capture(hwnd, &dir.join("win_sample.bmp"));
         click(hwnd, 68, 47); // second page tab
         pump(&mut pl, 300);
@@ -2373,7 +2457,7 @@ mod tests {
         let info = ChannelInfo { name: LEMON_EQ.into(), target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(key, info).unwrap();
         pump(&mut pl, 400);
-        let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&key].window.as_ref().unwrap().hwnd();
         capture(frame, &dir.join("eq_window.bmp"));
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0, "the editor is a child of the frame");
@@ -2399,7 +2483,7 @@ mod tests {
         let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
-        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0, "the editor is a child of the frame");
         // Where osc 2's coarse knob is drawn (painted-frame coordinates -> editor client, hosted crop).
@@ -2451,7 +2535,7 @@ mod tests {
         let info = ChannelInfo { name: crate::citrus::CITRUS.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
-        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0, "the editor is a child of the frame");
         let mut er: RECT = unsafe { std::mem::zeroed() };
@@ -2491,7 +2575,7 @@ mod tests {
         let info = ChannelInfo { name: crate::smith::SMITH.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
-        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0, "the editor is a child of the frame");
         let mut er: RECT = unsafe { std::mem::zeroed() };
@@ -2532,7 +2616,7 @@ mod tests {
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
-        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0);
         let mut seed = 0x2545F4914F6CDD1Du64;
@@ -2546,7 +2630,7 @@ mod tests {
         let send = |msg: u32, wp: usize, x: i32, y: i32| unsafe { SendMessageW(editor as HWND, msg, wp, (x | (y << 16)) as isize) };
         // Probe on the sample page: the "Normalize" radio must change the plugin state, twice (on, off).
         let probe = |pl: &mut Plugins| -> bool {
-            pl.hosted.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(0);
+            pl.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(0);
             pump(pl, 40);
             let before = state(pl);
             send(WM_LBUTTONDOWN, 1, 298, 149);
@@ -2589,7 +2673,7 @@ mod tests {
                 }
                 6 => {
                     // Switch page through the host link.
-                    if let Some(l) = &mut pl.hosted.get_mut(&0).unwrap().link {
+                    if let Some(l) = &mut pl.editors.get_mut(&0).unwrap().link {
                         l.set_page(rnd(2) as usize);
                     }
                 }
@@ -2623,7 +2707,7 @@ mod tests {
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
-        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
         pump(&mut pl, 200);
@@ -2731,9 +2815,9 @@ mod tests {
         render(&mut pl);
         let before = render(&mut pl);
         assert!(before.iter().any(|v| v.abs() > 0.05), "the sample plays");
-        pl.hosted.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
+        pl.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
         pump(&mut pl, 100);
-        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
         pump(&mut pl, 200);
@@ -2817,9 +2901,9 @@ mod tests {
         let before = level(&mut pl);
         println!("level before {before}");
         assert!(before > 0.05, "the note is heard");
-        pl.hosted.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
+        pl.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
         pump(&mut pl, 100);
-        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
         pump(&mut pl, 200);
@@ -2866,7 +2950,7 @@ mod tests {
         let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
-        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe {
             SetForegroundWindow(frame as HWND);
@@ -2928,7 +3012,7 @@ mod tests {
             (r.right - r.left, r.bottom - r.top)
         };
         let handles = |pl: &Plugins| {
-            let w = pl.hosted[&0].window.as_ref().unwrap();
+            let w = pl.editors[&0].window.as_ref().unwrap();
             let area = w.area() as HWND;
             (w.hwnd() as HWND, area, unsafe { GetWindow(area, GW_CHILD) })
         };
@@ -3477,7 +3561,7 @@ mod tests {
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
-        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
         let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         unsafe {
             SetForegroundWindow(frame as HWND);
@@ -3548,6 +3632,7 @@ mod tests {
     /// the reopened project hosts the same classes with the saved state (spec: plugins/vst3-hosting.md §8,
     /// flp/events/plugins.md §4).
     #[test]
+    #[allow(deprecated)]
     fn vst3_plugins_save_and_reopen() {
         let (Some(smp), Some(eq)) = (bundled("Lemon Sampler.vst3"), bundled("Lemon Parametric EQ.vst3")) else { return };
         let load = |p: &std::path::Path| {
@@ -3558,21 +3643,21 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-vst3-save-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 4800]).unwrap();
         let mut a = crate::app::App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.file = None;
-        a.state.path = None;
-        a.plugins.available = vec![load(&smp)];
-        a.plugins.effects = vec![load(&eq)];
-        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), "Lemon Sampler");
-        a.plugins.create(row, 0).unwrap();
-        a.state.hosted_rows.push(row);
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
+        a.state.session.plugins.available = vec![load(&smp)];
+        a.state.session.plugins.effects = vec![load(&eq)];
+        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), "Lemon Sampler");
+        a.state.session.plugins.create(row, 0).unwrap();
+        a.state.session.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
-        assert!(a.plugins.set_state(row, json.as_bytes()));
-        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Lemon Parametric EQ".into(), state: Vec::new() });
-        a.plugins.create_effect(3, 2, 0, None).unwrap();
+        assert!(a.state.session.plugins.set_state(row, json.as_bytes()));
+        a.state.session.project.get_mut().mixer[3].slots[2] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Lemon Parametric EQ".into(), state: Vec::new() });
+        a.state.session.plugins.create_effect(3, 2, 0, None).unwrap();
         // An edit of the effect, through the hosting layer, flushed into its processor.
         {
-            let mut fx = a.plugins.hosted[&fx_key(3, 2)].plugin.lock().unwrap();
+            let mut fx = a.state.session.plugins.hosted[&fx_key(3, 2)].plugin.lock().unwrap();
             let id = (0..fx.param_count()).filter_map(|i| fx.param_info(i)).find(|p| !p.read_only && !p.hidden && p.automatable).unwrap().id;
             assert!(fx.set_param(id, 0.3));
             assert!(fx.activate(48000));
@@ -3580,7 +3665,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(60));
             fx.idle();
         }
-        let (ch_state, fx_state) = (a.plugins.state(row).unwrap(), a.plugins.state(fx_key(3, 2)).unwrap());
+        let (ch_state, fx_state) = (a.state.session.plugins.state(row).unwrap(), a.state.session.plugins.state(fx_key(3, 2)).unwrap());
         let fl = |b: &[u8]| os_vst3::fl_state::FlState::parse(b).is_some();
         assert!(fl(&ch_state) && fl(&fx_state), "saved in FL Studio's wrapper layout");
         a.save_to(path.clone());
@@ -3589,10 +3674,10 @@ mod tests {
         // The file names each class by its id.
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let r = crate::project_plugins::wrapped_channel(&saved.channels[row]).unwrap();
-        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst3", a.plugins.available[0].desc.id.as_str(), "Lemon Sampler"));
+        assert_eq!((r.format.as_str(), r.id.as_str(), r.name.as_str()), ("vst3", a.state.session.plugins.available[0].desc.id.as_str(), "Lemon Sampler"));
         assert_eq!(r.state, ch_state);
         let s = crate::project_plugins::wrapped_slot(saved.mixer[3].slots[2].as_ref().unwrap()).unwrap();
-        assert_eq!((s.format.as_str(), s.id.as_str()), ("vst3", a.plugins.effects[0].desc.id.as_str()));
+        assert_eq!((s.format.as_str(), s.id.as_str()), ("vst3", a.state.session.plugins.effects[0].desc.id.as_str()));
         assert_eq!(s.state, fx_state);
 
         // Reopened: found by class id even when the plugin file is named differently now.
@@ -3600,15 +3685,15 @@ mod tests {
         let (mut i, mut e) = (load(&smp), load(&eq));
         i.desc.path = "D:/moved/Renamed.vst3".into();
         e.desc.path = "D:/moved/Other.vst3".into();
-        b.plugins.available = vec![i];
-        b.plugins.effects = vec![e];
+        b.state.session.plugins.available = vec![i];
+        b.state.session.plugins.effects = vec![e];
         b.open(path.clone());
         b.sync_wrapped();
         let _ = std::fs::remove_file(&path);
-        assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
-        assert_eq!(b.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
-        assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
-        assert_eq!(b.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
+        assert!(b.state.session.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert_eq!(b.state.session.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
+        assert_eq!(b.state.session.plugins.state(row).as_deref(), Some(&ch_state[..]));
+        assert_eq!(b.state.session.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
         assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ"));
     }
 
@@ -3636,7 +3721,7 @@ mod tests {
             };
             let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
             pl.open_window(key, info).unwrap();
-            let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+            let frame = pl.editors[&key].window.as_ref().unwrap().hwnd();
             unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
             pump(&mut pl, 400);
             let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
@@ -3668,10 +3753,10 @@ mod tests {
             let info = ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
             for round in 0..2 {
                 pl.open_window(key, info.clone()).unwrap();
-                let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+                let frame = pl.editors[&key].window.as_ref().unwrap().hwnd();
                 unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
                 pump(&mut pl, 300);
-                let area = pl.hosted[&key].window.as_ref().unwrap().area() as HWND;
+                let area = pl.editors[&key].window.as_ref().unwrap().area() as HWND;
                 let editor = unsafe { GetWindow(area, GW_CHILD) };
                 assert!(!editor.is_null(), "{name}: the editor is a child of the frame's editor area");
                 let (mut ra, mut re): (RECT, RECT) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
@@ -3734,7 +3819,7 @@ mod tests {
         let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         match pl.open_window(key, info) {
             Ok(()) => {
-                let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
+                let frame = pl.editors[&key].window.as_ref().unwrap().hwnd();
                 unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
                 pump(&mut pl, 700);
             }
@@ -3764,8 +3849,8 @@ mod tests {
         let Some(flp) = std::env::var_os("OS_NATIVE_FLP").map(PathBuf::from) else { return };
         os_native::set_enabled(true);
         let mut app = crate::app::App::new(None);
-        app.plugins = Plugins::scan();
-        eprintln!("STEP {} native plugins listed", app.plugins.available.iter().chain(&app.plugins.effects).filter(|a| a.desc.format == os_host::Format::Native).count());
+        app.state.session.plugins = Plugins::scan();
+        eprintln!("STEP {} native plugins listed", app.state.session.plugins.available.iter().chain(&app.state.session.plugins.effects).filter(|a| a.desc.format == os_host::Format::Native).count());
         app.open(flp);
         eprintln!("STEP opened: {:?}", app.state.message);
         // The app's order: the built-in Lemon plugins take their channels and slots first.
@@ -3775,20 +3860,20 @@ mod tests {
             app.host_native();
         }
         eprintln!("STEP {:?}", app.state.message);
-        let proj = app.state.project.clone();
+        let proj = app.state.session.project.clone();
         let mut keys: Vec<(usize, String)> = proj.channels.iter().enumerate().filter_map(|(r, c)| Some((r, format!("channel {r} {}", c.plugin.clone()?)))).collect();
         keys.extend(proj.mixer.iter().flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((fx_key(m.index, k as u8), format!("track {} slot {k} {}", m.index, s.as_ref()?.name))))));
         for (key, label) in &keys {
-            let what = match app.plugins.hosted.get(key) {
+            let what = match app.state.session.plugins.hosted.get(key) {
                 Some(h) if h.keep_file_state => "hosted, keeps the file's state",
                 Some(_) => "hosted",
-                None if app.native_failed.contains(key) => "not installed or did not start",
+                None if app.state.session.plugins.native_failed.contains(key) => "not installed or did not start",
                 None => "not hosted (built-in or wrapped)",
             };
             eprintln!("RESULT {label:50} {what}");
         }
         let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
-        for (row, inst) in app.plugins.instruments() {
+        for (row, inst) in app.state.session.plugins.instruments() {
             let mut p = inst.lock().unwrap();
             p.note_on(0, 60, 0.8);
             for _ in 0..20 {
@@ -3797,7 +3882,7 @@ mod tests {
             p.note_off(0, 60);
             eprintln!("RESULT channel {row} renders, peak {:.3}", l.iter().chain(&r).fold(0.0f32, |m, s| m.max(s.abs())));
         }
-        for (t, k, fx) in app.plugins.effects() {
+        for (t, k, fx) in app.state.session.plugins.effects() {
             let mut p = fx.lock().unwrap();
             for _ in 0..20 {
                 p.process_fx(48000, &mut l, &mut r);
@@ -3818,40 +3903,41 @@ mod tests {
     /// created them has ended (here the test's thread; the app creates them on its main thread, spec "Threads").
     #[test]
     #[ignore]
+    #[allow(deprecated)]
     fn native_generator_from_the_rack_menu_plays_in_an_export() {
         let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
         // SAFETY: test-only, run alone; `OPENSTUDIO_NATIVE` is read only by the scan.
         unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
         let mut a = crate::app::App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.plugins = Plugins::scan();
-        a.state.plugdb.rebuild(&a.plugins);
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.plugins = Plugins::scan();
+        a.state.plugdb.rebuild(&a.state.session.plugins);
         use crate::plugin_menu::PlugCmd;
-        let fx = a.plugins.effects.iter().position(|e| e.desc.format == os_host::Format::Native).expect("a native effect");
+        let fx = a.state.session.plugins.effects.iter().position(|e| e.desc.format == os_host::Format::Native).expect("a native effect");
         let fx_menu = crate::plugin_menu::items(&a.state, crate::plugin_menu::Target::Fx(Some(0)), true);
         let fx_cmd = crate::playlist::Cmd::Plugin(PlugCmd::Effect { index: fx, slot: Some(0) });
         assert!(fx_menu.iter().any(|it| it.cmd == fx_cmd), "the slot's list has it");
-        let pick = a.plugins.available.iter().position(|x| x.desc.name == name).expect("the plugin is found");
+        let pick = a.state.session.plugins.available.iter().position(|x| x.desc.name == name).expect("the plugin is found");
         let add = crate::rack::add_one_items(&a.state).into_iter().find(|it| it.label == name).expect("Add one lists it");
         assert!(add.cmd == crate::playlist::Cmd::Plugin(PlugCmd::Generator { index: pick, after: None }));
-        let row = a.state.project.channels.len();
+        let row = a.state.session.project.channels.len();
         crate::playlist::run(&mut a, add.cmd);
-        assert_eq!(a.state.pending_plugin, Some((row, pick)));
+        assert_eq!(a.state.session.pending_plugin, Some((row, pick)));
         for _ in 0..100 {
             a.tick();
-            if a.state.pending_plugin.is_none() {
+            if a.state.session.pending_plugin.is_none() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(a.state.hosted_rows.contains(&row), "hosted: {:?}", a.state.message);
-        assert_eq!(a.plugins.descriptor(row).map(|d| d.format), Some(os_host::Format::Native));
+        assert!(a.state.session.hosted_rows.contains(&row), "hosted: {:?}", a.state.message);
+        assert_eq!(a.state.session.plugins.descriptor(row).map(|d| d.format), Some(os_host::Format::Native));
         eprintln!("MESSAGE {:?}", a.state.message);
         // One C5 at velocity 100, a beat long, on the new channel.
-        let channel = a.state.project.channels[row].index;
-        a.state.project.patterns[0].notes = vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(channel, 0) }];
+        let channel = a.state.session.project.channels[row].index;
+        a.state.session.project.get_mut().patterns[0].notes = vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(channel, 0) }];
         let path = std::env::temp_dir().join(format!("openstudio-native-gen-{}.wav", std::process::id()));
-        a.transport.export(&a.state.project, os_engine::PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
+        a.transport.export(&a.state.session.project, os_engine::PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
         let t0 = std::time::Instant::now();
         let secs = loop {
             match a.transport.export_status() {
@@ -3928,7 +4014,7 @@ mod tests {
         let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         match pl.open_window(0, info) {
             Ok(()) => {
-                let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+                let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
                 unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
                 pump(&mut pl, 700);
             }
@@ -4186,14 +4272,14 @@ mod tests {
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         pl.create_effect(1, 0, index, None).unwrap();
-        assert!(!pl.hosted[&fx_key(1, 0)].detached, "a project's instance opens docked");
+        assert!(!pl.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "a project's instance opens docked");
         pl.added(fx_key(1, 0));
-        assert!(!pl.hosted[&fx_key(1, 0)].detached, "check off: docked");
+        assert!(!pl.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "check off: docked");
         crate::prefs::set_check(&DETACH_NEW, true);
         pl.create_effect(1, 1, index, None).unwrap();
         pl.added(fx_key(1, 1));
-        assert!(pl.hosted[&fx_key(1, 1)].detached, "check on: detached");
-        assert!(!pl.hosted[&fx_key(1, 0)].detached, "an existing plugin keeps its mode");
+        assert!(pl.editors.get(&fx_key(1, 1)).is_some_and(|e| e.detached), "check on: detached");
+        assert!(!pl.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "an existing plugin keeps its mode");
     }
 
     /// "Limit the number of open plugin editors": with 25 open, the one opened earliest closes before another opens
@@ -4223,16 +4309,16 @@ mod tests {
             let (t, s) = fx_of(k).unwrap();
             pl.create_effect(t, s, index, None).unwrap();
         }
-        let open = |pl: &Plugins| pl.hosted.values().filter(|h| h.window.is_some()).count();
+        let open = |pl: &Plugins| pl.editors.values().filter(|e| e.window.is_some()).count();
         // Without a main window every frame is detached.
         pl.open_window(keys[0], info(1)).unwrap();
         let hwnd = pl.window_of(keys[0]).unwrap().0;
         unsafe { SetWindowPos(hwnd as HWND, std::ptr::null_mut(), 300, 200, 0, 0, SWP_NOSIZE | SWP_NOZORDER) };
         pump(&mut pl, 50);
         assert!(pl.close_if_open(keys[0]));
-        assert_eq!((pl.hosted[&keys[0]].detached, pl.hosted[&keys[0]].placed), (true, Some((300, 200))));
+        assert_eq!((pl.editors[&keys[0]].detached, pl.editors[&keys[0]].placed), (true, Some((300, 200))));
         pl.open_window(keys[0], info(1)).unwrap();
-        assert_eq!(pl.hosted[&keys[0]].window.as_ref().unwrap().position(), Some((300, 200)), "reopened where it was");
+        assert_eq!(pl.editors[&keys[0]].window.as_ref().unwrap().position(), Some((300, 200)), "reopened where it was");
         for &k in &keys[1..25] {
             pl.open_window(k, info(fx_of(k).unwrap().0)).unwrap();
             pump(&mut pl, 10);
@@ -4240,7 +4326,7 @@ mod tests {
         assert_eq!(open(&pl), 25);
         pl.open_window(keys[25], info(4)).unwrap();
         assert_eq!(open(&pl), 25, "the 26th closed the earliest first");
-        assert!(pl.hosted[&keys[0]].window.is_none() && pl.hosted.contains_key(&keys[0]), "closed, its plugin kept");
+        assert!(pl.editors[&keys[0]].window.is_none() && pl.hosted.contains_key(&keys[0]), "closed, its plugin kept");
         crate::prefs::set_check(&crate::prefs::LIMIT_EDITORS, false);
         pl.open_window(keys[0], info(1)).unwrap();
         assert_eq!(open(&pl), 26, "no limit");

@@ -786,7 +786,7 @@ impl ApplicationHandler for Shell {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(h) = window.window_handle() {
                 if let RawWindowHandle::Win32(w) = h.as_raw() {
-                    self.app.plugins.owner = w.hwnd.get();
+                    self.app.state.session.plugins.owner = w.hwnd.get();
                     // Docked plugin windows are children: our own painting must not draw over them.
                     use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_STYLE, WS_CLIPCHILDREN};
                     let hwnd = w.hwnd.get() as windows_sys::Win32::Foundation::HWND;
@@ -800,8 +800,8 @@ impl ApplicationHandler for Shell {
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             match window.window_handle().map(|h| h.as_raw()) {
-                Ok(RawWindowHandle::Xlib(h)) => self.app.plugins.owner = h.window as isize,
-                Ok(RawWindowHandle::Xcb(h)) => self.app.plugins.owner = h.window.get() as isize,
+                Ok(RawWindowHandle::Xlib(h)) => self.app.state.session.plugins.owner = h.window as isize,
+                Ok(RawWindowHandle::Xcb(h)) => self.app.state.session.plugins.owner = h.window.get() as isize,
                 _ => {}
             }
         }
@@ -810,12 +810,12 @@ impl ApplicationHandler for Shell {
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(RawWindowHandle::AppKit(h)) = window.window_handle().map(|h| h.as_raw()) {
-                self.app.plugins.owner = h.ns_view.as_ptr() as isize;
+                self.app.state.session.plugins.owner = h.ns_view.as_ptr() as isize;
             }
         }
         #[cfg(target_os = "macos")]
         menu_bar::install();
-        self.app.plugins.scale = ui_scale(&window) as f32;
+        self.app.state.session.plugins.scale = ui_scale(&window) as f32;
         // Built-in and cached plugins at once, then a background scan (spec: ui/plugin-manager.md §4).
         splash::step(&self.splash, splash::PLUGINS, "Loading plugins");
         self.app.start_plugins();
@@ -860,7 +860,7 @@ impl ApplicationHandler for Shell {
             if os_host::guard::tripped() {
                 return;
             }
-            self.app.plugins.clear();
+            self.app.state.session.plugins.clear();
             plugins::sweep_retired();
         }
     }
@@ -1153,7 +1153,7 @@ impl ApplicationHandler for Shell {
                 let at = screen_state(&window).map(|s| s.0);
                 // X11 main window (Linux): the X server knows where the pointer is.
                 #[cfg(target_os = "linux")]
-                let at = at.or_else(|| (self.app.plugins.owner != 0).then(crate::plugin_window::pointer).flatten());
+                let at = at.or_else(|| (self.app.state.session.plugins.owner != 0).then(crate::plugin_window::pointer).flatten());
                 if let (Some((cx, cy)), Ok(p)) = (at, window.inner_position()) {
                     let (mx, my) = self.to_app(&window, f64::from(cx - p.x), f64::from(cy - p.y));
                     self.app.mouse_move(mx, my);
@@ -1180,7 +1180,7 @@ impl ApplicationHandler for Shell {
             // Windows display scale changed, or the window moved to a monitor with another DPI: the canvas follows at
             // the next paint; docked plugin windows are redrawn at the new scale (spec: ui/ui-scaling.md §3).
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.app.plugins.set_scale(gui_scale(scale_factor) as f32);
+                self.app.state.session.plugins.set_scale(gui_scale(scale_factor) as f32);
                 self.inset = insets(&window);
                 self.app.invalidate();
                 window.request_redraw();
@@ -1220,7 +1220,7 @@ impl ApplicationHandler for Shell {
                     canvas.resize(cw, ch, scale);
                     self.app.invalidate();
                     // Main GUI scaling changed: docked plugin windows follow (spec: ui/ui-scaling.md §3).
-                    self.app.plugins.set_scale(scale);
+                    self.app.state.session.plugins.set_scale(scale);
                 }
                 // The window may have reached a monitor with another refresh rate.
                 let monitor = window.current_monitor();

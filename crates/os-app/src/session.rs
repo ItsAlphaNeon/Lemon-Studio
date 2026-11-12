@@ -45,6 +45,16 @@ pub struct Session {
     /// The effects inside containers, by hosted key: mixer track, slot and member id (`App::sync_containers`). The
     /// plugin host's, kept here until it is the session's (control-plane step 7): commands find plugins by it.
     pub plugin_members: std::collections::BTreeMap<usize, (u16, u8, u32)>,
+    /// The plugin host: the instances playing the channels and slots, the plugins found, presets, containers
+    /// (`crate::plugins`; control-plane step 7).
+    pub plugins: crate::plugins::Plugins,
+    /// Rack rows played by a hosted plugin.
+    pub hosted_rows: Vec<usize>,
+    /// Requests for the plugin host, handled on the next tick: (row, `Plugins::available` index) to create, row to open.
+    pub pending_plugin: Option<(usize, usize)>,
+    pub pending_open: Option<usize>,
+    /// The hosted plugins' parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
+    pub params: crate::params::ParamUi,
 }
 
 /// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
@@ -63,6 +73,8 @@ pub struct Touched {
     pub rack_step: Option<u64>,
     /// What the views follow in this order, before the rest above.
     pub views: Vec<View>,
+    /// The window has to be drawn again (`App::host`).
+    pub repaint: bool,
 }
 
 /// A change the interface's views follow, in order (`Touched::views`).
@@ -121,6 +133,11 @@ impl Session {
             fx_requests: Vec::new(),
             link_moves: Vec::new(),
             plugin_members: Default::default(),
+            plugins: crate::plugins::Plugins::default(),
+            hosted_rows: Vec::new(),
+            pending_plugin: None,
+            pending_open: None,
+            params: Default::default(),
         }
     }
 

@@ -443,7 +443,7 @@ pub fn param_edit(s: &mut crate::session::Session, owner: u32, before: &[(u32, f
 /// tweaks is off or the value stays. The step comes from no change the release could judge: a plugin may take the
 /// value on its next idle.
 pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, to: f64) {
-    let Some(param) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
+    let Some(param) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
     if command::key_owner(&s.session, key) == Some(0) {
         s.session.control.settle(s.session.project.get_mut());
@@ -546,7 +546,7 @@ impl Queues {
             dirty: s.session.dirty,
             written: s.session.project.written_at(),
             message: s.message.clone(),
-            hosted_rows: s.hosted_rows.clone(),
+            hosted_rows: s.session.hosted_rows.clone(),
             selected_channel: s.selected_channel,
             rack_sel: s.rack.sel.clone(),
             selected_mixer: s.selected_mixer,
@@ -565,7 +565,7 @@ impl Queues {
         s.session.sample_loads.truncate(self.sample_loads);
         s.session.fx_requests.truncate(self.fx);
         s.message = self.message;
-        s.hosted_rows = self.hosted_rows;
+        s.session.hosted_rows = self.hosted_rows;
         (s.selected_channel, s.rack.sel, s.selected_mixer, s.mixer.sel) = (self.selected_channel, self.rack_sel, self.selected_mixer, self.mixer_sel);
         (s.z, s.plugin_channel, s.playlist.sel) = (self.windows, self.plugin_channel, self.clips);
         s.piano = self.piano;

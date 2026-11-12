@@ -443,20 +443,20 @@ pub const FLIP_SPARE: &str = "Swap A / B";
 
 /// The preset header of the instance under `key`.
 fn header(app: &App, key: usize) -> Option<Header> {
-    let d = app.plugins.descriptor(key)?;
+    let d = app.state.session.plugins.descriptor(key)?;
     Some(Header { plugin: d.name.clone(), id: d.uid(), format: d.format.as_str().into(), body: String::new() })
 }
 
 /// The current preset of the instance under `key` when it is a file of the user's presets (one that can be renamed and
 /// deleted; factory presets and files dropped from elsewhere cannot).
 fn own_current(app: &App, key: usize) -> Option<PathBuf> {
-    let p = app.plugins.presets.get(&key)?;
+    let p = app.state.session.plugins.presets.get(&key)?;
     (!is_factory(p) && p.is_file() && root().is_some_and(|r| p.starts_with(r))).then(|| p.clone())
 }
 
 /// Rows of the presets in `list`: sub-folder presets in one submenu per folder when `nested`, else "Folder/name" rows.
 fn rows(app: &App, key: usize, list: &[Preset], nested: bool) -> Vec<PItem> {
-    let cur = app.plugins.presets.get(&key);
+    let cur = app.state.session.plugins.presets.get(&key);
     let row = |p: &Preset, label: String| PItem::new(label, Cmd::Preset(PCmd::Load(key, p.path.clone()))).mark(Mark::Check(cur == Some(&p.path)));
     let mut v: Vec<PItem> = Vec::new();
     let mut folders: Vec<(String, Vec<PItem>)> = Vec::new();
@@ -512,12 +512,12 @@ pub fn fill_window_menu(app: &App, key: usize, menu: &mut Popup) {
             // The plugin's star in the plugin manager (spec: ui/browser.md §10).
             "Add to favourites" => *it = PItem::new(it.label.clone(), Cmd::Browser(crate::browser::BCmd::Star(key))),
             "Display preset name in preset selector" => {
-                let shown = app.plugins.hosted.get(&key).map(|h| !h.hide_preset);
+                let shown = app.state.session.plugins.hosted.get(&key).map(|h| !h.hide_preset);
                 *it = on(PItem::new(it.label.clone(), Cmd::Preset(PCmd::ShowName(key, shown != Some(true)))).mark(Mark::Check(shown != Some(false))), shown.is_some());
             }
             // The spare state (spec: ui/plugin-window.md "Spare state"): Flip is greyed until a state is stored.
-            "Copy to B" => *it = on(PItem::new(it.label.clone(), Cmd::Preset(PCmd::StoreSpare(key))), app.plugins.hosted.contains_key(&key)),
-            "Swap A / B" => *it = on(PItem::new(it.label.clone(), Cmd::Preset(PCmd::FlipSpare(key))), app.plugins.hosted.get(&key).is_some_and(|h| h.spare.is_some())),
+            "Copy to B" => *it = on(PItem::new(it.label.clone(), Cmd::Preset(PCmd::StoreSpare(key))), app.state.session.plugins.hosted.contains_key(&key)),
+            "Swap A / B" => *it = on(PItem::new(it.label.clone(), Cmd::Preset(PCmd::FlipSpare(key))), app.state.session.plugins.hosted.get(&key).is_some_and(|h| h.spare.is_some())),
             _ => {}
         }
     }
@@ -546,7 +546,7 @@ pub fn run(app: &mut App, c: PCmd) -> Option<String> {
         PCmd::Step(key, dir) => {
             let h = header(app, key)?;
             let l = list(&h.plugin);
-            match step(&l, app.plugins.presets.get(&key).map(PathBuf::as_path), dir) {
+            match step(&l, app.state.session.plugins.presets.get(&key).map(PathBuf::as_path), dir) {
                 Some(i) => load_into(app, key, &l[i].path),
                 None => Some(format!("No presets for {} yet (Save preset as... stores one)", h.plugin)),
             }
@@ -578,13 +578,13 @@ pub fn run(app: &mut App, c: PCmd) -> Option<String> {
         }
         PCmd::Browse(key) => browse(app, key),
         PCmd::StoreSpare(key) => {
-            let state = app.plugins.state(key)?;
-            app.plugins.hosted.get_mut(&key)?.spare = Some(state);
+            let state = app.state.session.plugins.state(key)?;
+            app.state.session.plugins.hosted.get_mut(&key)?.spare = Some(state);
             Some("Copied to B".into())
         }
-        PCmd::FlipSpare(key) => flip_spare(app, key),
+        PCmd::FlipSpare(key) => flip_spare(&mut app.state.session, key),
         PCmd::ShowName(key, show) => {
-            app.plugins.show_preset_name(key, show);
+            app.state.session.plugins.show_preset_name(key, show);
             None
         }
     };
@@ -597,38 +597,38 @@ pub fn run(app: &mut App, c: PCmd) -> Option<String> {
 /// and the channel's or slot's name (`control::state_edit`). Lemon Studio's choice: the original's own behaviour was
 /// not looked at.
 pub fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
-    load_with(app, key, path, true)
+    load_with(&mut app.state.session, key, path, true)
 }
 
 /// The state the instance under `key` would go back to on undo (`Taken::Plugin`); `None` when it has none to save.
-fn side(app: &App, key: usize) -> Option<crate::control::command::PluginSide> {
+fn side(ses: &crate::session::Session, key: usize) -> Option<crate::control::command::PluginSide> {
     let name = match crate::plugins::fx_of(key) {
         // A container's effect: no name of its own to put back.
         None if key >= crate::plugins::MEMBER_KEY => None,
-        None => app.state.session.project.channels.get(key)?.name.clone(),
-        Some((t, k)) => crate::mixer::slot_label(&app.state.session, t, k),
+        None => ses.project.channels.get(key)?.name.clone(),
+        Some((t, k)) => crate::mixer::slot_label(ses, t, k),
     };
-    Some(crate::control::command::PluginSide { state: app.plugins.state(key)?, preset: app.plugins.presets.get(&key).cloned(), name, fill: 0 })
+    Some(crate::control::command::PluginSide { state: ses.plugins.state(key)?, preset: ses.plugins.presets.get(&key).cloned(), name, fill: 0 })
 }
 
 /// `load_into`; `step`: an undo step for it (none for a preset that goes into an instance just made for it, part of
 /// the step that made it).
-fn load_with(app: &mut App, key: usize, path: &Path, step: bool) -> Option<String> {
-    let d = app.plugins.descriptor(key)?;
+fn load_with(ses: &mut crate::session::Session, key: usize, path: &Path, step: bool) -> Option<String> {
+    let d = ses.plugins.descriptor(key)?;
     let first = match crate::smith::fst_state(path, &d.name).or_else(|| crate::citrus::fst_state(path)) {
         // An FL preset file (Citrus's and Smith's lists of an FL install's presets) holds the original's state.
         Some(state) => state.map(|s| (shown_name(path), Body::State(s))),
         None => read_any(path, &d).and_then(|v| v.into_iter().next().ok_or_else(|| format!("{} holds no preset", shown_name(path)))),
     };
-    let before = if step { side(app, key) } else { None };
+    let before = if step { side(ses, key) } else { None };
     Some(match first {
-        Ok((_, body)) => match apply(app, key, &body) {
+        Ok((_, body)) => match apply(ses, key, &body) {
             Some(missing) => {
-                app.plugins.mark_edited(key);
-                app.plugins.set_preset(key, Some(path.to_path_buf()));
-                auto_name(app, key, path);
-                if let Some(before) = before.filter(|b| side(app, key).as_ref() != Some(b)) {
-                    crate::control::state_edit(&mut app.state.session, key, crate::control::command::PLUGIN_PRESET, before);
+                ses.plugins.mark_edited(key);
+                ses.plugins.set_preset(key, Some(path.to_path_buf()));
+                auto_name(ses, key, path);
+                if let Some(before) = before.filter(|b| side(ses, key).as_ref() != Some(b)) {
+                    crate::control::state_edit(ses, key, crate::control::command::PLUGIN_PRESET, before);
                 }
                 match missing.is_empty() {
                     true => format!("Preset: {}", shown_name(path)),
@@ -645,28 +645,28 @@ fn load_with(app: &mut App, key: usize, path: &Path, step: bool) -> Option<Strin
 /// (an A/B compare). One undo step that puts the state in use back. Lemon Studio's choices: the spare state is not part
 /// of undo (undoing a flip leaves the spare state as the flip left it), and the preset shown and the channel's or slot's
 /// name stay as they are.
-fn flip_spare(app: &mut App, key: usize) -> Option<String> {
-    let spare = app.plugins.hosted.get(&key)?.spare.clone()?;
-    let now = app.plugins.state(key)?;
-    let before = side(app, key);
-    if !app.plugins.set_state(key, &spare) {
-        return Some(format!("{} did not take its spare state", app.plugins.hosted.get(&key)?.name));
+fn flip_spare(ses: &mut crate::session::Session, key: usize) -> Option<String> {
+    let spare = ses.plugins.hosted.get(&key)?.spare.clone()?;
+    let now = ses.plugins.state(key)?;
+    let before = side(ses, key);
+    if !ses.plugins.set_state(key, &spare) {
+        return Some(format!("{} did not take its spare state", ses.plugins.hosted.get(&key)?.name));
     }
-    app.plugins.hosted.get_mut(&key)?.spare = Some(now);
-    app.plugins.mark_edited(key);
-    app.state.params.reread(key);
-    if let Some(before) = before.filter(|b| side(app, key).as_ref() != Some(b)) {
-        crate::control::state_edit(&mut app.state.session, key, FLIP_SPARE, before);
+    ses.plugins.hosted.get_mut(&key)?.spare = Some(now);
+    ses.plugins.mark_edited(key);
+    ses.params.reread(key);
+    if let Some(before) = before.filter(|b| side(ses, key).as_ref() != Some(b)) {
+        crate::control::state_edit(ses, key, FLIP_SPARE, before);
     }
     Some("Swapped A / B".into())
 }
 
 /// Puts `body` into the instance under `key`: the names of listed parameters it does not have, `None` when it did
 /// not take it.
-fn apply(app: &mut App, key: usize, body: &Body) -> Option<Vec<String>> {
+fn apply(ses: &mut crate::session::Session, key: usize, body: &Body) -> Option<Vec<String>> {
     match body {
-        Body::State(s) => app.plugins.set_state(key, s).then(Vec::new),
-        Body::Params(p) => app.plugins.apply_params(key, p),
+        Body::State(s) => ses.plugins.set_state(key, s).then(Vec::new),
+        Body::Params(p) => ses.plugins.apply_params(key, p),
     }
 }
 
@@ -674,15 +674,14 @@ fn apply(app: &mut App, key: usize, body: &Body) -> Option<Vec<String>> {
 /// effect slots" is on, a mixer slot takes the preset's name, kept until the next preset or a rename by hand (the
 /// slot's window title shows it too); a channel goes by "Name channels after their sample or plugin" (`rack::auto_name`). Spec:
 /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
-fn auto_name(app: &mut App, key: usize, path: &Path) {
-    let s = &mut app.state;
+fn auto_name(ses: &mut crate::session::Session, key: usize, path: &Path) {
     match crate::plugins::fx_of(key) {
         Some(slot) if crate::prefs::check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS) => {
-            crate::mixer::set_slot_label(&mut s.session, slot.0, slot.1, Some(shown_name(path)));
+            crate::mixer::set_slot_label(ses, slot.0, slot.1, Some(shown_name(path)));
         }
         Some(_) => {}
         None => {
-            if let Some(ch) = s.session.project.get_mut().channels.get_mut(key) {
+            if let Some(ch) = ses.project.get_mut().channels.get_mut(key) {
                 crate::rack::auto_name(ch, path);
             }
         }
@@ -692,12 +691,12 @@ fn auto_name(app: &mut App, key: usize, path: &Path) {
 /// Save preset as...: the save dialog, in the plugin's preset folder (`save_chosen` writes the file).
 fn save_as(app: &mut App, key: usize) -> Option<String> {
     let h = header(app, key)?;
-    if app.plugins.state(key).is_none() {
+    if app.state.session.plugins.state(key).is_none() {
         return Some(format!("{} has no state to save", h.plugin));
     }
     let dir = dir_for(&h.plugin)?;
     let _ = std::fs::create_dir_all(&dir);
-    let start = app.plugins.presets.get(&key).map(|p| shown_name(p)).unwrap_or_else(|| "New preset".into());
+    let start = app.state.session.plugins.presets.get(&key).map(|p| shown_name(p)).unwrap_or_else(|| "New preset".into());
     let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Save, "Save preset as", "preset", crate::dialog::Then::SavePreset(key))
         .filter("Lemon Studio preset", &[EXT])
         .start(Some(&dir))
@@ -714,11 +713,11 @@ fn with_ext(target: PathBuf) -> PathBuf {
 /// The preset file chosen in Save preset as...: the plugin's state is written there. Returns the status message.
 pub fn save_chosen(app: &mut App, key: usize, target: PathBuf) -> Option<String> {
     let h = header(app, key)?;
-    let Some(state) = app.plugins.state(key) else { return Some(format!("{} has no state to save", h.plugin)) };
+    let Some(state) = app.state.session.plugins.state(key) else { return Some(format!("{} has no state to save", h.plugin)) };
     let target = with_ext(target);
     Some(match save(&target, &h, &state) {
         Ok(()) => {
-            app.plugins.set_preset(key, Some(target.clone()));
+            app.state.session.plugins.set_preset(key, Some(target.clone()));
             format!("Saved preset {}", shown_name(&target))
         }
         Err(e) => format!("Preset not saved: {e}"),
@@ -729,7 +728,7 @@ pub fn save_chosen(app: &mut App, key: usize, target: PathBuf) -> Option<String>
 /// named after it), as Lemon Studio presets, and the first one loads. Returns the status message.
 pub fn import_chosen(app: &mut App, key: usize, file: PathBuf) -> Option<String> {
     let h = header(app, key)?;
-    let d = app.plugins.descriptor(key)?;
+    let d = app.state.session.plugins.descriptor(key)?;
     let found = match read_any(&file, &d) {
         Ok(v) if !v.is_empty() => v,
         Ok(_) => return Some(format!("{} holds no preset", shown_name(&file))),
@@ -762,8 +761,8 @@ pub fn rename_chosen(app: &mut App, key: usize, old: PathBuf, target: PathBuf) -
     }
     Some(match std::fs::rename(&old, &target) {
         Ok(()) => {
-            if app.plugins.presets.get(&key) == Some(&old) {
-                app.plugins.set_preset(key, Some(target.clone()));
+            if app.state.session.plugins.presets.get(&key) == Some(&old) {
+                app.state.session.plugins.set_preset(key, Some(target.clone()));
             }
             format!("Renamed preset {} to {}", shown_name(&old), shown_name(&target))
         }
@@ -775,8 +774,8 @@ pub fn rename_chosen(app: &mut App, key: usize, old: PathBuf, target: PathBuf) -
 pub fn delete_chosen(app: &mut App, key: usize, path: PathBuf) -> Option<String> {
     Some(match std::fs::remove_file(&path) {
         Ok(()) => {
-            if app.plugins.presets.get(&key) == Some(&path) {
-                app.plugins.set_preset(key, None);
+            if app.state.session.plugins.presets.get(&key) == Some(&path) {
+                app.state.session.plugins.set_preset(key, None);
             }
             format!("Deleted preset {}", shown_name(&path))
         }
@@ -830,14 +829,14 @@ pub fn dropped(app: &mut App, path: &Path) -> Option<String> {
     let mut slot = None;
     match win {
         Some(Win::ChannelRack) => {
-            if let Some(row) = crate::views::rack::row_at(&app.state, y).filter(|&r| app.plugins.descriptor(r).is_some()) {
+            if let Some(row) = crate::views::rack::row_at(&app.state, y).filter(|&r| app.state.session.plugins.descriptor(r).is_some()) {
                 return load_into(app, row, path);
             }
         }
         Some(Win::Mixer) => {
             if let Some(k) = mix {
                 let key = crate::plugins::fx_key(app.state.selected_mixer, k);
-                if app.plugins.descriptor(key).is_some() {
+                if app.state.session.plugins.descriptor(key).is_some() {
                     return load_into(app, key, path);
                 }
                 slot = Some(k);
@@ -848,18 +847,18 @@ pub fn dropped(app: &mut App, path: &Path) -> Option<String> {
     let name = shown_name(path);
     let Some(uid) = uid_of(path) else { return Some(format!("{name}: drop it on a plugin window, a channel or a mixer slot")) };
     let same = |d: &os_host::Descriptor| d.uid().eq_ignore_ascii_case(&uid);
-    if let Some(i) = app.plugins.available.iter().position(|a| same(&a.desc)) {
+    if let Some(i) = app.state.session.plugins.available.iter().position(|a| same(&a.desc)) {
         crate::plugin_menu::add_generator(app, i, None);
         let row = app.state.session.project.channels.len() - 1;
-        app.plugins.preset_waits.push((row, path.to_path_buf(), std::time::Instant::now()));
+        app.state.session.plugins.preset_waits.push((row, path.to_path_buf(), std::time::Instant::now()));
         return Some(format!("Loading {name} in a new channel"));
     }
-    if let Some(i) = app.plugins.effects.iter().position(|a| same(&a.desc)) {
+    if let Some(i) = app.state.session.plugins.effects.iter().position(|a| same(&a.desc)) {
         let t = app.state.selected_mixer;
         let slot = slot.or_else(|| app.state.session.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8));
         let Some(k) = slot else { return Some("Every slot of this track is in use".into()) };
         crate::plugin_menu::add_effect(app, i, Some(k));
-        app.plugins.preset_waits.push((crate::plugins::fx_key(t, k), path.to_path_buf(), std::time::Instant::now()));
+        app.state.session.plugins.preset_waits.push((crate::plugins::fx_key(t, k), path.to_path_buf(), std::time::Instant::now()));
         return Some(format!("Loading {name} in a new effect"));
     }
     let plugin = std::fs::read(path).ok().and_then(|b| decode(&b).map(|(h, _)| h.plugin)).filter(|p| !p.is_empty());
@@ -868,15 +867,21 @@ pub fn dropped(app: &mut App, path: &Path) -> Option<String> {
 
 /// Presets dropped where a new instance was made load once it is hosted (or are given up after [`WAIT`]).
 pub fn pending_tick(app: &mut App) {
-    if app.plugins.preset_waits.is_empty() {
-        return;
+    if !app.state.session.plugins.preset_waits.is_empty() {
+        app.host(|ses, _| pending_in(ses));
     }
-    for (key, path, at) in std::mem::take(&mut app.plugins.preset_waits) {
-        if app.plugins.descriptor(key).is_some() {
-            app.state.message = load_with(app, key, &path, false);
-            app.invalidate();
+}
+
+/// `pending_tick` on the session: what the loads say goes to the interface (`View::Message`).
+pub(crate) fn pending_in(ses: &mut crate::session::Session) {
+    for (key, path, at) in std::mem::take(&mut ses.plugins.preset_waits) {
+        if ses.plugins.descriptor(key).is_some() {
+            if let Some(m) = load_with(ses, key, &path, false) {
+                ses.touched.views.push(crate::session::View::Message(m));
+            }
+            ses.touched.repaint = true;
         } else if at.elapsed() < WAIT {
-            app.plugins.preset_waits.push((key, path, at));
+            ses.plugins.preset_waits.push((key, path, at));
         }
     }
 }
@@ -1111,7 +1116,7 @@ mod tests {
         pl.available = crate::plugins::builtin();
         let index = pl.index_of(crate::plugins::LEMON_SAMPLER).expect("built in");
         pl.create(0, index).unwrap();
-        app.plugins = pl;
+        app.state.session.plugins = pl;
         (app, dir, guard)
     }
 
@@ -1122,7 +1127,7 @@ mod tests {
         let h = header(&app, 0).unwrap();
         assert_eq!(h.plugin, "Lemon Sampler");
         assert!(h.id.starts_with("clap:"));
-        let state = app.plugins.state(0).unwrap();
+        let state = app.state.session.plugins.state(0).unwrap();
         // Two presets: the default state, and one with a sample path.
         save(&file_for(&dir_for(&h.plugin).unwrap(), "Default"), &h, &state).unwrap();
         let other = crate::plugins::with_sample_path(&state, "C:/x/rim.wav").unwrap();
@@ -1131,13 +1136,13 @@ mod tests {
         assert_eq!(names, ["Default", "Rim"]);
         assert!(run(&mut app, PCmd::Step(0, -1)).unwrap().contains("Rim") || !factory(&h.plugin).is_empty(), "back from no preset = last");
         run(&mut app, PCmd::Load(0, file_for(&dir_for(&h.plugin).unwrap(), "Rim")));
-        assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/rim.wav"));
-        assert_eq!(app.plugins.preset_name(0).as_deref(), Some("Rim"));
+        assert_eq!(app.state.session.plugins.sampler_path(0).as_deref(), Some("C:/x/rim.wav"));
+        assert_eq!(app.state.session.plugins.preset_name(0).as_deref(), Some("Rim"));
         // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup": "Name channels after their sample or plugin" is
         // on by default.
         assert_eq!(app.state.session.project.channels[0].name.as_deref(), Some("Rim"), "the ◀ ▶ arrows rename the channel");
         run(&mut app, PCmd::Step(0, -1));
-        assert_eq!(app.plugins.sampler_path(0).as_deref(), Some(""), "back to Default");
+        assert_eq!(app.state.session.plugins.sampler_path(0).as_deref(), Some(""), "back to Default");
         let it = items(&app, 0, true);
         assert!(it.iter().any(|i| i.label == "Default" && i.mark == Mark::Check(true)));
         // The window menu's Presets entry lists them; Browse presets works.
@@ -1157,16 +1162,16 @@ mod tests {
     fn presets_of_a_container_member() {
         let (mut app, dir, _env) = hosted_sampler("member");
         let key = crate::plugins::MEMBER_KEY;
-        let index = app.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
-        app.plugins.create(key, index).unwrap();
+        let index = app.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        app.state.session.plugins.create(key, index).unwrap();
         let h = header(&app, key).unwrap();
-        let other = crate::plugins::with_sample_path(&app.plugins.state(key).unwrap(), "C:/x/rim.wav").unwrap();
+        let other = crate::plugins::with_sample_path(&app.state.session.plugins.state(key).unwrap(), "C:/x/rim.wav").unwrap();
         let rim = file_for(&dir_for(&h.plugin).unwrap(), "Rim");
         save(&rim, &h, &other).unwrap();
         let names: Vec<Option<String>> = app.state.session.project.channels.iter().map(|c| c.name.clone()).collect();
         assert_eq!(run(&mut app, PCmd::Load(key, rim.clone())).as_deref(), Some("Preset: Rim"));
-        assert_eq!(app.plugins.sampler_path(key).as_deref(), Some("C:/x/rim.wav"));
-        assert_eq!(app.plugins.preset_name(key).as_deref(), Some("Rim"));
+        assert_eq!(app.state.session.plugins.sampler_path(key).as_deref(), Some("C:/x/rim.wav"));
+        assert_eq!(app.state.session.plugins.preset_name(key).as_deref(), Some("Rim"));
         assert_eq!(app.state.session.project.channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), names);
         let mut m = crate::playlist::plugin_window_menu(key, false, 0.0, 0.0);
         fill_window_menu(&app, key, &mut m);
@@ -1190,22 +1195,22 @@ mod tests {
         assert_eq!(entry(&app, "Copy to B").cmd, Cmd::Preset(PCmd::StoreSpare(0)));
         assert!(entry(&app, "Copy to B").enabled);
         assert!(!entry(&app, "Swap A / B").enabled, "nothing stored yet");
-        let a = crate::plugins::with_sample_path(&app.plugins.state(0).unwrap(), "C:/x/a.wav").unwrap();
-        assert!(app.plugins.set_state(0, &a));
+        let a = crate::plugins::with_sample_path(&app.state.session.plugins.state(0).unwrap(), "C:/x/a.wav").unwrap();
+        assert!(app.state.session.plugins.set_state(0, &a));
         assert_eq!(run(&mut app, PCmd::StoreSpare(0)).as_deref(), Some("Copied to B"));
         assert!(entry(&app, "Swap A / B").enabled);
         let b = crate::plugins::with_sample_path(&a, "C:/x/b.wav").unwrap();
-        assert!(app.plugins.set_state(0, &b));
+        assert!(app.state.session.plugins.set_state(0, &b));
         let steps = app.state.session.history.at();
         assert_eq!(run(&mut app, PCmd::FlipSpare(0)).as_deref(), Some("Swapped A / B"));
-        assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/a.wav"), "the stored state is in use");
+        assert_eq!(app.state.session.plugins.sampler_path(0).as_deref(), Some("C:/x/a.wav"), "the stored state is in use");
         assert_eq!(app.state.session.history.newest_done(), Some(FLIP_SPARE));
         assert_eq!(app.state.session.history.at(), steps + 1);
         run(&mut app, PCmd::FlipSpare(0));
-        assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/b.wav"), "and back");
+        assert_eq!(app.state.session.plugins.sampler_path(0).as_deref(), Some("C:/x/b.wav"), "and back");
         crate::history::undo(&mut app.state);
         app.host_commands();
-        assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/a.wav"), "undo puts the state in use back");
+        assert_eq!(app.state.session.plugins.sampler_path(0).as_deref(), Some("C:/x/a.wav"), "undo puts the state in use back");
         // The mixer's slot menu fills the same entries for the slot's plugin.
         let key = crate::plugins::fx_key(app.state.selected_mixer, 0);
         let m = crate::mixer::slot_menu(&app, 0, 0.0, 0.0);
@@ -1218,7 +1223,7 @@ mod tests {
     #[test]
     fn display_preset_name_switch() {
         let (mut app, dir, _env) = hosted_sampler("shown-name");
-        app.plugins.set_preset(0, Some(dir.join("Rim.ospreset")));
+        app.state.session.plugins.set_preset(0, Some(dir.join("Rim.ospreset")));
         let entry = |app: &App| {
             let mut m = crate::playlist::plugin_window_menu(0, false, 0.0, 0.0);
             fill_window_menu(app, 0, &mut m);
@@ -1226,14 +1231,14 @@ mod tests {
         };
         let it = entry(&app);
         assert_eq!((it.mark, it.cmd, it.enabled), (Mark::Check(true), Cmd::Preset(PCmd::ShowName(0, false)), true));
-        assert_eq!(app.plugins.shown_preset(0).as_deref(), Some("Rim"));
+        assert_eq!(app.state.session.plugins.shown_preset(0).as_deref(), Some("Rim"));
         run(&mut app, PCmd::ShowName(0, false));
-        assert_eq!(app.plugins.shown_preset(0), None);
-        assert_eq!(app.plugins.preset_name(0).as_deref(), Some("Rim"), "the preset is still known");
+        assert_eq!(app.state.session.plugins.shown_preset(0), None);
+        assert_eq!(app.state.session.plugins.preset_name(0).as_deref(), Some("Rim"), "the preset is still known");
         let it = entry(&app);
         assert_eq!((it.mark, it.cmd), (Mark::Check(false), Cmd::Preset(PCmd::ShowName(0, true))));
         run(&mut app, PCmd::ShowName(0, true));
-        assert_eq!(app.plugins.shown_preset(0).as_deref(), Some("Rim"));
+        assert_eq!(app.state.session.plugins.shown_preset(0).as_deref(), Some("Rim"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1246,7 +1251,7 @@ mod tests {
         let enabled = |app: &App, label: &str| popup(app, 0, 0.0, 0.0).items.iter().find(|i| i.label == label).unwrap().enabled;
         assert!(enabled(&app, "Save preset as...") && enabled(&app, "Import preset...") && enabled(&app, "Browse presets"));
         assert!(!enabled(&app, "Rename preset...") && !enabled(&app, "Delete preset..."), "no current preset");
-        let state = app.plugins.state(0).unwrap();
+        let state = app.state.session.plugins.state(0).unwrap();
         let mine = file_for(&dir_for(&h.plugin).unwrap(), "Mine");
         save(&mine, &h, &state).unwrap();
         run(&mut app, PCmd::Load(0, mine.clone()));
@@ -1254,18 +1259,18 @@ mod tests {
         let renamed = mine.with_file_name("Ours.ospreset");
         rename_chosen(&mut app, 0, mine.clone(), renamed.with_extension(""));
         assert!(!mine.exists() && renamed.exists());
-        assert_eq!(app.plugins.preset_name(0).as_deref(), Some("Ours"));
+        assert_eq!(app.state.session.plugins.preset_name(0).as_deref(), Some("Ours"));
         assert_eq!(delete_chosen(&mut app, 0, renamed.clone()).as_deref(), Some("Deleted preset Ours"));
         assert!(!renamed.exists());
-        assert_eq!(app.plugins.preset_name(0), None);
+        assert_eq!(app.state.session.plugins.preset_name(0), None);
         // Import: a preset from elsewhere is copied into the plugin's folder and loads.
         let elsewhere = tmp("box-elsewhere").join("Snare.ospreset");
         save(&elsewhere, &h, &crate::plugins::with_sample_path(&state, "C:/x/snare.wav").unwrap()).unwrap();
         assert_eq!(import_chosen(&mut app, 0, elsewhere.clone()).as_deref(), Some("Imported preset Snare"));
         let copy = file_for(&dir_for(&h.plugin).unwrap(), "Snare");
         assert!(copy.exists());
-        assert_eq!(app.plugins.presets.get(&0), Some(&copy));
-        assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/snare.wav"));
+        assert_eq!(app.state.session.plugins.presets.get(&0), Some(&copy));
+        assert_eq!(app.state.session.plugins.sampler_path(0).as_deref(), Some("C:/x/snare.wav"));
         import_chosen(&mut app, 0, elsewhere.clone());
         assert!(copy.with_file_name("Snare 2.ospreset").exists(), "a second import does not replace the first");
         // Browse presets: the browser shows its Plugin presets at the plugin.
@@ -1297,10 +1302,10 @@ mod tests {
         let fx = crate::plugins::fx_key(1, 0);
         pl.create(0, index).unwrap();
         pl.create(fx, index).unwrap();
-        app.plugins = pl;
+        app.state.session.plugins = pl;
         app.state.session.project.get_mut().channels[0].name = Some("808 Snare".into());
         crate::mixer::track_mut(&mut app.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
-        let (h, state) = (header(&app, 0).unwrap(), app.plugins.state(0).unwrap());
+        let (h, state) = (header(&app, 0).unwrap(), app.state.session.plugins.state(0).unwrap());
         let preset = |name: &str| {
             let p = file_for(&dir, name);
             save(&p, &h, &state).unwrap();
@@ -1345,14 +1350,14 @@ mod tests {
     fn parameter_presets_load_through_the_parameters() {
         let (mut app, dir, _env) = hosted_sampler("param-load");
         let h = header(&app, 0).unwrap();
-        let infos = app.plugins.param_infos(0);
+        let infos = app.state.session.plugins.param_infos(0);
         let knob = infos.iter().find(|i| !i.read_only && !i.hidden && !i.bypass && i.steps == 0 && i.max > i.min).expect("a knob").clone();
         let mid = knob.min + (knob.max - knob.min) * 0.25;
         let p = dir.join("Quarter.ospreset");
         std::fs::write(&p, encode_params(&h, &[(knob.name.clone(), mid), ("No such knob".into(), 1.0)])).unwrap();
         let msg = run(&mut app, PCmd::Load(0, p)).unwrap();
         assert!(msg.starts_with("Preset: Quarter") && msg.contains("No such knob"), "{msg}");
-        assert!((app.plugins.param_value(0, knob.id).unwrap() - 0.25).abs() < 1e-3);
+        assert!((app.state.session.plugins.param_value(0, knob.id).unwrap() - 0.25).abs() < 1e-3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

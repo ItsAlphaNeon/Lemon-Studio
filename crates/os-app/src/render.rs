@@ -104,15 +104,15 @@ pub fn render(o: &Opts) -> Result<(), String> {
     crate::transport::headless();
     let mut app = crate::app::App::new(None);
     match o.hosted {
-        Hosted::Builtin => app.plugins = crate::plugins::Plugins::builtins(),
+        Hosted::Builtin => app.state.session.plugins = crate::plugins::Plugins::builtins(),
         Hosted::LastScan => {
             app.load_plugins();
         }
         #[cfg(test)]
-        Hosted::ScanNow => app.plugins = crate::plugins::Plugins::scan(),
+        Hosted::ScanNow => app.state.session.plugins = crate::plugins::Plugins::scan(),
     }
     // Instances start at the render rate (`Plugins::create_with` activates at the current rate).
-    app.plugins.set_rate(o.rate);
+    app.state.session.plugins.set_rate(o.rate);
     app.open(o.project.clone());
     let opened = app.state.session.path.is_some();
     eprintln!("OPEN {}", app.state.message.clone().unwrap_or_default());
@@ -129,22 +129,22 @@ pub fn render(o: &Opts) -> Result<(), String> {
     let mut last = usize::MAX;
     for _ in 0..400 {
         app.plugin_tick();
-        let n = app.plugins.hosted.len();
+        let n = app.state.session.plugins.hosted.len();
         if n == last && t0.elapsed() > Duration::from_secs(2) {
             break;
         }
         last = n;
         std::thread::sleep(Duration::from_millis(10));
     }
-    eprintln!("HOSTED {} in {:.1} s: {}", app.plugins.hosted.len(), t0.elapsed().as_secs_f64(), app.state.message.clone().unwrap_or_default());
+    eprintln!("HOSTED {} in {:.1} s: {}", app.state.session.plugins.hosted.len(), t0.elapsed().as_secs_f64(), app.state.message.clone().unwrap_or_default());
     report(&app);
 
-    app.plugins.set_offline(true);
+    app.state.session.plugins.set_offline(true);
     let project = crate::rack::play_project(&app.state);
     let mut library = crate::transport::host_library(crate::factory_folder::dir());
     lemon_sampler::set_host_ticks(project.ppq);
-    let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &app.plugins.instruments());
-    crate::project_plugins::attach_effects(&mut e, &project, app.plugins.effects());
+    let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &app.state.session.plugins.instruments());
+    crate::project_plugins::attach_effects(&mut e, &project, app.state.session.plugins.effects());
     if o.from > 0 {
         e.seek_tick(o.from);
     } else {
@@ -182,7 +182,7 @@ fn report(app: &crate::app::App) { // This code is a part of L e m o n S t u d i
         if matches!(c.kind, ChannelKind::Automation | ChannelKind::Layer) {
             continue;
         }
-        let who = match app.plugins.descriptor(row) {
+        let who = match app.state.session.plugins.descriptor(row) {
             Some(d) => format!("{} ({})", d.name, crate::plugins::format_name(d.format)),
             None => "engine".into(),
         };
@@ -192,7 +192,7 @@ fn report(app: &crate::app::App) { // This code is a part of L e m o n S t u d i
     for m in &p.mixer {
         for (k, s) in m.slots.iter().enumerate() {
             let Some(s) = s else { continue };
-            let who = match app.plugins.descriptor(crate::plugins::fx_key(m.index, k as u8)) {
+            let who = match app.state.session.plugins.descriptor(crate::plugins::fx_key(m.index, k as u8)) {
                 Some(d) => format!("{} ({})", d.name, crate::plugins::format_name(d.format)),
                 None if os_engine::effects::from_slot(&s.name, &s.state, 44100).is_some() => "engine".into(),
                 None => "nothing (sound passes)".into(),

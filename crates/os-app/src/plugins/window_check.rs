@@ -64,7 +64,7 @@ struct Look {
 }
 
 fn look(pl: &Plugins) -> Option<Look> {
-    let w = pl.hosted.get(&0)?.window.as_ref()?;
+    let w = pl.editors.get(&0)?.window.as_ref()?;
     // SAFETY: the frame's views live as long as its window, which `pl` holds.
     let (frame, area) = unsafe { (&*(w.hwnd() as *const NSView), &*(w.area() as *const NSView)) };
     let editor = area.subviews().firstObject().map(|v| frame_of(&v));
@@ -126,7 +126,7 @@ pub fn run(args: &[String]) -> i32 {
         }
         pump(&mut el, &mut pl, 900);
         let stem = name.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
-        let display = pl.hosted[&0].window.as_ref().map_or(2.0, |w| w.scale());
+        let display = pl.editors.get(&0).and_then(|e| e.window.as_ref()).map_or(2.0, |w| w.scale());
         for (k, tag) in [(display, "display"), (1.0, "1x"), (2.0, "2x")] {
             if tag != "display" {
                 pl.rescale_window(0, k);
