@@ -1898,17 +1898,10 @@ impl App {
     /// Follows a running export: moves the progress bar, then reports the result (a pattern render's goes to
     /// `pattern_render_done`).
     pub(crate) fn export_tick(&mut self) {
-        let Some((name, _)) = self.state.session.export.clone() else { return };
-        match self.state.session.transport.export_status() {
-            crate::transport::Export::Running(p) => {
-                self.state.session.export = Some((name, p));
-                self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
-            }
-            crate::transport::Export::Done(r) => {
-                self.state.session.export = None;
-                self.midi_after_export();
-                self.state.session.plugins.set_offline(false);
-                lemon_sampler::stream::export_finished();
+        match crate::export::poll(&mut self.state.session) {
+            crate::export::Polled::Idle => {}
+            crate::export::Polled::Running => self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0)),
+            crate::export::Polled::Done(name, r) => {
                 if let Some(p) = self.state.session.pattern_render.take() {
                     return self.pattern_render_done(p, r);
                 }
@@ -1926,7 +1919,6 @@ impl App {
                 });
                 self.invalidate();
             }
-            crate::transport::Export::Idle => {}
         }
     }
 
@@ -2402,102 +2394,26 @@ impl App {
         self.state.session.transport.set_effects(Vec::new());
     }
 
-    /// Every sampler channel is played and edited by Lemon Sampler (owner, 2026-10-10; spec: plugins/lemon-sampler.md §7):
-    /// a channel without an instance gets one, started from the channel's sample and envelopes. Without Lemon Sampler
-    /// (plugin not found) sampler channels keep the engine's own sample playback.
-    /// With a `deadline` it stops after the instance that passes it; returns whether every sampler row is done.
+    /// `loading::sync_samplers` with the views following it (tests).
+    #[cfg(test)]
     fn sync_samplers(&mut self, deadline: Option<std::time::Instant>) -> bool {
-        let Some(index) = self.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER) else { return true };
-        let mut added = false;
-        let mut done = true;
-        for row in 0..self.state.session.project.channels.len() {
-            let ch = &self.state.session.project.channels[row];
-            if !ch.kind.is_sampler() || self.state.session.hosted_rows.contains(&row) || self.state.session.plugins.sampler_failed.contains(&row) {
-                continue;
-            }
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                done = false;
-                break;
-            }
-            let st = crate::plugins::sampler_state(ch);
-            if let Some(l) = &mut self.state.session.loading {
-                l.hosted += 1;
-                l.label = ch.name.clone().unwrap_or_default();
-            }
-            match self.state.session.plugins.create_with(row, index, Some(&st)) {
-                Ok(_) => {
-                    self.state.session.hosted_rows.push(row);
-                    added = true;
-                    // A channel just added (ADD ▸ Lemon Sampler): its window is about to open (spec:
-                    // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
-                    if self.state.session.pending_open == Some(row) {
-                        self.state.session.plugins.added(row);
-                    }
-                }
-                Err(e) => {
-                    self.state.session.plugins.sampler_failed.push(row);
-                    self.state.message = Some(format!("Lemon Sampler: {e}"));
-                }
-            }
-        }
-        if added {
-            self.state.session.transport.set_instruments(self.state.session.plugins.instruments());
-            self.state.session.dirty = true;
-        }
-        done
+        self.host(|s| crate::loading::sync_samplers(s, deadline))
     }
 
     /// Project loading (spec: ui/project-loading.md): samples decode on worker threads first, then the sampler
     /// instances start a few per tick (`loading::HOST_BUDGET`) so the progress panel keeps moving. Without a loading
     /// project, new sampler rows are hosted at once.
     fn loading_tick(&mut self) {
-        let Some(decoded) = self.state.session.loading.as_mut().map(|l| l.decode_done()) else {
-            self.sync_samplers(None);
-            return;
-        };
-        let deadline = std::time::Instant::now() + crate::loading::HOST_BUDGET;
-        // Then the plugin channels and mixer effects, under the same budget, then the samplers' played samples.
-        if decoded && self.sync_samplers(Some(deadline)) && self.host_plugins(deadline) && self.state.session.loading.as_mut().is_some_and(|l| l.builds_done()) {
-            self.state.session.loading = None;
-            self.state.session.samples.wait = false;
+        let scanning = self.sweep.is_some();
+        match self.host(|s| crate::loading::tick(s, scanning)) {
+            None => {}
             // What was not found is listed now (spec: ui/project-loading.md §6).
-            crate::missing::loaded(self);
-            return self.invalidate();
-        }
-        self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
-    }
-
-    /// Starts the opened project's plugin channels and mixer effects until `deadline` (`project_plugins::sync_wrapped`
-    /// and the other hosts stop after the instance that passes it): true when none is left to start.
-    fn host_plugins(&mut self, deadline: std::time::Instant) -> bool {
-        self.state.session.plugins.host_deadline = Some(deadline);
-        self.state.session.plugins.host_more = false;
-        self.sync_effects();
-        self.sync_wrapped();
-        self.sync_osc3();
-        self.sync_citrus();
-        self.sync_smith();
-        self.sync_slicer();
-        self.sync_drums();
-        self.sync_native();
-        self.state.session.plugins.host_deadline = None;
-        let samplers = self.state.session.hosted_rows.iter().filter(|&&r| self.state.session.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
-        let done = (self.state.session.plugins.hosted.len() + self.state.session.plugins.wrap_failed.len() + self.state.session.plugins.fx_failed.len() + self.state.session.plugins.native_failed.len()).saturating_sub(samplers);
-        let more = self.state.session.plugins.host_more;
-        if let Some(l) = &mut self.state.session.loading {
-            l.label.clear();
-            l.plugins_done = done;
-            // Plugins no host plays (FL's own effects without a recreation) are not waited for.
-            if !more {
-                l.plugins = done;
+            Some(true) => {
+                crate::missing::loaded(self);
+                self.invalidate();
             }
+            Some(false) => self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0)),
         }
-        !more
-    }
-
-    /// Whether the plugin hosts' time this tick is over (`host_plugins`): the host that asks stops and goes on next tick.
-    pub(crate) fn past_deadline(&mut self) -> bool {
-        self.state.session.plugins.past_deadline()
     }
 
     /// `f`, the plugin host's part of a tick on the session, with the views following it and the

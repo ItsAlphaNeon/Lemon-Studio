@@ -519,12 +519,6 @@ impl App {
         self.state.session.midi_out.configure(c);
     }
 
-    /// After an export: all notes off to the outputs that want it (spec §2).
-    pub(crate) fn midi_after_export(&mut self) {
-        if Switch::Output.on() {
-            self.state.session.midi_out.notes_off();
-        }
-    }
 }
 
 /// Settings > MIDI's controls (`views::midi_page`) and the OPTIONS menu's MIDI switches.
