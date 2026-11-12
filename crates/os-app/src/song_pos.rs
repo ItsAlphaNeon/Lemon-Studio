@@ -88,7 +88,7 @@ impl App {
             s.playlist.pos = t;
             // The initial values follow a song position move (spec: ui/settings-choices.md "Advanced: Initialize
             // controls automatically").
-            crate::init::apply(s);
+            crate::init::apply(&mut s.session);
         } else {
             s.piano.marker = t;
             s.piano.marker_placed = true;

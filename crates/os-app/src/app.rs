@@ -1852,7 +1852,7 @@ impl App {
                 s.session.project = crate::locked::Locked::new(project);
                 // Opening in song mode sets the initial values, as FL 26 does (spec: flp/engine-events.md "Event
                 // 216"); the project is opened with them, not changed.
-                crate::init::apply(s);
+                crate::init::apply(&mut s.session);
                 crate::project_info::opened(s);
                 s.session.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
@@ -4071,7 +4071,7 @@ impl App {
         // Initialize controls automatically"). The engine sets them itself there; the project follows, so the controls
         // show them.
         let looped = now.playing && old.playing && now.song && old.song && !now.paused && now.tick < old.tick;
-        if looped && crate::init::apply(&mut self.state) {
+        if looped && crate::init::apply(&mut self.state.session) {
             self.invalidate();
         }
         if now.playing != old.playing || now.paused != old.paused || now.song != old.song {
@@ -4848,7 +4848,7 @@ impl App {
             return self.invalidate();
         }
         // The initial values first (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
-        crate::init::apply(&mut self.state);
+        crate::init::apply(&mut self.state.session);
         let mut p = self.state.session.project.clone();
         p.tempo = Some(self.state.tempo());
         self.transport.stop();
@@ -7094,7 +7094,7 @@ impl App {
         self.shift_clone = false;
         self.release();
         // An undo step whose press changed nothing goes (spec: ui/settings-choices.md "Undo history").
-        crate::history::settle(&mut self.state);
+        crate::history::settle(&mut self.state.session);
     }
 
     fn release(&mut self) {
@@ -7789,7 +7789,7 @@ impl App {
             }
             let v = v + dy.signum() * id.notch() * if dy == 0.0 { 0.0 } else { 1.0 };
             if v.clamp(0.0, 1.0) != self.state.knob(id) {
-                crate::history::knob(&mut self.state, id, true);
+                crate::history::knob(&mut self.state.session, id, true);
             }
             self.state.set_knob(id, v);
             self.record_knob(id);
@@ -7807,7 +7807,7 @@ impl App {
             if v != v0 {
                 // One step for a run of notches on the fader (none with Undo knob tweaks off: a fader is a knob here).
                 if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) && !s.session.history.joins(crate::history::Run::Fader(t)) {
-                    crate::control::edit_press(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t));
+                    crate::control::edit_press(&mut s.session, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t));
                     s.session.history.set_run(crate::history::Run::Fader(t));
                 }
                 if let Some(m) = crate::mixer::track_mut(&mut s.session, t) {
@@ -8192,7 +8192,7 @@ impl App {
         }
         // The song starts with the project's initial values (spec: ui/settings-choices.md "Advanced: Initialize
         // controls automatically").
-        if crate::init::apply(&mut self.state) {
+        if crate::init::apply(&mut self.state.session) {
             self.invalidate();
         }
         if song {
@@ -8674,7 +8674,7 @@ impl App {
                             if let Some(row) = self.state.session.project.channels.iter().position(|c| c.index == ch) {
                                 self.state.rack.select_only(row);
                             }
-                            self.state.playlist.popup = Some(pl::pick_menu(&self.state, ch, x, y));
+                            self.state.playlist.popup = Some(pl::pick_menu(&self.state.session, ch, x, y));
                         }
                     }
                 }
@@ -8846,7 +8846,7 @@ impl App {
                     }
                     // A song position move: the initial values (spec: ui/settings-choices.md "Advanced: Initialize
                     // controls automatically").
-                    crate::init::apply(s);
+                    crate::init::apply(&mut s.session);
                 } else if let Some((a, _)) = s.piano.range.filter(|_| s.shown(Win::PianoRoll)) {
                     // spec: ui/recording.md §5: the piano roll's time selection, as in SONG mode.
                     s.piano.marker = a;
@@ -8893,7 +8893,7 @@ impl App {
                 let n = s.tempo_digits.get().iter().filter(|&&d| x >= d).count();
                 let step = [1.0, 0.1, 0.01, 0.001][n];
                 // One undo step for the drag (none when it doesn't change the tempo).
-                crate::control::edit_press(s, crate::control::command::TEMPO, crate::control::command::Region::Settings);
+                crate::control::edit_press(&mut s.session, crate::control::command::TEMPO, crate::control::command::Region::Settings);
                 self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo(), step });
             }
             Action::SongPos => self.song_pos_press(),
@@ -8957,7 +8957,7 @@ impl App {
             Action::Mix(crate::mixer::MHit::EqGraph) => {
                 if let Some(g) = self.top_hit(self.mouse.0, self.mouse.1).map(|h| h.rect) {
                     let (track, band) = (self.state.selected_mixer, crate::mixer::eq_band_at(&self.state, g, self.mouse.0));
-                    crate::control::edit_press(&mut self.state, "Mixer track equalizer", crate::control::command::Region::Track(track));
+                    crate::control::edit_press(&mut self.state.session, "Mixer track equalizer", crate::control::command::Region::Track(track));
                     self.drag = Some(Drag::EqGraph { track, band, g });
                     crate::mixer::eq_graph_drag(&mut self.state, track, band, g, self.mouse);
                     self.damage_eq();
@@ -8994,7 +8994,7 @@ impl App {
                 // tweaks off: a fader is a knob here).
                 if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
                     let tracks = std::iter::once(t).chain(others.iter().map(|o| o.0));
-                    crate::control::edit_press_all(s, crate::history::MIXER_VOLUME, tracks.map(crate::control::command::Region::Track));
+                    crate::control::edit_press_all(&mut s.session, crate::history::MIXER_VOLUME, tracks.map(crate::control::command::Region::Track));
                 }
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0, level, others });
             }
@@ -9025,13 +9025,13 @@ impl App {
             }
             // An automation clip LFO's switch and mode: a click flips them, one undo step.
             Action::Knob(id @ crate::knobs::KnobId::AutoLfo(_, k)) if k.switch() => {
-                crate::history::knob(s, id, false);
+                crate::history::knob(&mut s.session, id, false);
                 s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
             // A MIDI Out check: a click flips it, one undo step.
             Action::Knob(id @ crate::knobs::KnobId::MidiOut(_, k)) if k.switch() => {
-                crate::history::knob(s, id, false);
+                crate::history::knob(&mut s.session, id, false);
                 s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
@@ -9041,7 +9041,7 @@ impl App {
                 self.reset_control(crate::knobs::Control::Knob(id));
             }
             Action::Knob(id) => {
-                crate::history::knob(s, id, false);
+                crate::history::knob(&mut s.session, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
@@ -10036,17 +10036,27 @@ pub(crate) fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_wind
 /// The timebase goes from `from` to `to` ticks per quarter (`App::set_timebase`, an undone or redone change): every tick
 /// count follows, the project's, the views', the history's and the clipboards'.
 pub(crate) fn retime(s: &mut State, from: u16, to: u16) {
+    crate::follow::around(s, |s| retime_in(&mut s.session, from, to));
+}
+
+/// `retime` in the session: the project's and the history's ticks; the views follow (`retime_views`).
+pub(crate) fn retime_in(s: &mut crate::session::Session, from: u16, to: u16) {
     if from == to {
         return;
     }
-    s.session.project.get_mut().set_ppq(to);
+    s.project.get_mut().set_ppq(to);
+    crate::history::rescale(s, from, to);
+    s.touched.views.push(crate::session::View::Retimed(from, to));
+    s.dirty = true;
+}
+
+/// `retime`'s part in the views: their ticks and the step clipboard.
+pub(crate) fn retime_views(s: &mut State, from: u16, to: u16) {
     crate::piano::rescale(s, from, to);
     crate::playlist::rescale(s, from, to);
-    crate::history::rescale(&mut s.session, from, to);
     if let Some(rows) = &mut s.rack.clipboard {
         rows.iter_mut().flatten().for_each(|n| n.rescale(from, to));
     }
-    s.session.dirty = true;
 }
 
 /// A generator-plugin channel played by a hosted instrument, routed like `add_channel`. Returns its rack row.
@@ -24249,13 +24259,13 @@ mod tests {
         let auto = pl::create_automation(&mut app.state, os_model::target::TEMPO, "Tempo", 0.5);
         pl::add_point(&mut app.state.session, auto, 2.0, 0.9);
         let labels = |p: &pl::Popup| p.items.iter().filter(|i| !i.sep).map(|i| i.label.to_string()).collect::<Vec<_>>();
-        let menu = pl::pick_menu(&app.state, auto, 0.0, 0.0);
+        let menu = pl::pick_menu(&app.state.session, auto, 0.0, 0.0);
         let want = ["Select in arranger", "Group selected...", "Rename, color and icon...", "Change color...", "Random color", "Change icon...", "Chokes itself", "Clone", "Clone with links", "Delete..."];
         assert_eq!(labels(&menu), want);
         app.state.session.project.get_mut().channels[0].kind = ChannelKind::AudioClip;
         let audio = app.state.session.project.channels[0].index;
         let want = ["Preview", "Select in arranger", "Group selected...", "Rename, color and icon...", "Change color...", "Random color", "Change icon...", "Load sample...", "Edit sample...", "Chokes itself", "Clone", "Delete..."];
-        assert_eq!(labels(&pl::pick_menu(&app.state, audio, 0.0, 0.0)), want);
+        assert_eq!(labels(&pl::pick_menu(&app.state.session, audio, 0.0, 0.0)), want);
         // Select in playlist: every clip of the source.
         app.state.playlist.sel.clear();
         pl::run(&mut app, Cmd::Pick(PickCmd::SelectInPlaylist, auto));

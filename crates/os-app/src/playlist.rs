@@ -792,11 +792,11 @@ pub fn put_icon(s: &mut crate::session::Session, owner: IconOwner, icon: Option<
 
 /// Change icon... ▸: None, then [`ICONS`], the current one ticked; each sets the icon of `key` (a rack row, a mixer
 /// track's `TRACK_ICON_KEY + track` or an `fx_key`).
-pub fn icon_items(s: &State, key: usize) -> Vec<PItem> {
+pub fn icon_items(s: &crate::session::Session, key: usize) -> Vec<PItem> {
     // A container's member: its own icon, saved with the container (`crate::container::Member::icon`).
     let cur = match crate::container::of_key(s, key) {
-        Some((t, k, id)) => crate::container::member(&s.session, t, k, id).and_then(|m| m.icon),
-        None => window_icon(&s.session.project, key),
+        Some((t, k, id)) => crate::container::member(s, t, k, id).and_then(|m| m.icon),
+        None => window_icon(&s.project, key),
     };
     let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];
     v.extend(ICONS.iter().enumerate().map(|(i, &(name, icon))| PItem::new(name, Cmd::SetIcon(key, Some(i))).mark(Mark::Check(cur == Some(icon)))));
@@ -806,7 +806,7 @@ pub fn icon_items(s: &State, key: usize) -> Vec<PItem> {
 /// Sets (or with `None` clears) the icon of `key`. A container member's icon is part of its container's state: one undo
 /// step.
 fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
-    if let Some((t, k, id)) = crate::container::of_key(s, key) {
+    if let Some((t, k, id)) = crate::container::of_key(&s.session, key) {
         let icon = icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i);
         crate::container::edit_own(s, t, k, id, crate::container::ICON, |m| m.icon = icon);
         return;
@@ -1556,18 +1556,18 @@ pub(crate) fn capture(s: &crate::session::Session) -> Snapshot {
 }
 
 /// Puts an undo state back (undo and redo, `crate::history`).
-pub(crate) fn restore(s: &mut State, (c, m, t, a, st): Snapshot) {
-    let arr = arr_mut(&mut s.session);
+pub(crate) fn restore(s: &mut crate::session::Session, (c, m, t, a, st): Snapshot) {
+    let arr = arr_mut(s);
     arr.clips = c;
     arr.markers = m;
     arr.tracks = t;
-    s.session.project.get_mut().automations = a;
-    for (ch, (v, m)) in s.session.project.get_mut().channels.iter_mut().zip(st) {
+    s.project.get_mut().automations = a;
+    for (ch, (v, m)) in s.project.get_mut().channels.iter_mut().zip(st) {
         ch.sound.stretch = v;
         ch.mixer_track = m;
     }
-    s.playlist.sel.clear();
-    s.session.dirty = true;
+    s.touched.views.push(crate::session::View::ClipsCleared);
+    s.dirty = true;
 }
 
 /// Topmost clip under (x, y): the last one in the list (drawn on top).
@@ -2287,7 +2287,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
     let mut snaps = vec![crate::history::Snap::Playlist(Box::new(capture(&s.session))), rack];
     if init.is_some() {
-        snaps.push(crate::history::Snap::Init(tgt, crate::init::entry(s, tgt)));
+        snaps.push(crate::history::Snap::Init(tgt, crate::init::entry(&s.session, tgt)));
     }
     crate::history::record(&mut s.session, crate::history::CREATE_AUTOMATION, crate::history::Snap::Several(snaps));
     crate::follow::keep_rack_view(s);
@@ -2332,7 +2332,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Automation;
     if init.is_some() {
-        crate::init::put(s, tgt, init);
+        crate::init::put(&mut s.session, tgt, init);
     }
     s.session.dirty = true;
     index
@@ -2872,8 +2872,8 @@ pub enum PickCmd {
 }
 
 /// Right-click on an audio or automation clip in the picker (§10a): its channel's menu, as FL shows it there.
-pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
-    let audio = source_kind(&s.session, ClipSource::Channel(ch)) == PickKind::Audio;
+pub fn pick_menu(s: &crate::session::Session, ch: u16, x: f32, y: f32) -> Popup {
+    let audio = source_kind(s, ClipSource::Channel(ch)) == PickKind::Audio;
     let it = |label: &'static str, c: PickCmd| PItem::new(label, Cmd::Pick(c, ch));
     let mut items = Vec::new();
     if audio {
@@ -2886,7 +2886,7 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
         it("Rename, color and icon...", PickCmd::Rename),
         it("Change color...", PickCmd::ChangeColor),
         it("Random color", PickCmd::RandomColor),
-        match s.session.project.channels.iter().position(|c| c.index == ch) {
+        match s.project.channels.iter().position(|c| c.index == ch) {
             Some(row) => PItem::sub("Change icon...", icon_items(s, row)),
             None => PItem::not_yet("Change icon..."),
         },
@@ -2895,11 +2895,11 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
     if audio {
         // Greyed while the channel has no sample to open.
         let edit = it("Edit sample...", PickCmd::EditSample);
-        let has = s.session.project.channel(ch).is_some_and(|c| c.sample_path.as_deref().is_some_and(|p| !p.is_empty()));
+        let has = s.project.channel(ch).is_some_and(|c| c.sample_path.as_deref().is_some_and(|p| !p.is_empty()));
         items.extend([it("Load sample...", PickCmd::LoadSample), if has { edit } else { edit.off() }]);
     }
     // Ticked while the channel's cut and cut by are one group, as on the rack's channel menu (ui/channel-rack.md §18).
-    let cuts = s.session.project.channel(ch).is_some_and(|c| crate::rack::cuts_itself(&c.misc));
+    let cuts = s.project.channel(ch).is_some_and(|c| crate::rack::cuts_itself(&c.misc));
     items.extend([it("Chokes itself", PickCmd::CutItself).mark(Mark::Check(cuts)), PItem::sep(), it("Clone", PickCmd::Clone)]);
     if !audio {
         items.push(it("Clone with links", PickCmd::Clone));
@@ -3832,7 +3832,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         PlDrag::Playback | PlDrag::Perform => {}
         PlDrag::SongPos => {
             s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
-            crate::init::apply(s);
+            crate::init::apply(&mut s.session);
         }
         PlDrag::TimeSel { t0 } => {
             let t = snap_round(s, &g, g.tick_at(x), alt);
@@ -4187,7 +4187,7 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
         // Moving the song position switches to SONG mode; a time selection does not (§7). The initial values follow
         // (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
         s.set_song_mode(true);
-        crate::init::apply(s);
+        crate::init::apply(&mut s.session);
         app.drag = Some(Drag::Pl(PlDrag::SongPos));
     }
     app.invalidate();
@@ -4245,7 +4245,7 @@ pub fn press_markers(app: &mut App, grid: Rect, right: bool) {
         // As a click on the ruler: SONG mode, the initial values follow (§7).
         s.playlist.pos = t0;
         s.set_song_mode(true);
-        crate::init::apply(s);
+        crate::init::apply(&mut s.session);
         app.drag = Some(Drag::Pl(PlDrag::Marker { i, dt: 0, t0 }));
     }
     app.invalidate();
@@ -4371,11 +4371,11 @@ pub fn commit_edit(s: &mut State) {
         // Their own steps too. Settled first: they renumber mixer tracks, which moves channels' mixer tracks, part of
         // the playlist's step since audio tracks (`capture`), so the step above would no longer be empty.
         EditTarget::MixerInsert(n) => {
-            crate::history::settle(s);
+            crate::history::settle(&mut s.session);
             s.message = crate::mixer::insert_many(s, n, &text);
         }
         EditTarget::MixerGroup(n) => {
-            crate::history::settle(s);
+            crate::history::settle(&mut s.session);
             crate::mixer::create_group(s, n, &text);
         }
         EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
@@ -5163,11 +5163,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             Some(format!("Created automation clip \"{name}\""))
         }
         Cmd::InitControl(tgt, v) => {
-            crate::init::init(s, tgt, v);
+            crate::init::init(&mut s.session, tgt, v);
             None
         }
         Cmd::DeleteInit(tgt) => {
-            crate::init::delete(s, tgt);
+            crate::init::delete(&mut s.session, tgt);
             None
         }
         Cmd::JumpQuantize(q) => {
@@ -5604,17 +5604,17 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
 
 /// The CPU switches of the plugin in window `key` (a channel row or an `fx_key`; `None`: no plugin there, or a
 /// channel that hosts none, a sampler's or an audio clip's).
-pub fn plugin_cpu(s: &State, key: usize) -> Option<os_model::PluginCpu> {
+pub fn plugin_cpu(s: &crate::session::Session, key: usize) -> Option<os_model::PluginCpu> {
     // A container's member: its own (Lemon Studio's design, `crate::container::Member::cpu`).
     if let Some((t, k, id)) = crate::container::of_key(s, key) {
-        return crate::container::member(&s.session, t, k, id).map(|m| m.cpu);
+        return crate::container::member(s, t, k, id).map(|m| m.cpu);
     }
     match crate::plugins::fx_of(key) {
         Some((t, k)) => {
-            let m = s.session.project.mixer.iter().find(|m| m.index == t)?;
+            let m = s.project.mixer.iter().find(|m| m.index == t)?;
             m.slots.get(usize::from(k))?.as_ref().map(|_| m.slot_cpu[usize::from(k)])
         }
-        None => s.session.project.channels.get(key).filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| c.misc.cpu),
+        None => s.project.channels.get(key).filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| c.misc.cpu),
     }
 }
 
@@ -5622,7 +5622,7 @@ pub fn plugin_cpu(s: &State, key: usize) -> Option<os_model::PluginCpu> {
 /// of the plugin in window `key`, one undo step. Saved with the plugin (event 212's flags); the engine renders the same.
 pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
     use crate::control::command::Region;
-    if plugin_cpu(s, key).is_none() {
+    if plugin_cpu(&s.session, key).is_none() {
         return;
     }
     let flip = |c: &mut os_model::PluginCpu| {
@@ -5630,7 +5630,7 @@ pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
         *b = !*b;
     };
     let name = if smart { "Auto-bypass when silent" } else { "Threaded processing" };
-    if let Some((t, k, id)) = crate::container::of_key(s, key) {
+    if let Some((t, k, id)) = crate::container::of_key(&s.session, key) {
         crate::container::edit_own(s, t, k, id, name, |m| flip(&mut m.cpu));
         return;
     }
@@ -5670,7 +5670,7 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
     // A container's effect: Replace ▸ puts another effect in its place (an instrument, another instrument), Delete...
     // removes it from the container. Its own name, colour, icon and CPU switches are a slot's entries on the member
     // (Lemon Studio's design, spec: plugins/patcher/README.md §4.5), each one undo step, saved with the container.
-    if let Some(&(t, k, id)) = s.params.members.get(&key) {
+    if let Some(&(t, k, id)) = s.session.plugin_members.get(&key) {
         let Some(list) = crate::container::members(&s.session, t, k) else { return };
         let Some(i) = list.iter().position(|m| m.id == id) else { return };
         let target = if list[i].instrument { crate::plugin_menu::Target::MemberInst(k, i) } else { crate::plugin_menu::Target::Member(k, i) };
@@ -5689,11 +5689,11 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
                     *it = PItem::sub("Change color...", colors);
                 }
                 "Random color" => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::MemberRandomColor(k, i))))),
-                "Change icon..." => *it = PItem::sub("Change icon...", icon_items(s, key)),
+                "Change icon..." => *it = PItem::sub("Change icon...", icon_items(&s.session, key)),
                 _ => {}
             }
         }
-        fill_cpu(s, key, menu);
+        fill_cpu(&s.session, key, menu);
         return;
     }
     if let Some((t, k)) = crate::plugins::fx_of(key) {
@@ -5712,11 +5712,11 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
                     *it = PItem::sub("Change color...", colors);
                 }
                 "Random color" => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotRandomColor(k))))),
-                "Change icon..." => *it = PItem::sub("Change icon...", icon_items(s, key)),
+                "Change icon..." => *it = PItem::sub("Change icon...", icon_items(&s.session, key)),
                 _ => {}
             }
         }
-        fill_cpu(s, key, menu);
+        fill_cpu(&s.session, key, menu);
         return;
     }
     let Some(ch) = s.session.project.channels.get(key).map(|c| c.index) else { return };
@@ -5727,16 +5727,16 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
             "Rename, color and icon..." => set(it, Cmd::Pick(PickCmd::Rename, ch)),
             "Change color..." => set(it, Cmd::Pick(PickCmd::ChangeColor, ch)),
             "Random color" => set(it, Cmd::Rack(RCmd::RandomColor(key))),
-            "Change icon..." => *it = PItem::sub("Change icon...", icon_items(s, key)),
+            "Change icon..." => *it = PItem::sub("Change icon...", icon_items(&s.session, key)),
             _ => {}
         }
     }
-    fill_cpu(s, key, menu);
+    fill_cpu(&s.session, key, menu);
 }
 
 /// The window menu's CPU entries, ticked from the plugin's switches; greyed (with the defaults' ticks) for a channel
 /// hosting no plugin, as in the original.
-fn fill_cpu(s: &State, key: usize, menu: &mut Popup) {
+fn fill_cpu(s: &crate::session::Session, key: usize, menu: &mut Popup) {
     let Some(c) = plugin_cpu(s, key) else { return };
     for it in menu.items.iter_mut() {
         let (on, smart) = match &*it.label {
@@ -5840,7 +5840,7 @@ mod tests {
         let mut app = app();
         app.state.session.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
         let ch = app.state.session.project.channels[0].index;
-        let it = |app: &App| entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Chokes itself").clone();
+        let it = |app: &App| entry(&pick_menu(&app.state.session, ch, 0.0, 0.0), "Chokes itself").clone();
         assert!(it(&app).enabled);
         assert_eq!(it(&app).mark, Mark::Check(false));
         let cmd = it(&app).cmd;
@@ -5865,14 +5865,14 @@ mod tests {
         app.state.session.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
         app.state.session.project.get_mut().channels[0].sample_path = None;
         let ch = app.state.session.project.channels[0].index;
-        assert!(!entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Edit sample...").enabled, "no sample");
+        assert!(!entry(&pick_menu(&app.state.session, ch, 0.0, 0.0), "Edit sample...").enabled, "no sample");
         let dir = std::env::temp_dir().join(format!("ls_edit_sample_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("Tone.wav");
         let tone = tesla::sample::Sample::from_channels(44100, vec![vec![0.25; 4410], vec![-0.25; 4410]], tesla::sample::Format::Int16);
         std::fs::write(&file, tesla::wav::write(&tone, tesla::wav::Depth::Own)).unwrap();
         app.state.session.project.get_mut().channels[0].sample_path = Some(file.to_string_lossy().into_owned());
-        let it = entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Edit sample...").clone();
+        let it = entry(&pick_menu(&app.state.session, ch, 0.0, 0.0), "Edit sample...").clone();
         assert!(it.enabled);
         assert_eq!(run(&mut app, it.cmd).as_deref(), Some("Tone.wav is in the audio editor"));
         let Some(crate::mixer::FxReq::Create { track: 0, state: Some(st), .. }) = app.state.session.fx_requests.last().cloned() else {
@@ -5977,7 +5977,7 @@ mod tests {
         app.state.session.control.settle(app.state.session.project.get_mut());
         app.state.session.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
         let ch = app.state.session.project.channels[0].index;
-        let menu = |app: &App| entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Change icon...").clone();
+        let menu = |app: &App| entry(&pick_menu(&app.state.session, ch, 0.0, 0.0), "Change icon...").clone();
         let m = menu(&app);
         assert!(m.enabled && m.children[0].label == "None" && m.children[0].mark == Mark::Check(true));
         let keys = m.children.iter().find(|i| i.label == "Keys").unwrap().cmd.clone();

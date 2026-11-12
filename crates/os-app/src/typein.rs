@@ -40,7 +40,7 @@ pub enum Target {
 /// A member's parameter as the hosted instance's (`Target::Param`), while its effect is loaded.
 fn resolved(s: &State, t: Target) -> Option<Target> {
     match t {
-        Target::MemberParam(m, k, id, i) => Some(Target::Param(crate::container::member_key(s, crate::container::place_key(m, k), id)?, i)),
+        Target::MemberParam(m, k, id, i) => Some(Target::Param(crate::container::member_key(&s.session, crate::container::place_key(m, k), id)?, i)),
         t => Some(t),
     }
 }
@@ -244,7 +244,7 @@ pub(crate) fn get(s: &State, t: Target) -> Option<f64> {
 fn set(s: &mut State, t: Target, v: f64) {
     match t {
         Target::Knob(k) => {
-            crate::history::knob(s, k, false);
+            crate::history::knob(&mut s.session, k, false);
             s.set_knob(k, v as f32);
         }
         Target::Fader(m) => crate::control::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(m), |s| {

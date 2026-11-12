@@ -454,7 +454,7 @@ impl App {
         let s = &mut self.state;
         if s.song_mode() {
             s.playlist.pos = t;
-            crate::init::apply(s);
+            crate::init::apply(&mut s.session);
         } else {
             s.piano.marker = t;
         }

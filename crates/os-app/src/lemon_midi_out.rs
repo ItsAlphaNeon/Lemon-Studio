@@ -813,7 +813,7 @@ mod tests {
         a.add_midi_out();
         let row = a.state.session.project.channels.len() - 1;
         let id = KnobId::MidiOut(row, MoKnob::SendLevels);
-        crate::history::knob(&mut a.state, id, false);
+        crate::history::knob(&mut a.state.session, id, false);
         a.state.set_knob(id, 0.0);
         assert!(!row_settings(&a.state.session.project, row).unwrap().send_levels);
         a.undo_key(false);

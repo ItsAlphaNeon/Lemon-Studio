@@ -254,7 +254,7 @@ pub struct FaderGroup {
 
 impl FaderGroup {
     /// Whether these are the levels of the tracks `sel` (sorted), with every fader where the last drag left it.
-    fn holds(&self, s: &State, sel: &[u16]) -> bool {
+    fn holds(&self, s: &crate::session::Session, sel: &[u16]) -> bool {
         let level_of = |t: u16| self.levels.iter().find(|l| l.0 == t).map_or(0.0, |l| l.1);
         self.levels.iter().map(|l| l.0).eq(sel.iter().copied())
             && self.levels.iter().all(|&(t, level)| {
@@ -263,7 +263,7 @@ impl FaderGroup {
                     Some((p, v)) => group_fader(level, level_of(p), v),
                     None => level,
                 };
-                volume(&s.session, t) == left
+                volume(s, t) == left
             })
     }
 }
@@ -332,7 +332,7 @@ pub fn volume(s: &crate::session::Session, t: u16) -> f64 {
 pub fn group_levels(s: &mut State) -> Vec<(u16, f64)> {
     let mut sel = selected(s);
     sel.sort_unstable();
-    if !s.mixer.faders.holds(s, &sel) {
+    if !s.mixer.faders.holds(&s.session, &sel) {
         let levels = sel.iter().map(|&t| (t, volume(&s.session, t))).collect();
         s.mixer.faders = FaderGroup { levels, moved: None };
     }
@@ -1647,7 +1647,7 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         // the channel rack's gradient (no dialog).
         if is_selected(s, n) && selected(s).len() > 1 { PItem::new("Gradient color...", mx(MCmd::GradientColor)) } else { PItem::not_yet("Gradient color...") },
         // Lemon Studio's design (session only, as the rack's): drawn under the track's name.
-        PItem::sub("Change icon...", crate::playlist::icon_items(s, crate::playlist::TRACK_ICON_KEY + usize::from(n))),
+        PItem::sub("Change icon...", crate::playlist::icon_items(&s.session, crate::playlist::TRACK_ICON_KEY + usize::from(n))),
         // Greyed on tracks that have an audio track already (Assign) or none (Unassign), as in the original.
         {
             let tg = targets(s, n);
@@ -1833,7 +1833,7 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
     let replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), true);
     // CPU: the plugin's switches, as in its window menu (spec: ui/plugin-window.md "CPU", audio/auto-bypass.md).
     let key = crate::plugins::fx_key(s.selected_mixer, slot);
-    let cpu = crate::playlist::plugin_cpu(s, key).unwrap_or_default();
+    let cpu = crate::playlist::plugin_cpu(&s.session, key).unwrap_or_default();
     let items = vec![
         PItem::sub("Replace", replace),
         PItem::new("Delete...", mx(MCmd::SlotDelete(slot))),
@@ -1868,7 +1868,7 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
         PItem::sub("Change color...", color_items(|c| mx(MCmd::SlotColor(slot, c)))),
         PItem::new("Random color", mx(MCmd::SlotRandomColor(slot))),
         // Lemon Studio's design (session only): drawn before the slot's name and on its plugin window.
-        PItem::sub("Change icon...", crate::playlist::icon_items(s, crate::plugins::fx_key(s.selected_mixer, slot))),
+        PItem::sub("Change icon...", crate::playlist::icon_items(&s.session, crate::plugins::fx_key(s.selected_mixer, slot))),
         PItem::sep(),
         scaling_menu(app, slot),
         PItem::new("Help", mx(MCmd::SlotHelp(slot))),

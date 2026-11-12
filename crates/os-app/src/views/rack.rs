@@ -454,7 +454,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
                 ui.c.icon(if ch.enabled { &os_ui::tabler::VOLUME } else { &os_ui::tabler::VOLUME_OFF }, mb, col);
             }
         } else {
-            let row_len = rk::row_len(s, i);
+            let row_len = rk::row_len(&s.session, i);
             ui.c.push_clip(step_area);
             for k in first_step..(first_step + steps_shown + 1) {
                 let sr = Rect::new(step_x0 + STEP_W * k as f32 - sx, ry + 4.0, 13.0, 19.0);

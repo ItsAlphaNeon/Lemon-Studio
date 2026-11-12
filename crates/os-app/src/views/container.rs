@@ -58,7 +58,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     }
     ui.hit(win, Action::Swallow, "");
     let (track, slot) = s.container.at;
-    let title = crate::container::title(s, track, slot).unwrap_or_else(|| "Container".into());
+    let title = crate::container::title(&s.session, track, slot).unwrap_or_else(|| "Container".into());
     ui.hit(Rect::new(x0 + 1.0, y0 + 1.0, W - 30.0, TITLE_H - 4.0), Action::WinDrag(Win::Container), "");
     super::strum::label(ui, Font::new(17), x0 + 9.0, y0 + 15.0, -1, t.text, &title);
     let close = Rect::new(x0 + W - 20.0, y0 + 10.0, 10.0, 10.0);
@@ -82,7 +82,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         // The name (the one typed for it, else its plugin's), after its colour and icon: a click opens the effect's
         // window; a member whose plugin was not found is greyed.
         let name = m.shown();
-        let found = crate::container::member_key(s, crate::container::place_key(track, slot), m.id).is_some();
+        let found = crate::container::member_key(&s.session, crate::container::place_key(track, slot), m.id).is_some();
         let name_r = Rect::new(row.x, row.y, row.w - WET_X - 18.0, row.h);
         let hint = if found { format!("Open {name}'s window (right-click: its menu)") } else { format!("{name} was not found (right-click: its menu)") };
         let hov = ui.hit(name_r, Action::Container(CAct::Open(i)), hint);

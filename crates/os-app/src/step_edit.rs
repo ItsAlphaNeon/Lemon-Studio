@@ -164,7 +164,7 @@ impl App {
         if s.song_mode() {
             s.playlist.pos = to;
             // The initial values follow a song position move, as with the slider (`App::set_song_pos`).
-            crate::init::apply(s);
+            crate::init::apply(&mut s.session);
         } else {
             s.piano.marker = to;
         }

@@ -95,6 +95,12 @@ fn view(s: &mut State, v: crate::session::View) {
             s.mixer.sel.clear();
             s.selected_mixer = n;
         }
+        View::Rows(map) => crate::rack::remap_view(s, &map),
+        View::RackAutosize => crate::rack::autosize(s),
+        View::ClipsCleared => s.playlist.sel.clear(),
+        View::Retimed(from, to) => crate::app::retime_views(s, from, to),
+        View::Message(m) => s.message = Some(m),
+        View::MemberLevel { t, k, id, wet, v } => crate::container::show_level(s, t, k, id, wet, v),
         View::PatternsRenumbered => {
             s.playlist.sel.clear();
             s.playlist.hover_clip = None;

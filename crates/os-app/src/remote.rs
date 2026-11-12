@@ -288,7 +288,7 @@ pub fn label(s: &State, l: &Link) -> String {
         Target::RackTrack(r) | Target::RackLed(r) => format!("{} - {name}", channel(r)),
         Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::mixer::name(&s.session, a)),
         Target::Param(key, index) => crate::params::clip_name(s, key, index),
-        Target::MemberParam(m, k, id, index) => match crate::container::member_key(s, crate::container::place_key(m, k), id) {
+        Target::MemberParam(m, k, id, index) => match crate::container::member_key(&s.session, crate::container::place_key(m, k), id) {
             Some(key) => crate::params::clip_name(s, key, index),
             None => format!("{} - {name}", crate::container::place_name(&s.session, m, k)),
         },
@@ -643,7 +643,7 @@ impl App {
         let v = v.clamp(0.0, 1.0);
         match t {
             Target::Knob(k) => {
-                crate::history::knob(&mut self.state, k, true);
+                crate::history::knob(&mut self.state.session, k, true);
                 self.state.set_knob(k, v);
                 self.record_knob(k);
             }
@@ -660,7 +660,7 @@ impl App {
             }
             // An effect inside a container: its instance while it is loaded.
             Target::MemberParam(m, k, id, index) => {
-                if let Some(key) = crate::container::member_key(&self.state, crate::container::place_key(m, k), id) {
+                if let Some(key) = crate::container::member_key(&self.state.session, crate::container::place_key(m, k), id) {
                     crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
                     self.record_plugin_param(key, index, f64::from(v));
                 }
@@ -708,7 +708,7 @@ impl App {
                 let (sw, sh) = self.state.screen;
                 let at = ((self.mouse.0 - 20.0).clamp(0.0, (sw - w).max(0.0)), (self.mouse.1 - 20.0).clamp(0.0, (sh - h).max(0.0)));
                 // An effect inside a container links by its place and id (`params::link_target`).
-                let targets = params.into_iter().map(|i| crate::params::link_target(&self.state, key, i)).collect();
+                let targets = params.into_iter().map(|i| crate::params::link_target(&self.state.session, key, i)).collect();
                 self.state.link_box = Some(LinkBox::group(targets, at));
                 self.state.message = Some("Move the MIDI controller for the first parameter".into());
             }
@@ -829,9 +829,9 @@ impl App {
 /// What Link all parameters... links (the box's field, its hint): the plugin's name, or the mixer track's.
 pub fn group_name(s: &State, b: &LinkBox) -> String {
     match b.target {
-        Target::Param(key, _) => crate::params::owner_name(s, key),
-        Target::MemberParam(m, k, id, _) => match crate::container::member_key(s, crate::container::place_key(m, k), id) {
-            Some(key) => crate::params::owner_name(s, key),
+        Target::Param(key, _) => crate::params::owner_name(&s.session, key),
+        Target::MemberParam(m, k, id, _) => match crate::container::member_key(&s.session, crate::container::place_key(m, k), id) {
+            Some(key) => crate::params::owner_name(&s.session, key),
             None => crate::container::place_name(&s.session, m, k),
         },
         Target::Fader(t) => crate::mixer::name(&s.session, t),

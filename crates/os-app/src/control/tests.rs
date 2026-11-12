@@ -149,7 +149,7 @@ fn a_transaction_is_one_named_step_and_all_or_nothing() {
 fn the_interface_and_the_commands_share_one_history() {
     let mut a = app();
     let kick = ids(&a).0[0];
-    crate::history::knob(&mut a.state, crate::knobs::KnobId::ChanVol(0), false);
+    crate::history::knob(&mut a.state.session, crate::knobs::KnobId::ChanVol(0), false);
     a.state.session.project.get_mut().channels[0].volume = 0.3;
     apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": kick, "volume": 0.6}))]).unwrap();
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Test: channel settings"));
@@ -528,13 +528,13 @@ fn the_mixer_s_edits_are_undoable() {
     });
     // A fader drag is one step; a press that doesn't move it is none.
     let steps = a.state.session.history.at();
-    crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
-    crate::history::settle(&mut a.state);
+    crate::control::edit_press(&mut a.state.session, "Mixer track volume", command::Region::Track(1));
+    crate::history::settle(&mut a.state.session);
     assert_eq!(a.state.session.history.at(), steps, "a click without a drag");
     ui_round_trip(&mut a, "Mixer track volume", |a| {
-        crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
+        crate::control::edit_press(&mut a.state.session, "Mixer track volume", command::Region::Track(1));
         a.state.session.project.get_mut().mixer[1].volume = Some(0.3);
-        crate::history::settle(&mut a.state);
+        crate::history::settle(&mut a.state.session);
     });
 }
 

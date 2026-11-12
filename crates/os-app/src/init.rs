@@ -27,18 +27,18 @@ pub const INIT_LABEL: &str = "Set as song start value";
 pub const DELETE_LABEL: &str = "Remove start value";
 
 /// Control `t`'s entry in the list.
-pub fn entry(s: &State, t: u32) -> Option<InitControl> {
-    s.session.project.init_controls.iter().find(|c| c.target == t).copied()
+pub fn entry(s: &crate::session::Session, t: u32) -> Option<InitControl> {
+    s.project.init_controls.iter().find(|c| c.target == t).copied()
 }
 
 /// Whether control `t` is in the list (the check mark of "Set as song start value").
-pub fn listed(s: &State, t: u32) -> bool {
+pub fn listed(s: &crate::session::Session, t: u32) -> bool {
     entry(s, t).is_some()
 }
 
 /// Puts control `t`'s entry in the list (`None`: takes it out). An entry already there keeps its place.
-pub(crate) fn put(s: &mut State, t: u32, e: Option<InitControl>) {
-    let list = &mut s.session.project.get_mut().init_controls;
+pub(crate) fn put(s: &mut crate::session::Session, t: u32, e: Option<InitControl>) {
+    let list = &mut s.project.get_mut().init_controls;
     match e {
         Some(c) => match list.iter_mut().find(|x| x.target == t) {
             Some(x) => *x = c,
@@ -47,20 +47,20 @@ pub(crate) fn put(s: &mut State, t: u32, e: Option<InitControl>) {
         None => list.retain(|x| x.target != t),
     }
     // Playback gets the list (the engine sets it where a song loops).
-    s.session.dirty = true;
+    s.dirty = true;
 }
 
 /// "Set as song start value": control `t`, at its value `v` (0..1), goes in the list, replacing an earlier value.
 /// One undo step, "Initialized control". Nothing for a control whose stored units aren't known (a plugin parameter).
-pub fn init(s: &mut State, t: u32, v: f64) {
+pub fn init(s: &mut crate::session::Session, t: u32, v: f64) {
     let Some(c) = InitControl::from_unit(t, v) else { return };
     let snap = Snap::Init(t, entry(s, t));
-    history::record(&mut s.session, INITIALIZED, snap);
+    history::record(s, INITIALIZED, snap);
     put(s, t, Some(c));
 }
 
 /// "Remove start value": control `t` leaves the list. No undo step (FL makes none).
-pub fn delete(s: &mut State, t: u32) {
+pub fn delete(s: &mut crate::session::Session, t: u32) {
     put(s, t, None);
 }
 
@@ -77,7 +77,7 @@ pub fn items(s: &State, control: Option<(u32, f64)>) -> [PItem; 2] {
     let Some((t, v)) = control else {
         return [PItem::new(INIT_LABEL, Cmd::Nothing).off(), PItem::new(DELETE_LABEL, Cmd::Nothing).off()];
     };
-    let on = listed(s, t);
+    let on = listed(&s.session, t);
     let init = if InitControl::from_unit(t, v).is_some() { PItem::new(INIT_LABEL, Cmd::InitControl(t, v)) } else { PItem::not_yet(INIT_LABEL) };
     let delete = if on { PItem::new(DELETE_LABEL, Cmd::DeleteInit(t)) } else { PItem::new(DELETE_LABEL, Cmd::Nothing).off() };
     [init.mark(Mark::Check(on)), delete]
@@ -86,16 +86,16 @@ pub fn items(s: &State, control: Option<(u32, f64)>) -> [PItem; 2] {
 /// In song mode: every control in the list takes its value at once (where playback starts, the song position moves
 /// or playback loops back to the song's start). Not an undo step. A record whose units aren't known, or whose control
 /// the project doesn't have, is left alone. Returns whether a value changed; the project then goes to playback.
-pub fn apply(s: &mut State) -> bool {
+pub fn apply(s: &mut crate::session::Session) -> bool {
     if !s.song_mode() {
         return false;
     }
     let mut changed = false;
-    for c in s.session.project.init_controls.clone() {
+    for c in s.project.init_controls.clone() {
         changed |= set_value(s, c);
     }
     if changed {
-        s.session.dirty = true;
+        s.dirty = true;
     }
     changed
 }
@@ -109,7 +109,7 @@ fn set<T: PartialEq>(x: &mut T, v: T) -> bool {
 
 /// Control `c.target` set to `c.value` (stored units) in the model. The project counts as written only when a value
 /// changed.
-fn set_value(s: &mut State, c: InitControl) -> bool {
+fn set_value(s: &mut crate::session::Session, c: InitControl) -> bool {
     let main = matches!(c.target, InitControl::MAIN_VOLUME | InitControl::MAIN_SWING | InitControl::MAIN_PITCH);
     if !main && matches!(target::decode(c.target), Target::Tempo) {
         let bpm = (f64::from(c.value) / 1000.0).clamp(10.0, 522.0);
@@ -117,7 +117,7 @@ fn set_value(s: &mut State, c: InitControl) -> bool {
         s.set_tempo(bpm);
         return changed;
     }
-    s.session.project.write_if(|p| set_in_project(p, c))
+    s.project.write_if(|p| set_in_project(p, c))
 }
 
 /// `set_value` for a control the project holds.
@@ -216,7 +216,7 @@ pub fn name(s: &State, t: u32) -> String {
         Target::SlotOn(m, k) => format!("{} - Slot {} switch", mix(m), k + 1),
         Target::SlotMix(m, k) => format!("{} - Slot {} mix level", mix(m), k + 1),
         // A plugin that isn't hosted: its parameter by number.
-        p @ (Target::ChannelParam(..) | Target::SlotParam(..)) => match (crate::params::key_of(s, p), p) {
+        p @ (Target::ChannelParam(..) | Target::SlotParam(..)) => match (crate::params::key_of(&s.session, p), p) {
             (Some((key, index)), _) => crate::params::clip_name(s, key, index),
             (None, Target::SlotParam(m, k, i)) => format!("{} - Slot {} - Parameter {}", mix(m), k + 1, i + 1),
             (None, _) => format!("{} - Parameter {}", channel((t >> 16) as u16), (t & 0x7FFF) + 1),

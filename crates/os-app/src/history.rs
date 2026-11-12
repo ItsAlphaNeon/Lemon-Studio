@@ -153,23 +153,23 @@ impl Snap {
     }
 
     /// What this covers, as the project has it now.
-    fn now(&self, s: &State) -> Snap {
+    fn now(&self, s: &crate::session::Session) -> Snap {
         match self {
-            Snap::Pattern { number, .. } => Snap::pattern(&s.session, *number),
-            Snap::Playlist(_) => Snap::Playlist(Box::new(crate::playlist::capture(&s.session))),
+            Snap::Pattern { number, .. } => Snap::pattern(s, *number),
+            Snap::Playlist(_) => Snap::Playlist(Box::new(crate::playlist::capture(s))),
             Snap::Knob(id, _) => Snap::Knob(*id, knob_value(s, *id)),
             // A track gone since is left as the step has it (`put` does nothing then).
-            Snap::TrackIo(t, _) => crate::mixer::track(&s.session, *t).map_or_else(|| self.clone(), |m| Snap::TrackIo(*t, track_io_of(m))),
+            Snap::TrackIo(t, _) => crate::mixer::track(s, *t).map_or_else(|| self.clone(), |m| Snap::TrackIo(*t, track_io_of(m))),
             // A channel gone since is left as the step has it (`put` does nothing then).
-            Snap::Sample { row, .. } => Snap::sample(&s.session, *row).unwrap_or_else(|| self.clone()),
-            Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.session.project.channels.get(*row).cloned().map(Box::new) },
+            Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
+            Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
             Snap::Init(t, _) => Snap::Init(*t, crate::init::entry(s, *t)),
-            Snap::Patterns { .. } => Snap::Patterns { patterns: s.session.project.patterns.clone(), current: s.pattern() },
-            Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(&s.session, r.row))),
+            Snap::Patterns { .. } => Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern() },
+            Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(s, r.row))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
             // What each command would put back, as it is now (`swap` applies them).
             Snap::Commands(v) => Snap::Commands(v.iter().map(|c| c.now(s)).collect()),
-            Snap::Timebase(_) => Snap::Timebase(Box::new(Timebase::now(&s.session))),
+            Snap::Timebase(_) => Snap::Timebase(Box::new(Timebase::now(s))),
         }
     }
 
@@ -220,57 +220,57 @@ impl Snap {
 
     /// Puts this into the project. A pattern's step leaves the pattern shown as it is, as in FL (24.1.1, 2026-11-09: a
     /// step sequencer and a piano roll edit in one pattern, undone and redone while another was shown, kept that one).
-    fn put(self, s: &mut State) {
+    fn put(self, s: &mut crate::session::Session) {
         match self {
             Snap::Pattern { number, notes, controls, length, loops } => {
-                let p = crate::patterns::pat_mut(&mut s.session, number);
+                let p = crate::patterns::pat_mut(s, number);
                 (p.notes, p.controls, p.length) = (notes, controls, length);
                 (p.loops, p.loop_mode) = loops;
-                s.session.touched.notes = true;
+                s.touched.notes = true;
             }
             Snap::Playlist(p) => crate::playlist::restore(s, *p),
             Snap::Knob(id, v) => set_knob_value(s, id, v),
             Snap::TrackIo(t, [i, o, r, m]) => {
-                if let Some(x) = crate::mixer::track_mut(&mut s.session, t) {
+                if let Some(x) = crate::mixer::track_mut(s, t) {
                     (x.audio_in, x.audio_out, x.rec_source, x.monitor) = (i, o, r as u8, m as u8);
                 }
             }
             Snap::Sample { row, path, name, root, stretch, flags } => {
-                if let Some(ch) = s.session.project.get_mut().channels.get_mut(row) {
+                if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
                     (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (path.clone(), name, root, stretch);
                     ch.sound.sampler_flags = flags;
                     // Its Lemon Sampler follows on the next tick: the sample (none: cleared), root note, stretch and
                     // Keep on disk.
-                    s.session.sample_loads.push((row, path.unwrap_or_default()));
+                    s.sample_loads.push((row, path.unwrap_or_default()));
                 }
             }
             // The channel goes or comes back only as the last row: rows below it would move.
             Snap::Channel { row, ch } => match ch {
-                None if row + 1 == s.session.project.channels.len() => crate::rack::remove_last(s),
-                Some(c) if row == s.session.project.channels.len() => crate::rack::push_channel(s, *c),
+                None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
+                Some(c) if row == s.project.channels.len() => crate::rack::push_channel_in(s, *c),
                 _ => {}
             },
             Snap::Init(t, e) => crate::init::put(s, t, e),
             Snap::Patterns { patterns, current } => {
-                s.session.project.get_mut().patterns = patterns;
+                s.project.get_mut().patterns = patterns;
                 s.set_pattern(current);
-                s.session.touched.notes = true;
+                s.touched.notes = true;
             }
             Snap::Rack(r) => put_rack(s, *r),
             Snap::Several(v) => v.into_iter().rev().for_each(|x| x.put(s)),
             Snap::Commands(v) => {
-                crate::control::take_back(s, v);
+                crate::control::take_back_in(s, v);
             }
             Snap::Timebase(t) => {
                 let Timebase { ppq, patterns, arrangements } = *t;
-                let from = s.session.project.ppq.max(1);
-                crate::app::retime(s, from, ppq.max(1));
-                (s.session.project.get_mut().patterns, s.session.project.get_mut().arrangements) = (patterns, arrangements);
+                let from = s.project.ppq.max(1);
+                crate::app::retime_in(s, from, ppq.max(1));
+                (s.project.get_mut().patterns, s.project.get_mut().arrangements) = (patterns, arrangements);
                 // Playback stops on the next tick, as for the change (`App::set_timebase`).
-                s.session.retimed = true;
+                s.retimed = true;
             }
         }
-        s.session.dirty = true;
+        s.dirty = true;
     }
 }
 
@@ -282,14 +282,14 @@ pub fn timebase(s: &mut crate::session::Session) {
 }
 
 /// Puts the rack's side `r` back (`Snap::Rack`).
-fn put_rack(s: &mut State, r: RackSide) {
+fn put_rack(s: &mut crate::session::Session, r: RackSide) {
     let RackSide { row, ch, groups: (names, of, shown) } = r;
     match ch {
-        None if row + 1 == s.session.project.channels.len() => crate::rack::remove_last(s),
-        Some(c) if row == s.session.project.channels.len() => crate::rack::push_channel(s, c),
+        None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
+        Some(c) if row == s.project.channels.len() => crate::rack::push_channel_in(s, c),
         _ => {}
     }
-    s.session.project.write_if(|p| {
+    s.project.write_if(|p| {
         let before = (p.groups.clone(), p.current_group, p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>());
         (p.groups, p.current_group) = (names, shown);
         for (c, g) in p.channels.iter_mut().zip(of) {
@@ -300,31 +300,31 @@ fn put_rack(s: &mut State, r: RackSide) {
 }
 
 /// The model's value of a knob: the channels' volume and pan as stored (exact), the others as the knob reads them.
-fn knob_value(s: &State, id: KnobId) -> Option<f64> {
+fn knob_value(s: &crate::session::Session, id: KnobId) -> Option<f64> {
     Some(match id {
-        KnobId::ChanVol(i) => s.session.project.channels.get(i).map_or(0.0, |c| c.volume),
-        KnobId::ChanPan(i) => s.session.project.channels.get(i).map_or(0.0, |c| c.pan),
+        KnobId::ChanVol(i) => s.project.channels.get(i).map_or(0.0, |c| c.volume),
+        KnobId::ChanPan(i) => s.project.channels.get(i).map_or(0.0, |c| c.pan),
         // The level the container's list holds (the knob shows the chain's, an automated one included).
-        KnobId::Member(t, k, id, wet) => crate::container::level(&s.session, t, k, id, wet).map_or(0.0, f64::from),
+        KnobId::Member(t, k, id, wet) => crate::container::level(s, t, k, id, wet).map_or(0.0, f64::from),
         // A route with no level record: the knob shows unity, and the record is what the step must put back.
-        KnobId::Send(a, b) => return crate::mixer::track(&s.session, a).map_or(Some(0.8), |m| m.send_levels.iter().find(|(d, _)| *d == b).map(|&(_, l)| l)),
-        _ => f64::from(s.knob(id)),
+        KnobId::Send(a, b) => return crate::mixer::track(s, a).map_or(Some(0.8), |m| m.send_levels.iter().find(|(d, _)| *d == b).map(|&(_, l)| l)),
+        _ => f64::from(s.knob(id).unwrap_or(0.0)),
     })
 }
 
-fn set_knob_value(s: &mut State, id: KnobId, v: Option<f64>) {
+fn set_knob_value(s: &mut crate::session::Session, id: KnobId, v: Option<f64>) {
     let Some(v) = v else {
         if let KnobId::Send(a, b) = id {
-            if let Some(m) = crate::mixer::track_mut(&mut s.session, a) {
+            if let Some(m) = crate::mixer::track_mut(s, a) {
                 m.send_levels.retain(|&(d, _)| d != b);
-                s.session.dirty = true;
+                s.dirty = true;
             }
         }
         return;
     };
     match id {
-        KnobId::ChanVol(i) => s.session.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.volume = v),
-        KnobId::ChanPan(i) => s.session.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.pan = v),
+        KnobId::ChanVol(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.volume = v),
+        KnobId::ChanPan(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.pan = v),
         _ => s.set_knob(id, v as f32),
     }
 }
@@ -566,12 +566,12 @@ pub fn unrecord(s: &mut crate::session::Session) {
 
 /// A button was released: the step recorded since the last release goes when its edit changed nothing (a click on a
 /// note that did not move it, a knob clicked without a turn).
-pub fn settle(s: &mut State) {
-    let h = &s.session.history;
+pub fn settle(s: &mut crate::session::Session) {
+    let h = &s.history;
     if h.fresh && h.done > 0 && h.done == h.steps.len() && h.steps[h.done - 1].snap.now(s) == h.steps[h.done - 1].snap {
-        unrecord(&mut s.session);
+        unrecord(s);
     }
-    s.session.history.fresh = false;
+    s.history.fresh = false;
 }
 
 /// Before a sample loads into channel `row` (the file dialog, a drop, the browser's send): one step, "Load channel
@@ -596,66 +596,77 @@ pub fn track_io(s: &mut crate::session::Session, track: u16) {
 
 /// Before knob `id` turns: a step unless Undo knob tweaks is off. `wheel`: a mouse-wheel notch, which joins the step
 /// of the notches just before it on the same knob.
-pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
+pub fn knob(s: &mut crate::session::Session, id: KnobId, wheel: bool) {
     // The piano roll tool dialogs' knobs only preview; their Accept is the step (spec: ui/piano-strum.md §1).
     if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) || matches!(id, KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_)) {
         return;
     }
-    let h = &s.session.history;
+    let h = &s.history;
     if wheel && h.joins(Run::Wheel(id)) {
         return;
     }
     let snap = Snap::Knob(id, knob_value(s, id));
-    record(&mut s.session, knob_name(id), snap);
+    record(s, knob_name(id), snap);
     if wheel {
-        s.session.history.run = Some(Run::Wheel(id));
+        s.history.run = Some(Run::Wheel(id));
     }
 }
 
-fn swap(s: &mut State, i: usize) {
-    crate::follow::around(s, |s| swap_step(s, i));
-}
-
-fn swap_step(s: &mut State, i: usize) {
-    s.motion.borrow_mut().ripples_over();
-    if let Snap::Commands(v) = &mut s.session.history.steps[i].snap {
+fn swap_step(s: &mut crate::session::Session, i: usize) {
+    if let Snap::Commands(v) = &mut s.history.steps[i].snap {
         let v = std::mem::take(v);
-        let other = crate::control::take_back(s, v);
-        s.session.history.steps[i].snap = Snap::Commands(other);
-        s.session.dirty = true;
+        let other = crate::control::take_back_in(s, v);
+        s.history.steps[i].snap = Snap::Commands(other);
+        s.dirty = true;
         return;
     }
-    let now = s.session.history.steps[i].snap.now(s);
-    let old = std::mem::replace(&mut s.session.history.steps[i].snap, now);
+    let now = s.history.steps[i].snap.now(s);
+    let old = std::mem::replace(&mut s.history.steps[i].snap, now);
     let rack = old.has_rack();
     old.put(s);
     if rack {
-        s.session.touched.rack_step = Some(s.session.history.steps[i].id);
+        s.touched.rack_step = Some(s.history.steps[i].id);
     }
 }
 
-/// Undoes the newest done step; its name, or `None` when nothing is done.
+/// Undoes the newest done step; its name, or `None` when nothing is done. The views follow.
 pub fn undo(s: &mut State) -> Option<String> {
-    let h = &mut s.session.history;
+    if s.session.history.done > 0 {
+        s.motion.borrow_mut().ripples_over();
+    }
+    crate::follow::around(s, |s| undo_in(&mut s.session))
+}
+
+/// `undo` in the session.
+pub fn undo_in(s: &mut crate::session::Session) -> Option<String> {
+    let h = &mut s.history;
     if h.done == 0 {
         return None;
     }
     h.done -= 1;
     (h.undid, h.run, h.fresh) = (true, None, false);
     let i = h.done;
-    swap(s, i);
-    Some(s.session.history.steps[i].name.to_string())
+    swap_step(s, i);
+    Some(s.history.steps[i].name.to_string())
 }
 
-/// Redoes the oldest undone step; its name, or `None` when nothing is undone.
+/// Redoes the oldest undone step; its name, or `None` when nothing is undone. The views follow.
 pub fn redo(s: &mut State) -> Option<String> {
-    let h = &mut s.session.history;
+    if s.session.history.done < s.session.history.steps.len() {
+        s.motion.borrow_mut().ripples_over();
+    }
+    crate::follow::around(s, |s| redo_in(&mut s.session))
+}
+
+/// `redo` in the session.
+pub fn redo_in(s: &mut crate::session::Session) -> Option<String> {
+    let h = &mut s.history;
     if h.done == h.steps.len() {
         return None;
     }
     let i = h.done;
-    swap(s, i);
-    let h = &mut s.session.history;
+    swap_step(s, i);
+    let h = &mut s.history;
     h.done += 1;
     (h.undid, h.run, h.fresh) = (false, None, false);
     Some(h.steps[i].name.to_string())
@@ -825,20 +836,20 @@ mod tests {
         let s = &mut app.state;
         let snap = Snap::pattern(&s.session, s.pattern());
         record(&mut s.session, "Piano roll edit", snap);
-        settle(s);
+        settle(&mut s.session);
         assert_eq!(s.session.history.len(), 0, "nothing changed");
         let snap = Snap::pattern(&s.session, s.pattern());
         record(&mut s.session, "Piano roll edit", snap);
         crate::rack::set_step(s, 0, 9, !crate::rack::row_steps(&s.session, 0, 10)[9]);
-        settle(s);
+        settle(&mut s.session);
         crate::rack::set_step(s, 0, 9, !crate::rack::row_steps(&s.session, 0, 10)[9]);
-        settle(s);
+        settle(&mut s.session);
         assert_eq!(s.session.history.len(), 1, "an earlier press's step stays");
         s.session.history.reset();
         let id = KnobId::ChanVol(0);
         let v0 = s.session.project.channels[0].volume;
         for _ in 0..3 {
-            knob(s, id, true);
+            knob(&mut s.session, id, true);
             let v = s.knob(id) - 0.03;
             s.set_knob(id, v);
         }
@@ -1016,7 +1027,7 @@ mod tests {
         s.session.project.get_mut().mixer[t].routes = vec![0];
         s.session.project.get_mut().mixer[t].send_levels.clear();
         let id = KnobId::Send(1, 0);
-        knob(s, id, true);
+        knob(&mut s.session, id, true);
         s.set_knob(id, 0.5);
         assert_eq!(s.session.project.mixer[t].send_levels, vec![(0, 0.5)]);
         assert!(undo(s).is_some());
@@ -1050,7 +1061,7 @@ mod tests {
         let mut app = App::new(None);
         let id = KnobId::MixSep(3);
         let start = app.state.session.project.clone();
-        knob(&mut app.state, id, true);
+        knob(&mut app.state.session, id, true);
         app.state.set_knob(id, 0.25);
         let steps = app.state.session.history.len();
         crate::mixer::run(&mut app, crate::mixer::MCmd::Delete(2));

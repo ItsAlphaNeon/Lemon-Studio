@@ -628,7 +628,7 @@ fn load_with(app: &mut App, key: usize, path: &Path, step: bool) -> Option<Strin
                 app.plugins.set_preset(key, Some(path.to_path_buf()));
                 auto_name(app, key, path);
                 if let Some(before) = before.filter(|b| side(app, key).as_ref() != Some(b)) {
-                    crate::control::state_edit(&mut app.state, key, crate::control::command::PLUGIN_PRESET, before);
+                    crate::control::state_edit(&mut app.state.session, key, crate::control::command::PLUGIN_PRESET, before);
                 }
                 match missing.is_empty() {
                     true => format!("Preset: {}", shown_name(path)),
@@ -656,7 +656,7 @@ fn flip_spare(app: &mut App, key: usize) -> Option<String> {
     app.plugins.mark_edited(key);
     app.state.params.reread(key);
     if let Some(before) = before.filter(|b| side(app, key).as_ref() != Some(b)) {
-        crate::control::state_edit(&mut app.state, key, FLIP_SPARE, before);
+        crate::control::state_edit(&mut app.state.session, key, FLIP_SPARE, before);
     }
     Some("Swapped A / B".into())
 }

@@ -269,7 +269,7 @@ fn run_commands(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json
     let mut undo = Vec::with_capacity(commands.len());
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
-        match c.apply(s) {
+        match c.apply(&mut s.session) {
             Ok(done) => {
                 undo.push(done.undo);
                 results.push(done.result);
@@ -292,20 +292,21 @@ fn run_commands(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json
 /// Applies undo commands (from `run`, in their order), returning the commands that redo them (in theirs). An undo
 /// that fails (the project was changed under it in a way it can't follow) stops there.
 pub fn take_back(s: &mut State, undo: Vec<Command>) -> Vec<Command> {
-    crate::follow::around(s, |s| take_back_commands(s, undo))
+    crate::follow::around(s, |s| take_back_in(&mut s.session, undo))
 }
 
-fn take_back_commands(s: &mut State, undo: Vec<Command>) -> Vec<Command> {
+/// `take_back` in the session; the views follow.
+pub(crate) fn take_back_in(s: &mut crate::session::Session, undo: Vec<Command>) -> Vec<Command> {
     let mut redo = Vec::with_capacity(undo.len());
     for c in undo {
         match c.apply(s) {
             Ok(d) => redo.push(d.undo),
             Err(e) => {
-                s.message = Some(format!("Undo: {e}"));
+                s.touched.views.push(crate::session::View::Message(format!("Undo: {e}")));
                 break;
             }
         }
-        s.session.control.settle(s.session.project.get_mut());
+        s.control.settle(s.project.get_mut());
     }
     redo.reverse();
     redo
@@ -338,11 +339,11 @@ pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: im
     s.session.link_moves.clear();
     // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
     // its region may name other things (tracks renumbered by a delete).
-    crate::history::settle(s);
-    let before = command::Taken::of(s, region);
+    crate::history::settle(&mut s.session);
+    let before = command::Taken::of(&s.session, region);
     let r = f(s);
     if let Some(before) = before {
-        if command::Taken::of(s, region).as_ref() != Some(&before) {
+        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
             record_edit(&mut s.session, name, before);
         }
     }
@@ -368,11 +369,11 @@ pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, r
     s.session.link_moves.clear();
     // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
     // its region may name other things (tracks renumbered by a delete).
-    crate::history::settle(s);
-    let before = command::Taken::of(s, region);
+    crate::history::settle(&mut s.session);
+    let before = command::Taken::of(&s.session, region);
     let r = f(s);
     if let Some(before) = before {
-        if command::Taken::of(s, region).as_ref() != Some(&before) {
+        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
             record_edit(&mut s.session, name, before);
             s.session.history.set_run(run);
         }
@@ -396,12 +397,12 @@ fn record_edit(s: &mut crate::session::Session, name: &'static str, before: comm
 /// `edit` for an edit that needs the app (a mixer menu command hosting or dropping plugins).
 pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
     app.state.session.link_moves.clear();
-    crate::history::settle(&mut app.state);
-    let before = command::Taken::of(&app.state, region);
+    crate::history::settle(&mut app.state.session);
+    let before = command::Taken::of(&app.state.session, region);
     let r = f(app);
     let s = &mut app.state;
     if let Some(before) = before {
-        if command::Taken::of(s, region).as_ref() != Some(&before) {
+        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
             record_edit(&mut s.session, name, before);
         }
     }
@@ -444,10 +445,10 @@ pub fn param_edit(s: &mut crate::session::Session, owner: u32, before: &[(u32, f
 pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, to: f64) {
     let Some(param) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
-    if command::key_owner(s, key) == Some(0) {
+    if command::key_owner(&s.session, key) == Some(0) {
         s.session.control.settle(s.session.project.get_mut());
     }
-    let Some(owner) = command::key_owner(s, key) else { return };
+    let Some(owner) = command::key_owner(&s.session, key) else { return };
     // Known for the undo's other side (`Command::apply`).
     s.session.control.saw_param(owner, param, to);
     s.session.plugin_edited |= before.is_some_and(|v| v != to);
@@ -461,13 +462,13 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
 /// window menu, a preset file dropped on it): one step, `name`, that puts `before` back (the state, the preset shown
 /// and its channel's or slot's name), keyed by the owner's id so it follows moves. The step comes from no change the
 /// release could judge.
-pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command::PluginSide) {
+pub fn state_edit(s: &mut crate::session::Session, key: usize, name: &'static str, before: command::PluginSide) {
     if command::key_owner(s, key) == Some(0) {
-        s.session.control.settle(s.session.project.get_mut());
+        s.control.settle(s.project.get_mut());
     }
     let Some(owner) = command::key_owner(s, key).filter(|&o| o != 0) else { return };
-    crate::history::record(&mut s.session, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(command::Taken::Plugin(owner, Box::new(before))))]));
-    crate::history::done_with(&mut s.session);
+    crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(command::Taken::Plugin(owner, Box::new(before))))]));
+    crate::history::done_with(s);
 }
 
 /// `edit_app` for a run of changes that make one step (the tempo tapper's taps, wheel notches on a value box): a change
@@ -478,12 +479,12 @@ pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: comman
         return f(app);
     }
     app.state.session.link_moves.clear();
-    crate::history::settle(&mut app.state);
-    let before = command::Taken::of(&app.state, region);
+    crate::history::settle(&mut app.state.session);
+    let before = command::Taken::of(&app.state.session, region);
     let r = f(app);
     let s = &mut app.state;
     if let Some(before) = before {
-        if command::Taken::of(s, region).as_ref() != Some(&before) {
+        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
             record_edit(&mut s.session, name, before);
             s.session.history.set_run(run);
         }
@@ -493,15 +494,15 @@ pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: comman
 
 /// A press that starts an edit of `region` (a fader drag): the step named `name` is recorded now, holding the region
 /// as it is, and goes again at the release when the drag changed nothing (`history::settle`).
-pub fn edit_press(s: &mut State, name: &'static str, region: command::Region) {
+pub fn edit_press(s: &mut crate::session::Session, name: &'static str, region: command::Region) {
     edit_press_all(s, name, [region]);
 }
 
 /// `edit_press` for an edit of several regions (a drag on the fader of a selected track moves them all): one step.
-pub fn edit_press_all(s: &mut State, name: &'static str, regions: impl IntoIterator<Item = command::Region>) {
+pub fn edit_press_all(s: &mut crate::session::Session, name: &'static str, regions: impl IntoIterator<Item = command::Region>) {
     let before: Vec<Command> = regions.into_iter().filter_map(|r| command::Taken::of(s, r)).map(|t| Command::Put(Box::new(t))).collect();
     if !before.is_empty() {
-        crate::history::record(&mut s.session, name, crate::history::Snap::Commands(before));
+        crate::history::record(s, name, crate::history::Snap::Commands(before));
     }
 }
 

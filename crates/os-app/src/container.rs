@@ -251,8 +251,8 @@ pub fn key_place(key: usize) -> Option<(u16, u8)> {
 }
 
 /// The project id of the slot plugin or channel holding the container at place (`t`, `k`).
-pub fn place_id(s: &State, t: u16, k: u8) -> Option<Id> {
-    let p = &s.session.project;
+pub fn place_id(s: &crate::session::Session, t: u16, k: u8) -> Option<Id> {
+    let p = &s.project;
     if k == CHANNEL {
         return p.channels.get(usize::from(t)).map(|c| c.id);
     }
@@ -260,8 +260,8 @@ pub fn place_id(s: &State, t: u16, k: u8) -> Option<Id> {
 }
 
 /// The place of the container held by the slot plugin or channel with project id `id` (`place_id`'s other way).
-pub fn id_place(s: &State, id: u32) -> Option<(u16, u8)> {
-    let p = &s.session.project;
+pub fn id_place(s: &crate::session::Session, id: u32) -> Option<(u16, u8)> {
+    let p = &s.project;
     if let Some(r) = p.channels.iter().position(|c| c.id.0 == id) {
         return Some((u16::try_from(r).ok()?, CHANNEL));
     }
@@ -278,12 +278,12 @@ pub fn place_name(s: &crate::session::Session, t: u16, k: u8) -> String {
 }
 
 /// The container's title, "Container (Bus 2)": its slot's label, or for a channel's "Container (Lemon Trio)".
-pub fn title(s: &State, t: u16, k: u8) -> Option<String> {
+pub fn title(s: &crate::session::Session, t: u16, k: u8) -> Option<String> {
     if k != CHANNEL {
         return crate::params::effect_label(s, t, k);
     }
-    state_in(&s.session.project, t, k)?;
-    Some(format!("Container ({})", place_name(&s.session, t, k)))
+    state_in(&s.project, t, k)?;
+    Some(format!("Container ({})", place_name(s, t, k)))
 }
 
 /// The automation target of item `item` of the container at place (`t`, `k`): a parameter of its slot or channel.
@@ -404,14 +404,24 @@ pub fn shown_level(s: &State, t: u16, k: u8, id: u32, wet: bool) -> f32 {
 /// A level knob turned (`State::set_knob`): the list takes the level, no undo step (a drag's is taken at its press), and
 /// the knob shows it until the chain plays it.
 pub fn put_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
-    let Some(list) = leveled(&s.session, t, k, id, wet, v) else { return };
-    set_members(&mut s.session, t, k, &list);
+    crate::follow::around(s, |s| put_level_in(&mut s.session, t, k, id, wet, v));
+}
+
+/// `put_level` in the session; the open list's knob shows the level (`session::View::MemberLevel`).
+pub fn put_level_in(s: &mut crate::session::Session, t: u16, k: u8, id: u32, wet: bool, v: f32) {
+    let Some(list) = leveled(s, t, k, id, wet, v) else { return };
+    set_members(s, t, k, &list);
+    s.touched.views.push(crate::session::View::MemberLevel { t, k, id, wet, v });
+    s.dirty = true;
+}
+
+/// The open list's level knob shows `v` until the chain plays it (`put_level`).
+pub fn show_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
     if s.container.at == (t, k) {
         if let Some(l) = s.container.live.get_mut(&id) {
             *(if wet { &mut l.0 } else { &mut l.1 }) = v;
         }
     }
-    s.session.dirty = true;
 }
 
 /// The right-click menu of a member's level knob: Reset, then its level's parameter menu (`params::level_items`).
@@ -515,8 +525,8 @@ pub fn each_member_cpu(p: &mut Project, mut f: impl FnMut(&mut os_model::PluginC
 }
 
 /// The member hosted under `key`: its container's place and its id.
-pub fn of_key(s: &State, key: usize) -> Option<(u16, u8, u32)> {
-    s.params.members.get(&key).copied()
+pub fn of_key(s: &crate::session::Session, key: usize) -> Option<(u16, u8, u32)> {
+    s.plugin_members.get(&key).copied()
 }
 
 /// The member with id `id` of the container at place (`t`, `k`).
@@ -573,15 +583,15 @@ pub fn level_automation(s: &crate::session::Session, t: u16, k: u8, id: u32, wet
 
 /// The member that the container under `Plugins::containers` key `place` holds under id `id`: its hosted key, when its
 /// plugin is loaded.
-pub fn member_key(s: &State, place: usize, id: u32) -> Option<usize> {
+pub fn member_key(s: &crate::session::Session, place: usize, id: u32) -> Option<usize> {
     let (t, k) = key_place(place)?;
-    s.params.members.iter().find(|(_, m)| **m == (t, k, id)).map(|(&key, _)| key)
+    s.plugin_members.iter().find(|(_, m)| **m == (t, k, id)).map(|(&key, _)| key)
 }
 
 /// The name of the member hosted under `key` and its container's title, "Lemon Limiter in Container (Bus 2)".
-pub fn member_label(s: &State, key: usize) -> Option<String> {
-    let &(t, k, id) = s.params.members.get(&key)?;
-    let name = member(&s.session, t, k, id)?.shown().to_string();
+pub fn member_label(s: &crate::session::Session, key: usize) -> Option<String> {
+    let &(t, k, id) = s.plugin_members.get(&key)?;
+    let name = member(s, t, k, id)?.shown().to_string();
     Some(format!("{name} in {}", title(s, t, k)?))
 }
 
@@ -1340,7 +1350,7 @@ impl App {
             }
         }
         if want.is_empty() && self.plugins.containers.is_empty() {
-            self.state.params.members.clear();
+            self.state.session.plugin_members.clear();
             self.mirror_levels();
             return;
         }
@@ -1458,7 +1468,7 @@ impl App {
         }
         if changed {
             // Which member each hosted key is, for its parameters' targets and links (`params::target_of`).
-            let members = &mut self.state.params.members;
+            let members = &mut self.state.session.plugin_members;
             members.clear();
             for (&slot_key, live) in &self.plugins.containers {
                 let Some((t, k)) = key_place(slot_key) else { continue };
@@ -1728,16 +1738,16 @@ mod tests {
         tick(&mut a);
         a.params_tick();
         let key = a.plugins.containers[&fx_key(2, 0)].keys[1].unwrap();
-        assert_eq!(a.state.params.members.get(&key), Some(&(2, 0, 2)));
+        assert_eq!(a.state.session.plugin_members.get(&key), Some(&(2, 0, 2)));
         let tgt = target::slot_param(2, 0, target::member_item(2, 0).unwrap());
-        assert_eq!(crate::params::target_of(&a.state, key, 0), Some(tgt));
-        assert_eq!(crate::params::key_of(&a.state, target::decode(tgt)), Some((key, 0)));
-        assert_eq!(crate::params::target_of(&a.state, key, usize::from(MEMBER_WET)), None, "past the parameters' room");
+        assert_eq!(crate::params::target_of(&a.state.session, key, 0), Some(tgt));
+        assert_eq!(crate::params::key_of(&a.state.session, target::decode(tgt)), Some((key, 0)));
+        assert_eq!(crate::params::target_of(&a.state.session, key, usize::from(MEMBER_WET)), None, "past the parameters' room");
         let pname = crate::params::param_name(&a.state, key, 0).unwrap();
 
         // Show all parameters: the member's node under Effects, after its container.
         assert_eq!(a.browse_params(key), None);
-        let node = format!("1:Current project/Effects/{second} in {}", crate::params::effect_label(&a.state, 2, 0).unwrap());
+        let node = format!("1:Current project/Effects/{second} in {}", crate::params::effect_label(&a.state.session, 2, 0).unwrap());
         assert_eq!(a.state.browser_sel.as_deref(), Some(node.as_str()));
         let row = rows(&a.state).iter().position(|r| r.item == Item::Param(key, 0)).expect("the parameter row");
         assert!(a.params_browser_right(row, 0.0, 0.0));
@@ -1750,14 +1760,14 @@ mod tests {
         assert_eq!(cmd_of(&menu.items, "Enter value..."), Cmd::TypeIn(link));
         assert_eq!(crate::typein::get(&a.state, link), crate::params::param_value(&a.state, key, 0));
         crate::playlist::run(&mut a, Cmd::CreateAutomation(t, name.clone(), 0.5));
-        assert_eq!(crate::params::driving_clip(&a.state, tgt), Some(a.state.session.project.channels.last().unwrap().index));
+        assert_eq!(crate::params::driving_clip(&a.state.session, tgt), Some(a.state.session.project.channels.last().unwrap().index));
         assert_eq!(crate::init::name(&a.state, tgt), name, "the clip's name, from its target");
         // Moved to the front of the list: the same member, the same target.
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Member(0, 1, Op::Up)));
         tick(&mut a);
         assert_eq!(a.plugins.containers[&fx_key(2, 0)].keys[0], Some(key));
-        assert_eq!(crate::params::key_of(&a.state, target::decode(tgt)), Some((key, 0)));
-        assert_eq!(crate::params::target_of(&a.state, key, 0), Some(tgt));
+        assert_eq!(crate::params::key_of(&a.state.session, target::decode(tgt)), Some((key, 0)));
+        assert_eq!(crate::params::target_of(&a.state.session, key, 0), Some(tgt));
 
         // A controller on the parameter, kept by place and id.
         crate::remote::set_links(&[]);
@@ -1778,7 +1788,7 @@ mod tests {
         assert_eq!(cmd_of(&wet.children, "MIDI learn..."), Cmd::Remote(RCmd::Link(T::Member(2, 0, 2, true))));
         assert_eq!(crate::init::name(&a.state, level), caption);
         assert_eq!(level_of(&a.state.session, target::decode(level)), Some((2, 0, 2, true)));
-        assert_eq!(crate::params::key_of(&a.state, target::decode(level)), None, "not a parameter of the effect");
+        assert_eq!(crate::params::key_of(&a.state.session, target::decode(level)), None, "not a parameter of the effect");
         crate::remote::add(Link::new(0, 21, T::Member(2, 0, 2, false)), true);
         a.state.session.history.reset();
         assert!(a.remote_cc("Test", 0, 21, 64));
@@ -1918,12 +1928,12 @@ mod tests {
         let slot = crate::mixer::track(&a.state.session, 2).unwrap().slots[0].as_ref().unwrap().id.0;
         let owner = member_owner(slot, 2).unwrap();
         assert_eq!(a.plugins.hosted[&key].owner.0, owner, "hosted under its owner id");
-        assert_eq!((owner_key(&a.state, owner), key_owner(&a.state, key)), (Some(key), Some(owner)));
+        assert_eq!((owner_key(&a.state.session, owner), key_owner(&a.state.session, key)), (Some(key), Some(owner)));
         assert_eq!(member_owner(slot, 16), None);
         // Moved to the front: the same owner finds it.
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Member(0, 1, Op::Up)));
         tick(&mut a);
-        assert_eq!(owner_key(&a.state, owner), Some(key));
+        assert_eq!(owner_key(&a.state.session, owner), Some(key));
 
         // A value typed in (or a window's gesture: the same step by owner): one step, undone on the instance.
         let id = a.plugins.param_infos(key)[0].id;
@@ -1945,7 +1955,7 @@ mod tests {
         let shown = std::path::PathBuf::from("C:/x/Before.fst");
         let side = PluginSide { state: a.plugins.state(key).unwrap(), preset: Some(shown.clone()), name: None, fill: 0 };
         let names = crate::mixer::slot_names_of(&a.state.session.project).clone();
-        crate::control::state_edit(&mut a.state, key, PLUGIN_PRESET, side);
+        crate::control::state_edit(&mut a.state.session, key, PLUGIN_PRESET, side);
         assert_eq!(a.state.session.history.newest_done(), Some(PLUGIN_PRESET));
         assert_eq!(a.plugins.presets.get(&key), None);
         crate::history::undo(&mut a.state);
@@ -2014,7 +2024,7 @@ mod tests {
         assert!(!m.state.is_empty(), "with its state");
         assert!(!a.state.hosted_rows.contains(&0) && !a.plugins.hosted.contains_key(&0), "no instance under the row");
         assert!(a.state.shown(Win::Container) && a.state.container.at == (0, CHANNEL));
-        assert_eq!(title(&a.state, 0, CHANNEL), Some(format!("Container ({})", place_name(&a.state.session, 0, CHANNEL))));
+        assert_eq!(title(&a.state.session, 0, CHANNEL), Some(format!("Container ({})", place_name(&a.state.session, 0, CHANNEL))));
         assert!(!crate::rack::channel_menu(&a.state, 0, 0.0, 0.0).items.iter().any(|i| i.label == WRAP && i.enabled), "not twice");
         // The chain plays the channel's notes.
         let live = &a.plugins.containers[&0];
@@ -2073,10 +2083,10 @@ mod tests {
         a.params_tick();
         let key = a.plugins.containers[&0].keys[0].unwrap();
         let index = a.state.session.project.channels[0].index;
-        assert_eq!(a.state.params.members.get(&key), Some(&(0, CHANNEL, 1)));
+        assert_eq!(a.state.session.plugin_members.get(&key), Some(&(0, CHANNEL, 1)));
         let tgt = target::channel_param(index, target::member_item(1, 0).unwrap());
-        assert_eq!(crate::params::target_of(&a.state, key, 0), Some(tgt));
-        assert_eq!(crate::params::key_of(&a.state, target::decode(tgt)), Some((key, 0)));
+        assert_eq!(crate::params::target_of(&a.state.session, key, 0), Some(tgt));
+        assert_eq!(crate::params::key_of(&a.state.session, target::decode(tgt)), Some((key, 0)));
         let level = level_target(&a.state.session, 0, CHANNEL, 2, false).unwrap();
         assert_eq!(level, target::channel_param(index, target::member_item(2, MEMBER_DRY).unwrap()));
         assert_eq!(level_of(&a.state.session, target::decode(level)), Some((0, CHANNEL, 2, false)));
@@ -2088,8 +2098,8 @@ mod tests {
         assert_eq!(a.plugins.containers[&0].fx.lock().unwrap().members[1].dry, 0.25, "the chain plays the level");
         // Undo steps of its own edits go by the channel's id.
         let owner = crate::control::command::member_owner(a.state.session.project.channels[0].id.0, 1).unwrap();
-        assert_eq!(crate::control::command::key_owner(&a.state, key), Some(owner));
-        assert_eq!(crate::control::command::owner_key(&a.state, owner), Some(key));
+        assert_eq!(crate::control::command::key_owner(&a.state.session, key), Some(owner));
+        assert_eq!(crate::control::command::owner_key(&a.state.session, owner), Some(key));
         assert_eq!(a.plugins.hosted[&key].owner.0, owner);
         // A member window's Replace ▸ lists instruments for an instrument.
         let mut m = crate::playlist::plugin_window_menu(key, false, 0.0, 0.0);
@@ -2173,8 +2183,8 @@ mod tests {
         assert_eq!(a.state.session.history.newest_done(), Some(WRAP_ALL), "one step");
         // The clip still drives the delay's parameter 0: its member's, found by its target.
         let key = a.plugins.containers[&fx_key(2, 0)].keys[1].unwrap();
-        assert_eq!(crate::params::key_of(&a.state, target::decode(item(2, 0))), Some((key, 0)));
-        assert_eq!(crate::params::driving_clip(&a.state, item(2, 0)), Some(ch));
+        assert_eq!(crate::params::key_of(&a.state.session, target::decode(item(2, 0))), Some((key, 0)));
+        assert_eq!(crate::params::driving_clip(&a.state.session, item(2, 0)), Some(ch));
         // And the remote link drives it.
         assert!(a.remote_cc("Test", 0, 20, 127));
         a.plugins.hosted[&key].plugin.lock().unwrap().idle();
@@ -2248,7 +2258,7 @@ mod tests {
         assert_eq!(clips(&a), vec![moved, volume]);
         assert_eq!(links(), vec![T::MemberParam(0, CHANNEL, 1, 3), T::Knob(KnobId::ChanVol(0))]);
         let key = a.plugins.containers[&0].keys[0].unwrap();
-        assert_eq!(crate::params::key_of(&a.state, target::decode(moved)), Some((key, 3)));
+        assert_eq!(crate::params::key_of(&a.state.session, target::decode(moved)), Some((key, 3)));
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(WRAP));
         ticks(&mut a);
         assert_eq!(clips(&a), vec![param, volume]);
@@ -2301,7 +2311,7 @@ mod tests {
         crate::playlist::commit_edit(&mut a.state);
         assert_eq!(a.state.session.history.newest_done(), Some(NAME));
         assert_eq!(label(1, &members(&a.state.session, 2, 1).unwrap()[1]), "2. Echo (wet 100%, dry 0%)");
-        assert!(crate::params::owner_name(&a.state, key).starts_with("Echo in "));
+        assert!(crate::params::owner_name(&a.state.session, key).starts_with("Echo in "));
         #[cfg(plugin_windows)]
         assert!(a.member_infos()[&key].name.starts_with("Echo ("));
         crate::history::undo(&mut a.state);

@@ -42,6 +42,9 @@ pub struct Session {
     /// The remote control links the edit under way moved with what they drive (`remote::follow`), as (target before
     /// the edit, target now): its undo step puts them back (`control::edit`).
     pub link_moves: Vec<(crate::typein::Target, crate::typein::Target)>,
+    /// The effects inside containers, by hosted key: mixer track, slot and member id (`App::sync_containers`). The
+    /// plugin host's, kept here until it is the session's (control-plane step 7): commands find plugins by it.
+    pub plugin_members: std::collections::BTreeMap<usize, (u16, u8, u32)>,
 }
 
 /// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
@@ -74,6 +77,18 @@ pub enum View {
     MixerSelect(u16),
     /// Patterns were renumbered: the clip and note selections go.
     PatternsRenumbered,
+    /// The channels' rows moved: each row's new row, `None` for a channel that went (`rack::remap_state`).
+    Rows(Vec<Option<usize>>),
+    /// The channel rack's rows changed in number: its height follows (`rack::autosize`).
+    RackAutosize,
+    /// A container member's level knob was set: the open list shows it (`container::show_level`).
+    MemberLevel { t: u16, k: u8, id: u32, wet: bool, v: f32 },
+    /// The playlist's clips were put back: its selection goes.
+    ClipsCleared,
+    /// The timebase went from `.0` to `.1` ticks per quarter: the views' ticks and the clipboards follow (`app::retime`).
+    Retimed(u16, u16),
+    /// A message for the hint bar.
+    Message(String),
 }
 
 impl View {
@@ -105,6 +120,7 @@ impl Session {
             samples: Default::default(),
             fx_requests: Vec::new(),
             link_moves: Vec::new(),
+            plugin_members: Default::default(),
         }
     }
 

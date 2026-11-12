@@ -680,21 +680,21 @@ pub fn len_value(s: &crate::session::Session) -> u32 {
 }
 
 /// A row's own length in steps: its loop length in loop mode, else the pattern length (§15).
-pub fn row_len(s: &State, r: usize) -> u32 {
-    if !loop_mode(&s.session) {
-        return pattern_steps(&s.session);
+pub fn row_len(s: &crate::session::Session, r: usize) -> u32 {
+    if !loop_mode(s) {
+        return pattern_steps(s);
     }
-    if advanced(&s.session) {
-        return unit_len(s, r).unwrap_or_else(|| pattern_steps(&s.session));
+    if advanced(s) {
+        return unit_len(s, r).unwrap_or_else(|| pattern_steps(s));
     }
-    loop_box_len(&s.session, r)
+    loop_box_len(s, r)
 }
 
 /// Under Advanced looping, row `r`'s loop length in the current pattern (`None`: it does not loop there).
-fn unit_len(s: &State, r: usize) -> Option<u32> {
-    let notes = s.session.project.pattern(s.pattern()).map_or(&[][..], |p| &p.notes[..]);
+fn unit_len(s: &crate::session::Session, r: usize) -> Option<u32> {
+    let notes = s.project.pattern(s.pattern()).map_or(&[][..], |p| &p.notes[..]);
     // A loop point, else a length of steps (FL's Advanced looping takes both).
-    unit_steps(s, notes, ch_index(&s.session, r)?, loop_unit_of(&s.session, r)).or_else(|| loop_len_of(&s.session, r))
+    unit_steps(s, notes, ch_index(s, r)?, loop_unit_of(s, r)).or_else(|| loop_len_of(s, r))
 }
 
 /// Advanced looping's loop point (§7 Loop type, §15; the original's manual: a row plays to the end of its last used
@@ -719,11 +719,11 @@ impl LoopUnit {
     }
 
     /// Steps in one unit: a beat and a bar of the project's signature (§23).
-    fn steps(self, s: &State) -> u32 {
+    fn steps(self, s: &crate::session::Session) -> u32 {
         match self {
             LoopUnit::Step => 1,
-            LoopUnit::Beat => beat_steps(&s.session),
-            LoopUnit::Bar => bar_steps(&s.session),
+            LoopUnit::Beat => beat_steps(s),
+            LoopUnit::Bar => bar_steps(s),
         }
     }
 }
@@ -735,8 +735,8 @@ pub fn advanced(s: &crate::session::Session) -> bool {
 
 /// The loop length, in steps, of channel `ch` among `notes` with loop point `unit`: its last used step (a note covers
 /// the steps it lasts) rounded up to whole units. `None` without a unit or without notes.
-fn unit_steps(s: &State, notes: &[Note], ch: u16, unit: Option<LoopUnit>) -> Option<u32> {
-    let ps = per_step(&s.session);
+fn unit_steps(s: &crate::session::Session, notes: &[Note], ch: u16, unit: Option<LoopUnit>) -> Option<u32> {
+    let ps = per_step(s);
     let u = unit?.steps(s).max(1);
     let used = notes.iter().filter(|n| n.channel == ch && !n.muted()).map(|n| (n.position + n.length.max(ps) - 1) / ps + 1).max()?;
     Some(used.div_ceil(u) * u)
@@ -968,11 +968,11 @@ pub fn toggle_step(s: &mut State, r: usize, k: u32) -> bool {
 }
 
 /// Fill each N steps (§18): the row's notes inside the pattern length become steps 1, 1+N, 1+2N, …
-pub fn fill_each(s: &mut State, r: usize, every: u32) {
-    let (len, ps) = (row_len(s, r), per_step(&s.session));
-    let mut notes: Vec<Note> = row_notes(&s.session, r).into_iter().filter(|n| n.position >= len * ps).collect();
+pub fn fill_each(s: &mut crate::session::Session, r: usize, every: u32) {
+    let (len, ps) = (row_len(s, r), per_step(s));
+    let mut notes: Vec<Note> = row_notes(s, r).into_iter().filter(|n| n.position >= len * ps).collect();
     notes.extend((0..len).step_by(every.max(1) as usize).map(|k| Note::step(0, k * ps)));
-    set_row_notes(&mut s.session, r, notes);
+    set_row_notes(s, r, notes);
 }
 
 /// Write a step sequence (Advanced fill's Accept) over the row's notes inside the sequence length.
@@ -985,10 +985,10 @@ pub fn write_sequence(s: &mut crate::session::Session, r: usize, steps: &[bool])
 }
 
 /// Rotate the row's notes by one step, wrapping inside the pattern length (§18).
-pub fn rotate(s: &mut State, r: usize, dir: i32) {
-    let (len, ps) = (row_len(s, r), per_step(&s.session));
+pub fn rotate(s: &mut crate::session::Session, r: usize, dir: i32) {
+    let (len, ps) = (row_len(s, r), per_step(s));
     let span = i64::from(len * ps);
-    let notes = row_notes(&s.session, r)
+    let notes = row_notes(s, r)
         .into_iter()
         .map(|mut n| {
             if i64::from(n.position) < span {
@@ -997,7 +997,7 @@ pub fn rotate(s: &mut State, r: usize, dir: i32) {
             n
         })
         .collect();
-    set_row_notes(&mut s.session, r, notes);
+    set_row_notes(s, r, notes);
 }
 
 /// The steps the row shows: on/off for steps `0..len` (used by the Advanced fill dialog).
@@ -1395,27 +1395,39 @@ fn moved_link(l: crate::typein::Target, m: &dyn Fn(usize) -> Option<usize>) -> O
 
 /// The last row's channel goes (an undone drop that made it, `history`): `reorder` without the app, whose instrument
 /// for the row goes on the next tick (`App::plugin_tick`). A project keeps at least one channel.
-pub fn remove_last(s: &mut State) {
-    let n = s.session.project.channels.len();
+pub fn remove_last(s: &mut crate::session::Session) {
+    let n = s.project.channels.len();
     if n < 2 {
         return;
     }
     let map: Vec<Option<usize>> = (0..n).map(|r| (r + 1 < n).then_some(r)).collect();
-    remap_state(s, &map);
+    remap_in(s, &map);
 }
 
 /// Channel `ch` comes back as the last row (a redone drop that made it, `history`); Lemon Sampler hosts it from its
 /// settings on the next tick.
-pub fn push_channel(s: &mut State, mut ch: os_model::Channel) {
-    ch.index = s.session.project.channels.len() as u16;
-    s.session.project.get_mut().channels.push(ch);
-    autosize(s);
+pub fn push_channel(s: &mut State, ch: os_model::Channel) {
+    crate::follow::around(s, |s| push_channel_in(&mut s.session, ch));
+}
+
+/// `push_channel` in the session; the rack's height follows.
+pub fn push_channel_in(s: &mut crate::session::Session, mut ch: os_model::Channel) {
+    ch.index = s.project.channels.len() as u16;
+    s.project.get_mut().channels.push(ch);
+    s.touched.views.push(crate::session::View::RackAutosize);
 }
 
 /// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
 pub(crate) fn remap_state(s: &mut State, map: &[Option<usize>]) {
     remap_project(s.session.project.get_mut(), map);
     remap_ui(s, map);
+}
+
+/// `remap_state` in the session; the views follow the rows.
+pub(crate) fn remap_in(s: &mut crate::session::Session, map: &[Option<usize>]) {
+    remap_project(s.project.get_mut(), map);
+    remap_session(s, map);
+    s.touched.views.push(crate::session::View::Rows(map.to_vec()));
 }
 
 /// `remap_state`'s part in the app state, for a project already renumbered (`map` as there).
@@ -2032,7 +2044,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Rename, color and icon...", RCmd::Rename(r)),
         it("Change color...", RCmd::ChangeColor(r)),
         it("Random color", RCmd::RandomColor(r)),
-        PItem::sub("Change icon...", crate::playlist::icon_items(s, r)),
+        PItem::sub("Change icon...", crate::playlist::icon_items(&s.session, r)),
         PItem::sep(),
         if sampler { it("Load sample...", RCmd::LoadSample(r)) } else { PItem::new("Load sample...", Cmd::Nothing).off() },
         it("Chokes itself", RCmd::CutItself(r)).mark(Mark::Check(s.session.project.channels.get(r).is_some_and(|c| cuts_itself(&c.misc)))),
@@ -2161,7 +2173,7 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
         delete,
         PItem::sep(),
     ];
-    let driven = control.and_then(|c| crate::params::driving_clip(s, c.0));
+    let driven = control.and_then(|c| crate::params::driving_clip(&s.session, c.0));
     v.push(match auto {
         Some((tgt, name, val)) => PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, val)),
         None => PItem::new("Create automation clip", Cmd::Nothing).off(),
@@ -2534,7 +2546,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::Fill(r, n) => {
             snapshot(&mut s.session);
-            fill_each(s, r, n);
+            fill_each(&mut s.session, r, n);
             None
         }
         RCmd::AdvancedFill(r) => {
@@ -2543,7 +2555,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::Rotate(r, d) => {
             snapshot(&mut s.session);
-            rotate(s, r, d);
+            rotate(&mut s.session, r, d);
             None
         }
         RCmd::Solo(r) => {
@@ -2564,13 +2576,13 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::PasteValue(k) => {
             if let Some(v) = s.value_clip {
-                crate::history::knob(s, k, false);
+                crate::history::knob(&mut s.session, k, false);
                 s.set_knob(k, v as f32);
             }
             None
         }
         RCmd::SetValue(k, v) => {
-            crate::history::knob(s, k, false);
+            crate::history::knob(&mut s.session, k, false);
             s.set_knob(k, v);
             None
         }
@@ -2878,7 +2890,7 @@ fn expand_loops(p: &mut Project, s: &State, rows: Option<&[usize]>) {
         let advanced = loop_type_of(code) == 2;
         for &ch in &chans {
             let Some(v) = pat.loops.iter().find(|l| l.0 == ch).map(|l| l.1) else { continue };
-            let len = if advanced { unit_steps(s, &pat.notes, ch, unit_of(v)).or(length_of(v)) } else { length_of(v) };
+            let len = if advanced { unit_steps(&s.session, &pat.notes, ch, unit_of(v)).or(length_of(v)) } else { length_of(v) };
             let Some(len) = len else { continue };
             let span = len.max(1) * ps;
             let src: Vec<Note> = pat.notes.iter().filter(|n| n.channel == ch && n.position < span).copied().collect();
@@ -3288,7 +3300,7 @@ mod tests {
         a.mark_saved();
         loop_step(&mut a.state.session, LOOP_MODE_STEP);
         set_loop_mode(&mut a.state.session, true);
-        crate::history::settle(&mut a.state);
+        crate::history::settle(&mut a.state.session);
         assert_eq!(a.state.session.history.newest_done(), Some(LOOP_MODE_STEP));
         assert!(loop_mode(&a.state.session) && !a.unsaved());
         assert!(crate::history::undo(&mut a.state).is_some());
@@ -3683,7 +3695,7 @@ mod tests {
         assert_eq!(app.state.rack_size.0, w + LOOP_W, "room for the boxes");
         put_loop(&mut app.state.session, 1, Some(5));
         assert_eq!((loop_box_len(&app.state.session, 1), loop_box_len(&app.state.session, 0)), (5, pattern_steps(&app.state.session)));
-        assert_eq!(row_len(&app.state, 1), pattern_steps(&app.state.session), "loop mode off: the length plays no part");
+        assert_eq!(row_len(&app.state.session, 1), pattern_steps(&app.state.session), "loop mode off: the length plays no part");
         run(&mut app, RCmd::Opt(ALWAYS_ADVANCED));
         assert!(!loop_boxes(&app.state));
         assert_eq!(app.state.rack_size.0, w);
@@ -3765,13 +3777,13 @@ mod tests {
         p.notes.sort_by_key(|x| (x.position, x.channel));
         assert_eq!((pattern_steps(&s.session), beat_steps(&s.session), bar_steps(&s.session)), (16, 4, 16));
 
-        assert_eq!((loop_box_text(&s.session, 0), loop_box_value(&s.session, 0), row_len(s, 0)), ("···".to_string(), 0, 16), "no loop point: no loop");
+        assert_eq!((loop_box_text(&s.session, 0), loop_box_value(&s.session, 0), row_len(&s.session, 0)), ("···".to_string(), 0, 16), "no loop point: no loop");
         assert_eq!(set_loop_box(&mut s.session, 0, 1), "Loop point: Step");
-        assert_eq!(row_len(s, 0), 6, "the last used step");
+        assert_eq!(row_len(&s.session, 0), 6, "the last used step");
         set_loop_box(&mut s.session, 0, 2);
-        assert_eq!((loop_box_text(&s.session, 0).as_str(), row_len(s, 0)), ("Beat", 8));
+        assert_eq!((loop_box_text(&s.session, 0).as_str(), row_len(&s.session, 0)), ("Beat", 8));
         set_loop_box(&mut s.session, 0, 9);
-        assert_eq!((loop_box_text(&s.session, 0).as_str(), row_len(s, 0)), ("Bar", 16), "past the last: Bar");
+        assert_eq!((loop_box_text(&s.session, 0).as_str(), row_len(&s.session, 0)), ("Bar", 16), "past the last: Bar");
         set_loop_box(&mut s.session, 0, 2);
 
         // Playback repeats the first beat-rounded 8 steps over the pattern.
@@ -4864,16 +4876,16 @@ mod tests {
         let init = entry(&app, 2, crate::init::INIT_LABEL);
         assert!(init.enabled && init.mark == Mark::Check(false));
         crate::playlist::run(&mut app, init.cmd);
-        assert_eq!(crate::init::entry(&app.state, target::MAIN_SWING).map(|c| c.value), Some(32));
+        assert_eq!(crate::init::entry(&app.state.session, target::MAIN_SWING).map(|c| c.value), Some(32));
         assert_eq!(entry(&app, 2, crate::init::INIT_LABEL).mark, Mark::Check(true));
         app.state.session.project.get_mut().swing = Some(100);
         app.state.set_song_mode(true);
-        assert!(crate::init::apply(&mut app.state));
+        assert!(crate::init::apply(&mut app.state.session));
         assert_eq!(app.state.session.project.swing, Some(32), "the song starts with it");
         let delete = entry(&app, 2, crate::init::DELETE_LABEL);
         assert!(delete.enabled);
         crate::playlist::run(&mut app, delete.cmd);
-        assert!(!crate::init::listed(&app.state, target::MAIN_SWING));
+        assert!(!crate::init::listed(&app.state.session, target::MAIN_SWING));
 
         // MIDI learn... on the mixer box and the LED: the link box, then the controller drives them.
         crate::remote::set_links(&[]);
@@ -4958,7 +4970,7 @@ mod tests {
             let made = pl::create_automation(&mut app.state, tgt, &clip, v);
             assert_eq!(app.state.session.project.channels.iter().find(|c| c.index == made).and_then(|c| c.name.clone()), Some(clip.clone()));
             assert_eq!(app.state.session.project.automation(made).map(|x| (x.target(), x.points[0].value)), Some((Some(tgt), v)));
-            assert_eq!(crate::init::entry(&app.state, tgt).map(|c| c.value), Some(stored), "{clip}");
+            assert_eq!(crate::init::entry(&app.state.session, tgt).map(|c| c.value), Some(stored), "{clip}");
             assert_eq!(crate::init::name(&app.state, tgt), clip);
             assert_eq!(entry(&app, a, "Edit automation clip...").cmd, Cmd::Param(crate::params::PCmd::EditClip(made)));
         }
@@ -4985,7 +4997,7 @@ mod tests {
         app.state.session.project.get_mut().channels[row].mixer_track = 5;
         app.state.session.project.get_mut().channels[row].enabled = false;
         app.state.set_song_mode(true);
-        assert!(crate::init::apply(&mut app.state));
+        assert!(crate::init::apply(&mut app.state.session));
         assert_eq!((app.state.session.project.channels[row].mixer_track, app.state.session.project.channels[row].enabled), (2, true));
         for a in &actions[1..] {
             let delete = entry(&app, a, crate::init::DELETE_LABEL);
