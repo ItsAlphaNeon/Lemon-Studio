@@ -127,7 +127,7 @@ impl App {
             "notes" => super::query::notes(&self.state, uint(params, "pattern")? as u32).map_err(bad),
             "plugins" => {
                 let names = |v: &[crate::plugins::Available]| v.iter().map(|a| a.desc.name.clone()).collect::<Vec<_>>();
-                Ok(json!({ "instruments": names(&self.plugins.available), "effects": names(&self.plugins.effects) }))
+                Ok(json!({ "instruments": names(&self.state.session.plugins.available), "effects": names(&self.state.session.plugins.effects) }))
             }
             "params" => self.params_of(uint(params, "owner")? as u32),
             "history" => {
@@ -148,7 +148,7 @@ impl App {
             "plugin_states" => {
                 let owner = uint(params, "owner")? as u32;
                 let key = super::command::owner_key(&self.state.session, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
-                let name = self.plugins.descriptor(key).map(|d| d.name).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
+                let name = self.state.session.plugins.descriptor(key).map(|d| d.name).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
                 let found = self.journal.states_of(&name, 50);
                 let list: Vec<Value> = found.iter().map(|f| json!({ "file": f.file.display().to_string(), "seq": f.seq, "t": f.t, "at": f.at, "hash": f.hash })).collect();
                 Ok(json!({ "plugin": name, "states": list }))
@@ -231,7 +231,7 @@ impl App {
     /// The parameters of the plugin playing channel or slot `owner`.
     fn params_of(&mut self, owner: u32) -> Result<Value, Fail> {
         let key = super::command::owner_key(&self.state.session, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
-        let h = self.plugins.hosted.get(&key).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
+        let h = self.state.session.plugins.hosted.get(&key).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
         let p = h.plugin.lock().map_err(|_| failed("the plugin is busy"))?;
         let mut list = Vec::new();
         for i in 0..p.param_count() {
@@ -268,7 +268,7 @@ impl App {
             if let Command::SetParam { owner, param, from: from @ None, .. } = c {
                 let key = super::command::owner_key(&self.state.session, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
                 let v = self
-                    .plugins
+                    .state.session.plugins
                     .hosted
                     .get(&key)
                     .and_then(|h| h.plugin.lock().ok()?.param_value(*param))

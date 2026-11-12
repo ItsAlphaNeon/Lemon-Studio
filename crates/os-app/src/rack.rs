@@ -1037,8 +1037,7 @@ pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
     remap_view(s, map);
 }
 
-/// `remap_ui`'s part in the interface: the rack's state, the selections, the plugin window and the plugin host's
-/// requests follow their rows.
+/// `remap_ui`'s part in the interface: the rack's state, the selections and the plugin window follow their rows.
 pub(crate) fn remap_view(s: &mut State, map: &[Option<usize>]) {
     let m = |r: usize| map.get(r).copied().flatten();
     let len = s.session.project.channels.len().max(1);
@@ -1049,9 +1048,6 @@ pub(crate) fn remap_view(s: &mut State, map: &[Option<usize>]) {
         s.hide(Win::Plugin);
     }
     s.plugin_channel = keep(s.plugin_channel);
-    s.hosted_rows = s.hosted_rows.iter().filter_map(|&r| m(r)).collect();
-    s.pending_open = s.pending_open.and_then(m);
-    s.pending_plugin = s.pending_plugin.and_then(|(r, i)| m(r).map(|r| (r, i)));
     s.piano.clear_selection();
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
@@ -1587,7 +1583,7 @@ pub(crate) fn set_stretch(app: &mut App, rows: &[usize], method: i32) {
     for &r in rows {
         let Some(c) = app.state.session.project.get_mut().channels.get_mut(r) else { continue };
         c.sound.stretch[3] = method as u32;
-        app.plugins.set_sampler_stretch(r, &c.sound);
+        app.state.session.plugins.set_sampler_stretch(r, &c.sound);
     }
     app.state.session.dirty = true;
 }
@@ -1599,8 +1595,8 @@ fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
         let Some(c) = app.state.session.project.get_mut().channels.get_mut(r) else { continue };
         c.sound.declick = mode;
         if c.kind.is_sampler() {
-            app.plugins.set_param_named(r, SAMPLER_DECLICK, f64::from(mode));
-            app.state.params.reread(r);
+            app.state.session.plugins.set_param_named(r, SAMPLER_DECLICK, f64::from(mode));
+            app.state.session.params.reread(r);
         }
     }
     app.state.session.dirty = true;
@@ -2047,7 +2043,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         // spec: ui/plugin-window.md "Docking and the window menu"
         #[cfg(plugin_windows)]
-        RCmd::DetachAll(on) => app.plugins.set_all_detached(on),
+        RCmd::DetachAll(on) => app.state.session.plugins.set_all_detached(on),
         // spec: ui/channel-switches.md §6
         #[cfg(any(windows, target_os = "macos"))]
         RCmd::EditorKeys(on) => crate::plugin_window::set_editor_keys(on),
@@ -2406,7 +2402,7 @@ fn restretch_all(app: &mut App) -> Option<String> {
     }
     for &r in &rows {
         let sound = app.state.session.project.channels[r].sound.clone();
-        app.plugins.set_sampler_stretch(r, &sound);
+        app.state.session.plugins.set_sampler_stretch(r, &sound);
     }
     app.state.session.dirty = true;
     let tempo = format!("{:.3}", app.state.tempo());
@@ -3105,7 +3101,7 @@ mod tests {
     #[test]
     fn channel_menu_burn_midi() {
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins = crate::plugins::Plugins::default();
         let burn = |app: &App, r: usize| {
             let m = channel_menu(&app.state, r, 0.0, 0.0);
             let sub = m.items.iter().find(|i| i.label == "Burn MIDI to").map(|i| i.children.clone()).unwrap();
@@ -4096,13 +4092,13 @@ mod tests {
     #[test]
     fn lemon_sampler_takes_what_the_load_read() {
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         let r = sampler_row(&app);
         app.plugin_tick();
-        assert!(app.state.hosted_rows.contains(&r), "Lemon Sampler hosts the row");
+        assert!(app.state.session.hosted_rows.contains(&r), "Lemon Sampler hosts the row");
         let params = |app: &App| {
-            let st = app.plugins.state(r).expect("state");
+            let st = app.state.session.plugins.state(r).expect("state");
             let (_, json) = crate::plugins::state_json(&st);
             serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone()
         };
@@ -4115,12 +4111,12 @@ mod tests {
         let both = tagged_wav(None, "hosted", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
         sample_chosen(&mut app, r, both.clone());
         app.plugin_tick();
-        assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(both.to_string_lossy().as_ref()));
+        assert_eq!(app.state.session.plugins.sampler_path(r).as_deref(), Some(both.to_string_lossy().as_ref()));
         assert_eq!(read(&app), (67, auto_index, 16), "root 67, Auto, 4 beats = 16 steps");
         let plain = tagged_wav(None, "hosted-plain", 0.5, &[]);
         sample_chosen(&mut app, r, plain.clone());
         app.plugin_tick();
-        assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(plain.to_string_lossy().as_ref()));
+        assert_eq!(app.state.session.plugins.sampler_path(r).as_deref(), Some(plain.to_string_lossy().as_ref()));
         assert_eq!(read(&app), (60, auto_index, 16), "back to C5, the stretch kept");
         for p in [both, plain] {
             let _ = std::fs::remove_file(p);
@@ -4129,11 +4125,11 @@ mod tests {
 
     /// Row `r`'s Lemon Sampler: its sample, root note, stretch method (its menu index) and TIME in steps.
     fn sampler_side(app: &App, r: usize) -> (String, i64, i64, i64) {
-        let st = app.plugins.state(r).expect("hosted");
+        let st = app.state.session.plugins.state(r).expect("hosted");
         let (_, json) = crate::plugins::state_json(&st);
         let p = serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone();
         let steps = lemon_sampler::params::time_steps(p["ts_time"]["f32"].as_f64().unwrap() as f32);
-        let path = app.plugins.sampler_path(r).unwrap_or_default();
+        let path = app.state.session.plugins.sampler_path(r).unwrap_or_default();
         (path, p["root"]["i32"].as_i64().unwrap(), p["ts_mode"]["i32"].as_i64().unwrap(), steps.round() as i64)
     }
 
@@ -4223,11 +4219,11 @@ mod tests {
     fn the_hosted_sampler_follows_undo_and_redo() {
         use crate::history::{ctrl_alt_z, ctrl_z};
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         let r = sampler_row(&app);
         app.plugin_tick();
-        assert!(app.state.hosted_rows.contains(&r));
+        assert!(app.state.session.hosted_rows.contains(&r));
         let start = sampler_side(&app, r);
         let auto_index = i64::from(lemon_sampler::params::stretch_index(os_model::stretch_mode::AUTO));
         let (plain, both) = (tagged_wav(None, "undo-plain", 0.5, &[]), tagged_wav(None, "undo-both", 0.5, &[smpl(67), acid(4, 60, 95.0)]));
@@ -4254,10 +4250,10 @@ mod tests {
         assert_eq!(sampler_side(&app, n), (both_s.clone(), 67, auto_index, 16));
         ctrl_z(&mut app.state);
         app.plugin_tick();
-        assert!(!app.plugins.hosted.contains_key(&n) && !app.state.hosted_rows.contains(&n), "the instrument goes");
+        assert!(!app.state.session.plugins.hosted.contains_key(&n) && !app.state.session.hosted_rows.contains(&n), "the instrument goes");
         ctrl_alt_z(&mut app.state);
         app.plugin_tick();
-        assert!(app.state.hosted_rows.contains(&n));
+        assert!(app.state.session.hosted_rows.contains(&n));
         assert_eq!(sampler_side(&app, n), (both_s, 67, auto_index, 16), "hosted again from the channel");
         for p in [plain, both] {
             let _ = std::fs::remove_file(p);

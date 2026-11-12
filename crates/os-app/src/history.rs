@@ -1652,25 +1652,25 @@ mod tests {
     #[test]
     fn an_added_generator_is_one_step() {
         let mut a = App::new(None);
-        a.plugins = crate::plugins::Plugins::default();
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins = crate::plugins::Plugins::default();
+        a.state.session.plugins.available = crate::plugins::builtin();
         let n = a.state.session.project.channels.len();
-        let sampler = a.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
-        let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        let sampler = a.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        let trio = a.state.session.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         crate::plugin_menu::add_generator(&mut a, sampler, None);
         crate::plugin_menu::add_generator(&mut a, trio, None);
         assert_eq!(a.state.session.project.channels.len(), n + 2);
         assert_eq!(names(&a.state), [LAST_RESET, ADD_CHANNEL, ADD_CHANNEL]);
         a.plugin_tick();
-        assert!(a.plugins.hosted.contains_key(&(n + 1)), "the Trio is hosted");
+        assert!(a.state.session.plugins.hosted.contains_key(&(n + 1)), "the Trio is hosted");
         assert_eq!(undo(&mut a.state).as_deref(), Some(ADD_CHANNEL));
         a.plugin_tick();
         assert_eq!((a.state.session.project.channels.len(), a.state.selected_channel), (n + 1, n), "the Trio channel went");
-        assert!(!a.plugins.hosted.contains_key(&(n + 1)), "and its instance");
+        assert!(!a.state.session.plugins.hosted.contains_key(&(n + 1)), "and its instance");
         assert_eq!(redo(&mut a.state).as_deref(), Some(ADD_CHANNEL));
         a.plugin_tick();
         assert_eq!(a.state.session.project.channels.len(), n + 2);
-        assert!(a.plugins.hosted.contains_key(&(n + 1)), "its instance is back");
+        assert!(a.state.session.plugins.hosted.contains_key(&(n + 1)), "its instance is back");
         assert_eq!(a.state.session.project.channels[n + 1].plugin, Some(crate::osc3::file_name(crate::osc3::LEMON_TRIO).to_string()));
         undo(&mut a.state);
         undo(&mut a.state);
@@ -1784,16 +1784,16 @@ mod tests {
     #[test]
     fn an_inserted_generator_is_one_step() {
         let mut a = App::new(None);
-        a.plugins = crate::plugins::Plugins::default();
-        a.plugins.available = crate::plugins::builtin();
-        let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        a.state.session.plugins = crate::plugins::Plugins::default();
+        a.state.session.plugins.available = crate::plugins::builtin();
+        let trio = a.state.session.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         assert!(a.state.session.project.channels.len() >= 3);
         a.state.session.project.get_mut().patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
         let (chans, pats) = (a.state.session.project.channels.clone(), a.state.session.project.patterns.clone());
         crate::plugin_menu::add_generator(&mut a, trio, Some(0));
         a.plugin_tick();
         let trio_name = Some(crate::osc3::LEMON_TRIO.to_string());
-        assert_eq!(a.plugins.descriptor(1).map(|d| d.name), trio_name, "hosted in its row");
+        assert_eq!(a.state.session.plugins.descriptor(1).map(|d| d.name), trio_name, "hosted in its row");
         let (more, moved) = (a.state.session.project.channels.clone(), a.state.session.project.patterns.clone());
         assert_eq!((more.len(), a.state.selected_channel), (chans.len() + 1, 1));
         assert_ne!(moved, pats, "the notes follow their rows");
@@ -1801,11 +1801,11 @@ mod tests {
         ctrl_z(&mut a);
         a.plugin_tick();
         assert_eq!((&a.state.session.project.channels, &a.state.session.project.patterns), (&chans, &pats), "all as before");
-        assert_ne!(a.plugins.descriptor(1).map(|d| d.name), trio_name, "the instance goes");
+        assert_ne!(a.state.session.plugins.descriptor(1).map(|d| d.name), trio_name, "the instance goes");
         ctrl_alt_z(&mut a);
         a.plugin_tick();
         assert_eq!((&a.state.session.project.channels, &a.state.session.project.patterns), (&more, &moved), "inserted again");
-        assert_eq!(a.plugins.descriptor(1).map(|d| d.name), trio_name, "with its instance");
+        assert_eq!(a.state.session.plugins.descriptor(1).map(|d| d.name), trio_name, "with its instance");
     }
 
     /// Replace is one step, "Replace channel": undone, the channel and its old instrument come back; redone, the new
@@ -1813,15 +1813,15 @@ mod tests {
     #[test]
     fn replace_is_one_step() {
         let mut a = App::new(None);
-        a.plugins = crate::plugins::Plugins::default();
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins = crate::plugins::Plugins::default();
+        a.state.session.plugins.available = crate::plugins::builtin();
         a.plugin_tick();
         a.plugin_tick();
         let ticks = |a: &mut App| (0..3).for_each(|_| a.plugin_tick());
-        let name = |a: &App| a.plugins.descriptor(0).map(|d| d.name);
+        let name = |a: &App| a.state.session.plugins.descriptor(0).map(|d| d.name);
         let (old, old_name) = (a.state.session.project.channels[0].clone(), name(&a));
         assert!(old_name.is_some());
-        let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        let trio = a.state.session.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         crate::plugin_menu::replace_generator(&mut a, trio, 0);
         ticks(&mut a);
         let new = a.state.session.project.channels[0].clone();
@@ -1835,7 +1835,7 @@ mod tests {
             ctrl_alt_z(&mut a);
             ticks(&mut a);
             assert_eq!((&a.state.session.project.channels[0], name(&a)), (&new, Some(crate::osc3::LEMON_TRIO.to_string())));
-            assert_eq!(a.state.hosted_rows.iter().filter(|&&r| r == 0).count(), 1);
+            assert_eq!(a.state.session.hosted_rows.iter().filter(|&&r| r == 0).count(), 1);
         }
     }
 

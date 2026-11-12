@@ -226,16 +226,16 @@ impl App {
 
     /// The built-in plugins plus the last scan's, and the user's choices. False when there is no scan cache yet.
     pub fn load_plugins(&mut self) -> bool {
-        let (owner, scale) = (self.plugins.owner, self.plugins.scale);
-        self.plugins = crate::plugins::Plugins::builtins();
-        (self.plugins.owner, self.plugins.scale) = (owner, scale);
+        let (owner, scale) = (self.state.session.plugins.owner, self.state.session.plugins.scale);
+        self.state.session.plugins = crate::plugins::Plugins::builtins();
+        (self.state.session.plugins.owner, self.state.session.plugins.scale) = (owner, scale);
         let db = &mut self.state.plugdb;
         db.prefs = db::Prefs::load();
         let cached = db::Cache::load();
         let found = cached.is_some();
         db.cache = cached.unwrap_or_default();
-        self.plugins.merge(&self.state.plugdb.cache);
-        self.state.plugdb.rebuild(&self.plugins);
+        self.state.session.plugins.merge(&self.state.plugdb.cache);
+        self.state.plugdb.rebuild(&self.state.session.plugins);
         found
     }
 
@@ -289,11 +289,11 @@ impl App {
     fn apply_scan(&mut self, cache: Cache) {
         let report = db::compare(&self.state.plugdb.cache, &cache);
         cache.save();
-        self.plugins.merge(&cache);
+        self.state.session.plugins.merge(&cache);
         let db = &mut self.state.plugdb;
         db.cache = cache;
         db.progress = None;
-        db.rebuild(&self.plugins);
+        db.rebuild(&self.state.session.plugins);
         self.state.message = Some(report.message());
         self.invalidate();
     }
@@ -301,7 +301,7 @@ impl App {
     /// The user changed a plugin choice: saved, and the lists follow.
     pub(crate) fn prefs_changed(&mut self) {
         self.state.plugdb.prefs.save();
-        self.state.plugdb.rebuild(&self.plugins);
+        self.state.plugdb.rebuild(&self.state.session.plugins);
         self.invalidate();
     }
 }

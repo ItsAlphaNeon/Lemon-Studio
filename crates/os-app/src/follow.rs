@@ -42,9 +42,10 @@ pub fn before(s: &State) -> Before {
     Before { clips: s.playlist.sel.iter().filter_map(|&i| clips.get(i).map(|c| c.id.0)).collect(), rack: RackView::now(s) }
 }
 
-/// The views brought in line with what the session changed since `b`.
-pub fn after(s: &mut State, b: Before) {
+/// The views brought in line with what the session changed since `b`; whether the window has to be drawn again.
+pub fn after(s: &mut State, b: Before) -> bool {
     let t = std::mem::take(&mut s.session.touched);
+    let repaint = t.repaint;
     for v in t.views {
         view(s, v);
     }
@@ -73,6 +74,7 @@ pub fn after(s: &mut State, b: Before) {
             v.put(s);
         }
     }
+    repaint
 }
 
 fn view(s: &mut State, v: crate::session::View) {
@@ -113,7 +115,8 @@ fn view(s: &mut State, v: crate::session::View) {
 pub fn around<R>(s: &mut State, f: impl FnOnce(&mut State) -> R) -> R {
     let b = before(s);
     let r = f(s);
-    after(s, b);
+    // The input that led here draws the window again anyway (`App::host` asks for the hosting's own).
+    let _ = after(s, b);
     r
 }
 

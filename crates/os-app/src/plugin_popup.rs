@@ -78,11 +78,11 @@ impl App {
                 self.state.playlist.popup = None;
             }
             if id != m.id {
-                self.plugins.menu_done(k, id, None);
+                self.state.session.plugins.menu_done(k, id, None);
             }
         }
         if !holds(&p, m.id) {
-            self.plugins.menu_done(key, m.id, None);
+            self.state.session.plugins.menu_done(key, m.id, None);
             return false;
         }
         self.state.playlist.popup = Some(p);
@@ -96,7 +96,7 @@ impl App {
         let Some((key, id)) = self.plugin_menu else { return };
         let shown = self.state.playlist.popup.as_ref().is_some_and(|p| holds(p, id));
         // An instance busy on the audio thread is taken as still showing its editor.
-        let editor = self.plugins.hosted.get(&key).is_some_and(|h| h.plugin.try_lock().map_or(true, |p| p.editor_open()));
+        let editor = self.state.session.plugins.hosted.get(&key).is_some_and(|h| h.plugin.try_lock().map_or(true, |p| p.editor_open()));
         if shown && editor {
             return;
         }
@@ -105,7 +105,7 @@ impl App {
             self.invalidate();
         }
         self.plugin_menu = None;
-        self.plugins.menu_done(key, id, None);
+        self.state.session.plugins.menu_done(key, id, None);
     }
 
     /// An entry picked in a plugin's menu (`Cmd::PluginMenu`, the popup already closed): the plugin runs it now, on the
@@ -114,7 +114,7 @@ impl App {
         if self.plugin_menu.is_some_and(|(_, m)| m == id) {
             self.plugin_menu = None;
         }
-        self.plugins.menu_done(key, id, Some(pick));
+        self.state.session.plugins.menu_done(key, id, Some(pick));
         self.invalidate();
     }
 }
@@ -272,7 +272,7 @@ mod tests {
         let done = Arc::new(Mutex::new(Vec::new()));
         let desc = crate::plugins::builtin()[0].desc.clone();
         let fake = Arc::new(Mutex::new(Fake { desc, done: done.clone(), automate: Vec::new(), editor: true, asks: None }));
-        a.plugins.hosted.insert(0, Hosted::new(fake.clone()));
+        a.state.session.plugins.hosted.insert(0, Hosted::new(fake.clone()));
         (a, fake, done)
     }
 
@@ -338,7 +338,7 @@ mod tests {
     fn a_menu_without_a_window_closes_unpicked() {
         let (mut a, fake, done) = app();
         fake.lock().unwrap().asks = Some(menu(4));
-        let requests = a.plugins.idle(|_| None);
+        let requests = a.state.session.plugins.idle(|_| None);
         assert!(!requests.iter().any(|r| matches!(r, crate::plugins::Request::PluginMenu(..))));
         assert_eq!(*done.lock().unwrap(), [(4, None)]);
         assert!(fake.lock().unwrap().asks.is_none());

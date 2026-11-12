@@ -164,13 +164,13 @@ mod tests {
     #[test]
     fn the_hosted_sampler_sees_it() {
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         let r = sampler_row(&app);
         app.plugin_tick();
-        assert!(app.state.hosted_rows.contains(&r), "Lemon Sampler hosts the row");
+        assert!(app.state.session.hosted_rows.contains(&r), "Lemon Sampler hosts the row");
         let keep_disk = |app: &App| {
-            let st = app.plugins.state(r).expect("state");
+            let st = app.state.session.plugins.state(r).expect("state");
             let (_, json) = crate::plugins::state_json(&st);
             serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"]["keep_disk"]["bool"].as_bool()
         };
@@ -178,7 +178,7 @@ mod tests {
         let p = wav("hosted", 48000, 2, 30 * 48000);
         sample_chosen(&mut app, r, p.clone());
         app.plugin_tick();
-        assert_eq!(app.plugins.sampler_path(r).as_deref(), Some(p.to_string_lossy().as_ref()));
+        assert_eq!(app.state.session.plugins.sampler_path(r).as_deref(), Some(p.to_string_lossy().as_ref()));
         assert_eq!(keep_disk(&app), Some(true));
         ctrl_z(&mut app.state);
         app.plugin_tick();

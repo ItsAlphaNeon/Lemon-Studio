@@ -70,12 +70,12 @@ pub fn tokens(app: &App) -> Vec<Token> {
     z.iter()
         .filter_map(|&w| match w {
             Win::Plugin => Some(Token::Channel(s.plugin_channel)),
-            Win::Hosted(k) => app.plugins.hosted.get(&k).filter(|h| h.window.is_some()).map(|_| Token::Plugin(k)),
+            Win::Hosted(k) => app.state.session.plugins.hosted.get(&k).filter(|h| h.window.is_some()).map(|_| Token::Plugin(k)),
             w => NAMES.iter().any(|(x, _)| *x == w).then_some(Token::Win(w)),
         })
         .chain(
             // Plugin windows of their own (not in the window stack): after the rest.
-            app.plugins.hosted.iter().filter(|(k, h)| h.window.is_some() && !z.contains(&Win::Hosted(**k))).map(|(k, _)| Token::Plugin(*k)),
+            app.state.session.plugins.hosted.iter().filter(|(k, h)| h.window.is_some() && !z.contains(&Win::Hosted(**k))).map(|(k, _)| Token::Plugin(*k)),
         )
         .collect()
 }
@@ -118,13 +118,13 @@ impl App {
             self.session_plugins.clear();
         }
         while let Some(&k) = self.session_plugins.first() {
-            if !self.plugins.hosted.contains_key(&k) {
+            if !self.state.session.plugins.hosted.contains_key(&k) {
                 break;
             }
             self.session_plugins.remove(0);
             match crate::plugins::fx_of(k) {
                 Some((track, slot)) => self.open_fx(track, slot),
-                None => self.state.pending_open = Some(k),
+                None => self.state.session.pending_open = Some(k),
             }
             // One a tick: `pending_open` holds one.
             break;

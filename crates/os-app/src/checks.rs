@@ -51,9 +51,9 @@ fn open(path: &std::path::Path) -> App {
         crate::rt::enable_in_tests();
     }
     let mut app = App::new(None);
-    app.plugins = crate::plugins::Plugins::default();
-    app.plugins.available = crate::plugins::builtin();
-    app.plugins.effects = crate::plugins::builtin_effects();
+    app.state.session.plugins = crate::plugins::Plugins::default();
+    app.state.session.plugins.available = crate::plugins::builtin();
+    app.state.session.plugins.effects = crate::plugins::builtin_effects();
     let t0 = Instant::now();
     app.open(path.into());
     while app.loading() && t0.elapsed() < Duration::from_secs(180) {
@@ -62,7 +62,7 @@ fn open(path: &std::path::Path) -> App {
     }
     // `OS_CHECK_REPLACE=<plugin>=<plugin>`: the channels of the first plugin get the second, as Replace ▸ gives it.
     if let Some((from, to)) = std::env::var("OS_CHECK_REPLACE").ok().as_deref().and_then(|v| v.split_once('=')) {
-        let index = app.plugins.index_of(to).unwrap_or_else(|| panic!("no plugin {to}"));
+        let index = app.state.session.plugins.index_of(to).unwrap_or_else(|| panic!("no plugin {to}"));
         let rows: Vec<usize> = (0..app.state.session.project.channels.len())
             .filter(|&r| {
                 let ch = &app.state.session.project.channels[r];
@@ -77,7 +77,7 @@ fn open(path: &std::path::Path) -> App {
     }
     // Mixer effects are hosted a few ticks after loading.
     run(&mut app, Duration::from_millis(500));
-    eprintln!("{}: loaded in {:.1} s, {} plugins hosted", path.display(), t0.elapsed().as_secs_f64(), app.plugins.hosted.len());
+    eprintln!("{}: loaded in {:.1} s, {} plugins hosted", path.display(), t0.elapsed().as_secs_f64(), app.state.session.plugins.hosted.len());
     app
 }
 

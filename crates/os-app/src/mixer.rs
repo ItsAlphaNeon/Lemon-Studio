@@ -422,7 +422,7 @@ pub(crate) fn slot_help(app: &App, slot: u8) -> Option<String> {
     let s = &app.state;
     let t = s.selected_mixer;
     let p = track(&s.session, t)?.slots.get(usize::from(slot))?.as_ref()?;
-    match app.plugins.hosted.get(&crate::plugins::fx_key(t, slot)) {
+    match app.state.session.plugins.hosted.get(&crate::plugins::fx_key(t, slot)) {
         Some(h) => {
             let p = h.plugin.lock().ok()?;
             let own = crate::plugins::builtin_effects().iter().chain(&crate::plugins::builtin()).any(|a| a.desc.id == p.desc().id);
@@ -442,11 +442,11 @@ pub const SCALES: [u16; 5] = [100, 125, 150, 175, 200];
 /// the hosted plugin's window and editor, radio items; greyed for an effect the engine plays itself (no editor).
 fn scaling_menu(app: &App, slot: u8) -> PItem {
     let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
-    let now = app.plugins.editor_scales.get(&key).map(|k| (k * 100.0).round() as u16);
+    let now = app.state.session.plugins.editor_scales.get(&key).map(|k| (k * 100.0).round() as u16);
     let mut items = vec![PItem::new("Main", Cmd::Mixer(MCmd::SlotScale(slot, None))).mark(Mark::Radio(now.is_none()))];
     items.extend(SCALES.iter().map(|&p| PItem::new(format!("{p}%"), Cmd::Mixer(MCmd::SlotScale(slot, Some(p)))).mark(Mark::Radio(now == Some(p)))));
     let it = PItem::sub("Scaling", items);
-    if app.plugins.hosted.contains_key(&key) { it } else { it.off() }
+    if app.state.session.plugins.hosted.contains_key(&key) { it } else { it.off() }
 }
 
 /// View ▸ Waveforms on or off; the waveforms start empty.
@@ -1404,13 +1404,13 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     if let MCmd::SlotScale(slot, pct) = c {
         let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
-        app.plugins.set_editor_scale(key, pct.map(|p| f32::from(p) / 100.0));
+        app.state.session.plugins.set_editor_scale(key, pct.map(|p| f32::from(p) / 100.0));
         return None;
     }
     // A track's state takes its effects' settings from their instances.
     if let MCmd::SaveState(n) = c {
         let mut proj = app.state.session.project.clone();
-        crate::project_plugins::store_hosted(&mut proj, &app.plugins);
+        crate::project_plugins::store_hosted(&mut proj, &app.state.session.plugins);
         let m = proj.mixer.iter().find(|m| m.index == n)?;
         return Some(match crate::mixer_state::save(&crate::mixer_state::TrackState::of(m), &name(&app.state.session, n)) {
             Ok(p) => format!("Saved the mixer track state \"{}\"", p.file_stem().unwrap_or_default().to_string_lossy()),
@@ -1429,7 +1429,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     }
     // Wrap in container and Wrap all in container: one step, with the remote control links they move (`App::wrap_slot`).
     if let MCmd::Wrap(slot, all) = c {
-        crate::container::store_members(app.state.session.project.get_mut(), &app.plugins);
+        crate::container::store_members(app.state.session.project.get_mut(), &app.state.session.plugins);
         return app.wrap_slot(slot, all);
     }
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
@@ -1464,7 +1464,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     if let Some(name) = step {
         // The containers' members as their windows left them: what the step keeps and an undo brings back.
         if matches!(c, MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberAddInst(..) | MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..)) {
-            crate::container::store_members(app.state.session.project.get_mut(), &app.plugins);
+            crate::container::store_members(app.state.session.project.get_mut(), &app.state.session.plugins);
         }
         return crate::control::edit_app(app, name, Region::Project, |app| run_now(app, c));
     }
@@ -1754,7 +1754,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::AddEffect(slot, index) => {
             let t = s.selected_mixer;
-            let Some(nm) = app.plugins.effects.get(index).map(|a| a.desc.name.clone()) else { return None };
+            let Some(nm) = s.session.plugins.effects.get(index).map(|a| a.desc.name.clone()) else { return None };
             if let Some(m) = track_mut(&mut s.session, t) {
                 m.slots[usize::from(slot)] = Some(crate::plugins::new_slot(&nm));
                 m.slot_on[usize::from(slot)] = true;
@@ -1872,7 +1872,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::SlotSidechain(slot, port) => {
             let t = s.selected_mixer;
-            if crate::project_plugins::set_slot_sidechain(s.session.project.get_mut(), &app.plugins, t, slot, port) {
+            if crate::project_plugins::set_slot_sidechain(s.session.project.get_mut(), &s.session.plugins, t, slot, port) {
                 changed(&mut s.session);
                 None
             } else {
@@ -2003,8 +2003,8 @@ impl App {
                 waiting.retain(|w| !matches!(*w, FxReq::Create { track: t, slot: s, .. } if (t, s) == (track, slot)));
             }
             if let FxReq::Create { index, .. } = r {
-                if !self.plugins.effect_ready(index) {
-                    let name = self.plugins.effects.get(index).map(|a| a.desc.name.clone()).unwrap_or_default();
+                if !self.state.session.plugins.effect_ready(index) {
+                    let name = self.state.session.plugins.effects.get(index).map(|a| a.desc.name.clone()).unwrap_or_default();
                     let msg = format!("Trying {name} before its first load...");
                     if self.state.message.as_deref() != Some(msg.as_str()) {
                         self.state.message = Some(msg);
@@ -2016,9 +2016,9 @@ impl App {
             }
             done = true;
             match r {
-                FxReq::Create { track, slot, index, state } => match self.plugins.create_effect(track, slot, index, state.as_deref()) {
+                FxReq::Create { track, slot, index, state } => match self.state.session.plugins.create_effect(track, slot, index, state.as_deref()) {
                     Ok(_) => {
-                        self.plugins.added(crate::plugins::fx_key(track, slot));
+                        self.state.session.plugins.added(crate::plugins::fx_key(track, slot));
                         relink = true;
                         self.open_fx(track, slot);
                     }
@@ -2031,22 +2031,22 @@ impl App {
                 },
                 FxReq::Toggle { track, slot } => {
                     let key = crate::plugins::fx_key(track, slot);
-                    if !self.plugins.close_if_open(key) {
+                    if !self.state.session.plugins.close_if_open(key) {
                         self.open_fx(track, slot);
                     }
                 }
                 FxReq::Show { track, slot } => self.open_fx(track, slot),
                 FxReq::Delete { track, slot } => {
                     let key = crate::plugins::fx_key(track, slot);
-                    if self.plugins.hosted.contains_key(&key) {
+                    if self.state.session.plugins.hosted.contains_key(&key) {
                         // Kept for an undo that brings the slot back (`control::host`).
-                        self.plugins.keep(key);
-                        self.plugins.drop_key(key);
+                        self.state.session.plugins.keep(key);
+                        self.state.session.plugins.drop_key(key);
                         relink = true;
                     }
                 }
                 FxReq::Remap(map) => {
-                    self.plugins.remap_fx(&|t, k| Some(map.iter().find(|(a, _)| *a == (t, k)).map_or((t, k), |&(_, b)| b)));
+                    self.state.session.plugins.remap_fx(&|t, k| Some(map.iter().find(|(a, _)| *a == (t, k)).map_or((t, k), |&(_, b)| b)));
                     relink = true;
                 }
             }
@@ -2054,7 +2054,7 @@ impl App {
         waiting.append(&mut self.state.session.fx_requests);
         self.state.session.fx_requests = waiting;
         if relink {
-            self.transport.set_effects(self.plugins.effects());
+            self.transport.set_effects(self.state.session.plugins.effects());
             self.state.session.dirty = true;
         }
         if done {
@@ -2097,14 +2097,14 @@ impl App {
         use tesla::state::{from_plugin_state, plugin_state, Saved};
         let empty = first_tesla(&self.state.session, t).and_then(|k| {
             let key = crate::plugins::fx_key(t, k);
-            let saved = self.plugins.state(key).and_then(|b| from_plugin_state(&b)).filter(|s| s.sample.is_empty())?;
+            let saved = self.state.session.plugins.state(key).and_then(|b| from_plugin_state(&b)).filter(|s| s.sample.is_empty())?;
             Some((k, key, saved))
         });
         let saved = match empty {
             Some((k, key, mut saved)) => {
                 set(&mut saved);
-                if self.plugins.set_state(key, &plugin_state(&saved)) {
-                    self.plugins.mark_edited(key);
+                if self.state.session.plugins.set_state(key, &plugin_state(&saved)) {
+                    self.state.session.plugins.mark_edited(key);
                     self.state.session.fx_requests.push(FxReq::Show { track: t, slot: k });
                     changed(&mut self.state.session);
                     self.invalidate();
@@ -2126,7 +2126,7 @@ impl App {
     fn add_tesla(&mut self, t: u16, state: Option<Vec<u8>>) -> bool {
         use crate::plugins::TESLA;
         let s = &mut self.state;
-        let Some(index) = self.plugins.effect_index(TESLA) else {
+        let Some(index) = s.session.plugins.effect_index(TESLA) else {
             s.message = Some(format!("{TESLA} is not available"));
             self.invalidate();
             return false;
@@ -2189,7 +2189,7 @@ impl App {
             crate::container::show(&mut self.state, track, slot);
             return;
         }
-        if !self.plugins.hosted.contains_key(&key) {
+        if !self.state.session.plugins.hosted.contains_key(&key) {
             self.state.message = Some("This slot's plugin is not hosted yet".into());
             return;
         }
@@ -2200,7 +2200,7 @@ impl App {
         #[cfg(plugin_windows)]
         {
             let info = fx_info(&self.state.session.project, key);
-            match info.map(|i| self.plugins.open_window(key, i)) {
+            match info.map(|i| self.state.session.plugins.open_window(key, i)) {
                 Some(Ok(())) => {
                     self.state.raise(crate::app::Win::Hosted(key));
                     self.select_window_track(key);
@@ -2649,7 +2649,7 @@ mod tests {
     #[test]
     fn slot_commands_without_plugins() {
         let mut a = app();
-        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        a.state.session.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
         select(&mut a.state, 2, false);
         run(&mut a, MCmd::AddEffect(0, 0));
         assert_eq!(slot_name(&a.state.session, 2, 0).as_deref(), Some("Test FX"));
@@ -2672,7 +2672,7 @@ mod tests {
         use crate::typein::Target as T;
         use os_model::target::{self, MIXER_PAN, MIXER_VOLUME, SLOT_MIX};
         let mut a = app();
-        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        a.state.session.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
         select(&mut a.state, 3, false);
         run(&mut a, MCmd::AddEffect(0, 0));
         crate::playlist::automation_channel(&mut a.state, target::slot_param(3, 0, 5), "FX", Vec::new());
@@ -2986,7 +2986,7 @@ mod tests {
     fn open_audio_editor_and_record_sets_up_a_logger() {
         use tesla::state::{from_plugin_state, plugin_state, Saved, WHEN_ON_PLAY};
         let mut a = app();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let logger = |b: &[u8]| from_plugin_state(b).map(|s| (s.rec.when, s.rec.max, s.rec.append, s.rec.slave, s.rec.armed));
         let want = Some((WHEN_ON_PLAY, 3, true, true, true));
         assert!(track_items(&a.state, 2).iter().any(|i| i.label == "Open audio editor and record" && i.enabled));
@@ -2997,19 +2997,19 @@ mod tests {
         assert_eq!(logger(&st), want);
         // An empty Tesla already there (hosted with its defaults) is set up in place and shown.
         a.state.session.fx_requests.clear();
-        a.plugins.create_effect(2, 0, index, None).unwrap();
+        a.state.session.plugins.create_effect(2, 0, index, None).unwrap();
         let key = crate::plugins::fx_key(2, 0);
-        assert_eq!(logger(&a.plugins.state(key).unwrap()).map(|r| r.4), Some(false));
+        assert_eq!(logger(&a.state.session.plugins.state(key).unwrap()).map(|r| r.4), Some(false));
         run(&mut a, MCmd::AudioEditorRecord(2));
         assert_eq!(a.state.session.fx_requests, vec![FxReq::Show { track: 2, slot: 0 }]);
-        assert_eq!(logger(&a.plugins.state(key).unwrap()), want);
+        assert_eq!(logger(&a.state.session.plugins.state(key).unwrap()), want);
         // One holding a sample: a new Tesla in the next free slot.
         a.state.session.fx_requests.clear();
         let sample = tesla::sample::Sample::from_channels(44100, vec![vec![0.5; 100]], tesla::sample::Format::Int16);
-        assert!(a.plugins.set_state(key, &plugin_state(&Saved { sample, ..Saved::default() })));
+        assert!(a.state.session.plugins.set_state(key, &plugin_state(&Saved { sample, ..Saved::default() })));
         run(&mut a, MCmd::AudioEditorRecord(2));
         assert!(matches!(a.state.session.fx_requests.as_slice(), [FxReq::Create { track: 2, slot: 1, state: Some(_), .. }]));
-        assert_eq!(from_plugin_state(&a.plugins.state(key).unwrap()).map(|s| s.sample.frames()), Some(100), "left alone");
+        assert_eq!(from_plugin_state(&a.state.session.plugins.state(key).unwrap()).map(|s| s.sample.frames()), Some(100), "left alone");
     }
 
     /// Open audio editor adds a Tesla as one step that undo takes away, as FL's adds Edison ("insert effect plugin",
@@ -3017,7 +3017,7 @@ mod tests {
     #[test]
     fn an_added_audio_editor_is_an_undo_step() {
         let mut a = app();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let steps = a.state.session.history.at();
         run(&mut a, MCmd::AudioEditor(2));
         assert_eq!(teslas(&a.state.session), [(2, 0)]);
@@ -3037,7 +3037,7 @@ mod tests {
     #[test]
     fn remove_all_audio_editors_asks_first() {
         let mut a = app();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let label = "Remove all (audio editor) instances";
         assert!(options_menu(&a.state, 0.0, 0.0).items.iter().any(|i| i.label == label && i.enabled));
         assert_eq!(run(&mut a, MCmd::RemoveTeslas).as_deref(), Some("No audio editors in the mixer"));
@@ -3216,7 +3216,7 @@ mod tests {
     #[test]
     fn slot_colors_follow_the_slot() {
         let mut a = app();
-        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        a.state.session.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
         select(&mut a.state, 2, false);
         run(&mut a, MCmd::AddEffect(0, 0));
         let m = slot_menu(&a, 0, 0.0, 0.0);
@@ -3249,7 +3249,7 @@ mod tests {
         use crate::icons::Icon;
         use crate::playlist::TRACK_ICON_KEY;
         let mut a = app();
-        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        a.state.session.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
         select(&mut a.state, 2, false);
         run(&mut a, MCmd::AddEffect(0, 0));
         let pick = |m: &Popup, label: &str| {
@@ -3280,7 +3280,7 @@ mod tests {
     #[test]
     fn auto_bypass_switches_per_slot_and_for_all() {
         let mut a = app();
-        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        a.state.session.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
         select(&mut a.state, 2, false);
         run(&mut a, MCmd::AddEffect(0, 0));
         run(&mut a, MCmd::AddEffect(1, 0));
@@ -3376,7 +3376,7 @@ mod tests {
     #[test]
     fn slot_help_opens_the_plugins_page() {
         let mut a = app();
-        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        a.state.session.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
         select(&mut a.state, 2, false);
         run(&mut a, MCmd::AddEffect(0, 0));
         track_mut(&mut a.state.session, 2).unwrap().slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Balance".into(), state: os_engine::effects::balance::Settings { v: [0, 128] }.to_state() });

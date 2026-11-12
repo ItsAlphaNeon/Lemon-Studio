@@ -251,14 +251,14 @@ impl App {
         let (mut copied, mut failed) = (0, 0);
         for row in 0..self.state.session.project.channels.len() {
             // A hosted Lemon Sampler's own sample is the one it plays; it loads the copy too.
-            let hosted = self.plugins.sampler_path(row);
+            let hosted = self.state.session.plugins.sampler_path(row);
             let listed = self.state.session.project.channels[row].sample_path.as_deref().filter(|p| !p.is_empty()).map(crate::plugins::resolve_sample);
             let Some(src) = hosted.clone().filter(|p| !p.is_empty()).or(listed) else { continue };
             match copy_sample(Path::new(&src), dir) {
                 Ok(to) => {
                     let to = to.to_string_lossy().into_owned();
                     if hosted.is_some_and(|h| h != to) {
-                        self.plugins.load_sample(row, &to);
+                        self.state.session.plugins.load_sample(row, &to);
                     }
                     self.state.session.project.get_mut().channels[row].sample_path = Some(to);
                     copied += 1;
@@ -370,14 +370,14 @@ impl App {
             self.state.session.path = Some(file_after.clone());
             // The samples inside the folder are found in the renamed one.
             for row in 0..self.state.session.project.channels.len() {
-                let hosted = self.plugins.sampler_path(row);
+                let hosted = self.state.session.plugins.sampler_path(row);
                 let ch = &mut self.state.session.project.get_mut().channels[row];
                 let Some(p) = hosted.clone().filter(|p| !p.is_empty()).or_else(|| ch.sample_path.as_deref().map(crate::plugins::resolve_sample)) else { continue };
                 let Ok(rel) = Path::new(&p).strip_prefix(old) else { continue };
                 let moved = new.join(rel).to_string_lossy().into_owned();
                 ch.sample_path = Some(moved.clone());
                 if hosted.is_some() {
-                    self.plugins.load_sample(row, &moved);
+                    self.state.session.plugins.load_sample(row, &moved);
                 }
             }
             if let Some(df) = self.state.session.project.get_mut().data_folder.as_mut().filter(|d| d.choice == DataFolder::SPECIFIED) {

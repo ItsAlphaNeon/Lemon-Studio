@@ -136,7 +136,7 @@ impl App {
             // File ▸ Browser extra search folders (spec §4).
             BCmd::Configure => self.open_settings(crate::views::settings::FILE),
             BCmd::Star(key) => {
-                let Some(d) = self.plugins.descriptor(key) else { return Some("No plugin here".into()) };
+                let Some(d) = self.state.session.plugins.descriptor(key) else { return Some("No plugin here".into()) };
                 return Some(self.star_plugin(&d.uid(), &d.name));
             }
         }
@@ -770,8 +770,8 @@ impl App {
             }
             RowCmd::ChannelWindow => {
                 let Item::Channel(i) = row.item else { return None };
-                if s.hosted_rows.contains(&i) {
-                    s.pending_open = Some(i);
+                if s.session.hosted_rows.contains(&i) {
+                    s.session.pending_open = Some(i);
                 } else {
                     self.open_channel_window(i);
                 }
@@ -1109,7 +1109,7 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         Item::Preset(ref p) => {
             let key = s.selected_channel;
             let it = PItem::new("Load into selected channel", Cmd::Preset(crate::presets::PCmd::Load(key, p.into())));
-            items.push(if s.hosted_rows.contains(&key) { it } else { it.off() });
+            items.push(if s.session.hosted_rows.contains(&key) { it } else { it.off() });
         }
         Item::None | Item::File(_) | Item::Param(..) | Item::Container => {}
     }
@@ -1327,8 +1327,8 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let dir = folder("browser_favs", &["Kick 01.wav", "readme.txt"]);
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::builtins();
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.browser_folders.push(dir.clone());
         app.state.browser_open.insert(view::disk_key(&dir));
         let fav = |items: &[PItem]| items.iter().find(|i| i.label == "Favorite").map(|i| i.mark);
@@ -1343,7 +1343,7 @@ mod tests {
         app.state.browser_open.extend(["2:Plugin library/Generators".into(), "2:Plugin library/Generators/Sampler".into()]);
         assert_eq!(fav(&right(&mut app, &mut c, |r| r.item == Item::Generator(0))), Some(Mark::Check(false)));
         app.browser_cmd(BCmd::Row(RowCmd::Favorite));
-        let uid = app.plugins.available[0].desc.uid();
+        let uid = app.state.session.plugins.available[0].desc.uid();
         assert!(app.state.plugdb.prefs.is_favorite(&uid) && app.state.plugdb.lists.gens.iter().any(|e| e.index == 0 && e.favorite));
         // The Favorites tab: the plugin, then the file, each starred; the file row shows its info.
         app.act(Action::BrowserTab(view::FAV_TAB));
@@ -1363,7 +1363,7 @@ mod tests {
         // "Add to plugin database (flag as favorite)" of a hosted plugin toggles the same star.
         app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         let row = 0;
-        app.plugins.create(row, 0).expect("Lemon Sampler hosted");
+        app.state.session.plugins.create(row, 0).expect("Lemon Sampler hosted");
         assert!(app.browser_cmd(BCmd::Star(row)).is_some_and(|m| m.contains("no longer")));
         assert!(!app.state.plugdb.prefs.is_favorite(&uid));
         assert_eq!(labels(&app), Vec::<String>::new());
@@ -1428,8 +1428,8 @@ mod tests {
         let Ok(mut c) = Canvas::new(1280, 900, 1.0) else { return };
         let dir = folder("browser_shots", &["Drums/Kicks/Big Kick.wav", "Drums/Kicks/Kick Tail.wav", "Drums/Snares/Kick Snare Combo.wav", "readme.txt"]);
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::builtins();
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.browser_folders.push(dir.clone());
         let mut shot = |app: &mut App, name: &str| {
             app.paint(&mut c, None);
@@ -1458,8 +1458,8 @@ mod tests {
     #[test]
     fn plugin_database_by_category_and_format() {
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::builtins();
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.browser_tab = view::PLUGIN_TAB;
         let root = "2:Plugin library";
         app.state.browser_open.extend([format!("{root}/Generators"), format!("{root}/{}", view::INSTALLED), format!("{root}/{}/Generators", view::INSTALLED)]);

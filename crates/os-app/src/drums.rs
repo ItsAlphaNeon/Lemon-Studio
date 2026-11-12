@@ -67,41 +67,48 @@ impl crate::app::App {
     /// instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose instance
     /// failed is not tried again.
     pub(crate) fn sync_drums(&mut self) {
-        if crate::project_plugins::native_first() {
-            return;
-        }
-        let Some(index) = self.plugins.index_of(LEMON_DRUMS) else { return };
-        let pending = self.state.pending_plugin.map(|(r, _)| r);
-        let rows: Vec<usize> = (0..self.state.session.project.channels.len())
-            .filter(|&r| is_fpc(&self.state.session.project.channels[r]))
-            .filter(|&r| !self.state.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && Some(r) != pending)
-            .collect();
-        if rows.is_empty() {
-            return;
-        }
-        let mut added = false;
-        for row in rows {
-            if self.past_deadline() {
-                break;
-            }
-            let fl = self.state.session.project.channels[row].plugin_state.clone().unwrap_or_default();
-            match self.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
-                Ok(_) => {
-                    self.state.hosted_rows.push(row);
-                    added = true;
-                }
-                Err(e) => {
-                    self.wrap_failed.push(row);
-                    self.state.message = Some(format!("{LEMON_DRUMS}: {e}"));
-                }
-            }
-        }
-        if added {
-            self.transport.set_instruments(self.plugins.instruments());
-            self.state.session.dirty = true;
-        }
-        self.invalidate();
+        self.host(sync_drums);
     }
+}
+
+/// Hosts Lemon Drum Sampler on every FPC channel without an instance, started from the channel's saved state (a new
+/// instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose instance
+/// failed is not tried again.
+pub(crate) fn sync_drums(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    if crate::project_plugins::native_first() {
+        return;
+    }
+    let Some(index) = s.plugins.index_of(LEMON_DRUMS) else { return };
+    let pending = s.pending_plugin.map(|(r, _)| r);
+    let rows: Vec<usize> = (0..s.project.channels.len())
+        .filter(|&r| is_fpc(&s.project.channels[r]))
+        .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let mut added = false;
+    for row in rows {
+        if s.plugins.past_deadline() {
+            break;
+        }
+        let fl = s.project.channels[row].plugin_state.clone().unwrap_or_default();
+        match s.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
+            Ok(_) => {
+                s.hosted_rows.push(row);
+                added = true;
+            }
+            Err(e) => {
+                s.plugins.wrap_failed.push(row);
+                s.touched.views.push(crate::session::View::Message(format!("{LEMON_DRUMS}: {e}")));
+            }
+        }
+    }
+    if added {
+        transport.set_instruments(s.plugins.instruments());
+        s.dirty = true;
+    }
+    s.touched.repaint = true;
 }
 
 #[cfg(test)]
@@ -191,28 +198,28 @@ mod tests {
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.available = crate::plugins::builtin();
         let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_DRUMS);
         let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_DRUMS));
         a.sync_drums();
-        assert!(a.state.hosted_rows.contains(&row));
+        assert!(a.state.session.hosted_rows.contains(&row));
         a.save_to(file.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&file).unwrap()).unwrap()).unwrap();
         assert_eq!(saved.channels[row].plugin_state.as_deref(), Some(lemon_drum_sampler::params::default_state().as_slice()));
 
         let fl = state_for(&path);
-        assert!(a.plugins.set_state(row, &plugin_state(&fl)));
+        assert!(a.state.session.plugins.set_state(row, &plugin_state(&fl)));
         a.save_to(file.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&file).unwrap()).unwrap()).unwrap();
         assert_eq!(saved.channels[row].plugin_state.as_deref(), Some(fl.as_slice()));
         let mut b = App::new(None);
-        b.plugins.available = crate::plugins::builtin();
+        b.state.session.plugins.available = crate::plugins::builtin();
         b.open(file.clone());
         b.sync_drums();
-        assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
-        assert_eq!(b.plugins.drums_file_state(row), Some(fl.clone()));
+        assert!(b.state.session.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert_eq!(b.state.session.plugins.drums_file_state(row), Some(fl.clone()));
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_file(path);
     }
@@ -228,12 +235,12 @@ mod tests {
         let rows: Vec<usize> = (0..project.channels.len()).filter(|&r| is_fpc(&project.channels[r])).collect();
         assert_eq!(rows.len(), 2, "two FPC channels");
         let mut a = App::new(None);
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.available = crate::plugins::builtin();
         a.open(path.clone());
         a.sync_drums();
         for &r in &rows {
             let fl = project.channels[r].plugin_state.clone().expect("an FPC state");
-            assert_eq!(a.plugins.drums_file_state(r).as_ref(), Some(&fl), "channel {r}");
+            assert_eq!(a.state.session.plugins.drums_file_state(r).as_ref(), Some(&fl), "channel {r}");
             let st = State::parse(&fl).expect("a readable state");
             let pads: Vec<_> = st.pads().into_iter().filter(|p| p.sounding().next().is_some()).collect();
             assert!(pads.len() >= 8, "channel {r}: {} pads with samples", pads.len());
@@ -249,7 +256,7 @@ mod tests {
                 p.sounding().all(|(_, l)| os_engine::sample::load_shared(std::path::Path::new(&crate::plugins::resolve_sample(&l.path))).is_ok())
             };
             let pad = pads.iter().find(decodes).unwrap_or_else(|| panic!("channel {r}: a pad whose samples open"));
-            let inst = a.plugins.hosted[&r].plugin.clone() as SharedInstrument;
+            let inst = a.state.session.plugins.hosted[&r].plugin.clone() as SharedInstrument;
             let mut i = inst.lock().unwrap();
             let key = u8::try_from(pad.key).unwrap();
             i.note_on(0, key, 100.0 / 128.0);

@@ -22,9 +22,9 @@ fn open_load() {
         return;
     };
     let mut app = crate::app::App::new(None);
-    app.plugins = crate::plugins::Plugins::default();
-    app.plugins.available = crate::plugins::builtin();
-    app.plugins.effects = crate::plugins::builtin_effects();
+    app.state.session.plugins = crate::plugins::Plugins::default();
+    app.state.session.plugins.available = crate::plugins::builtin();
+    app.state.session.plugins.effects = crate::plugins::builtin_effects();
     let mut canvas = Canvas::new(1920, 1080, 1.0).unwrap();
     let t0 = Instant::now();
     app.open(path.into());

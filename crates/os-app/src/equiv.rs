@@ -159,7 +159,7 @@ impl Fp {
         Fp(vec![
             ("project", project_hash(&s.session.project)),
             ("side", side),
-            ("lemon", hash(&crate::lemon_state::saved_form(s, &app.plugins))),
+            ("lemon", hash(&crate::lemon_state::saved_form(s, &app.state.session.plugins))),
             ("history", history),
             // Whether the engine holds the project as it is: 0 nothing sent yet, 1 in step, 2 behind. Not the copy
             // itself: what it was last handed while playing starts or pauses follows the audio thread's timing.
@@ -375,9 +375,9 @@ impl Rig {
         let copy = work.join(project.file_name().expect("a file"));
         std::fs::copy(project, &copy).expect("copy the project");
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
-        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins.effects = crate::plugins::builtin_effects();
         app.open(copy);
         let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0, used: Default::default(), edits: Default::default(), aimed: None, seen: Default::default(), id_fault: None };
         rig.settle();
@@ -734,9 +734,9 @@ fn ids_fault(p: &os_model::Project) -> Option<String> {
 /// A second app with `path` opened, as the rig opens (builtin plugins only), loading waited for.
 fn open_app(path: &Path) -> App {
     let mut a = App::new(None);
-    a.plugins = crate::plugins::Plugins::default();
-    a.plugins.available = crate::plugins::builtin();
-    a.plugins.effects = crate::plugins::builtin_effects();
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.available = crate::plugins::builtin();
+    a.state.session.plugins.effects = crate::plugins::builtin_effects();
     a.open(path.to_path_buf());
     let t0 = Instant::now();
     while a.loading() && t0.elapsed() < Duration::from_secs(180) {

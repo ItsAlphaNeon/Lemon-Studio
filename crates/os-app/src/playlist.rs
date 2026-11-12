@@ -14,7 +14,7 @@ use std::rc::Rc;
 pub use crate::edit::playlist::*;
 
 use os_model::{
-    target, AutoMode, AutoPoint, Arrangement, Automation, Channel, ChannelKind, Clip, ClipSource, PlaylistTrack, Rgb, TimeMarker,
+    target, AutoMode, AutoPoint, Automation, Channel, ChannelKind, Clip, ClipSource, PlaylistTrack, Rgb, TimeMarker,
 };
 use os_ui::Rect;
 
@@ -2541,7 +2541,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     if let Some(row) = audio {
                         if opens == Some(Some(crate::shortcuts::ClipOpen::Channel)) {
                             s.rack.select_only(row);
-                            s.pending_open = Some(row);
+                            s.session.pending_open = Some(row);
                             app.focus_channel(row);
                         }
                     } else {
@@ -3150,7 +3150,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             // Stretched channels: their Lemon Sampler takes the new stretch settings (§9b).
             for (ch, _) in std::mem::take(&mut s.playlist.stretch_base) {
                 let Some(row) = s.session.project.channels.iter().position(|c| c.index == ch) else { continue };
-                app.plugins.set_sampler_stretch(row, &s.session.project.channels[row].sound);
+                s.session.plugins.set_sampler_stretch(row, &s.session.project.channels[row].sound);
             }
         }
         PlDrag::Marker { i, t0, .. } => {
@@ -3751,7 +3751,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         #[cfg(plugin_windows)]
         Cmd::PluginDetach(row, on) => {
-            app.plugins.set_detached(row, on);
+            app.state.session.plugins.set_detached(row, on);
             app.state.raise(crate::app::Win::Hosted(row));
             app.invalidate();
             return None;
@@ -4945,7 +4945,7 @@ mod tests {
     #[test]
     fn picker_edit_sample_opens_tesla() {
         let mut app = app();
-        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.session.plugins.effects = crate::plugins::builtin_effects();
         app.state.session.project.get_mut().channels[0].kind = os_model::ChannelKind::AudioClip;
         app.state.session.project.get_mut().channels[0].sample_path = None;
         let ch = app.state.session.project.channels[0].index;
@@ -5006,8 +5006,8 @@ mod tests {
     #[test]
     fn slot_window_menu_entries() {
         let mut app = app();
-        app.plugins.effects = crate::plugins::builtin_effects();
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.session.plugins.effects = crate::plugins::builtin_effects();
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         let (t, k) = (3u16, 2u8);
         crate::mixer::track_mut(&mut app.state.session, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));
         app.state.selected_mixer = 5;

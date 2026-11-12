@@ -352,7 +352,7 @@ fn plugin_target(s: &State, page: usize) -> Option<PluginTarget> {
             }
         }
     };
-    let list = s.params.lists.get(&key)?;
+    let list = s.session.params.lists.get(&key)?;
     let mut map: [Option<PluginSlot>; 8] = Default::default();
     let mut mapped = true;
     if sampler {
@@ -410,8 +410,8 @@ fn page_name(pt: &PluginTarget) -> String {
 /// `None` when the instance was not to be had this tick (`plugins::lock_for_tick`): the texts shown stay, read again at
 /// the next tick.
 fn plugin_texts(s: &State, pt: &PluginTarget, meter: Option<&os_host::Meter>) -> Option<[String; 8]> {
-    let list = s.params.lists.get(&pt.key);
-    let plugin = s.params.plugin(pt.key);
+    let list = s.session.params.lists.get(&pt.key);
+    let plugin = s.session.params.plugin(pt.key);
     let p = match &plugin {
         Some(m) => Some(crate::plugins::lock_for_tick(m, meter)?),
         None => None,
@@ -625,7 +625,7 @@ impl App {
     /// The plugin window the encoders opened closes.
     fn close_opened(&mut self) {
         if let Some(row) = self.drive().opened.take() {
-            self.plugins.close_if_open(row);
+            self.state.session.plugins.close_if_open(row);
             self.invalidate();
         }
     }
@@ -1005,7 +1005,7 @@ impl App {
         let Some((index, _, centre, _)) = pt.slots[i].clone() else { return };
         let t = Target::Param(pt.key, index);
         // A parameter of few steps (a switch, a choice) moves a step per detent.
-        let steps_of = self.state.params.lists.get(&pt.key).and_then(|l| l.params.get(index)).map_or(0, |e| e.steps);
+        let steps_of = self.state.session.params.lists.get(&pt.key).and_then(|l| l.params.get(index)).map_or(0, |e| e.steps);
         if (1..=MAX_STEPPED).contains(&steps_of) {
             let n = f64::from(steps_of);
             let at = (self.target_value(t) * n).round() + f64::from(steps);
@@ -1029,8 +1029,8 @@ impl App {
         if self.state.plugin_tabs.hidden(key) {
             self.state.raise(Win::Hosted(key));
         }
-        let id = self.state.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id);
-        if let (Some(id), Some(l)) = (id, self.plugins.hosted.get(&key).and_then(|h| h.link.as_ref())) {
+        let id = self.state.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id);
+        if let (Some(id), Some(l)) = (id, self.state.session.plugins.hosted.get(&key).and_then(|h| h.link.as_ref())) {
             l.reveal(id);
         }
         // Any plugin: the app's own hint says what changes.
@@ -1042,10 +1042,10 @@ impl App {
     fn open_target_window(&mut self, key: usize) {
         if crate::plugins::fx_of(key).is_none() {
             let row = key;
-            let open = self.plugins.window_of(row).is_some();
+            let open = self.state.session.plugins.window_of(row).is_some();
             if !open {
-                if self.state.hosted_rows.contains(&row) {
-                    self.state.pending_open = Some(row);
+                if self.state.session.hosted_rows.contains(&row) {
+                    self.state.session.pending_open = Some(row);
                 } else {
                     self.open_channel_window(row);
                 }
@@ -1250,7 +1250,7 @@ impl App {
         let reread = plugin.as_ref().map(|pt| match &d.plugin_shown {
             Some((at, key, pg, texts)) if *key == pt.key && *pg == pt.page && now.duration_since(*at) < PLUGIN_REREAD
                 && !d.last_turn.iter().flatten().any(|(t, _)| t > at) => (false, texts.clone()),
-            shown => match plugin_texts(s, pt, self.plugins.hosted.get(&pt.key).and_then(|h| h.meter.as_deref())) {
+            shown => match plugin_texts(s, pt, self.state.session.plugins.hosted.get(&pt.key).and_then(|h| h.meter.as_deref())) {
                 Some(texts) => (true, texts),
                 None => (false, shown.as_ref().filter(|(_, key, pg, _)| *key == pt.key && *pg == pt.page).map(|x| x.3.clone()).unwrap_or_default()),
             },

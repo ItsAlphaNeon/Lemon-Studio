@@ -143,7 +143,7 @@ impl App {
     /// Before a save: the project's last changes and every hosted plugin's state as saved, into the journal.
     pub(crate) fn journal_saving(&mut self) {
         self.journal_tick_project();
-        let keys: Vec<usize> = self.plugins.hosted.keys().copied().collect();
+        let keys: Vec<usize> = self.state.session.plugins.hosted.keys().copied().collect();
         for key in keys {
             if !self.journal_plugin(key) {
                 self.journal.retry.push(key);
@@ -232,7 +232,7 @@ impl App {
         let mut read = std::mem::take(&mut self.journal.retry);
         read.extend(closed);
         for &key in &open {
-            let count = self.plugins.hosted.get(&key).and_then(|h| h.attention_count());
+            let count = self.state.session.plugins.hosted.get(&key).and_then(|h| h.attention_count());
             // One that never asks for attention is read each time.
             if count.is_none() || self.journal.attention.get(&key) != count.as_ref() {
                 read.push(key);
@@ -254,7 +254,7 @@ impl App {
     /// The hosted instances whose windows are open (the plugins a user edits).
     fn editing_plugins(&self) -> Vec<usize> {
         #[cfg(plugin_windows)]
-        return self.plugins.hosted.iter().filter(|(_, h)| h.window.is_some()).map(|(&k, _)| k).collect();
+        return self.state.session.plugins.hosted.iter().filter(|(_, h)| h.window.is_some()).map(|(&k, _)| k).collect();
         #[cfg(not(plugin_windows))]
         Vec::new()
     }
@@ -263,7 +263,7 @@ impl App {
     /// audio thread had the instance: not read.
     pub(crate) fn journal_plugin(&mut self, key: usize) -> bool {
         let Some(owner) = crate::control::command::key_owner(&self.state.session, key) else { return true };
-        let Ok(state) = self.plugins.state_if_free(key) else { return false };
+        let Ok(state) = self.state.session.plugins.state_if_free(key) else { return false };
         let Some(state) = state else { return true };
         let hash = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -279,7 +279,7 @@ impl App {
         if !self.journal.known.insert(format!("{hash:016x}")) {
             return true;
         }
-        let plugin = self.plugins.descriptor(key).map(|d| json!({ "name": d.name, "format": d.format.as_str(), "id": d.id }));
+        let plugin = self.state.session.plugins.descriptor(key).map(|d| json!({ "name": d.name, "format": d.format.as_str(), "id": d.id }));
         let place = match crate::plugins::fx_of(key) {
             None => json!({ "channel": self.state.session.project.channels.get(key).map(|c| c.name.clone()) }),
             Some((t, k)) => json!({ "track": t, "slot": k }),
@@ -352,13 +352,13 @@ impl App {
     /// Puts back the state written as entry `seq` of journal `file` into the instance under `key` (Recover from
     /// journal). Returns the status message.
     pub(crate) fn recover_state(&mut self, key: usize, file: &std::path::Path, seq: u64) -> String {
-        let Some(name) = self.plugins.descriptor(key).map(|d| d.name) else { return "No plugin there".into() };
+        let Some(name) = self.state.session.plugins.descriptor(key).map(|d| d.name) else { return "No plugin there".into() };
         let Some(state) = self.journal.state_at(file, seq) else { return format!("That {name} state is no longer in the journal") };
-        if !self.plugins.set_state(key, &state) {
+        if !self.state.session.plugins.set_state(key, &state) {
             return format!("{name} did not take the state");
         }
-        self.plugins.mark_edited(key);
-        self.state.params.reread(key);
+        self.state.session.plugins.mark_edited(key);
+        self.state.session.params.reread(key);
         if !self.journal_plugin(key) {
             self.journal.retry.push(key);
         }
@@ -541,8 +541,8 @@ mod tests {
         assert_eq!(notes[0]["removed"][0]["position"], 0);
         assert_eq!(notes[0]["removed"].as_array().unwrap().len(), 1, "only the moved note");
         // A plugin's state, written once while it stays the same.
-        a.plugins.available = crate::plugins::builtin();
-        a.plugins.create_with(0, a.plugins.index_of(crate::citrus::CITRUS).unwrap(), None).unwrap();
+        a.state.session.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.create_with(0, a.state.session.plugins.index_of(crate::citrus::CITRUS).unwrap(), None).unwrap();
         let mark = a.journal.since(0).1;
         a.journal_plugin(0);
         a.journal_plugin(0);
@@ -550,20 +550,20 @@ mod tests {
         assert_eq!(es.len(), 1, "once while unchanged");
         assert_eq!(es[0]["kind"], "plugin_state");
         let st = unbase64(es[0]["state"].as_str().unwrap()).unwrap();
-        assert_eq!(Some(st), a.plugins.state(0), "the whole state, readable back");
+        assert_eq!(Some(st), a.state.session.plugins.state(0), "the whole state, readable back");
         // Changed, then recovered from the journal: the state it had.
-        let first = a.plugins.state(0).unwrap();
-        let p = a.plugins.param_infos(0).into_iter().find(|p| !p.read_only && !p.bypass && p.max > p.min).unwrap();
+        let first = a.state.session.plugins.state(0).unwrap();
+        let p = a.state.session.plugins.param_infos(0).into_iter().find(|p| !p.read_only && !p.bypass && p.max > p.min).unwrap();
         let v = if (p.default - p.min).abs() > 1e-6 { p.min } else { p.max };
-        assert!(a.plugins.set_param_named(0, &p.name, v));
-        a.plugins.hosted[&0].plugin.lock().unwrap().idle();
-        assert_ne!(a.plugins.state(0).as_ref(), Some(&first), "changed");
+        assert!(a.state.session.plugins.set_param_named(0, &p.name, v));
+        a.state.session.plugins.hosted[&0].plugin.lock().unwrap().idle();
+        assert_ne!(a.state.session.plugins.state(0).as_ref(), Some(&first), "changed");
         a.journal_plugin(0);
-        let name = a.plugins.descriptor(0).unwrap().name;
+        let name = a.state.session.plugins.descriptor(0).unwrap().name;
         let found = a.journal.states_of(&name, 10);
         assert_eq!(found.len(), 2, "both states, newest first");
         let msg = a.recover_state(0, &found[1].file, found[1].seq);
         assert!(msg.ends_with("recovered from the journal"), "{msg}");
-        assert_eq!(a.plugins.state(0), Some(first), "the first state back");
+        assert_eq!(a.state.session.plugins.state(0), Some(first), "the first state back");
     }
 }

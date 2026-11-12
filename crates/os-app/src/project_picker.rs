@@ -142,7 +142,7 @@ mod tests {
         run(&mut app, ProjCmd::Channel(3));
         assert_eq!(app.state.selected_channel, 3);
         assert_eq!(app.state.rack.sel.iter().copied().collect::<Vec<_>>(), [3]);
-        assert_eq!(app.state.pending_open, Some(3), "a sampler channel's window opens once hosted");
+        assert_eq!(app.state.session.pending_open, Some(3), "a sampler channel's window opens once hosted");
     }
 
     /// Ctrl+F8 opens and closes it; the VIEW entry and the toolbar button open it; the button's right click is the

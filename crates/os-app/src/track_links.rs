@@ -465,8 +465,8 @@ mod tests {
         let inst = entry(&items, "Instrument track");
         assert_eq!(inst.children[0].label, "Use existing channel");
         assert!(entry(&inst.children[0].children, "Snare").enabled);
-        app.plugins.available = crate::plugins::builtin();
-        let i = app.plugins.index_of(crate::plugins::LEMON_SAMPLER).expect("the built-in sampler");
+        app.state.session.plugins.available = crate::plugins::builtin();
+        let i = app.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER).expect("the built-in sampler");
         let rows = app.state.session.project.channels.len();
         let steps = app.state.session.history.at();
         let msg = crate::playlist::run(&mut app, Cmd::TrackMode(6, Mode::NewInstrument(i)));

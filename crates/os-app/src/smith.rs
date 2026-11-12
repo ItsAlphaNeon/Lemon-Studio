@@ -85,43 +85,50 @@ impl crate::app::App {
     /// when the channel has none). A row waiting for the picker's own instance is left to it; a row whose instance
     /// failed is not tried again.
     pub(crate) fn sync_smith(&mut self) {
-        // The installed Ogun plays these channels instead (`host_native`).
-        if crate::project_plugins::native_first() {
-            return;
-        }
-        let Some(index) = self.plugins.index_of(SMITH) else { return };
-        let pending = self.state.pending_plugin.map(|(r, _)| r);
-        let rows: Vec<usize> = (0..self.state.session.project.channels.len())
-            .filter(|&r| is_ogun(&self.state.session.project.channels[r]))
-            .filter(|&r| !self.state.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && Some(r) != pending)
-            .collect();
-        if rows.is_empty() {
-            return;
-        }
-        let mut added = false;
-        for row in rows {
-            if self.past_deadline() {
-                break;
-            }
-            let fl = self.state.session.project.channels[row].plugin_state.clone().unwrap_or_default();
-            let st = smith::plugin_state_from_fl(&fl);
-            match self.plugins.create_with(row, index, Some(&st)) {
-                Ok(_) => {
-                    self.state.hosted_rows.push(row);
-                    added = true;
-                }
-                Err(e) => {
-                    self.wrap_failed.push(row);
-                    self.state.message = Some(format!("{SMITH}: {e}"));
-                }
-            }
-        }
-        if added {
-            self.transport.set_instruments(self.plugins.instruments());
-            self.state.session.dirty = true;
-        }
-        self.invalidate();
+        self.host(sync_smith);
     }
+}
+
+/// Hosts Smith on every Ogun channel without an instance, started from the channel's saved state (the default patch
+/// when the channel has none). A row waiting for the picker's own instance is left to it; a row whose instance
+/// failed is not tried again.
+pub(crate) fn sync_smith(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+    // The installed Ogun plays these channels instead (`host_native`).
+    if crate::project_plugins::native_first() {
+        return;
+    }
+    let Some(index) = s.plugins.index_of(SMITH) else { return };
+    let pending = s.pending_plugin.map(|(r, _)| r);
+    let rows: Vec<usize> = (0..s.project.channels.len())
+        .filter(|&r| is_ogun(&s.project.channels[r]))
+        .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    let mut added = false;
+    for row in rows {
+        if s.plugins.past_deadline() {
+            break;
+        }
+        let fl = s.project.channels[row].plugin_state.clone().unwrap_or_default();
+        let st = smith::plugin_state_from_fl(&fl);
+        match s.plugins.create_with(row, index, Some(&st)) {
+            Ok(_) => {
+                s.hosted_rows.push(row);
+                added = true;
+            }
+            Err(e) => {
+                s.plugins.wrap_failed.push(row);
+                s.touched.views.push(crate::session::View::Message(format!("{SMITH}: {e}")));
+            }
+        }
+    }
+    if added {
+        transport.set_instruments(s.plugins.instruments());
+        s.dirty = true;
+    }
+    s.touched.repaint = true;
 }
 
 #[cfg(test)]
@@ -170,30 +177,30 @@ mod tests {
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
-        a.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.available = crate::plugins::builtin();
         let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), SMITH);
         let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(SMITH));
         a.sync_smith();
-        assert!(a.state.hosted_rows.contains(&row));
-        assert_eq!(a.plugins.ogun_file_state(row), Some(Vec::new()));
+        assert!(a.state.session.hosted_rows.contains(&row));
+        assert_eq!(a.state.session.plugins.ogun_file_state(row), Some(Vec::new()));
         a.save_to(path.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         assert_eq!((saved.channels[row].plugin.as_deref(), saved.channels[row].plugin_state.as_deref()), (Some(FILE_NAME), None));
 
         // A patch goes in (as a preset load does), the project is saved and reopened.
         let fl = patch();
-        assert!(a.plugins.set_state(row, &smith::plugin_state_from_fl(&fl)));
+        assert!(a.state.session.plugins.set_state(row, &smith::plugin_state_from_fl(&fl)));
         a.save_to(path.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         assert_eq!(saved.channels[row].plugin_state.as_deref(), Some(fl.as_slice()));
         let mut b = App::new(None);
-        b.plugins.available = crate::plugins::builtin();
+        b.state.session.plugins.available = crate::plugins::builtin();
         b.open(path.clone());
         b.sync_smith();
-        assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
-        assert_eq!(b.plugins.ogun_file_state(row), Some(fl.clone()));
+        assert!(b.state.session.hosted_rows.contains(&row), "{:?}", b.state.message);
+        assert_eq!(b.state.session.plugins.ogun_file_state(row), Some(fl.clone()));
         b.save_to(path.clone());
         let again = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);

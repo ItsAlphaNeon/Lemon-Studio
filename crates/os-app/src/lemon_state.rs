@@ -116,7 +116,7 @@ pub fn saved_form(s: &State, plugins: &Plugins) -> Vec<u8> {
 
 /// Puts the state a `.lemon` file holds into `s` and `plugins` (a project just opened, its ids given). An FLP has
 /// none; its channels and mixer tracks show the icons their numbers stand for instead ([`from_flp`]).
-pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
+pub fn apply(s: &mut State, file: &FlpFile) {
     if !lemon::is_lemon(file) {
         from_flp(s);
         return;
@@ -137,7 +137,7 @@ pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
                 _ => continue,
             };
             if pct > 0 {
-                plugins.editor_scales.insert(key, f32::from(pct) / 100.0);
+                s.session.plugins.editor_scales.insert(key, f32::from(pct) / 100.0);
             }
         }
     }
@@ -568,8 +568,8 @@ mod tests {
         let tracks = &mut s.session.project.get_mut().arrangements[0].tracks;
         tracks[3].clip_lock = Some(os_model::ClipSource::Pattern(1));
         tracks[4].clip_lock = Some(os_model::ClipSource::Channel(0));
-        app.plugins.editor_scales.insert(0, 1.5);
-        app.plugins.editor_scales.insert(crate::plugins::fx_key(3, 2), 1.25);
+        app.state.session.plugins.editor_scales.insert(0, 1.5);
+        app.state.session.plugins.editor_scales.insert(crate::plugins::fx_key(3, 2), 1.25);
         app
     }
 
@@ -601,9 +601,9 @@ mod tests {
         assert_eq!(s.rack.through_off.iter().copied().collect::<Vec<_>>(), [ids[2]]);
         let locks: Vec<_> = s.session.project.arrangements[0].tracks.iter().enumerate().filter_map(|(t, tr)| Some((t, tr.clip_lock?))).collect();
         assert_eq!(locks, [(3, os_model::ClipSource::Pattern(1)), (4, os_model::ClipSource::Channel(0))]);
-        let scales: Vec<(usize, f32)> = back.plugins.editor_scales.iter().map(|(&k, &v)| (k, v)).collect();
+        let scales: Vec<(usize, f32)> = back.state.session.plugins.editor_scales.iter().map(|(&k, &v)| (k, v)).collect();
         assert_eq!(scales, [(0, 1.5), (crate::plugins::fx_key(3, 2), 1.25)]);
-        back.plugins.editor_scales.remove(&0);
+        back.state.session.plugins.editor_scales.remove(&0);
         assert!(back.unsaved(), "a Scaling ▸ change is an unsaved change");
         #[cfg(any(windows, target_os = "macos"))]
         {
@@ -615,7 +615,7 @@ mod tests {
         back.open(flp_path);
         let s = &back.state;
         assert!(!s.session.project.pdc_off && !s.mixer.waveforms && s.mixer.extra);
-        assert!(s.rack.wave_preview.is_empty() && s.rack.through_off.is_empty() && back.plugins.editor_scales.is_empty());
+        assert!(s.rack.wave_preview.is_empty() && s.rack.through_off.is_empty() && back.state.session.plugins.editor_scales.is_empty());
         assert!(s.session.project.arrangements.iter().flat_map(|a| &a.tracks).all(|t| t.clip_lock.is_none()));
         #[cfg(any(windows, target_os = "macos"))]
         assert!(editor_keys());
@@ -650,7 +650,7 @@ mod tests {
         let mut f = file.clone();
         lemon::to_lemon(&mut f, &[Event::new(lemon::NOTE_LOCKS, Value::var([LAYOUT, 1, 0, 0, 0, 0, 99, 0]))]).unwrap();
         let mut s = with_state();
-        apply(&mut s.state, &mut s.plugins, &f);
+        apply(&mut s.state, &f);
         assert_eq!(s.state.rack.note_lock, [None, None]);
         again.open(flp_path);
         assert_eq!(again.state.rack.note_lock, [None, None], "an FLP has no locks");
@@ -788,7 +788,7 @@ mod tests {
         }
         let mut f = file.clone();
         lemon::to_lemon(&mut f, &[Event::new(lemon::SLOT_COLORS, Value::var(b))]).unwrap();
-        apply(&mut s.state, &mut s.plugins, &f);
+        apply(&mut s.state, &f);
         assert_eq!(crate::mixer::slot_colors_of(&s.state.session.project).len(), 1);
         assert_eq!(crate::mixer::slot_colors_of(&s.state.session.project).get(&(2, 0)), Some(&os_model::Rgb::new(10, 200, 30)));
         let _ = std::fs::remove_dir_all(&d);

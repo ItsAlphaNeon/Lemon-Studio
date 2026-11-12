@@ -415,10 +415,13 @@ pub(crate) fn remap_in(s: &mut crate::session::Session, map: &[Option<usize>]) {
     s.touched.views.push(crate::session::View::Rows(map.to_vec()));
 }
 
-/// `remap_ui`'s part in the session: the samples queued for loading follow their rows.
+/// `remap_ui`'s part in the session: the samples queued for loading and the plugin host's requests follow their rows.
 pub(crate) fn remap_session(s: &mut crate::session::Session, map: &[Option<usize>]) {
     let m = |r: usize| map.get(r).copied().flatten();
     s.sample_loads = std::mem::take(&mut s.sample_loads).into_iter().filter_map(|(r, p)| m(r).map(|r| (r, p))).collect();
+    s.hosted_rows = s.hosted_rows.iter().filter_map(|&r| m(r)).collect();
+    s.pending_open = s.pending_open.and_then(m);
+    s.pending_plugin = s.pending_plugin.and_then(|(r, i)| m(r).map(|r| (r, i)));
     s.dirty = true;
 }
 

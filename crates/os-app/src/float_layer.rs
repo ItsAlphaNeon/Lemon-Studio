@@ -288,16 +288,16 @@ mod tests {
         let mut c = os_ui::Canvas::new(1920, 1080, 1.0).unwrap();
         let mut a = App::new(None);
         a.state.bar.tiling = true;
-        a.plugins.available = crate::plugins::builtin();
-        a.plugins.scale = 1.0;
+        a.state.session.plugins.available = crate::plugins::builtin();
+        a.state.session.plugins.scale = 1.0;
         a.state.session.project.get_mut().channels.push(Default::default());
         a.paint(&mut c, None);
         crate::prefs::set_check(&crate::prefs::PLUGIN_TABS, false);
         for (row, name) in [(0, "Zest"), (1, crate::citrus::CITRUS)] {
-            let index = a.plugins.index_of(name).unwrap();
-            a.plugins.create_with(row, index, None).unwrap();
+            let index = a.state.session.plugins.index_of(name).unwrap();
+            a.state.session.plugins.create_with(row, index, None).unwrap();
             let info = ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-            a.plugins.open_window(row, info).unwrap();
+            a.state.session.plugins.open_window(row, info).unwrap();
         }
         let t0 = Instant::now();
         while !(0..2).all(|r| a.state.embeds.get(&r).is_some_and(|e| e.view().frame.is_some())) && t0.elapsed() < Duration::from_secs(5) {
