@@ -65,7 +65,7 @@ fn run(app: &mut App, title: &'static str, file: &Path, job: impl FnOnce(&Atomic
         return;
     }
     let name = file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    app.zipping = Some(Zipping { rx, title, name, done, total });
+    app.state.session.zipping = Some(Zipping { rx, title, name, done, total });
     app.invalidate();
 }
 
@@ -73,7 +73,7 @@ fn run(app: &mut App, title: &'static str, file: &Path, job: impl FnOnce(&Atomic
 
 /// Opens a zipped project: unzips it (`unzip`), then opens the project file in it.
 pub fn import(app: &mut App, zip: PathBuf) {
-    if app.zipping.is_some() {
+    if app.state.session.zipping.is_some() {
         return;
     }
     let fallback = crate::app::theme_dir().map(|d| d.join(UNZIP_DIR));
@@ -300,7 +300,7 @@ fn write_zip(zip: &Path, flp: &[u8], pack: &Pack, done: &AtomicU64, total: &Atom
 
 /// Export zipped project... chose `zip`: writes it on a thread of its own.
 pub fn export(app: &mut App, zip: PathBuf) {
-    if app.zipping.is_some() {
+    if app.state.session.zipping.is_some() {
         return;
     }
     let zip = if zip.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
@@ -328,7 +328,7 @@ pub fn export(app: &mut App, zip: PathBuf) {
 
 /// Follows the running job: when it is over, an unzipped project opens, a written zip is reported.
 pub fn tick(app: &mut App) {
-    let Some(z) = &app.zipping else { return };
+    let Some(z) = &app.state.session.zipping else { return };
     let result = match z.rx.try_recv() {
         Ok(r) => r,
         Err(TryRecvError::Empty) => {
@@ -337,7 +337,7 @@ pub fn tick(app: &mut App) {
         }
         Err(TryRecvError::Disconnected) => Err("stopped".into()),
     };
-    let z = app.zipping.take().expect("checked");
+    let z = app.state.session.zipping.take().expect("checked");
     match result {
         Ok(Done::Unzipped(project)) => {
             app.open(project);

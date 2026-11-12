@@ -2396,7 +2396,7 @@ fn restretch_all(app: &mut App) -> Option<String> {
     let rows: Vec<usize> = (0..app.state.session.project.channels.len()).filter(|&r| tempo_fitted(&app.state.session.project.channels[r])).collect();
     if let Some(fits) = crate::playlist::audio_fits(&app.state.session) {
         if crate::playlist::fit_clips(&mut app.state.session.project.get_mut().arrangements, &fits) {
-            crate::playlist::fit_clips(&mut app.saved.0.arrangements, &fits);
+            crate::playlist::fit_clips(&mut app.state.session.saved.0.arrangements, &fits);
             app.damage_win(Win::Playlist);
         }
     }
@@ -2818,7 +2818,7 @@ mod tests {
         assert!(a.unsaved());
         toggle_lock(&mut a.state.session, 1);
         assert!(crate::history::undo(&mut a.state).is_some(), "the project step undone");
-        assert_eq!(a.state.session.project.main_volume, a.saved.0.main_volume);
+        assert_eq!(a.state.session.project.main_volume, a.state.session.saved.0.main_volume);
         assert_eq!(locked_rows(&a.state.session.project), [0, 1].into(), "the locks stay");
     }
 

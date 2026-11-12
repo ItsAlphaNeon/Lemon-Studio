@@ -584,7 +584,8 @@ pub(crate) fn params_in(ses: &mut crate::session::Session) -> Tick {
     for (&key, h) in &ses.plugins.hosted {
         // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
         // is read again next tick (its events stay queued).
-        let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
+        let editor = ses.plugins.editors.get(&key).is_some_and(|e| e.open());
+        let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen), editor) else { continue };
         // A plugin's parameters can take a few ms to read (`lock_for_tick`).
         let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };
         let t0 = std::time::Instant::now();

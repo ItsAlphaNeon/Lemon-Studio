@@ -343,7 +343,7 @@ fn an_effect_added_by_a_command_is_hosted_without_a_window() {
     let key = crate::plugins::fx_key(1, 2);
     assert_eq!(a.state.session.plugins.hosted.get(&key).map(|h| h.owner.0), Some(slot));
     #[cfg(plugin_windows)]
-    assert!(a.state.session.plugins.hosted[&key].window.is_none());
+    assert!(a.state.session.plugins.editors.get(&key).is_none_or(|e| e.window.is_none()));
     crate::history::undo(&mut a.state);
     a.plugin_tick();
     assert!(!a.state.session.plugins.hosted.contains_key(&key), "undone: the instance goes");
@@ -1055,11 +1055,11 @@ fn idle_ticks_hand_playback_nothing() {
     for _ in 0..3 {
         a.tick();
     }
-    let n = a.transport.updates_for_tests();
+    let n = a.state.session.transport.updates_for_tests();
     for _ in 0..20 {
         a.tick();
     }
-    assert_eq!(a.transport.updates_for_tests(), n, "an idle tick writes nothing");
+    assert_eq!(a.state.session.transport.updates_for_tests(), n, "an idle tick writes nothing");
 }
 
 #[test]
@@ -1068,13 +1068,13 @@ fn a_write_reaches_playback_with_no_flag_set() {
     for _ in 0..3 {
         a.tick();
     }
-    let n = a.transport.updates_for_tests();
+    let n = a.state.session.transport.updates_for_tests();
     a.state.session.dirty = false;
     a.state.session.project.get_mut().main_volume = Some(1234);
     a.tick();
-    assert_eq!(a.transport.updates_for_tests(), n + 1);
+    assert_eq!(a.state.session.transport.updates_for_tests(), n + 1);
     a.tick();
-    assert_eq!(a.transport.updates_for_tests(), n + 1, "once");
+    assert_eq!(a.state.session.transport.updates_for_tests(), n + 1, "once");
 }
 
 #[test]
@@ -1083,9 +1083,9 @@ fn a_proposal_hands_playback_nothing() {
     for _ in 0..3 {
         a.tick();
     }
-    let n = a.transport.updates_for_tests();
+    let n = a.state.session.transport.updates_for_tests();
     let kick = ids(&a).0[0];
     propose(&mut a.state, &test_client(), "Boom", vec![cmd(json!({"op": "set_channel", "channel": kick, "name": "Boom"}))]).unwrap();
     a.tick();
-    assert_eq!(a.transport.updates_for_tests(), n, "the dry run took its change back");
+    assert_eq!(a.state.session.transport.updates_for_tests(), n, "the dry run took its change back");
 }

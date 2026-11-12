@@ -55,6 +55,30 @@ pub struct Session {
     pub pending_open: Option<usize>,
     /// The hosted plugins' parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
+    /// MIDI controller input, and its held notes: (key, rack row they started on).
+    pub(crate) midi: crate::midi_in::MidiIn,
+    pub(crate) midi_out: crate::midi_out::MidiOut,
+    /// The control plane's socket (`--control`), when it listens.
+    pub(crate) rpc_server: Option<crate::control::server::Server>,
+    /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
+    pub(crate) loading: Option<crate::loading::Loading>,
+    /// The opened project's missing samples and plugins (`crate::missing`).
+    pub(crate) missing: crate::missing::Missing,
+    /// A zipped project being unzipped or written (`crate::zipped`): its panel shows, input waits.
+    pub(crate) zipping: Option<crate::zipped::Zipping>,
+    /// An export is rendering (FILE > Export): its first file's name and progress (0..1); the same panel shows, input
+    /// waits.
+    pub(crate) export: Option<(String, f32)>,
+    /// The running export is PATTERNS > Quick render as audio clip / Render and replace's (spec: ui/pattern-render.md):
+    /// what to do with its file.
+    pub(crate) pattern_render: Option<crate::pattern_render::Pending>,
+    /// The project, tempo and Lemon Studio's own saved state (`lemon_state::saved_form`) as last opened, saved or
+    /// created: anything else has unsaved changes.
+    pub(crate) saved: (os_model::Project, f64, Vec<u8>),
+    /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
+    pub(crate) backup: crate::backup::Backup,
+    /// Playback: the audio thread and what it plays (`crate::transport`). Last, so it goes after the plugins it plays.
+    pub transport: crate::transport::Transport,
 }
 
 /// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
@@ -115,7 +139,7 @@ impl View {
 }
 
 impl Session {
-    pub fn new(project: os_model::Project) -> Self {
+    pub fn new(project: os_model::Project, transport: crate::transport::Transport) -> Self {
         Session {
             project: crate::locked::Locked::new(project),
             history: Default::default(),
@@ -138,6 +162,17 @@ impl Session {
             pending_plugin: None,
             pending_open: None,
             params: Default::default(),
+            midi: crate::midi_in::MidiIn::none(),
+            midi_out: crate::midi_out::MidiOut::none(),
+            loading: None,
+            missing: Default::default(),
+            zipping: None,
+            export: None,
+            pattern_render: None,
+            saved: (os_model::Project::default(), 0.0, Vec::new()),
+            backup: Default::default(),
+            rpc_server: None,
+            transport,
         }
     }
 

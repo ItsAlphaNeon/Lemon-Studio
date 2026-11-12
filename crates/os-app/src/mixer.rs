@@ -2054,7 +2054,7 @@ impl App {
         waiting.append(&mut self.state.session.fx_requests);
         self.state.session.fx_requests = waiting;
         if relink {
-            self.transport.set_effects(self.state.session.plugins.effects());
+            self.state.session.transport.set_effects(self.state.session.plugins.effects());
             self.state.session.dirty = true;
         }
         if done {

@@ -128,7 +128,7 @@ impl App {
             return self.invalidate();
         }
         capture::set_last_input(&input);
-        if self.transport.playing() {
+        if self.state.session.transport.playing() {
             self.act(Action::Stop);
         }
         let stream = if input.asio {
@@ -182,7 +182,7 @@ impl App {
     pub(crate) fn one_click_tick(&mut self) {
         let Some(r) = self.audio_rec.as_mut() else { return };
         if !r.ending {
-            let t = &self.transport;
+            let t = &self.state.session.transport;
             let live = t.playing() && !t.paused() && self.state.rec.count.is_none();
             let device = t.opened();
             let rate = r.rate.or(device.as_ref().map(|d| d.rate)).unwrap_or(48000);
@@ -317,11 +317,11 @@ mod tests {
         let channels = app.state.session.project.channels.len();
         app.one_click_begin(Input { device: "Test ASIO".into(), asio: true, first: 0, stereo: true }, None, false).unwrap();
         assert!(app.state.rec.audio && capture().on());
-        app.transport.pretend_at(0.0, true);
+        app.state.session.transport.pretend_at(0.0, true);
         app.state.rec.armed = true;
         app.one_click_tick();
         capture().push(4800, |ch, f| if ch == 0 { f as f32 / 4800.0 } else { 0.5 });
-        app.transport.stop();
+        app.state.session.transport.stop();
         for _ in 0..500 {
             app.one_click_tick();
             if app.audio_rec.is_none() {
@@ -357,11 +357,11 @@ mod tests {
         let channels = app.state.session.project.channels.len();
         let clips = app.state.session.project.arrangement().map_or(0, |a| a.clips.len());
         app.one_click_begin(Input { device: "Test ASIO".into(), asio: true, first: 0, stereo: true }, None, true).unwrap();
-        app.transport.pretend_at(0.0, true);
+        app.state.session.transport.pretend_at(0.0, true);
         app.state.rec.armed = true;
         app.one_click_tick();
         capture().push(4800, |ch, f| if ch == 0 { f as f32 / 4800.0 } else { 0.5 });
-        app.transport.stop();
+        app.state.session.transport.stop();
         for _ in 0..500 {
             app.one_click_tick();
             if app.audio_rec.is_none() {

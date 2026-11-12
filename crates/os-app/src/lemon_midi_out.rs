@@ -591,7 +591,7 @@ impl crate::app::App {
             s.session.control.settle(s.session.project.get_mut());
             s.session.dirty = true;
             app.sync_midi_outs();
-            app.transport.set_instruments(app.state.session.plugins.instruments());
+            app.state.session.transport.set_instruments(app.state.session.plugins.instruments());
             app.open_channel_window(rows[0]);
         });
         let n = rows.len();
@@ -601,7 +601,7 @@ impl crate::app::App {
 
 /// Every MIDI Out channel has its instrument, with the channel's settings and levels; rows that are no longer MIDI
 /// Out channels lose theirs. Runs every tick.
-pub(crate) fn sync_midi_outs(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+pub(crate) fn sync_midi_outs(s: &mut crate::session::Session) {
     let rows: Vec<(usize, Live)> = s.project.channels.iter().enumerate().filter(|(_, c)| is_midi_out(c)).map(|(r, c)| (r, Live::of(c))).collect();
     let outs = &mut s.plugins.midi_outs;
     if rows.is_empty() && outs.is_empty() {
@@ -626,7 +626,7 @@ pub(crate) fn sync_midi_outs(s: &mut crate::session::Session, transport: &crate:
         }
     }
     if changed {
-        transport.set_instruments(s.plugins.instruments());
+        s.transport.set_instruments(s.plugins.instruments());
     }
 }
 

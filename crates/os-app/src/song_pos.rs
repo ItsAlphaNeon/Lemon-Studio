@@ -74,7 +74,7 @@ pub fn hint(s: &State, pos: u32) -> String {
 impl App {
     /// The position the slider's input starts from (the playhead while this mode plays).
     pub(crate) fn song_pos_now(&self) -> u32 {
-        let t = &self.transport;
+        let t = &self.state.session.transport;
         let dragging = matches!(self.drag, Some(Drag::SongPos { .. }));
         shown(&self.state, t.playing(), t.song(), t.tick(), dragging)
     }
@@ -104,7 +104,7 @@ impl App {
     /// Playback follows a moved position, as after a click in the playlist ruler (spec: ui/playlist.md §7): the song
     /// plays on from there (a paused pattern stops); a playing pattern starts again from its new position.
     fn song_pos_restart(&mut self) {
-        let tp = &self.transport;
+        let tp = &self.state.session.transport;
         if !tp.playing() {
             return;
         }
@@ -119,7 +119,7 @@ impl App {
                 tp.stop();
             }
         } else if !tp.song() && !tp.paused() {
-            self.transport.stop();
+            self.state.session.transport.stop();
             self.start_playback();
         }
     }

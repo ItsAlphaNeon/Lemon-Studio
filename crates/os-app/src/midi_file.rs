@@ -664,7 +664,7 @@ impl App {
         }
         let parts = imp.parts.len();
         if o.new_project {
-            self.transport.silence();
+            self.state.session.transport.silence();
             self.reset_hosted();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;

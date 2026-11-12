@@ -25,7 +25,7 @@ impl App {
         if !plan.row_map.is_empty() {
             self.typing_release_all();
         }
-        self.host(|s, t| follow_apply(s, t, plan));
+        self.host(|s| follow_apply(s, plan));
     }
 }
 
@@ -79,11 +79,11 @@ pub(crate) fn follow_plan(ses: &crate::session::Session, rows_too: bool, fx_too:
 
 /// `follow_plan` carried out: instances moved to where their channels and slots are, those back from an undo hosted
 /// again from their kept state.
-pub(crate) fn follow_apply(ses: &mut crate::session::Session, transport: &crate::transport::Transport, plan: FollowPlan) {
+pub(crate) fn follow_apply(ses: &mut crate::session::Session, plan: FollowPlan) {
     let FollowPlan { rows, slots, row_map, fx_map, rows_too, fx_too } = plan;
     if !row_map.is_empty() {
         let m = |r: usize| row_map.get(&r).copied().unwrap_or(Some(r));
-        crate::app::remap_rows_in(ses, transport, &m);
+        crate::app::remap_rows_in(ses, &m);
     }
     if rows_too {
         // The rows hosted are the instances' rows: an edit may have moved or dropped rows of the list without
@@ -92,7 +92,7 @@ pub(crate) fn follow_apply(ses: &mut crate::session::Session, transport: &crate:
     }
     if !fx_map.is_empty() {
         ses.plugins.remap_fx(&|t, k| fx_map.get(&(t, k)).copied().unwrap_or(Some((t, k))));
-        transport.set_effects(ses.plugins.effects());
+        ses.transport.set_effects(ses.plugins.effects());
         ses.dirty = true;
     }
 
@@ -142,7 +142,7 @@ pub(crate) fn follow_apply(ses: &mut crate::session::Session, transport: &crate:
             Some((t, k)) if fx => ses.plugins.effect_index_of_uid(&uid).is_some_and(|i| ses.plugins.create_effect(t, k, i, Some(&state)).is_ok()),
             None if !fx => match ses.plugins.index_of_uid(&uid) {
                 Some(i) => {
-                    crate::app::plugin_paste_in(ses, transport, key, i, &state);
+                    crate::app::plugin_paste_in(ses, key, i, &state);
                     ses.plugins.hosted.contains_key(&key)
                 }
                 None => false,
@@ -153,7 +153,7 @@ pub(crate) fn follow_apply(ses: &mut crate::session::Session, transport: &crate:
             h.owner = id;
         }
         if made && fx {
-            transport.set_effects(ses.plugins.effects());
+            ses.transport.set_effects(ses.plugins.effects());
         }
         ses.dirty = true;
     }
@@ -169,7 +169,7 @@ impl App {
 
 /// The plugins commands added (`HostReq`) are hosted, and the parameter values they set reach their instances.
 /// Unlike the plugin menus, nothing opens a window: the user didn't ask for one.
-pub(crate) fn host_commands(ses: &mut crate::session::Session, transport: &crate::transport::Transport) {
+pub(crate) fn host_commands(ses: &mut crate::session::Session) {
     let reqs = std::mem::take(&mut ses.control.host);
     let mut relink = (false, false);
     for r in reqs {
@@ -212,7 +212,7 @@ pub(crate) fn host_commands(ses: &mut crate::session::Session, transport: &crate
     }
     // Owners for what was just hosted.
     if relink.0 || relink.1 {
-        follow_apply(ses, transport, follow_plan(&*ses, false, false));
+        follow_apply(ses, follow_plan(&*ses, false, false));
     }
     for row in std::mem::take(&mut ses.control.misc) {
         crate::misc::follow_in(ses, row);
@@ -252,10 +252,10 @@ pub(crate) fn host_commands(ses: &mut crate::session::Session, transport: &crate
         ses.touched.repaint = true;
     }
     if relink.0 {
-        transport.set_instruments(ses.plugins.instruments());
+        ses.transport.set_instruments(ses.plugins.instruments());
     }
     if relink.1 {
-        transport.set_effects(ses.plugins.effects());
+        ses.transport.set_effects(ses.plugins.effects());
     }
     if relink.0 || relink.1 {
         ses.dirty = true;
@@ -265,7 +265,7 @@ pub(crate) fn host_commands(ses: &mut crate::session::Session, transport: &crate
 
 /// Samples loaded into channels (`Session::sample_loads`) reach their hosted Lemon Sampler, with the root note and
 /// stretch settings the load may have read from the file (`rack::read_tags`).
-pub(crate) fn sample_loads(ses: &mut crate::session::Session, _: &crate::transport::Transport) {
+pub(crate) fn sample_loads(ses: &mut crate::session::Session) {
     for (row, path) in std::mem::take(&mut ses.sample_loads) {
         if !ses.hosted_rows.contains(&row) {
             continue;
@@ -283,7 +283,7 @@ pub(crate) fn sample_loads(ses: &mut crate::session::Session, _: &crate::transpo
 /// The plugin the user picked for a channel (`Session::pending_plugin`) is hosted, once it is ready; until then the
 /// index of the plugin waited for (a native generator waits for its first check in a child process,
 /// `Plugins::instrument_ready`).
-pub(crate) fn pending_plugin(ses: &mut crate::session::Session, transport: &crate::transport::Transport) -> Option<usize> {
+pub(crate) fn pending_plugin(ses: &mut crate::session::Session) -> Option<usize> {
     let (row, index) = ses.pending_plugin?;
     if !ses.plugins.instrument_ready(index) {
         return Some(index);
@@ -293,7 +293,7 @@ pub(crate) fn pending_plugin(ses: &mut crate::session::Session, transport: &crat
         Ok(name) => {
             ses.plugins.added(row);
             ses.hosted_rows.push(row);
-            transport.set_instruments(ses.plugins.instruments());
+            ses.transport.set_instruments(ses.plugins.instruments());
             ses.dirty = true;
             ses.pending_open = Some(row);
             format!("Added {name}")

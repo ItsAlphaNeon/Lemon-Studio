@@ -185,7 +185,7 @@ impl App {
     /// pattern as an export does, with its progress panel; `pattern_render_done` takes the file. A pattern without
     /// notes is refused in a warning box, as the Export form refuses one.
     pub(crate) fn render_pattern(&mut self, replace: bool) {
-        if self.export.is_some() {
+        if self.state.session.export.is_some() {
             return;
         }
         let s = &self.state;
@@ -201,7 +201,7 @@ impl App {
         }
         let stem = file_stem(&dir, &crate::patterns::name_of(&s.session, pattern));
         let job = job(s, &dir, &stem);
-        self.pattern_render = Some(Pending { pattern, replace });
+        self.state.session.pattern_render = Some(Pending { pattern, replace });
         self.start_export(job, false);
     }
 
@@ -209,7 +209,7 @@ impl App {
     /// pattern, the Rendered folder, the pattern's file name and the quick render's choices, changeable before the
     /// render; Export renders and makes the channel as Quick render does.
     pub(crate) fn open_render_form(&mut self) {
-        if self.export.is_some() {
+        if self.state.session.export.is_some() {
             return;
         }
         let s = &self.state;
@@ -239,7 +239,7 @@ impl App {
             return self.invalidate();
         }
         let job = self.export_job(f);
-        self.pattern_render = Some(Pending { pattern: self.state.pattern().max(1), replace: false });
+        self.state.session.pattern_render = Some(Pending { pattern: self.state.pattern().max(1), replace: false });
         self.start_export(job, false);
     }
 
@@ -364,7 +364,7 @@ mod tests {
     /// Runs the render the command started, as the app's tick follows an export.
     fn finish(app: &mut App) {
         let t0 = std::time::Instant::now();
-        while app.export.is_some() {
+        while app.state.session.export.is_some() {
             assert!(t0.elapsed().as_secs() < 60, "the render did not finish");
             app.export_tick();
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -382,9 +382,9 @@ mod tests {
         crate::patterns::pat_mut(&mut app.state.session, 1).name = Some("Verse".into());
         let channels = app.state.session.project.channels.len();
         app.pattern_cmd(crate::patterns::Cmd::QuickRender);
-        assert!(app.export.is_some() && app.pattern_render.is_some(), "the export's progress shows");
+        assert!(app.state.session.export.is_some() && app.state.session.pattern_render.is_some(), "the export's progress shows");
         finish(&mut app);
-        assert!(app.pattern_render.is_none(), "{:?}", app.state.message);
+        assert!(app.state.session.pattern_render.is_none(), "{:?}", app.state.message);
         assert_eq!(app.state.session.project.channels.len(), channels + 1, "{:?}", app.state.message);
         let ch = app.state.session.project.channels.last().unwrap();
         assert_eq!((ch.kind, ch.name.as_deref(), ch.mixer_track), (ChannelKind::AudioClip, Some("Verse"), 0));
@@ -398,7 +398,7 @@ mod tests {
         // A pattern with no notes: a warning, no render.
         app.state.set_pattern(2);
         app.pattern_cmd(crate::patterns::Cmd::QuickRender);
-        assert!(app.export.is_none() && app.pattern_render.is_none() && !app.state.dialogs.is_empty());
+        assert!(app.state.session.export.is_none() && app.state.session.pattern_render.is_none() && !app.state.dialogs.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -418,7 +418,7 @@ mod tests {
         assert!(f.to_clip && !f.song && !f.song_ok && f.o.formats == [true, false, false, false] && !f.o.master_fx);
         assert_eq!((f.folder.clone(), f.name.text.as_str()), (d.join("Rendered"), "Pattern 1"));
         app.dialog_click(crate::dialog::DHit::Form(crate::project_forms::FHit::Main));
-        assert!(app.state.dialogs.is_empty() && app.pattern_render.is_some());
+        assert!(app.state.dialogs.is_empty() && app.state.session.pattern_render.is_some());
         finish(&mut app);
         assert_eq!(app.state.session.project.channels.len(), channels + 1, "{:?}", app.state.message);
         let ch = app.state.session.project.channels.last().unwrap();

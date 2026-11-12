@@ -342,7 +342,7 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             format!("Ghost channels {}", if s.piano.ghosts { "on" } else { "off" })
         }
         NCmd::AddMarker => {
-            let tick = if app.transport.playing() && !app.transport.song() { app.transport.tick() as u32 } else { app.state.piano.marker };
+            let tick = if app.state.session.transport.playing() && !app.state.session.transport.song() { app.state.session.transport.tick() as u32 } else { app.state.piano.marker };
             return Some(add_marker(&mut app.state, tick));
         }
         NCmd::Snap(p) => return Some(crate::piano_snap::set(s, p)),

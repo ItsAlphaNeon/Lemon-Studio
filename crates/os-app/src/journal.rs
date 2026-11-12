@@ -254,7 +254,7 @@ impl App {
     /// The hosted instances whose windows are open (the plugins a user edits).
     fn editing_plugins(&self) -> Vec<usize> {
         #[cfg(plugin_windows)]
-        return self.state.session.plugins.hosted.iter().filter(|(_, h)| h.window.is_some()).map(|(&k, _)| k).collect();
+        return self.state.session.plugins.editors.iter().filter(|(_, e)| e.window.is_some()).map(|(&k, _)| k).collect();
         #[cfg(not(plugin_windows))]
         Vec::new()
     }

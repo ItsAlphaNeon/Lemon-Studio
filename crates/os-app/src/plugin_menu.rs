@@ -250,7 +250,7 @@ fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<Stri
     app.state.session.plugins.keep(row);
     app.state.session.plugins.drop_key(row);
     app.state.session.hosted_rows.retain(|&r| r != row);
-    app.transport.set_instruments(app.state.session.plugins.instruments());
+    app.state.session.transport.set_instruments(app.state.session.plugins.instruments());
     let s = &mut app.state;
     let ch = &mut s.session.project.get_mut().channels[row];
     ch.plugin_state = None;

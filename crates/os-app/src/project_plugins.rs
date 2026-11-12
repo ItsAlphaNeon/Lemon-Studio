@@ -340,7 +340,7 @@ impl crate::app::App {
     /// that does not give the file's state back byte for byte keeps the file's bytes on a save (`Hosted::keep_file_state`).
     pub(crate) fn host_native(&mut self) {
         let scanning = self.sweep.is_some();
-        self.host(|s, t| host_native(s, t, scanning));
+        self.host(|s| host_native(s, scanning));
     }
 
     /// The hidden preference changed (or the native host with it): the channels and slots a built-in recreation can
@@ -383,8 +383,8 @@ impl crate::app::App {
             list.retain(|k| !all.contains(k));
         }
         if !swap.is_empty() {
-            self.transport.set_instruments(self.state.session.plugins.instruments());
-            self.transport.set_effects(self.state.session.plugins.effects());
+            self.state.session.transport.set_instruments(self.state.session.plugins.instruments());
+            self.state.session.transport.set_effects(self.state.session.plugins.effects());
             self.state.session.dirty = true;
         }
         self.invalidate();
@@ -394,7 +394,7 @@ impl crate::app::App {
 }
 
 /// `App::host_native` in the session; `scanning`: a plugin scan is running.
-pub(crate) fn host_native(ses: &mut crate::session::Session, transport: &crate::transport::Transport, scanning: bool) {
+pub(crate) fn host_native(ses: &mut crate::session::Session, scanning: bool) {
     use crate::plugins::fx_key;
     let pending = ses.pending_plugin.map(|(r, _)| r);
     let mut added = (false, false);
@@ -482,10 +482,10 @@ pub(crate) fn host_native(ses: &mut crate::session::Session, transport: &crate::
         }
     }
     if added.0 {
-        transport.set_instruments(ses.plugins.instruments());
+        ses.transport.set_instruments(ses.plugins.instruments());
     }
     if added.1 {
-        transport.set_effects(ses.plugins.effects());
+        ses.transport.set_effects(ses.plugins.effects());
     }
     let mut parts = Vec::new();
     if !hosted.is_empty() {
@@ -514,7 +514,7 @@ pub(crate) fn host_native(ses: &mut crate::session::Session, transport: &crate::
 /// format is found (the hint bar names those; a save keeps the file's wrapper for them until they are changed,
 /// `Hosted::stand_in`). A plugin that is not found keeps its saved data (written back unchanged) and is not looked
 /// for again.
-pub(crate) fn sync_wrapped(ses: &mut crate::session::Session, transport: &crate::transport::Transport) {
+pub(crate) fn sync_wrapped(ses: &mut crate::session::Session) {
     use crate::plugins::fx_key;
     let mut added = (false, false);
     let (mut missing, mut switched) = (Vec::new(), Vec::new());
@@ -590,10 +590,10 @@ pub(crate) fn sync_wrapped(ses: &mut crate::session::Session, transport: &crate:
         }
     }
     if added.0 {
-        transport.set_instruments(ses.plugins.instruments());
+        ses.transport.set_instruments(ses.plugins.instruments());
     }
     if added.1 {
-        transport.set_effects(ses.plugins.effects());
+        ses.transport.set_effects(ses.plugins.effects());
     }
     let mut parts = Vec::new();
     if !missing.is_empty() {

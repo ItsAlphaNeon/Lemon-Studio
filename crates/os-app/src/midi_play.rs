@@ -144,10 +144,10 @@ const TEMPO_EVERY: Duration = Duration::from_millis(250);
 impl App {
     /// The input devices' messages, the device lists, the external clock and what master sync sends: on every tick.
     pub(crate) fn midi_tick(&mut self) {
-        if self.midi.take_changed() {
+        if self.state.session.midi.take_changed() {
             self.midi_refresh(false);
         }
-        let evs = self.midi.poll();
+        let evs = self.state.session.midi.poll();
         self.midi_events(evs);
         self.midi_pending();
         self.ext_sync_tick();
@@ -156,7 +156,7 @@ impl App {
         // The bent row returns to the centre when another is selected (spec §4).
         if let Some(row) = self.midi_play.bend_row.filter(|&r| r != self.state.selected_channel) {
             self.midi_play.bend_row = None;
-            self.transport.midi(row, [0xe0, 0, 64], 200.0);
+            self.state.session.transport.midi(row, [0xe0, 0, 64], 200.0);
         }
         self.midi_out_tick();
     }
@@ -165,12 +165,12 @@ impl App {
     /// changed in the hint bar.
     pub(crate) fn midi_refresh(&mut self, said: bool) {
         let before: Vec<String> = self.midi_page().inputs.iter().map(|i| i.name.clone()).collect();
-        let opened = self.midi.refresh();
+        let opened = self.state.session.midi.refresh();
         self.surface_refresh();
-        self.midi.set_ext_sync(cfg::ext_sync().as_deref());
+        self.state.session.midi.set_ext_sync(cfg::ext_sync().as_deref());
         let p = &mut self.state.midi;
-        p.inputs = self.midi.inputs.clone();
-        p.outputs = self.midi.outputs.clone();
+        p.inputs = self.state.session.midi.inputs.clone();
+        p.outputs = self.state.session.midi.outputs.clone();
         p.input = p.input.min(p.inputs.len().saturating_sub(1));
         p.output = p.output.min(p.outputs.len().saturating_sub(1));
         let failed: Vec<&str> = p.inputs.iter().filter(|i| i.failed).map(|i| i.name.as_str()).collect();
@@ -234,7 +234,7 @@ impl App {
                         let x = f64::from(v) / 16384.0 * 2.0 - 1.0;
                         c.pitch_cents = (x * 100.0 * f64::from(c.misc.pitch_range)).round() as i32;
                         let cents = c.pitch_cents;
-                        self.transport.channel_pitch(row, cents);
+                        self.state.session.transport.channel_pitch(row, cents);
                         self.invalidate();
                     }
                 }
@@ -243,7 +243,7 @@ impl App {
                     if row < self.state.session.project.channels.len() {
                         self.sync_live();
                         if let Some(b) = ev.msg.bytes() {
-                            self.transport.midi(row, b, 200.0);
+                            self.state.session.transport.midi(row, b, 200.0);
                         }
                         self.midi_play.bend_row = Some(row);
                     }
@@ -268,7 +268,7 @@ impl App {
         let row = self.state.selected_channel;
         let Some(b) = m.bytes().filter(|_| row < self.state.session.project.channels.len()) else { return };
         self.sync_live();
-        self.transport.midi(row, b, 200.0);
+        self.state.session.transport.midi(row, b, 200.0);
     }
 
     fn midi_note_on(&mut self, ch: u8, key: u8, vel: u8) {
@@ -321,7 +321,7 @@ impl App {
             self.midi_end(h, h.up.unwrap_or(64));
         }
         self.sync_live();
-        self.transport.note_on_midi(row, play, vel, midi);
+        self.state.session.transport.note_on_midi(row, play, vel, midi);
         self.midi_play.held.push(Held { key, src, row, play, up: None });
         self.step_edit_down_with(src, play, vel, extra);
     }
@@ -340,13 +340,13 @@ impl App {
     }
 
     fn midi_end(&mut self, h: Held, release: u8) {
-        self.transport.note_off(h.row, h.play);
+        self.state.session.transport.note_off(h.row, h.play);
         self.step_edit_up_with(h.src, Some(release));
     }
 
     /// A key of the Performance mode MIDI channel (spec: ui/performance-mode.md §3).
     pub(crate) fn perform_note(&mut self, key: u8, vel: u8, down: bool) {
-        let now = self.transport.playing().then(|| self.transport.tick().max(0.0) as u32);
+        let now = self.state.session.transport.playing().then(|| self.state.session.transport.tick().max(0.0) as u32);
         if let Some(m) = crate::perform::midi_note(&mut self.state, key, vel, down, now) {
             self.state.message = Some(m);
         }
@@ -443,12 +443,12 @@ impl App {
         let ahead = (f64::from(ahead_ms) / 1000.0 * self.state.tempo() / 60.0 * f64::from(ppq)).round() as u32;
         match m {
             Msg::Start => {
-                self.transport.stop();
+                self.state.session.transport.stop();
                 self.ext_position(ahead);
                 self.start_playback();
             }
-            Msg::Continue => match self.transport.state() {
-                T::Paused => self.transport.resume(),
+            Msg::Continue => match self.state.session.transport.state() {
+                T::Paused => self.state.session.transport.resume(),
                 T::Stopped => {
                     if ahead > 0 {
                         let at = if self.state.song_mode() { self.state.playlist.pos } else { self.state.piano.marker };
@@ -459,15 +459,15 @@ impl App {
                 T::Playing => {}
             },
             Msg::Stop => {
-                if self.transport.state() == T::Playing {
-                    self.transport.pause();
+                if self.state.session.transport.state() == T::Playing {
+                    self.state.session.transport.pause();
                 }
             }
             Msg::Spp(sixteenths) => {
                 let t = u32::from(sixteenths) * ppq / 4;
-                let running = self.transport.state() == T::Playing;
+                let running = self.state.session.transport.state() == T::Playing;
                 // The position counts from a stop: a paused playback would resume where it paused.
-                self.transport.stop();
+                self.state.session.transport.stop();
                 self.ext_position(t);
                 if running {
                     self.start_playback();
@@ -491,7 +491,7 @@ impl App {
 
     /// The external clock's tempo and the status line (spec §8).
     fn ext_sync_tick(&mut self) {
-        let st = self.midi.ext_status();
+        let st = self.state.session.midi.ext_status();
         let text = st.text();
         if self.state.midi.status != text {
             self.state.midi.status = text;
@@ -513,7 +513,7 @@ impl App {
     fn midi_out_tick(&mut self) {
         let send = Switch::Output.on() && Switch::MasterSync.on();
         let sync = if send {
-            self.midi
+            self.state.session.midi
                 .outputs
                 .iter()
                 .filter_map(|name| {
@@ -526,7 +526,7 @@ impl App {
         };
         let (mut ports, mut ports_off) = (Vec::new(), Vec::new());
         if Switch::Output.on() {
-            for name in &self.midi.outputs {
+            for name in &self.state.session.midi.outputs {
                 let c = cfg::output(name);
                 if let Some(p) = c.port {
                     ports.push((name.clone(), p));
@@ -545,13 +545,13 @@ impl App {
             ppq: self.state.session.project.ppq.max(1),
             tempo: self.state.tempo(),
         };
-        self.midi_out.configure(c);
+        self.state.session.midi_out.configure(c);
     }
 
     /// After an export: all notes off to the outputs that want it (spec §2).
     pub(crate) fn midi_after_export(&mut self) {
         if Switch::Output.on() {
-            self.midi_out.notes_off();
+            self.state.session.midi_out.notes_off();
         }
     }
 }
@@ -709,7 +709,7 @@ impl App {
     /// External clock sync chosen (`Cmd::MidiExt`).
     pub(crate) fn set_ext_sync(&mut self, device: Option<String>) -> Option<String> {
         cfg::set_ext_sync(device.as_deref());
-        self.midi.set_ext_sync(device.as_deref());
+        self.state.session.midi.set_ext_sync(device.as_deref());
         self.invalidate();
         Some(format!("External clock sync: {}", device.as_deref().unwrap_or("Off")))
     }
@@ -885,9 +885,9 @@ mod tests {
     fn master_clock_loopback() {
         use std::sync::{Arc, Mutex};
         let mut app = App::new(None);
-        app.midi = crate::midi_in::MidiIn::open(|| {});
-        app.midi_out = crate::midi_out::MidiOut::start(app.transport.watch());
-        let name = app.midi.outputs.iter().find(|n| n.contains("LemonKeys")).cloned().expect("a LemonKeys output");
+        app.state.session.midi = crate::midi_in::MidiIn::open(|| {});
+        app.state.session.midi_out = crate::midi_out::MidiOut::start(app.state.session.transport.watch());
+        let name = app.state.session.midi.outputs.iter().find(|n| n.contains("LemonKeys")).cloned().expect("a LemonKeys output");
         let input = midir::MidiInput::new("Lemon Studio clock test").unwrap();
         let port = input.ports().into_iter().find(|p| input.port_name(p).is_ok_and(|n| n.contains("LemonKeys")));
         let got: Arc<Mutex<Vec<u8>>> = Arc::default();

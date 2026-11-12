@@ -175,7 +175,7 @@ impl App {
         }
         self.state.session.path = Some(own);
         // The project file still holds the last save: unsaved until saved again.
-        self.saved.1 = f64::NAN;
+        self.state.session.saved.1 = f64::NAN;
         let n = b.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         self.state.message = Some(format!("Reverted to {n}"));
     }

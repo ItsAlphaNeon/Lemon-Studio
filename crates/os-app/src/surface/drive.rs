@@ -440,7 +440,7 @@ impl App {
     /// The control port: opened when a recognised keyboard is listed, closed (the keyboard taken out of DAW mode first)
     /// when it goes. From `midi_refresh`.
     pub(crate) fn surface_refresh(&mut self) {
-        if self.surface.as_ref().is_some_and(|d| !d.port.listed(&self.midi.inputs)) {
+        if self.surface.as_ref().is_some_and(|d| !d.port.listed(&self.state.session.midi.inputs)) {
             self.surface = None;
         }
         if self.surface.is_none() && cfg!(not(test)) {
@@ -921,7 +921,7 @@ impl App {
             Target::Knob(k) => f64::from(s.knob(k)),
             Target::Fader(m) => crate::mixer::track(&s.session, m).and_then(|m| m.volume).unwrap_or(0.8),
             Target::Param(key, i) => crate::params::param_value(s, key, i).unwrap_or(0.0),
-            Target::Tempo => self.transport.tempo().unwrap_or(s.tempo()),
+            Target::Tempo => self.state.session.transport.tempo().unwrap_or(s.tempo()),
         }
     }
 
@@ -1030,7 +1030,7 @@ impl App {
             self.state.raise(Win::Hosted(key));
         }
         let id = self.state.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id);
-        if let (Some(id), Some(l)) = (id, self.state.session.plugins.hosted.get(&key).and_then(|h| h.link.as_ref())) {
+        if let (Some(id), Some(l)) = (id, self.state.session.plugins.editors.get(&key).and_then(|e| e.link.as_ref())) {
             l.reveal(id);
         }
         // Any plugin: the app's own hint says what changes.
@@ -1259,7 +1259,7 @@ impl App {
         let pads_held: Vec<u8> = d.pads_held.iter().map(|h| h.0).collect();
         let n = track_count(s);
         let rows = rows(s);
-        let playing = self.transport.playing() && !self.transport.paused();
+        let playing = self.state.session.transport.playing() && !self.state.session.transport.paused();
         let mut lights: Vec<(Led, Colour, bool)> = Vec::new();
         let lit = |on: bool| if on { lk::WHITE } else { lk::OFF };
         let momentary = |cc: u8| lit(held.contains(&cc));
@@ -1398,7 +1398,7 @@ impl App {
             }
             _ => {}
         }
-        let tempo = self.transport.tempo().unwrap_or(s.tempo());
+        let tempo = self.state.session.transport.tempo().unwrap_or(s.tempo());
         let master_again = d.master_again.filter(|t| *t <= Instant::now()).is_some();
         let master = (crate::mixer::name(&s.session, 0), crate::mixer::track(&s.session, 0).and_then(|m| m.volume).unwrap_or(0.8));
         let shown = plugin.as_ref().zip(reread).filter(|(_, (read, _))| *read).map(|(pt, (_, texts))| (now, pt.key, pt.page, texts));

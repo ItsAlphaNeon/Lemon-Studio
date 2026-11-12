@@ -63,7 +63,7 @@ impl App {
     /// take the samples behind the placeholders from there, and so do the hosted Lemon Samplers.
     pub(crate) fn set_factory_folder(&mut self, chosen: Option<PathBuf>) {
         crate::settings_file::write(KEY, &chosen.as_deref().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default());
-        self.transport.set_factory(dir());
+        self.state.session.transport.set_factory(dir());
         for row in self.state.session.hosted_rows.clone() {
             let Some(ch) = self.state.session.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { continue };
             let Some(path) = ch.sample_path.as_deref().filter(|p| os_engine::SampleLibrary::has_placeholder(p)) else { continue };
