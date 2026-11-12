@@ -392,141 +392,8 @@ pub enum MenuEntry {
 impl App {
     /// Every plugin tick: keeps the parameter lists of hosted instances and records the parameters their editors moved.
     pub(crate) fn params_tick(&mut self) {
-        let ui = &mut self.state.session.params;
-        ui.lists.retain(|k, _| self.state.session.plugins.hosted.contains_key(k));
-        let mut moved = None;
-        let mut edited = Vec::new();
-        let mut automate = Vec::new();
-        let mut recorded = Vec::new();
-        let mut stretch = Vec::new();
-        let (mut seen, mut steps) = (Vec::new(), Vec::new());
-        for (&key, h) in &self.state.session.plugins.hosted {
-            // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
-            // is read again next tick (its events stay queued).
-            let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
-            // A plugin's parameters can take a few ms to read (`lock_for_tick`).
-            let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };
-            let t0 = std::time::Instant::now();
-            let weak = Arc::downgrade(&h.plugin);
-            let count = p.param_count();
-            let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));
-            if stale {
-                let params: Vec<Entry> = (0..count)
-                    .map(|i| match p.param_info(i) {
-                        Some(info) => Entry { id: info.id, name: info.name, hidden: info.hidden, default: info.default, steps: info.steps },
-                        None => Entry { id: u32::MAX, name: String::new(), hidden: true, default: 0.0, steps: 0 },
-                    })
-                    .collect();
-                let values = read_values(&*p, &params);
-                let now = std::time::Instant::now();
-                ui.lists.insert(key, List { plugin: weak, params, seen: look, values, open: BTreeMap::new(), read_at: now, reread: false });
-            }
-            let events = p.take_param_events();
-            if let Some(l) = ui.lists.get_mut(&key) {
-                let moved_count = l.seen.count != look.count;
-                l.seen = look;
-                let owner = h.owner;
-                // What this tick's edits in the window change, by parameter: the value each moved from and to, and
-                // whether a value came without a gesture.
-                let mut changed: BTreeMap<u32, (f64, f64)> = BTreeMap::new();
-                let mut loose = false;
-                for e in &events {
-                    match *e {
-                        os_host::ParamEvent::Begin(id) => {
-                            let from = l.values.get(&id).copied().or_else(|| p.param_value(id));
-                            if let Some(from) = from {
-                                l.open.entry(id).or_insert(from);
-                            }
-                        }
-                        os_host::ParamEvent::Value(id, v) => {
-                            let from = l.values.insert(id, v);
-                            seen.push((owner, id, v));
-                            if let (false, Some(from)) = (l.open.contains_key(&id), from) {
-                                changed.entry(id).or_insert((from, v)).1 = v;
-                                loose = true;
-                            }
-                        }
-                        os_host::ParamEvent::End(id) => {
-                            if let Some(from) = l.open.remove(&id) {
-                                let now = l.values.get(&id).copied().unwrap_or(from);
-                                changed.entry(id).or_insert((from, now)).1 = now;
-                            }
-                        }
-                    }
-                }
-                let changed: Vec<(u32, f64)> = changed.into_iter().filter(|(_, (from, now))| from != now).map(|(id, (from, _))| (id, from)).collect();
-                if !changed.is_empty() && !owner.is_none() {
-                    steps.push((owner.0, changed, loose));
-                }
-                // The plugin reported something other than its editor's edits (a preset it loaded, a restart,
-                // automation), or the host set what it doesn't know: the values are read again, so an undo moves
-                // back to what was there. Never during a gesture, whose start is kept.
-                let due = l.reread || (events.is_empty() && moved_count && l.read_at.elapsed() >= REREAD_EVERY);
-                if !stale && due && l.open.is_empty() {
-                    l.values = read_values(&*p, &l.params);
-                    (l.read_at, l.reread) = (std::time::Instant::now(), false);
-                }
-            }
-            let sampler = key < crate::plugins::FX_KEY && p.desc().name == crate::plugins::LEMON_SAMPLER;
-            for e in events {
-                if let (true, os_host::ParamEvent::Value(id, v)) = (sampler, &e) {
-                    if let Some(x) = ui.lists.get(&key).and_then(|l| l.params.iter().find(|x| x.id == *id)) {
-                        stretch.push((key, x.name.clone(), *v));
-                    }
-                }
-                let (os_host::ParamEvent::Begin(id) | os_host::ParamEvent::Value(id, _)) = e else { continue };
-                edited.push(key);
-                if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
-                    moved = Some(Tweak::Plugin { key, index });
-                    // What automation recording takes: the value with the parameter's stated range.
-                    if let (os_host::ParamEvent::Value(_, v), Some(info)) = (e, p.param_info(index)) {
-                        recorded.push((key, index, (info.min, info.max), v));
-                    }
-                }
-            }
-            // "Create automation clip" picked in the plugin's own menu (CLAP context menu).
-            for id in p.take_automation_requests() {
-                if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
-                    automate.push((key, index));
-                }
-            }
-            if let Some(m) = &h.meter {
-                m.note_hold(t0.elapsed());
-            }
-            #[cfg(target_os = "linux")]
-            crate::dropout_log::held(&p.desc().name, "reading its parameters", t0.elapsed());
-        }
-        // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
-        // begin to its end, values sent without one joined while they come in a row.
-        for (owner, id, v) in seen {
-            if !owner.is_none() {
-                self.state.session.control.saw_param(owner.0, id, v);
-            }
-        }
-        for (owner, changed, run) in steps {
-            crate::control::param_edit(&mut self.state.session, owner, &changed, run);
-        }
-        // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
-        for key in edited {
-            self.state.session.plugins.mark_edited(key);
-        }
-        // Lemon Sampler's time-stretch knobs are the channel's own settings: the channel takes the editor's edits, so
-        // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
-        // So are its root note page's: the engine applies the main pitch switch.
-        for (row, name, v) in stretch {
-            let Some(ch) = self.state.session.project.get_mut().channels.get_mut(row) else { continue };
-            let mut st = ch.sound.stretch;
-            let mut misc = ch.misc;
-            if crate::plugins::stretch_param(&name, v, &mut st) && st != ch.sound.stretch {
-                ch.sound.stretch = st;
-                self.state.session.dirty = true;
-            } else if crate::plugins::misc_param(&name, v, &mut misc) && misc != ch.misc {
-                ch.misc = misc;
-                self.state.session.dirty = true;
-            }
-        }
-        if let Some(t) = moved {
-            self.state.session.params.note(t);
+        let Tick { moved, recorded, automate } = params_in(&mut self.state.session);
+        if moved {
             self.tweak_hint();
         }
         for (key, index, range, v) in recorded {
@@ -691,6 +558,159 @@ impl App {
         s.session.dirty = true;
         Some(format!("Created automation clip \"{name}\""))
     }
+}
+
+/// What a plugin tick of the parameters leaves to the app (`App::params_tick`).
+pub(crate) struct Tick {
+    /// A parameter was tweaked in its window: the hint shows it.
+    moved: bool,
+    /// Values for automation recording: (key, index, range, value).
+    recorded: Vec<(usize, usize, (f64, f64), f64)>,
+    /// "Create automation clip" picked in a plugin's own menu: (key, index).
+    automate: Vec<(usize, usize)>,
+}
+
+/// `App::params_tick` in the session: the hosted instances' parameter lists kept, their editors' edits as undo steps,
+/// the user's edits marked, Lemon Sampler's own settings taken by its channel.
+pub(crate) fn params_in(ses: &mut crate::session::Session) -> Tick {
+    let ui = &mut ses.params;
+    ui.lists.retain(|k, _| ses.plugins.hosted.contains_key(k));
+    let mut moved = None;
+    let mut edited = Vec::new();
+    let mut automate = Vec::new();
+    let mut recorded = Vec::new();
+    let mut stretch = Vec::new();
+    let (mut seen, mut steps) = (Vec::new(), Vec::new());
+    for (&key, h) in &ses.plugins.hosted {
+        // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
+        // is read again next tick (its events stay queued).
+        let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
+        // A plugin's parameters can take a few ms to read (`lock_for_tick`).
+        let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };
+        let t0 = std::time::Instant::now();
+        let weak = Arc::downgrade(&h.plugin);
+        let count = p.param_count();
+        let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));
+        if stale {
+            let params: Vec<Entry> = (0..count)
+                .map(|i| match p.param_info(i) {
+                    Some(info) => Entry { id: info.id, name: info.name, hidden: info.hidden, default: info.default, steps: info.steps },
+                    None => Entry { id: u32::MAX, name: String::new(), hidden: true, default: 0.0, steps: 0 },
+                })
+                .collect();
+            let values = read_values(&*p, &params);
+            let now = std::time::Instant::now();
+            ui.lists.insert(key, List { plugin: weak, params, seen: look, values, open: BTreeMap::new(), read_at: now, reread: false });
+        }
+        let events = p.take_param_events();
+        if let Some(l) = ui.lists.get_mut(&key) {
+            let moved_count = l.seen.count != look.count;
+            l.seen = look;
+            let owner = h.owner;
+            // What this tick's edits in the window change, by parameter: the value each moved from and to, and
+            // whether a value came without a gesture.
+            let mut changed: BTreeMap<u32, (f64, f64)> = BTreeMap::new();
+            let mut loose = false;
+            for e in &events {
+                match *e {
+                    os_host::ParamEvent::Begin(id) => {
+                        let from = l.values.get(&id).copied().or_else(|| p.param_value(id));
+                        if let Some(from) = from {
+                            l.open.entry(id).or_insert(from);
+                        }
+                    }
+                    os_host::ParamEvent::Value(id, v) => {
+                        let from = l.values.insert(id, v);
+                        seen.push((owner, id, v));
+                        if let (false, Some(from)) = (l.open.contains_key(&id), from) {
+                            changed.entry(id).or_insert((from, v)).1 = v;
+                            loose = true;
+                        }
+                    }
+                    os_host::ParamEvent::End(id) => {
+                        if let Some(from) = l.open.remove(&id) {
+                            let now = l.values.get(&id).copied().unwrap_or(from);
+                            changed.entry(id).or_insert((from, now)).1 = now;
+                        }
+                    }
+                }
+            }
+            let changed: Vec<(u32, f64)> = changed.into_iter().filter(|(_, (from, now))| from != now).map(|(id, (from, _))| (id, from)).collect();
+            if !changed.is_empty() && !owner.is_none() {
+                steps.push((owner.0, changed, loose));
+            }
+            // The plugin reported something other than its editor's edits (a preset it loaded, a restart,
+            // automation), or the host set what it doesn't know: the values are read again, so an undo moves
+            // back to what was there. Never during a gesture, whose start is kept.
+            let due = l.reread || (events.is_empty() && moved_count && l.read_at.elapsed() >= REREAD_EVERY);
+            if !stale && due && l.open.is_empty() {
+                l.values = read_values(&*p, &l.params);
+                (l.read_at, l.reread) = (std::time::Instant::now(), false);
+            }
+        }
+        let sampler = key < crate::plugins::FX_KEY && p.desc().name == crate::plugins::LEMON_SAMPLER;
+        for e in events {
+            if let (true, os_host::ParamEvent::Value(id, v)) = (sampler, &e) {
+                if let Some(x) = ui.lists.get(&key).and_then(|l| l.params.iter().find(|x| x.id == *id)) {
+                    stretch.push((key, x.name.clone(), *v));
+                }
+            }
+            let (os_host::ParamEvent::Begin(id) | os_host::ParamEvent::Value(id, _)) = e else { continue };
+            edited.push(key);
+            if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
+                moved = Some(Tweak::Plugin { key, index });
+                // What automation recording takes: the value with the parameter's stated range.
+                if let (os_host::ParamEvent::Value(_, v), Some(info)) = (e, p.param_info(index)) {
+                    recorded.push((key, index, (info.min, info.max), v));
+                }
+            }
+        }
+        // "Create automation clip" picked in the plugin's own menu (CLAP context menu).
+        for id in p.take_automation_requests() {
+            if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
+                automate.push((key, index));
+            }
+        }
+        if let Some(m) = &h.meter {
+            m.note_hold(t0.elapsed());
+        }
+        #[cfg(target_os = "linux")]
+        crate::dropout_log::held(&p.desc().name, "reading its parameters", t0.elapsed());
+    }
+    // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
+    // begin to its end, values sent without one joined while they come in a row.
+    for (owner, id, v) in seen {
+        if !owner.is_none() {
+            ses.control.saw_param(owner.0, id, v);
+        }
+    }
+    for (owner, changed, run) in steps {
+        crate::control::param_edit(ses, owner, &changed, run);
+    }
+    // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
+    for key in edited {
+        ses.plugins.mark_edited(key);
+    }
+    // Lemon Sampler's time-stretch knobs are the channel's own settings: the channel takes the editor's edits, so
+    // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
+    // So are its root note page's: the engine applies the main pitch switch.
+    for (row, name, v) in stretch {
+        let Some(ch) = ses.project.get_mut().channels.get_mut(row) else { continue };
+        let mut st = ch.sound.stretch;
+        let mut misc = ch.misc;
+        if crate::plugins::stretch_param(&name, v, &mut st) && st != ch.sound.stretch {
+            ch.sound.stretch = st;
+            ses.dirty = true;
+        } else if crate::plugins::misc_param(&name, v, &mut misc) && misc != ch.misc {
+            ch.misc = misc;
+            ses.dirty = true;
+        }
+    }
+    let tweaked = moved.is_some();
+    if let Some(t) = moved {
+        ses.params.note(t);
+    }
+    Tick { moved: tweaked, recorded, automate }
 }
 
 #[cfg(test)]
