@@ -246,6 +246,8 @@ pub struct MixerUi {
     pub extra: bool,
     /// What drags on the selected faders keep while the selection lasts.
     pub faders: FaderGroup,
+    /// The track Shift+wheel last moved, and where the mouse was then (`wheel_move`).
+    pub move_grab: Option<(u16, (f32, f32))>,
 }
 
 /// What drags on selected faders keep while the selection lasts (spec: ui/mixer.md §4): each selected track's level at
@@ -280,7 +282,7 @@ impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), slot_colors: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
             meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None, waveforms: false, waves: Vec::new(), extra: true,
-            faders: FaderGroup::default() }
+            faders: FaderGroup::default(), move_grab: None }
     }
 }
 
@@ -642,7 +644,7 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
     match h {
         MHit::Strip(n) => {
             select(s, n, ctrl);
-            if shift {
+            if shift && !ctrl {
                 start_rename(s, n, at);
             }
             None
@@ -1515,6 +1517,26 @@ fn move_track(s: &mut State, n: u16, d: i32) -> Option<String> {
     let (a, b) = (n.min(o), n.max(o) + 1);
     renumber(s, &m, a, b, 0);
     None
+}
+
+/// Shift+wheel over track `n`'s strip: it becomes the only selected track and moves one place per notch, left for
+/// `notches` > 0, as Move left / right do. While the mouse stays still, more notches move the same track, which has left
+/// the cursor.
+pub fn wheel_move(app: &mut App, n: u16, notches: i32) {
+    let at = app.mouse;
+    let n = match app.state.mixer.move_grab {
+        Some((g, m)) if m == at => g,
+        _ => n,
+    };
+    if n == 0 {
+        return;
+    }
+    select(&mut app.state, n, false);
+    for _ in 0..notches.unsigned_abs() {
+        let now = app.state.selected_mixer;
+        app.state.message = run(app, if notches > 0 { MCmd::MoveLeft(now) } else { MCmd::MoveRight(now) });
+    }
+    app.state.mixer.move_grab = Some((app.state.selected_mixer, at));
 }
 
 /// Deletes track `n`: later tracks move one left, a default track is added at the end (§6.1 Delete).
