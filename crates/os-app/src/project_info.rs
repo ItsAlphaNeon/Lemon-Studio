@@ -87,27 +87,37 @@ pub fn spent_days(s: &State, now: Instant) -> f64 {
     s.project.work_time.map_or(0.0, |w| w.spent) + s.credits.clock.elapsed(now).as_secs_f64() / 86_400.0
 }
 
+/// The date and time now, as a project's start (days since 1899-12-30): fixed in a test that runs the motions' clock
+/// (`anim::set_clock_at`, the equivalence harness), so a project made new starts the same on every run.
+fn work_time_now() -> WorkTime {
+    #[cfg(test)]
+    if !crate::anim::still() {
+        return WorkTime { started: 46_000.5, spent: 0.0 };
+    }
+    os_flp::project::work_time_now()
+}
+
 /// The project as it is saved (`App::save_to`): its time spent includes the session's clock (spec:
 /// flp/events/project-info.md "Writer notes": "then adds the time spent").
 pub(crate) fn stamp(s: &State, p: &mut Project) {
-    let started = s.project.work_time.map_or_else(|| os_flp::project::work_time_now().started, |w| w.started);
-    p.work_time = Some(WorkTime { started, spent: spent_days(s, Instant::now()) });
+    let started = s.project.work_time.map_or_else(|| work_time_now().started, |w| w.started);
+    p.work_time = Some(WorkTime { started, spent: spent_days(s, crate::anim::now()) });
 }
 
 /// A project was opened (`App::open`): one whose file has no start is started now, as a writer creating a project does
 /// (spec: flp/events/project-info.md "Writer notes"); the clock starts again; the Song info box shows when the project
 /// asks for it (event 10).
 pub(crate) fn opened(s: &mut State) {
-    s.project.work_time.get_or_insert_with(os_flp::project::work_time_now);
-    s.credits.clock.restart(Instant::now());
+    s.project.work_time.get_or_insert_with(work_time_now);
+    s.credits.clock.restart(crate::anim::now());
     s.credits.song_box = s.project.show_info == Some(true);
     (s.credits.song_since, s.credits.song_alpha) = (None, 1.0);
 }
 
 /// A new project: started now, nothing spent (spec: ui/settings-choices.md "Info": "A new project starts now").
 pub(crate) fn created(s: &mut State) {
-    s.project.work_time = Some(os_flp::project::work_time_now());
-    s.credits.clock.restart(Instant::now());
+    s.project.work_time = Some(work_time_now());
+    s.credits.clock.restart(crate::anim::now());
     s.credits.song_box = false;
 }
 
@@ -332,7 +342,7 @@ impl App {
     /// Lemon Studio's main window came to the foreground (`on`) or left it: the working time counts only while it is in
     /// front (`WorkClock`).
     pub fn main_focused(&mut self, on: bool) {
-        self.state.credits.clock.focus(on, Instant::now());
+        self.state.credits.clock.focus(on, crate::anim::now());
     }
 
     /// Periodic (`App::tick`): the Info page shows the time spent by the minute; it repaints when that changes.
@@ -352,7 +362,7 @@ impl App {
     pub(crate) fn reset_work_time(&mut self) {
         let s = &mut self.state;
         s.project.work_time.get_or_insert_with(os_flp::project::work_time_now).spent = 0.0;
-        s.credits.clock.restart(Instant::now());
+        s.credits.clock.restart(crate::anim::now());
         if self.saved.0.work_time == s.project.work_time {
             self.saved.0.work_time = None;
         }

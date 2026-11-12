@@ -352,7 +352,7 @@ impl App {
             }
         }
         if self.smooth.running() && self.smooth.at.is_none() {
-            self.smooth.at = Some(Instant::now());
+            self.smooth.at = Some(crate::anim::now());
         }
         r
     }

@@ -2386,7 +2386,7 @@ fn targets(s: &State, n: u16) -> Vec<u16> {
 }
 
 fn rand_seed() -> u32 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(7, |d| d.subsec_nanos())
+    crate::clip_colors::clock() as u32
 }
 
 /// Keys while the mixer is in front (§2): F2 rename, Del delete, Alt+Left / Right move, S solo, Alt+S alt solo,
