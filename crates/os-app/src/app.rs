@@ -15861,7 +15861,7 @@ mod tests {
         crate::plugin_menu::add_generator(&mut a, sampler, None);
         let on = a.state.session.pending_open.unwrap();
         a.sync_samplers(None);
-        let detached = |r: usize| a.state.session.plugins.hosted[&r].detached;
+        let detached = |r: usize| a.state.session.plugins.editors.get(&r).is_some_and(|e| e.detached);
         assert!(detached(on));
         assert!(!detached(off), "added before: keeps its mode");
         assert!(!detached(0), "the project's channel");
@@ -21740,14 +21740,14 @@ mod tests {
         app.state.session.plugins.effects = crate::plugins::builtin_effects();
         app.sync_samplers(None);
         app.state.session.plugins.create_effect(1, 0, 0, None).expect("an effect in a mixer slot");
-        assert!(app.state.session.plugins.hosted.len() >= 2 && app.state.session.plugins.hosted.values().all(|h| !h.detached));
+        assert!(app.state.session.plugins.hosted.len() >= 2 && app.state.session.plugins.editors.values().all(|e| !e.detached));
         let items = submenu(TOOLS_MENU, EDITORS_LABEL).unwrap()(&app.state);
         let rack = crate::rack::options_menu(&app.state, 0.0, 0.0);
         assert_eq!(rack.items.iter().find(|i| i.label == EDITORS_LABEL).map(|i| &i.children), Some(&items), "the rack's is the same");
         crate::playlist::run(&mut app, items[1].cmd.clone());
-        assert!(app.state.session.plugins.hosted.values().all(|h| h.detached), "Detached");
+        assert!(app.state.session.plugins.hosted.keys().all(|k| app.state.session.plugins.editors.get(k).is_some_and(|e| e.detached)), "Detached");
         crate::playlist::run(&mut app, items[0].cmd.clone());
-        assert!(app.state.session.plugins.hosted.values().all(|h| !h.detached), "Attached");
+        assert!(app.state.session.plugins.editors.values().all(|e| !e.detached), "Attached");
     }
 
     /// ADD > Effect ▸: the effect plugin menu as a submenu; a pick goes into the selected mixer track's first empty

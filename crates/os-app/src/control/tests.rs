@@ -343,7 +343,7 @@ fn an_effect_added_by_a_command_is_hosted_without_a_window() {
     let key = crate::plugins::fx_key(1, 2);
     assert_eq!(a.state.session.plugins.hosted.get(&key).map(|h| h.owner.0), Some(slot));
     #[cfg(plugin_windows)]
-    assert!(a.state.session.plugins.hosted[&key].window.is_none());
+    assert!(a.state.session.plugins.editors.get(&key).is_none_or(|e| e.window.is_none()));
     crate::history::undo(&mut a.state);
     a.plugin_tick();
     assert!(!a.state.session.plugins.hosted.contains_key(&key), "undone: the instance goes");
