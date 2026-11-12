@@ -121,7 +121,7 @@ fn project_hash(p: &os_model::Project) -> u64 {
 /// Project state the interface holds until save (specs: control-plane.md part 2, "Where main is"), as one value: a
 /// field per line, so a difference names its field.
 fn side(app: &App) -> String {
-    let (s, r) = (&app.state, &app.state.rack);
+    let s = &app.state;
     // Since step 5 the project's (`rack::groups`, `rack::filter`, `rack::unsorted_at`), read as the rack held them.
     let groups = crate::rack::groups(&s.project);
     // "Unsorted" at the end of the group list reads as None (last) or as its place there: the same thing.

@@ -2634,6 +2634,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::LoopType(t) => {
+            loop_step(s, LOOP_MODE_STEP);
             set_loop_type(s, t);
             None
         }
@@ -2854,25 +2855,25 @@ pub fn play_project(s: &State) -> Project {
     p.tempo = Some(s.tempo());
     // The pattern shown: a song with no clips plays it (os-engine), not the one the project was opened or saved on.
     p.current_pattern = Some(s.pattern().max(1));
-    let rows = loop_rows(s);
-    if loop_mode(s) && !rows.is_empty() {
-        expand_loops(&mut p, s, &rows);
-    }
+    // Each pattern plays its own loops, in its own loop mode (FL keeps them per pattern).
+    expand_loops(&mut p, s, None);
     crate::perform::apply(s, &mut p);
     p
 }
 
-/// Repeat each row's first `loop_len` steps up to the end of every pattern (its length as played, §23); notes past
-/// the loop length go. Under Advanced looping the length is each pattern's own: the row's notes there rounded up to
-/// its loop point.
-fn expand_loops(p: &mut Project, s: &State, rows: &[usize]) {
+/// In each pattern in loop mode, a looping row repeats its first loop length's steps up to the end of the pattern (its
+/// length as played, §23); notes past the loop length go. The pattern's own loops (FL 24.1.1's form): a length, and
+/// under Advanced looping a loop point too, which is the row's notes there rounded up to the unit. `rows`: only those.
+fn expand_loops(p: &mut Project, s: &State, rows: Option<&[usize]>) {
     let ps = per_step(s);
     let ends: Vec<u32> = p.patterns.iter().map(|pat| p.pattern_length(pat.number)).collect();
-    for &r in rows {
-        let Some(ch) = p.channels.get(r).map(|c| c.index) else { continue };
-        for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
-            // The shown pattern's lengths and loop points, in every pattern (as before; FL keeps them per pattern).
-            let len = if advanced(s) { unit_steps(s, &pat.notes, ch, loop_unit_of(s, r)).or_else(|| loop_len_of(s, r)) } else { loop_len_of(s, r) };
+    let chans: Vec<u16> = p.channels.iter().enumerate().filter(|(r, _)| rows.is_none_or(|rs| rs.contains(r))).map(|(_, c)| c.index).collect();
+    for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
+        let Some(code) = pat.loop_mode else { continue };
+        let advanced = loop_type_of(code) == 2;
+        for &ch in &chans {
+            let Some(v) = pat.loops.iter().find(|l| l.0 == ch).map(|l| l.1) else { continue };
+            let len = if advanced { unit_steps(s, &pat.notes, ch, unit_of(v)).or(length_of(v)) } else { length_of(v) };
             let Some(len) = len else { continue };
             let span = len.max(1) * ps;
             let src: Vec<Note> = pat.notes.iter().filter(|n| n.channel == ch && n.position < span).copied().collect();
@@ -2895,7 +2896,7 @@ fn burn(s: &mut State, all: bool) {
     let looping = loop_rows(s);
     let rows: Vec<usize> = if all { looping } else { s.rack.sel.iter().copied().filter(|r| looping.contains(r)).collect() };
     let mut p = s.project.clone();
-    expand_loops(&mut p, s, &rows);
+    expand_loops(&mut p, s, Some(&rows));
     let n = s.pattern();
     if let (Some(src), Some(dst)) = (p.pattern(n).cloned(), s.project.get_mut().patterns.iter_mut().find(|x| x.number == n)) {
         dst.notes = src.notes;
@@ -3091,6 +3092,18 @@ pub fn fill_hit(s: &mut State, h: FillHit) {
     f.rebuild();
 }
 
+/// Undo step names of loop edits, as FL 24.1.1's history names them (spec: ui/undo-steps.md): the loop icon and the
+/// loop type; a loop box's drag or wheel (measured on Advanced looping's loop point; the same for a loop length).
+pub const LOOP_MODE_STEP: &str = "Set pattern loop mode";
+pub const LOOP_POINT_STEP: &str = "Set advanced looping settings";
+
+/// One undo step for a loop edit in the shown pattern (a drag's press takes it; one that changes nothing goes on
+/// release, as the graph editor's).
+pub fn loop_step(s: &mut State, name: &'static str) {
+    let snap = crate::history::Snap::pattern(s, s.pattern().max(1));
+    crate::history::record(s, name, snap);
+}
+
 /// A press in the graph editor (§14): one undo step for the drag, dropped on release when it changed nothing (spec:
 /// ui/undo-steps.md, "Graph editor change velocity", one per drag). Only the velocity tab's name was measured.
 pub fn graph_step(s: &mut State) {
@@ -3259,6 +3272,23 @@ pub fn set_loop_type(s: &mut State, t: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Loop edits are undo steps with FL's names but no unsaved change (ui/undo-steps.md): the loop icon is "Set
+    /// pattern loop mode", and its undo turns loop mode off again.
+    #[test]
+    fn loop_mode_is_an_undo_step_and_no_unsaved_change() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.set_pattern(1);
+        a.mark_saved();
+        loop_step(&mut a.state, LOOP_MODE_STEP);
+        set_loop_mode(&mut a.state, true);
+        crate::history::settle(&mut a.state);
+        assert_eq!(a.state.history.newest_done(), Some(LOOP_MODE_STEP));
+        assert!(loop_mode(&a.state) && !a.unsaved());
+        assert!(crate::history::undo(&mut a.state).is_some());
+        assert!(!loop_mode(&a.state));
+    }
 
     /// The pattern shown is the project's (event 67); as in FL, showing another is no undo step but an unsaved change,
     /// and an undo of another step leaves it.

@@ -59,7 +59,7 @@ pub const MIXER_TRACK_IO: &str = "Mixer track audio input / output";
 #[derive(Debug, Clone, PartialEq)]
 pub enum Snap {
     /// Pattern `number`'s notes, control points and length (the piano roll, the step sequencer).
-    Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32> },
+    Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32>, loops: (Vec<(u16, u32)>, Option<u32>) },
     /// The playlist (`playlist::capture`).
     Playlist(Box<crate::playlist::Snapshot>),
     /// A knob's value: the model's own for the channel knobs, else the knob's 0..1; `None` for a send with no level
@@ -149,6 +149,8 @@ impl Snap {
             notes: p.map(|p| p.notes.clone()).unwrap_or_default(),
             controls: p.map(|p| p.controls.clone()).unwrap_or_default(),
             length: p.and_then(|p| p.length),
+            // Its loops and loop mode (FL's loop edits are steps of this kind, `rack::loop_step`).
+            loops: p.map_or((Vec::new(), None), |p| (p.loops.clone(), p.loop_mode)),
         }
     }
 
@@ -220,9 +222,10 @@ impl Snap {
     /// step sequencer and a piano roll edit in one pattern, undone and redone while another was shown, kept that one).
     fn put(self, s: &mut State) {
         match self {
-            Snap::Pattern { number, notes, controls, length } => {
+            Snap::Pattern { number, notes, controls, length, loops } => {
                 let p = crate::patterns::pat_mut(s, number);
                 (p.notes, p.controls, p.length) = (notes, controls, length);
+                (p.loops, p.loop_mode) = loops;
                 s.piano.clear_selection();
             }
             Snap::Playlist(p) => crate::playlist::restore(s, *p),

@@ -7867,6 +7867,7 @@ impl App {
                 return None;
             }
             Some(Action::RackLoopBox(i)) => {
+                crate::rack::loop_step(&mut self.state, crate::rack::LOOP_POINT_STEP);
                 let v = crate::rack::loop_box_value(&self.state, i) + d;
                 crate::rack::set_loop_box(&mut self.state, i, v);
                 return None;
@@ -9435,11 +9436,15 @@ impl App {
             Action::RackLen => self.drag = Some(Drag::RackLen { y0: mouse.1, v0: rk::len_value(&self.state) }),
             Action::RackLoop => {
                 let s = &mut self.state;
+                rk::loop_step(s, rk::LOOP_MODE_STEP);
                 rk::relayout(s, |s| rk::set_loop_mode(s, !rk::loop_mode(s)));
                 s.piano.dirty = true;
             }
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
-            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state, i) }),
+            Action::RackLoopBox(i) => {
+                rk::loop_step(&mut self.state, rk::LOOP_POINT_STEP);
+                self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state, i) });
+            }
             Action::RackGraphArea => {
                 crate::rack::graph_step(&mut self.state);
                 self.rack_graph_at(mouse);
@@ -10101,6 +10106,11 @@ fn same_as_saved(saved: &Project, now: &Project) -> bool {
         let (loops, mode) = saved.pattern(q.number).map_or((Vec::new(), None), |x| (x.loops.clone(), x.loop_mode));
         (q.loops, q.loop_mode) = (loops, mode);
     }
+    // A pattern made only to hold loop settings (loop mode switched on in an empty one) is none either.
+    let bare = |q: &os_model::Pattern| {
+        q.notes.is_empty() && q.controls.is_empty() && q.name.is_none() && q.color.is_none() && q.length.is_none() && q.markers.is_empty()
+    };
+    now.patterns.retain(|q| saved.pattern(q.number).is_some() || !bare(q));
     *saved == now
 }
 
