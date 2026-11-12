@@ -2696,43 +2696,15 @@ impl App {
             self.sync_drums();
             self.sync_native();
         }
-        for (row, path) in std::mem::take(&mut self.state.session.sample_loads) {
-            if !self.state.session.hosted_rows.contains(&row) {
-                continue;
-            }
-            // The root note and stretch settings the load may have read from the file (`rack::read_tags`) go with it.
-            let set = self.state.session.project.channels.get(row).map(crate::plugins::tag_params).unwrap_or_default();
-            // A row hosted this tick already started from its channel's sample.
-            let new = self.state.session.plugins.sampler_path(row).as_deref() != Some(path.as_str());
-            if !self.state.session.plugins.set_sampler(row, new.then_some(path.as_str()), &set) {
-                self.state.message = Some(format!("Lemon Sampler did not take {path}"));
-                self.invalidate();
-            }
-        }
+        self.host(crate::control::host::sample_loads);
         // A native generator waits for its first check in a child process (`Plugins::instrument_ready`).
-        let pending = self.state.session.pending_plugin;
-        if let Some((_, index)) = pending.filter(|&(_, index)| !self.state.session.plugins.instrument_ready(index)) {
+        if let Some(index) = self.host(crate::control::host::pending_plugin) {
             let name = self.state.session.plugins.available.get(index).map(|a| a.desc.name.clone()).unwrap_or_default();
             let msg = format!("Trying {name} before its first load...");
             if self.state.message.as_deref() != Some(msg.as_str()) {
                 self.state.message = Some(msg);
                 self.invalidate();
             }
-        } else if let Some((row, index)) = pending {
-            self.state.session.pending_plugin = None;
-            match self.state.session.plugins.create(row, index) {
-                Ok(name) => {
-                    self.state.session.plugins.added(row);
-                    self.state.session.hosted_rows.push(row);
-                    self.transport.set_instruments(self.state.session.plugins.instruments());
-                    self.state.session.dirty = true;
-                    let format = self.state.session.plugins.descriptor(row).map_or("", |d| crate::plugins::format_name(d.format));
-                    self.state.message = Some(format!("Added {name} (hosted {format} plugin)"));
-                    self.state.session.pending_open = Some(row);
-                }
-                Err(e) => self.state.message = Some(format!("Plugin: {e}")),
-            }
-            self.invalidate();
         }
         // Without plugin windows opening one says so.
         #[cfg(not(plugin_windows))]
