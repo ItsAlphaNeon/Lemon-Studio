@@ -203,7 +203,7 @@ mod tests {
         use crate::mixer::FxReq;
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
-        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.session.plugins.effects = crate::plugins::builtin_effects();
         crate::settings_file::set_flag(ON, false);
         assert!(app.dump_audio_log().contains("off"));
         crate::settings_file::set_flag(ON, true);

@@ -31,7 +31,7 @@ impl App {
         // Where each owned instance belongs now.
         let mut row_map: HashMap<usize, Option<usize>> = HashMap::new();
         let mut fx_map: HashMap<(u16, u8), Option<(u16, u8)>> = HashMap::new();
-        for (&key, h) in &self.plugins.hosted {
+        for (&key, h) in &self.state.session.plugins.hosted {
             if h.owner.is_none() {
                 continue;
             }
@@ -61,11 +61,11 @@ impl App {
         if rows_too {
             // The rows hosted are the instances' rows: an edit may have moved or dropped rows of the list without
             // moving the instances (a command's delete, taken back before a tick).
-            self.state.hosted_rows = self.plugins.hosted.range(..FX_KEY).map(|(&r, _)| r).collect();
+            self.state.session.hosted_rows = self.state.session.plugins.hosted.range(..FX_KEY).map(|(&r, _)| r).collect();
         }
         if !fx_map.is_empty() {
-            self.plugins.remap_fx(&|t, k| fx_map.get(&(t, k)).copied().unwrap_or(Some((t, k))));
-            self.transport.set_effects(self.plugins.effects());
+            self.state.session.plugins.remap_fx(&|t, k| fx_map.get(&(t, k)).copied().unwrap_or(Some((t, k))));
+            self.transport.set_effects(self.state.session.plugins.effects());
             self.state.session.dirty = true;
         }
 
@@ -74,52 +74,60 @@ impl App {
         let p = &self.state.session.project;
         let row_id = |r: usize| p.channels.get(r).map(|c| c.id);
         let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.id);
-        let members = &self.state.session.plugin_members;
-        let state = &self.state;
-        let member_id = |key: usize| members.get(&key).and_then(|&(t, k, id)| crate::control::command::member_owner(crate::container::place_id(&state.session, t, k)?.0, id)).map(Id);
-        for (&key, h) in self.plugins.hosted.iter_mut() {
-            if h.owner.is_none() {
-                h.owner = match fx_of(key) {
+        let session = &self.state.session;
+        let member_id = |key: usize| session.plugin_members.get(&key).and_then(|&(t, k, id)| crate::control::command::member_owner(crate::container::place_id(session, t, k)?.0, id)).map(Id);
+        let owners: Vec<(usize, Id)> = session
+            .plugins
+            .hosted
+            .iter()
+            .filter(|(_, h)| h.owner.is_none())
+            .map(|(&key, _)| {
+                let id = match fx_of(key) {
                     None if key >= crate::plugins::MEMBER_KEY => member_id(key),
                     None => row_id(key),
                     Some((t, k)) => slot_id(t, k),
-                }
-                .unwrap_or(Id::NONE);
+                };
+                (key, id.unwrap_or(Id::NONE))
+            })
+            .collect();
+        for (key, id) in owners {
+            if let Some(h) = self.state.session.plugins.hosted.get_mut(&key) {
+                h.owner = id;
             }
         }
 
         // Channels and slots back from an undo: hosted again from the state kept when they went.
-        if !(rows_too || fx_too) || self.plugins.stash.is_empty() {
+        if !(rows_too || fx_too) || self.state.session.plugins.stash.is_empty() {
             return;
         }
         let back: Vec<(usize, Id, bool, String, Vec<u8>)> = self
-            .plugins
+            .state.session.plugins
             .stash
             .iter()
             .filter(|e| if e.1 { fx_too } else { rows_too })
             .filter_map(|(id, fx, uid, state)| {
                 let key = if *fx { slots.get(&id.0).map(|&(t, k)| fx_key(t, k)) } else { rows.get(&id.0).copied() }?;
-                (!self.plugins.hosted.contains_key(&key)).then(|| (key, *id, *fx, uid.clone(), state.clone()))
+                (!self.state.session.plugins.hosted.contains_key(&key)).then(|| (key, *id, *fx, uid.clone(), state.clone()))
             })
             .collect();
         for (key, id, fx, uid, state) in back {
-            self.plugins.stash.retain(|e| e.0 .0 != id.0);
+            self.state.session.plugins.stash.retain(|e| e.0 .0 != id.0);
             let made = match fx_of(key) {
-                Some((t, k)) if fx => self.plugins.effect_index_of_uid(&uid).is_some_and(|i| self.plugins.create_effect(t, k, i, Some(&state)).is_ok()),
-                None if !fx => match self.plugins.index_of_uid(&uid) {
+                Some((t, k)) if fx => self.state.session.plugins.effect_index_of_uid(&uid).is_some_and(|i| self.state.session.plugins.create_effect(t, k, i, Some(&state)).is_ok()),
+                None if !fx => match self.state.session.plugins.index_of_uid(&uid) {
                     Some(i) => {
                         self.plugin_paste(key, i, &state);
-                        self.plugins.hosted.contains_key(&key)
+                        self.state.session.plugins.hosted.contains_key(&key)
                     }
                     None => false,
                 },
                 _ => false,
             };
-            if let Some(h) = self.plugins.hosted.get_mut(&key).filter(|_| made) {
+            if let Some(h) = self.state.session.plugins.hosted.get_mut(&key).filter(|_| made) {
                 h.owner = id;
             }
             if made && fx {
-                self.transport.set_effects(self.plugins.effects());
+                self.transport.set_effects(self.state.session.plugins.effects());
             }
             self.state.session.dirty = true;
         }
@@ -137,16 +145,16 @@ impl App {
             match r {
                 crate::control::HostReq::Instrument { channel, plugin } => {
                     let Some(row) = p.channels.iter().position(|c| c.id.0 == channel.0) else { continue };
-                    if self.plugins.hosted.contains_key(&row) {
+                    if self.state.session.plugins.hosted.contains_key(&row) {
                         continue;
                     }
-                    let Some(index) = self.plugins.index_of(&plugin) else {
+                    let Some(index) = self.state.session.plugins.index_of(&plugin) else {
                         self.state.message = Some(format!("Plugin not found: {plugin}"));
                         continue;
                     };
-                    match self.plugins.create(row, index) {
+                    match self.state.session.plugins.create(row, index) {
                         Ok(_) => {
-                            self.state.hosted_rows.push(row);
+                            self.state.session.hosted_rows.push(row);
                             relink.0 = true;
                         }
                         Err(e) => self.state.message = Some(format!("Plugin: {e}")),
@@ -159,11 +167,11 @@ impl App {
                     }) else {
                         continue;
                     };
-                    let Some(index) = self.plugins.effect_index(&plugin) else {
+                    let Some(index) = self.state.session.plugins.effect_index(&plugin) else {
                         self.state.message = Some(format!("Effect not found: {plugin}"));
                         continue;
                     };
-                    match self.plugins.create_effect(t, k, index, None) {
+                    match self.state.session.plugins.create_effect(t, k, index, None) {
                         Ok(_) => relink.1 = true,
                         Err(e) => self.state.message = Some(format!("Effect: {e}")),
                     }
@@ -179,9 +187,9 @@ impl App {
         }
         for (owner, param, v) in std::mem::take(&mut self.state.session.control.params) {
             let Some(key) = crate::control::command::owner_key(&self.state.session, owner) else { continue };
-            let set = self.plugins.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.set_param(param, v));
+            let set = self.state.session.plugins.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.set_param(param, v));
             if set {
-                self.plugins.mark_edited(key);
+                self.state.session.plugins.mark_edited(key);
                 self.state.params.set_by_host(key, param, v);
             }
         }
@@ -191,31 +199,31 @@ impl App {
         let mut states = std::mem::take(&mut self.state.session.control.states);
         for i in 0..states.len() {
             let (owner, fill) = (states[i].0, states[i].2);
-            let Some(key) = crate::control::command::owner_key(&self.state.session, owner).filter(|k| self.plugins.hosted.contains_key(k)) else { continue };
-            let (now, preset) = (self.plugins.state(key).unwrap_or_default(), self.plugins.presets.get(&key).cloned());
+            let Some(key) = crate::control::command::owner_key(&self.state.session, owner).filter(|k| self.state.session.plugins.hosted.contains_key(k)) else { continue };
+            let (now, preset) = (self.state.session.plugins.state(key).unwrap_or_default(), self.state.session.plugins.presets.get(&key).cloned());
             match states[i + 1..].iter_mut().find(|e| e.1.fill == fill) {
                 Some((_, side, _)) => (side.state, side.preset, side.fill) = (now, preset, 0),
                 None => crate::history::fill_plugin_side(&mut self.state.session, fill, &now, preset.as_deref()),
             }
             let side = &states[i].1;
-            if side.fill != 0 || side.state.is_empty() || !self.plugins.set_state(key, &side.state) {
+            if side.fill != 0 || side.state.is_empty() || !self.state.session.plugins.set_state(key, &side.state) {
                 continue;
             }
-            self.plugins.set_preset(key, side.preset.clone());
+            self.state.session.plugins.set_preset(key, side.preset.clone());
             // The parameters as the state left them: what the window's next edit and a parameter's undo move from.
             self.state.params.reread(key);
-            for info in self.plugins.param_infos(key) {
-                if let Some(v) = self.plugins.param_value(key, info.id) {
+            for info in self.state.session.plugins.param_infos(key) {
+                if let Some(v) = self.state.session.plugins.param_value(key, info.id) {
                     self.state.session.control.saw_param(owner, info.id, v);
                 }
             }
             self.invalidate();
         }
         if relink.0 {
-            self.transport.set_instruments(self.plugins.instruments());
+            self.transport.set_instruments(self.state.session.plugins.instruments());
         }
         if relink.1 {
-            self.transport.set_effects(self.plugins.effects());
+            self.transport.set_effects(self.state.session.plugins.effects());
         }
         if relink.0 || relink.1 {
             self.state.session.dirty = true;

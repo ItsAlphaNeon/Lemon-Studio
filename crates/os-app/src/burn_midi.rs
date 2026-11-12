@@ -696,7 +696,7 @@ impl App {
         // A hosted instrument plays what the channel's own arpeggiator made, and what it puts out is what is burnt. One
         // that declares no note output (Lemon Sampler on every sampler channel, most instruments) is not played: the
         // pass would only keep the channel silent for nothing.
-        let hosted = self.plugins.hosted.get(&row).map(|h| Arc::clone(&h.plugin)).filter(|h| h.lock().is_ok_and(|p| p.puts_out_notes()));
+        let hosted = self.state.session.plugins.hosted.get(&row).map(|h| Arc::clone(&h.plugin)).filter(|h| h.lock().is_ok_and(|p| p.puts_out_notes()));
         let from_plugin = hosted.map(|h| {
             let input = own.as_deref().unwrap_or(&src);
             let end = s.session.project.pattern_length(cur).max(input.iter().map(|n| n.position + n.length.max(1)).max().unwrap_or(0));
@@ -839,7 +839,7 @@ mod tests {
     /// holding `notes` of rack row 0's channel and a step of row 1's.
     fn app_with(notes: &[Note]) -> App {
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins = crate::plugins::Plugins::default();
         let (a, b) = (app.state.session.project.channels[0].index, app.state.session.project.channels[1].index);
         let cur = app.state.pattern().max(1);
         app.state.set_pattern(cur);
@@ -999,7 +999,7 @@ mod tests {
         let fifths = Arc::new(std::sync::Mutex::new(Fifths { desc, capture: false, out: Vec::new(), resets: 0, outputs: true }));
         let mut h = crate::plugins::Hosted::new(fifths.clone());
         h.owner = app.state.session.project.channels[0].id;
-        app.plugins.hosted.insert(0, h);
+        app.state.session.plugins.hosted.insert(0, h);
         let cur = app.state.pattern();
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false));
         // A step plays a step long (24 ticks at 96 PPQ).
@@ -1028,7 +1028,7 @@ mod tests {
         let silent = Arc::new(std::sync::Mutex::new(Fifths { desc, capture: false, out: Vec::new(), resets: 0, outputs: false }));
         let mut h = crate::plugins::Hosted::new(silent.clone());
         h.owner = app.state.session.project.channels[0].id;
-        app.plugins.hosted.insert(0, h);
+        app.state.session.plugins.hosted.insert(0, h);
         (app.state.session.project.get_mut().channels[0].misc.arp.direction, app.state.session.project.get_mut().channels[0].misc.arp.chord) = (1, 1);
         let cur = app.state.pattern();
         let own = generate(&app.state.session.project.channels[0], &notes_of(&app, cur, 0), app.state.session.project.ppq).expect("an arpeggio");

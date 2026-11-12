@@ -339,8 +339,8 @@ pub(crate) mod tests {
         app.state.session.project.get_mut().channels[b].sample_path = Some(r"C:\Users\someone\Downloads\Gone.wav".into());
         app.state.session.file = None;
         app.save_to(dir.join("Song.flp"));
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
         app.open(dir.join("Song.flp"));
         let missing = missing_samples(&app.state);
         assert_eq!(missing.iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![b], "only the sample that is nowhere");

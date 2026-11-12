@@ -393,14 +393,14 @@ impl App {
     /// Every plugin tick: keeps the parameter lists of hosted instances and records the parameters their editors moved.
     pub(crate) fn params_tick(&mut self) {
         let ui = &mut self.state.params;
-        ui.lists.retain(|k, _| self.plugins.hosted.contains_key(k));
+        ui.lists.retain(|k, _| self.state.session.plugins.hosted.contains_key(k));
         let mut moved = None;
         let mut edited = Vec::new();
         let mut automate = Vec::new();
         let mut recorded = Vec::new();
         let mut stretch = Vec::new();
         let (mut seen, mut steps) = (Vec::new(), Vec::new());
-        for (&key, h) in &self.plugins.hosted {
+        for (&key, h) in &self.state.session.plugins.hosted {
             // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
             // is read again next tick (its events stay queued).
             let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
@@ -508,7 +508,7 @@ impl App {
         }
         // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
         for key in edited {
-            self.plugins.mark_edited(key);
+            self.state.session.plugins.mark_edited(key);
         }
         // Lemon Sampler's time-stretch knobs are the channel's own settings: the channel takes the editor's edits, so
         // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
@@ -643,7 +643,7 @@ impl App {
         let ok = set_param_value(&mut self.state, key, index, v);
         if ok {
             crate::control::param_set(&mut self.state, key, index, before, v);
-            self.plugins.mark_edited(key);
+            self.state.session.plugins.mark_edited(key);
         }
         (!ok).then(|| "The plugin did not take the value".to_string())
     }
@@ -727,7 +727,7 @@ mod tests {
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
         a.state.session.project.get_mut().mixer[2].slots[1] = Some(eq);
         a.sync_effects();
@@ -757,7 +757,7 @@ mod tests {
         assert_eq!(a.state.value_clip, Some(0.5));
         a.state.value_clip = Some(0.75);
         assert_eq!(crate::playlist::run(&mut a, Cmd::Param(PCmd::Paste(key, 0))), None);
-        a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        a.state.session.plugins.hosted[&key].plugin.lock().unwrap().idle();
         assert!((value_of(&a.state, key, 0).unwrap() - 0.75).abs() < 1e-6);
 
         // Dropped on the playlist: a clip there, aimed at the parameter.
@@ -796,7 +796,7 @@ mod tests {
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.reset_hosted();
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
         a.state.session.project.get_mut().mixer[2].slots[1] = Some(eq);
         a.sync_effects();
@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn parameter_set_is_an_undo_step() {
         let (mut a, key) = eq_app();
-        let idle = |a: &App| a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        let idle = |a: &App| a.state.session.plugins.hosted[&key].plugin.lock().unwrap().idle();
         let v0 = value_of(&a.state, key, 35).unwrap();
         a.state.session.history.reset();
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
@@ -891,7 +891,7 @@ mod tests {
         let max = set.children[6].cmd.clone();
         assert_eq!(max, Cmd::Param(PCmd::Set(key, 35, 1.0)));
         assert_eq!(crate::playlist::run(&mut a, max), None);
-        a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        a.state.session.plugins.hosted[&key].plugin.lock().unwrap().idle();
         assert!((value_of(&a.state, key, 35).unwrap() - 1.0).abs() < 1e-6);
         let set = entry(&row_menu(&mut a, key, 35), "Set...");
         assert_eq!(set.children.iter().position(|i| i.mark == Mark::Radio(true)), Some(6), "Maximum is marked now");
@@ -905,7 +905,7 @@ mod tests {
         let text = param_text_of(&a, key, 21, 1.0);
         assert_eq!(last.label.as_ref(), text);
         crate::playlist::run(&mut a, last.cmd.clone());
-        a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        a.state.session.plugins.hosted[&key].plugin.lock().unwrap().idle();
         assert!((value_of(&a.state, key, 21).unwrap() - 1.0).abs() < 1e-6);
 
         // A clip on Main level: Edit automation clip... is enabled and Link to controller... ticked.
@@ -986,7 +986,7 @@ mod tests {
             let mut a = App::new(None);
             a.state.session.project = crate::locked::Locked::new(project);
             a.reset_hosted();
-            a.plugins.effects = crate::plugins::builtin_effects();
+            a.state.session.plugins.effects = crate::plugins::builtin_effects();
             a.sync_effects();
             a.params_tick();
             for (ch, t) in links {
@@ -1017,7 +1017,7 @@ mod tests {
         let k: usize = std::env::var("OS_PARAM_K").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
         let mut a = App::new(None);
         a.open(input.into());
-        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
         a.sync_effects();
         a.params_tick();
         let key = a.state.params.lists.keys().copied().find(|&k| fx_of(k).is_some()).expect("a hosted EQ slot");

@@ -183,7 +183,7 @@ fn sync(app: &mut crate::app::App, row: usize, ms: &[M]) {
     let misc = ch.misc;
     for &m in ms {
         if let Some((name, plain)) = sampler_param(&misc, m) {
-            app.plugins.set_param_named(row, name, plain);
+            app.state.session.plugins.set_param_named(row, name, plain);
         }
     }
     app.state.params.reread(row);

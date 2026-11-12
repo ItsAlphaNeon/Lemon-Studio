@@ -116,18 +116,18 @@ fn open(el: &ActiveEventLoop, main: &Window, app: &App, w: Win) -> Option<DetWin
     #[cfg(target_os = "linux")]
     let attrs = {
         use winit::platform::x11::{WindowAttributesExtX11, WindowType};
-        if app.plugins.owner != 0 { attrs.with_x11_window_type(vec![WindowType::Utility]).with_visible(false) } else { attrs }
+        if app.state.session.plugins.owner != 0 { attrs.with_x11_window_type(vec![WindowType::Utility]).with_visible(false) } else { attrs }
     };
     let window = Rc::new(el.create_window(attrs).ok()?);
     #[cfg(target_os = "linux")]
-    if app.plugins.owner != 0 {
+    if app.state.session.plugins.owner != 0 {
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let id = match window.window_handle().map(|h| h.as_raw()) {
             Ok(RawWindowHandle::Xlib(h)) => h.window as u32,
             Ok(RawWindowHandle::Xcb(h)) => h.window.get(),
             _ => 0,
         };
-        crate::plugin_window::set_transient(id, app.plugins.owner);
+        crate::plugin_window::set_transient(id, app.state.session.plugins.owner);
         window.set_visible(true);
     }
     let context = softbuffer::Context::new(window.clone()).ok()?;

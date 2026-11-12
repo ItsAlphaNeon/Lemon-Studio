@@ -296,12 +296,12 @@ fn rpc_requests_and_errors() {
 #[test]
 fn hosted_plugins_follow_deletes_and_undo() {
     let mut a = app();
-    a.plugins = crate::plugins::Plugins::default();
-    a.plugins.available = crate::plugins::builtin();
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.available = crate::plugins::builtin();
     a.plugin_tick();
     a.plugin_tick();
     let (ch, ..) = ids(&a);
-    let rows = |a: &App| a.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, h)| (r, h.owner.0)).collect::<Vec<_>>();
+    let rows = |a: &App| a.state.session.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, h)| (r, h.owner.0)).collect::<Vec<_>>();
     assert_eq!(rows(&a), ch.iter().copied().enumerate().collect::<Vec<_>>(), "each sampler hosted, owned by its channel");
     let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false, token: None };
     // A parameter set through the control plane, then its channel deleted and brought back.
@@ -310,13 +310,13 @@ fn hosted_plugins_follow_deletes_and_undo() {
     let pid = p["id"].as_u64().unwrap();
     a.rpc(&mut c, "apply", &json!({"command": {"op": "set_param", "owner": ch[1], "param": pid, "value": 0.9}})).ok().unwrap();
     a.plugin_tick();
-    let value = |a: &App, row: usize| a.plugins.hosted[&row].plugin.lock().unwrap().param_value(pid as u32).unwrap();
+    let value = |a: &App, row: usize| a.state.session.plugins.hosted[&row].plugin.lock().unwrap().param_value(pid as u32).unwrap();
     assert!((value(&a, 1) - 0.9).abs() < 1e-6);
     a.rpc(&mut c, "apply", &json!({"command": {"op": "delete_channel", "channel": ch[1]}})).ok().unwrap();
     a.plugin_tick();
     let want: Vec<(usize, u32)> = [ch[0], ch[2], ch[3], ch[4]].into_iter().enumerate().collect();
     assert_eq!(rows(&a), want, "the rows below moved up with their instances");
-    assert_eq!(a.state.hosted_rows.iter().copied().collect::<std::collections::BTreeSet<_>>(), (0..4).collect());
+    assert_eq!(a.state.session.hosted_rows.iter().copied().collect::<std::collections::BTreeSet<_>>(), (0..4).collect());
     a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
     a.plugin_tick();
     assert_eq!(rows(&a), ch.iter().copied().enumerate().collect::<Vec<_>>(), "back on its row");
@@ -333,23 +333,23 @@ fn hosted_plugins_follow_deletes_and_undo() {
 #[test]
 fn an_effect_added_by_a_command_is_hosted_without_a_window() {
     let mut a = app();
-    a.plugins = crate::plugins::Plugins::default();
-    a.plugins.effects = crate::plugins::builtin_effects();
-    let Some(name) = a.plugins.effects.first().map(|e| e.desc.name.clone()) else { return };
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.effects = crate::plugins::builtin_effects();
+    let Some(name) = a.state.session.plugins.effects.first().map(|e| e.desc.name.clone()) else { return };
     let ins1 = ids(&a).1[1];
     let r = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_effect", "track": ins1, "slot": 2, "plugin": name}))]).unwrap();
     let slot = r[0]["slot"].as_u64().unwrap() as u32;
     a.plugin_tick();
     let key = crate::plugins::fx_key(1, 2);
-    assert_eq!(a.plugins.hosted.get(&key).map(|h| h.owner.0), Some(slot));
+    assert_eq!(a.state.session.plugins.hosted.get(&key).map(|h| h.owner.0), Some(slot));
     #[cfg(plugin_windows)]
-    assert!(a.plugins.hosted[&key].window.is_none());
+    assert!(a.state.session.plugins.hosted[&key].window.is_none());
     crate::history::undo(&mut a.state);
     a.plugin_tick();
-    assert!(!a.plugins.hosted.contains_key(&key), "undone: the instance goes");
+    assert!(!a.state.session.plugins.hosted.contains_key(&key), "undone: the instance goes");
     crate::history::redo(&mut a.state);
     a.plugin_tick();
-    assert_eq!(a.plugins.hosted.get(&key).map(|h| h.owner.0), Some(slot), "redone: back from what it kept");
+    assert_eq!(a.state.session.plugins.hosted.get(&key).map(|h| h.owner.0), Some(slot), "redone: back from what it kept");
 }
 
 #[cfg(unix)]
@@ -503,7 +503,7 @@ fn the_mixer_s_edits_are_undoable() {
         crate::mixer::set_latency(&mut a.state, 2, false, 20.0);
     });
     // Effect slots: added, moved, named, removed.
-    a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+    a.state.session.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
     a.state.selected_mixer = 2;
     a.state.mixer.sel.clear();
     ui_round_trip(&mut a, "Add effect", |a| {
@@ -573,12 +573,12 @@ fn the_rack_s_and_patterns_edits_are_undoable() {
 #[test]
 fn a_deleted_channel_s_instrument_comes_back_with_an_undo() {
     let mut a = app();
-    a.plugins = crate::plugins::Plugins::default();
-    a.plugins.available = crate::plugins::builtin();
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.available = crate::plugins::builtin();
     a.plugin_tick();
     a.plugin_tick();
     let ch = ids(&a).0;
-    let key = |a: &App, id: u32| a.plugins.hosted.iter().find(|(_, h)| h.owner.0 == id).map(|(&k, _)| k);
+    let key = |a: &App, id: u32| a.state.session.plugins.hosted.iter().find(|(_, h)| h.owner.0 == id).map(|(&k, _)| k);
     crate::rack::delete_step(&mut a, &[1]);
     a.plugin_tick();
     assert_eq!(key(&a, ch[1]), None);
@@ -586,7 +586,7 @@ fn a_deleted_channel_s_instrument_comes_back_with_an_undo() {
     crate::history::undo(&mut a.state);
     a.plugin_tick();
     assert_eq!((0..5).map(|r| key(&a, ch[r])).collect::<Vec<_>>(), (0..5).map(Some).collect::<Vec<_>>());
-    assert_eq!(a.state.hosted_rows.iter().copied().collect::<std::collections::BTreeSet<_>>(), (0..5).collect());
+    assert_eq!(a.state.session.hosted_rows.iter().copied().collect::<std::collections::BTreeSet<_>>(), (0..5).collect());
 }
 
 #[cfg(unix)]
@@ -645,50 +645,50 @@ fn clients_connect_over_a_local_port() {
 #[test]
 fn a_replaced_generator_stays_replaced() {
     let mut a = app();
-    a.plugins = crate::plugins::Plugins::default();
-    a.plugins.available = crate::plugins::builtin();
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.available = crate::plugins::builtin();
     a.plugin_tick();
     a.plugin_tick();
-    let trio = a.plugins.available.iter().position(|p| p.desc.name == crate::osc3::LEMON_TRIO).unwrap();
+    let trio = a.state.session.plugins.available.iter().position(|p| p.desc.name == crate::osc3::LEMON_TRIO).unwrap();
     crate::plugin_menu::replace_generator(&mut a, trio, 0);
     for _ in 0..3 {
         a.plugin_tick();
     }
-    assert_eq!(a.plugins.descriptor(0).map(|d| d.name), Some(crate::osc3::LEMON_TRIO.to_string()), "the old sampler is not hosted again");
-    assert_eq!(a.state.hosted_rows.iter().filter(|&&r| r == 0).count(), 1);
+    assert_eq!(a.state.session.plugins.descriptor(0).map(|d| d.name), Some(crate::osc3::LEMON_TRIO.to_string()), "the old sampler is not hosted again");
+    assert_eq!(a.state.session.hosted_rows.iter().filter(|&&r| r == 0).count(), 1);
     // And back: Lemon Sampler hosts the channel, not the Lemon Trio it replaced.
-    let sampler = a.plugins.available.iter().position(|p| p.desc.name == crate::plugins::LEMON_SAMPLER).unwrap();
+    let sampler = a.state.session.plugins.available.iter().position(|p| p.desc.name == crate::plugins::LEMON_SAMPLER).unwrap();
     crate::plugin_menu::replace_generator(&mut a, sampler, 0);
     for _ in 0..3 {
         a.plugin_tick();
     }
-    assert_eq!(a.plugins.descriptor(0).map(|d| d.name), Some(crate::plugins::LEMON_SAMPLER.to_string()));
+    assert_eq!(a.state.session.plugins.descriptor(0).map(|d| d.name), Some(crate::plugins::LEMON_SAMPLER.to_string()));
 }
 
 #[test]
 fn a_dry_run_leaves_the_instruments_and_the_selections() {
     let mut a = app();
-    a.plugins = crate::plugins::Plugins::default();
-    a.plugins.available = crate::plugins::builtin();
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.available = crate::plugins::builtin();
     a.plugin_tick();
     a.plugin_tick();
     let ch = ids(&a).0;
     a.state.rack.select_only(1);
     a.state.selected_channel = 1;
-    let live = a.plugins.hosted[&1].plugin.clone();
-    let rows = a.state.hosted_rows.clone();
+    let live = a.state.session.plugins.hosted[&1].plugin.clone();
+    let rows = a.state.session.hosted_rows.clone();
     propose(&mut a.state, &test_client(), "Fewer", vec![cmd(json!({"op": "delete_channel", "channel": ch[1]}))]).unwrap();
     assert_eq!((a.state.selected_channel, a.state.rack.sel.iter().copied().collect::<Vec<_>>()), (1, vec![1]));
-    assert_eq!(a.state.hosted_rows, rows);
+    assert_eq!(a.state.session.hosted_rows, rows);
     a.plugin_tick();
     a.plugin_tick();
-    assert!(std::sync::Arc::ptr_eq(&a.plugins.hosted[&1].plugin, &live), "the same instance plays the channel");
+    assert!(std::sync::Arc::ptr_eq(&a.state.session.plugins.hosted[&1].plugin, &live), "the same instance plays the channel");
     // A transaction that fails half way leaves them too.
     let bad = vec![cmd(json!({"op": "delete_channel", "channel": ch[1]})), cmd(json!({"op": "set_tempo", "bpm": 1}))];
     assert!(apply(&mut a.state, &test_client(), None, bad).is_err());
     a.plugin_tick();
-    assert!(std::sync::Arc::ptr_eq(&a.plugins.hosted[&1].plugin, &live));
-    assert_eq!(a.state.hosted_rows, rows);
+    assert!(std::sync::Arc::ptr_eq(&a.state.session.plugins.hosted[&1].plugin, &live));
+    assert_eq!(a.state.session.hosted_rows, rows);
 }
 
 #[test]
@@ -801,12 +801,12 @@ impl os_host::Plugin for Knob {
 fn edits_in_a_plugin_s_window_are_undo_steps() {
     use os_host::ParamEvent::{Begin, End, Value};
     let mut a = app();
-    a.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins = crate::plugins::Plugins::default();
     let desc = crate::plugins::builtin()[0].desc.clone();
     let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.25, 0.5], events: Vec::new() }));
     let mut h = crate::plugins::Hosted::new(knob.clone());
     h.owner = a.state.session.project.channels[0].id;
-    a.plugins.hosted.insert(0, h);
+    a.state.session.plugins.hosted.insert(0, h);
     a.params_tick();
     // The plugin moves its knobs as its window is dragged: the values are the plugin's at once, the events follow.
     let drag = |a: &mut App, events: Vec<os_host::ParamEvent>| {
@@ -868,12 +868,12 @@ fn knob_state(v: [f64; 2]) -> Vec<u8> {
 fn preset_loads_are_undo_steps() {
     use crate::presets::{load_into, save, Header};
     let mut a = app();
-    a.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins = crate::plugins::Plugins::default();
     let desc = crate::plugins::builtin()[0].desc.clone();
     let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc: desc.clone(), value: [0.25, 0.5], events: Vec::new() }));
     let mut h = crate::plugins::Hosted::new(knob.clone());
     h.owner = a.state.session.project.channels[0].id;
-    a.plugins.hosted.insert(0, h);
+    a.state.session.plugins.hosted.insert(0, h);
     a.state.session.project.get_mut().channels[0].name = Some("808 Snare".into());
     a.params_tick();
     let dir = std::env::temp_dir().join(format!("os-preset-undo-{}", std::process::id()));
@@ -888,7 +888,7 @@ fn preset_loads_are_undo_steps() {
     // What the instance on `row` and its channel hold, once the app's tick has put back what an undo or redo took.
     let seen = |a: &mut App, row: usize| {
         a.host_commands();
-        (knob.lock().unwrap().value, a.state.session.project.channels[row].name.clone().unwrap_or_default(), a.plugins.preset_name(row))
+        (knob.lock().unwrap().value, a.state.session.project.channels[row].name.clone().unwrap_or_default(), a.state.session.plugins.preset_name(row))
     };
     let at = |v: [f64; 2], name: &str, preset: Option<&str>| (v, name.to_string(), preset.map(str::to_string));
 
@@ -903,7 +903,7 @@ fn preset_loads_are_undo_steps() {
     // The channel moves without a step of its own: the instance follows it, and so does the undo.
     a.state.session.project.get_mut().channels.swap(0, 1);
     a.follow_ids(true, false);
-    assert!(a.plugins.hosted.contains_key(&1));
+    assert!(a.state.session.plugins.hosted.contains_key(&1));
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PRESET));
     assert_eq!(seen(&mut a, 1), at([0.9, 0.1], "Bright", Some("Bright")));
     crate::history::undo(&mut a.state);
@@ -932,7 +932,7 @@ fn preset_loads_are_undo_steps() {
     crate::prefs::set_check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS, true);
     let fx = crate::plugins::fx_key(1, 0);
     let slot_knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
-    a.plugins.hosted.insert(fx, crate::plugins::Hosted::new(slot_knob.clone()));
+    a.state.session.plugins.hosted.insert(fx, crate::plugins::Hosted::new(slot_knob.clone()));
     crate::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
     let slot = |a: &App| crate::mixer::slot_name(&a.state.session, 1, 0).unwrap_or_default();
     let plain = slot(&a);
@@ -941,14 +941,14 @@ fn preset_loads_are_undo_steps() {
     assert_eq!((a.state.session.history.at(), slot(&a), slot_knob.lock().unwrap().value), (steps + 1, "Bright".to_string(), [0.9, 0.1]));
     crate::history::undo(&mut a.state);
     a.host_commands();
-    assert_eq!((slot(&a), slot_knob.lock().unwrap().value, a.plugins.preset_name(fx)), (plain.clone(), [0.5, 0.5], None));
+    assert_eq!((slot(&a), slot_knob.lock().unwrap().value, a.state.session.plugins.preset_name(fx)), (plain.clone(), [0.5, 0.5], None));
     crate::history::redo(&mut a.state);
     a.host_commands();
     assert_eq!((slot(&a), slot_knob.lock().unwrap().value), ("Bright".to_string(), [0.9, 0.1]));
 
     // A preset dropped where a new instance was made loads into it as part of the step that made it.
     let steps = a.state.session.history.at();
-    a.plugins.preset_waits.push((1, dark.clone(), std::time::Instant::now()));
+    a.state.session.plugins.preset_waits.push((1, dark.clone(), std::time::Instant::now()));
     crate::presets::pending_tick(&mut a);
     assert_eq!((a.state.session.history.at(), knob.lock().unwrap().value), (steps, [0.1, 0.9]));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1020,7 +1020,7 @@ fn a_hosted_slots_scaling_and_help() {
     let desc = crate::plugins::builtin()[0].desc.clone();
     let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
     let fx = crate::plugins::fx_key(1, 0);
-    a.plugins.hosted.insert(fx, crate::plugins::Hosted::new(knob));
+    a.state.session.plugins.hosted.insert(fx, crate::plugins::Hosted::new(knob));
     crate::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Lemon Sampler"));
     crate::mixer::select(&mut a.state, 1, false);
     let scaling = |a: &App| slot_menu(a, 0, 0.0, 0.0).items.into_iter().find(|i| i.label == "Scaling").unwrap();
@@ -1031,12 +1031,12 @@ fn a_hosted_slots_scaling_and_help() {
     assert_eq!(marks[2], ("125%".into(), Mark::Radio(false)));
     assert_eq!(m.children[2].cmd, Cmd::Mixer(MCmd::SlotScale(0, Some(125))));
     run(&mut a, MCmd::SlotScale(0, Some(125)));
-    assert_eq!((a.plugins.scale_for(fx, 1.0), scaling(&a).children[2].mark.clone()), (1.25, Mark::Radio(true)));
+    assert_eq!((a.state.session.plugins.scale_for(fx, 1.0), scaling(&a).children[2].mark.clone()), (1.25, Mark::Radio(true)));
     run(&mut a, MCmd::SlotScale(0, None));
-    assert_eq!(a.plugins.scale_for(fx, 1.5), 1.5, "Main");
+    assert_eq!(a.state.session.plugins.scale_for(fx, 1.5), 1.5, "Main");
     assert_eq!(run(&mut a, MCmd::SlotHelp(0)), Some(format!("Opening {}", crate::help_links::plugin_page("Lemon Sampler"))));
     // No instance (an effect the engine plays itself has no editor): greyed.
-    a.plugins.hosted.clear();
+    a.state.session.plugins.hosted.clear();
     assert!(!scaling(&a).enabled);
 }
 

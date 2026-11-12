@@ -121,9 +121,9 @@ fn audio_load() {
     os_engine::parallel::configure_auto(std::env::var_os("OS_MIX_AUTO").is_some());
     let limit: f64 = std::env::var("OS_AUDIO_BENCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(f64::MAX);
     let mut app = crate::app::App::new(None);
-    app.plugins = crate::plugins::Plugins::default();
-    app.plugins.available = crate::plugins::builtin();
-    app.plugins.effects = crate::plugins::builtin_effects();
+    app.state.session.plugins = crate::plugins::Plugins::default();
+    app.state.session.plugins.available = crate::plugins::builtin();
+    app.state.session.plugins.effects = crate::plugins::builtin_effects();
     app.open(path.into());
     eprintln!("{}", app.state.message.clone().unwrap_or_default());
     let t0 = Instant::now();
@@ -142,8 +142,8 @@ fn audio_load() {
     let mut library = SampleLibrary::new(crate::factory_folder::dir());
     library.resample_stretches = true;
     let mut e = Engine::new(&project, &mut library, rate, PlayMode::Song);
-    let inst = app.plugins.instruments();
-    let fx = app.plugins.effects();
+    let inst = app.state.session.plugins.instruments();
+    let fx = app.state.session.plugins.effects();
     eprintln!("{} hosted instruments, {} hosted effects, {} Hz", inst.len(), fx.len(), rate);
     // OS_AUDIO_BENCH_SKIP=inst|fx leaves those out, to see what each costs.
     let skip = std::env::var("OS_AUDIO_BENCH_SKIP").unwrap_or_default();

@@ -348,7 +348,7 @@ mod tests {
         use crate::mixer::FxReq;
         let _one = RECORDING.lock().unwrap_or_else(|e| e.into_inner());
         let mut app = app();
-        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.session.plugins.effects = crate::plugins::builtin_effects();
         crate::playlist::run(&mut app, Cmd::OneClickEditor);
         let Some(Popup { items, .. }) = app.state.playlist.popup.take() else { panic!("no input menu") };
         assert!(items.iter().any(|i| matches!(&i.cmd, Cmd::OneClick(_, true))));

@@ -546,7 +546,7 @@ impl Queues {
             dirty: s.session.dirty,
             written: s.session.project.written_at(),
             message: s.message.clone(),
-            hosted_rows: s.hosted_rows.clone(),
+            hosted_rows: s.session.hosted_rows.clone(),
             selected_channel: s.selected_channel,
             rack_sel: s.rack.sel.clone(),
             selected_mixer: s.selected_mixer,
@@ -565,7 +565,7 @@ impl Queues {
         s.session.sample_loads.truncate(self.sample_loads);
         s.session.fx_requests.truncate(self.fx);
         s.message = self.message;
-        s.hosted_rows = self.hosted_rows;
+        s.session.hosted_rows = self.hosted_rows;
         (s.selected_channel, s.rack.sel, s.selected_mixer, s.mixer.sel) = (self.selected_channel, self.rack_sel, self.selected_mixer, self.mixer_sel);
         (s.z, s.plugin_channel, s.playlist.sel) = (self.windows, self.plugin_channel, self.clips);
         s.piano = self.piano;

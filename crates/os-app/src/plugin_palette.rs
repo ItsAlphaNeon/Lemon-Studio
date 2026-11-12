@@ -557,14 +557,14 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
         for name in ["Test Synth", "Bass Drum"] {
-            app.plugins.available.push(db::fake(name, os_host::Kind::Instrument));
+            app.state.session.plugins.available.push(db::fake(name, os_host::Kind::Instrument));
         }
         for name in ["Space Reverb", "Delay Lama"] {
-            app.plugins.effects.push(db::fake(name, os_host::Kind::Effect));
+            app.state.session.plugins.effects.push(db::fake(name, os_host::Kind::Effect));
         }
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app
     }
 
@@ -678,9 +678,9 @@ mod tests {
     fn many_plugins_scroll_inside_a_fixed_window() {
         let mut app = app();
         for i in 0..400 {
-            app.plugins.available.push(db::fake(&format!("Many Synth {i:03}"), os_host::Kind::Instrument));
+            app.state.session.plugins.available.push(db::fake(&format!("Many Synth {i:03}"), os_host::Kind::Instrument));
         }
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.screen = (1366.0, 768.0);
         app.open_plugin_palette(Target::Gen(None), (1300.0, 700.0), None);
         let r = rect(&app.state);
