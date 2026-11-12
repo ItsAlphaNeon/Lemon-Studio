@@ -140,8 +140,8 @@ impl App {
         let Some(ch) = crate::piano::channel(s) else { return };
         let pos = crate::song_pos::stored(s);
         let at = if s.song_mode() {
-            let Some(t) = crate::piano::pattern_tick_in_song(s, f64::from(pos)) else {
-                let m = format!("Step edit: {} does not play at the song position", crate::patterns::name_of(s, s.pattern()));
+            let Some(t) = crate::piano::pattern_tick_in_song(&s.session, f64::from(pos)) else {
+                let m = format!("Step edit: {} does not play at the song position", crate::patterns::name_of(&s.session, s.pattern()));
                 return self.say(m);
             };
             t as u32
@@ -150,11 +150,11 @@ impl App {
         };
         let len = step(s);
         let snap = crate::history::Snap::pattern(s, s.pattern());
-        crate::history::record(s, crate::history::STEP_EDIT, snap);
+        crate::history::record(&mut s.session, crate::history::STEP_EDIT, snap);
         let mut new = Vec::with_capacity(keys.len());
         for &(key, velocity) in keys {
             let i = crate::piano::add_note(s, ch, at, i32::from(key));
-            let n = &mut crate::piano::pattern_mut(s).notes[i];
+            let n = &mut crate::piano::pattern_mut(&mut s.session).notes[i];
             (n.length, n.velocity) = (len, velocity);
             new.push(i);
         }
@@ -215,7 +215,7 @@ mod tests {
 
     /// The pattern's notes as (position, length, key, velocity).
     fn notes(app: &App) -> Vec<(u32, u32, u16, u8)> {
-        piano::notes(&app.state).iter().map(|n| (n.position, n.length, n.key, n.velocity)).collect()
+        piano::notes(&app.state.session).iter().map(|n| (n.position, n.length, n.key, n.velocity)).collect()
     }
 
     fn selected(app: &App) -> Vec<usize> {
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(app.state.piano.typed, [(ch, 48)], "the typing keyboard plays it");
         typed(&mut app, KeyCode::KeyZ, false);
         assert_eq!(notes(&app), [(0, st, 48, 100)]);
-        assert_eq!(piano::notes(&app.state)[0].channel, ch);
+        assert_eq!(piano::notes(&app.state.session)[0].channel, ch);
         assert_eq!((app.state.piano.marker, selected(&app)), (st, vec![0]));
         assert_eq!(app.hint, "Song position: 1:02:00");
         tap(&mut app, KeyCode::KeyX);
@@ -269,7 +269,7 @@ mod tests {
         app.state.set_song_mode(true);
         let bar = app.state.session.project.bar_ticks();
         let clip = os_model::Clip::new(2 * bar, bar, 0, os_model::ClipSource::Pattern(app.state.pattern()));
-        crate::playlist::arr_mut(&mut app.state).clips = vec![clip];
+        crate::playlist::arr_mut(&mut app.state.session).clips = vec![clip];
         app.state.playlist.pos = 2 * bar + 4 * st;
         tap(&mut app, KeyCode::KeyC);
         assert_eq!(notes(&app)[2], (4 * st, st, 52, 100));

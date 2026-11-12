@@ -204,8 +204,8 @@ fn state_in_mut(p: &mut Project, t: u16, k: u8) -> Option<&mut Vec<u8>> {
 }
 
 /// The members of the container at place (`t`, `k`) (a mixer slot, or a channel's for `k` = [`CHANNEL`]).
-pub fn members(s: &State, t: u16, k: u8) -> Option<Vec<Member>> {
-    let b = state_in(&s.session.project, t, k)?;
+pub fn members(s: &crate::session::Session, t: u16, k: u8) -> Option<Vec<Member>> {
+    let b = state_in(&s.project, t, k)?;
     // A channel just made a container and not saved yet holds no list: an empty one.
     if b.is_empty() && k == CHANNEL {
         return Some(Vec::new());
@@ -215,8 +215,8 @@ pub fn members(s: &State, t: u16, k: u8) -> Option<Vec<Member>> {
 
 /// How many members the container at place (`t`, `k`) holds, read from its state's header alone (the window's size,
 /// worked out on every frame without decoding the members' states).
-pub fn member_count(s: &State, t: u16, k: u8) -> Option<usize> {
-    let b = state_in(&s.session.project, t, k)?;
+pub fn member_count(s: &crate::session::Session, t: u16, k: u8) -> Option<usize> {
+    let b = state_in(&s.project, t, k)?;
     let word = |at: usize| Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?));
     (b.get(..4)? == MAGIC && (1..=VERSION).contains(&word(4)?)).then(|| word(8).map(|n| n as usize)).flatten()
 }
@@ -227,8 +227,8 @@ pub fn level_text(name: &str, wet: bool, v: f32) -> String {
 }
 
 /// Writes `list` as the state of the container at place (`t`, `k`).
-fn set_members(s: &mut State, t: u16, k: u8, list: &[Member]) {
-    if let Some(b) = state_in_mut(s.session.project.get_mut(), t, k) {
+fn set_members(s: &mut crate::session::Session, t: u16, k: u8, list: &[Member]) {
+    if let Some(b) = state_in_mut(s.project.get_mut(), t, k) {
         *b = encode(list);
     }
 }
@@ -269,11 +269,11 @@ pub fn id_place(s: &State, id: u32) -> Option<(u16, u8)> {
 }
 
 /// What the container at place (`t`, `k`) is shown as: its track's name for a slot's ("Bus 2"), its channel's name.
-pub fn place_name(s: &State, t: u16, k: u8) -> String {
+pub fn place_name(s: &crate::session::Session, t: u16, k: u8) -> String {
     if k != CHANNEL {
         return crate::mixer::name(s, t);
     }
-    let ch = s.session.project.channels.get(usize::from(t));
+    let ch = s.project.channels.get(usize::from(t));
     ch.and_then(|c| c.name.clone()).unwrap_or_else(|| format!("Channel {}", usize::from(t) + 1))
 }
 
@@ -283,25 +283,25 @@ pub fn title(s: &State, t: u16, k: u8) -> Option<String> {
         return crate::params::effect_label(s, t, k);
     }
     state_in(&s.session.project, t, k)?;
-    Some(format!("Container ({})", place_name(s, t, k)))
+    Some(format!("Container ({})", place_name(&s.session, t, k)))
 }
 
 /// The automation target of item `item` of the container at place (`t`, `k`): a parameter of its slot or channel.
-pub fn item_target(s: &State, t: u16, k: u8, item: u16) -> Option<u32> {
+pub fn item_target(s: &crate::session::Session, t: u16, k: u8, item: u16) -> Option<u32> {
     if k == CHANNEL {
-        return Some(target::channel_param(s.session.project.channels.get(usize::from(t))?.index, item));
+        return Some(target::channel_param(s.project.channels.get(usize::from(t))?.index, item));
     }
     Some(target::slot_param(t, k, item))
 }
 
 /// The container at place (`t`, `k`) and the item an automation target on its slot's or channel's parameters names.
-pub fn target_place(s: &State, tg: Auto) -> Option<(u16, u8, u16)> {
+pub fn target_place(s: &crate::session::Session, tg: Auto) -> Option<(u16, u8, u16)> {
     let (t, k, i) = match tg {
         Auto::SlotParam(m, k, i) => (m, k, i),
-        Auto::ChannelParam(ch, i) => (u16::try_from(s.session.project.channels.iter().position(|c| c.index == ch)?).ok()?, CHANNEL, i),
+        Auto::ChannelParam(ch, i) => (u16::try_from(s.project.channels.iter().position(|c| c.index == ch)?).ok()?, CHANNEL, i),
         _ => return None,
     };
-    state_in(&s.session.project, t, k)?;
+    state_in(&s.project, t, k)?;
     Some((t, k, i))
 }
 
@@ -398,14 +398,14 @@ pub fn show(s: &mut State, t: u16, slot: u8) {
 /// What a member's level knob shows: the level the chain plays while the window shows its container, else the list's.
 pub fn shown_level(s: &State, t: u16, k: u8, id: u32, wet: bool) -> f32 {
     let live = s.container.live.get(&id).filter(|_| s.container.at == (t, k)).map(|l| if wet { l.0 } else { l.1 });
-    live.or_else(|| level(s, t, k, id, wet)).unwrap_or(0.0)
+    live.or_else(|| level(&s.session, t, k, id, wet)).unwrap_or(0.0)
 }
 
 /// A level knob turned (`State::set_knob`): the list takes the level, no undo step (a drag's is taken at its press), and
 /// the knob shows it until the chain plays it.
 pub fn put_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
-    let Some(list) = leveled(s, t, k, id, wet, v) else { return };
-    set_members(s, t, k, &list);
+    let Some(list) = leveled(&s.session, t, k, id, wet, v) else { return };
+    set_members(&mut s.session, t, k, &list);
     if s.container.at == (t, k) {
         if let Some(l) = s.container.live.get_mut(&id) {
             *(if wet { &mut l.0 } else { &mut l.1 }) = v;
@@ -418,7 +418,7 @@ pub fn put_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
 pub fn knob_menu(s: &State, id: KnobId, x: f32, y: f32) -> Option<Popup> {
     let KnobId::Member(t, k, m, wet) = id else { return None };
     let mut items = vec![PItem::new("Reset", Cmd::Reset(crate::knobs::Control::Knob(id)))];
-    items.extend(crate::params::level_items(s, level_automation(s, t, k, m, wet), crate::typein::Target::Member(t, k, m, wet)));
+    items.extend(crate::params::level_items(s, level_automation(&s.session, t, k, m, wet), crate::typein::Target::Member(t, k, m, wet)));
     Some(Popup { x, y, items, sub: None, scroll: [0; 2] })
 }
 
@@ -446,7 +446,7 @@ pub enum Op {
 /// Whether slot `slot` of the current track can be wrapped: a hosted effect, or (for Wrap all) a container.
 pub fn can_wrap(app: &App, slot: u8, all: bool) -> bool {
     let t = app.state.selected_mixer;
-    app.plugins.hosted.contains_key(&fx_key(t, slot)) || (all && members(&app.state, t, slot).is_some())
+    app.plugins.hosted.contains_key(&fx_key(t, slot)) || (all && members(&app.state.session, t, slot).is_some())
 }
 
 /// Whether rack row `row`'s instrument can be wrapped: a plugin channel whose plugin is hosted (not a sampler, whose
@@ -461,12 +461,12 @@ fn pct(v: f32) -> i32 {
 }
 
 /// The wet (`wet`) or dry level of member `id` of the container in slot `k` of track `t`.
-pub fn level(s: &State, t: u16, k: u8, id: u32, wet: bool) -> Option<f32> {
+pub fn level(s: &crate::session::Session, t: u16, k: u8, id: u32, wet: bool) -> Option<f32> {
     members(s, t, k)?.into_iter().find(|m| m.id == id).map(|m| if wet { m.wet } else { m.dry })
 }
 
 /// The type-in box's caption: "Bus 2 - Lemon Limiter wet" (a channel's container: the channel's name first).
-pub fn level_name(s: &State, t: u16, k: u8, id: u32, wet: bool) -> String {
+pub fn level_name(s: &crate::session::Session, t: u16, k: u8, id: u32, wet: bool) -> String {
     let name = members(s, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
     format!("{} - {name} {}", place_name(s, t, k), if wet { "wet" } else { "dry" })
 }
@@ -474,17 +474,17 @@ pub fn level_name(s: &State, t: u16, k: u8, id: u32, wet: bool) -> String {
 /// Sets the wet (`wet`) or dry level of member `id` of the container in slot `k` of track `t` to `v` (0..1): one undo
 /// step. The chain takes the level on the next tick, keeping its instances (`App::sync_containers`).
 pub fn set_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
-    let Some(list) = leveled(s, t, k, id, wet, v) else { return };
-    crate::control::edit(s, LEVEL, region(t, k), |s| set_members(s, t, k, &list));
+    let Some(list) = leveled(&s.session, t, k, id, wet, v) else { return };
+    crate::control::edit(s, LEVEL, region(t, k), |s| set_members(&mut s.session, t, k, &list));
     s.session.dirty = true;
 }
 
 /// `set_level` from a controller (a remote link): one undo step while the same level keeps moving, none while Undo
 /// knob tweaks is off, as a knob's.
 pub fn set_level_run(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
-    let Some(list) = leveled(s, t, k, id, wet, v) else { return };
+    let Some(list) = leveled(&s.session, t, k, id, wet, v) else { return };
     let run = crate::history::Run::Member(t, k, id, wet);
-    crate::control::run_edit(s, LEVEL, region(t, k), run, true, |s| set_members(s, t, k, &list));
+    crate::control::run_edit(s, LEVEL, region(t, k), run, true, |s| set_members(&mut s.session, t, k, &list));
     s.session.dirty = true;
 }
 
@@ -492,10 +492,10 @@ pub fn set_level_run(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
 /// icon; spec: plugins/patcher/README.md §4.5): one undo step `name`, none when nothing changed. Saved with the
 /// container; the chain takes an Auto-bypass switch on the next tick, keeping its instances.
 pub fn edit_own(s: &mut State, t: u16, k: u8, id: u32, name: &'static str, f: impl FnOnce(&mut Member)) {
-    let Some(mut list) = members(s, t, k) else { return };
+    let Some(mut list) = members(&s.session, t, k) else { return };
     let Some(m) = list.iter_mut().find(|m| m.id == id) else { return };
     f(m);
-    crate::control::edit(s, name, region(t, k), |s| set_members(s, t, k, &list));
+    crate::control::edit(s, name, region(t, k), |s| set_members(&mut s.session, t, k, &list));
     s.session.dirty = true;
 }
 
@@ -520,7 +520,7 @@ pub fn of_key(s: &State, key: usize) -> Option<(u16, u8, u32)> {
 }
 
 /// The member with id `id` of the container at place (`t`, `k`).
-pub fn member(s: &State, t: u16, k: u8, id: u32) -> Option<Member> {
+pub fn member(s: &crate::session::Session, t: u16, k: u8, id: u32) -> Option<Member> {
     members(s, t, k)?.into_iter().find(|m| m.id == id)
 }
 
@@ -542,7 +542,7 @@ fn region(t: u16, k: u8) -> crate::control::command::Region {
 }
 
 /// The list with the level set (`None`: no such member, or the level is `v` already).
-fn leveled(s: &State, t: u16, k: u8, id: u32, wet: bool, v: f32) -> Option<Vec<Member>> {
+fn leveled(s: &crate::session::Session, t: u16, k: u8, id: u32, wet: bool, v: f32) -> Option<Vec<Member>> {
     let mut list = members(s, t, k)?;
     let m = list.iter_mut().find(|m| m.id == id)?;
     let level = if wet { &mut m.wet } else { &mut m.dry };
@@ -555,19 +555,19 @@ fn leveled(s: &State, t: u16, k: u8, id: u32, wet: bool, v: f32) -> Option<Vec<M
 
 /// The automation target of member `id`'s wet (`wet`) or dry level in the container at place (`t`, `k`) (spec:
 /// plugins/patcher/README.md §4.2, §4.4).
-pub fn level_target(s: &State, t: u16, k: u8, id: u32, wet: bool) -> Option<u32> {
+pub fn level_target(s: &crate::session::Session, t: u16, k: u8, id: u32, wet: bool) -> Option<u32> {
     item_target(s, t, k, target::member_item(id, if wet { MEMBER_WET } else { MEMBER_DRY })?)
 }
 
 /// The member level an automation target names, when it is one: track (or row), slot (or [`CHANNEL`]), member id, wet.
-pub fn level_of(s: &State, tg: Auto) -> Option<(u16, u8, u32, bool)> {
+pub fn level_of(s: &crate::session::Session, tg: Auto) -> Option<(u16, u8, u32, bool)> {
     let (m, k, i) = target_place(s, tg)?;
     let (id, item) = target::member_of(i)?;
     (item >= MEMBER_WET && members(s, m, k)?.iter().any(|x| x.id == id)).then_some((m, k, id, item == MEMBER_WET))
 }
 
 /// "Create automation clip" on a member's level: target, clip name ("Bus 2 - Lemon Limiter wet"), current value.
-pub fn level_automation(s: &State, t: u16, k: u8, id: u32, wet: bool) -> Option<(u32, String, f64)> {
+pub fn level_automation(s: &crate::session::Session, t: u16, k: u8, id: u32, wet: bool) -> Option<(u32, String, f64)> {
     Some((level_target(s, t, k, id, wet)?, level_name(s, t, k, id, wet), f64::from(level(s, t, k, id, wet)?)))
 }
 
@@ -581,12 +581,12 @@ pub fn member_key(s: &State, place: usize, id: u32) -> Option<usize> {
 /// The name of the member hosted under `key` and its container's title, "Lemon Limiter in Container (Bus 2)".
 pub fn member_label(s: &State, key: usize) -> Option<String> {
     let &(t, k, id) = s.params.members.get(&key)?;
-    let name = member(s, t, k, id)?.shown().to_string();
+    let name = member(&s.session, t, k, id)?.shown().to_string();
     Some(format!("{name} in {}", title(s, t, k)?))
 }
 
 /// Whether member `id` of the container at place (`t`, `k`) is an instrument.
-pub fn is_instrument(s: &State, t: u16, k: u8, id: u32) -> bool {
+pub fn is_instrument(s: &crate::session::Session, t: u16, k: u8, id: u32) -> bool {
     members(s, t, k).is_some_and(|l| l.iter().any(|m| m.id == id && m.instrument))
 }
 
@@ -602,7 +602,7 @@ fn label(i: usize, m: &Member) -> String {
 /// The slot menu's Container ▸ for a container in slot `slot` of the current track: its members, "1. Lemon Limiter
 /// (wet 100%, dry 0%)", each opening its window, then Edit list... (the container's window, `show`).
 pub fn list_items(s: &State, slot: u8) -> Option<Vec<PItem>> {
-    let m = members(s, s.selected_mixer, slot)?;
+    let m = members(&s.session, s.selected_mixer, slot)?;
     let mx = |i: usize, op: Op| Cmd::Mixer(crate::mixer::MCmd::Member(slot, i, op));
     let mut v: Vec<PItem> = m.iter().enumerate().map(|(i, m)| PItem::new(label(i, m), mx(i, Op::Open))).collect();
     if v.is_empty() {
@@ -622,7 +622,7 @@ fn member_ops(s: &State, t: u16, slot: u8, m: &[Member], i: usize) -> Vec<PItem>
     // A level's submenu: the parameter menu of a knob (automation, remote control, value), Enter value... in percents.
     let level = |id: u32, wet: bool, v: f32| {
         let label = format!("{}: {}%", if wet { "Wet" } else { "Dry" }, pct(v));
-        let create = level_automation(s, t, slot, id, wet);
+        let create = level_automation(&s.session, t, slot, id, wet);
         PItem::sub(label, crate::params::level_items(s, create, crate::typein::Target::Member(t, slot, id, wet)))
     };
     let mem = &m[i];
@@ -785,8 +785,8 @@ fn stuck_text(n: usize) -> String {
 
 /// Whether an automation clip, a recorded pattern event or a controller link drives target `tg`, or (a slot's mix) a
 /// remote control link.
-fn driven(s: &State, tg: u32) -> bool {
-    let p = &s.session.project;
+fn driven(s: &crate::session::Session, tg: u32) -> bool {
+    let p = &s.project;
     let linked = match target::decode(tg) {
         Auto::SlotMix(t, k) => crate::remote::link_of(crate::typein::Target::Knob(KnobId::SlotMix(t, k))).is_some(),
         _ => false,
@@ -799,7 +799,7 @@ fn driven(s: &State, tg: u32) -> bool {
 
 /// After the wrap's undo step `name`: the remote control links on what moved follow it (they are the program's
 /// settings, not the project's), and the step puts them back (`Taken::Links`).
-fn relink(s: &mut State, name: &str, moved: &Moved) {
+fn relink(s: &mut crate::session::Session, name: &str, moved: &Moved) {
     let mut all = crate::remote::links();
     let mut pairs = Vec::new();
     for l in &mut all {
@@ -808,7 +808,7 @@ fn relink(s: &mut State, name: &str, moved: &Moved) {
             l.target = to;
         }
     }
-    if pairs.is_empty() || s.session.history.newest_done() != Some(name) {
+    if pairs.is_empty() || s.history.newest_done() != Some(name) {
         return;
     }
     crate::remote::set_links(&all);
@@ -895,8 +895,8 @@ pub fn open_patchers(s: &mut State, effects: &[crate::plugins::Available]) -> Op
         .flat_map(|m| m.slots.iter().enumerate().filter(|(_, p)| p.as_ref().is_some_and(|p| p.name == PATCHER)).map(move |(k, _)| (m.index, k as u8)))
         .collect();
     for (t, k) in places {
-        let place = format!("{}, slot {}", crate::mixer::name(s, t), k + 1);
-        let Some(slot) = crate::mixer::track_mut(s, t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
+        let place = format!("{}, slot {}", crate::mixer::name(&s.session, t), k + 1);
+        let Some(slot) = crate::mixer::track_mut(&mut s.session, t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
         let Some(patch) = patcher::parse(&slot.state) else {
             left.push(format!("{place} (a state Lemon Studio does not read)"));
             continue;
@@ -945,7 +945,7 @@ impl App {
             msg
         });
         if let Some(m) = moved {
-            relink(&mut self.state, name, &m);
+            relink(&mut self.state.session, name, &m);
         }
         msg
     }
@@ -962,10 +962,10 @@ impl App {
     /// dry 0 %, so the clip blends it as before. Run inside the undo step (`wrap_slot`).
     pub(crate) fn wrap_in_container(&mut self, slot: u8, all: bool) -> (Option<String>, Option<Moved>) {
         let t = self.state.selected_mixer;
-        let Some(track) = crate::mixer::track(&self.state, t) else { return (None, None) };
+        let Some(track) = crate::mixer::track(&self.state.session, t) else { return (None, None) };
         let slots: Vec<u8> = if all { (0..10u8).filter(|&k| track.slots[usize::from(k)].is_some()).collect() } else { vec![slot] };
         // A single slot whose switch or mix is driven keeps them: they blend the container as they blended the effect.
-        let keep_mix = !all && (driven(&self.state, target::slot(t, slot, target::SLOT_MIX)) || driven(&self.state, target::slot(t, slot, target::SLOT_ON)));
+        let keep_mix = !all && (driven(&self.state.session, target::slot(t, slot, target::SLOT_MIX)) || driven(&self.state.session, target::slot(t, slot, target::SLOT_ON)));
         let kept = (track.slot_mix[usize::from(slot)], track.slot_on[usize::from(slot)]);
         let mut list = Vec::new();
         let mut taken = Vec::new();
@@ -973,7 +973,7 @@ impl App {
         let mut moves = Vec::new();
         for k in slots {
             let (mix, on) = (track.slot_mix[usize::from(k)], track.slot_on[usize::from(k)]);
-            if let Some(inner) = members(&self.state, t, k) {
+            if let Some(inner) = members(&self.state.session, t, k) {
                 let first = list.len() as u32 + 1;
                 moves.push(Move { from: (t, k), ids: Ids::Members(inner.iter().zip(first..).map(|(m, new)| (m.id, new)).collect()) });
                 list.extend(inner);
@@ -993,8 +993,8 @@ impl App {
             m.cpu = track.slot_cpu[usize::from(k)];
             // An emptied slot's name, colour and icon go with its effect; the container's slot keeps its own.
             if k != slot {
-                m.label = crate::mixer::slot_label(&self.state, t, k);
-                m.color = crate::mixer::slot_color(&self.state, t, k);
+                m.label = crate::mixer::slot_label(&self.state.session, t, k);
+                m.color = crate::mixer::slot_color(&self.state.session, t, k);
                 m.icon = crate::playlist::icon_of(&self.state.session.project, crate::playlist::IconOwner::Slot(t, k));
             }
             moves.push(Move { from: (t, k), ids: Ids::Plugin(list.len() as u32 + 1) });
@@ -1012,14 +1012,14 @@ impl App {
         }
         let n = list.len();
         // The slot's name, colour and icon go with the container (`clear_slot` forgets them).
-        let name = crate::mixer::slot_label(&self.state, t, slot);
-        let color = crate::mixer::slot_color(&self.state, t, slot);
+        let name = crate::mixer::slot_label(&self.state.session, t, slot);
+        let color = crate::mixer::slot_color(&self.state.session, t, slot);
         let icon = crate::playlist::icon_of(&self.state.session.project, crate::playlist::IconOwner::Slot(t, slot));
         for &k in &taken {
             // The hosted instances go with an undo kept (`FxReq::Delete`), the slots' names, colours and icons too.
             crate::mixer::clear_slot(&mut self.state, t, k);
         }
-        if let Some(m) = crate::mixer::track_mut(&mut self.state, t) {
+        if let Some(m) = crate::mixer::track_mut(&mut self.state.session, t) {
             m.slots[usize::from(slot)] = Some(SlotPlugin { id: Id::NONE, name: CONTAINER.into(), state: encode(&list) });
             if keep_mix {
                 (m.slot_mix[usize::from(slot)], m.slot_on[usize::from(slot)]) = kept;
@@ -1028,13 +1028,13 @@ impl App {
         let moved = Moved { to: (t, slot), index: 0, moves };
         let stuck = moved.retarget(&mut self.state);
         if name.is_some() {
-            crate::mixer::set_slot_label(&mut self.state, t, slot, name);
+            crate::mixer::set_slot_label(&mut self.state.session, t, slot, name);
         }
         if color.is_some() {
-            crate::mixer::set_slot_color(&mut self.state, t, slot, color);
+            crate::mixer::set_slot_color(&mut self.state.session, t, slot, color);
         }
         if icon.is_some() {
-            crate::playlist::put_icon(&mut self.state, crate::playlist::IconOwner::Slot(t, slot), icon);
+            crate::playlist::put_icon(&mut self.state.session, crate::playlist::IconOwner::Slot(t, slot), icon);
         }
         self.state.session.dirty = true;
         let mut msg = format!("{} effect{} in a container", n, if n == 1 { "" } else { "s" });
@@ -1050,7 +1050,7 @@ impl App {
     /// (inside the undo step, `mixer::run`) Move up, Move down, Remove. The chain follows on the next tick.
     pub(crate) fn edit_member(&mut self, slot: u8, i: usize, op: Op) -> Option<String> {
         let t = self.state.selected_mixer;
-        let mut list = members(&self.state, t, slot)?;
+        let mut list = members(&self.state.session, t, slot)?;
         if i >= list.len() {
             return None;
         }
@@ -1063,7 +1063,7 @@ impl App {
             }
             _ => return None,
         }
-        set_members(&mut self.state, t, slot, &list);
+        set_members(&mut self.state.session, t, slot, &list);
         self.state.session.dirty = true;
         None
     }
@@ -1074,7 +1074,7 @@ impl App {
     /// only, an instrument at [`INSTRUMENT_LEVELS`]. Inside the undo step (`mixer::run`).
     pub(crate) fn add_member(&mut self, slot: u8, index: usize, instrument: bool) -> Option<String> {
         let t = self.state.selected_mixer;
-        let mut list = members(&self.state, t, slot)?;
+        let mut list = members(&self.state.session, t, slot)?;
         if instrument && slot != CHANNEL {
             return None;
         }
@@ -1083,7 +1083,7 @@ impl App {
         let Some(id) = free_id(&list) else { return Some(format!("A container holds at most {MEMBER_IDS} effects")) };
         let (wet, dry) = if instrument { INSTRUMENT_LEVELS } else { (1.0, 0.0) };
         list.push(Member { id, instrument, uid: a.desc.uid(), name: a.desc.name.clone(), wet, dry, state: Vec::new(), ..Member::default() });
-        set_members(&mut self.state, t, slot, &list);
+        set_members(&mut self.state.session, t, slot, &list);
         self.state.session.dirty = true;
         None
     }
@@ -1094,13 +1094,13 @@ impl App {
     /// when its effect is replaced). Inside the undo step (`mixer::run`).
     pub(crate) fn replace_member(&mut self, slot: u8, i: usize, index: usize, instrument: bool) -> Option<String> {
         let t = self.state.selected_mixer;
-        let mut list = members(&self.state, t, slot)?;
+        let mut list = members(&self.state.session, t, slot)?;
         let a = if instrument { self.plugins.available.get(index)? } else { self.plugins.effects.get(index)? };
         let m = list.get_mut(i)?;
         (m.instrument, m.uid, m.name, m.state) = (instrument, a.desc.uid(), a.desc.name.clone(), Vec::new());
         // The new plugin's own: no name, colour or icon, the switches a new plugin starts with (as a slot's on Replace).
         (m.cpu, m.label, m.color, m.icon) = (os_model::PluginCpu::default(), None, None, None);
-        set_members(&mut self.state, t, slot, &list);
+        set_members(&mut self.state.session, t, slot, &list);
         self.state.session.dirty = true;
         None
     }
@@ -1119,7 +1119,7 @@ impl App {
             msg
         });
         if let Some(m) = moved {
-            relink(&mut self.state, WRAP, &m);
+            relink(&mut self.state.session, WRAP, &m);
         }
         msg
     }
@@ -1163,11 +1163,11 @@ impl App {
     /// the slots is a plain drop, as there is no plugin to wrap.
     pub(crate) fn drop_container_on_slot(&mut self, slot: Option<u8>, shift: bool) -> Option<String> {
         let t = self.state.selected_mixer;
-        let filled = |k: u8| crate::mixer::track(&self.state, t).is_some_and(|m| m.slots[usize::from(k)].is_some());
+        let filled = |k: u8| crate::mixer::track(&self.state.session, t).is_some_and(|m| m.slots[usize::from(k)].is_some());
         if let Some(k) = slot.filter(|&k| shift && filled(k)) {
             return crate::mixer::run(self, crate::mixer::MCmd::Wrap(k, false));
         }
-        let free = || crate::mixer::track(&self.state, t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8);
+        let free = || crate::mixer::track(&self.state.session, t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8);
         match slot.or_else(free) {
             Some(k) => crate::mixer::run(self, crate::mixer::MCmd::AddContainer(k)),
             None => Some("Every slot of this track is in use".into()),
@@ -1199,7 +1199,7 @@ impl App {
     /// The container window's controls (`CAct`).
     pub(crate) fn container_act(&mut self, a: CAct) {
         let (t, k) = self.state.container.at;
-        let Some(list) = members(&self.state, t, k) else { return };
+        let Some(list) = members(&self.state.session, t, k) else { return };
         let (x, y) = self.mouse;
         let s = &self.state;
         let mut items = match a {
@@ -1243,7 +1243,7 @@ impl App {
             return;
         }
         let (t, k) = self.state.container.at;
-        if members(&self.state, t, k).is_none() {
+        if members(&self.state.session, t, k).is_none() {
             self.state.hide(Win::Container);
             self.invalidate();
             return;
@@ -1298,7 +1298,7 @@ impl App {
                 None => crate::app::channel_info(&self.state.session.project, slot_key),
             };
             let Some(info) = info else { continue };
-            let list = key_place(slot_key).and_then(|(t, k)| members(&self.state, t, k)).unwrap_or_default();
+            let list = key_place(slot_key).and_then(|(t, k)| members(&self.state.session, t, k)).unwrap_or_default();
             for ((id, _), key) in live.shape.iter().zip(&live.keys) {
                 let Some(key) = key else { continue };
                 let Some(h) = self.plugins.hosted.get(key) else { continue };
@@ -1314,7 +1314,7 @@ impl App {
     pub(crate) fn member_place(&self, key: usize) -> Option<String> {
         let slot_key = self.plugins.containers.iter().find(|(_, l)| l.keys.contains(&Some(key)))?.0;
         Some(match key_place(*slot_key)? {
-            (r, CHANNEL) => format!("{}, container", place_name(&self.state, r, CHANNEL)),
+            (r, CHANNEL) => format!("{}, container", place_name(&self.state.session, r, CHANNEL)),
             (0, k) => format!("Master, slot {}, container", k + 1),
             (t, k) => format!("Bus {t}, slot {}, container", k + 1),
         })
@@ -1539,7 +1539,7 @@ mod tests {
     }
 
     fn names(a: &App, slot: u8) -> Vec<String> {
-        members(&a.state, 2, slot).unwrap_or_default().into_iter().map(|m| m.name).collect()
+        members(&a.state.session, 2, slot).unwrap_or_default().into_iter().map(|m| m.name).collect()
     }
 
     /// Wrap all in container: the track's two hosted effects become one container in the slot the command was used on,
@@ -1548,25 +1548,25 @@ mod tests {
     #[test]
     fn wrap_the_tracks_effects_in_a_container() {
         let (mut a, first, second) = two_effects();
-        if let Some(m) = crate::mixer::track_mut(&mut a.state, 2) {
+        if let Some(m) = crate::mixer::track_mut(&mut a.state.session, 2) {
             m.slot_mix[1] = 0.5;
         }
         // The slot's name and colour go with the container; the emptied slot's go.
-        crate::mixer::set_slot_label(&mut a.state, 2, 1, Some("Echo".into()));
-        crate::mixer::set_slot_color(&mut a.state, 2, 0, Some(os_model::Rgb { r: 1, g: 2, b: 3 }));
+        crate::mixer::set_slot_label(&mut a.state.session, 2, 1, Some("Echo".into()));
+        crate::mixer::set_slot_color(&mut a.state.session, 2, 0, Some(os_model::Rgb { r: 1, g: 2, b: 3 }));
         let menu = crate::mixer::slot_menu(&a, 1, 0.0, 0.0);
         let item = |label: &str| menu.items.iter().find(|i| i.label == label).unwrap().clone();
         assert!(item(WRAP).enabled && item(WRAP_ALL).enabled);
         assert_eq!(item(WRAP_ALL).cmd, Cmd::Mixer(MCmd::Wrap(1, true)));
         crate::playlist::run(&mut a, item(WRAP_ALL).cmd);
         tick(&mut a);
-        let t = crate::mixer::track(&a.state, 2).unwrap();
+        let t = crate::mixer::track(&a.state.session, 2).unwrap();
         assert!(t.slots[0].is_none(), "the other slot is emptied");
         assert_eq!(t.slots[1].as_ref().map(|p| p.name.as_str()), Some(CONTAINER));
         assert_eq!((t.slot_mix[1], t.slot_on[1]), (1.0, true));
         assert_eq!(crate::mixer::slot_names_of(&a.state.session.project).get(&(2, 1)).map(String::as_str), Some("Echo"));
         assert!(crate::mixer::slot_colors_of(&a.state.session.project).is_empty());
-        let list = members(&a.state, 2, 1).unwrap();
+        let list = members(&a.state.session, 2, 1).unwrap();
         assert_eq!(names(&a, 1), [first.clone(), second.clone()]);
         assert_eq!((list[0].id, list[1].id), (1, 2));
         assert_eq!((list[0].wet, list[0].dry), (1.0, 0.0));
@@ -1585,7 +1585,7 @@ mod tests {
         // Undo: both slots and their instances come back; the members go.
         crate::history::undo(&mut a.state);
         tick(&mut a);
-        let t = crate::mixer::track(&a.state, 2).unwrap();
+        let t = crate::mixer::track(&a.state.session, 2).unwrap();
         assert!(t.slots[0].is_some() && t.slots[1].as_ref().is_some_and(|p| p.name != CONTAINER));
         assert_eq!(t.slot_mix[1], 0.5);
         assert!(a.plugins.containers.is_empty());
@@ -1595,16 +1595,16 @@ mod tests {
         // Wrap in container: that slot only.
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(0, false)));
         tick(&mut a);
-        let t = crate::mixer::track(&a.state, 2).unwrap();
+        let t = crate::mixer::track(&a.state.session, 2).unwrap();
         assert_eq!(t.slots[0].as_ref().map(|p| p.name.as_str()), Some(CONTAINER));
         assert!(t.slots[1].as_ref().is_some_and(|p| p.name != CONTAINER));
-        assert_eq!(members(&a.state, 2, 0).map(|m| m.len()), Some(1));
+        assert_eq!(members(&a.state.session, 2, 0).map(|m| m.len()), Some(1));
         assert!(a.plugins.hosted.contains_key(&fx_key(2, 1)) && a.plugins.containers.contains_key(&fx_key(2, 0)));
         // Wrap all then takes the container's member and the other effect.
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(0, true)));
         tick(&mut a);
         assert_eq!(names(&a, 0), [first, second]);
-        assert!(crate::mixer::track(&a.state, 2).unwrap().slots[1].is_none());
+        assert!(crate::mixer::track(&a.state.session, 2).unwrap().slots[1].is_none());
     }
 
     /// The container's list: moving a member keeps its instance; removing one drops it; Add effect ▸ adds the effect
@@ -1617,7 +1617,7 @@ mod tests {
         tick(&mut a);
         let keys = |a: &App| a.plugins.containers[&fx_key(2, 0)].keys.clone();
         let before = keys(&a);
-        assert_eq!(label(1, &members(&a.state, 2, 0).unwrap()[1]), format!("2. {second} (wet 100%, dry 0%)"));
+        assert_eq!(label(1, &members(&a.state.session, 2, 0).unwrap()[1]), format!("2. {second} (wet 100%, dry 0%)"));
         let ops = &menu_of(&mut a, 1);
         assert_eq!(ops.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(), ["Open editor", "Wet: 100%", "Dry: 0%", "Move up", "Move down", "Remove"]);
         assert!(ops[3].enabled && !ops[4].enabled, "the last one moves up only");
@@ -1641,7 +1641,7 @@ mod tests {
         crate::history::undo(&mut a.state);
         tick(&mut a);
         assert_eq!(names(&a, 0), [second.clone(), first.clone()]);
-        assert_eq!(members(&a.state, 2, 0).unwrap()[0].state, state);
+        assert_eq!(members(&a.state.session, 2, 0).unwrap()[0].state, state);
         // Add effect: the plugin palette of an empty slot, adding at the end.
         a.container_act(CAct::Add);
         let lim = crate::plugin_palette::cmd_of(&a.state, &first).expect("the limiter in the palette");
@@ -1649,9 +1649,9 @@ mod tests {
         crate::playlist::run(&mut a, lim);
         tick(&mut a);
         assert_eq!(names(&a, 0), [second, first.clone(), first]);
-        assert_eq!(members(&a.state, 2, 0).unwrap()[2].id, 3);
+        assert_eq!(members(&a.state.session, 2, 0).unwrap()[2].id, 3);
         // The smallest free id: a removed member's comes back to the next one added.
-        let with = |ids: &[u32]| -> Vec<Member> { ids.iter().map(|&id| Member { id, ..members(&a.state, 2, 0).unwrap()[0].clone() }).collect() };
+        let with = |ids: &[u32]| -> Vec<Member> { ids.iter().map(|&id| Member { id, ..members(&a.state.session, 2, 0).unwrap()[0].clone() }).collect() };
         assert_eq!(free_id(&with(&[2, 3])), Some(1));
         assert_eq!(free_id(&with(&[1, 2, 4])), Some(3));
         assert_eq!(free_id(&with(&(1..=MEMBER_IDS).collect::<Vec<_>>())), None, "at most 15");
@@ -1695,11 +1695,11 @@ mod tests {
         assert_eq!((ops[1].label.as_ref(), cmd_of(&ops[1].children, "Enter value...")), ("Wet: 100%", Cmd::TypeIn(wet)));
         assert_eq!((ops[2].label.as_ref(), cmd_of(&ops[2].children, "Enter value...")), ("Dry: 0%", Cmd::TypeIn(dry)));
         assert_eq!(text(&a.state, wet, false), "100%");
-        assert_eq!(crate::typein::caption(&a.state, dry), format!("Value for {} - {second} dry", crate::mixer::name(&a.state, 2)));
+        assert_eq!(crate::typein::caption(&a.state, dry), format!("Value for {} - {second} dry", crate::mixer::name(&a.state.session, 2)));
         accept(&mut a.state, wet, false, "60");
         accept(&mut a.state, dry, false, "40%");
         tick(&mut a);
-        let m = &members(&a.state, 2, 0).unwrap()[1];
+        let m = &members(&a.state.session, 2, 0).unwrap()[1];
         assert!((m.wet - 0.6).abs() < 1e-6 && (m.dry - 0.4).abs() < 1e-6);
         let live = &a.plugins.containers[&fx_key(2, 0)];
         assert_eq!(live.keys, keys, "the instances are kept");
@@ -1708,7 +1708,7 @@ mod tests {
         drop(c);
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(LEVEL));
         tick(&mut a);
-        assert_eq!(members(&a.state, 2, 0).unwrap()[1].dry, 0.0);
+        assert_eq!(members(&a.state.session, 2, 0).unwrap()[1].dry, 0.0);
         assert_eq!(a.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members[1].dry, 0.0);
         assert_eq!(a.plugins.containers[&fx_key(2, 0)].keys, keys);
     }
@@ -1744,7 +1744,7 @@ mod tests {
         let menu = a.state.playlist.popup.take().unwrap();
         let Cmd::CreateAutomation(t, name, _) = cmd_of(&menu.items, "Create automation clip") else { panic!() };
         assert_eq!(t, tgt);
-        assert_eq!(name, format!("{second} in {} - {} - {pname}", crate::plugins::slot_label(&crate::mixer::slot_name(&a.state, 2, 0).unwrap()), crate::mixer::name(&a.state, 2)));
+        assert_eq!(name, format!("{second} in {} - {} - {pname}", crate::plugins::slot_label(&crate::mixer::slot_name(&a.state.session, 2, 0).unwrap()), crate::mixer::name(&a.state.session, 2)));
         let link = T::MemberParam(2, 0, 2, 0);
         assert_eq!(cmd_of(&menu.items, "MIDI learn..."), Cmd::Remote(RCmd::Link(link)));
         assert_eq!(cmd_of(&menu.items, "Enter value..."), Cmd::TypeIn(link));
@@ -1772,18 +1772,18 @@ mod tests {
         let ops = menu_of(&mut a, 0);
         let wet = &ops[1];
         assert_eq!(wet.label, "Wet: 100%");
-        let level = level_target(&a.state, 2, 0, 2, true).unwrap();
-        let caption = level_name(&a.state, 2, 0, 2, true);
+        let level = level_target(&a.state.session, 2, 0, 2, true).unwrap();
+        let caption = level_name(&a.state.session, 2, 0, 2, true);
         assert_eq!(cmd_of(&wet.children, "Create automation clip"), Cmd::CreateAutomation(level, caption.clone(), 1.0));
         assert_eq!(cmd_of(&wet.children, "MIDI learn..."), Cmd::Remote(RCmd::Link(T::Member(2, 0, 2, true))));
         assert_eq!(crate::init::name(&a.state, level), caption);
-        assert_eq!(level_of(&a.state, target::decode(level)), Some((2, 0, 2, true)));
+        assert_eq!(level_of(&a.state.session, target::decode(level)), Some((2, 0, 2, true)));
         assert_eq!(crate::params::key_of(&a.state, target::decode(level)), None, "not a parameter of the effect");
         crate::remote::add(Link::new(0, 21, T::Member(2, 0, 2, false)), true);
         a.state.session.history.reset();
         assert!(a.remote_cc("Test", 0, 21, 64));
         assert!(a.remote_cc("Test", 0, 21, 127));
-        assert_eq!(members(&a.state, 2, 0).unwrap()[0].dry, 1.0);
+        assert_eq!(members(&a.state.session, 2, 0).unwrap()[0].dry, 1.0);
         assert_eq!(a.state.session.history.len(), 1, "one step while it moves");
         crate::remote::set_links(&[]);
     }
@@ -1803,7 +1803,7 @@ mod tests {
         crate::mixer::select(&mut a.state, 1, false);
         a.open_fx(2, 0);
         assert!(a.state.shown(Win::Container) && a.state.container.at == (2, 0));
-        assert_eq!(member_count(&a.state, 2, 0), Some(2));
+        assert_eq!(member_count(&a.state.session, 2, 0), Some(2));
         tick(&mut a);
         assert_eq!(a.state.container.live.get(&2), Some(&(1.0, 0.0)), "the chain's levels");
         let (wet, dry) = (KnobId::Member(2, 0, 2, true), KnobId::Member(2, 0, 2, false));
@@ -1819,31 +1819,31 @@ mod tests {
         a.mouse_up();
         tick(&mut a);
         let want = 1.0 - 256.0 / 1024.0;
-        assert!((members(&a.state, 2, 0).unwrap()[1].wet - want).abs() < 1e-5);
+        assert!((members(&a.state.session, 2, 0).unwrap()[1].wet - want).abs() < 1e-5);
         assert_eq!(a.state.session.history.len(), 1, "one step for the drag");
         assert!((a.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members[1].wet - want).abs() < 1e-5);
         assert!((a.state.knob(wet) - want).abs() < 1e-5);
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(LEVEL));
         tick(&mut a);
-        assert_eq!(members(&a.state, 2, 0).unwrap()[1].wet, 1.0);
+        assert_eq!(members(&a.state.session, 2, 0).unwrap()[1].wet, 1.0);
         assert_eq!(a.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members[1].wet, 1.0);
 
         // A level the chain plays (as automation sets it) turns the knob; the list keeps its own.
         a.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().set_levels(1, 0.3, 0.7);
         tick(&mut a);
         assert!((a.state.knob(wet) - 0.3).abs() < 1e-6 && (a.state.knob(dry) - 0.7).abs() < 1e-6);
-        assert_eq!(members(&a.state, 2, 0).unwrap()[1].wet, 1.0);
+        assert_eq!(members(&a.state.session, 2, 0).unwrap()[1].wet, 1.0);
 
         // Right clicks: a knob's menu, a name's menu.
         assert!(a.container_right(&Action::Knob(dry)));
         let menu = a.state.playlist.popup.take().unwrap().items;
         assert_eq!(menu[0].label, "Reset");
         assert_eq!(cmd_of(&menu, "Enter value..."), Cmd::TypeIn(T::Member(2, 0, 2, false)));
-        assert_eq!(cmd_of(&menu, "Create automation clip"), Cmd::CreateAutomation(level_target(&a.state, 2, 0, 2, false).unwrap(), level_name(&a.state, 2, 0, 2, false), 0.0));
+        assert_eq!(cmd_of(&menu, "Create automation clip"), Cmd::CreateAutomation(level_target(&a.state.session, 2, 0, 2, false).unwrap(), level_name(&a.state.session, 2, 0, 2, false), 0.0));
         a.state.set_knob(dry, 0.4);
         a.state.session.history.reset();
         crate::playlist::run(&mut a, menu[0].cmd.clone());
-        assert_eq!(members(&a.state, 2, 0).unwrap()[1].dry, 0.0, "Reset: back to dry 0");
+        assert_eq!(members(&a.state.session, 2, 0).unwrap()[1].dry, 0.0, "Reset: back to dry 0");
         assert_eq!(a.state.session.history.newest_done(), Some(LEVEL));
         assert!(a.container_right(&Action::Container(CAct::Open(0))));
         let ops = a.state.playlist.popup.take().unwrap().items;
@@ -1887,7 +1887,7 @@ mod tests {
         crate::playlist::run(&mut a, lim);
         tick(&mut a);
         assert_eq!(names(&a, 0), [first.clone(), first.clone()]);
-        let m2 = members(&a.state, 2, 0).unwrap()[1].clone();
+        let m2 = members(&a.state.session, 2, 0).unwrap()[1].clone();
         assert_eq!((m2.id, m2.wet, m2.dry), (2, 1.0, 0.25), "its id and levels stay");
         assert_ne!(a.plugins.containers[&fx_key(2, 0)].keys[1], Some(key), "a new instance");
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(REPLACE));
@@ -1915,7 +1915,7 @@ mod tests {
         tick(&mut a);
         a.params_tick();
         let key = a.plugins.containers[&fx_key(2, 0)].keys[1].unwrap();
-        let slot = crate::mixer::track(&a.state, 2).unwrap().slots[0].as_ref().unwrap().id.0;
+        let slot = crate::mixer::track(&a.state.session, 2).unwrap().slots[0].as_ref().unwrap().id.0;
         let owner = member_owner(slot, 2).unwrap();
         assert_eq!(a.plugins.hosted[&key].owner.0, owner, "hosted under its owner id");
         assert_eq!((owner_key(&a.state, owner), key_owner(&a.state, key)), (Some(key), Some(owner)));
@@ -2007,14 +2007,14 @@ mod tests {
         let ch = &a.state.session.project.channels[0];
         assert!(is_container_channel(ch));
         assert_eq!((&ch.name, ch.mixer_track, ch.volume), (&before.name, before.mixer_track, before.volume), "the channel stays");
-        let list = members(&a.state, 0, CHANNEL).unwrap();
+        let list = members(&a.state.session, 0, CHANNEL).unwrap();
         assert_eq!(list.len(), 1);
         let m = &list[0];
         assert_eq!((m.id, m.instrument, m.name.as_str(), m.wet, m.dry), (1, true, crate::osc3::LEMON_TRIO, 1.0, 1.0));
         assert!(!m.state.is_empty(), "with its state");
         assert!(!a.state.hosted_rows.contains(&0) && !a.plugins.hosted.contains_key(&0), "no instance under the row");
         assert!(a.state.shown(Win::Container) && a.state.container.at == (0, CHANNEL));
-        assert_eq!(title(&a.state, 0, CHANNEL), Some(format!("Container ({})", place_name(&a.state, 0, CHANNEL))));
+        assert_eq!(title(&a.state, 0, CHANNEL), Some(format!("Container ({})", place_name(&a.state.session, 0, CHANNEL))));
         assert!(!crate::rack::channel_menu(&a.state, 0, 0.0, 0.0).items.iter().any(|i| i.label == WRAP && i.enabled), "not twice");
         // The chain plays the channel's notes.
         let live = &a.plugins.containers[&0];
@@ -2063,7 +2063,7 @@ mod tests {
         assert_eq!(a.state.session.history.newest_done(), Some(ADD_INSTRUMENT));
         crate::playlist::run(&mut a, fx);
         ticks(&mut a);
-        let list = members(&a.state, 0, CHANNEL).unwrap();
+        let list = members(&a.state.session, 0, CHANNEL).unwrap();
         assert_eq!(list.iter().map(|m| (m.id, m.instrument, m.wet, m.dry)).collect::<Vec<_>>(), [(1, true, 1.0, 1.0), (2, true, 1.0, 1.0), (3, false, 1.0, 0.0)]);
         let live = &a.plugins.containers[&0];
         assert_eq!(live.fx.lock().unwrap().members.len(), 3);
@@ -2077,11 +2077,11 @@ mod tests {
         let tgt = target::channel_param(index, target::member_item(1, 0).unwrap());
         assert_eq!(crate::params::target_of(&a.state, key, 0), Some(tgt));
         assert_eq!(crate::params::key_of(&a.state, target::decode(tgt)), Some((key, 0)));
-        let level = level_target(&a.state, 0, CHANNEL, 2, false).unwrap();
+        let level = level_target(&a.state.session, 0, CHANNEL, 2, false).unwrap();
         assert_eq!(level, target::channel_param(index, target::member_item(2, MEMBER_DRY).unwrap()));
-        assert_eq!(level_of(&a.state, target::decode(level)), Some((0, CHANNEL, 2, false)));
+        assert_eq!(level_of(&a.state.session, target::decode(level)), Some((0, CHANNEL, 2, false)));
         assert_eq!(crate::typein::text(&a.state, T::Member(0, CHANNEL, 2, false), false), "100%");
-        assert!(crate::init::name(&a.state, level).starts_with(&place_name(&a.state, 0, CHANNEL)));
+        assert!(crate::init::name(&a.state, level).starts_with(&place_name(&a.state.session, 0, CHANNEL)));
         crate::typein::accept(&mut a.state, T::Member(0, CHANNEL, 2, false), false, "25");
         assert_eq!(a.state.session.history.newest_done(), Some(LEVEL));
         ticks(&mut a);
@@ -2103,14 +2103,14 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let path = d.join("Channel.lemon");
         a.save_to(path.clone());
-        let saved = members(&a.state, 0, CHANNEL).unwrap();
+        let saved = members(&a.state.session, 0, CHANNEL).unwrap();
         let mut back = App::new(None);
         back.plugins = crate::plugins::Plugins::default();
         back.plugins.available = crate::plugins::builtin();
         back.plugins.effects = crate::plugins::builtin_effects();
         back.open(path);
         ticks(&mut back);
-        assert_eq!(members(&back.state, 0, CHANNEL), Some(saved));
+        assert_eq!(members(&back.state.session, 0, CHANNEL), Some(saved));
         assert_eq!(back.plugins.containers[&0].fx.lock().unwrap().members.len(), 3);
         assert!(back.plugins.containers[&0].keys.iter().all(Option::is_some));
         let _ = std::fs::remove_dir_all(&d);
@@ -2210,17 +2210,17 @@ mod tests {
     #[test]
     fn a_driven_slot_mix_stays_on_the_slot() {
         let (mut a, _, _) = two_effects();
-        if let Some(m) = crate::mixer::track_mut(&mut a.state, 2) {
+        if let Some(m) = crate::mixer::track_mut(&mut a.state.session, 2) {
             (m.slot_mix[0], m.slot_mix[1]) = (0.5, 0.5);
         }
         crate::playlist::run(&mut a, Cmd::CreateAutomation(target::slot(2, 1, target::SLOT_MIX), "Mix".into(), 0.5));
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(1, false)));
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(0, false)));
         tick(&mut a);
-        let t = crate::mixer::track(&a.state, 2).unwrap();
+        let t = crate::mixer::track(&a.state.session, 2).unwrap();
         assert_eq!((t.slot_mix[1], t.slot_mix[0]), (0.5, 1.0));
-        assert_eq!(members(&a.state, 2, 1).map(|l| (l[0].wet, l[0].dry)), Some((1.0, 0.0)));
-        assert!(members(&a.state, 2, 0).is_some_and(|l| (l[0].wet - 0.5).abs() < 1e-6 && (l[0].dry - 0.5).abs() < 1e-6));
+        assert_eq!(members(&a.state.session, 2, 1).map(|l| (l[0].wet, l[0].dry)), Some((1.0, 0.0)));
+        assert!(members(&a.state.session, 2, 0).is_some_and(|l| (l[0].wet - 0.5).abs() < 1e-6 && (l[0].dry - 0.5).abs() < 1e-6));
     }
 
     /// The channel's Wrap in container moves the instrument's clips and links onto member 1 (spec §4.5); the channel's
@@ -2266,14 +2266,14 @@ mod tests {
         use crate::playlist::{fill_plugin_window_menu, plugin_window_menu};
         let (mut a, first, second) = two_effects();
         let red = os_model::Rgb::new(0xc8, 0x50, 0x4a);
-        crate::mixer::set_slot_label(&mut a.state, 2, 0, Some("Glue".into()));
-        crate::mixer::set_slot_color(&mut a.state, 2, 0, Some(red));
-        if let Some(m) = crate::mixer::track_mut(&mut a.state, 2) {
+        crate::mixer::set_slot_label(&mut a.state.session, 2, 0, Some("Glue".into()));
+        crate::mixer::set_slot_color(&mut a.state.session, 2, 0, Some(red));
+        if let Some(m) = crate::mixer::track_mut(&mut a.state.session, 2) {
             m.slot_cpu[0].smart_disable = true;
         }
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(1, true)));
         tick(&mut a);
-        let list = members(&a.state, 2, 1).unwrap();
+        let list = members(&a.state.session, 2, 1).unwrap();
         assert_eq!((list[0].label.as_deref(), list[0].color, list[0].cpu.smart_disable), (Some("Glue"), Some(red), true), "the emptied slot's go with its effect");
         assert_eq!((list[1].label.as_deref(), list[1].cpu.smart_disable), (None, false));
         assert_eq!((list[0].shown(), list[1].shown()), ("Glue", second.as_str()));
@@ -2300,29 +2300,29 @@ mod tests {
         a.state.playlist.edit.as_mut().unwrap().text = "Echo".into();
         crate::playlist::commit_edit(&mut a.state);
         assert_eq!(a.state.session.history.newest_done(), Some(NAME));
-        assert_eq!(label(1, &members(&a.state, 2, 1).unwrap()[1]), "2. Echo (wet 100%, dry 0%)");
+        assert_eq!(label(1, &members(&a.state.session, 2, 1).unwrap()[1]), "2. Echo (wet 100%, dry 0%)");
         assert!(crate::params::owner_name(&a.state, key).starts_with("Echo in "));
         #[cfg(plugin_windows)]
         assert!(a.member_infos()[&key].name.starts_with("Echo ("));
         crate::history::undo(&mut a.state);
-        assert_eq!(members(&a.state, 2, 1).unwrap()[1].label, None);
+        assert_eq!(members(&a.state.session, 2, 1).unwrap()[1].label, None);
         crate::history::redo(&mut a.state);
 
         // Change color... ▸ and Random color, Change icon... ▸: one step each.
         let colors = entry(&menu(&a), "Change color...");
         crate::playlist::run(&mut a, colors.children[1].cmd.clone());
-        assert_eq!((members(&a.state, 2, 1).unwrap()[1].color, a.state.session.history.newest_done()), (Some(red), Some(COLOR)));
+        assert_eq!((members(&a.state.session, 2, 1).unwrap()[1].color, a.state.session.history.newest_done()), (Some(red), Some(COLOR)));
         let random = entry(&menu(&a), "Random color").cmd;
         crate::playlist::run(&mut a, random);
-        assert!(members(&a.state, 2, 1).unwrap()[1].color.is_some());
+        assert!(members(&a.state.session, 2, 1).unwrap()[1].color.is_some());
         let icons = entry(&menu(&a), "Change icon...");
         let (name, icon) = crate::playlist::ICONS[2];
         let pick = icons.children.iter().find(|i| i.label == name).unwrap().cmd.clone();
         crate::playlist::run(&mut a, pick);
-        assert_eq!((members(&a.state, 2, 1).unwrap()[1].icon, a.state.session.history.newest_done()), (Some(icon), Some(ICON)));
+        assert_eq!((members(&a.state.session, 2, 1).unwrap()[1].icon, a.state.session.history.newest_done()), (Some(icon), Some(ICON)));
         assert_eq!(entry(&menu(&a), "Change icon...").children.iter().find(|i| i.label == name).unwrap().mark, crate::playlist::Mark::Check(true));
         crate::history::undo(&mut a.state);
-        assert_eq!(members(&a.state, 2, 1).unwrap()[1].icon, None);
+        assert_eq!(members(&a.state.session, 2, 1).unwrap()[1].icon, None);
         crate::history::redo(&mut a.state);
 
         // The CPU switches: one step each; Auto-bypass reaches the chain, keeping its instances.
@@ -2332,7 +2332,7 @@ mod tests {
         crate::playlist::run(&mut a, smart.cmd);
         crate::playlist::run(&mut a, Cmd::PluginCpu(key, false));
         tick(&mut a);
-        assert_eq!(members(&a.state, 2, 1).unwrap()[1].cpu, os_model::PluginCpu { threaded: false, smart_disable: true });
+        assert_eq!(members(&a.state.session, 2, 1).unwrap()[1].cpu, os_model::PluginCpu { threaded: false, smart_disable: true });
         assert!(a.plugins.containers[&fx_key(2, 1)].fx.lock().unwrap().members[1].smart);
         assert_eq!(a.plugins.containers[&fx_key(2, 1)].keys, keys);
         assert_eq!(entry(&menu(&a), "Allow threaded processing").mark, crate::playlist::Mark::Check(false));
@@ -2346,33 +2346,33 @@ mod tests {
         // Switch auto-bypass for all plugins switches the members' too (all on, then all off), one step.
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::AutoBypassAll));
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::AutoBypassAll));
-        assert!(members(&a.state, 2, 1).unwrap().iter().all(|m| !m.cpu.smart_disable));
+        assert!(members(&a.state.session, 2, 1).unwrap().iter().all(|m| !m.cpu.smart_disable));
         crate::history::undo(&mut a.state);
-        assert!(members(&a.state, 2, 1).unwrap().iter().all(|m| m.cpu.smart_disable));
+        assert!(members(&a.state.session, 2, 1).unwrap().iter().all(|m| m.cpu.smart_disable));
         tick(&mut a);
 
         // Replace ▸ starts the new effect afresh: no name, colour or icon, a new plugin's switches.
-        let saved = members(&a.state, 2, 1).unwrap();
+        let saved = members(&a.state.session, 2, 1).unwrap();
         let lim = a.plugins.effects.iter().position(|e| e.desc.name == first).unwrap();
         crate::playlist::run(&mut a, Cmd::SlotWin(2, Box::new(Cmd::Mixer(MCmd::MemberReplace(1, 0, lim)))));
-        let m = &members(&a.state, 2, 1).unwrap()[0];
+        let m = &members(&a.state.session, 2, 1).unwrap()[0];
         assert_eq!((m.label.as_ref(), m.color, m.icon, m.cpu), (None, None, None, os_model::PluginCpu::default()));
         crate::history::undo(&mut a.state);
         tick(&mut a);
-        assert_eq!(members(&a.state, 2, 1).unwrap(), saved);
+        assert_eq!(members(&a.state.session, 2, 1).unwrap(), saved);
 
         // Saved in a .lemon file and opened again.
         let d = std::env::temp_dir().join(format!("lemon-container-own-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let path = d.join("Own.lemon");
         a.save_to(path.clone());
-        let saved = members(&a.state, 2, 1).unwrap();
+        let saved = members(&a.state.session, 2, 1).unwrap();
         let mut back = App::new(None);
         back.plugins = crate::plugins::Plugins::default();
         back.plugins.effects = crate::plugins::builtin_effects();
         back.open(path);
         tick(&mut back);
-        let opened = members(&back.state, 2, 1).unwrap();
+        let opened = members(&back.state.session, 2, 1).unwrap();
         assert_eq!(opened, saved);
         assert_eq!((opened[1].label.as_deref(), opened[1].icon, opened[1].cpu.smart_disable), (Some("Echo"), Some(icon), true));
         let _ = std::fs::remove_dir_all(&d);
@@ -2448,14 +2448,14 @@ mod tests {
         let serial = patcher_state(&nodes, &chain_links(3, 1.0));
         let leveled = patcher_state(&nodes[..1], &chain_links(1, 0.5));
         let patcher = |state: &[u8]| Some(SlotPlugin { id: Id::NONE, name: os_flp::patcher::PATCHER.into(), state: state.to_vec() });
-        let t = crate::mixer::track_mut(&mut a.state, 2).unwrap();
+        let t = crate::mixer::track_mut(&mut a.state.session, 2).unwrap();
         (t.slots[0], t.slots[1]) = (patcher(&serial), patcher(&leveled));
         a.state.session.project.get_mut().channels[0].plugin = Some(os_flp::patcher::PATCHER.into());
         a.state.session.project.get_mut().channels[0].name = Some("Keys".into());
         let msg = open_patchers(&mut a.state, &a.plugins.effects).expect("a hint");
-        let bus = crate::mixer::name(&a.state, 2);
+        let bus = crate::mixer::name(&a.state.session, 2);
         assert_eq!(msg, format!("Patcher: {bus}, slot 1 opened as a container; left as they were: {bus}, slot 2 (link levels other than 1.0), Keys (an instrument patch)"));
-        let list = members(&a.state, 2, 0).expect("a container");
+        let list = members(&a.state.session, 2, 0).expect("a container");
         let uid = |i: usize| a.plugins.effects[i].desc.uid();
         let shown: Vec<_> = list.iter().map(|m| (m.id, m.uid.clone(), m.wet, m.dry, m.label.clone())).collect();
         assert_eq!(
@@ -2465,7 +2465,7 @@ mod tests {
         assert_eq!(list[0].state, crate::plugins::recreation_state_from_fl("Lemon Limiter", &fl_lim).unwrap(), "the recreation's reader");
         assert_eq!((list[1].name.as_str(), list[1].state.as_slice()), ("Fruity Squeeze", &[5, 5][..]), "kept");
         assert_eq!(list[2].state, [9, 9], "the wrapped plugin's own state");
-        let t = crate::mixer::track(&a.state, 2).unwrap();
+        let t = crate::mixer::track(&a.state.session, 2).unwrap();
         assert_eq!(t.slots[1], patcher(&leveled), "left as it was");
         assert_eq!(a.state.session.project.channels[0].plugin.as_deref(), Some(os_flp::patcher::PATCHER));
         // The chain plays the two plugins found and passes the other by; the hint says so after the opening's.
@@ -2483,11 +2483,11 @@ mod tests {
         let empty = patcher_state(&[("Control Surface", "Surface", &[])], &[(1001, 1000, 1.0)]);
         let many: Vec<(&str, &str, &[u8])> = vec![("Fruity Limiter", "Fruity Limiter", &[][..]); MAX_MEMBERS + 1];
         let many = patcher_state(&many, &chain_links(MAX_MEMBERS as u32 + 1, 1.0));
-        let t = crate::mixer::track_mut(&mut a.state, 2).unwrap();
+        let t = crate::mixer::track_mut(&mut a.state.session, 2).unwrap();
         (t.slots[0], t.slots[1]) = (patcher(&empty), patcher(&many));
         let msg = open_patchers(&mut a.state, &[]).unwrap();
         assert!(msg.ends_with(&format!("slot 2 (more than {MAX_MEMBERS} effects)")), "{msg}");
-        assert_eq!(members(&a.state, 2, 0), Some(vec![]));
+        assert_eq!(members(&a.state.session, 2, 0), Some(vec![]));
         crate::project_plugins::NATIVE_FIRST.with(|n| n.set(None));
     }
 
@@ -2502,25 +2502,25 @@ mod tests {
         tick(&mut a);
         assert_eq!(a.state.session.history.newest_done(), Some(WRAP));
         assert_eq!(names(&a, 0), [first.clone()]);
-        assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some(second.as_str()), "the next slot stays as it is");
+        assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some(second.as_str()), "the next slot stays as it is");
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(WRAP));
         tick(&mut a);
-        assert!(members(&a.state, 2, 0).is_none());
-        assert_eq!(crate::mixer::slot_name(&a.state, 2, 0).as_deref(), Some(first.as_str()));
+        assert!(members(&a.state.session, 2, 0).is_none());
+        assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 0).as_deref(), Some(first.as_str()));
 
         // Without Shift: an empty container in place of the delay.
         a.drop_container_on_slot(Some(1), false);
         tick(&mut a);
         assert_eq!(a.state.session.history.newest_done(), Some("Add effect"));
-        assert_eq!(members(&a.state, 2, 1), Some(vec![]));
+        assert_eq!(members(&a.state.session, 2, 1), Some(vec![]));
         assert!(a.plugins.containers.contains_key(&fx_key(2, 1)) && !a.plugins.hosted.contains_key(&fx_key(2, 1)));
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Add effect"));
         tick(&mut a);
-        assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some(second.as_str()));
+        assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some(second.as_str()));
         // Beside the slots, and with Shift on an empty slot: the first free slot, the slot itself.
         a.drop_container_on_slot(None, true);
         a.drop_container_on_slot(Some(5), true);
-        assert!(members(&a.state, 2, 2).is_some() && members(&a.state, 2, 5).is_some());
+        assert!(members(&a.state.session, 2, 2).is_some() && members(&a.state.session, 2, 5).is_some());
     }
 
     // spec: plugins/patcher/README.md "3.3 Patcherize (slot menu, channel menu)" (Shift+drop), "2.8 Presets and Patcherize"
@@ -2534,13 +2534,13 @@ mod tests {
         ticks(&mut a);
         assert_eq!(a.state.session.history.newest_done(), Some(WRAP));
         assert!(is_container_channel(&a.state.session.project.channels[0]));
-        assert_eq!(members(&a.state, 0, CHANNEL).unwrap()[0].name, crate::osc3::LEMON_TRIO);
+        assert_eq!(members(&a.state.session, 0, CHANNEL).unwrap()[0].name, crate::osc3::LEMON_TRIO);
         assert_eq!(a.state.session.project.channels.len(), rows);
         a.drop_container_on_rack(Some(0), false);
         ticks(&mut a);
         assert_eq!(a.state.session.history.newest_done(), Some(crate::history::ADD_CHANNEL));
         assert_eq!(a.state.session.project.channels.len(), rows + 1);
-        assert!(is_container_channel(&a.state.session.project.channels[rows]) && members(&a.state, rows as u16, CHANNEL) == Some(vec![]));
+        assert!(is_container_channel(&a.state.session.project.channels[rows]) && members(&a.state.session, rows as u16, CHANNEL) == Some(vec![]));
         assert_eq!(a.state.selected_channel, rows);
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
         assert_eq!(a.state.session.project.channels.len(), rows);

@@ -196,7 +196,7 @@ mod tests {
             }
             // The clip shows its channel's colour.
             let ch = app.state.session.project.channels.last().expect("channel").index;
-            assert_eq!(crate::playlist::clip_tint(&app.state, ClipSource::Channel(ch)), Some(*auto.last().expect("one")));
+            assert_eq!(crate::playlist::clip_tint(&app.state.session, ClipSource::Channel(ch)), Some(*auto.last().expect("one")));
         }
     }
 
@@ -253,7 +253,7 @@ mod tests {
         let (audio, auto) = new_channels(&mut app, 2);
         let before: Vec<Option<Rgb>> = app.state.session.project.channels.iter().map(|c| c.color).collect();
         let tints: Vec<Option<Rgb>> =
-            app.state.session.project.channels.iter().map(|c| crate::playlist::clip_tint(&app.state, ClipSource::Channel(c.index))).collect();
+            app.state.session.project.channels.iter().map(|c| crate::playlist::clip_tint(&app.state.session, ClipSource::Channel(c.index))).collect();
         for on in [true, false, true] {
             let text = app.state.fl_text.take().expect("theme");
             app.state.fl_text = Some(os_theme::fl::set_key(&text, "OverrideClips", if on { "1" } else { "0" }));
@@ -261,7 +261,7 @@ mod tests {
             assert_eq!(app.state.clip_colors.note_colors, on, "followed");
             assert_eq!(app.state.session.project.channels.iter().map(|c| c.color).collect::<Vec<_>>(), before, "channels, setting {on}");
             let now: Vec<Option<Rgb>> =
-                app.state.session.project.channels.iter().map(|c| crate::playlist::clip_tint(&app.state, ClipSource::Channel(c.index))).collect();
+                app.state.session.project.channels.iter().map(|c| crate::playlist::clip_tint(&app.state.session, ClipSource::Channel(c.index))).collect();
             assert_eq!(now, tints, "clips, setting {on}");
         }
         // A clip made now follows it: on, a green.

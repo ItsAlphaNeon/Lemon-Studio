@@ -136,7 +136,7 @@ impl crate::app::App {
         }
         let ppq = f64::from(s.session.project.ppq.max(1));
         crate::piano::snapshot_as(s, "Dump to piano roll");
-        let p = crate::piano::pattern_mut(s);
+        let p = crate::piano::pattern_mut(&mut s.session);
         p.notes.retain(|n| n.channel != ch);
         for n in notes {
             let start = (n.start * ppq).round().max(0.0) as u32;
@@ -351,21 +351,21 @@ mod tests {
         let ch = a.state.session.project.channels[row].index;
         let other = a.state.session.project.channels[0].index;
         a.state.session.project.get_mut().ppq = 96;
-        let p = crate::piano::pattern_mut(&mut a.state);
+        let p = crate::piano::pattern_mut(&mut a.state.session);
         p.notes = vec![Note::step(ch, 0), Note::step(other, 48)];
         let notes: Vec<os_hostlink::NoteOut> = [(0.0, 0.5625, 60), (0.5625, 1.125, 61)]
             .into_iter()
             .map(|(start, end, key)| os_hostlink::NoteOut { start, end, key, velocity: 100 })
             .collect();
         a.notes_from_plugin(row, &notes);
-        let got: Vec<(u16, u32, u32, u16)> = crate::piano::notes(&a.state).iter().map(|n| (n.channel, n.position, n.length, n.key)).collect();
+        let got: Vec<(u16, u32, u32, u16)> = crate::piano::notes(&a.state.session).iter().map(|n| (n.channel, n.position, n.length, n.key)).collect();
         assert_eq!(got, [(ch, 0, 54, 60), (other, 48, 0, 60), (ch, 54, 54, 61)]);
         assert!(crate::piano::undo(&mut a.state));
-        assert_eq!(crate::piano::notes(&a.state).len(), 2);
+        assert_eq!(crate::piano::notes(&a.state.session).len(), 2);
         // An effect's notes (Tesla's Convert to score, from a mixer slot) go to the selected channel.
         a.state.selected_channel = 0;
         a.notes_from_plugin(crate::plugins::fx_key(0, 3), &notes[..1]);
-        let mut got: Vec<(u16, u32, u16)> = crate::piano::notes(&a.state).iter().map(|n| (n.channel, n.position, n.key)).collect();
+        let mut got: Vec<(u16, u32, u16)> = crate::piano::notes(&a.state.session).iter().map(|n| (n.channel, n.position, n.key)).collect();
         got.sort();
         let mut want = vec![(ch, 0, 60), (other, 0, 60)];
         want.sort();

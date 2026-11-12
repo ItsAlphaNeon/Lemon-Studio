@@ -54,7 +54,8 @@ pub(crate) fn put(s: &mut State, t: u32, e: Option<InitControl>) {
 /// One undo step, "Initialized control". Nothing for a control whose stored units aren't known (a plugin parameter).
 pub fn init(s: &mut State, t: u32, v: f64) {
     let Some(c) = InitControl::from_unit(t, v) else { return };
-    history::record(s, INITIALIZED, Snap::Init(t, entry(s, t)));
+    let snap = Snap::Init(t, entry(s, t));
+    history::record(&mut s.session, INITIALIZED, snap);
     put(s, t, Some(c));
 }
 
@@ -175,7 +176,7 @@ pub fn name(s: &State, t: u32) -> String {
         Some(row) => s.session.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1)),
         None => format!("Channel {}", ch + 1),
     };
-    let mix = |t: u16| crate::mixer::name(s, t);
+    let mix = |t: u16| crate::mixer::name(&s.session, t);
     match t {
         InitControl::MAIN_VOLUME => return "Main volume".into(),
         InitControl::MAIN_SWING => return "Main swing".into(),
@@ -183,8 +184,8 @@ pub fn name(s: &State, t: u32) -> String {
         _ => {}
     }
     // A container member's wet or dry level (spec: plugins/patcher/README.md §4.2).
-    if let Some((m, k, id, wet)) = crate::container::level_of(s, target::decode(t)) {
-        return crate::container::level_name(s, m, k, id, wet);
+    if let Some((m, k, id, wet)) = crate::container::level_of(&s.session, target::decode(t)) {
+        return crate::container::level_name(&s.session, m, k, id, wet);
     }
     match target::decode(t) {
         Target::Tempo => "Tempo".into(),
@@ -333,7 +334,7 @@ mod tests {
         let (t, name, v) = a.automation_target(&Action::Knob(KnobId::ChanVol(0))).unwrap();
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
         assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 10000)]);
-        assert_eq!((a.state.session.history.len(), pl::clips(&a.state).len()), (1, 1));
+        assert_eq!((a.state.session.history.len(), pl::clips(&a.state.session).len()), (1, 1));
         // The clip's channel: the only selected one, in the "Automation" group with the filter on it, as the original's
         // rack shows after every Create automation clip.
         let row = a.state.session.project.channels.len() - 1;
@@ -342,12 +343,12 @@ mod tests {
         assert!(crate::rack::groups(&a.state.session.project)[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
         let channels = a.state.session.project.channels.len();
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert!(a.state.session.project.init_controls.is_empty() && pl::clips(&a.state).is_empty());
+        assert!(a.state.session.project.init_controls.is_empty() && pl::clips(&a.state.session).is_empty());
         assert_eq!(a.state.session.project.channels.len(), channels - 1, "the clip's channel goes with the undo");
         assert!(crate::rack::groups(&a.state.session.project).iter().all(|g| g.name != "Automation") && crate::rack::filter(&a.state.session.project) == crate::rack::Filter::All);
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert_eq!((a.state.session.project.channels.len(), crate::rack::filter(&a.state.session.project)), (channels, crate::rack::Filter::Group(g)));
-        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 10000)], 1));
+        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 10000)], 1));
         // A second clip on the moved knob: its new value replaces the old one; undo brings that back.
         a.state.session.project.get_mut().channels[0].volume = 0.5;
         pl::run(&mut a, Cmd::CreateAutomation(vol, "Kick - Channel volume".into(), 0.5));
@@ -360,16 +361,16 @@ mod tests {
         prefs::set_check(&prefs::INIT_CONTROLS, false);
         let (t, name, v) = a.automation_target(&Action::Tempo).unwrap();
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
-        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 3));
+        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 6400)], 3));
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 2));
+        assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 6400)], 2));
         prefs::set_check(&prefs::INIT_CONTROLS, true);
     }
 
     /// A song (pattern 1, empty, on track 1) with channel 1's volume and the tempo listed.
     fn song_app() -> App {
         let mut a = app();
-        pl::arr_mut(&mut a.state).clips.push(Clip::new(0, 4 * 384, 0, ClipSource::Pattern(1)));
+        pl::arr_mut(&mut a.state.session).clips.push(Clip::new(0, 4 * 384, 0, ClipSource::Pattern(1)));
         a.state.session.project.get_mut().init_controls = vec![rec(target::channel(0, target::CHANNEL_VOLUME), 6400), rec(target::TEMPO, 140_000)];
         a
     }
@@ -468,10 +469,10 @@ mod tests {
         let mut c = App::new(None);
         c.state.set_song_mode(true);
         c.open(path.clone());
-        assert!(!c.state.song_mode() && !pl::clips(&c.state).is_empty());
+        assert!(!c.state.song_mode() && !pl::clips(&c.state.session).is_empty());
         assert_eq!(controls(&c), MOVED);
         // Without event 9 (a file from before Lemon Studio wrote it): song mode, even with no clips.
-        pl::arr_mut(&mut a.state).clips.clear();
+        pl::arr_mut(&mut a.state.session).clips.clear();
         a.save_to(path.clone());
         let mut f = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
         for c in &mut f.chunks {

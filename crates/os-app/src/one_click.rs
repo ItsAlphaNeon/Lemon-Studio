@@ -240,7 +240,7 @@ impl App {
         let p = &s.session.project;
         let tempo = p.tick_tempo(s.tempo().max(1.0));
         let len = (frames as f64 / f64::from(rate) * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
-        let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
+        let track = crate::playlist::free_track(&s.session, 0, start, start + len.max(1));
         let text = path.to_string_lossy();
         match crate::playlist::add_audio_clip_as(s, &text, track, start, RECORDED) {
             Some(i) => {

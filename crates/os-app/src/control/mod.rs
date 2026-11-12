@@ -316,8 +316,8 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
         By::User => step.clone().into(),
         By::Client(n) => format!("{n}: {}", lower(&step)).into(),
     };
-    crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
-    crate::history::done_with(s);
+    crate::history::record_named(&mut s.session, label, crate::history::Snap::Commands(undo));
+    crate::history::done_with(&mut s.session);
     s.session.control.saw(&s.session.project, s.tempo());
     s.session.control.event(by, "apply", step, ops);
     Ok(results)
@@ -381,8 +381,8 @@ fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
     if !links.is_empty() {
         undo.push(Command::Put(Box::new(command::Taken::Links(links))));
     }
-    crate::history::record(s, name, crate::history::Snap::Commands(undo));
-    crate::history::done_with(s);
+    crate::history::record(&mut s.session, name, crate::history::Snap::Commands(undo));
+    crate::history::done_with(&mut s.session);
 }
 
 /// `edit` for an edit that needs the app (a mixer menu command hosting or dropping plugins).
@@ -404,14 +404,14 @@ pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: comman
 /// tweaks is off. `run`: values the plugin sent outside a gesture (no begin and end of the edit), which join the step
 /// of the plugin's values just before them, as a knob's wheel notches do; a parameter not in that step yet joins it
 /// with its value before. The step comes from no press of the app's, so no release looks at it.
-pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
-    s.session.plugin_edited = true;
+pub fn param_edit(s: &mut crate::session::Session, owner: u32, before: &[(u32, f64)], run: bool) {
+    s.plugin_edited = true;
     if !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
         return;
     }
     let put = |&(param, v): &(u32, f64)| Command::Put(Box::new(command::Taken::Param(owner, param, v)));
     let r = crate::history::Run::Param(owner);
-    if run && s.session.history.joins(r) {
+    if run && s.history.joins(r) {
         crate::history::extend_newest(s, |cmds| {
             for b in before {
                 let has = cmds.iter().any(|c| matches!(c, Command::Put(t) if matches!(**t, command::Taken::Param(_, p, _) if p == b.0)));
@@ -425,7 +425,7 @@ pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
     crate::history::record(s, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(before.iter().map(put).collect()));
     crate::history::done_with(s);
     if run {
-        s.session.history.set_run(r);
+        s.history.set_run(r);
     }
 }
 
@@ -445,8 +445,8 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     s.session.plugin_edited |= before.is_some_and(|v| v != to);
     let Some(v) = before.filter(|&v| v != to && crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) else { return };
     let put = Command::Put(Box::new(command::Taken::Param(owner, param, v)));
-    crate::history::record(s, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));
-    crate::history::done_with(s);
+    crate::history::record(&mut s.session, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));
+    crate::history::done_with(&mut s.session);
 }
 
 /// Plugin instance `key` took a whole new state at the user's request (a preset from its window's Presets box, ◀ ▶ or
@@ -458,8 +458,8 @@ pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command
         s.session.control.settle(s.session.project.get_mut());
     }
     let Some(owner) = command::key_owner(s, key).filter(|&o| o != 0) else { return };
-    crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(command::Taken::Plugin(owner, Box::new(before))))]));
-    crate::history::done_with(s);
+    crate::history::record(&mut s.session, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(command::Taken::Plugin(owner, Box::new(before))))]));
+    crate::history::done_with(&mut s.session);
 }
 
 /// `edit_app` for a run of changes that make one step (the tempo tapper's taps, wheel notches on a value box): a change
@@ -493,7 +493,7 @@ pub fn edit_press(s: &mut State, name: &'static str, region: command::Region) {
 pub fn edit_press_all(s: &mut State, name: &'static str, regions: impl IntoIterator<Item = command::Region>) {
     let before: Vec<Command> = regions.into_iter().filter_map(|r| command::Taken::of(s, r)).map(|t| Command::Put(Box::new(t))).collect();
     if !before.is_empty() {
-        crate::history::record(s, name, crate::history::Snap::Commands(before));
+        crate::history::record(&mut s.session, name, crate::history::Snap::Commands(before));
     }
 }
 
@@ -609,10 +609,10 @@ pub fn accept(s: &mut State, n: u64) -> Result<Vec<serde_json::Value>, String> {
 }
 
 /// Discards proposal `n`.
-pub fn discard(s: &mut State, n: u64) -> Result<(), String> {
-    let i = s.session.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
-    let p = s.session.control.proposals.remove(i);
-    s.session.control.event(&p.by, "discarded", p.name, Vec::new());
+pub fn discard(s: &mut crate::session::Session, n: u64) -> Result<(), String> {
+    let i = s.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
+    let p = s.control.proposals.remove(i);
+    s.control.event(&p.by, "discarded", p.name, Vec::new());
     Ok(())
 }
 

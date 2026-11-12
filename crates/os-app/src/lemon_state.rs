@@ -496,11 +496,11 @@ mod tests {
         app.state.session.control.settle(app.state.session.project.get_mut());
         let ch = app.state.session.project.channels[1].id.0;
         let s = &mut app.state;
-        crate::playlist::put_icon(s, IconOwner::Channel(ch), Some(Icon::Mic));
-        crate::playlist::put_icon(s, IconOwner::Track(2), Some(Icon::Star));
-        crate::playlist::put_icon(s, IconOwner::Slot(2, 1), Some(Icon::Plug));
-        crate::mixer::set_slot_label(s, 2, 1, Some("Crunch ✓".into()));
-        crate::mixer::set_slot_color(s, 2, 0, Some(os_model::Rgb::new(10, 200, 30)));
+        crate::playlist::put_icon(&mut s.session, IconOwner::Channel(ch), Some(Icon::Mic));
+        crate::playlist::put_icon(&mut s.session, IconOwner::Track(2), Some(Icon::Star));
+        crate::playlist::put_icon(&mut s.session, IconOwner::Slot(2, 1), Some(Icon::Plug));
+        crate::mixer::set_slot_label(&mut s.session, 2, 1, Some("Crunch ✓".into()));
+        crate::mixer::set_slot_color(&mut s.session, 2, 0, Some(os_model::Rgb::new(10, 200, 30)));
         s.playlist.perf_clip_progress = false;
         s.playlist.perf_track_progress = true;
         s.playlist.perf_plus_scene = true;
@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(crate::mixer::slot_colors_of(&s.session.project).get(&(2, 0)), Some(&os_model::Rgb::new(10, 200, 30)));
         let pl = &s.playlist;
         assert_eq!((pl.perf_clip_progress, pl.perf_track_progress, pl.perf_plus_scene, pl.perf_velocity_subclips), (false, true, true, false));
-        crate::playlist::put_icon(&mut back.state, IconOwner::Track(2), None);
+        crate::playlist::put_icon(&mut back.state.session, IconOwner::Track(2), None);
         assert!(back.unsaved(), "an icon taken off is an unsaved change");
         // Saved again, what was taken off stays off (the events are replaced, not kept from the opened file).
         back.save_to(path.clone());
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(crate::playlist::window_icon(&s.session.project, 1), Some(Icon::Mic));
         assert!(!app.unsaved(), "the icons are the opened state");
         // Saved as .lemon with the track 2 icon taken off: the FLP events keep the original numbers.
-        crate::playlist::put_icon(&mut app.state, IconOwner::Track(2), None);
+        crate::playlist::put_icon(&mut app.state.session, IconOwner::Track(2), None);
         let lemon_path = d.join("Icons.lemon");
         app.save_to(lemon_path.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&lemon_path).unwrap()).unwrap()).unwrap();
@@ -780,11 +780,11 @@ mod tests {
         assert_eq!(lemon::data(&file, 240), Some(vec![7, 7]), "the unknown event is kept");
         // Two colours, the second cut short: the first is read.
         let mut s = with_state();
-        crate::mixer::set_slot_color(&mut s.state, 3, 4, Some(os_model::Rgb::new(1, 2, 3)));
+        crate::mixer::set_slot_color(&mut s.state.session, 3, 4, Some(os_model::Rgb::new(1, 2, 3)));
         let mut b = slot_colors(&s.state).data().unwrap().to_vec();
         b.truncate(b.len() - 1);
         for (t, k) in crate::mixer::slot_colors_of(&s.state.session.project).into_keys() {
-            crate::mixer::set_slot_color(&mut s.state, t, k, None);
+            crate::mixer::set_slot_color(&mut s.state.session, t, k, None);
         }
         let mut f = file.clone();
         lemon::to_lemon(&mut f, &[Event::new(lemon::SLOT_COLORS, Value::var(b))]).unwrap();

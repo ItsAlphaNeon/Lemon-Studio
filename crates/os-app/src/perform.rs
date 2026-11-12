@@ -79,7 +79,7 @@ pub fn on(s: &State) -> bool {
 
 /// The performance zone's end (the Start marker), while performance mode is on (§2).
 pub fn zone(s: &State) -> Option<u32> {
-    on(s).then(|| start_marker(s)).flatten().filter(|&z| z > 0)
+    on(s).then(|| start_marker(&s.session)).flatten().filter(|&z| z > 0)
 }
 
 fn ppq(s: &State) -> u32 {
@@ -90,7 +90,7 @@ fn ppq(s: &State) -> u32 {
 /// every bar does. Lemon Studio: what lies before the first marker belongs to the first column.
 pub fn columns(s: &State) -> Vec<u32> {
     let Some(z) = zone(s) else { return Vec::new() };
-    let mut at: Vec<u32> = markers(s).iter().filter(|m| m.kind != TimeMarker::START && m.position < z).map(|m| m.position).collect();
+    let mut at: Vec<u32> = markers(&s.session).iter().filter(|m| m.kind != TimeMarker::START && m.position < z).map(|m| m.position).collect();
     if at.is_empty() {
         at = (0..z).step_by(4 * ppq(s) as usize).collect();
     }
@@ -116,20 +116,20 @@ fn column_of(cols: &[u32], tick: u32) -> usize {
 /// Clip `i`'s slot (track, column) when it lies in the zone.
 pub fn slot_of(s: &State, i: usize) -> Option<(u16, usize)> {
     let z = zone(s)?;
-    let c = clips(s).get(i).filter(|c| c.position < z)?;
+    let c = clips(&s.session).get(i).filter(|c| c.position < z)?;
     Some((c.track, column_of(&columns(s), c.position)))
 }
 
 /// The clips of a slot, in time order.
 fn slot_clips(s: &State, cols: &[u32], track: u16, col: usize) -> Vec<Clip> {
     let (a, b) = (cols.get(col).copied().unwrap_or(u32::MAX), cols.get(col + 1).copied().or(zone(s)).unwrap_or(u32::MAX));
-    let mut v: Vec<Clip> = clips(s).iter().filter(|c| c.track == track && c.position >= a && c.position < b).copied().collect();
+    let mut v: Vec<Clip> = clips(&s.session).iter().filter(|c| c.track == track && c.position >= a && c.position < b).copied().collect();
     v.sort_by_key(|c| c.position);
     v
 }
 
 fn settings(s: &State, track: u16) -> PerfSettings {
-    track_info(s, track).map(|t| t.perf).unwrap_or_default()
+    track_info(&s.session, track).map(|t| t.perf).unwrap_or_default()
 }
 
 /// The next point of a grid of `unit` ticks that starts at `z`, at or after `now`. With Tolerant, a point passed by
@@ -267,7 +267,7 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     // Latch: the playing slot's press stops it.
     if set.press == 3 && s.playlist.perform.live.get(&track).is_some_and(|l| l.column == col && now.is_none_or(|t| t < l.until())) {
         stop(s, track, now, instant);
-        return Some(format!("{}: stopped", crate::playlist::track_name(s, track)));
+        return Some(format!("{}: stopped", crate::playlist::track_name(&s.session, track)));
     }
     let first = next_in_slot(s, &cols, track, col)?;
     let p = ppq(s);
@@ -299,7 +299,7 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     }
     s.session.dirty = true;
     let (bar, step, _) = crate::views::toolbar::bst_ticks(f64::from(at) * 96.0 / f64::from(p));
-    Some(format!("{}: {} at {bar}:{step:02}", crate::playlist::track_name(s, track), PerfSettings::PRESSES[usize::from(set.press)]))
+    Some(format!("{}: {} at {bar}:{step:02}", crate::playlist::track_name(&s.session, track), PerfSettings::PRESSES[usize::from(set.press)]))
 }
 
 /// The Trigger sync unit (§3, §4): the track's `sync` setting for a clip of `len` ticks, or with note 127 held the
@@ -320,7 +320,7 @@ fn sync_unit(s: &State, sync: u8, len: u32) -> Option<u32> {
 fn column_tracks(s: &State, col: usize, keep: impl Fn(u16) -> bool) -> Vec<u16> {
     let Some(z) = zone(s) else { return Vec::new() };
     let cols = columns(s);
-    let mut tracks: Vec<u16> = clips(s).iter().filter(|c| c.position < z && column_of(&cols, c.position) == col).map(|c| c.track).filter(|&t| keep(t)).collect();
+    let mut tracks: Vec<u16> = clips(&s.session).iter().filter(|c| c.position < z && column_of(&cols, c.position) == col).map(|c| c.track).filter(|&t| keep(t)).collect();
     tracks.sort_unstable();
     tracks.dedup();
     tracks
@@ -339,7 +339,7 @@ pub fn trigger_scene(s: &mut State, col: usize, now: Option<u32>, instant: bool,
 pub fn scene_of(s: &State, i: usize) -> Option<(Vec<(u16, usize)>, String)> {
     let z = zone(s)?;
     let (track, col) = slot_of(s, i)?;
-    let all = clips(s);
+    let all = clips(&s.session);
     let g = all.get(i)?.group();
     if g != 0 {
         let cols = columns(s);
@@ -348,12 +348,12 @@ pub fn scene_of(s: &State, i: usize) -> Option<(Vec<(u16, usize)>, String)> {
         v.dedup_by_key(|c| c.track);
         return Some((v.iter().map(|c| (c.track, column_of(&cols, c.position))).collect(), format!("(clip group {g})")));
     }
-    let lead = crate::playlist::group_track(s, track).or(crate::playlist::is_group_track(s, track).then_some(track));
+    let lead = crate::playlist::group_track(&s.session, track).or(crate::playlist::is_group_track(&s.session, track).then_some(track));
     let Some(l) = lead else {
         return Some((column_tracks(s, col, |_| true).into_iter().map(|t| (t, col)).collect(), (col + 1).to_string()));
     };
-    let tracks = column_tracks(s, col, |t| t == l || crate::playlist::group_track(s, t) == Some(l));
-    Some((tracks.into_iter().map(|t| (t, col)).collect(), format!("{} ({})", col + 1, crate::playlist::track_name(s, l))))
+    let tracks = column_tracks(s, col, |t| t == l || crate::playlist::group_track(&s.session, t) == Some(l));
+    Some((tracks.into_iter().map(|t| (t, col)).collect(), format!("{} ({})", col + 1, crate::playlist::track_name(&s.session, l))))
 }
 
 /// Ctrl+click on zone clip `i` (§3a): the scene `scene_of` names.
@@ -386,7 +386,7 @@ fn play_scene(s: &mut State, slots: Vec<(u16, usize)>, name: &str, now: Option<u
 
 /// The track progress display (§3): each launched track's progress through its pass at `tick`, 0 to 1.
 pub fn track_progress(s: &State, tick: u32) -> Vec<(u16, f32)> {
-    let all = clips(s);
+    let all = clips(&s.session);
     progress(s, tick).into_iter().filter_map(|(i, k)| all.get(i).map(|c| (c.track, k))).collect()
 }
 
@@ -394,7 +394,7 @@ pub fn track_progress(s: &State, tick: u32) -> Vec<(u16, f32)> {
 /// the pass playing is, 0 to 1.
 pub fn progress(s: &State, tick: u32) -> Vec<(usize, f32)> {
     let Some(z) = zone(s) else { return Vec::new() };
-    let (all, cols) = (clips(s), columns(s));
+    let (all, cols) = (clips(&s.session), columns(s));
     let mut out = Vec::new();
     for (&track, l) in &s.playlist.perform.live {
         let Some(p) = l.pass_at(tick) else { continue };
@@ -591,7 +591,7 @@ pub fn record(s: &mut State, stop: u32) -> usize {
     if takes.is_empty() {
         return 0;
     }
-    let mut all = clips(s).to_vec();
+    let mut all = clips(&s.session).to_vec();
     let mut made = 0;
     for (t, v) in takes {
         let (from, to) = (v[0].position, v.last().map_or(0, Clip::end));
@@ -608,8 +608,8 @@ pub fn record(s: &mut State, stop: u32) -> usize {
             c
         }));
     }
-    crate::playlist::snapshot_as(s, crate::record::RECORDED);
-    arr_mut(s).clips = all;
+    crate::playlist::snapshot_as(&mut s.session, crate::record::RECORDED);
+    arr_mut(&mut s.session).clips = all;
     s.playlist.perform.live.retain(|_, l| l.armed);
     s.session.dirty = true;
     made
@@ -661,10 +661,10 @@ impl MarkerForm {
 /// `f.spacing` bars apart from bar 1, a Start marker one bar after the last column, SONG, performance mode on.
 pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
     let (count, spacing) = (u32::from(f.count.max(1)), u32::from(f.spacing.max(1)));
-    crate::playlist::snapshot_as(s, "Prepare for performance mode");
+    crate::playlist::snapshot_as(&mut s.session, "Prepare for performance mode");
     let bar = 4 * ppq(s);
     let start = count * spacing * bar + bar;
-    let a = arr_mut(s);
+    let a = arr_mut(&mut s.session);
     a.markers.retain(|m| !(m.kind == TimeMarker::START || (m.kind == TimeMarker::PLAIN && m.position < start)));
     for k in 0..count {
         a.markers.push(TimeMarker::new(k * spacing * bar, ""));
@@ -786,7 +786,7 @@ mod tests {
         let mut app = App::new(None);
         let s = &mut app.state;
         s.session.project.get_mut().ppq = 96;
-        let a = arr_mut(s);
+        let a = arr_mut(&mut s.session);
         // Two columns of 4 bars on track 0: pattern 1 (1 bar) in column 0, pattern 2 (2 bars) in column 1. After the
         // Start marker at bar 9, pattern 3 on track 0 and 1.
         a.clips = vec![
@@ -811,7 +811,7 @@ mod tests {
         assert_eq!((l.column, l.armed), (1, true), "note 1: track 1, column 2, armed while stopped");
         app.midi_notes(vec![note(12, true), note(120, true)]);
         assert!(!app.state.playlist.perform.live.contains_key(&1), "track 2 has no clips in the zone");
-        arr_mut(&mut app.state).tracks[0].perf.press = 1;
+        arr_mut(&mut app.state.session).tracks[0].perf.press = 1;
         app.midi_notes(vec![note(0, true)]);
         assert_eq!(app.state.playlist.perform.live[&0].column, 0);
         app.midi_notes(vec![note(1, false)]);
@@ -834,8 +834,8 @@ mod tests {
         app.state.playlist.perform = Perform::default();
 
         // Notes 125 / 126 held: a note triggers its column's scene.
-        arr_mut(&mut app.state).tracks[0].perf.press = 0;
-        arr_mut(&mut app.state).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
+        arr_mut(&mut app.state.session).tracks[0].perf.press = 0;
+        arr_mut(&mut app.state.session).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
         app.midi_notes(vec![note(125, true), note(12, true)]);
         assert_eq!(app.state.message.as_deref(), Some("Scene 1: 2 tracks"));
         assert!(app.state.playlist.perform.live.contains_key(&2));
@@ -861,7 +861,7 @@ mod tests {
         assert_eq!(progress(s, 3456 + 96), vec![(0, 0.25)]);
         assert_eq!(progress(s, 3840 + 288), vec![(0, 0.75)], "the second pass");
         // Position sync 1 beat: the first pass starts 10 ticks into the clip.
-        arr_mut(s).tracks[0].perf.position_sync = 3;
+        arr_mut(&mut s.session).tracks[0].perf.position_sync = 3;
         trigger(s, 1, Some(3082), true, false);
         assert_eq!(progress(s, 3082), vec![(1, 10.0 / 768.0)]);
     }
@@ -871,7 +871,7 @@ mod tests {
     fn scenes_trigger_columns() {
         let mut app = app();
         let s = &mut app.state;
-        arr_mut(s).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
+        arr_mut(&mut s.session).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
         trigger(s, 1, None, false, false);
         assert_eq!(trigger_scene(s, 0, None, false, false).as_deref(), Some("Scene 1: 2 tracks"));
         let cols = |s: &State| s.playlist.perform.live.iter().map(|(&t, l)| (t, l.column)).collect::<Vec<_>>();
@@ -892,7 +892,7 @@ mod tests {
     fn group_scenes() {
         let mut app = app();
         let s = &mut app.state;
-        let a = arr_mut(s);
+        let a = arr_mut(&mut s.session);
         a.clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
         a.clips.push(Clip::new(0, 384, 3, ClipSource::Pattern(1)));
         a.tracks[3].grouped = true;
@@ -903,8 +903,8 @@ mod tests {
         let cols = |s: &State| s.playlist.perform.live.iter().map(|(&t, l)| (t, l.column)).collect::<Vec<_>>();
         assert_eq!(cols(s), vec![(2, 0), (3, 0)]);
         // A clip group: each grouped clip's slot.
-        arr_mut(s).clips[1].set_group(5);
-        arr_mut(s).clips[4].set_group(5);
+        arr_mut(&mut s.session).clips[1].set_group(5);
+        arr_mut(&mut s.session).clips[4].set_group(5);
         assert_eq!(trigger_clip_scene(s, 1, None, false, false).as_deref(), Some("Scene (clip group 5): 2 tracks"));
         assert_eq!(cols(s), vec![(0, 1), (2, 0)], "track 4 is not in it and stops");
         assert_eq!(trigger_clip_scene(s, 4, None, false, true).as_deref(), Some("+Scene (clip group 5): 2 tracks"));
@@ -940,16 +940,16 @@ mod tests {
         let z = 3072;
         trigger(s, 0, Some(z + 128), true, false);
         assert_eq!(record(s, z + 128 + 900), 3);
-        let on0: Vec<(u32, u32)> = clips(s).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
+        let on0: Vec<(u32, u32)> = clips(&s.session).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
         assert_eq!(on0, vec![(z, 128), (z + 128, 384), (z + 512, 384), (z + 896, 132)], "the clip there ends where the recording starts");
-        assert_eq!(clips(s).iter().filter(|c| c.track == 1).count(), 1, "track 2 is left alone");
+        assert_eq!(clips(&s.session).iter().filter(|c| c.track == 1).count(), 1, "track 2 is left alone");
         assert!(s.playlist.perform.live.is_empty());
         assert_eq!(s.session.history.newest_done(), Some(crate::record::RECORDED));
         assert_eq!(record(s, z + 2000), 0, "nothing launched");
         // A stretch over a clip that starts in it: the clip goes.
         trigger(s, 0, Some(z), true, false);
         assert_eq!(record(s, z + 384), 1);
-        let on0: Vec<(u32, u32)> = clips(s).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
+        let on0: Vec<(u32, u32)> = clips(&s.session).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
         assert_eq!(on0, vec![(z + 512, 384), (z + 896, 132), (z, 384)]);
     }
 
@@ -960,8 +960,8 @@ mod tests {
         let s = &mut app.state;
         let z = 3072;
         // Column 0 of track 1 holds three clips: patterns 1, 4 and 5.
-        arr_mut(s).clips.push(Clip::new(384, 384, 0, ClipSource::Pattern(4)));
-        arr_mut(s).clips.push(Clip::new(768, 384, 0, ClipSource::Pattern(5)));
+        arr_mut(&mut s.session).clips.push(Clip::new(384, 384, 0, ClipSource::Pattern(4)));
+        arr_mut(&mut s.session).clips.push(Clip::new(768, 384, 0, ClipSource::Pattern(5)));
         let src = |s: &State| s.playlist.perform.live[&0].passes[0].source;
         for (vel, pat) in [(1, 1), (43, 1), (44, 4), (85, 4), (86, 5), (127, 5)] {
             midi_note(s, 0, vel, true, Some(z));
@@ -975,7 +975,7 @@ mod tests {
         midi_note(s, 0, 127, true, Some(z));
         assert_eq!(src(s), ClipSource::Pattern(5), "off: round robin");
         // March & wrap: each column's first clip, never a sub-clip.
-        arr_mut(s).tracks[0].perf.motion = 2;
+        arr_mut(&mut s.session).tracks[0].perf.motion = 2;
         midi_note(s, 0, 127, true, Some(z));
         let pats: Vec<ClipSource> = s.playlist.perform.live[&0].passes.iter().take(4).map(|c| c.source).collect();
         assert_eq!(pats, vec![ClipSource::Pattern(1), ClipSource::Pattern(2), ClipSource::Pattern(1), ClipSource::Pattern(2)]);
@@ -1023,7 +1023,7 @@ mod tests {
         assert!(app.typing_key(BracketLeft, true, false, false), "a note key outside the layout does nothing");
         assert!(app.typing_held.is_empty());
         // Hold & stop: the key's release stops it; the grid scrolled one column right, 1 is column 2.
-        arr_mut(&mut app.state).tracks[0].perf.press = 1;
+        arr_mut(&mut app.state.session).tracks[0].perf.press = 1;
         app.state.playlist.perform = Perform { origin: (0, 1), ..Perform::default() };
         assert!(app.typing_key(Digit1, true, false, false));
         assert_eq!(app.state.playlist.perform.live[&0].column, 1);
@@ -1044,7 +1044,7 @@ mod tests {
         assert_eq!((zone(s), columns(s)), (Some(3072), vec![0, 1536]));
         assert_eq!((slot_of(&s, 0), slot_of(&s, 1), slot_of(&s, 2)), (Some((0, 0)), Some((0, 1)), None));
         // Without markers, every bar is a column.
-        arr_mut(s).markers.retain(|m| m.kind == TimeMarker::START);
+        arr_mut(&mut s.session).markers.retain(|m| m.kind == TimeMarker::START);
         assert_eq!(columns(s).len(), 8);
         s.session.project.get_mut().performance = Some(false);
         assert_eq!((zone(s), slot_of(&s, 0)), (None, None));
@@ -1070,7 +1070,7 @@ mod tests {
         assert!(a.clips.iter().any(|c| c.track == 0 && c.position == 3456 && c.source == ClipSource::Pattern(1) && !c.muted));
 
         // Alt: at once; Position sync 1 beat starts 10 ticks in.
-        arr_mut(s).tracks[0].perf.position_sync = 3;
+        arr_mut(&mut s.session).tracks[0].perf.position_sync = 3;
         trigger(s, 1, Some(3082), true, false);
         let l = &s.playlist.perform.live[&0];
         assert_eq!((l.passes[0].position, l.passes[0].length, l.passes[0].window), (3082, 758, Some((10.0, 768.0))));
@@ -1088,33 +1088,33 @@ mod tests {
         let mut app = app();
         let s = &mut app.state;
         // March & wrap: column 0, column 1, column 0, ...
-        arr_mut(s).tracks[0].perf = PerfSettings { motion: 2, trigger_sync: 0, ..PerfSettings::default() };
+        arr_mut(&mut s.session).tracks[0].perf = PerfSettings { motion: 2, trigger_sync: 0, ..PerfSettings::default() };
         trigger(s, 0, Some(3072), false, false);
         let l = &s.playlist.perform.live[&0];
         let srcs: Vec<ClipSource> = l.passes.iter().take(4).map(|c| c.source).collect();
         assert_eq!(srcs, [1, 2, 1, 2].map(ClipSource::Pattern));
         assert_eq!(l.passes[1].position, 3072 + 384);
         // One shot: one pass.
-        arr_mut(s).tracks[0].perf.motion = 1;
+        arr_mut(&mut s.session).tracks[0].perf.motion = 1;
         trigger(s, 1, Some(3072), false, false);
         assert_eq!(s.playlist.perform.live[&0].passes.len(), 1);
         // March & stop from the last column: one pass.
-        arr_mut(s).tracks[0].perf.motion = 4;
+        arr_mut(&mut s.session).tracks[0].perf.motion = 4;
         trigger(s, 1, Some(3072), false, false);
         assert_eq!(s.playlist.perform.live[&0].passes.len(), 1);
         // Latch: pressing the playing slot again stops it.
-        arr_mut(s).tracks[0].perf = PerfSettings { press: 3, trigger_sync: 0, ..PerfSettings::default() };
+        arr_mut(&mut s.session).tracks[0].perf = PerfSettings { press: 3, trigger_sync: 0, ..PerfSettings::default() };
         trigger(s, 0, Some(3072), false, false);
         trigger(s, 0, Some(3100), false, false);
         assert!(!s.playlist.perform.live.contains_key(&0));
         // Hold & stop: the release stops it.
-        arr_mut(s).tracks[0].perf.press = 1;
+        arr_mut(&mut s.session).tracks[0].perf.press = 1;
         trigger(s, 0, Some(3072), false, false);
         assert_eq!(s.playlist.perform.held, Some(0));
         release(s, Some(3200));
         assert!(!s.playlist.perform.live.contains_key(&0));
         // Queue: waits for the pass playing to end.
-        arr_mut(s).tracks[0].perf = PerfSettings { trigger_sync: 0, ..PerfSettings::default() };
+        arr_mut(&mut s.session).tracks[0].perf = PerfSettings { trigger_sync: 0, ..PerfSettings::default() };
         trigger(s, 0, Some(3072), false, false);
         trigger(s, 1, Some(3100), false, true);
         let l = &s.playlist.perform.live[&0];
@@ -1139,7 +1139,7 @@ mod tests {
         assert!(sub.iter().any(|i| i.label == "Tolerant" && matches!(i.mark, Mark::Check(true))));
         run(&mut app, Cmd::PerfSet(2, 1, 5));
         run(&mut app, Cmd::PerfSet(2, 5, 0));
-        let p = track_info(&app.state, 2).unwrap().perf;
+        let p = track_info(&app.state.session, 2).unwrap().perf;
         assert_eq!((p.motion, p.tolerant), (5, false));
 
         // play_project: the zone is silent; a launched clip plays.
@@ -1171,7 +1171,7 @@ mod tests {
         s.session.project.get_mut().ppq = 96;
         let msg = prepare_with(s, MarkerForm::default());
         assert!(msg.contains("bar 66"), "{msg}");
-        let m = markers(s);
+        let m = markers(&s.session);
         assert_eq!(m.len(), 17);
         assert_eq!((m[1].position, m[15].position, m[16].kind, m[16].position), (1536, 23040, TimeMarker::START, 24960));
         assert_eq!((s.session.project.performance, s.song_mode(), s.playlist.pos), (Some(true), true, 24960));
@@ -1192,7 +1192,7 @@ mod tests {
         crate::playlist::run(&mut app, crate::playlist::Cmd::PerfPrepare);
         assert_eq!(app.top_message().map(|m| m.1), Some(CONFIRM.to_string()));
         app.act(crate::app::Action::Dlg(DHit::Button(1)));
-        assert!(app.state.dialogs.is_empty() && markers(&app.state).is_empty(), "Cancel");
+        assert!(app.state.dialogs.is_empty() && markers(&app.state.session).is_empty(), "Cancel");
         crate::playlist::run(&mut app, crate::playlist::Cmd::PerfPrepare);
         app.act(crate::app::Action::Dlg(DHit::Button(0)));
         assert!(matches!(app.state.dialogs.last().map(|m| &m.body), Some(Body::Markers(f)) if *f == MarkerForm::default()));
@@ -1208,8 +1208,8 @@ mod tests {
         app.act(crate::app::Action::Dlg(DHit::Accept));
         assert!(app.state.dialogs.is_empty());
         let s = &app.state;
-        assert_eq!(markers(s).len(), 9);
-        assert_eq!((markers(s)[1].position, markers(s)[8].position), (768, 8 * 768 + 384), "2 bars apart, Start a bar after");
+        assert_eq!(markers(&s.session).len(), 9);
+        assert_eq!((markers(&s.session)[1].position, markers(&s.session)[8].position), (768, 8 * 768 + 384), "2 bars apart, Start a bar after");
         assert_eq!(s.message.as_deref(), Some("Prepared for performance mode: 8 columns, Start marker at bar 18"));
     }
 }

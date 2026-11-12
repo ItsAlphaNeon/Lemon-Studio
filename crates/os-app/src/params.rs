@@ -142,7 +142,7 @@ pub enum PCmd {
 /// The hosted key of the instance an automation target points at, and the parameter index. A container's parameter
 /// (a slot's or a channel's) is its member's (`None` for a member's level, or a member whose plugin is not loaded).
 pub fn key_of(s: &State, t: Target) -> Option<(usize, usize)> {
-    if let Some((track, slot, k)) = crate::container::target_place(s, t) {
+    if let Some((track, slot, k)) = crate::container::target_place(&s.session, t) {
         let (id, item) = target::member_of(k).filter(|m| m.1 < target::MEMBER_WET)?;
         return Some((crate::container::member_key(s, crate::container::place_key(track, slot), id)?, usize::from(item)));
     }
@@ -159,7 +159,7 @@ pub fn target_of(s: &State, key: usize, index: usize) -> Option<u32> {
     let k = u16::try_from(index).ok().filter(|&k| k < 0x8000)?;
     if key >= MEMBER_KEY {
         let &(track, slot, id) = s.params.members.get(&key)?;
-        return crate::container::item_target(s, track, slot, target::member_item(id, k).filter(|_| k < target::MEMBER_WET)?);
+        return crate::container::item_target(&s.session, track, slot, target::member_item(id, k).filter(|_| k < target::MEMBER_WET)?);
     }
     Some(match fx_of(key) {
         Some((track, slot)) => target::slot_param(track, slot, k),
@@ -180,17 +180,17 @@ pub fn link_target(s: &State, key: usize, index: usize) -> crate::typein::Target
 /// or for an effect inside a container "<effect> in <container> - <track>".
 pub(crate) fn owner_name(s: &State, key: usize) -> String {
     if let Some(&(track, slot, id)) = s.params.members.get(&key) {
-        let name = crate::container::members(s, track, slot).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
+        let name = crate::container::members(&s.session, track, slot).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
         if slot == crate::container::CHANNEL {
-            return format!("{name} in Container - {}", crate::container::place_name(s, track, slot));
+            return format!("{name} in Container - {}", crate::container::place_name(&s.session, track, slot));
         }
-        let plugin = crate::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
-        return format!("{name} in {} - {}", crate::plugins::slot_label(&plugin), crate::mixer::name(s, track));
+        let plugin = crate::mixer::slot_name(&s.session, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
+        return format!("{name} in {} - {}", crate::plugins::slot_label(&plugin), crate::mixer::name(&s.session, track));
     }
     match fx_of(key) {
         Some((track, slot)) => {
-            let plugin = crate::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
-            format!("{} - {}", crate::plugins::slot_label(&plugin), crate::mixer::name(s, track))
+            let plugin = crate::mixer::slot_name(&s.session, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
+            format!("{} - {}", crate::plugins::slot_label(&plugin), crate::mixer::name(&s.session, track))
         }
         None => {
             let ch = s.session.project.channels.get(key);
@@ -378,7 +378,7 @@ pub fn node_key(s: &State, key: usize) -> Option<String> {
 
 /// A slot's row label under Effects: "<slot plugin> (<track name>)" (FL observed, spec §6).
 pub fn effect_label(s: &State, track: u16, slot: u8) -> Option<String> {
-    Some(format!("{} ({})", crate::mixer::slot_name(s, track, slot)?, crate::mixer::name(s, track)))
+    Some(format!("{} ({})", crate::mixer::slot_name(&s.session, track, slot)?, crate::mixer::name(&s.session, track)))
 }
 
 /// The menu entries for the last tweaked parameters (spec §5; `views::menus::MenuCmd::Params`).
@@ -506,7 +506,7 @@ impl App {
             }
         }
         for (owner, changed, run) in steps {
-            crate::control::param_edit(&mut self.state, owner, &changed, run);
+            crate::control::param_edit(&mut self.state.session, owner, &changed, run);
         }
         // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
         for key in edited {
@@ -685,7 +685,7 @@ impl App {
         let (tgt, name, v) = automation(&self.state, key, index)?;
         let s = &mut self.state;
         crate::playlist::create_automation(s, tgt, &name, v);
-        let arr = crate::playlist::arr_mut(s);
+        let arr = crate::playlist::arr_mut(&mut s.session);
         if let Some(c) = arr.clips.last_mut() {
             c.position = tick;
             c.track = track;
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ - Bus 2 - Main level\""));
         let ch = a.state.session.project.channels.last().unwrap().index;
         assert_eq!(a.state.session.project.automations.last().map(|x| (x.channel, x.target())), Some((ch, Some(tgt))));
-        let clip = crate::playlist::arr_mut(&mut a.state).clips.last().cloned().unwrap();
+        let clip = crate::playlist::arr_mut(&mut a.state.session).clips.last().cloned().unwrap();
         assert_eq!((clip.position, clip.track, clip.source), (384, 3, os_model::ClipSource::Channel(ch)));
         assert_eq!(value_text(&a.state, Target::SlotParam(2, 1, 0), 1.0).as_deref(), Some("18.0dB"));
 
@@ -919,8 +919,8 @@ mod tests {
         let edit = entry(&m, "Edit automation clip...");
         assert_eq!((edit.enabled, &edit.cmd), (true, &Cmd::Param(PCmd::EditClip(ch))));
         // Picked: the clip is the current source, selected and in view, the playlist in front.
-        let clip = crate::playlist::clips(&a.state).iter().position(|c| c.source == os_model::ClipSource::Channel(ch)).unwrap();
-        let first = crate::playlist::clips(&a.state)[clip];
+        let clip = crate::playlist::clips(&a.state.session).iter().position(|c| c.source == os_model::ClipSource::Channel(ch)).unwrap();
+        let first = crate::playlist::clips(&a.state.session)[clip];
         a.state.playlist.sel.clear();
         a.state.playlist_scroll = (5000.0, 900.0);
         a.state.raise(crate::app::Win::Mixer);
@@ -932,7 +932,7 @@ mod tests {
         assert!(s.playlist_scroll.0 < 5000.0);
         assert_eq!(s.z.last(), Some(&crate::app::Win::Playlist));
         // Its clips gone from the arrangement: a message, the source still picked.
-        crate::playlist::arr_mut(&mut a.state).clips.retain(|c| c.source != os_model::ClipSource::Channel(ch));
+        crate::playlist::arr_mut(&mut a.state.session).clips.retain(|c| c.source != os_model::ClipSource::Channel(ch));
         let msg = crate::playlist::run(&mut a, Cmd::Param(PCmd::EditClip(ch)));
         assert!(msg.is_some_and(|m| m.starts_with("No clip of")));
         // Another parameter: no clip, not linked; a controller linked to it ticks Link to controller... too.

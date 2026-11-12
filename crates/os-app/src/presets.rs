@@ -606,7 +606,7 @@ fn side(app: &App, key: usize) -> Option<crate::control::command::PluginSide> {
         // A container's effect: no name of its own to put back.
         None if key >= crate::plugins::MEMBER_KEY => None,
         None => app.state.session.project.channels.get(key)?.name.clone(),
-        Some((t, k)) => crate::mixer::slot_label(&app.state, t, k),
+        Some((t, k)) => crate::mixer::slot_label(&app.state.session, t, k),
     };
     Some(crate::control::command::PluginSide { state: app.plugins.state(key)?, preset: app.plugins.presets.get(&key).cloned(), name, fill: 0 })
 }
@@ -678,7 +678,7 @@ fn auto_name(app: &mut App, key: usize, path: &Path) {
     let s = &mut app.state;
     match crate::plugins::fx_of(key) {
         Some(slot) if crate::prefs::check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS) => {
-            crate::mixer::set_slot_label(s, slot.0, slot.1, Some(shown_name(path)));
+            crate::mixer::set_slot_label(&mut s.session, slot.0, slot.1, Some(shown_name(path)));
         }
         Some(_) => {}
         None => {
@@ -1299,7 +1299,7 @@ mod tests {
         pl.create(fx, index).unwrap();
         app.plugins = pl;
         app.state.session.project.get_mut().channels[0].name = Some("808 Snare".into());
-        crate::mixer::track_mut(&mut app.state, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
+        crate::mixer::track_mut(&mut app.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
         let (h, state) = (header(&app, 0).unwrap(), app.plugins.state(0).unwrap());
         let preset = |name: &str| {
             let p = file_for(&dir, name);
@@ -1308,7 +1308,7 @@ mod tests {
         };
         let (chorus, bandpass, bass) = (preset("Chorus"), preset("Bandpass"), preset("Deep Bass"));
         let channel = |app: &App| app.state.session.project.channels[0].name.clone().unwrap_or_default();
-        let slot = |app: &App| crate::mixer::slot_name(&app.state, 1, 0).unwrap_or_default();
+        let slot = |app: &App| crate::mixer::slot_name(&app.state.session, 1, 0).unwrap_or_default();
         // Channels: on by default.
         assert_eq!(run(&mut app, PCmd::Load(0, bass)).as_deref(), Some("Preset: Deep Bass"));
         assert_eq!(channel(&app), "Deep Bass");

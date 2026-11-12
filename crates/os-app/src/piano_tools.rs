@@ -135,7 +135,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             if sel.is_empty() {
                 return true;
             }
-            let all = piano::notes(s);
+            let all = piano::notes(&s.session);
             s.piano.clipboard = sel.iter().filter_map(|&i| all.get(i).copied()).collect();
             piano::snapshot(s);
             piano::delete(s, sel);
@@ -197,7 +197,7 @@ fn pick(app: &mut App, letter: &str) -> bool {
     let s = &mut app.state;
     let Some(ch) = piano::channel(s) else { return true };
     let sel = s.piano.selection(s.pattern(), Some(ch));
-    let all = piano::notes(s);
+    let all = piano::notes(&s.session);
     let mine: Vec<usize> = (0..all.len()).filter(|&i| all[i].channel == ch).collect();
     let mut rng = s.piano.rng;
     let one = |rng: &mut u64| mine.get((next(rng) % mine.len().max(1) as u64) as usize).copied();
@@ -222,9 +222,9 @@ fn pick(app: &mut App, letter: &str) -> bool {
 /// last end) and the play-start marker goes to its start; nothing selected: nothing.
 pub fn span_to_range(s: &mut State) {
     let sel = s.piano.selection(s.pattern(), piano::channel(s));
-    let all = piano::notes(s);
+    let all = piano::notes(&s.session);
     let picked: Vec<&Note> = sel.iter().filter_map(|&i| all.get(i)).collect();
-    let (Some(a), Some(b)) = (picked.iter().map(|n| n.position).min(), picked.iter().map(|n| n.position + piano::shown_len(s, n)).max()) else { return };
+    let (Some(a), Some(b)) = (picked.iter().map(|n| n.position).min(), picked.iter().map(|n| n.position + piano::shown_len(&s.session, n)).max()) else { return };
     s.piano.range = Some((a, b));
     s.piano.marker = a;
 }
@@ -251,7 +251,7 @@ pub(crate) fn cycle_channel(app: &mut App, dir: i32, with_notes: bool) -> bool {
 /// Whether a channel rack row has notes in the current pattern.
 fn has_notes(s: &State, row: usize) -> bool {
     let ch = s.session.project.channels[row].index;
-    piano::notes(s).iter().any(|nt| nt.channel == ch)
+    piano::notes(&s.session).iter().any(|nt| nt.channel == ch)
 }
 
 fn channel_name(s: &State, row: usize) -> String {
@@ -311,7 +311,7 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             done(ch, if starts_only { "quantized start times" } else { "quantized" })
         }
         NCmd::Legato => {
-            let end = piano::pattern_end(s);
+            let end = piano::pattern_end(&s.session);
             done(apply(s, |_, ns| legato(ns, end)), "legato")
         }
         NCmd::QuickChop => done(apply(s, |_, ns| chop_from_start(ns, unit.unwrap_or(1))), "chopped"),
@@ -365,7 +365,7 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
 pub fn add_marker(s: &mut State, tick: u32) -> String {
     let step = u32::from(s.session.project.ppq.max(4)) / 4;
     let tick = tick - tick % step;
-    let markers = &mut piano::pattern_mut(s).markers;
+    let markers = &mut piano::pattern_mut(&mut s.session).markers;
     let n = markers.iter().filter(|m| m.kind == 0).count() + 1;
     let name = format!("Marker {n}");
     let at = markers.partition_point(|m| m.position <= tick);
@@ -383,10 +383,10 @@ pub fn duplicate(s: &mut State) {
         Some(_) => s.piano.selection(s.pattern(), piano::channel(s)),
         None => piano::targets(s),
     };
-    let all = piano::notes(s);
+    let all = piano::notes(&s.session);
     let clip: Vec<Note> = idx.iter().filter_map(|&i| all.get(i).copied()).collect();
     let start = clip.iter().map(|n| n.position).min();
-    let end = clip.iter().map(|n| n.position + piano::shown_len(s, n)).max();
+    let end = clip.iter().map(|n| n.position + piano::shown_len(&s.session, n)).max();
     if let Some((r0, r1)) = range {
         let span = r1 - r0;
         if let Some(a) = start {
@@ -414,7 +414,7 @@ pub(crate) fn apply_as(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<N
         return false;
     }
     let had_sel = !s.piano.selection(s.pattern(), Some(ch)).is_empty();
-    let all = piano::notes(s);
+    let all = piano::notes(&s.session);
     let picked: Vec<Note> = idx.iter().filter_map(|&i| all.get(i).copied()).collect();
     let out = f(s, picked.clone());
     if out == picked {
@@ -423,7 +423,7 @@ pub(crate) fn apply_as(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<N
     if let Some(name) = step {
         piano::snapshot_as(s, name);
     }
-    let p = piano::pattern_mut(s);
+    let p = piano::pattern_mut(&mut s.session);
     let mut notes: Vec<Note> = p.notes.iter().enumerate().filter(|(i, _)| !idx.contains(i)).map(|(_, n)| *n).collect();
     let start = notes.len();
     notes.extend(out);

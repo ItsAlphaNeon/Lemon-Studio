@@ -34,8 +34,8 @@ pub struct Docks {
 
 pub fn docks(s: &State) -> Docks {
     let mut d = Docks { parts: Default::default(), widths: [0.0; 3] };
-    for n in 1..=mx::inserts(s) {
-        let (dock, sep) = mx::track(s, n).map_or((os_model::DOCK_MIDDLE, false), |m| (m.dock.min(os_model::DOCK_RIGHT), m.separator));
+    for n in 1..=mx::inserts(&s.session) {
+        let (dock, sep) = mx::track(&s.session, n).map_or((os_model::DOCK_MIDDLE, false), |m| (m.dock.min(os_model::DOCK_RIGHT), m.separator));
         let p = usize::from(dock);
         let gap = sep && !d.parts[p].is_empty();
         if gap {
@@ -329,7 +329,7 @@ fn cables(ui: &mut Ui, s: &State, strips: Rect, docks: &Docks, bottom: f32) {
     let (ay, ky) = (bottom - 38.0, bottom - 40.0);
     let cur = s.selected_mixer;
     let from = (socket_x(cur), ay);
-    let sends: Vec<(u16, f64)> = (0..=mx::inserts(s)).filter(|&n| n != cur).filter_map(|n| Some((n, mx::send(s, cur, n)?))).collect();
+    let sends: Vec<(u16, f64)> = (0..=mx::inserts(&s.session)).filter(|&n| n != cur).filter_map(|n| Some((n, mx::send(&s.session, cur, n)?))).collect();
     let mut cables = s.cables.borrow_mut();
     cables.begin(cur);
     for &(n, level) in &sends {
@@ -523,7 +523,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         ui.c.fill_rect(Rect::new(left + STRIP_W - 1.0, ly.y(HEAD_Y1) + 1.0, 1.0, bottom - ly.y(HEAD_Y1) - 1.0), ui.t.s(0x1c1f21));
     }
     // The whole strip selects (Ctrl adds, Shift renames); controls register on top of it (spec: ui/mixer.md §2).
-    ui.hit(Rect::new(left, ly.y(HEAD_Y0), STRIP_W, bottom - ly.y(HEAD_Y0)), Action::Mix(MHit::Strip(n)), mx::name(s, n));
+    ui.hit(Rect::new(left, ly.y(HEAD_Y0), STRIP_W, bottom - ly.y(HEAD_Y0)), Action::Mix(MHit::Strip(n)), mx::name(&s.session, n));
     let hov = ui.hovering(Rect::new(left, ly.y(HEAD_Y0), STRIP_W, ly.y(PANEL_Y1) - ly.y(HEAD_Y0)));
 
     // Header number (insert strips only; the master's "M" sits in the fixed header band).
@@ -697,28 +697,28 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     // a send knob where the current track sends, else the ▲ "route to this track" button; an orange "^" marks tracks that receive a route.
     let ay = by - 38.0;
     let cur = s.selected_mixer;
-    let cur_name = mx::name(s, cur);
+    let cur_name = mx::name(&s.session, cur);
     if selected {
         down_arrow(ui, kx, ay);
-    } else if let Some(level) = mx::send(s, cur, n) {
+    } else if let Some(level) = mx::send(&s.session, cur, n) {
         // Send knob (fader law) with its arc, the green "^" that removes the route; its cable is drawn with the others.
         let ky = by - 40.0;
         let id = KnobId::Send(cur, n);
         ui.hit(Rect::new(kx - 13.0, ky - 13.0, 26.0, 26.0), Action::Knob(id), s.knob_text(id));
         send_knob(ui, s, n, kx, ky, level);
         let ur = Rect::new(kx - 6.0, by - 61.0, 12.0, 8.0);
-        let hov = ui.hit(ur, Action::Mix(MHit::Unroute(n)), format!("Remove the send from {cur_name} to {}", mx::name(s, n)));
+        let hov = ui.hit(ur, Action::Mix(MHit::Unroute(n)), format!("Remove the send from {cur_name} to {}", mx::name(&s.session, n)));
         let ink = ui.hover_ink(hov, ur, t.accent, ui.t.tx(0xffffff));
         ui.c.fill_polygon(&[(kx - 4.0, by - 55.0), (kx, by - 59.0), (kx + 4.0, by - 55.0)], ink);
     } else if !(master && cur == 0) {
-        let hint = format!("Enable send from {cur_name} to {}  Ctrl/Shift", mx::name(s, n));
+        let hint = format!("Enable send from {cur_name} to {}  Ctrl/Shift", mx::name(&s.session, n));
         let route = Rect::new(kx - 8.0, ay - 8.0, 16.0, 14.0);
         let hov = ui.hit(route, Action::Mix(MHit::Route(n)), hint);
         let mut g = Glyph::new();
         g.polygon(&[(kx - 6.5, ay + 3.0), (kx, ay - 3.5), (kx + 6.5, ay + 3.0)]);
         let ink = ui.hover_ink(hov, route, ui.t.tx(0xd8e0e6), t.accent);
         ui.c.glyph(ink, &g);
-        if !master && mx::receives(s, n) {
+        if !master && mx::receives(&s.session, n) {
             ui.c.fill_polygon(&[(kx - 3.5, ay - 9.0), (kx, ay - 12.5), (kx + 3.5, ay - 9.0)], ui.t.h(0xf09a28));
         }
     }
@@ -834,7 +834,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let lf = Font::new(9).bold();
     let lw = ui.c.text_width(lf, label);
     ui.c.text(lf, r.x + 12.5 - lw / 2.0, r.y + 43.0, ink, label);
-    let (text, any) = mx::input_label(s, n);
+    let (text, any) = mx::input_label(&s.session, n);
     let combo = Rect::new(r.x + 27.0, r.y + 28.0, 159.0, 23.0);
     if any {
         let hov = ui.hit(combo, Action::Mix(MHit::Input), "Audio input source");
@@ -843,7 +843,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         off_combo(ui, combo, "Audio input source", &text, input_bg);
     }
     let clock = Rect::new(r.x + 192.0, r.y + 29.0, 21.0, 21.0);
-    let lat = mx::track(s, n).map_or(0.0, |m| m.latency_in);
+    let lat = mx::track(&s.session, n).map_or(0.0, |m| m.latency_in);
     let hov = ui.hit(clock, Action::Mix(MHit::InLatency), format!("Input latency  {}", mx::latency_text(lat)));
     let mut g = Glyph::new();
     g.ring(r.x + 202.0, r.y + 39.5, 8.5, 1.8).rect(r.x + 201.2, r.y + 34.0, 1.6, 6.5).rect(r.x + 201.2, r.y + 38.9, 5.0, 1.6);
@@ -854,7 +854,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     for i in 0..10 {
         let row = Rect::new(r.x + 1.0, r.y + 61.0 + 33.0 * kp * i as f32, r.w - 2.0, 28.0 * kp);
         let k = i as u8;
-        let plugin = mx::slot_name(s, n, k);
+        let plugin = mx::slot_name(&s.session, n, k);
         let fs = (18.0 * kp.max(0.62)).round() as u16;
         let hint = format!("FX slot {} options", i + 1);
         let ha = ui.hit(Rect::new(row.x, row.y, 19.0, row.h), Action::Mix(MHit::SlotArrow(k)), hint.clone());
@@ -878,7 +878,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
             ui.c.fill_rect(row.inset(1.0), face);
         }
         // A coloured slot (Lemon Studio's design): a 3 px bar of its colour at the row's left edge.
-        if let Some(c) = mx::slot_color(s, n, k) {
+        if let Some(c) = mx::slot_color(&s.session, n, k) {
             ui.c.fill_rect(Rect::new(row.x + 3.0, row.y + 4.0 * kp, 3.0, row.h - 8.0 * kp), super::rgb(c));
         }
         turned_chevron(ui, row.x + 10.0, row.cy(), turn * PI / 2.0, ui.t.tx(0xc4ccd0).mix(ui.t.tx(0xffffff), arrow));
@@ -990,7 +990,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     // Output rows at the bottom: the track latency combo, then the output combo.
     ui.c.fill_rect(Rect::new(r.x, b - 66.0, r.w, 1.0), ui.t.s(0x1f2224));
     ui.c.fill_rect(Rect::new(r.x, b - 33.0, r.w, 1.0), ui.t.s(0x1f2224));
-    let lat = mx::track(s, n).map_or(0.0, |m| m.latency_out);
+    let lat = mx::track(&s.session, n).map_or(0.0, |m| m.latency_out);
     let hov = ui.hit(Rect::new(r.x + 3.0, b - 60.0, r.w - 6.0, 22.0), Action::Mix(MHit::OutLatency), format!("Track latency  {}", mx::latency_text(lat)));
     let mut g = Glyph::new();
     g.ring(r.x + 14.0, b - 48.5, 8.0, 1.5).rect(r.x + 13.3, b - 53.0, 1.4, 5.0).rect(r.x + 13.3, b - 49.2, 4.0, 1.4);
@@ -1004,7 +1004,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     ui.c.glyph(ui.t.tx(0xc4ccd0), &g);
     let out = Rect::new(r.x + 26.0, b - 28.0, 189.0, 24.0);
     let hov = ui.hit(out, Action::Mix(MHit::Output), "Audio output target");
-    os_ui::kit::combo(ui.c, ui.t, out, &mx::output_label(s, n), Font::new(17), os_ui::kit::State::hover(hov));
+    os_ui::kit::combo(ui.c, ui.t, out, &mx::output_label(&s.session, n), Font::new(17), os_ui::kit::State::hover(hov));
 }
 
 /// An input combo with nothing to choose (no device inputs): drawn greyed out with `text`, its hit only says so.

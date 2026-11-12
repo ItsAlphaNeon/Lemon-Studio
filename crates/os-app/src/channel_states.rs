@@ -65,7 +65,7 @@ fn save_as(app: &mut App, row: usize) -> Option<String> {
     }
     let dir = root()?;
     let _ = std::fs::create_dir_all(&dir);
-    let name = crate::presets::folder_name(&crate::rack::channel_name(&app.state, row));
+    let name = crate::presets::folder_name(&crate::rack::channel_name(&app.state.session, row));
     let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Save, "Save channel state as", "channel state", crate::dialog::Then::SaveChannelState(row))
         .filter("Lemon Studio channel state", &[EXT])
         .start(Some(&dir))
@@ -136,7 +136,7 @@ pub fn add(app: &mut App, path: &Path) -> Option<String> {
     }
     let s = &mut app.state;
     let row = s.session.project.channels.len();
-    crate::history::record(s, LOAD, crate::history::Snap::Channel { row, ch: None });
+    crate::history::record(&mut s.session, LOAD, crate::history::Snap::Channel { row, ch: None });
     crate::rack::push_channel(s, ch);
     s.selected_channel = row;
     s.rack.select_only(row);

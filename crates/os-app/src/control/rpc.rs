@@ -168,7 +168,7 @@ impl App {
             }
             "discard" => {
                 need(c, Level::Edit)?;
-                super::discard(&mut self.state, uint(params, "proposal")?).map_err(failed)?;
+                super::discard(&mut self.state.session, uint(params, "proposal")?).map_err(failed)?;
                 Ok(Value::Null)
             }
             "undo" | "redo" => {

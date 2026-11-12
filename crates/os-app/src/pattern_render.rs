@@ -73,7 +73,7 @@ pub fn job(s: &State, dir: &Path, stem: &str) -> ex::Job {
         ..Options::default()
     };
     let tempo = s.session.project.tick_tempo(s.tempo());
-    let ticks = crate::piano::pattern_length(s, s.pattern());
+    let ticks = crate::piano::pattern_length(&s.session, s.pattern());
     ex::Job {
         options,
         folder: dir.to_path_buf(),
@@ -93,7 +93,7 @@ pub fn job(s: &State, dir: &Path, stem: &str) -> ex::Job {
 /// The caller records the undo step. Returns the channel's index.
 pub fn add_channel(s: &mut State, path: &str, pattern: u16) -> u16 {
     let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let name = crate::playlist::unique_channel_name(s, &crate::patterns::name_of(s, pattern));
+    let name = crate::playlist::unique_channel_name(&s.session, &crate::patterns::name_of(&s.session, pattern));
     let color = s.session.project.pattern(pattern).and_then(|p| p.color).or_else(|| Some(s.clip_colors.new_channel(index)));
     s.session.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
@@ -130,14 +130,14 @@ pub fn add_channel(s: &mut State, path: &str, pattern: u16) -> u16 {
 /// clips are selected. Returns how many there were.
 pub fn replace_clips(s: &mut State, pattern: u16, ch: u16) -> usize {
     let src = ClipSource::Channel(ch);
-    let found: Vec<Clip> = crate::playlist::clips(s).iter().filter(|c| c.source == ClipSource::Pattern(pattern)).copied().collect();
+    let found: Vec<Clip> = crate::playlist::clips(&s.session).iter().filter(|c| c.source == ClipSource::Pattern(pattern)).copied().collect();
     if found.is_empty() {
         return 0;
     }
     let windows: Vec<Option<(f64, f64)>> =
         found.iter().map(|c| c.window.map(|(a, b)| (crate::playlist::to_src(s, src, a), crate::playlist::to_src(s, src, b)))).collect();
     let mut windows = windows.into_iter();
-    let a = crate::playlist::arr_mut(s);
+    let a = crate::playlist::arr_mut(&mut s.session);
     let mut clips = Vec::with_capacity(a.clips.len() + found.len());
     let mut sel = Vec::with_capacity(found.len());
     for mut c in std::mem::take(&mut a.clips) {
@@ -167,15 +167,15 @@ pub fn place(s: &mut State, p: &Pending, path: &Path) -> String {
         return format!("{text} could not be read");
     }
     let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
-    crate::playlist::snapshot_with(s, if p.replace { REPLACE } else { QUICK }, before);
+    crate::playlist::snapshot_with(&mut s.session, if p.replace { REPLACE } else { QUICK }, before);
     let ch = add_channel(s, &text, p.pattern);
     let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if !p.replace {
-        return format!("Rendered {} to {file}", crate::patterns::name_of(s, p.pattern));
+        return format!("Rendered {} to {file}", crate::patterns::name_of(&s.session, p.pattern));
     }
     match replace_clips(s, p.pattern, ch) {
-        0 => format!("Rendered {} to {file} (no clips of it in the arranger to replace)", crate::patterns::name_of(s, p.pattern)),
-        n => format!("Rendered {} to {file}: replaced {n} clip(s)", crate::patterns::name_of(s, p.pattern)),
+        0 => format!("Rendered {} to {file} (no clips of it in the arranger to replace)", crate::patterns::name_of(&s.session, p.pattern)),
+        n => format!("Rendered {} to {file}: replaced {n} clip(s)", crate::patterns::name_of(&s.session, p.pattern)),
     }
 }
 
@@ -190,7 +190,7 @@ impl App {
         let s = &self.state;
         let pattern = s.pattern().max(1);
         if !s.session.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty()) {
-            let text = format!("Nothing to render: {} has no notes.", crate::patterns::name_of(s, pattern));
+            let text = format!("Nothing to render: {} has no notes.", crate::patterns::name_of(&s.session, pattern));
             return self.tell(crate::dialog::Kind::Warning, TITLE, crate::dialog::spans(&[&text]));
         }
         let dir = folder(s);
@@ -198,7 +198,7 @@ impl App {
             self.state.message = Some(format!("Render failed: {}: {e}", dir.display()));
             return self.invalidate();
         }
-        let stem = file_stem(&dir, &crate::patterns::name_of(s, pattern));
+        let stem = file_stem(&dir, &crate::patterns::name_of(&s.session, pattern));
         let job = job(s, &dir, &stem);
         self.pattern_render = Some(Pending { pattern, replace });
         self.start_export(job, false);
@@ -214,11 +214,11 @@ impl App {
         let s = &self.state;
         let pattern = s.pattern().max(1);
         if !s.session.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty()) {
-            let text = format!("Nothing to render: {} has no notes.", crate::patterns::name_of(s, pattern));
+            let text = format!("Nothing to render: {} has no notes.", crate::patterns::name_of(&s.session, pattern));
             return self.tell(crate::dialog::Kind::Warning, TITLE, crate::dialog::spans(&[&text]));
         }
         let dir = folder(s);
-        let stem = file_stem(&dir, &crate::patterns::name_of(s, pattern));
+        let stem = file_stem(&dir, &crate::patterns::name_of(&s.session, pattern));
         let o = job(s, &dir, &stem).options;
         self.open_export(false);
         let Some(crate::dialog::Modal { body: crate::dialog::Body::Project(crate::project_forms::Form::Export(f)), .. }) = self.state.dialogs.last_mut() else {
@@ -335,7 +335,7 @@ mod tests {
         let mut app = app();
         let s = &mut app.state;
         let ppq = u32::from(s.session.project.ppq);
-        let a = crate::playlist::arr_mut(s);
+        let a = crate::playlist::arr_mut(&mut s.session);
         a.clips.push(Clip::new(0, 4 * ppq, 2, ClipSource::Pattern(1)));
         a.clips.push(Clip::new(0, 4 * ppq, 3, ClipSource::Pattern(2)));
         let mut cut = Clip::new(8 * ppq, 2 * ppq, 5, ClipSource::Pattern(1));
@@ -345,7 +345,7 @@ mod tests {
         let ch = add_channel(s, "x.wav", 1);
         assert_eq!(s.session.project.channels.last().unwrap().name.as_deref(), Some("Pattern 1"));
         assert_eq!(replace_clips(s, 1, ch), 2);
-        let c = crate::playlist::clips(s).to_vec();
+        let c = crate::playlist::clips(&s.session).to_vec();
         assert_eq!(c.len(), 5);
         assert!(c[0].source == ClipSource::Pattern(1) && c[0].muted);
         assert_eq!((c[1].source, c[1].position, c[1].length, c[1].track, c[1].muted, c[1].window), (ClipSource::Channel(ch), 0, 4 * ppq, 2, false, None));
@@ -378,7 +378,7 @@ mod tests {
         let mut app = app();
         let d = temp("quick");
         with_data_folder(&mut app, &d);
-        crate::patterns::pat_mut(&mut app.state, 1).name = Some("Verse".into());
+        crate::patterns::pat_mut(&mut app.state.session, 1).name = Some("Verse".into());
         let channels = app.state.session.project.channels.len();
         app.pattern_cmd(crate::patterns::Cmd::QuickRender);
         assert!(app.export.is_some() && app.pattern_render.is_some(), "the export's progress shows");
@@ -390,7 +390,7 @@ mod tests {
         let path = PathBuf::from(ch.sample_path.clone().unwrap());
         assert_eq!(path, d.join("Rendered").join("Verse.wav"));
         assert!(std::fs::metadata(&path).unwrap().len() > 44);
-        assert!(crate::playlist::clips(&app.state).is_empty(), "nothing placed");
+        assert!(crate::playlist::clips(&app.state.session).is_empty(), "nothing placed");
         assert!(app.state.session.history.entries().iter().any(|e| e.1 == QUICK));
         crate::history::undo(&mut app.state);
         assert_eq!(app.state.session.project.channels.len(), channels, "one undo step");
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(app.state.session.project.channels.len(), channels + 1, "{:?}", app.state.message);
         let ch = app.state.session.project.channels.last().unwrap();
         assert_eq!(ch.sample_path.as_deref().map(PathBuf::from), Some(d.join("Rendered").join("Pattern 1.wav")));
-        assert!(crate::playlist::clips(&app.state).is_empty());
+        assert!(crate::playlist::clips(&app.state.session).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -433,18 +433,18 @@ mod tests {
         let d = temp("replace");
         with_data_folder(&mut app, &d);
         let ppq = u32::from(app.state.session.project.ppq);
-        crate::playlist::arr_mut(&mut app.state).clips.push(Clip::new(ppq * 4, ppq * 4, 1, ClipSource::Pattern(1)));
+        crate::playlist::arr_mut(&mut app.state.session).clips.push(Clip::new(ppq * 4, ppq * 4, 1, ClipSource::Pattern(1)));
         let channels = app.state.session.project.channels.len();
         app.pattern_cmd(crate::patterns::Cmd::RenderReplace);
         finish(&mut app);
         assert_eq!(app.state.session.project.channels.len(), channels + 1, "{:?}", app.state.message);
         let ch = app.state.session.project.channels.last().unwrap().index;
-        let c = crate::playlist::clips(&app.state).to_vec();
+        let c = crate::playlist::clips(&app.state.session).to_vec();
         assert_eq!(c.len(), 2);
         assert!(c[0].muted && c[1].source == ClipSource::Channel(ch) && (c[1].position, c[1].track) == (ppq * 4, 1));
         assert!(app.state.session.history.entries().iter().any(|e| e.1 == REPLACE));
         crate::history::undo(&mut app.state);
-        let c = crate::playlist::clips(&app.state);
+        let c = crate::playlist::clips(&app.state.session);
         assert!(c.len() == 1 && !c[0].muted && app.state.session.project.channels.len() == channels, "one undo step");
         let _ = std::fs::remove_dir_all(&d);
     }

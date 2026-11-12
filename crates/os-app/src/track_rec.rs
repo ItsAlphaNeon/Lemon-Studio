@@ -68,7 +68,7 @@ pub fn file_name(project: &str, now: chrono::NaiveDateTime, track: &str) -> Stri
 
 /// The file an armed track would record into now (the disk-record button's hint).
 pub fn armed_file(s: &State, track: u16) -> String {
-    file_name(&crate::backup::project_name(s.session.path.as_deref()), chrono::Local::now().naive_local(), &crate::mixer::name(s, track))
+    file_name(&crate::backup::project_name(s.session.path.as_deref()), chrono::Local::now().naive_local(), &crate::mixer::name(&s.session, track))
 }
 
 pub(crate) fn folder(s: &State) -> std::path::PathBuf {
@@ -110,7 +110,7 @@ impl App {
         let mut names: Vec<String> = Vec::new();
         for &t in &armed {
             // Two tracks of one name get files of their own.
-            let name = crate::mixer::name(s, t);
+            let name = crate::mixer::name(&s.session, t);
             names.push(if names.contains(&name) { format!("{name} ({t})") } else { name });
         }
         let mut recs = Vec::new();
@@ -182,7 +182,7 @@ impl App {
             (_, false) => format!("Recorded {} file(s) into the Recorded folder", made.len()),
             (_, true) => {
                 let s = &mut self.state;
-                crate::playlist::snapshot_as(s, crate::one_click::RECORDED);
+                crate::playlist::snapshot_as(&mut s.session, crate::one_click::RECORDED);
                 let p = &s.session.project;
                 let tempo = p.tick_tempo(s.tempo().max(1.0));
                 let ppq = f64::from(p.ppq.max(1));
@@ -214,7 +214,7 @@ impl App {
     pub(crate) fn arm_tracks(&mut self, tracks: &[u16], on: bool) -> Option<String> {
         let mut n = 0;
         for &t in tracks {
-            if let Some(m) = crate::mixer::track_mut(&mut self.state, t).filter(|m| m.armed != on) {
+            if let Some(m) = crate::mixer::track_mut(&mut self.state.session, t).filter(|m| m.armed != on) {
                 m.armed = on;
                 n += 1;
             }

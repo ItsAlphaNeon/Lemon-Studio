@@ -207,7 +207,7 @@ pub fn points(s: &State) -> Vec<(u32, i32)> {
 /// Control `target`'s events in the current pattern.
 pub fn points_of(s: &State, target: u32) -> Vec<(u32, i32)> {
     let kind = target;
-    piano::controls(s).iter().filter(|c| c.kind == kind).map(|c| (c.position, c.value)).collect()
+    piano::controls(&s.session).iter().filter(|c| c.kind == kind).map(|c| (c.position, c.value)).collect()
 }
 
 fn set(s: &mut State, tick: u32, level: f64) {
@@ -217,7 +217,7 @@ fn set(s: &mut State, tick: u32, level: f64) {
 
 fn set_value(s: &mut State, tick: u32, v: i32) {
     let kind = s.events.target;
-    piano::set_control(s, (kind >> 16) as u16, kind as u16, tick, v);
+    piano::set_control(&mut s.session, (kind >> 16) as u16, kind as u16, tick, v);
 }
 
 /// What Copy and Duplicate take without a selection: the pattern's length, or to the last event when that lies later.
@@ -228,7 +228,7 @@ fn whole(s: &State) -> (u32, u32) {
 /// Deletes the control's events from `from` to `to` (both included); returns how many went.
 pub fn erase(s: &mut State, from: u32, to: u32) -> usize {
     let kind = s.events.target;
-    piano::erase_controls(s, (kind >> 16) as u16, kind as u16, from.min(to), from.max(to))
+    piano::erase_controls(&mut s.session, (kind >> 16) as u16, kind as u16, from.min(to), from.max(to))
 }
 
 /// Draws from `a` to `b` (tick, level): an event on every multiple of `unit` between them (both ends included) at
@@ -239,7 +239,7 @@ pub fn draw(s: &mut State, a: (u32, f64), b: (u32, f64), unit: u32) {
     let unit = unit.max(1);
     let (first, last) = (t0 / unit * unit, t1 / unit * unit);
     let kind = s.events.target;
-    let p = piano::pattern_mut(s);
+    let p = piano::pattern_mut(&mut s.session);
     p.controls.retain(|c| !(c.kind == kind && (first..=last).contains(&c.position)));
     let mut t = first;
     while t <= last {
@@ -931,16 +931,16 @@ mod tests {
         s.events.sel = Some((24, 72));
         assert!(copy(s));
         s.events.sel = Some((192, 200));
-        piano::set_control(s, 0, 0, 200, 1);
+        piano::set_control(&mut s.session, 0, 0, 200, 1);
         assert!(paste(s));
         assert_eq!(points(s).iter().filter(|p| p.0 >= 192).copied().collect::<Vec<_>>(), vec![(192, 3200), (216, 6400)]);
         assert_eq!(s.events.sel, Some((192, 240)));
         s.events.sel = None;
         assert_eq!(delete(s), 6, "every event without a selection");
         // Another control's events stay.
-        piano::set_control(s, 1, 0, 0, 100);
+        piano::set_control(&mut s.session, 1, 0, 0, 100);
         assert_eq!(delete(s), 0);
-        assert_eq!(piano::controls(s).len(), 1);
+        assert_eq!(piano::controls(&s.session).len(), 1);
         // A mixer track's pan keeps its own unit.
         assert!(open(s, os_model::target::mixer(1, os_model::target::MIXER_PAN), "Insert 1 - Pan", 0.5, None));
         draw(s, (0, 0.0), (0, 0.0), 24);

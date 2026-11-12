@@ -195,7 +195,7 @@ impl App {
             let (now, preset) = (self.plugins.state(key).unwrap_or_default(), self.plugins.presets.get(&key).cloned());
             match states[i + 1..].iter_mut().find(|e| e.1.fill == fill) {
                 Some((_, side, _)) => (side.state, side.preset, side.fill) = (now, preset, 0),
-                None => crate::history::fill_plugin_side(&mut self.state, fill, &now, preset.as_deref()),
+                None => crate::history::fill_plugin_side(&mut self.state.session, fill, &now, preset.as_deref()),
             }
             let side = &states[i].1;
             if side.fill != 0 || side.state.is_empty() || !self.plugins.set_state(key, &side.state) {

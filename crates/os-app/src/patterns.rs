@@ -130,7 +130,7 @@ pub fn used(p: &Pattern) -> bool {
 /// source (a new pattern, empty until notes are added).
 pub fn listed(s: &State) -> Vec<u16> {
     let mut v: Vec<u16> = s.session.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).collect();
-    v.extend(crate::playlist::clips(s).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }));
+    v.extend(crate::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }));
     if let Some(ClipSource::Pattern(n)) = s.playlist.source {
         v.push(n);
     }
@@ -146,27 +146,27 @@ fn created_box(s: &mut State) {
     }
 }
 
-pub fn name_of(s: &State, n: u16) -> String {
-    s.session.project.pattern(n).and_then(|p| p.name.clone()).unwrap_or_else(|| format!("Pattern {n}"))
+pub fn name_of(s: &crate::session::Session, n: u16) -> String {
+    s.project.pattern(n).and_then(|p| p.name.clone()).unwrap_or_else(|| format!("Pattern {n}"))
 }
 
-fn is_used(s: &State, n: u16) -> bool {
-    s.session.project.pattern(n).is_some_and(used)
+fn is_used(s: &crate::session::Session, n: u16) -> bool {
+    s.project.pattern(n).is_some_and(used)
 }
 
 /// Lowest unused number.
-pub fn first_empty(s: &State) -> u16 {
+pub fn first_empty(s: &crate::session::Session) -> u16 {
     (1..=MAX).find(|&n| !is_used(s, n)).unwrap_or(MAX)
 }
 
 /// Lowest unused number above `after`.
-pub fn next_empty(s: &State, after: u16) -> u16 {
+pub fn next_empty(s: &crate::session::Session, after: u16) -> u16 {
     (after.saturating_add(1)..=MAX).find(|&n| !is_used(s, n)).unwrap_or(MAX)
 }
 
 /// The pattern `n`, added when the project has none with that number.
-pub fn pat_mut(s: &mut State, n: u16) -> &mut Pattern {
-    let ps = &mut s.session.project.get_mut().patterns;
+pub fn pat_mut(s: &mut crate::session::Session, n: u16) -> &mut Pattern {
+    let ps = &mut s.project.get_mut().patterns;
     let i = match ps.iter().position(|p| p.number == n) {
         Some(i) => i,
         None => {
@@ -216,13 +216,13 @@ pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
 }
 
 /// "<name> #k" with the lowest free k >= 2 (§3 Clone).
-pub fn clone_name(s: &State, n: u16) -> String {
+pub fn clone_name(s: &crate::session::Session, n: u16) -> String {
     let name = name_of(s, n);
     let base = match name.rsplit_once(" #") {
         Some((b, k)) if k.parse::<u32>().is_ok() => b.to_string(),
         _ => name,
     };
-    let taken = |cand: &str| s.session.project.patterns.iter().any(|p| p.name.as_deref() == Some(cand));
+    let taken = |cand: &str| s.project.patterns.iter().any(|p| p.name.as_deref() == Some(cand));
     (2..).map(|k| format!("{base} #{k}")).find(|c| !taken(c)).expect("unbounded")
 }
 
@@ -232,12 +232,12 @@ fn swap(s: &mut State, a: u16, b: u16) {
 }
 
 /// Transpose every note of pattern `n` by `semis`.
-pub fn transpose(s: &mut State, n: u16, semis: i32) {
-    if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
+pub fn transpose(s: &mut crate::session::Session, n: u16, semis: i32) {
+    if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
         for note in &mut p.notes {
             note.key = (i32::from(note.key) + semis).clamp(0, 131) as u16;
         }
-        s.session.dirty = true;
+        s.dirty = true;
     }
 }
 
@@ -268,7 +268,7 @@ pub(crate) fn random_color(seed: u64) -> Rgb {
 /// Open the name box for pattern `n` at `at`.
 pub fn open_name_box(s: &mut State, target: BoxTarget, at: (f32, f32)) {
     let text = match target {
-        BoxTarget::Name(n) => name_of(s, n),
+        BoxTarget::Name(n) => name_of(&s.session, n),
         BoxTarget::Transpose(_) => String::new(),
         BoxTarget::Rack(b) => crate::rack::box_text(s, b),
     };
@@ -314,21 +314,21 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
     let cur = s.pattern().max(1);
     match cmd {
         Cmd::FindFirst => {
-            s.set_pattern(first_empty(s));
+            s.set_pattern(first_empty(&s.session));
             open_name_box(s, BoxTarget::Name(s.pattern()), at);
             created_box(s);
         }
         Cmd::FindNext => {
-            s.set_pattern(next_empty(s, cur));
+            s.set_pattern(next_empty(&s.session, cur));
             open_name_box(s, BoxTarget::Name(s.pattern()), at);
             created_box(s);
         }
         Cmd::FindNextNoName => {
-            s.set_pattern(next_empty(s, cur));
+            s.set_pattern(next_empty(&s.session, cur));
             s.playlist.source = Some(ClipSource::Pattern(s.pattern()));
         }
         Cmd::SelectInPlaylist => {
-            let sel: Vec<usize> = crate::playlist::clips(s)
+            let sel: Vec<usize> = crate::playlist::clips(&s.session)
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| c.source == ClipSource::Pattern(cur))
@@ -339,7 +339,7 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             if !s.shown(crate::app::Win::Playlist) || !s.in_front(crate::app::Win::Playlist) {
                 s.raise(crate::app::Win::Playlist);
             }
-            return Some(format!("Selected {n} clip(s) of {}", name_of(s, cur)));
+            return Some(format!("Selected {n} clip(s) of {}", name_of(&s.session, cur)));
         }
         Cmd::Rename => open_name_box(s, BoxTarget::Name(cur), at),
         Cmd::ChangeColor => {
@@ -350,7 +350,7 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
         }
         Cmd::RandomColor => {
             let seed = crate::clip_colors::clock();
-            pat_mut(s, cur).color = Some(random_color(seed ^ u64::from(cur)));
+            pat_mut(&mut s.session, cur).color = Some(random_color(seed ^ u64::from(cur)));
             s.session.dirty = true;
         }
         Cmd::Transpose => open_name_box(s, BoxTarget::Transpose(cur), at),
@@ -364,10 +364,10 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
                 return None;
             }
             let mut copy = s.session.project.pattern(cur).cloned().unwrap_or(Pattern { number: cur, ..Pattern::default() });
-            copy.name = Some(clone_name(s, cur));
+            copy.name = Some(clone_name(&s.session, cur));
             renumber(s, |n| Some(if n > cur { (n + 1).min(MAX) } else { n }));
             copy.number = cur + 1;
-            *pat_mut(s, cur + 1) = copy;
+            *pat_mut(&mut s.session, cur + 1) = copy;
             s.set_pattern(cur + 1);
         }
         // Its Manage messages entry off: as if Ok was pressed.
@@ -419,7 +419,7 @@ pub fn split_by_channel(s: &mut State) {
         .iter()
         .enumerate()
         .filter(|(_, c)| orig.notes.iter().any(|n| n.channel == c.index))
-        .map(|(r, c)| (c.index, crate::rack::channel_name(s, r)))
+        .map(|(r, c)| (c.index, crate::rack::channel_name(&s.session, r)))
         .collect();
     let Some(((first, name), rest)) = chans.split_first() else { return };
     let k = rest.len() as u16;
@@ -429,9 +429,9 @@ pub fn split_by_channel(s: &mut State) {
         return;
     }
     let undo = crate::history::Snap::Patterns { patterns: s.session.project.patterns.clone(), current: cur };
-    crate::playlist::snapshot_with(s, "Split by instrument", undo);
+    crate::playlist::snapshot_with(&mut s.session, "Split by instrument", undo);
     // Notes of a channel no longer in the rack stay with the original.
-    let p = pat_mut(s, cur);
+    let p = pat_mut(&mut s.session, cur);
     p.notes.retain(|n| n.channel == *first || !chans.iter().any(|c| c.0 == n.channel));
     p.name = Some(name.clone());
     s.session.dirty = true;
@@ -442,7 +442,7 @@ pub fn split_by_channel(s: &mut State) {
     for (j, (ch, name)) in (1..).zip(rest) {
         // Control points stay with the original (only notes are divided).
         let notes = orig.notes.iter().filter(|n| n.channel == *ch).copied().collect();
-        *pat_mut(s, cur + j) = Pattern { number: cur + j, name: Some(name.clone()), notes, controls: Vec::new(), ..orig.clone() };
+        *pat_mut(&mut s.session, cur + j) = Pattern { number: cur + j, name: Some(name.clone()), notes, controls: Vec::new(), ..orig.clone() };
     }
     if let Some(a) = s.session.project.get_mut().arrangement_mut() {
         // Clips are drawn in record order: the new ones go just before their original, which stays on top.
@@ -506,7 +506,7 @@ fn accept_now(s: &mut State) {
             let text = b.text.trim().to_string();
             let name = (!text.is_empty() && text != format!("Pattern {n}")).then_some(text.clone());
             if name.is_some() || s.session.project.pattern(n).is_some() {
-                pat_mut(s, n).name = name;
+                pat_mut(&mut s.session, n).name = name;
             }
             if b.created {
                 s.playlist.source = Some(ClipSource::Pattern(n));
@@ -520,7 +520,7 @@ fn accept_now(s: &mut State) {
         }
         BoxTarget::Transpose(n) => {
             if let Ok(v) = b.text.trim().trim_start_matches('+').parse::<i32>() {
-                transpose(s, n, v);
+                transpose(&mut s.session, n, v);
             }
         }
         BoxTarget::Rack(rb) => {
@@ -552,7 +552,7 @@ fn set_color_now(s: &mut State, i: usize) {
     if let Some(&c) = SWATCHES.get(i) {
         let col = Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8));
         match target {
-            Some(BoxTarget::Name(n)) => pat_mut(s, n).color = col,
+            Some(BoxTarget::Name(n)) => pat_mut(&mut s.session, n).color = col,
             Some(BoxTarget::Rack(crate::rack::RBox::Channel(r))) => {
                 if let Some(ch) = s.session.project.get_mut().channels.get_mut(r) {
                     ch.color = col;
@@ -655,12 +655,12 @@ mod tests {
             Pattern { number: 3, notes: vec![Note::step(1, 0)], ..Pattern::default() },
             Pattern { number: 5, name: Some("Lead".into()), ..Pattern::default() },
         ];
-        crate::playlist::arr_mut(s).clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Pattern(3))];
+        crate::playlist::arr_mut(&mut s.session).clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Pattern(3))];
         app
     }
 
     fn clip_pats(s: &State) -> Vec<u16> {
-        crate::playlist::clips(s).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }).collect()
+        crate::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }).collect()
     }
 
     #[test]
@@ -668,9 +668,9 @@ mod tests {
         let mut app = app();
         let s = &mut app.state;
         assert_eq!(listed(s), vec![1, 2, 3, 5]);
-        assert_eq!(first_empty(s), 4);
+        assert_eq!(first_empty(&s.session), 4);
         s.set_pattern(5);
-        assert_eq!(next_empty(s, 5), 6);
+        assert_eq!(next_empty(&s.session, 5), 6);
         run(s, Cmd::FindFirst, (0.0, 0.0));
         assert_eq!(s.pattern(), 4);
         // Cancel keeps the number current but unlisted; accepting a name lists it.
@@ -680,7 +680,7 @@ mod tests {
         key(s, &winit::keyboard::Key::Character("Probe".into()), false);
         accept(s);
         assert_eq!(listed(s), vec![1, 2, 3, 4, 5]);
-        assert_eq!(name_of(s, 4), "Probe");
+        assert_eq!(name_of(&s.session, 4), "Probe");
     }
 
     /// A new pattern is placeable at once: accepting its name box, default name included, lists it in the picker
@@ -708,24 +708,24 @@ mod tests {
         s.set_pattern(1);
         run(s, Cmd::Clone, (0.0, 0.0));
         assert_eq!(s.pattern(), 2);
-        assert_eq!(name_of(s, 2), "Kick #3");
-        assert_eq!(name_of(s, 3), "Kick #2");
+        assert_eq!(name_of(&s.session, 2), "Kick #3");
+        assert_eq!(name_of(&s.session, 3), "Kick #2");
         assert_eq!(clip_pats(s), vec![1, 4]);
         // Insert one at 2: everything from 2 moves up.
         run(s, Cmd::InsertOne, (0.0, 0.0));
         s.pat_ui.name_box = None;
-        assert_eq!(name_of(s, 3), "Kick #3");
+        assert_eq!(name_of(&s.session, 3), "Kick #3");
         assert!(!s.session.project.pattern(2).is_some_and(used));
         assert_eq!(clip_pats(s), vec![1, 5]);
         // Delete the empty 2: later ones move down; the clip follows.
         run(s, Cmd::Delete, (0.0, 0.0));
         assert!(s.pat_ui.confirm);
         delete_current(s);
-        assert_eq!(name_of(s, 2), "Kick #3");
+        assert_eq!(name_of(&s.session, 2), "Kick #3");
         assert_eq!(clip_pats(s), vec![1, 4]);
         // Move down swaps with the next number.
         run(s, Cmd::MoveDown, (0.0, 0.0));
-        assert_eq!((s.pattern(), name_of(s, 3), name_of(s, 2)), (3, "Kick #3".into(), "Kick #2".into()));
+        assert_eq!((s.pattern(), name_of(&s.session, 3), name_of(&s.session, 2)), (3, "Kick #3".into(), "Kick #2".into()));
         // Deleting a pattern removes its clips.
         s.set_pattern(1);
         delete_current(s);
@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(s.session.project.pattern(1).unwrap().notes[0].key, k0 - 3);
         run(s, Cmd::Rename, (0.0, 0.0));
         suggest(s, 4, 3);
-        assert_eq!(name_of(s, 1), "Chorus");
+        assert_eq!(name_of(&s.session, 1), "Chorus");
         assert!(s.pat_ui.name_box.is_none());
     }
 }

@@ -673,7 +673,7 @@ mod tests {
         assert!(b.state.hosted_rows.contains(&row), "{:?}", b.state.message);
         assert_eq!(b.plugins.sampler_path(row).as_deref(), Some("C:/samples/one.wav"));
         assert_eq!(b.plugins.eq_file_state(fx_key(3, 2)), Some(fl));
-        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some(LEMON_EQ));
+        assert_eq!(crate::mixer::slot_name(&b.state.session, 3, 2).as_deref(), Some(LEMON_EQ));
 
         // Saved again (onto the opened file): the new state is written into the same wrapper.
         assert!(b.plugins.load_sample(row, "C:/samples/two.wav"));
@@ -769,7 +769,7 @@ mod tests {
         b.sync_wrapped();
         let _ = std::fs::remove_file(&path);
         for (k, name) in LINKED_EFFECTS.iter().enumerate() {
-            assert_eq!(crate::mixer::slot_name(&b.state, at(k).0, at(k).1).as_deref(), Some(*name));
+            assert_eq!(crate::mixer::slot_name(&b.state.session, at(k).0, at(k).1).as_deref(), Some(*name));
             assert!(b.plugins.descriptor(key(k)).is_some_and(|d| is_builtin(&d)), "{name} hosted, built in");
             if *name == crate::plugins::TESLA {
                 assert_eq!(tesla_frames_of(b.plugins.state(key(k))), Some(tesla_frames), "Tesla kept its sample");
@@ -812,7 +812,7 @@ mod tests {
         b.open(path.clone());
         let _ = std::fs::remove_file(&path);
         assert_eq!(b.state.session.project.mixer, a.state.session.project.mixer);
-        assert_eq!(crate::mixer::inserts(&b.state), crate::mixer::inserts(&a.state));
+        assert_eq!(crate::mixer::inserts(&b.state.session), crate::mixer::inserts(&a.state.session));
     }
 
     /// Trim unused tracks leaves fewer tracks than the file has; the save drops the rest (spec:
@@ -828,7 +828,7 @@ mod tests {
         a.state.session.project.get_mut().channels[4].mixer_track = 9;
         a.state.session.project.get_mut().mixer[9].name = Some("Nine".into());
         crate::mixer::run(&mut a, crate::mixer::MCmd::Trim { non_empty: false });
-        assert_eq!(crate::mixer::inserts(&a.state), 5);
+        assert_eq!(crate::mixer::inserts(&a.state.session), 5);
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", a.state.message);
         let mut b = App::new(None);

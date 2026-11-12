@@ -36,7 +36,7 @@ fn height(n: usize) -> f32 {
 
 pub fn rect(s: &State) -> Rect {
     let (t, k) = s.container.at;
-    let n = member_count(s, t, k).unwrap_or(0);
+    let n = member_count(&s.session, t, k).unwrap_or(0);
     Rect::new(s.container.pos.0, s.container.pos.1, W, height(n))
 }
 
@@ -70,7 +70,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     let (wx, dx, mx) = (x0 + W - WET_X, x0 + W - DRY_X, x0 + W - MENU_X);
     super::strum::label(ui, small, wx, y0 + TOP - 8.0, 0, t.text_dim, "WET");
     super::strum::label(ui, small, dx, y0 + TOP - 8.0, 0, t.text_dim, "DRY");
-    let list = members(s, track, slot).unwrap_or_default();
+    let list = members(&s.session, track, slot).unwrap_or_default();
     if list.is_empty() {
         super::strum::label(ui, lf, x0 + 12.0, y0 + TOP + ROW_H / 2.0, -1, t.text_faint, "(empty)");
     }

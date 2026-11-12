@@ -509,7 +509,7 @@ impl App {
         let slot = || {
             let k = match hit.action {
                 Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k)) => k,
-                _ => (0..10).find(|&k| crate::mixer::slot_name(s, s.selected_mixer, k).is_none())?,
+                _ => (0..10).find(|&k| crate::mixer::slot_name(&s.session, s.selected_mixer, k).is_none())?,
             };
             let part = |a: Action| self.hits.iter().rev().find(|h| h.action == a).map(|h| h.rect);
             let name = part(Action::Mix(crate::mixer::MHit::SlotName(k)))?;
@@ -587,7 +587,7 @@ impl App {
         match item {
             Item::Pattern(n) => {
                 if let Some((track, tick)) = spot {
-                    pl::snapshot(s);
+                    pl::snapshot(&mut s.session);
                     s.playlist.source = Some(ClipSource::Pattern(n));
                     s.playlist.picker = PickKind::Pattern;
                     let i = pl::place(s, track, tick);
@@ -601,7 +601,7 @@ impl App {
                 let (kind, index) = (ch.kind, ch.index);
                 if let Some((track, tick)) = spot {
                     if matches!(kind, ChannelKind::AudioClip | ChannelKind::Automation) {
-                        pl::snapshot(s);
+                        pl::snapshot(&mut s.session);
                         s.playlist.source = Some(ClipSource::Channel(index));
                         s.playlist.picker = if kind == ChannelKind::AudioClip { PickKind::Audio } else { PickKind::Automation };
                         let i = pl::place(s, track, tick);
@@ -1253,7 +1253,7 @@ fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<Str
     }
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
     let path = crate::data_folder::adopt(s, path);
-    crate::history::load_sample(s, row);
+    crate::history::load_sample(&mut s.session, row);
     let ch = &mut s.session.project.get_mut().channels[row];
     crate::rack::auto_name(ch, std::path::Path::new(&path));
     crate::rack::read_tags(ch, std::path::Path::new(&path));

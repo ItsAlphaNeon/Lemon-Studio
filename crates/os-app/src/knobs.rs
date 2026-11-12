@@ -273,7 +273,7 @@ impl State {
                 (0.5 + sep as f32 / 2.0).clamp(0.0, 1.0)
             }
             KnobId::SlotMix(t, k) => self.session.project.mixer.iter().find(|m| m.index == t).map_or(1.0, |m| m.slot_mix[usize::from(k).min(9)] as f32),
-            KnobId::Send(a, b) => crate::mixer::send(self, a, b).unwrap_or(0.8) as f32,
+            KnobId::Send(a, b) => crate::mixer::send(&self.session, a, b).unwrap_or(0.8) as f32,
             KnobId::ChanVol(i) => self.session.project.channels.get(i).map_or(0.8, |c| c.volume as f32).clamp(0.0, 1.0),
             KnobId::ChanPan(i) => self.session.project.channels.get(i).map_or(0.5, |c| 0.5 + c.pan as f32 / 2.0).clamp(0.0, 1.0),
             // Main swing is project data, 0..=128 (spec: flp/events/project-info.md, event 11).
@@ -312,7 +312,7 @@ impl State {
             KnobId::ChanVol(row) if self.is_clip_row(row) => 1.0,
             KnobId::ChanPan(row) if self.is_clip_row(row) => 0.0,
             // An instrument member's levels as Add starts them: wet and dry (a layer).
-            KnobId::Member(t, k, member, false) if crate::container::is_instrument(self, t, k, member) => 1.0,
+            KnobId::Member(t, k, member, false) if crate::container::is_instrument(&self.session, t, k, member) => 1.0,
             _ => id.default_value(),
         }
     }
@@ -463,7 +463,7 @@ impl State {
             KnobId::ChanVol(row) if self.is_clip_row(row) => format!("Maximum: {:.0}%", n * 100.0),
             KnobId::ChanPan(_) => format!("Channel panning: {}", pan_text(bipolar)),
             KnobId::MixSep(_) => crate::mixer::sep_text(f64::from(bipolar)),
-            KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::mixer::name(self, b)), f64::from(n)),
+            KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::mixer::name(&self.session, b)), f64::from(n)),
             KnobId::SlotMix(..) => format!("Mix level: {:.0}%", n * 100.0),
             // spec: ui/channel-rack.md §11: "Channel volume: 78%  -5.2dB  0.55".
             KnobId::ChanVol(_) => {
@@ -474,7 +474,7 @@ impl State {
             KnobId::Swing => format!("Main swing: {:.0}%", n * 100.0),
             // "Lemon Limiter wet: 60%".
             KnobId::Member(t, k, id, wet) => {
-                let name = crate::container::members(self, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
+                let name = crate::container::members(&self.session, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
                 crate::container::level_text(&name, wet, n)
             }
             // "EQ band 1 (low shelf) level: 0.0dB", "... freq: 90Hz", "... width: 0.27" (spec: ui/mixer.md §8).
@@ -505,7 +505,7 @@ impl crate::app::App {
             Control::Fader(t) => {
                 let v = os_model::MixerTrack::new(t).volume.unwrap_or(0.8);
                 crate::control::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t), |s| {
-                    if let Some(m) = crate::mixer::track_mut(s, t) {
+                    if let Some(m) = crate::mixer::track_mut(&mut s.session, t) {
                         m.volume = Some(v);
                         s.session.dirty = true;
                     }
@@ -562,7 +562,7 @@ mod tests {
         let mut app = crate::app::App::new(None);
         app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.set_knob(KnobId::MixSep(1), 0.5 + 0.01 / 2.0);
-        let sep = |app: &crate::app::App| crate::mixer::track(&app.state, 1).unwrap().stereo_separation;
+        let sep = |app: &crate::app::App| crate::mixer::track(&app.state.session, 1).unwrap().stereo_separation;
         assert_eq!(sep(&app), Some(1.0 / 64.0));
         assert_eq!(app.state.knob_text(KnobId::MixSep(1)), "Stereo separation: 2% merged");
         app.state.set_knob(KnobId::MixSep(1), 0.5 - 0.125 / 2.0);
@@ -611,9 +611,9 @@ mod tests {
         }
         assert!(crate::history::undo(&mut app.state).is_some(), "an undo step");
         assert_ne!(app.state.knob(KnobId::SlotMix(1, 0)), 1.0, "undone");
-        crate::mixer::track_mut(&mut app.state, 1).unwrap().volume = Some(0.2);
+        crate::mixer::track_mut(&mut app.state.session, 1).unwrap().volume = Some(0.2);
         app.reset_control(Control::Fader(1));
-        assert_eq!(crate::mixer::track(&app.state, 1).unwrap().volume, Some(0.8));
+        assert_eq!(crate::mixer::track(&app.state.session, 1).unwrap().volume, Some(0.8));
         assert_eq!(app.hint, "Volume: 100%  0.0dB  1.00");
         app.state.session.project.get_mut().channels[0].pitch_cents = 250;
         app.reset_control(Control::ChanPitch(0));

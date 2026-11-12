@@ -178,15 +178,15 @@ pub fn target_name(s: &State, t: Target) -> String {
     match t {
         Target::Knob(k @ (KnobId::MixPan(m) | KnobId::MixSep(m) | KnobId::SlotMix(m, _))) => {
             let label = if let KnobId::MixSep(_) = k { "Stereo separation".to_string() } else { knob_label(s, k) };
-            format!("{} - {label}", crate::mixer::name(s, m))
+            format!("{} - {label}", crate::mixer::name(&s.session, m))
         }
         Target::Knob(k) => knob_label(s, k),
-        Target::Fader(m) => format!("{} - Volume", crate::mixer::name(s, m)),
+        Target::Fader(m) => format!("{} - Volume", crate::mixer::name(&s.session, m)),
         Target::Param(key, index) => crate::params::param_name(s, key, index).unwrap_or_else(|| format!("Parameter {}", index + 1)),
-        Target::Latency(m, input, u) => format!("{} - {} latency ({})", crate::mixer::name(s, m), if input { "Input" } else { "Track" }, u.name()),
+        Target::Latency(m, input, u) => format!("{} - {} latency ({})", crate::mixer::name(&s.session, m), if input { "Input" } else { "Track" }, u.name()),
         Target::RackTrack(_) => "Target mixer track".into(),
         Target::RackLed(_) => "Channel on / off".into(),
-        Target::Member(m, k, id, wet) => crate::container::level_name(s, m, k, id, wet),
+        Target::Member(m, k, id, wet) => crate::container::level_name(&s.session, m, k, id, wet),
         Target::MemberParam(.., i) => match resolved(s, t) {
             Some(p @ Target::Param(..)) => target_name(s, p),
             _ => format!("Parameter {}", i + 1),
@@ -228,12 +228,12 @@ fn position_for_gain(k: Law, g: f64) -> f64 {
 pub(crate) fn get(s: &State, t: Target) -> Option<f64> {
     match t {
         Target::Knob(k) => Some(f64::from(s.knob(k))),
-        Target::Fader(m) => Some(crate::mixer::track(s, m)?.volume.unwrap_or(0.8)),
+        Target::Fader(m) => Some(crate::mixer::track(&s.session, m)?.volume.unwrap_or(0.8)),
         Target::Param(key, index) => crate::params::param_value(s, key, index),
-        Target::Latency(m, input, _) => crate::mixer::track(s, m).map(|t| f64::from(if input { t.latency_in } else { t.latency_out })),
+        Target::Latency(m, input, _) => crate::mixer::track(&s.session, m).map(|t| f64::from(if input { t.latency_in } else { t.latency_out })),
         Target::RackTrack(r) => s.session.project.channels.get(r).map(|c| f64::from(c.mixer_track)),
         Target::RackLed(r) => s.session.project.channels.get(r).map(|c| if c.enabled { 1.0 } else { 0.0 }),
-        Target::Member(m, k, id, wet) => crate::container::level(s, m, k, id, wet).map(f64::from),
+        Target::Member(m, k, id, wet) => crate::container::level(&s.session, m, k, id, wet).map(f64::from),
         Target::MemberParam(..) => match resolved(s, t)? {
             p @ Target::Param(..) => get(s, p),
             _ => None,
@@ -248,7 +248,7 @@ fn set(s: &mut State, t: Target, v: f64) {
             s.set_knob(k, v as f32);
         }
         Target::Fader(m) => crate::control::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(m), |s| {
-            if let Some(t) = crate::mixer::track_mut(s, m) {
+            if let Some(t) = crate::mixer::track_mut(&mut s.session, m) {
                 t.volume = Some(v.clamp(0.0, 1.0));
                 s.session.dirty = true;
             }

@@ -409,11 +409,11 @@ pub fn euclid(n: usize, k: usize) -> Vec<bool> {
 // Rows, steps and lengths
 
 /// Whether row `r` passes the display filter.
-pub fn in_filter(s: &State, r: usize) -> bool {
-    let group = s.session.project.channels.get(r).and_then(|c| c.rack.group);
-    match filter(&s.session.project) {
+pub fn in_filter(s: &crate::session::Session, r: usize) -> bool {
+    let group = s.project.channels.get(r).and_then(|c| c.rack.group);
+    match filter(&s.project) {
         Filter::All => true,
-        Filter::Group(g) => group.is_some() && group == file_group(&s.session.project, g),
+        Filter::Group(g) => group.is_some() && group == file_group(&s.project, g),
         Filter::Unsorted => group.is_none(),
     }
 }
@@ -463,8 +463,8 @@ pub fn filter(p: &os_model::Project) -> Filter {
     }
 }
 
-pub fn set_filter(s: &mut State, f: Filter) {
-    s.session.project.write_if(|p| {
+pub fn set_filter(s: &mut crate::session::Session, f: Filter) {
+    s.project.write_if(|p| {
         let now = match f {
             Filter::All => None,
             Filter::Group(g) => file_group(p, g),
@@ -522,8 +522,8 @@ pub fn add_group(s: &mut State, name: &str, rows: &BTreeSet<usize>) {
 }
 
 /// Rename filter group: the rack's group `g` named `name`.
-pub fn rename_group(s: &mut State, g: usize, name: &str) {
-    s.session.project.write_if(|p| match file_group(p, g).and_then(|i| p.groups.get_mut(i as usize)) {
+pub fn rename_group(s: &mut crate::session::Session, g: usize, name: &str) {
+    s.project.write_if(|p| match file_group(p, g).and_then(|i| p.groups.get_mut(i as usize)) {
         Some(n) if n != name => {
             *n = name.to_string();
             true
@@ -534,8 +534,8 @@ pub fn rename_group(s: &mut State, g: usize, name: &str) {
 
 /// Tests: the groups `groups` in this order, "Unsorted" after them (or at `unsorted_at`), each channel in its first.
 #[cfg(test)]
-pub fn set_groups(s: &mut State, groups: &[Group], unsorted_at: Option<usize>) {
-    let p = s.session.project.get_mut();
+pub fn set_groups(s: &mut crate::session::Session, groups: &[Group], unsorted_at: Option<usize>) {
+    let p = s.project.get_mut();
     p.groups = groups.iter().map(|g| g.name.clone()).collect();
     let u = unsorted_at.unwrap_or(p.groups.len()).min(p.groups.len());
     p.groups.insert(u, os_model::UNSORTED_GROUP.to_string());
@@ -555,8 +555,8 @@ pub fn as_saved(p: &mut os_model::Project) {
 }
 
 /// An imported MIDI file's channels: a group named `name` first in the list, "Unsorted" last, shown.
-pub fn import_group(s: &mut State, name: &str, rows: impl IntoIterator<Item = usize>) {
-    s.session.project.write_if(|p| {
+pub fn import_group(s: &mut crate::session::Session, name: &str, rows: impl IntoIterator<Item = usize>) {
+    s.project.write_if(|p| {
         if let Some(u) = unsorted_at(p) {
             p.groups.remove(u);
             let u = u as u32;
@@ -608,50 +608,50 @@ pub fn delete_group(s: &mut State, g: usize) {
 }
 
 /// The rows the rack shows, top to bottom.
-pub fn shown(s: &State) -> Vec<usize> {
-    (0..s.session.project.channels.len()).filter(|&r| in_filter(s, r)).collect()
+pub fn shown(s: &crate::session::Session) -> Vec<usize> {
+    (0..s.project.channels.len()).filter(|&r| in_filter(s, r)).collect()
 }
 
 /// Ticks per step.
-pub fn per_step(s: &State) -> u32 {
-    (u32::from(s.session.project.ppq.max(4)) / 4).max(1)
+pub fn per_step(s: &crate::session::Session) -> u32 {
+    (u32::from(s.project.ppq.max(4)) / 4).max(1)
 }
 
 /// The current pattern's explicit length in steps (`None` = Auto).
-pub fn explicit_len(s: &State) -> Option<u32> {
+pub fn explicit_len(s: &crate::session::Session) -> Option<u32> {
     let ps = per_step(s);
-    s.session.project.pattern(s.pattern()).and_then(|p| p.length).filter(|&l| l > 0).map(|l| (l / ps).max(1))
+    s.project.pattern(s.pattern()).and_then(|p| p.length).filter(|&l| l > 0).map(|l| (l / ps).max(1))
 }
 
 /// Pattern length in steps (§3, §7, §23): the explicit length, else the content rounded up to whole bars of the
 /// pattern's own signature (the project's where it has none), at least one bar: the length the engine plays.
-pub fn pattern_steps(s: &State) -> u32 {
+pub fn pattern_steps(s: &crate::session::Session) -> u32 {
     if let Some(l) = explicit_len(s) {
         return l;
     }
-    s.session.project.pattern_length(s.pattern()).div_ceil(per_step(s)).max(1)
+    s.project.pattern_length(s.pattern()).div_ceil(per_step(s)).max(1)
 }
 
 /// Steps in a bar of the project's signature: what the length box's Set to ▸ N bars counts (§23).
-pub fn bar_steps(s: &State) -> u32 {
-    (s.session.project.bar_ticks() / per_step(s)).max(1)
+pub fn bar_steps(s: &crate::session::Session) -> u32 {
+    (s.project.bar_ticks() / per_step(s)).max(1)
 }
 
 /// Steps in a beat of the project's bar (16 / denominator for a time signature): the length of the step colour
 /// groups (§3, §23).
-pub fn beat_steps(s: &State) -> u32 {
-    u32::from(s.session.project.bar().1).max(1)
+pub fn beat_steps(s: &crate::session::Session) -> u32 {
+    u32::from(s.project.bar().1).max(1)
 }
 
 /// Longest pattern the length box sets: 32 bars of the project's signature, at least [`MAX_STEPS`].
-pub fn max_steps(s: &State) -> u32 {
+pub fn max_steps(s: &crate::session::Session) -> u32 {
     MAX_STEPS.max(32 * bar_steps(s))
 }
 
 /// The current pattern's bars up to tick `end`, as `(start, end)` ticks (§6, §23): its own signature's from each
 /// marker on, the project's before the first; a marker cuts the bar it falls in.
-pub fn pattern_bars(s: &State, end: u32) -> Vec<(u32, u32)> {
-    let regions = s.session.project.pattern_bars(s.pattern());
+pub fn pattern_bars(s: &crate::session::Session, end: u32) -> Vec<(u32, u32)> {
+    let regions = s.project.pattern_bars(s.pattern());
     let mut bars = Vec::new();
     for (i, &(start, bar, _)) in regions.iter().enumerate() {
         let stop = regions.get(i + 1).map_or(end, |r| r.0.min(end));
@@ -665,36 +665,36 @@ pub fn pattern_bars(s: &State, end: u32) -> Vec<(u32, u32)> {
 }
 
 /// Set the current pattern's length (`None` = Auto).
-pub fn set_len(s: &mut State, steps: Option<u32>) {
+pub fn set_len(s: &mut crate::session::Session, steps: Option<u32>) {
     let ps = per_step(s);
     let n = s.pattern().max(1);
     let max = max_steps(s);
     // No undo step, as in FL (measured 2026-10-28).
     crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
-    s.session.dirty = true;
+    s.dirty = true;
 }
 
 /// Length box value: 0 = Auto.
-pub fn len_value(s: &State) -> u32 {
+pub fn len_value(s: &crate::session::Session) -> u32 {
     explicit_len(s).unwrap_or(0)
 }
 
 /// A row's own length in steps: its loop length in loop mode, else the pattern length (§15).
 pub fn row_len(s: &State, r: usize) -> u32 {
-    if !loop_mode(s) {
-        return pattern_steps(s);
+    if !loop_mode(&s.session) {
+        return pattern_steps(&s.session);
     }
-    if advanced(s) {
-        return unit_len(s, r).unwrap_or_else(|| pattern_steps(s));
+    if advanced(&s.session) {
+        return unit_len(s, r).unwrap_or_else(|| pattern_steps(&s.session));
     }
-    loop_box_len(s, r)
+    loop_box_len(&s.session, r)
 }
 
 /// Under Advanced looping, row `r`'s loop length in the current pattern (`None`: it does not loop there).
 fn unit_len(s: &State, r: usize) -> Option<u32> {
     let notes = s.session.project.pattern(s.pattern()).map_or(&[][..], |p| &p.notes[..]);
     // A loop point, else a length of steps (FL's Advanced looping takes both).
-    unit_steps(s, notes, ch_index(s, r)?, loop_unit_of(s, r)).or_else(|| loop_len_of(s, r))
+    unit_steps(s, notes, ch_index(&s.session, r)?, loop_unit_of(&s.session, r)).or_else(|| loop_len_of(&s.session, r))
 }
 
 /// Advanced looping's loop point (§7 Loop type, §15; the original's manual: a row plays to the end of its last used
@@ -722,39 +722,39 @@ impl LoopUnit {
     fn steps(self, s: &State) -> u32 {
         match self {
             LoopUnit::Step => 1,
-            LoopUnit::Beat => beat_steps(s),
-            LoopUnit::Bar => bar_steps(s),
+            LoopUnit::Beat => beat_steps(&s.session),
+            LoopUnit::Bar => bar_steps(&s.session),
         }
     }
 }
 
 /// Whether the loop type is Advanced looping.
-pub fn advanced(s: &State) -> bool {
+pub fn advanced(s: &crate::session::Session) -> bool {
     loop_type(s) == 2
 }
 
 /// The loop length, in steps, of channel `ch` among `notes` with loop point `unit`: its last used step (a note covers
 /// the steps it lasts) rounded up to whole units. `None` without a unit or without notes.
 fn unit_steps(s: &State, notes: &[Note], ch: u16, unit: Option<LoopUnit>) -> Option<u32> {
-    let ps = per_step(s);
+    let ps = per_step(&s.session);
     let u = unit?.steps(s).max(1);
     let used = notes.iter().filter(|n| n.channel == ch && !n.muted()).map(|n| (n.position + n.length.max(ps) - 1) / ps + 1).max()?;
     Some(used.div_ceil(u) * u)
 }
 
 /// The rows that loop: those with a loop point under Advanced looping, else those with a loop length.
-fn loop_rows(s: &State) -> Vec<usize> {
+fn loop_rows(s: &crate::session::Session) -> Vec<usize> {
     if advanced(s) { loop_units(s).into_keys().chain(loop_lens(s).into_keys()).collect::<BTreeSet<usize>>().into_iter().collect() } else { loop_lens(s).into_keys().collect() }
 }
 
 /// What row `r`'s loop box shows: the loop length, or under Advanced looping its loop point ("···" for none).
-pub fn loop_box_text(s: &State, r: usize) -> String {
+pub fn loop_box_text(s: &crate::session::Session, r: usize) -> String {
     if advanced(s) { loop_unit_of(s, r).map_or("···", |u| u.name()).to_string() } else { loop_box_len(s, r).to_string() }
 }
 
 /// The value a loop box's wheel and drag start from: the loop length, or under Advanced looping the loop point's place
 /// in [`LOOP_UNITS`].
-pub fn loop_box_value(s: &State, r: usize) -> i32 {
+pub fn loop_box_value(s: &crate::session::Session, r: usize) -> i32 {
     if advanced(s) {
         let u = loop_unit_of(s, r);
         LOOP_UNITS.iter().position(|&x| x == u).unwrap_or(0) as i32
@@ -765,8 +765,8 @@ pub fn loop_box_value(s: &State, r: usize) -> i32 {
 
 /// A loop box's wheel or drag reached value `v` (as [`loop_box_value`] counts): row `r` takes that length or loop
 /// point. Returns the hint to show.
-pub fn set_loop_box(s: &mut State, r: usize, v: i32) -> String {
-    s.session.dirty = true;
+pub fn set_loop_box(s: &mut crate::session::Session, r: usize, v: i32) -> String {
+    s.dirty = true;
     if advanced(s) {
         match LOOP_UNITS[v.clamp(0, LOOP_UNITS.len() as i32 - 1) as usize] {
             Some(u) => {
@@ -787,7 +787,7 @@ pub fn set_loop_box(s: &mut State, r: usize, v: i32) -> String {
 
 /// What a row's loop box shows and its wheel and drag start from: the row's loop length, else the pattern length; also
 /// with loop mode off, where the boxes show while "Always show advanced controls" is ticked (§15).
-pub fn loop_box_len(s: &State, r: usize) -> u32 {
+pub fn loop_box_len(s: &crate::session::Session, r: usize) -> u32 {
     loop_len_of(s, r).unwrap_or_else(|| pattern_steps(s)).max(1)
 }
 
@@ -823,11 +823,11 @@ pub fn filter_tick(s: &mut State) -> bool {
         return false;
     }
     s.rack.filter_seen = Some(r);
-    if !s.rack.opts.contains(AUTO_FILTER) || r >= s.session.project.channels.len() || in_filter(s, r) {
+    if !s.rack.opts.contains(AUTO_FILTER) || r >= s.session.project.channels.len() || in_filter(&s.session, r) {
         return false;
     }
     let f = s.session.project.channels[r].rack.group.and_then(|i| rack_group(&s.session.project, i)).map_or(Filter::Unsorted, Filter::Group);
-    set_filter(s, f);
+    set_filter(&mut s.session, f);
     autosize(s);
     true
 }
@@ -864,12 +864,12 @@ pub fn scroll_to_row(s: &mut State, r: usize) -> bool {
 
 /// Whether the rows show their loop boxes: in loop mode, or with Always show advanced controls ticked (§15).
 pub fn loop_boxes(s: &State) -> bool {
-    loop_mode(s) || s.rack.opts.contains(ALWAYS_ADVANCED)
+    loop_mode(&s.session) || s.rack.opts.contains(ALWAYS_ADVANCED)
 }
 
 /// Channel index (note `channel`) of row `r`.
-fn ch_index(s: &State, r: usize) -> Option<u16> {
-    s.session.project.channels.get(r).map(|c| c.index)
+fn ch_index(s: &crate::session::Session, r: usize) -> Option<u16> {
+    s.project.channels.get(r).map(|c| c.index)
 }
 
 /// Whether step `k` of channel `ch` has a note (a note anywhere inside the step counts); a muted note, which a removed
@@ -879,26 +879,26 @@ pub fn step_on(notes: &[Note], ch: u16, k: u32, ps: u32) -> bool {
 }
 
 /// The current pattern's notes of row `r`.
-pub fn row_notes(s: &State, r: usize) -> Vec<Note> {
+pub fn row_notes(s: &crate::session::Session, r: usize) -> Vec<Note> {
     let Some(ch) = ch_index(s, r) else { return Vec::new() };
-    s.session.project.pattern(s.pattern()).map(|p| p.notes.iter().filter(|n| n.channel == ch).copied().collect()).unwrap_or_default()
+    s.project.pattern(s.pattern()).map(|p| p.notes.iter().filter(|n| n.channel == ch).copied().collect()).unwrap_or_default()
 }
 
 /// Replace row `r`'s notes in the current pattern.
-fn set_row_notes(s: &mut State, r: usize, notes: Vec<Note>) {
+fn set_row_notes(s: &mut crate::session::Session, r: usize, notes: Vec<Note>) {
     let Some(ch) = ch_index(s, r) else { return };
     let n = s.pattern().max(1);
     let p = crate::patterns::pat_mut(s, n);
     p.notes.retain(|x| x.channel != ch);
     p.notes.extend(notes.into_iter().map(|x| Note { channel: ch, ..x }));
     p.notes.sort_by_key(|x| (x.position, x.channel));
-    s.session.dirty = true;
+    s.dirty = true;
 }
 
 /// Cut / Copy (§11): rows `rows`' notes of the pattern go to the clipboard, a row each, in rack order.
 fn copy_rows(s: &mut State, rows: &[usize]) {
     if !rows.is_empty() {
-        s.rack.clipboard = Some(rows.iter().map(|&r| row_notes(s, r)).collect());
+        s.rack.clipboard = Some(rows.iter().map(|&r| row_notes(&s.session, r)).collect());
     }
 }
 
@@ -910,7 +910,7 @@ fn cut_rows(s: &mut State, rows: &[usize]) {
     copy_rows(s, rows);
     snapshot(s);
     for &r in rows {
-        set_row_notes(s, r, Vec::new());
+        set_row_notes(&mut s.session, r, Vec::new());
     }
 }
 
@@ -918,21 +918,21 @@ fn cut_rows(s: &mut State, rows: &[usize]) {
 /// below it, in order; rows past the last one shown are left out (one undo step).
 fn paste_at(s: &mut State, r: usize) {
     let Some(rows) = s.rack.clipboard.clone() else { return };
-    let shown = shown(s);
+    let shown = shown(&s.session);
     let below = shown.iter().position(|&x| x == r).map_or(vec![r], |i| shown[i..].to_vec());
     snapshot(s);
     for (to, notes) in below.into_iter().zip(rows) {
-        set_row_notes(s, to, notes);
+        set_row_notes(&mut s.session, to, notes);
     }
 }
 
 /// Turn step `k` of row `r` on or off.
 pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
-    let Some(ch) = ch_index(s, r) else { return };
-    let ps = per_step(s);
+    let Some(ch) = ch_index(&s.session, r) else { return };
+    let ps = per_step(&s.session);
     let n = s.pattern().max(1);
     let mute = s.rack.opts.contains(MUTE_REMOVED);
-    let p = crate::patterns::pat_mut(s, n);
+    let p = crate::patterns::pat_mut(&mut s.session, n);
     let has = step_on(&p.notes, ch, k, ps);
     let at = |x: &Note| x.channel == ch && x.position / ps == k;
     if on && !has {
@@ -957,26 +957,26 @@ pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
 /// (`crate::history`; spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
 pub fn snapshot(s: &mut State) {
     let snap = crate::history::Snap::pattern(s, s.pattern().max(1));
-    crate::history::record(s, crate::history::STEP_SEQ_EDIT, snap);
+    crate::history::record(&mut s.session, crate::history::STEP_SEQ_EDIT, snap);
 }
 
 /// Toggle step `k` of row `r`; returns its new state (§9).
 pub fn toggle_step(s: &mut State, r: usize, k: u32) -> bool {
-    let on = !ch_index(s, r).is_some_and(|ch| s.session.project.pattern(s.pattern()).is_some_and(|p| step_on(&p.notes, ch, k, per_step(s))));
+    let on = !ch_index(&s.session, r).is_some_and(|ch| s.session.project.pattern(s.pattern()).is_some_and(|p| step_on(&p.notes, ch, k, per_step(&s.session))));
     set_step(s, r, k, on);
     on
 }
 
 /// Fill each N steps (§18): the row's notes inside the pattern length become steps 1, 1+N, 1+2N, …
 pub fn fill_each(s: &mut State, r: usize, every: u32) {
-    let (len, ps) = (row_len(s, r), per_step(s));
-    let mut notes: Vec<Note> = row_notes(s, r).into_iter().filter(|n| n.position >= len * ps).collect();
+    let (len, ps) = (row_len(s, r), per_step(&s.session));
+    let mut notes: Vec<Note> = row_notes(&s.session, r).into_iter().filter(|n| n.position >= len * ps).collect();
     notes.extend((0..len).step_by(every.max(1) as usize).map(|k| Note::step(0, k * ps)));
-    set_row_notes(s, r, notes);
+    set_row_notes(&mut s.session, r, notes);
 }
 
 /// Write a step sequence (Advanced fill's Accept) over the row's notes inside the sequence length.
-pub fn write_sequence(s: &mut State, r: usize, steps: &[bool]) {
+pub fn write_sequence(s: &mut crate::session::Session, r: usize, steps: &[bool]) {
     let ps = per_step(s);
     let len = steps.len() as u32;
     let mut notes: Vec<Note> = row_notes(s, r).into_iter().filter(|n| n.position >= len * ps).collect();
@@ -986,9 +986,9 @@ pub fn write_sequence(s: &mut State, r: usize, steps: &[bool]) {
 
 /// Rotate the row's notes by one step, wrapping inside the pattern length (§18).
 pub fn rotate(s: &mut State, r: usize, dir: i32) {
-    let (len, ps) = (row_len(s, r), per_step(s));
+    let (len, ps) = (row_len(s, r), per_step(&s.session));
     let span = i64::from(len * ps);
-    let notes = row_notes(s, r)
+    let notes = row_notes(&s.session, r)
         .into_iter()
         .map(|mut n| {
             if i64::from(n.position) < span {
@@ -997,11 +997,11 @@ pub fn rotate(s: &mut State, r: usize, dir: i32) {
             n
         })
         .collect();
-    set_row_notes(s, r, notes);
+    set_row_notes(&mut s.session, r, notes);
 }
 
 /// The steps the row shows: on/off for steps `0..len` (used by the Advanced fill dialog).
-pub fn row_steps(s: &State, r: usize, len: u32) -> Vec<bool> {
+pub fn row_steps(s: &crate::session::Session, r: usize, len: u32) -> Vec<bool> {
     let ps = per_step(s);
     let notes = row_notes(s, r);
     (0..len).map(|k| notes.iter().any(|n| n.position / ps == k)).collect()
@@ -1028,18 +1028,18 @@ pub fn join_group(s: &mut State, r: usize, name: &str) {
     autosize(s);
 }
 
-pub(crate) fn channel_name(s: &State, r: usize) -> String {
-    s.session.project.channels.get(r).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default()
+pub(crate) fn channel_name(s: &crate::session::Session, r: usize) -> String {
+    s.project.channels.get(r).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default()
 }
 
 /// "<name> #k" with the lowest free k >= 2 (§18 Clone).
-pub fn clone_name(s: &State, r: usize) -> String {
+pub fn clone_name(s: &crate::session::Session, r: usize) -> String {
     let name = channel_name(s, r);
     let base = match name.rsplit_once(" #") {
         Some((b, k)) if k.parse::<u32>().is_ok() => b.to_string(),
         _ => name,
     };
-    let taken = |cand: &str| s.session.project.channels.iter().any(|c| c.name.as_deref() == Some(cand));
+    let taken = |cand: &str| s.project.channels.iter().any(|c| c.name.as_deref() == Some(cand));
     (2..).map(|k| format!("{base} #{k}")).find(|c| !taken(c)).expect("unbounded")
 }
 
@@ -1047,8 +1047,8 @@ fn seed() -> u64 {
     crate::clip_colors::clock()
 }
 
-pub fn random_color(s: &mut State, r: usize, salt: u64) {
-    if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
+pub fn random_color(s: &mut crate::session::Session, r: usize, salt: u64) {
+    if let Some(c) = s.project.get_mut().channels.get_mut(r) {
         c.color = Some(crate::patterns::random_color(seed() ^ salt.wrapping_mul(0x9e37_79b9)));
     }
 }
@@ -1098,9 +1098,9 @@ pub const MUTE_SOLO: &str = "Channel mute / solo";
 
 fn solo_now(s: &mut State, r: usize) {
     let locked: BTreeSet<usize> = locked_rows(&s.session.project);
-    let soloed_now = solo_of(s, r);
+    let soloed_now = solo_of(&s.session, r);
     // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
-    let in_solo = s.rack.soloed.is_some_and(|a| solo_of(s, a));
+    let in_solo = s.rack.soloed.is_some_and(|a| solo_of(&s.session, a));
     if !soloed_now && !in_solo {
         s.rack.pre_solo = Some(s.session.project.channels.iter().map(|c| c.enabled).collect());
     }
@@ -1144,7 +1144,7 @@ impl App {
         if crate::prefs::check(&crate::prefs::AUTO_ZIP_EMPTY) {
             let s = &mut self.state;
             let zipped: BTreeSet<usize> = used.iter().enumerate().filter(|&(_, &u)| !u).map(|(r, _)| r).collect();
-            set_zipped(s, &if zipped.len() == used.len() { BTreeSet::new() } else { zipped });
+            set_zipped(&mut s.session, &if zipped.len() == used.len() { BTreeSet::new() } else { zipped });
             autosize(s);
             self.invalidate();
         }
@@ -1159,8 +1159,8 @@ impl App {
 }
 
 /// Channel `r` is the only unlocked channel on.
-fn solo_of(s: &State, r: usize) -> bool {
-    s.session.project.channels.get(r).is_some_and(|c| c.enabled) && s.session.project.channels.iter().enumerate().all(|(i, c)| i == r || c.rack.locked || !c.enabled)
+fn solo_of(s: &crate::session::Session, r: usize) -> bool {
+    s.project.channels.get(r).is_some_and(|c| c.enabled) && s.project.channels.iter().enumerate().all(|(i, c)| i == r || c.rack.locked || !c.enabled)
 }
 
 /// The rows whose mute state is locked (Lock active/mute state, event 32): solos leave them as they are.
@@ -1175,8 +1175,8 @@ pub fn zipped_rows(p: &os_model::Project) -> BTreeSet<usize> {
 }
 
 /// Zips `rows` and unzips the others; the project is written only when that changes something.
-pub fn set_zipped(s: &mut State, rows: &BTreeSet<usize>) {
-    s.session.project.write_if(|p| {
+pub fn set_zipped(s: &mut crate::session::Session, rows: &BTreeSet<usize>) {
+    s.project.write_if(|p| {
         let mut changed = false;
         for (r, c) in p.channels.iter_mut().enumerate() {
             changed |= c.rack.zipped != rows.contains(&r);
@@ -1187,8 +1187,8 @@ pub fn set_zipped(s: &mut State, rows: &BTreeSet<usize>) {
 }
 
 /// Whether row `r`'s mute state is locked.
-pub fn is_locked(s: &State, r: usize) -> bool {
-    s.session.project.channels.get(r).is_some_and(|c| c.rack.locked)
+pub fn is_locked(s: &crate::session::Session, r: usize) -> bool {
+    s.project.channels.get(r).is_some_and(|c| c.rack.locked)
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
@@ -1202,21 +1202,21 @@ pub fn toggle_mute(s: &mut State, r: usize) {
 
 /// Lock active/mute state: no undo step and no unsaved change, as in FL (`ui/undo-steps.md`), though the file keeps it
 /// (`App::unsaved` leaves it out; an undo or redo of another step leaves it as it is, `control::command::Mutes`).
-pub fn toggle_lock(s: &mut State, r: usize) {
-    if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
+pub fn toggle_lock(s: &mut crate::session::Session, r: usize) {
+    if let Some(c) = s.project.get_mut().channels.get_mut(r) {
         c.rack.locked = !c.rack.locked;
     }
 }
 
 /// Channels with no notes in any pattern that no playlist clip uses (Select unused channels,
 /// spec: ui/unused-channels.md §1).
-pub fn unused(s: &State) -> BTreeSet<usize> {
-    let used_clip = |i: u16| s.session.project.arrangements.iter().any(|a| a.clips.iter().any(|c| c.source == ClipSource::Channel(i)));
-    s.session.project
+pub fn unused(s: &crate::session::Session) -> BTreeSet<usize> {
+    let used_clip = |i: u16| s.project.arrangements.iter().any(|a| a.clips.iter().any(|c| c.source == ClipSource::Channel(i)));
+    s.project
         .channels
         .iter()
         .enumerate()
-        .filter(|(_, c)| !s.session.project.patterns.iter().any(|p| p.notes.iter().any(|n| n.channel == c.index)) && !used_clip(c.index))
+        .filter(|(_, c)| !s.project.patterns.iter().any(|p| p.notes.iter().any(|n| n.channel == c.index)) && !used_clip(c.index))
         .map(|(r, _)| r)
         .collect()
 }
@@ -1240,26 +1240,26 @@ pub fn cuts_itself(m: &os_model::ChannelMisc) -> bool {
 
 /// Chokes itself on a channel's menu (§18), as the original does: ticking gives the channel the lowest cut group no
 /// channel uses yet, as both its cut and cut by; unticking sets both to none (spec: ui/channel-rack.md §18).
-pub fn cut_itself(s: &mut State, r: usize) {
-    let Some(on) = s.session.project.channels.get(r).map(|c| cuts_itself(&c.misc)) else { return };
+pub fn cut_itself(s: &mut crate::session::Session, r: usize) {
+    let Some(on) = s.project.channels.get(r).map(|c| cuts_itself(&c.misc)) else { return };
     let group = if on {
         0
     } else {
-        let used: BTreeSet<u32> = s.session.project.channels.iter().flat_map(|c| [c.misc.cut, c.misc.cut_by]).collect();
+        let used: BTreeSet<u32> = s.project.channels.iter().flat_map(|c| [c.misc.cut, c.misc.cut_by]).collect();
         (1..).find(|g| !used.contains(g)).unwrap_or(1)
     };
-    if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
+    if let Some(c) = s.project.get_mut().channels.get_mut(r) {
         c.misc.cut = group;
         c.misc.cut_by = group;
     }
-    s.session.dirty = true;
+    s.dirty = true;
 }
 
 /// Transpose the selected channels' notes of the current pattern.
 pub fn transpose_selected(s: &mut State, semis: i32) {
-    let chans: Vec<u16> = s.rack.sel.iter().filter_map(|&r| ch_index(s, r)).collect();
+    let chans: Vec<u16> = s.rack.sel.iter().filter_map(|&r| ch_index(&s.session, r)).collect();
     let n = s.pattern().max(1);
-    for note in crate::patterns::pat_mut(s, n).notes.iter_mut().filter(|x| chans.contains(&x.channel)) {
+    for note in crate::patterns::pat_mut(&mut s.session, n).notes.iter_mut().filter(|x| chans.contains(&x.channel)) {
         note.key = (i32::from(note.key) + semis).clamp(0, 131) as u16;
     }
     s.session.dirty = true;
@@ -1456,7 +1456,7 @@ pub fn clone_rows(app: &mut App, rows: &[usize]) {
     for r in 0..n {
         order.push(r);
         if rows.contains(&r) {
-            let name = clone_name(&app.state, r);
+            let name = clone_name(&app.state.session, r);
             let mut c = app.state.session.project.channels[r].clone();
             let from = c.index;
             c.index = app.state.session.project.channels.len() as u16;
@@ -1486,7 +1486,7 @@ pub fn clone_rows(app: &mut App, rows: &[usize]) {
     if let Some(&last) = new_rows.last() {
         s.selected_channel = last;
     }
-    s.message = Some(if new_rows.len() == 1 { format!("Cloned as {}", channel_name(s, new_rows[0])) } else { format!("Cloned {} channels", new_rows.len()) });
+    s.message = Some(if new_rows.len() == 1 { format!("Cloned as {}", channel_name(&s.session, new_rows[0])) } else { format!("Cloned {} channels", new_rows.len()) });
 }
 
 /// Ask before deleting rows (§18: "The selected channel is about to be deleted.").
@@ -1512,7 +1512,7 @@ pub fn ask_delete(s: &mut State, rows: Vec<usize>) {
 /// Purge unused audio clips: the unused audio-clip channels go, after the delete confirmation; one undo step
 /// (`delete_rows`; spec: ui/unused-channels.md §4).
 pub fn ask_purge(s: &mut State) -> Option<String> {
-    let rows: Vec<usize> = unused(s).into_iter().filter(|&r| s.session.project.channels[r].kind == ChannelKind::AudioClip).collect();
+    let rows: Vec<usize> = unused(&s.session).into_iter().filter(|&r| s.session.project.channels[r].kind == ChannelKind::AudioClip).collect();
     if rows.is_empty() {
         return Some("No unused audio clips".into());
     }
@@ -1588,7 +1588,7 @@ pub fn sort(app: &mut App, by: SortBy) {
     let ch = |r: usize| &s.session.project.channels[r];
     match by {
         SortBy::Color => order.sort_by_key(|&r| ch(r).color.map_or(u32::MAX, |c| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b))),
-        SortBy::Name => order.sort_by_key(|&r| channel_name(s, r).to_lowercase()),
+        SortBy::Name => order.sort_by_key(|&r| channel_name(&s.session, r).to_lowercase()),
         SortBy::Track => order.sort_by_key(|&r| ch(r).mixer_track),
         SortBy::Type => order.sort_by_key(|&r| match ch(r).kind {
             ChannelKind::Sampler => 0,
@@ -1607,7 +1607,7 @@ pub fn sort(app: &mut App, by: SortBy) {
 
 pub fn box_text(s: &State, b: RBox) -> String {
     match b {
-        RBox::Channel(r) => channel_name(s, r),
+        RBox::Channel(r) => channel_name(&s.session, r),
         RBox::GroupSel | RBox::NewGroup => format!("Group {}", groups(&s.session.project).len() + 1),
         RBox::RenameGroup(g) => groups(&s.session.project).get(g).map(|g| g.name.clone()).unwrap_or_default(),
         RBox::Transpose | RBox::ColorSel => String::new(),
@@ -1642,7 +1642,7 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
             let members = if b == RBox::GroupSel { s.rack.sel.clone() } else { BTreeSet::new() };
             add_group(s, text, &members);
         }
-        RBox::RenameGroup(g) if !text.is_empty() => rename_group(s, g, text),
+        RBox::RenameGroup(g) if !text.is_empty() => rename_group(&mut s.session, g, text),
         RBox::Transpose => {
             if let Ok(v) = text.trim_start_matches('+').parse::<i32>() {
                 transpose_selected(s, v);
@@ -2120,8 +2120,8 @@ fn receive_items(s: &State, r: usize) -> Vec<PItem> {
 /// a selected channel has a loop length (Lemon Studio's design; the original showed it greyed with loop mode off).
 fn burn_sel(s: &State) -> PItem {
     let i = it("Burn selected loops to pattern", RCmd::Burn(false));
-    let rows = loop_rows(s);
-    if loop_mode(s) && s.rack.sel.iter().any(|r| rows.contains(r)) { i } else { i.off() }
+    let rows = loop_rows(&s.session);
+    if loop_mode(&s.session) && s.rack.sel.iter().any(|r| rows.contains(r)) { i } else { i.off() }
 }
 
 /// The Automation / Remote control / Value groups shared by knob and LED menus (§19). `other` is the mixer box or the
@@ -2257,31 +2257,31 @@ pub fn led_menu(s: &State, r: usize, auto: Option<(u32, String, f64)>, x: f32, y
     let soloed = s.rack.soloed == Some(r);
     let mut items = vec![
         it("Solo", RCmd::Solo(r)).mark(Mark::Check(soloed)),
-        it("Lock active/mute state", RCmd::Lock(r)).mark(Mark::Check(is_locked(s, r))),
+        it("Lock active/mute state", RCmd::Lock(r)).mark(Mark::Check(is_locked(&s.session, r))),
     ];
     items.extend(value_groups(s, None, Some(crate::typein::Target::RackLed(r)), auto));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Group combo (§7): left click lists the filters.
-pub fn filter_menu(s: &State, x: f32, y: f32) -> Popup {
-    let f = filter(&s.session.project);
+pub fn filter_menu(s: &crate::session::Session, x: f32, y: f32) -> Popup {
+    let f = filter(&s.project);
     let mut items = vec![it("All", RCmd::SetFilter(Filter::All)).mark(Mark::Radio(f == Filter::All))];
-    items.extend(groups(&s.session.project).iter().enumerate().map(|(i, g)| it(g.name.clone(), RCmd::SetFilter(Filter::Group(i))).mark(Mark::Radio(f == Filter::Group(i)))));
+    items.extend(groups(&s.project).iter().enumerate().map(|(i, g)| it(g.name.clone(), RCmd::SetFilter(Filter::Group(i))).mark(Mark::Radio(f == Filter::Group(i)))));
     items.push(it("Unsorted", RCmd::SetFilter(Filter::Unsorted)).mark(Mark::Radio(f == Filter::Unsorted)));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Group combo right click (§7).
-pub fn filter_edit_menu(s: &State, x: f32, y: f32) -> Popup {
-    let group = matches!(filter(&s.session.project), Filter::Group(_));
+pub fn filter_edit_menu(s: &crate::session::Session, x: f32, y: f32) -> Popup {
+    let group = matches!(filter(&s.project), Filter::Group(_));
     let del = it("Delete filter group", RCmd::DeleteGroup);
     let ren = it("Rename filter group", RCmd::RenameGroup);
     Popup { x, y, items: vec![it("Add filter group", RCmd::AddGroup), if group { del } else { del.off() }, if group { ren } else { ren.off() }], sub: None, scroll: [0; 2] }
 }
 
 /// Pattern length box right click (§7).
-pub fn length_menu(s: &State, x: f32, y: f32) -> Popup {
+pub fn length_menu(s: &crate::session::Session, x: f32, y: f32) -> Popup {
     let (cur, bar) = (explicit_len(s), bar_steps(s));
     let mut items = vec![PItem::head("Set to"), it("Auto", RCmd::SetLen(None)).mark(Mark::Radio(cur.is_none()))];
     for bars in [1u32, 2, 4, 8, 16, 32] {
@@ -2293,8 +2293,8 @@ pub fn length_menu(s: &State, x: f32, y: f32) -> Popup {
 
 /// Loop button right click (§7).
 pub fn loop_menu(s: &State, x: f32, y: f32) -> Popup {
-    let t = loop_type(s);
-    let on = loop_mode(s);
+    let t = loop_type(&s.session);
+    let on = loop_mode(&s.session);
     let burn = |label: &'static str, all: bool| if on { it(label, RCmd::Burn(all)) } else { it(label, RCmd::Burn(all)).off() };
     let items = vec![
         PItem::head("Loop type"),
@@ -2362,7 +2362,7 @@ pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
     let path = crate::data_folder::adopt(s, &p.to_string_lossy());
     if r < s.session.project.channels.len() {
-        crate::history::load_sample(s, r);
+        crate::history::load_sample(&mut s.session, r);
     }
     if let Some(ch) = s.session.project.get_mut().channels.get_mut(r) {
         auto_name(ch, &p);
@@ -2485,7 +2485,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::RandomColor(r) => {
-            random_color(s, r, r as u64);
+            random_color(&mut s.session, r, r as u64);
             None
         }
         RCmd::Delete(r) => {
@@ -2539,7 +2539,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Lock(r) => {
-            toggle_lock(s, r);
+            toggle_lock(&mut s.session, r);
             None
         }
         RCmd::Reset(k) => {
@@ -2597,7 +2597,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::SetFilter(f) => {
-            set_filter(s, f);
+            set_filter(&mut s.session, f);
             s.rack_scroll = 0.0;
             autosize(s);
             None
@@ -2623,12 +2623,12 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::SetLen(v) => {
-            set_len(s, v);
+            set_len(&mut s.session, v);
             None
         }
         RCmd::LoopType(t) => {
             loop_step(s, LOOP_MODE_STEP);
-            set_loop_type(s, t);
+            set_loop_type(&mut s.session, t);
             None
         }
         RCmd::Burn(all) => {
@@ -2636,7 +2636,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::SelectUnused => {
-            s.rack.sel = unused(s);
+            s.rack.sel = unused(&s.session);
             Some(format!("{} unused channel(s) selected", s.rack.sel.len()))
         }
         RCmd::Purge => ask_purge(s),
@@ -2646,7 +2646,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::ColorRandom => {
             for &r in &sel {
-                random_color(s, r, r as u64 + 1);
+                random_color(&mut s.session, r, r as u64 + 1);
             }
             None
         }
@@ -2679,7 +2679,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             Some(format!("Truncate swing notes {} for {} channel(s)", if on { "on" } else { "off" }, sel.len()))
         }
         RCmd::CutItself(r) => {
-            cut_itself(s, r);
+            cut_itself(&mut s.session, r);
             None
         }
         RCmd::SwingSel(None) => {
@@ -2705,12 +2705,12 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::ZipSel => {
             let rows: BTreeSet<usize> = zipped_rows(&s.session.project).into_iter().chain(sel.iter().copied()).collect();
-            set_zipped(s, &rows);
+            set_zipped(&mut s.session, &rows);
             autosize(s);
             None
         }
         RCmd::UnzipAll => {
-            set_zipped(s, &BTreeSet::new());
+            set_zipped(&mut s.session, &BTreeSet::new());
             autosize(s);
             None
         }
@@ -2794,8 +2794,8 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
 // Advanced fill dialog
 
 pub fn open_fill(s: &mut State, r: usize) {
-    let len = pattern_steps(s).min(64);
-    let steps = row_steps(s, r, len);
+    let len = pattern_steps(&s.session).min(64);
+    let steps = row_steps(&s.session, r, len);
     let at = (((s.screen.0 - crate::views::rack::FILL_W) / 2.0).round(), ((s.screen.1 - crate::views::rack::FILL_H) / 2.0).round().max(90.0));
     s.rack.fill = Some(FillDlg { row: r, kind: FillType::Manual, len, amount: 4, rotate: 0, steps, at });
 }
@@ -2858,7 +2858,7 @@ pub fn play_project(s: &State) -> Project {
 /// length as played, §23); notes past the loop length go. The pattern's own loops (FL 24.1.1's form): a length, and
 /// under Advanced looping a loop point too, which is the row's notes there rounded up to the unit. `rows`: only those.
 fn expand_loops(p: &mut Project, s: &State, rows: Option<&[usize]>) {
-    let ps = per_step(s);
+    let ps = per_step(&s.session);
     let ends: Vec<u32> = p.patterns.iter().map(|pat| p.pattern_length(pat.number)).collect();
     let chans: Vec<u16> = p.channels.iter().enumerate().filter(|(r, _)| rows.is_none_or(|rs| rs.contains(r))).map(|(_, c)| c.index).collect();
     for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
@@ -2886,7 +2886,7 @@ fn expand_loops(p: &mut Project, s: &State, rows: Option<&[usize]>) {
 
 /// Loop button > Burn: write the loops into the current pattern's notes and drop the loop lengths.
 fn burn(s: &mut State, all: bool) {
-    let looping = loop_rows(s);
+    let looping = loop_rows(&s.session);
     let rows: Vec<usize> = if all { looping } else { s.rack.sel.iter().copied().filter(|r| looping.contains(r)).collect() };
     let mut p = s.session.project.clone();
     expand_loops(&mut p, s, Some(&rows));
@@ -2895,7 +2895,7 @@ fn burn(s: &mut State, all: bool) {
         dst.notes = src.notes;
     }
     for r in rows {
-        put_loop(s, r, None);
+        put_loop(&mut s.session, r, None);
     }
     s.session.dirty = true;
 }
@@ -2932,7 +2932,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Named(NamedKey::ArrowUp) if alt => RCmd::MoveSel(-1),
         Key::Named(NamedKey::ArrowDown) if alt => RCmd::MoveSel(1),
         Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) if !ctrl => {
-            let rows = shown(s);
+            let rows = shown(&s.session);
             let cur = rows.iter().position(|&r| Some(&r) == s.rack.sel.iter().next()).or_else(|| rows.iter().position(|&r| r == focus));
             let next = match (cur, k) {
                 (Some(i), NamedKey::ArrowUp) => i.saturating_sub(1),
@@ -3004,7 +3004,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
 pub fn fill_accept(s: &mut State) {
     if let Some(f) = s.rack.fill.take() {
         snapshot(s);
-        write_sequence(s, f.row, &f.steps);
+        write_sequence(&mut s.session, f.row, &f.steps);
     }
 }
 
@@ -3094,7 +3094,7 @@ pub const LOOP_POINT_STEP: &str = "Set advanced looping settings";
 /// release, as the graph editor's).
 pub fn loop_step(s: &mut State, name: &'static str) {
     let snap = crate::history::Snap::pattern(s, s.pattern().max(1));
-    crate::history::record(s, name, snap);
+    crate::history::record(&mut s.session, name, snap);
 }
 
 /// A press in the graph editor (§14): one undo step for the drag, dropped on release when it changed nothing (spec:
@@ -3102,18 +3102,18 @@ pub fn loop_step(s: &mut State, name: &'static str) {
 pub fn graph_step(s: &mut State) {
     let name = if s.rack.graph_tab == Tab::Vel { "Graph editor change velocity" } else { "Graph editor change" };
     let snap = crate::history::Snap::pattern(s, s.pattern().max(1));
-    crate::history::record(s, name, snap);
+    crate::history::record(&mut s.session, name, snap);
 }
 
 /// Graph editor (§14): set step `k`'s value of the focused channel from 0..1; a column without a step edits the
 /// nearest step note to its left.
 pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
     let r = s.selected_channel;
-    let ch = ch_index(s, r)?;
-    let ps = per_step(s);
+    let ch = ch_index(&s.session, r)?;
+    let ps = per_step(&s.session);
     let tab = s.rack.graph_tab;
     let n = s.pattern().max(1);
-    let p = crate::patterns::pat_mut(s, n);
+    let p = crate::patterns::pat_mut(&mut s.session, n);
     let idx = p
         .notes
         .iter()
@@ -3167,54 +3167,54 @@ fn length_of(v: u32) -> Option<u32> {
 }
 
 /// The shown pattern, where the rack's loops are.
-fn shown_pattern(s: &State) -> Option<&os_model::Pattern> {
-    s.session.project.pattern(s.pattern())
+fn shown_pattern(s: &crate::session::Session) -> Option<&os_model::Pattern> {
+    s.project.pattern(s.pattern())
 }
 
 /// Row `r`'s value in the shown pattern's loops (FL 24.1.1's form: a length, 0, or a loop point).
-fn loop_value(s: &State, r: usize) -> Option<u32> {
+fn loop_value(s: &crate::session::Session, r: usize) -> Option<u32> {
     let ch = ch_index(s, r)?;
     shown_pattern(s)?.loops.iter().find(|l| l.0 == ch).map(|l| l.1)
 }
 
 /// Whether the shown pattern is in loop mode (§15).
-pub fn loop_mode(s: &State) -> bool {
+pub fn loop_mode(s: &crate::session::Session) -> bool {
     shown_pattern(s).is_some_and(|p| p.loop_mode.is_some())
 }
 
 /// The loop type (0 Loop step channels, 1 Loop all channels, 2 Advanced looping): the shown pattern's while loop mode
 /// is on, else the one last chosen in it (as FL, which keeps that in memory; another pattern shows Loop step channels).
-pub fn loop_type(s: &State) -> u8 {
+pub fn loop_type(s: &crate::session::Session) -> u8 {
     match shown_pattern(s).and_then(|p| p.loop_mode) {
         Some(code) => loop_type_of(code),
-        None if s.session.loop_type_of == s.pattern() => s.session.loop_type,
+        None if s.loop_type_of == s.pattern() => s.loop_type,
         None => 0,
     }
 }
 
 /// Row `r`'s loop length in steps (§15).
-pub fn loop_len_of(s: &State, r: usize) -> Option<u32> {
+pub fn loop_len_of(s: &crate::session::Session, r: usize) -> Option<u32> {
     loop_value(s, r).and_then(length_of)
 }
 
 /// Row `r`'s Advanced looping loop point (Bar under Loop all channels is that type's "loops", not a point).
-pub fn loop_unit_of(s: &State, r: usize) -> Option<LoopUnit> {
+pub fn loop_unit_of(s: &crate::session::Session, r: usize) -> Option<LoopUnit> {
     loop_value(s, r).filter(|&v| !(loop_type(s) == 1 && v == os_model::Pattern::LOOP_BAR)).and_then(unit_of)
 }
 
 /// The rows' loop lengths.
-pub fn loop_lens(s: &State) -> BTreeMap<usize, u32> {
-    (0..s.session.project.channels.len()).filter_map(|r| Some((r, loop_len_of(s, r)?))).collect()
+pub fn loop_lens(s: &crate::session::Session) -> BTreeMap<usize, u32> {
+    (0..s.project.channels.len()).filter_map(|r| Some((r, loop_len_of(s, r)?))).collect()
 }
 
 /// The rows' Advanced looping loop points.
-pub fn loop_units(s: &State) -> BTreeMap<usize, LoopUnit> {
-    (0..s.session.project.channels.len()).filter_map(|r| Some((r, loop_unit_of(s, r)?))).collect()
+pub fn loop_units(s: &crate::session::Session) -> BTreeMap<usize, LoopUnit> {
+    (0..s.project.channels.len()).filter_map(|r| Some((r, loop_unit_of(s, r)?))).collect()
 }
 
 /// Row `r`'s value in the shown pattern set to `v` (`None`: none; under Loop all channels in loop mode, Bar, as FL
 /// writes a channel that loops). Only that row's value changes, so a pattern keeps the file's form elsewhere.
-fn put_loop(s: &mut State, r: usize, v: Option<u32>) {
+fn put_loop(s: &mut crate::session::Session, r: usize, v: Option<u32>) {
     let Some(ch) = ch_index(s, r) else { return };
     let v = v.or((loop_mode(s) && loop_type(s) == 1).then_some(os_model::Pattern::LOOP_BAR));
     if loop_value(s, r) == v {
@@ -3230,8 +3230,8 @@ fn put_loop(s: &mut State, r: usize, v: Option<u32>) {
 }
 
 /// Under Loop all channels in loop mode, every row without a value gets Bar (FL writes one for each channel).
-fn fill_all(s: &mut State) {
-    for r in 0..s.session.project.channels.len() {
+fn fill_all(s: &mut crate::session::Session) {
+    for r in 0..s.project.channels.len() {
         if loop_value(s, r).is_none() {
             put_loop(s, r, None);
         }
@@ -3239,7 +3239,7 @@ fn fill_all(s: &mut State) {
 }
 
 /// The loop icon (§15): loop mode on or off in the shown pattern, its type written while it is on.
-pub fn set_loop_mode(s: &mut State, on: bool) {
+pub fn set_loop_mode(s: &mut crate::session::Session, on: bool) {
     if loop_mode(s) == on {
         return;
     }
@@ -3251,8 +3251,8 @@ pub fn set_loop_mode(s: &mut State, on: bool) {
 }
 
 /// The loop menu's Loop type (§7).
-pub fn set_loop_type(s: &mut State, t: u8) {
-    (s.session.loop_type, s.session.loop_type_of) = (t, s.pattern());
+pub fn set_loop_type(s: &mut crate::session::Session, t: u8) {
+    (s.loop_type, s.loop_type_of) = (t, s.pattern());
     if loop_mode(s) {
         let n = s.pattern();
         crate::patterns::pat_mut(s, n).loop_mode = Some(LOOP_TYPE_CODES[usize::from(t.min(2))]);
@@ -3275,12 +3275,12 @@ mod tests {
         a.state.set_pattern(1);
         a.mark_saved();
         loop_step(&mut a.state, LOOP_MODE_STEP);
-        set_loop_mode(&mut a.state, true);
+        set_loop_mode(&mut a.state.session, true);
         crate::history::settle(&mut a.state);
         assert_eq!(a.state.session.history.newest_done(), Some(LOOP_MODE_STEP));
-        assert!(loop_mode(&a.state) && !a.unsaved());
+        assert!(loop_mode(&a.state.session) && !a.unsaved());
         assert!(crate::history::undo(&mut a.state).is_some());
-        assert!(!loop_mode(&a.state));
+        assert!(!loop_mode(&a.state.session));
     }
 
     /// The pattern shown is the project's (event 67); as in FL, showing another is no undo step but an unsaved change,
@@ -3328,12 +3328,12 @@ mod tests {
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.mark_saved();
         let steps = a.state.session.history.done();
-        toggle_lock(&mut a.state, 0);
-        assert!(is_locked(&a.state, 0) && !a.unsaved());
+        toggle_lock(&mut a.state.session, 0);
+        assert!(is_locked(&a.state.session, 0) && !a.unsaved());
         assert_eq!(a.state.session.history.done(), steps, "no step");
         crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
         assert!(a.unsaved());
-        toggle_lock(&mut a.state, 1);
+        toggle_lock(&mut a.state.session, 1);
         assert!(crate::history::undo(&mut a.state).is_some(), "the project step undone");
         assert_eq!(a.state.session.project.main_volume, a.saved.0.main_volume);
         assert_eq!(locked_rows(&a.state.session.project), [0, 1].into(), "the locks stay");
@@ -3347,18 +3347,18 @@ mod tests {
         a.state.set_pattern(1);
         let ch = a.state.session.project.channels[0].index;
         let follow = os_model::Pattern::LOOP_FOLLOW;
-        let pat = crate::patterns::pat_mut(&mut a.state, 1);
+        let pat = crate::patterns::pat_mut(&mut a.state.session, 1);
         // FL 24.1.1's form: the type (2, Loop all channels) while loop mode is on.
         (pat.loops, pat.loop_mode) = (vec![(ch, follow)], Some(2));
-        assert!(loop_mode(&a.state) && loop_type(&a.state) == 1);
+        assert!(loop_mode(&a.state.session) && loop_type(&a.state.session) == 1);
         let p = a.state.session.project.pattern(1).expect("pattern 1");
         assert_eq!((p.loops.clone(), p.loop_mode), (vec![(ch, follow)], Some(2)), "the file's form is kept");
         // Switched on in a pattern that had none: written so that it reads back on.
-        let pat = crate::patterns::pat_mut(&mut a.state, 1);
+        let pat = crate::patterns::pat_mut(&mut a.state.session, 1);
         (pat.loops, pat.loop_mode) = (Vec::new(), None);
-        set_loop_type(&mut a.state, 1);
-        set_loop_mode(&mut a.state, true);
-        assert!(loop_mode(&a.state) && loop_type(&a.state) == 1);
+        set_loop_type(&mut a.state.session, 1);
+        set_loop_mode(&mut a.state.session, true);
+        assert!(loop_mode(&a.state.session) && loop_type(&a.state.session) == 1);
     }
 
     /// Each pattern keeps its own loop lengths: showing another pattern loads its lengths, and a save there no longer
@@ -3369,19 +3369,19 @@ mod tests {
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         let ch = a.state.session.project.channels[0].index;
         for (n, len) in [(1, 3), (2, 5)] {
-            let pat = crate::patterns::pat_mut(&mut a.state, n);
+            let pat = crate::patterns::pat_mut(&mut a.state.session, n);
             (pat.loops, pat.loop_mode) = (vec![(ch, len)], None);
         }
         a.state.set_pattern(1);
-        assert_eq!(loop_lens(&a.state), [(0, 3)].into());
-        put_loop(&mut a.state, 0, Some(4));
+        assert_eq!(loop_lens(&a.state.session), [(0, 3)].into());
+        put_loop(&mut a.state.session, 0, Some(4));
         a.state.set_pattern(2);
-        assert_eq!(loop_lens(&a.state), [(0, 5)].into(), "pattern 2's own");
+        assert_eq!(loop_lens(&a.state.session), [(0, 5)].into(), "pattern 2's own");
         let loops = |a: &crate::app::App, n| a.state.session.project.pattern(n).map(|p| p.loops.clone());
         assert_eq!(loops(&a, 2), Some(vec![(ch, 5)]), "pattern 2 keeps its lengths");
         assert_eq!(loops(&a, 1), Some(vec![(ch, 4)]), "pattern 1 keeps the length set while it was shown");
         a.state.set_pattern(1);
-        assert_eq!(loop_lens(&a.state), [(0, 4)].into());
+        assert_eq!(loop_lens(&a.state.session), [(0, 4)].into());
     }
 
     /// Undo of a whole-project step leaves the pattern shown as it is (as in FL) and puts the loop mode back with the
@@ -3392,19 +3392,19 @@ mod tests {
         let mut a = crate::app::App::new(None);
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         let ch = a.state.session.project.channels[0].index;
-        let pat = crate::patterns::pat_mut(&mut a.state, 1);
+        let pat = crate::patterns::pat_mut(&mut a.state.session, 1);
         pat.notes.push(os_model::Note::step(ch, 0));
         (pat.loops, pat.loop_mode) = (vec![(ch, 0)], Some(LOOP_TYPE_CODES[0]));
         let before = a.state.session.project.pattern(1).cloned();
         a.state.set_pattern(1);
-        let p2 = crate::patterns::pat_mut(&mut a.state, 2);
+        let p2 = crate::patterns::pat_mut(&mut a.state.session, 2);
         p2.notes.push(os_model::Note::step(ch, 0));
         (p2.loops, p2.loop_mode) = (vec![(ch, 4)], None);
         crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
         a.state.set_pattern(2);
         assert!(crate::history::undo(&mut a.state).is_some());
         assert_eq!(a.state.pattern(), 2, "the pattern shown stays");
-        assert_eq!((loop_lens(&a.state), loop_mode(&a.state)), ([(0, 4)].into(), false), "pattern 2's own loops (mode off)");
+        assert_eq!((loop_lens(&a.state.session), loop_mode(&a.state.session)), ([(0, 4)].into(), false), "pattern 2's own loops (mode off)");
         a.state.set_pattern(3);
         assert_eq!(a.state.session.project.pattern(1).cloned(), before, "pattern 1's loops as they were");
     }
@@ -3453,15 +3453,15 @@ mod tests {
         // A pattern with nothing in it is not saved: pattern 2 gets a note.
         let ch = a.state.session.project.channels[0].index;
         let note = os_model::Note { position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
-        crate::patterns::pat_mut(&mut a.state, 2).notes.push(note);
+        crate::patterns::pat_mut(&mut a.state.session, 2).notes.push(note);
         a.state.set_pattern(2);
-        put_loop(&mut a.state, 0, Some(8));
+        put_loop(&mut a.state.session, 0, Some(8));
         a.save_to(file.clone());
         let mut b = crate::app::App::new(None);
         b.open(file.clone());
         let _ = std::fs::remove_file(&file);
         assert_eq!(b.state.pattern(), 2);
-        assert_eq!(loop_lens(&b.state).get(&0), Some(&8));
+        assert_eq!(loop_lens(&b.state.session).get(&0), Some(&8));
     }
 
     /// A knob's Edit automation clip... is greyed until a clip drives the control, then shows that clip (§19, as on a
@@ -3600,9 +3600,9 @@ mod tests {
         let mut app = App::new(None);
         let burn = |app: &App| options_menu(&app.state, 0.0, 0.0).items.iter().find(|i| i.label == "Burn selected loops to pattern").map(|i| (i.enabled, i.cmd.clone())).unwrap();
         assert_eq!(burn(&app).0, false);
-        set_loop_mode(&mut app.state, true);
-        put_loop(&mut app.state, 0, Some(3));
-        put_loop(&mut app.state, 1, Some(5));
+        set_loop_mode(&mut app.state.session, true);
+        put_loop(&mut app.state.session, 0, Some(3));
+        put_loop(&mut app.state.session, 1, Some(5));
         app.state.rack.sel = BTreeSet::from([2]);
         assert_eq!(burn(&app).0, false, "no selected channel loops");
         app.state.rack.sel = BTreeSet::from([1, 2]);
@@ -3610,7 +3610,7 @@ mod tests {
         assert!(on);
         let Cmd::Rack(c) = c else { panic!() };
         run(&mut app, c);
-        assert_eq!(loop_lens(&app.state), BTreeMap::from([(0, 3)]), "only the selected channel's loop burned");
+        assert_eq!(loop_lens(&app.state.session), BTreeMap::from([(0, 3)]), "only the selected channel's loop burned");
     }
 
     /// The channel menu's Burn MIDI to ▸ (§18): Current pattern and New pattern on the right-clicked channel, enabled on
@@ -3636,7 +3636,7 @@ mod tests {
         let cur = app.state.pattern().max(1);
         app.state.set_pattern(cur);
         let ch = app.state.session.project.channels[1].index;
-        crate::patterns::pat_mut(&mut app.state, cur).notes.push(os_model::Note::step(ch, 0));
+        crate::patterns::pat_mut(&mut app.state.session, cur).notes.push(os_model::Note::step(ch, 0));
         let e = &mut app.state.session.project.get_mut().channels[1].misc.echo;
         (e.feed, e.echoes, e.time) = (0.25, 2, 48.0 / 384.0);
         let Cmd::Rack(c) = burn(&app, 1)[1].2.clone() else { panic!() };
@@ -3667,11 +3667,11 @@ mod tests {
         let w = app.state.rack_size.0;
         run(&mut app, RCmd::Opt(ALWAYS_ADVANCED));
         assert_eq!(find(loop_menu(&app.state, 0.0, 0.0), ALWAYS_ADVANCED).1, Mark::Check(true));
-        assert!(loop_boxes(&app.state) && !loop_mode(&app.state));
+        assert!(loop_boxes(&app.state) && !loop_mode(&app.state.session));
         assert_eq!(app.state.rack_size.0, w + LOOP_W, "room for the boxes");
-        put_loop(&mut app.state, 1, Some(5));
-        assert_eq!((loop_box_len(&app.state, 1), loop_box_len(&app.state, 0)), (5, pattern_steps(&app.state)));
-        assert_eq!(row_len(&app.state, 1), pattern_steps(&app.state), "loop mode off: the length plays no part");
+        put_loop(&mut app.state.session, 1, Some(5));
+        assert_eq!((loop_box_len(&app.state.session, 1), loop_box_len(&app.state.session, 0)), (5, pattern_steps(&app.state.session)));
+        assert_eq!(row_len(&app.state, 1), pattern_steps(&app.state.session), "loop mode off: the length plays no part");
         run(&mut app, RCmd::Opt(ALWAYS_ADVANCED));
         assert!(!loop_boxes(&app.state));
         assert_eq!(app.state.rack_size.0, w);
@@ -3684,10 +3684,10 @@ mod tests {
         let mut app = App::new(None);
         let s = &mut app.state;
         let ch = s.session.project.channels[0].index;
-        let ps = per_step(s);
+        let ps = per_step(&s.session);
         let at = |s: &State| s.session.project.pattern(s.pattern()).map(|p| p.notes.iter().filter(|n| n.channel == ch && n.position / ps == 3).copied().collect::<Vec<_>>()).unwrap_or_default();
         set_step(s, 0, 3, true);
-        crate::patterns::pat_mut(s, s.pattern().max(1)).notes.iter_mut().filter(|n| n.channel == ch && n.position / ps == 3).for_each(|n| n.velocity = 33);
+        { let n = s.pattern().max(1); crate::patterns::pat_mut(&mut s.session, n) }.notes.iter_mut().filter(|n| n.channel == ch && n.position / ps == 3).for_each(|n| n.velocity = 33);
         run(&mut app, RCmd::Opt(MUTE_REMOVED));
         let s = &mut app.state;
         set_step(s, 0, 3, false);
@@ -3743,24 +3743,24 @@ mod tests {
         run(&mut app, RCmd::LoopType(2));
         assert_eq!(item(&app), (true, Mark::Radio(true)));
         let s = &mut app.state;
-        set_loop_mode(s, true);
+        set_loop_mode(&mut s.session, true);
         let ch = s.session.project.channels[0].index;
-        let ps = per_step(s);
+        let ps = per_step(&s.session);
         let n = s.pattern().max(1);
-        let p = crate::patterns::pat_mut(s, n);
+        let p = crate::patterns::pat_mut(&mut s.session, n);
         p.notes.retain(|x| x.channel != ch);
         p.notes.extend([Note::step(ch, 0), Note::step(ch, 5 * ps)]);
         p.notes.sort_by_key(|x| (x.position, x.channel));
-        assert_eq!((pattern_steps(s), beat_steps(s), bar_steps(s)), (16, 4, 16));
+        assert_eq!((pattern_steps(&s.session), beat_steps(&s.session), bar_steps(&s.session)), (16, 4, 16));
 
-        assert_eq!((loop_box_text(s, 0), loop_box_value(s, 0), row_len(s, 0)), ("···".to_string(), 0, 16), "no loop point: no loop");
-        assert_eq!(set_loop_box(s, 0, 1), "Loop point: Step");
+        assert_eq!((loop_box_text(&s.session, 0), loop_box_value(&s.session, 0), row_len(s, 0)), ("···".to_string(), 0, 16), "no loop point: no loop");
+        assert_eq!(set_loop_box(&mut s.session, 0, 1), "Loop point: Step");
         assert_eq!(row_len(s, 0), 6, "the last used step");
-        set_loop_box(s, 0, 2);
-        assert_eq!((loop_box_text(s, 0).as_str(), row_len(s, 0)), ("Beat", 8));
-        set_loop_box(s, 0, 9);
-        assert_eq!((loop_box_text(s, 0).as_str(), row_len(s, 0)), ("Bar", 16), "past the last: Bar");
-        set_loop_box(s, 0, 2);
+        set_loop_box(&mut s.session, 0, 2);
+        assert_eq!((loop_box_text(&s.session, 0).as_str(), row_len(s, 0)), ("Beat", 8));
+        set_loop_box(&mut s.session, 0, 9);
+        assert_eq!((loop_box_text(&s.session, 0).as_str(), row_len(s, 0)), ("Bar", 16), "past the last: Bar");
+        set_loop_box(&mut s.session, 0, 2);
 
         // Playback repeats the first beat-rounded 8 steps over the pattern.
         let steps = |p: &Project| p.pattern(n).unwrap().notes.iter().filter(|x| x.channel == ch).map(|x| x.position / ps).collect::<Vec<_>>();
@@ -3772,8 +3772,8 @@ mod tests {
         run(&mut app, RCmd::Burn(false));
         let s = &app.state;
         assert_eq!(steps(&s.session.project), [0, 5, 8, 13]);
-        assert!(loop_units(s).is_empty());
-        assert_eq!(loop_box_text(s, 0), "···");
+        assert!(loop_units(&s.session).is_empty());
+        assert_eq!(loop_box_text(&s.session, 0), "···");
     }
 
     /// Auto switch display filter: a newly selected channel the filter hides switches the filter to its group (else
@@ -3782,8 +3782,8 @@ mod tests {
     fn auto_switch_display_filter() {
         let mut app = App::new(None);
         let s = &mut app.state;
-        set_groups(s, &[Group { name: "Drums".into(), members: BTreeSet::from([0, 1]) }, Group { name: "Keys".into(), members: BTreeSet::from([2]) }], None);
-        set_filter(s, Filter::Group(0));
+        set_groups(&mut s.session, &[Group { name: "Drums".into(), members: BTreeSet::from([0, 1]) }, Group { name: "Keys".into(), members: BTreeSet::from([2]) }], None);
+        set_filter(&mut s.session, Filter::Group(0));
         s.selected_channel = 2;
         assert!(!filter_tick(s), "unticked");
         assert_eq!(crate::rack::filter(&s.session.project), Filter::Group(0));
@@ -3793,7 +3793,7 @@ mod tests {
         s.selected_channel = 2;
         assert!(filter_tick(s));
         assert_eq!(crate::rack::filter(&s.session.project), Filter::Group(1));
-        set_filter(s, Filter::Group(0));
+        set_filter(&mut s.session, Filter::Group(0));
         assert!(!filter_tick(s), "the hand-picked filter stays");
         s.selected_channel = 3;
         assert!(filter_tick(s));
@@ -3898,13 +3898,13 @@ mod tests {
         app.state.z = vec![Win::ChannelRack];
         assert!(app.state.session.project.channels.len() >= 5);
         for r in 0..5 {
-            set_row_notes(&mut app.state, r, Vec::new());
+            set_row_notes(&mut app.state.session, r, Vec::new());
         }
-        let ps = per_step(&app.state);
+        let ps = per_step(&app.state.session);
         set_step(&mut app.state, 0, 0, true);
         set_step(&mut app.state, 0, 4, true);
         set_step(&mut app.state, 1, 2, true);
-        let steps = |app: &App, r: usize| row_notes(&app.state, r).iter().map(|n| n.position / ps).collect::<Vec<_>>();
+        let steps = |app: &App, r: usize| row_notes(&app.state.session, r).iter().map(|n| n.position / ps).collect::<Vec<_>>();
         let key = |app: &mut App, k: &str| app.key(&Key::Character(k.into()), true, false);
         app.state.rack.sel = BTreeSet::from([0, 1]);
         key(&mut app, "c");
@@ -4017,8 +4017,8 @@ mod tests {
         }
         let idx = |app: &App, r: usize| app.state.session.project.channels[r].index;
         let (i0, i2, i3) = (idx(&app, 0), idx(&app, 2), idx(&app, 3));
-        crate::patterns::pat_mut(&mut app.state, 2).notes = vec![Note::step(i0, 0), Note::step(i2, 3)];
-        crate::playlist::arr_mut(&mut app.state).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
+        crate::patterns::pat_mut(&mut app.state.session, 2).notes = vec![Note::step(i0, 0), Note::step(i2, 3)];
+        crate::playlist::arr_mut(&mut app.state.session).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
         let tools = |label: &str| (0..80).find(|&i| item_at(TOOLS_MENU, i).is_some_and(|it| it.label == label)).unwrap();
         for label in ["Select unused instruments", "Remove unused audio clips"] {
             assert!(works(TOOLS_MENU, item_at(TOOLS_MENU, tools(label)).unwrap()), "{label} is not greyed out");
@@ -4103,8 +4103,8 @@ mod tests {
             app.state.session.project.get_mut().channels[r].kind = ChannelKind::AudioClip;
         }
         let (i2, i3) = (app.state.session.project.channels[2].index, app.state.session.project.channels[3].index);
-        crate::patterns::pat_mut(&mut app.state, 2).notes = vec![Note::step(i2, 0)];
-        crate::playlist::arr_mut(&mut app.state).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
+        crate::patterns::pat_mut(&mut app.state.session, 2).notes = vec![Note::step(i2, 0)];
+        crate::playlist::arr_mut(&mut app.state.session).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
         let before = ids(&app);
         assert_eq!(run(&mut app, RCmd::Purge).as_deref(), Some("Deleted the channel"));
         assert!(!app.state.pat_ui.confirm && !app.state.rack.purging);
@@ -4117,7 +4117,7 @@ mod tests {
     fn rack_settings_save_and_reopen() {
         let path = std::env::temp_dir().join(format!("os_rack_save_{}.flp", std::process::id()));
         let mut app = App::new(None);
-        crate::patterns::pat_mut(&mut app.state, 1).notes = vec![os_model::Note::step(2, 0), os_model::Note::step(0, 1)];
+        crate::patterns::pat_mut(&mut app.state.session, 1).notes = vec![os_model::Note::step(2, 0), os_model::Note::step(0, 1)];
         app.save_to(path.clone());
         app.open(path.clone());
         let n = app.state.session.project.channels.len();
@@ -4127,12 +4127,12 @@ mod tests {
         delete_rows(&mut app, &[2]);
         let s = &mut app.state;
         s.session.project.get_mut().swing = Some(64);
-        toggle_lock(s, 1);
-        set_zipped(s, &[2].into());
-        set_groups(s, &[Group { name: "Drums".into(), members: [0, 2].into() }], None);
-        set_filter(s, Filter::Group(0));
-        put_loop(s, 0, Some(5));
-        set_loop_mode(s, true);
+        toggle_lock(&mut s.session, 1);
+        set_zipped(&mut s.session, &[2].into());
+        set_groups(&mut s.session, &[Group { name: "Drums".into(), members: [0, 2].into() }], None);
+        set_filter(&mut s.session, Filter::Group(0));
+        put_loop(&mut s.session, 0, Some(5));
+        set_loop_mode(&mut s.session, true);
         app.save_to(path.clone());
         assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", app.state.message);
         app.open(path.clone());
@@ -4152,8 +4152,8 @@ mod tests {
         assert_eq!(crate::rack::groups(&s.session.project).len(), 1);
         assert_eq!(crate::rack::groups(&s.session.project)[0].members, [0, 2].into());
         assert_eq!(crate::rack::filter(&s.session.project), Filter::Group(0));
-        assert_eq!(loop_lens(s), [(0, 5)].into());
-        assert!(loop_mode(s));
+        assert_eq!(loop_lens(&s.session), [(0, 5)].into());
+        assert!(loop_mode(&s.session));
     }
 
     #[test]
@@ -4197,7 +4197,7 @@ mod tests {
                 // Channel rack (Ctrl+click on the LEDs); channel 5 is locked and muted.
                 toggle_mute(s, b);
                 toggle_mute(s, 4);
-                toggle_lock(s, 4);
+                toggle_lock(&mut s.session, 4);
                 solo(s, a);
                 assert!(s.session.project.channels.iter().enumerate().all(|(i, ch)| ch.enabled == (i == a)), "rack solo, {what}");
                 if moved {
@@ -4209,7 +4209,7 @@ mod tests {
                 assert_eq!(got, (0..5).map(|i| i != 4 && want(i)).collect::<Vec<_>>(), "rack, {what}");
 
                 // Playlist tracks.
-                let tracks = |s: &mut State| crate::playlist::arr_mut(s).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
+                let tracks = |s: &mut State| crate::playlist::arr_mut(&mut s.session).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
                 crate::playlist::toggle_track(s, b as u16);
                 crate::playlist::toggle_solo(s, a as u16);
                 if moved {
@@ -4220,7 +4220,7 @@ mod tests {
                 assert!(tracks(s).iter().enumerate().all(|(i, &on)| on == want(i)), "playlist, {what}");
 
                 // Mixer inserts (right-click on the LEDs): inserts 1, 2 and 3 are A, B and C.
-                crate::mixer::track_mut(s, 2).expect("insert 2").enabled = false;
+                crate::mixer::track_mut(&mut s.session, 2).expect("insert 2").enabled = false;
                 crate::mixer::solo(s, 1);
                 if moved {
                     crate::mixer::solo(s, 3);
@@ -4241,7 +4241,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         let s = &mut app.state;
-        let tracks = |s: &mut State| crate::playlist::arr_mut(s).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
+        let tracks = |s: &mut State| crate::playlist::arr_mut(&mut s.session).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
         crate::playlist::toggle_solo(s, 0);
         crate::playlist::toggle_track(s, 2);
         let got = tracks(s);
@@ -4304,7 +4304,7 @@ mod tests {
             let pat = |number: u16, notes: Vec<Note>| os_model::Pattern { number, notes, ..Default::default() };
             app.state.session.project.get_mut().patterns = vec![pat(1, vec![Note::step(0, 0), Note::step(2, 48)]), pat(2, vec![Note::step(1, 96)]), pat(3, Vec::new())];
             let zips = |app: &App| zipped_rows(&app.state.session.project).into_iter().collect::<Vec<usize>>();
-            set_zipped(&mut app.state, &[4].into());
+            set_zipped(&mut app.state.session, &[4].into());
             app.tick();
             assert_eq!(zips(&app), vec![4], "no switch yet, check {on}");
             let switch = |app: &mut App, p: u16| {
@@ -4317,7 +4317,7 @@ mod tests {
             // Zipping by hand works between switches.
             let mut rows = zipped_rows(&app.state.session.project);
             rows.insert(0);
-            set_zipped(&mut app.state, &rows);
+            set_zipped(&mut app.state.session, &rows);
             app.tick();
             assert_eq!(zips(&app), if on { vec![0, 1, 3, 4] } else { vec![0, 4] }, "zipped by hand, check {on}");
             // A pattern without notes (as one just made with "+") unzips every channel.
@@ -4331,17 +4331,17 @@ mod tests {
     fn step_app(c: &mut os_ui::Canvas, on: &[u32]) -> App {
         let mut app = App::new(None);
         app.state.z = vec![Win::ChannelRack];
-        let ch = ch_index(&app.state, 0).expect("row 0");
-        let ps = per_step(&app.state);
+        let ch = ch_index(&app.state.session, 0).expect("row 0");
+        let ps = per_step(&app.state.session);
         let n = app.state.pattern();
-        crate::patterns::pat_mut(&mut app.state, n).notes = on.iter().map(|&k| Note::step(ch, k * ps)).collect();
+        crate::patterns::pat_mut(&mut app.state.session, n).notes = on.iter().map(|&k| Note::step(ch, k * ps)).collect();
         app.paint(c, None);
         app
     }
 
     /// Row 0's steps that are on among the first 16.
     fn steps(app: &App) -> Vec<u32> {
-        let (ch, ps) = (ch_index(&app.state, 0).expect("row 0"), per_step(&app.state));
+        let (ch, ps) = (ch_index(&app.state.session, 0).expect("row 0"), per_step(&app.state.session));
         let notes = app.state.session.project.pattern(app.state.pattern()).map(|p| p.notes.clone()).unwrap_or_default();
         (0..16).filter(|&k| step_on(&notes, ch, k, ps)).collect()
     }
@@ -5007,7 +5007,7 @@ mod tests {
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 282240]).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
         let src = os_model::ClipSource::Channel(app.state.session.project.channels.last().unwrap().index);
-        let len = |app: &App| pl::clips(&app.state).iter().find(|c| c.source == src).map(|c| c.length);
+        let len = |app: &App| pl::clips(&app.state.session).iter().find(|c| c.source == src).map(|c| c.length);
         // 6.4 s at 130 BPM, PPQ 96 (ui/playlist.md §9c); at 120 BPM 1229 ticks.
         pl::fit_audio(&mut app.state);
         assert_eq!(len(&app), Some(1331));

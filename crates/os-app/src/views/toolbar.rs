@@ -484,7 +484,7 @@ fn time(ui: &mut Ui, c: &Ctx) {
     let secs = f.tick / ppq * 60.0 / s.session.project.tick_tempo(s.tempo().max(1.0));
     let ticks96 = f.tick * 96.0 / ppq;
     // The bars count from the Start marker's bar (spec: ui/playlist.md §7a, ui/performance-mode.md §1).
-    let start = crate::playlist::start_marker(s).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);
+    let start = crate::playlist::start_marker(&s.session).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);
     let (bar, step, tick) = match start {
         Some(z) => s.clock.bars_from(ticks96, (f64::from(z) * 96.0 / ppq / 384.0).floor() * 384.0, sig),
         None => {
@@ -871,7 +871,7 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
     ui.c.fill_rrect(prev, if lemon { 4.0 } else { 2.0 }, t.button);
     icons::draw(ui.c, Icon::ArrowRight, prev.inset(2.0), t.glyph);
     let pb = a.span(855.0, 948.0, 47.0, 76.0);
-    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(s, s.pattern().max(1)));
+    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(&s.session, s.pattern().max(1)));
     if lemon {
         os_ui::kit::lemon::well(ui.c, t, pb, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
     } else {

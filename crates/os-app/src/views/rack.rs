@@ -64,7 +64,7 @@ pub fn base_w(s: &State) -> f32 {
 /// Smallest width (Lemon Studio's; FL's is 4 steps, §5): four beats of the project's signature, and never under the
 /// default 16 steps, below which the title bar's right group runs into the speaker and the "Instrument rack" title.
 pub fn min_w(s: &State) -> f32 {
-    let steps = (4 * rk::beat_steps(s)).max(16);
+    let steps = (4 * rk::beat_steps(&s.session)).max(16);
     base_w(s) + STEP_W * (steps - 1) as f32
 }
 
@@ -131,7 +131,7 @@ impl RowPos {
 
 pub fn layout(s: &State) -> Vec<RowPos> {
     let mut y = PAD + 2.0;
-    rk::shown(s)
+    rk::shown(&s.session)
         .into_iter()
         .map(|row| {
             let zipped = s.session.project.channels.get(row).is_some_and(|c| c.rack.zipped);
@@ -192,7 +192,7 @@ pub fn step_at(s: &State, x: f32) -> Option<u32> {
 /// Horizontal step scroll in pixels.
 fn sx(s: &State) -> f32 {
     let shown = visible_steps(s);
-    let total = rk::pattern_steps(s).max(shown) + 256;
+    let total = rk::pattern_steps(&s.session).max(shown) + 256;
     s.rack_scroll_x.clamp(0.0, ((total - shown) as f32 * STEP_W).max(0.0))
 }
 
@@ -217,8 +217,8 @@ pub fn graph_rect(s: &State) -> Option<Rect> {
 /// The columns of the steps playing at ticks `a` and `b` in pattern mode, when they differ: lit steps down the
 /// column and the footer marker (§16) are all that a new step changes.
 pub fn step_columns(s: &State, a: f64, b: f64) -> Vec<Rect> {
-    let per_step = f64::from(rk::per_step(s).max(1));
-    let len = rk::pattern_steps(s).max(1);
+    let per_step = f64::from(rk::per_step(&s.session).max(1));
+    let len = rk::pattern_steps(&s.session).max(1);
     let step = |t: f64| (t / per_step).floor().max(0.0) as u32 % len;
     let (ka, kb) = (step(a), step(b));
     if ka == kb {
@@ -290,12 +290,12 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let rows_clip = if vbar { Rect::span(inner.x, inner.right() - 11.0, inner.y, inner.bottom()) } else { inner };
     let scroll = scroll(s);
     let steps_shown = visible_steps(s);
-    let len = rk::pattern_steps(s);
+    let len = rk::pattern_steps(&s.session);
     let sx = sx(s);
     let total_steps = len.max(steps_shown) + 256;
     let first_step = (sx / STEP_W).floor() as u32;
-    let per_step = rk::per_step(s);
-    let (group, bars) = (rk::beat_steps(s), rk::pattern_bars(s, len * per_step));
+    let per_step = rk::per_step(&s.session);
+    let (group, bars) = (rk::beat_steps(&s.session), rk::pattern_bars(&s.session, len * per_step));
     let pat = s.session.project.pattern(s.pattern());
     let notes: &[os_model::Note] = pat.map_or(&[], |p| &p.notes);
     // Playback position (pattern mode): the current step (§16).
@@ -477,8 +477,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
             }
             let tc = if !has { t.text_dim.shade(-0.3) } else if lhov { t.glyph } else { t.text_dim.shade(0.08) };
             // Advanced looping's words ("Beat") take a smaller font to fit.
-            let txt = rk::loop_box_text(s, i);
-            let font = if rk::advanced(s) { Font::new(10) } else { Font::new(13) };
+            let txt = rk::loop_box_text(&s.session, i);
+            let font = if rk::advanced(&s.session) { Font::new(10) } else { Font::new(13) };
             ui.c.text_center(font, lb, tc, &txt);
         }
     }
@@ -604,7 +604,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         ui.c.fill_rect_gradient(bx.inset(1.0), ui.t.s(0x35393b), ui.t.s(0x2f3335), 3.0);
     }
     let lc = if bhov { ui.t.tx(0xffffff) } else { ui.t.tx(0xa7adb0) };
-    match rk::explicit_len(s) {
+    match rk::explicit_len(&s.session) {
         None => {
             for k in 0..3 {
                 ui.c.fill_rect(Rect::new(r - 116.0 + 3.0 * k as f32, y + 14.0, 2.0, 1.0), lc);
@@ -619,17 +619,17 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let green = ui.t.a(0x8fd14a);
     if lemon {
         // Lemon: toggles are lit rounded squares with dark glyphs.
-        if rk::loop_mode(s) {
+        if rk::loop_mode(&s.session) {
             lk::lit_in(ui.c, ui.t, lr, lk::r_btn(t), lhov);
         } else if lhov {
             ui.c.fill_rrect(lr, lk::r_btn(t), t.button_hi);
         }
-        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(s) { lk::ink_on_lit(ui.t) } else { t.glyph });
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(&s.session) { lk::ink_on_lit(ui.t) } else { t.glyph });
     } else {
-        if rk::loop_mode(s) || lhov {
-            ui.c.stroke_rrect(lr, 3.0, 1.0, if rk::loop_mode(s) { green } else { t.glyph.shade(-0.3) });
+        if rk::loop_mode(&s.session) || lhov {
+            ui.c.stroke_rrect(lr, 3.0, 1.0, if rk::loop_mode(&s.session) { green } else { t.glyph.shade(-0.3) });
         }
-        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(s) { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(&s.session) { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
     }
     // Graph editor (§7, §14): blue outline when on.
     let gx = r - 58.0;
@@ -728,15 +728,15 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
     let (Some(g), Some(bars)) = (graph_rect(s), graph_bars(s)) else { return };
     let t = ui.t;
     let tab = s.rack.graph_tab;
-    let ps = rk::per_step(s);
+    let ps = rk::per_step(&s.session);
     ui.c.fill_rect(g, ui.t.s(0x15181a));
     ui.c.stroke_rrect(g, 0.0, 1.0, ui.t.s(0x0c0e0f));
     ui.hit(g, Action::Swallow, "");
     let ch = s.session.project.channels.get(s.selected_channel).map(|c| c.index);
-    let notes = rk::row_notes(s, s.selected_channel);
+    let notes = rk::row_notes(&s.session, s.selected_channel);
     ui.c.push_clip(bars);
     let x0 = s.rack_pos.0 + cols(s).step_x;
-    let group = rk::beat_steps(s);
+    let group = rk::beat_steps(&s.session);
     for k in first..first + shown + 1 {
         let cx = x0 + STEP_W * k as f32 - sx;
         let col = Rect::new(cx - 1.0, bars.y, STEP_W, bars.h);

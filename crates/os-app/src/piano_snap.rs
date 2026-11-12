@@ -53,11 +53,11 @@ fn targets(s: &State, skip: &[usize]) -> Vec<u32> {
     match s.piano.snap {
         EditorSnap::Events => {
             let ch = piano::channel(s);
-            piano::notes(s)
+            piano::notes(&s.session)
                 .iter()
                 .enumerate()
                 .filter(|&(i, n)| !skip.contains(&i) && (s.piano.ghosts || Some(n.channel) == ch))
-                .flat_map(|(_, n)| [n.position, n.position + piano::shown_len(s, n)])
+                .flat_map(|(_, n)| [n.position, n.position + piano::shown_len(&s.session, n)])
                 .collect()
         }
         EditorSnap::Markers => s.session.project.pattern(s.pattern()).map_or(Vec::new(), |p| p.markers.iter().map(|m| m.position).collect()),

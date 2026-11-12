@@ -304,7 +304,7 @@ impl PluginSide {
             // A container's effect has no name of its own (a preset renames nothing).
             None if key >= crate::plugins::MEMBER_KEY => None,
             None => s.session.project.channels[key].name.clone(),
-            Some((t, k)) => crate::mixer::slot_label(s, t, k),
+            Some((t, k)) => crate::mixer::slot_label(&s.session, t, k),
         })
     }
 
@@ -313,7 +313,7 @@ impl PluginSide {
         let Some(key) = owner_key(s, owner).filter(|&k| k < crate::plugins::MEMBER_KEY) else { return };
         match crate::plugins::fx_of(key) {
             None => s.session.project.get_mut().channels[key].name = self.name.clone(),
-            Some((t, k)) => crate::mixer::set_slot_label(s, t, k, self.name.clone()),
+            Some((t, k)) => crate::mixer::set_slot_label(&mut s.session, t, k, self.name.clone()),
         }
     }
 }
@@ -827,7 +827,7 @@ impl Command {
             }
 
             Command::AddTrack { at } => {
-                let last = crate::mixer::inserts(s) + 1;
+                let last = crate::mixer::inserts(&s.session) + 1;
                 if at.is_some_and(|a| a == 0 || a > last) {
                     return Err(format!("a new track goes at 1..={last}"));
                 }
@@ -887,7 +887,7 @@ impl Command {
                     return Err("a track can't send to itself".into());
                 }
                 let level = level.map(|v| unit("level", v, 0.0, 1.0)).transpose()?;
-                if level.is_some() && crate::mixer::makes_loop(s, a, b) {
+                if level.is_some() && crate::mixer::makes_loop(&s.session, a, b) {
                     return Err("that route would make a loop".into());
                 }
                 let place = track_place(&s.session.project, from)?;
@@ -976,7 +976,7 @@ impl Command {
             Command::AddPattern { name, color } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;
                 let n = s.session.project.patterns.iter().map(|p| p.number).max().unwrap_or(0) + 1;
-                let p = crate::patterns::pat_mut(s, n);
+                let p = crate::patterns::pat_mut(&mut s.session, n);
                 p.name = name.as_deref().and_then(text);
                 p.color = color.flatten();
                 let place = s.session.project.patterns.iter().position(|p| p.number == n).unwrap_or(0);
@@ -1045,18 +1045,18 @@ impl Command {
                 // Else the source's own length, as a clip placed in the playlist gets.
                 let length = length.filter(|&l| l > 0).unwrap_or_else(|| crate::playlist::source_len(s, source));
                 let sel = selected_clips(s);
-                let a = crate::playlist::arr_mut(s);
+                let a = crate::playlist::arr_mut(&mut s.session);
                 let at = a.clips.partition_point(|c| c.position <= position);
                 a.clips.insert(at, Clip::new(position, length, track - 1, source));
                 s.session.control.settle(s.session.project.get_mut());
-                let id = crate::playlist::clips(s)[at].id;
+                let id = crate::playlist::clips(&s.session)[at].id;
                 reselect_clips(s, &sel);
                 Ok(id_result("clip", id))
             }
             Command::DeleteClip { clip } => {
                 let i = clip_place(&s.session.project, clip)?;
                 let sel = selected_clips(s);
-                crate::playlist::arr_mut(s).clips.remove(i);
+                crate::playlist::arr_mut(&mut s.session).clips.remove(i);
                 reselect_clips(s, &sel);
                 none
             }
@@ -1071,7 +1071,7 @@ impl Command {
                     return Err("a clip's length can't be 0".into());
                 }
                 let sel = selected_clips(s);
-                let a = crate::playlist::arr_mut(s);
+                let a = crate::playlist::arr_mut(&mut s.session);
                 let mut c = a.clips.remove(i);
                 c.position = position.unwrap_or(c.position);
                 c.track = track.map_or(c.track, |t| t - 1);
@@ -1087,7 +1087,7 @@ impl Command {
                 if track == 0 || track > crate::playlist::TRACKS {
                     return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
                 }
-                let t = &mut crate::playlist::arr_mut(s).tracks[usize::from(track - 1)];
+                let t = &mut crate::playlist::arr_mut(&mut s.session).tracks[usize::from(track - 1)];
                 if let Some(n) = name {
                     t.name = text(&n);
                 }
@@ -1208,7 +1208,7 @@ fn restore(s: &mut State, side: Side) {
     if numbers(&s.session.project) == patterns_before {
         s.set_pattern(shown);
     }
-    let tracks = crate::mixer::inserts(s);
+    let tracks = crate::mixer::inserts(&s.session);
     s.selected_mixer = s.selected_mixer.min(tracks);
     s.mixer.sel.retain(|&t| t <= tracks);
     reselect_clips(s, &sel_clips);
@@ -1251,12 +1251,12 @@ impl Mutes {
 
 /// The playlist's selected clips by id (an edit that moves clips in the list keeps them selected).
 fn selected_clips(s: &State) -> Vec<u32> {
-    let clips = crate::playlist::clips(s);
+    let clips = crate::playlist::clips(&s.session);
     s.playlist.sel.iter().filter_map(|&i| clips.get(i).map(|c| c.id.0)).collect()
 }
 
 fn reselect_clips(s: &mut State, ids: &[u32]) {
-    let clips = crate::playlist::clips(s);
+    let clips = crate::playlist::clips(&s.session);
     let sel: Vec<usize> = clips.iter().enumerate().filter(|(_, c)| ids.contains(&c.id.0)).map(|(i, _)| i).collect();
     s.playlist.sel = sel;
     s.playlist.hover_clip = None;

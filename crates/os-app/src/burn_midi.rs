@@ -686,7 +686,7 @@ impl App {
         }
         let s = &self.state;
         let ch = &s.session.project.channels[row];
-        let name = crate::rack::channel_name(s, row);
+        let name = crate::rack::channel_name(&s.session, row);
         let (ppq, cur) = (s.session.project.ppq.max(4), s.pattern().max(1));
         let src: Vec<Note> = s.session.project.pattern(cur).map(|p| p.notes.iter().filter(|n| n.channel == ch.index).copied().collect()).unwrap_or_default();
         if !src.iter().any(|n| !n.muted() && !n.slide()) {
@@ -712,8 +712,8 @@ impl App {
         let count = notes.iter().filter(|n| !n.muted() && !n.slide()).count();
         let msg = crate::control::edit_app(self, STEP, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
-            let to = if new { crate::patterns::next_empty(s, cur) } else { cur };
-            let p = crate::patterns::pat_mut(s, to);
+            let to = if new { crate::patterns::next_empty(&s.session, cur) } else { cur };
+            let p = crate::patterns::pat_mut(&mut s.session, to);
             if new {
                 p.notes.extend(notes.iter().filter(|n| !n.muted() && !n.slide()).copied());
             } else {
@@ -727,7 +727,7 @@ impl App {
             m.echo.feed = 0.0;
             s.set_pattern(to);
             s.session.dirty = true;
-            if new { format!("{count} notes of {name} burnt to {}", crate::patterns::name_of(s, to)) } else { format!("{count} notes of {name} burnt") }
+            if new { format!("{count} notes of {name} burnt to {}", crate::patterns::name_of(&s.session, to)) } else { format!("{count} notes of {name} burnt") }
         });
         self.invalidate();
         Some(msg)
@@ -843,7 +843,7 @@ mod tests {
         let (a, b) = (app.state.session.project.channels[0].index, app.state.session.project.channels[1].index);
         let cur = app.state.pattern().max(1);
         app.state.set_pattern(cur);
-        let p = crate::patterns::pat_mut(&mut app.state, cur);
+        let p = crate::patterns::pat_mut(&mut app.state.session, cur);
         p.notes = notes.iter().map(|n| Note { channel: a, ..*n }).collect();
         p.notes.push(Note::step(b, 0));
         app
@@ -882,7 +882,7 @@ mod tests {
         let e = &mut app.state.session.project.get_mut().channels[0].misc.echo;
         (e.feed, e.echoes, e.time, e.pitch) = (0.25, 2, 48.0 / 384.0, 100.0 / 1200.0);
         let cur = app.state.pattern();
-        let to = crate::patterns::next_empty(&app.state, cur);
+        let to = crate::patterns::next_empty(&app.state.session, cur);
         assert_ne!(to, cur);
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, true));
         assert_eq!(app.state.pattern(), to, "the new pattern is the current one");
@@ -1013,7 +1013,7 @@ mod tests {
         // With the channel's arpeggiator on, the plugin is played the arpeggio.
         (app.state.session.project.get_mut().channels[0].misc.arp.direction, app.state.session.project.get_mut().channels[0].misc.arp.chord) = (1, 1);
         let ch = app.state.session.project.channels[0].index;
-        crate::patterns::pat_mut(&mut app.state, cur).notes.retain(|n| n.position == 0 || n.channel != ch);
+        crate::patterns::pat_mut(&mut app.state.session, cur).notes.retain(|n| n.position == 0 || n.channel != ch);
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false));
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 24, 67), (24, 24, 71)]);
         assert_eq!(app.state.session.project.channels[0].misc.arp.direction, 0);

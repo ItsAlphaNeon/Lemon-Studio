@@ -520,8 +520,8 @@ pub fn shortcut_now(item: &Item) -> &'static str {
 /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
 pub fn label_now(s: &State, menu: usize, item: &Item) -> std::borrow::Cow<'static, str> {
     match (menu, item.label) {
-        (EDIT_MENU, "Undo") => crate::history::edit_label(s, false).into(),
-        (EDIT_MENU, "Redo") => crate::history::edit_label(s, true).into(),
+        (EDIT_MENU, "Undo") => crate::history::edit_label(&s.session, false).into(),
+        (EDIT_MENU, "Redo") => crate::history::edit_label(&s.session, true).into(),
         (TOOLS_MENU, LOGGER_HEAD) => format!("{LOGGER_HEAD} (memory used: {}MB)", crate::audio_log::memory_mb()).into(),
         _ => label_of(menu, item),
     }
@@ -530,7 +530,7 @@ pub fn label_now(s: &State, menu: usize, item: &Item) -> std::borrow::Cow<'stati
 /// Whether an entry is in its menu now: EDIT's Redo only with Alternate undo mode on and a history to act on (spec:
 /// ui/menus.md "EDIT": only Undo while the history is empty).
 pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
-    !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(s)
+    !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(&s.session)
 }
 
 /// Whether an entry can be chosen now: it works (`works`), EDIT's have a step to act on, the project file rows
@@ -538,7 +538,7 @@ pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
 /// clipboard to browser audio.
 pub fn active(s: &State, menu: usize, item: &Item) -> bool {
     works(menu, item)
-        && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo"))
+        && (menu != EDIT_MENU || crate::history::edit_enabled(&s.session, item.label == "Redo"))
         && (s.session.path.is_some() || !needs_file(menu, item.label))
         && (!matches!(item.cmd, MenuCmd::SaveMidiClip) || !s.piano.clipboard.is_empty())
         && (!matches!(item.cmd, MenuCmd::SaveAudioClip) || crate::audio_clipboard::has_audio())
@@ -741,7 +741,7 @@ pub fn bar_model(s: &State) -> Vec<BarMenu> {
                 if mi == PATTERNS && ci == 0 {
                     for n in crate::patterns::listed(s) {
                         let mark = Mark::Radio(n == s.pattern());
-                        rows.push(BarRow { kind: Kind::Item, label: crate::patterns::name_of(s, n), shortcut: "", enabled: true, mark, pick: Some((mi, PATTERN_PICK + n as usize)) });
+                        rows.push(BarRow { kind: Kind::Item, label: crate::patterns::name_of(&s.session, n), shortcut: "", enabled: true, mark, pick: Some((mi, PATTERN_PICK + n as usize)) });
                     }
                 }
                 for (i, item) in items.iter().enumerate() {
@@ -806,7 +806,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     // Pattern list column: one row per project pattern (spec: ui/menus.md, PATTERNS).
     // spec: ui/pattern-menu.md §2: only used patterns, the column as wide as the longest name.
     let pats: Vec<(u16, String)> = if menu == PATTERNS {
-        crate::patterns::listed(s).into_iter().map(|n| (n, crate::patterns::name_of(s, n))).collect()
+        crate::patterns::listed(s).into_iter().map(|n| (n, crate::patterns::name_of(&s.session, n))).collect()
     } else {
         Vec::new()
     };

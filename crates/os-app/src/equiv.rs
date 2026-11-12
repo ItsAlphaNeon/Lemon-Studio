@@ -139,10 +139,10 @@ fn side(app: &App) -> String {
     // Since step 5 a channel's own (`rack.locked`); read the same way as when the rack kept the rows.
     f("locked", &crate::rack::locked_rows(&s.session.project));
     // Since step 5 the shown pattern's (`rack::loop_mode` and the rest), read as the rack held them.
-    f("loop_mode", &crate::rack::loop_mode(s));
-    f("loop_len", &crate::rack::loop_lens(s));
-    f("loop_unit", &crate::rack::loop_units(s));
-    f("loop_type", &crate::rack::loop_type(s));
+    f("loop_mode", &crate::rack::loop_mode(&s.session));
+    f("loop_len", &crate::rack::loop_lens(&s.session));
+    f("loop_unit", &crate::rack::loop_units(&s.session));
+    f("loop_type", &crate::rack::loop_type(&s.session));
     f("unsorted_at", &unsorted);
     out
 }
