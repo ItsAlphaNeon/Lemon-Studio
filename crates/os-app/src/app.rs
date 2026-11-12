@@ -10101,16 +10101,22 @@ fn same_as_saved(saved: &Project, now: &Project) -> bool {
             (y.rack.locked, y.rack.group) = (x.rack.locked, x.rack.group);
         }
     }
+    // A pattern made only to hold loop settings (loop mode switched on in an empty one) is no unsaved change either.
+    let loops_only = |q: &os_model::Pattern| {
+        (!q.loops.is_empty() || q.loop_mode.is_some())
+            && q.notes.is_empty()
+            && q.controls.is_empty()
+            && q.name.is_none()
+            && q.color.is_none()
+            && q.length.is_none()
+            && q.markers.is_empty()
+    };
+    now.patterns.retain(|q| saved.pattern(q.number).is_some() || !loops_only(q));
     // Loop mode, type and points: steps of their own in FL, but no unsaved change.
     for q in &mut now.patterns {
         let (loops, mode) = saved.pattern(q.number).map_or((Vec::new(), None), |x| (x.loops.clone(), x.loop_mode));
         (q.loops, q.loop_mode) = (loops, mode);
     }
-    // A pattern made only to hold loop settings (loop mode switched on in an empty one) is none either.
-    let bare = |q: &os_model::Pattern| {
-        q.notes.is_empty() && q.controls.is_empty() && q.name.is_none() && q.color.is_none() && q.length.is_none() && q.markers.is_empty()
-    };
-    now.patterns.retain(|q| saved.pattern(q.number).is_some() || !bare(q));
     *saved == now
 }
 
