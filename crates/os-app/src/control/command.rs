@@ -359,18 +359,13 @@ impl Settings {
     }
 }
 
-/// The whole project with the state of it the interface holds: the tempo and the rack's loops.
+/// The whole project, the pattern shown, and the loop type the rack remembers while loop mode is off.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Side {
     pub project: Project,
     pub tempo: f64,
     pub pattern: u16,
-    pub loop_len: std::collections::BTreeMap<usize, u32>,
-    /// Advanced looping's loop points by row, beside the loop lengths.
-    pub loop_unit: std::collections::BTreeMap<usize, crate::rack::LoopUnit>,
-    /// Loop mode and type, which say with the lengths what `pattern`'s loops are.
-    pub loop_mode: bool,
-    pub loop_type: u8,
+    pub loop_type: (u8, u16),
 }
 
 impl Side {
@@ -380,10 +375,7 @@ impl Side {
             project: s.project.clone(),
             tempo: s.tempo(),
             pattern: s.pattern(),
-            loop_len: r.loop_len.clone(),
-            loop_unit: r.loop_unit.clone(),
-            loop_mode: r.loop_mode,
-            loop_type: r.loop_type,
+            loop_type: (r.loop_type, r.type_of),
         }
     }
 }
@@ -1201,7 +1193,7 @@ fn restore(s: &mut State, side: Side) {
     let sel_clips = selected_clips(s);
     let new_row: std::collections::HashMap<u32, usize> = side.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
-    let Side { project, tempo, pattern, loop_len, loop_unit, loop_mode, loop_type } = side;
+    let Side { project, tempo, pattern, loop_type } = side;
     let shown = s.pattern();
     let numbers = |p: &Project| p.patterns.iter().map(|q| q.number).collect::<std::collections::BTreeSet<_>>();
     let patterns_before = numbers(&s.project);
@@ -1211,18 +1203,12 @@ fn restore(s: &mut State, side: Side) {
     s.set_tempo(tempo);
     s.set_pattern(pattern);
     crate::rack::remap_ui(s, &map);
-    let now = s.pattern();
-    let r = &mut s.rack;
-    (r.loop_len, r.loop_unit) = (loop_len, loop_unit);
-    (r.loop_mode, r.loop_type) = (loop_mode, loop_type);
-    // The loops put back are those of the pattern shown when the step was made. The pattern shown now stays shown, as
-    // in FL (an undo leaves the pattern shown), and gets its own loops; a step that made or removed patterns (a clone,
-    // a delete) shows the pattern it showed.
-    r.loops_of = now;
+    (s.rack.loop_type, s.rack.type_of) = loop_type;
+    // The pattern shown now stays shown, as in FL (an undo leaves the pattern shown); a step that made or removed
+    // patterns (a clone, a delete) shows the pattern it showed. Each pattern's loops are its own, put back with it.
     if numbers(&s.project) == patterns_before {
         s.set_pattern(shown);
     }
-    crate::rack::follow_pattern(s);
     let tracks = crate::mixer::inserts(s);
     s.selected_mixer = s.selected_mixer.min(tracks);
     s.mixer.sel.retain(|&t| t <= tracks);

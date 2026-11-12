@@ -619,17 +619,17 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let green = ui.t.a(0x8fd14a);
     if lemon {
         // Lemon: toggles are lit rounded squares with dark glyphs.
-        if s.rack.loop_mode {
+        if rk::loop_mode(s) {
             lk::lit_in(ui.c, ui.t, lr, lk::r_btn(t), lhov);
         } else if lhov {
             ui.c.fill_rrect(lr, lk::r_btn(t), t.button_hi);
         }
-        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { lk::ink_on_lit(ui.t) } else { t.glyph });
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(s) { lk::ink_on_lit(ui.t) } else { t.glyph });
     } else {
-        if s.rack.loop_mode || lhov {
-            ui.c.stroke_rrect(lr, 3.0, 1.0, if s.rack.loop_mode { green } else { t.glyph.shade(-0.3) });
+        if rk::loop_mode(s) || lhov {
+            ui.c.stroke_rrect(lr, 3.0, 1.0, if rk::loop_mode(s) { green } else { t.glyph.shade(-0.3) });
         }
-        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(s) { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
     }
     // Graph editor (§7, §14): blue outline when on.
     let gx = r - 58.0;

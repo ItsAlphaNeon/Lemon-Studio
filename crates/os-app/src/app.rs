@@ -1878,7 +1878,6 @@ impl App {
                 // 216"); the project is opened with them, not changed.
                 crate::init::apply(s);
                 crate::project_info::opened(s);
-                crate::rack::from_model(s);
                 s.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
                 crate::templates::remember(&path);
@@ -2068,8 +2067,6 @@ impl App {
             p.song_mode.get_or_insert(false);
             unset
         });
-        // The loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
-        crate::rack::to_model(s);
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
         crate::playlist::store_view(s);
         if s.project != before {
@@ -2518,7 +2515,6 @@ impl App {
         s.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
         crate::playlist::load_view(s);
         s.rack.reset();
-        crate::rack::from_model(s);
         s.piano.dirty = true;
         s.message = Some("New project".into());
         self.mark_saved();
@@ -4316,9 +4312,6 @@ impl App {
     pub fn tick(&mut self) -> bool {
         // Things the interface added get their ids before anything looks them up (`control::ids`).
         let s = &mut self.state;
-        // The rack's loops follow the pattern shown: a file holds them per pattern (spec: flp/events/patterns.md "Loop
-        // lengths").
-        crate::rack::follow_pattern(s);
         let edited = s.piano.dirty || s.project.written_at().is_some();
         s.control.settle_tick(&mut s.project, edited);
         self.control_tick();
@@ -9442,7 +9435,7 @@ impl App {
             Action::RackLen => self.drag = Some(Drag::RackLen { y0: mouse.1, v0: rk::len_value(&self.state) }),
             Action::RackLoop => {
                 let s = &mut self.state;
-                rk::relayout(s, |s| s.rack.loop_mode = !s.rack.loop_mode);
+                rk::relayout(s, |s| rk::set_loop_mode(s, !rk::loop_mode(s)));
                 s.piano.dirty = true;
             }
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,

@@ -227,16 +227,11 @@ pub struct RackUi {
     pub auto_resize: AutoResize,
     pub graph_open: bool,
     pub graph_tab: Tab,
-    pub loop_mode: bool,
-    /// Per-channel loop length in steps (§15).
-    pub loop_len: BTreeMap<usize, u32>,
-    /// Advanced looping's loop points (§15, loop type 2): a row with one loops at the end of its last used step, beat
-    /// or bar; a row without one does not loop.
-    pub loop_unit: BTreeMap<usize, LoopUnit>,
-    /// The pattern `loop_len`, `loop_mode` and `loop_type` belong to: the one shown when they were last loaded.
-    /// [`follow_pattern`] stores them into it and loads the shown one's when another is shown.
-    pub loops_of: u16,
+    /// The loop type last chosen while loop mode was off, and the pattern it was chosen in (FL keeps it in memory, not
+    /// in the file: [`loop_type`]). Loop mode, the type while it is on, and the rows' lengths and loop points are the
+    /// pattern's ([`loop_mode`], [`loop_lens`], [`loop_units`]).
     pub loop_type: u8,
+    pub type_of: u16,
     /// Steps copied by Cut / Copy: the copied channels' notes of the pattern, a row each (§11).
     pub clipboard: Option<Vec<Vec<Note>>>,
     /// Copied knob value (knob menu, §19).
@@ -303,12 +298,8 @@ impl Default for RackUi {
             auto_resize: AutoResize::Min,
             graph_open: false,
             graph_tab: Tab::Vel,
-            loop_mode: false,
-            loop_len: BTreeMap::new(),
-            loop_unit: BTreeMap::new(),
-            // The pattern a new project shows (`State`'s `pattern`).
-            loops_of: 1,
             loop_type: 0,
+            type_of: 0,
             clipboard: None,
             opts: [COMPLETE_PREVIEW, PREVIEW_MUTE].into_iter().collect(),
             pending_delete: None,
@@ -349,8 +340,6 @@ impl RackUi {
         self.sel = set(&self.sel);
         self.soloed = self.soloed.and_then(m);
         self.pre_solo = None; // rows renumbered: unsolo turns everything on
-        self.loop_len = self.loop_len.iter().filter_map(|(&r, &l)| m(r).map(|n| (n, l))).collect();
-        self.loop_unit = self.loop_unit.iter().filter_map(|(&r, &u)| m(r).map(|n| (n, u))).collect();
         for l in &mut self.note_lock {
             *l = l.and_then(m);
         }
@@ -699,7 +688,7 @@ pub fn len_value(s: &State) -> u32 {
 
 /// A row's own length in steps: its loop length in loop mode, else the pattern length (§15).
 pub fn row_len(s: &State, r: usize) -> u32 {
-    if !s.rack.loop_mode {
+    if !loop_mode(s) {
         return pattern_steps(s);
     }
     if advanced(s) {
@@ -712,7 +701,7 @@ pub fn row_len(s: &State, r: usize) -> u32 {
 fn unit_len(s: &State, r: usize) -> Option<u32> {
     let notes = s.project.pattern(s.pattern()).map_or(&[][..], |p| &p.notes[..]);
     // A loop point, else a length of steps (FL's Advanced looping takes both).
-    unit_steps(s, notes, ch_index(s, r)?, s.rack.loop_unit.get(&r).copied()).or_else(|| s.rack.loop_len.get(&r).copied())
+    unit_steps(s, notes, ch_index(s, r)?, loop_unit_of(s, r)).or_else(|| loop_len_of(s, r))
 }
 
 /// Advanced looping's loop point (§7 Loop type, §15; the original's manual: a row plays to the end of its last used
@@ -748,7 +737,7 @@ impl LoopUnit {
 
 /// Whether the loop type is Advanced looping.
 pub fn advanced(s: &State) -> bool {
-    s.rack.loop_type == 2
+    loop_type(s) == 2
 }
 
 /// The loop length, in steps, of channel `ch` among `notes` with loop point `unit`: its last used step (a note covers
@@ -762,19 +751,19 @@ fn unit_steps(s: &State, notes: &[Note], ch: u16, unit: Option<LoopUnit>) -> Opt
 
 /// The rows that loop: those with a loop point under Advanced looping, else those with a loop length.
 fn loop_rows(s: &State) -> Vec<usize> {
-    if advanced(s) { s.rack.loop_unit.keys().chain(s.rack.loop_len.keys()).copied().collect::<BTreeSet<usize>>().into_iter().collect() } else { s.rack.loop_len.keys().copied().collect() }
+    if advanced(s) { loop_units(s).into_keys().chain(loop_lens(s).into_keys()).collect::<BTreeSet<usize>>().into_iter().collect() } else { loop_lens(s).into_keys().collect() }
 }
 
 /// What row `r`'s loop box shows: the loop length, or under Advanced looping its loop point ("···" for none).
 pub fn loop_box_text(s: &State, r: usize) -> String {
-    if advanced(s) { s.rack.loop_unit.get(&r).map_or("···", |u| u.name()).to_string() } else { loop_box_len(s, r).to_string() }
+    if advanced(s) { loop_unit_of(s, r).map_or("···", |u| u.name()).to_string() } else { loop_box_len(s, r).to_string() }
 }
 
 /// The value a loop box's wheel and drag start from: the loop length, or under Advanced looping the loop point's place
 /// in [`LOOP_UNITS`].
 pub fn loop_box_value(s: &State, r: usize) -> i32 {
     if advanced(s) {
-        let u = s.rack.loop_unit.get(&r).copied();
+        let u = loop_unit_of(s, r);
         LOOP_UNITS.iter().position(|&x| x == u).unwrap_or(0) as i32
     } else {
         loop_box_len(s, r) as i32
@@ -788,17 +777,17 @@ pub fn set_loop_box(s: &mut State, r: usize, v: i32) -> String {
     if advanced(s) {
         match LOOP_UNITS[v.clamp(0, LOOP_UNITS.len() as i32 - 1) as usize] {
             Some(u) => {
-                s.rack.loop_unit.insert(r, u);
+                put_loop(s, r, Some(unit_code(u)));
                 format!("Loop point: {}", u.name())
             }
             None => {
-                s.rack.loop_unit.remove(&r);
+                put_loop(s, r, None);
                 "Loop point: don't loop".into()
             }
         }
     } else {
         let v = v.clamp(1, MAX_STEPS as i32) as u32;
-        s.rack.loop_len.insert(r, v);
+        put_loop(s, r, Some(v));
         format!("Loop point: {v} steps")
     }
 }
@@ -806,7 +795,7 @@ pub fn set_loop_box(s: &mut State, r: usize, v: i32) -> String {
 /// What a row's loop box shows and its wheel and drag start from: the row's loop length, else the pattern length; also
 /// with loop mode off, where the boxes show while "Always show advanced controls" is ticked (§15).
 pub fn loop_box_len(s: &State, r: usize) -> u32 {
-    s.rack.loop_len.get(&r).copied().unwrap_or_else(|| pattern_steps(s)).max(1)
+    loop_len_of(s, r).unwrap_or_else(|| pattern_steps(s)).max(1)
 }
 
 /// Loop options ▸ Always show advanced controls (§7; the original's manual: the looping controls stay visible with
@@ -882,7 +871,7 @@ pub fn scroll_to_row(s: &mut State, r: usize) -> bool {
 
 /// Whether the rows show their loop boxes: in loop mode, or with Always show advanced controls ticked (§15).
 pub fn loop_boxes(s: &State) -> bool {
-    s.rack.loop_mode || s.rack.opts.contains(ALWAYS_ADVANCED)
+    loop_mode(s) || s.rack.opts.contains(ALWAYS_ADVANCED)
 }
 
 /// Channel index (note `channel`) of row `r`.
@@ -2139,7 +2128,7 @@ fn receive_items(s: &State, r: usize) -> Vec<PItem> {
 fn burn_sel(s: &State) -> PItem {
     let i = it("Burn selected loops to pattern", RCmd::Burn(false));
     let rows = loop_rows(s);
-    if s.rack.loop_mode && s.rack.sel.iter().any(|r| rows.contains(r)) { i } else { i.off() }
+    if loop_mode(s) && s.rack.sel.iter().any(|r| rows.contains(r)) { i } else { i.off() }
 }
 
 /// The Automation / Remote control / Value groups shared by knob and LED menus (§19). `other` is the mixer box or the
@@ -2311,8 +2300,8 @@ pub fn length_menu(s: &State, x: f32, y: f32) -> Popup {
 
 /// Loop button right click (§7).
 pub fn loop_menu(s: &State, x: f32, y: f32) -> Popup {
-    let t = s.rack.loop_type;
-    let on = s.rack.loop_mode;
+    let t = loop_type(s);
+    let on = loop_mode(s);
     let burn = |label: &'static str, all: bool| if on { it(label, RCmd::Burn(all)) } else { it(label, RCmd::Burn(all)).off() };
     let items = vec![
         PItem::head("Loop type"),
@@ -2645,7 +2634,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::LoopType(t) => {
-            s.rack.loop_type = t;
+            set_loop_type(s, t);
             None
         }
         RCmd::Burn(all) => {
@@ -2866,7 +2855,7 @@ pub fn play_project(s: &State) -> Project {
     // The pattern shown: a song with no clips plays it (os-engine), not the one the project was opened or saved on.
     p.current_pattern = Some(s.pattern().max(1));
     let rows = loop_rows(s);
-    if s.rack.loop_mode && !rows.is_empty() {
+    if loop_mode(s) && !rows.is_empty() {
         expand_loops(&mut p, s, &rows);
     }
     crate::perform::apply(s, &mut p);
@@ -2882,7 +2871,8 @@ fn expand_loops(p: &mut Project, s: &State, rows: &[usize]) {
     for &r in rows {
         let Some(ch) = p.channels.get(r).map(|c| c.index) else { continue };
         for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
-            let len = if advanced(s) { unit_steps(s, &pat.notes, ch, s.rack.loop_unit.get(&r).copied()).or_else(|| s.rack.loop_len.get(&r).copied()) } else { s.rack.loop_len.get(&r).copied() };
+            // The shown pattern's lengths and loop points, in every pattern (as before; FL keeps them per pattern).
+            let len = if advanced(s) { unit_steps(s, &pat.notes, ch, loop_unit_of(s, r)).or_else(|| loop_len_of(s, r)) } else { loop_len_of(s, r) };
             let Some(len) = len else { continue };
             let span = len.max(1) * ps;
             let src: Vec<Note> = pat.notes.iter().filter(|n| n.channel == ch && n.position < span).copied().collect();
@@ -2911,8 +2901,7 @@ fn burn(s: &mut State, all: bool) {
         dst.notes = src.notes;
     }
     for r in rows {
-        s.rack.loop_len.remove(&r);
-        s.rack.loop_unit.remove(&r);
+        put_loop(s, r, None);
     }
     s.piano.dirty = true;
 }
@@ -3171,88 +3160,99 @@ fn length_of(v: u32) -> Option<u32> {
     (v != 0 && unit_of(v).is_none()).then_some(v)
 }
 
-/// The rack state of an opened (or new) project: loop lengths and loop mode from the current pattern (lock, zip,
-/// filter groups and the filter shown are the project's own).
-pub fn from_model(s: &mut State) {
-    load_loops(s);
+/// The shown pattern, where the rack's loops are.
+fn shown_pattern(s: &State) -> Option<&os_model::Pattern> {
+    s.project.pattern(s.pattern())
 }
 
-/// The shown pattern's loop lengths, loop points, loop type and loop mode into the rack (they are the pattern's, in the
-/// file: each channel's value, and the type while loop mode is on).
-fn load_loops(s: &mut State) {
-    let n = s.pattern();
-    let p = &s.project;
-    let rack = &mut s.rack;
-    rack.loops_of = n;
-    let pat = p.pattern(n);
-    let loops = pat.map(|p| p.loops.clone()).unwrap_or_default();
-    let row = |ch: u16| p.channels.iter().position(|c| c.index == ch);
-    rack.loop_len = loops.iter().filter_map(|&(ch, v)| Some((row(ch)?, length_of(v)?))).collect();
-    rack.loop_unit = loops.iter().filter_map(|&(ch, v)| Some((row(ch)?, unit_of(v)?))).collect();
-    let mode = pat.and_then(|p| p.loop_mode);
-    rack.loop_type = mode.map_or(0, loop_type_of);
-    rack.loop_mode = mode.is_some();
+/// Row `r`'s value in the shown pattern's loops (FL 24.1.1's form: a length, 0, or a loop point).
+fn loop_value(s: &State, r: usize) -> Option<u32> {
+    let ch = ch_index(s, r)?;
+    shown_pattern(s)?.loops.iter().find(|l| l.0 == ch).map(|l| l.1)
 }
 
-/// What a pattern's loops say, as `load_loops` reads them: the lengths and the loop points by channel, loop mode on
-/// with its type.
-fn loop_state(loops: &[(u16, u32)], mode: Option<u32>) -> (BTreeSet<(u16, u32)>, BTreeSet<(u16, u32)>, Option<u8>) {
-    let kind = mode.map(loop_type_of);
-    let lengths = loops.iter().filter(|&&(_, v)| length_of(v).is_some()).copied().collect();
-    // Under Loop all channels, Bar is what a looping channel without a length of its own says: the same as nothing.
-    let units = loops.iter().filter(|&&(_, v)| unit_of(v).is_some() && !(kind == Some(1) && v == os_model::Pattern::LOOP_BAR)).copied().collect();
-    (lengths, units, kind)
+/// Whether the shown pattern is in loop mode (§15).
+pub fn loop_mode(s: &State) -> bool {
+    shown_pattern(s).is_some_and(|p| p.loop_mode.is_some())
 }
 
-/// Writes the rack state into the project before a save (the inverse of [`from_model`]).
-pub fn to_model(s: &mut State) {
-    follow_pattern(s);
-    store_loops(s);
+/// The loop type (0 Loop step channels, 1 Loop all channels, 2 Advanced looping): the shown pattern's while loop mode
+/// is on, else the one last chosen in it (as FL, which keeps that in memory; another pattern shows Loop step channels).
+pub fn loop_type(s: &State) -> u8 {
+    match shown_pattern(s).and_then(|p| p.loop_mode) {
+        Some(code) => loop_type_of(code),
+        None if s.rack.type_of == s.pattern() => s.rack.loop_type,
+        None => 0,
+    }
 }
 
-/// When another pattern is shown than the one the rack's loops belong to: they go into theirs (unless it is gone),
-/// and the shown pattern's are loaded. Before, a save wrote them into whichever pattern was shown, over its own.
-pub(crate) fn follow_pattern(s: &mut State) {
-    let (shown, of) = (s.pattern(), s.rack.loops_of);
-    if shown == of {
+/// Row `r`'s loop length in steps (§15).
+pub fn loop_len_of(s: &State, r: usize) -> Option<u32> {
+    loop_value(s, r).and_then(length_of)
+}
+
+/// Row `r`'s Advanced looping loop point (Bar under Loop all channels is that type's "loops", not a point).
+pub fn loop_unit_of(s: &State, r: usize) -> Option<LoopUnit> {
+    loop_value(s, r).filter(|&v| !(loop_type(s) == 1 && v == os_model::Pattern::LOOP_BAR)).and_then(unit_of)
+}
+
+/// The rows' loop lengths.
+pub fn loop_lens(s: &State) -> BTreeMap<usize, u32> {
+    (0..s.project.channels.len()).filter_map(|r| Some((r, loop_len_of(s, r)?))).collect()
+}
+
+/// The rows' Advanced looping loop points.
+pub fn loop_units(s: &State) -> BTreeMap<usize, LoopUnit> {
+    (0..s.project.channels.len()).filter_map(|r| Some((r, loop_unit_of(s, r)?))).collect()
+}
+
+/// Row `r`'s value in the shown pattern set to `v` (`None`: none; under Loop all channels in loop mode, Bar, as FL
+/// writes a channel that loops). Only that row's value changes, so a pattern keeps the file's form elsewhere.
+fn put_loop(s: &mut State, r: usize, v: Option<u32>) {
+    let Some(ch) = ch_index(s, r) else { return };
+    let v = v.or((loop_mode(s) && loop_type(s) == 1).then_some(os_model::Pattern::LOOP_BAR));
+    if loop_value(s, r) == v {
         return;
     }
-    if s.project.pattern(of).is_some() {
-        s.set_pattern(of);
-        store_loops(s);
-        s.set_pattern(shown);
+    let n = s.pattern();
+    let pat = crate::patterns::pat_mut(s, n);
+    pat.loops.retain(|l| l.0 != ch);
+    if let Some(v) = v {
+        pat.loops.push((ch, v));
+        pat.loops.sort_by_key(|l| l.0);
     }
-    load_loops(s);
-    // Playback follows: the pattern's loops, and a song with no clips plays the pattern shown (`play_project`).
-    s.piano.dirty = true;
 }
 
-/// The rack's loop lengths, loop points, type and mode into the pattern they belong to (the shown one:
-/// `follow_pattern` first), in FL 24.1.1's form: each channel's loop point, else its length (under Loop all channels a
-/// channel without either loops at Bar, as FL writes it), and the type while loop mode is on.
-fn store_loops(s: &mut State) {
-    let n = s.pattern();
-    let rack = &s.rack;
-    let p = &s.project;
-    let all = rack.loop_mode && rack.loop_type == 1;
-    let loops: Vec<(u16, u32)> = p
-        .channels
-        .iter()
-        .enumerate()
-        .filter_map(|(r, c)| {
-            let v = rack.loop_unit.get(&r).map(|&u| unit_code(u)).or_else(|| rack.loop_len.get(&r).copied());
-            Some((c.index, v.or(all.then_some(os_model::Pattern::LOOP_BAR))?))
-        })
-        .collect();
-    let any = rack.loop_mode || !loops.is_empty();
-    let mode = rack.loop_mode.then(|| LOOP_TYPE_CODES[usize::from(rack.loop_type.min(2))]);
-    // A pattern whose loops already say what the rack holds is left as the file has it (its values for channels
-    // with neither, say).
-    let changed = p.pattern(n).map_or(any, |pat| loop_state(&pat.loops, pat.loop_mode) != loop_state(&loops, mode));
-    if changed {
-        let pat = crate::patterns::pat_mut(s, n);
-        pat.loops = loops;
-        pat.loop_mode = mode;
+/// Under Loop all channels in loop mode, every row without a value gets Bar (FL writes one for each channel).
+fn fill_all(s: &mut State) {
+    for r in 0..s.project.channels.len() {
+        if loop_value(s, r).is_none() {
+            put_loop(s, r, None);
+        }
+    }
+}
+
+/// The loop icon (§15): loop mode on or off in the shown pattern, its type written while it is on.
+pub fn set_loop_mode(s: &mut State, on: bool) {
+    if loop_mode(s) == on {
+        return;
+    }
+    let (n, t) = (s.pattern(), loop_type(s));
+    crate::patterns::pat_mut(s, n).loop_mode = on.then(|| LOOP_TYPE_CODES[usize::from(t.min(2))]);
+    if on && t == 1 {
+        fill_all(s);
+    }
+}
+
+/// The loop menu's Loop type (§7).
+pub fn set_loop_type(s: &mut State, t: u8) {
+    (s.rack.loop_type, s.rack.type_of) = (t, s.pattern());
+    if loop_mode(s) {
+        let n = s.pattern();
+        crate::patterns::pat_mut(s, n).loop_mode = Some(LOOP_TYPE_CODES[usize::from(t.min(2))]);
+        if t == 1 {
+            fill_all(s);
+        }
     }
 }
 
@@ -3327,18 +3327,15 @@ mod tests {
         let pat = crate::patterns::pat_mut(&mut a.state, 1);
         // FL 24.1.1's form: the type (2, Loop all channels) while loop mode is on.
         (pat.loops, pat.loop_mode) = (vec![(ch, follow)], Some(2));
-        from_model(&mut a.state);
-        assert!(a.state.rack.loop_mode && a.state.rack.loop_type == 1);
-        to_model(&mut a.state);
+        assert!(loop_mode(&a.state) && loop_type(&a.state) == 1);
         let p = a.state.project.pattern(1).expect("pattern 1");
         assert_eq!((p.loops.clone(), p.loop_mode), (vec![(ch, follow)], Some(2)), "the file's form is kept");
         // Switched on in a pattern that had none: written so that it reads back on.
         let pat = crate::patterns::pat_mut(&mut a.state, 1);
         (pat.loops, pat.loop_mode) = (Vec::new(), None);
-        (a.state.rack.loop_mode, a.state.rack.loop_type) = (true, 1);
-        to_model(&mut a.state);
-        from_model(&mut a.state);
-        assert!(a.state.rack.loop_mode && a.state.rack.loop_type == 1);
+        set_loop_type(&mut a.state, 1);
+        set_loop_mode(&mut a.state, true);
+        assert!(loop_mode(&a.state) && loop_type(&a.state) == 1);
     }
 
     /// Each pattern keeps its own loop lengths: showing another pattern loads its lengths, and a save there no longer
@@ -3353,19 +3350,15 @@ mod tests {
             (pat.loops, pat.loop_mode) = (vec![(ch, len)], None);
         }
         a.state.set_pattern(1);
-        from_model(&mut a.state);
-        assert_eq!(a.state.rack.loop_len, [(0, 3)].into());
-        a.state.rack.loop_len.insert(0, 4);
+        assert_eq!(loop_lens(&a.state), [(0, 3)].into());
+        put_loop(&mut a.state, 0, Some(4));
         a.state.set_pattern(2);
-        follow_pattern(&mut a.state);
-        assert_eq!(a.state.rack.loop_len, [(0, 5)].into(), "pattern 2's own");
-        to_model(&mut a.state);
+        assert_eq!(loop_lens(&a.state), [(0, 5)].into(), "pattern 2's own");
         let loops = |a: &crate::app::App, n| a.state.project.pattern(n).map(|p| p.loops.clone());
         assert_eq!(loops(&a, 2), Some(vec![(ch, 5)]), "pattern 2 keeps its lengths");
         assert_eq!(loops(&a, 1), Some(vec![(ch, 4)]), "pattern 1 keeps the length set while it was shown");
         a.state.set_pattern(1);
-        follow_pattern(&mut a.state);
-        assert_eq!(a.state.rack.loop_len, [(0, 4)].into());
+        assert_eq!(loop_lens(&a.state), [(0, 4)].into());
     }
 
     /// Undo of a whole-project step leaves the pattern shown as it is (as in FL) and puts the loop mode back with the
@@ -3381,18 +3374,15 @@ mod tests {
         (pat.loops, pat.loop_mode) = (vec![(ch, 0)], Some(LOOP_TYPE_CODES[0]));
         let before = a.state.project.pattern(1).cloned();
         a.state.set_pattern(1);
-        from_model(&mut a.state);
         let p2 = crate::patterns::pat_mut(&mut a.state, 2);
         p2.notes.push(os_model::Note::step(ch, 0));
         (p2.loops, p2.loop_mode) = (vec![(ch, 4)], None);
         crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.project.get_mut().main_volume = Some(50));
         a.state.set_pattern(2);
-        follow_pattern(&mut a.state);
         assert!(crate::history::undo(&mut a.state).is_some());
         assert_eq!(a.state.pattern(), 2, "the pattern shown stays");
-        assert_eq!((a.state.rack.loop_len.clone(), a.state.rack.loop_mode), ([(0, 4)].into(), false), "pattern 2's own loops (mode off)");
+        assert_eq!((loop_lens(&a.state), loop_mode(&a.state)), ([(0, 4)].into(), false), "pattern 2's own loops (mode off)");
         a.state.set_pattern(3);
-        follow_pattern(&mut a.state);
         assert_eq!(a.state.project.pattern(1).cloned(), before, "pattern 1's loops as they were");
     }
 
@@ -3403,11 +3393,10 @@ mod tests {
         let mut a = crate::app::App::new(None);
         a.state.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.set_pattern(1);
-        from_model(&mut a.state);
         a.state.piano.dirty = false;
+        let _ = a.state.project.take_written();
         a.state.set_pattern(2);
-        follow_pattern(&mut a.state);
-        assert!(a.state.piano.dirty, "playback follows the switch");
+        assert!(a.state.project.written_at().is_some(), "playback follows the switch (a write to the project)");
         assert_eq!(play_project(&a.state).current_pattern, Some(2));
     }
 
@@ -3443,14 +3432,13 @@ mod tests {
         let note = os_model::Note { position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
         crate::patterns::pat_mut(&mut a.state, 2).notes.push(note);
         a.state.set_pattern(2);
-        follow_pattern(&mut a.state);
-        a.state.rack.loop_len.insert(0, 8);
+        put_loop(&mut a.state, 0, Some(8));
         a.save_to(file.clone());
         let mut b = crate::app::App::new(None);
         b.open(file.clone());
         let _ = std::fs::remove_file(&file);
         assert_eq!(b.state.pattern(), 2);
-        assert_eq!(b.state.rack.loop_len.get(&0), Some(&8));
+        assert_eq!(loop_lens(&b.state).get(&0), Some(&8));
     }
 
     /// A knob's Edit automation clip... is greyed until a clip drives the control, then shows that clip (§19, as on a
@@ -3589,8 +3577,9 @@ mod tests {
         let mut app = App::new(None);
         let burn = |app: &App| options_menu(&app.state, 0.0, 0.0).items.iter().find(|i| i.label == "Burn selected loops to pattern").map(|i| (i.enabled, i.cmd.clone())).unwrap();
         assert_eq!(burn(&app).0, false);
-        app.state.rack.loop_mode = true;
-        app.state.rack.loop_len = BTreeMap::from([(0, 3), (1, 5)]);
+        set_loop_mode(&mut app.state, true);
+        put_loop(&mut app.state, 0, Some(3));
+        put_loop(&mut app.state, 1, Some(5));
         app.state.rack.sel = BTreeSet::from([2]);
         assert_eq!(burn(&app).0, false, "no selected channel loops");
         app.state.rack.sel = BTreeSet::from([1, 2]);
@@ -3598,7 +3587,7 @@ mod tests {
         assert!(on);
         let Cmd::Rack(c) = c else { panic!() };
         run(&mut app, c);
-        assert_eq!(app.state.rack.loop_len, BTreeMap::from([(0, 3)]), "only the selected channel's loop burned");
+        assert_eq!(loop_lens(&app.state), BTreeMap::from([(0, 3)]), "only the selected channel's loop burned");
     }
 
     /// The channel menu's Burn MIDI to ▸ (§18): Current pattern and New pattern on the right-clicked channel, enabled on
@@ -3655,9 +3644,9 @@ mod tests {
         let w = app.state.rack_size.0;
         run(&mut app, RCmd::Opt(ALWAYS_ADVANCED));
         assert_eq!(find(loop_menu(&app.state, 0.0, 0.0), ALWAYS_ADVANCED).1, Mark::Check(true));
-        assert!(loop_boxes(&app.state) && !app.state.rack.loop_mode);
+        assert!(loop_boxes(&app.state) && !loop_mode(&app.state));
         assert_eq!(app.state.rack_size.0, w + LOOP_W, "room for the boxes");
-        app.state.rack.loop_len.insert(1, 5);
+        put_loop(&mut app.state, 1, Some(5));
         assert_eq!((loop_box_len(&app.state, 1), loop_box_len(&app.state, 0)), (5, pattern_steps(&app.state)));
         assert_eq!(row_len(&app.state, 1), pattern_steps(&app.state), "loop mode off: the length plays no part");
         run(&mut app, RCmd::Opt(ALWAYS_ADVANCED));
@@ -3731,7 +3720,7 @@ mod tests {
         run(&mut app, RCmd::LoopType(2));
         assert_eq!(item(&app), (true, Mark::Radio(true)));
         let s = &mut app.state;
-        s.rack.loop_mode = true;
+        set_loop_mode(s, true);
         let ch = s.project.channels[0].index;
         let ps = per_step(s);
         let n = s.pattern().max(1);
@@ -3754,14 +3743,13 @@ mod tests {
         let steps = |p: &Project| p.pattern(n).unwrap().notes.iter().filter(|x| x.channel == ch).map(|x| x.position / ps).collect::<Vec<_>>();
         assert_eq!(steps(&play_project(s)), [0, 5, 8, 13]);
         // Saved as the loop point, as FL 24.1.1 writes it.
-        to_model(s);
         assert!(s.project.pattern(n).unwrap().loops.contains(&(ch, os_model::Pattern::LOOP_BEAT)), "{:?}", s.project.pattern(n).unwrap().loops);
         // Burned: written into the pattern, the loop point gone.
         s.rack.sel = BTreeSet::from([0]);
         run(&mut app, RCmd::Burn(false));
         let s = &app.state;
         assert_eq!(steps(&s.project), [0, 5, 8, 13]);
-        assert!(s.rack.loop_unit.is_empty());
+        assert!(loop_units(s).is_empty());
         assert_eq!(loop_box_text(s, 0), "···");
     }
 
@@ -4120,8 +4108,8 @@ mod tests {
         set_zipped(s, &[2].into());
         set_groups(s, &[Group { name: "Drums".into(), members: [0, 2].into() }], None);
         set_filter(s, Filter::Group(0));
-        s.rack.loop_len = [(0, 5)].into();
-        s.rack.loop_mode = true;
+        put_loop(s, 0, Some(5));
+        set_loop_mode(s, true);
         app.save_to(path.clone());
         assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", app.state.message);
         app.open(path.clone());
@@ -4141,8 +4129,8 @@ mod tests {
         assert_eq!(crate::rack::groups(&s.project).len(), 1);
         assert_eq!(crate::rack::groups(&s.project)[0].members, [0, 2].into());
         assert_eq!(crate::rack::filter(&s.project), Filter::Group(0));
-        assert_eq!(s.rack.loop_len, [(0, 5)].into());
-        assert!(s.rack.loop_mode);
+        assert_eq!(loop_lens(s), [(0, 5)].into());
+        assert!(loop_mode(s));
     }
 
     #[test]

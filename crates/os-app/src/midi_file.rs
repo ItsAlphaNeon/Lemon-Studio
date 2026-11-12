@@ -684,7 +684,6 @@ impl App {
             s.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
             crate::playlist::load_view(s);
             s.rack.reset();
-            crate::rack::from_model(s);
             // A project with nothing in it counts as saved; the import is its first change.
             self.mark_saved();
             place(&mut self.state, imp, o, &name, 1);
