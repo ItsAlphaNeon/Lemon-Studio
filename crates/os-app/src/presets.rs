@@ -625,8 +625,8 @@ fn side(app: &App, key: usize) -> Option<crate::control::command::PluginSide> {
     let name = match crate::plugins::fx_of(key) {
         // A container's effect: no name of its own to put back.
         None if key >= crate::plugins::MEMBER_KEY => None,
-        None => app.state.project.channels.get(key)?.name.clone(),
-        Some((t, k)) => crate::mixer::slot_label(&app.state, t, k),
+        None => app.state.session.project.channels.get(key)?.name.clone(),
+        Some((t, k)) => crate::mixer::slot_label(&app.state.session, t, k),
     };
     Some(crate::control::command::PluginSide { state: app.plugins.state(key)?, preset: app.plugins.presets.get(&key).cloned(), name, fill: 0 })
 }
@@ -648,7 +648,7 @@ fn load_with(app: &mut App, key: usize, path: &Path, step: bool) -> Option<Strin
                 app.plugins.set_preset(key, Some(path.to_path_buf()));
                 auto_name(app, key, path);
                 if let Some(before) = before.filter(|b| side(app, key).as_ref() != Some(b)) {
-                    crate::control::state_edit(&mut app.state, key, crate::control::command::PLUGIN_PRESET, before);
+                    crate::control::state_edit(&mut app.state.session, key, crate::control::command::PLUGIN_PRESET, before);
                 }
                 match missing.is_empty() {
                     true => format!("Preset: {}", shown_name(path)),
@@ -676,7 +676,7 @@ fn flip_spare(app: &mut App, key: usize) -> Option<String> {
     app.plugins.mark_edited(key);
     app.state.params.reread(key);
     if let Some(before) = before.filter(|b| side(app, key).as_ref() != Some(b)) {
-        crate::control::state_edit(&mut app.state, key, FLIP_SPARE, before);
+        crate::control::state_edit(&mut app.state.session, key, FLIP_SPARE, before);
     }
     Some("Swapped A / B".into())
 }
@@ -698,11 +698,11 @@ fn auto_name(app: &mut App, key: usize, path: &Path) {
     let s = &mut app.state;
     match crate::plugins::fx_of(key) {
         Some(slot) if crate::prefs::check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS) => {
-            crate::mixer::set_slot_label(s, slot.0, slot.1, Some(shown_name(path)));
+            crate::mixer::set_slot_label(&mut s.session, slot.0, slot.1, Some(shown_name(path)));
         }
         Some(_) => {}
         None => {
-            if let Some(ch) = s.project.get_mut().channels.get_mut(key) {
+            if let Some(ch) = s.session.project.get_mut().channels.get_mut(key) {
                 crate::rack::auto_name(ch, path);
             }
         }
@@ -870,13 +870,13 @@ pub fn dropped(app: &mut App, path: &Path) -> Option<String> {
     let same = |d: &os_host::Descriptor| d.uid().eq_ignore_ascii_case(&uid);
     if let Some(i) = app.plugins.available.iter().position(|a| same(&a.desc)) {
         crate::plugin_menu::add_generator(app, i, None);
-        let row = app.state.project.channels.len() - 1;
+        let row = app.state.session.project.channels.len() - 1;
         app.plugins.preset_waits.push((row, path.to_path_buf(), std::time::Instant::now()));
         return Some(format!("Loading {name} in a new channel"));
     }
     if let Some(i) = app.plugins.effects.iter().position(|a| same(&a.desc)) {
         let t = app.state.selected_mixer;
-        let slot = slot.or_else(|| app.state.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8));
+        let slot = slot.or_else(|| app.state.session.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8));
         let Some(k) = slot else { return Some("Every slot of this track is in use".into()) };
         crate::plugin_menu::add_effect(app, i, Some(k));
         app.plugins.preset_waits.push((crate::plugins::fx_key(t, k), path.to_path_buf(), std::time::Instant::now()));
@@ -1155,7 +1155,7 @@ mod tests {
         assert_eq!(app.plugins.preset_name(0).as_deref(), Some("Rim"));
         // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup": "Name channels after their sample or plugin" is
         // on by default.
-        assert_eq!(app.state.project.channels[0].name.as_deref(), Some("Rim"), "the ◀ ▶ arrows rename the channel");
+        assert_eq!(app.state.session.project.channels[0].name.as_deref(), Some("Rim"), "the ◀ ▶ arrows rename the channel");
         run(&mut app, PCmd::Step(0, -1));
         assert_eq!(app.plugins.sampler_path(0).as_deref(), Some(""), "back to Default");
         let it = items(&app, 0, true);
@@ -1183,11 +1183,11 @@ mod tests {
         let other = crate::plugins::with_sample_path(&app.plugins.state(key).unwrap(), "C:/x/rim.wav").unwrap();
         let rim = file_for(&dir_for(&h.plugin).unwrap(), "Rim");
         save(&rim, &h, &other).unwrap();
-        let names: Vec<Option<String>> = app.state.project.channels.iter().map(|c| c.name.clone()).collect();
+        let names: Vec<Option<String>> = app.state.session.project.channels.iter().map(|c| c.name.clone()).collect();
         assert_eq!(run(&mut app, PCmd::Load(key, rim.clone())).as_deref(), Some("Preset: Rim"));
         assert_eq!(app.plugins.sampler_path(key).as_deref(), Some("C:/x/rim.wav"));
         assert_eq!(app.plugins.preset_name(key).as_deref(), Some("Rim"));
-        assert_eq!(app.state.project.channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), names);
+        assert_eq!(app.state.session.project.channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), names);
         let mut m = crate::playlist::plugin_window_menu(key, false, 0.0, 0.0);
         fill_window_menu(&app, key, &mut m);
         let p = m.items.iter().find(|i| i.label == "Presets" && !i.head).unwrap();
@@ -1216,11 +1216,11 @@ mod tests {
         assert!(entry(&app, "Swap A / B").enabled);
         let b = crate::plugins::with_sample_path(&a, "C:/x/b.wav").unwrap();
         assert!(app.plugins.set_state(0, &b));
-        let steps = app.state.history.at();
+        let steps = app.state.session.history.at();
         assert_eq!(run(&mut app, PCmd::FlipSpare(0)).as_deref(), Some("Swapped A / B"));
         assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/a.wav"), "the stored state is in use");
-        assert_eq!(app.state.history.newest_done(), Some(FLIP_SPARE));
-        assert_eq!(app.state.history.at(), steps + 1);
+        assert_eq!(app.state.session.history.newest_done(), Some(FLIP_SPARE));
+        assert_eq!(app.state.session.history.at(), steps + 1);
         run(&mut app, PCmd::FlipSpare(0));
         assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/b.wav"), "and back");
         crate::history::undo(&mut app.state);
@@ -1318,8 +1318,8 @@ mod tests {
         pl.create(0, index).unwrap();
         pl.create(fx, index).unwrap();
         app.plugins = pl;
-        app.state.project.get_mut().channels[0].name = Some("808 Snare".into());
-        crate::mixer::track_mut(&mut app.state, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
+        app.state.session.project.get_mut().channels[0].name = Some("808 Snare".into());
+        crate::mixer::track_mut(&mut app.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
         let (h, state) = (header(&app, 0).unwrap(), app.plugins.state(0).unwrap());
         let preset = |name: &str| {
             let p = file_for(&dir, name);
@@ -1327,13 +1327,13 @@ mod tests {
             p
         };
         let (chorus, bandpass, bass) = (preset("Chorus"), preset("Bandpass"), preset("Deep Bass"));
-        let channel = |app: &App| app.state.project.channels[0].name.clone().unwrap_or_default();
-        let slot = |app: &App| crate::mixer::slot_name(&app.state, 1, 0).unwrap_or_default();
+        let channel = |app: &App| app.state.session.project.channels[0].name.clone().unwrap_or_default();
+        let slot = |app: &App| crate::mixer::slot_name(&app.state.session, 1, 0).unwrap_or_default();
         // Channels: on by default.
         assert_eq!(run(&mut app, PCmd::Load(0, bass)).as_deref(), Some("Preset: Deep Bass"));
         assert_eq!(channel(&app), "Deep Bass");
         prefs::set_check(&AUTO_NAME_CHANNELS, false);
-        app.state.project.get_mut().channels[0].name = Some("808 HiHat".into());
+        app.state.session.project.get_mut().channels[0].name = Some("808 HiHat".into());
         run(&mut app, PCmd::Load(0, chorus.clone()));
         assert_eq!(channel(&app), "808 HiHat", "off: the channel keeps its name");
         // Effect slots: off by default.
@@ -1344,7 +1344,7 @@ mod tests {
         run(&mut app, PCmd::Load(fx, chorus));
         assert_eq!(slot(&app), "Chorus");
         #[cfg(plugin_windows)]
-        assert_eq!(crate::mixer::fx_info(&app.state.project, fx).unwrap().name, "Chorus", "window title");
+        assert_eq!(crate::mixer::fx_info(&app.state.session.project, fx).unwrap().name, "Chorus", "window title");
         // The name stays with the check off, until a rename by hand or the next preset with it on.
         prefs::set_check(&AUTO_NAME_EFFECT_SLOTS, false);
         run(&mut app, PCmd::Load(fx, bandpass.clone()));

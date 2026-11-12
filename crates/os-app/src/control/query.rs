@@ -30,7 +30,7 @@ fn track_id(p: &Project, n: u16) -> Option<u32> {
 /// The project: settings, channels, mixer tracks in use, patterns and the playlist shown. Notes are read per pattern
 /// (`notes`).
 pub fn project(s: &State) -> Value {
-    let p = &s.project;
+    let p = &s.session.project;
     let (beats, steps) = p.bar();
     let channels: Vec<Value> = p
         .channels
@@ -40,7 +40,7 @@ pub fn project(s: &State) -> Value {
             json!({
                 "id": c.id.0,
                 "row": row,
-                "name": crate::rack::channel_name(s, row),
+                "name": crate::rack::channel_name(&s.session, row),
                 "kind": kind(c.kind),
                 "plugin": c.plugin,
                 "sample": c.sample_path,
@@ -53,7 +53,7 @@ pub fn project(s: &State) -> Value {
             })
         })
         .collect();
-    let used = crate::mixer::inserts(s);
+    let used = crate::mixer::inserts(&s.session);
     let tracks: Vec<Value> = p
         .mixer
         .iter()
@@ -79,7 +79,7 @@ pub fn project(s: &State) -> Value {
             json!({
                 "id": m.id.0,
                 "number": m.index,
-                "name": crate::mixer::name(s, m.index),
+                "name": crate::mixer::name(&s.session, m.index),
                 "color": color_text(m.color),
                 "volume": m.volume.unwrap_or(0.8),
                 "pan": m.pan.unwrap_or(0.0),
@@ -102,9 +102,9 @@ pub fn project(s: &State) -> Value {
             json!({
                 "id": q.id.0,
                 "number": q.number,
-                "name": crate::patterns::name_of(s, q.number),
+                "name": crate::patterns::name_of(&s.session, q.number),
                 "color": color_text(q.color),
-                "length": crate::playlist::source_len(s, os_model::ClipSource::Pattern(q.number)),
+                "length": crate::playlist::source_len(&s.session, os_model::ClipSource::Pattern(q.number)),
                 "auto_length": q.length.is_none(),
                 "notes": q.notes.len(),
             })
@@ -141,7 +141,7 @@ pub fn project(s: &State) -> Value {
         "main_volume": f64::from(p.main_volume.unwrap_or(Project::MAIN_VOLUME_DEFAULT)) / 16000.0,
         "main_pitch": p.main_pitch.unwrap_or(0),
         "info": { "title": i.title, "author": i.author, "genre": i.genre, "comments": i.comments, "url": i.url },
-        "file": s.path.as_ref().map(|p| p.display().to_string()),
+        "file": s.session.path.as_ref().map(|p| p.display().to_string()),
         "song_mode": s.song_mode(),
         "current_pattern": p.pattern(s.pattern()).map(|q| q.id.0),
         "selected_channel": p.channels.get(s.selected_channel).map(|c| c.id.0),
@@ -154,7 +154,7 @@ pub fn project(s: &State) -> Value {
 
 /// Pattern `id`'s notes, as `command::NoteIn` takes them (with every stored field a note command sets).
 pub fn notes(s: &State, id: u32) -> Result<Value, String> {
-    let p = &s.project;
+    let p = &s.session.project;
     let q = &p.patterns[crate::control::command::pattern_place(p, id)?];
     let notes: Vec<Value> = q
         .notes

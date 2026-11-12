@@ -87,7 +87,7 @@ pub fn grid_rect(s: &State) -> Rect {
 
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
-    let channel = s.project.channels.get(s.selected_channel);
+    let channel = s.session.project.channels.get(s.selected_channel);
     let name = channel.and_then(|c| c.name.clone()).unwrap_or_else(|| "(none)".into());
     let title = "Piano roll - ";
     window_body(ui, r);
@@ -123,7 +123,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let l = layout(r, s.piano.split);
     let g = Geom::new(s, l.grid);
     let ch = channel.map(|c| c.index);
-    let pat = s.project.patterns.iter().find(|p| p.number == s.pattern());
+    let pat = s.session.project.patterns.iter().find(|p| p.number == s.pattern());
     let notes: &[Note] = pat.map_or(&[], |p| &p.notes);
     let sel = s.piano.selection(s.pattern(), ch);
     // Only a ruler time selection shades the grid, and only its columns (§10).
@@ -151,7 +151,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     overview(ui, s, &l, &g, notes, ch);
     // A time-signature marker shows its signature (spec: ui/pattern-time-signature.md §2).
     let markers: Vec<(u32, String)> =
-        s.project.pattern(s.pattern()).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, super::playlist::marker_label(m))).collect();
+        s.session.project.pattern(s.pattern()).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, super::playlist::marker_label(m))).collect();
     ruler(ui, &l, &g, range, s.piano.marker, &markers);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
@@ -205,8 +205,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             ui.c.fill_rect(Rect::new(body.right() - 1.0, body.y + 1.0, 1.0, body.h - 2.0), hi);
         }
         // A repeating note shows a tick at every repeat interval inside its body (spec §7a).
-        if let Some(iv) = n.repeat_ticks(s.project.ppq) {
-            let end = n.position + piano::shown_len(s, n);
+        if let Some(iv) = n.repeat_ticks(s.session.project.ppq) {
+            let end = n.position + piano::shown_len(&s.session, n);
             let mut at = n.position + iv;
             let px = g.x_of((n.position + iv) as f32) - g.x_of(n.position as f32);
             while at < end && px >= 2.0 {
@@ -276,11 +276,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     // Playhead: the pattern's own in pattern mode; in song mode where the song is in this pattern, while a clip of
     // it plays there.
-    let head = if !f.playing { None } else if f.song { piano::pattern_tick_in_song(s, f.tick) } else { Some(f.tick) };
+    let head = if !f.playing { None } else if f.song { piano::pattern_tick_in_song(&s.session, f.tick) } else { Some(f.tick) };
     if let Some(tick) = head {
         let x = g.x_of(tick as f32);
         ui.c.fill_rect(Rect::new(x, l.grid.y, 1.5, l.grid.h), t.playhead);
-    } else if let Some(tick) = (!f.playing && s.song_mode()).then(|| piano::pattern_tick_in_song(s, f64::from(s.playlist.pos))).flatten() {
+    } else if let Some(tick) = (!f.playing && s.song_mode()).then(|| piano::pattern_tick_in_song(&s.session, f64::from(s.playlist.pos))).flatten() {
         // Stopped in song mode on a place where this pattern plays: a grey line there.
         let x = g.x_of(tick as f32).round();
         ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 3.0, l.grid.h), ui.t.s(0x38373b));
@@ -497,7 +497,7 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     // Horizontal scroll bar over the pattern plus room to scroll on (half a screen past the
     // pattern or the current view).
     let view = l.grid.w / g.ppt;
-    let len = piano::pattern_length(s, s.pattern()) as f32;
+    let len = piano::pattern_length(&s.session, s.pattern()) as f32;
     let span = s.piano.bar_span.unwrap_or(len.max(g.scroll_x + view) + view / 2.0);
     // Scroll arrows at both ends (§1a); the bar runs between them (small scroll bars: no arrows).
     let arrow = if super::small_scrollbars() { 0.0 } else { 19.0 };
@@ -512,7 +512,7 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     let dash = t.note_top.mix(t.note_bottom, 0.5);
     for n in notes.iter().filter(|n| Some(n.channel) == ch) {
         let x = o.x + n.position as f32 / span * o.w;
-        let w = (piano::shown_len(s, n) as f32 / span * o.w).max(1.0);
+        let w = (piano::shown_len(&s.session, n) as f32 / span * o.w).max(1.0);
         let y = o.y + 3.0 + (1.0 - f32::from(n.key) / TOP_KEY as f32) * (o.h - 7.0);
         ui.c.fill_rect(Rect::new(x, y.round(), w, 1.0), dash);
     }
@@ -766,7 +766,7 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
         if x > p.right() + 4.0 {
             continue;
         }
-        let end = g.x_of((n.position + piano::shown_len(s, n)) as f32);
+        let end = g.x_of((n.position + piano::shown_len(&s.session, n)) as f32);
         if end < p.x - 4.0 {
             continue;
         }
@@ -825,7 +825,7 @@ fn control_bars(ui: &mut Ui, s: &State, g: &Geom, p: Rect, lane: Lane, ch: Optio
         _ => (Color::rgb(0x6b4669), Color::rgb(0x865c83)),
     };
     let kind = os_model::ControlPoint::new(0, ch, param, 0).kind;
-    let points: Vec<_> = piano::controls(s).iter().filter(|c| c.kind == kind).collect();
+    let points: Vec<_> = piano::controls(&s.session).iter().filter(|c| c.kind == kind).collect();
     let center = s.piano.pitch_center;
     let base = lane.control_base(p, center).round();
     for (i, c) in points.iter().enumerate() {

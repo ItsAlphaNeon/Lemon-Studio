@@ -135,7 +135,7 @@ impl App {
         }
         // A channel locked to the Touch controller takes its notes (spec: ui/channel-rack.md §18 Receive notes from).
         let row = self.state.rack.note_row(crate::rack::NoteSrc::Touch, self.state.selected_channel);
-        if let Some(k) = key.filter(|_| row < self.state.project.channels.len()) {
+        if let Some(k) = key.filter(|_| row < self.state.session.project.channels.len()) {
             self.locked_hint(crate::rack::NoteSrc::Touch, row);
             self.sync_live();
             self.transport.note_on(row, u16::from(k), VELOCITY);
@@ -193,7 +193,7 @@ mod tests {
     fn opens_and_plays() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.selected_channel = 1;
         app.paint(&mut c, None);
         let b = hit_rect(&app, &Action::ToggleWin(Win::Touch));

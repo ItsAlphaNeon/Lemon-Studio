@@ -1068,38 +1068,37 @@ pub enum Drag {
 }
 
 impl State {
-    /// SONG (or PAT) on the toolbar: the project's song mode (event 9). As in FL it is no undo step and no unsaved
-    /// change (`ui/undo-steps.md`): `App::unsaved` leaves it out, and an undo or redo of another step leaves it.
+    // The session's views, for the interface's many readers (`crate::session::Session`).
     pub fn song_mode(&self) -> bool {
-        self.project.song_mode.unwrap_or(false)
+        self.session.song_mode()
     }
 
     pub fn set_song_mode(&mut self, on: bool) {
-        self.project.write_if(|p| p.song_mode.replace(on) != Some(on));
+        self.session.set_song_mode(on);
     }
 
-    /// The pattern shown: the project's (event 67), so a save opens on it again with its loops. As in FL, showing
-    /// another is no undo step but an unsaved change (`ui/undo-steps.md`); an undo leaves it (control::command).
     pub fn pattern(&self) -> u16 {
-        self.project.current_pattern.unwrap_or(1).max(1)
+        self.session.pattern()
     }
 
     pub fn set_pattern(&mut self, n: u16) {
-        self.project.write_if(|p| p.current_pattern.replace(n) != Some(n));
+        self.session.set_pattern(n);
     }
 
-    /// The tempo: the project's (BPM). Its edits are undo steps, as FL's "Knob tweak (tempo)" (`ui/undo-steps.md`).
     pub fn tempo(&self) -> f64 {
-        self.project.tempo.unwrap_or(130.0)
+        self.session.tempo()
     }
 
     pub fn set_tempo(&mut self, bpm: f64) {
-        self.project.write_if(|p| p.tempo.replace(bpm) != Some(bpm));
+        self.session.set_tempo(bpm);
     }
 }
 
 pub struct State {
-    pub project: crate::locked::Locked,
+    /// The open project and what goes with it (`crate::session`).
+    pub session: crate::session::Session,
+    /// The rack's view an undo step puts back, by step (`crate::follow`).
+    pub rack_views: std::collections::HashMap<u64, crate::follow::RackView>,
     /// The toolbar's scope / analyzer and peak bars (fed from the audio tap in `App::tick`).
     pub monitor: crate::monitor::Monitor,
     /// The plugin database: choices, last scan, the plugin menus' lists, the plugin manager's table (spec:
@@ -1134,12 +1133,6 @@ pub struct State {
     /// Requests for the plugin host, handled on the next tick: (row, `Plugins::available` index) to create, row to open.
     pub pending_plugin: Option<(usize, usize)>,
     pub pending_open: Option<usize>,
-    /// Samples to load into rows' Lemon Sampler instances on the next tick (browser send, drops on a rack row).
-    pub sample_loads: Vec<(usize, String)>,
-    /// An undo or redo changed the timebase (`history::Timebase`): playback stops on the next tick.
-    pub retimed: bool,
-    pub file: Option<os_flp::FlpFile>,
-    pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
     pub z: Vec<Win>,
     /// The empty workspace took the last click: no window has the focus (Ctrl+F12 closes them all,
@@ -1240,16 +1233,9 @@ pub struct State {
     /// The Remote control settings box, while open, and Multilink to controllers (`crate::remote`).
     pub link_box: Option<crate::remote::LinkBox>,
     pub multilink: crate::remote::Multi,
-    /// The remote control links the edit under way moved with what they drive (`remote::follow`), as (target before
-    /// the edit, target now): its undo step puts them back (`control::edit`).
-    pub link_moves: Vec<(crate::typein::Target, crate::typein::Target)>,
     pub maximized: bool,
     pub piano: PianoState,
     pub playlist: crate::playlist::PlaylistState,
-    /// The project's undo history (spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
-    pub history: crate::history::History,
-    /// The control plane: ids, its commands' requests for the app, events, proposals (`crate::control`).
-    pub control: crate::control::Control,
     /// The main toolbar's snap, which the editors' Main follows (spec: ui/global-snap.md).
     pub global_snap: crate::snap::Global,
     /// The tiling layout's split views (`crate::tiles`), and their animation under way.
@@ -1752,7 +1738,7 @@ pub struct App {
     pub(crate) copying: bool,
     /// Follow Omarchy: the system theme last applied (`omarchy::stamp`) and when to look again (`omarchy_tick`).
     pub(crate) omarchy: (Option<(String, Option<std::time::SystemTime>)>, std::time::Instant),
-    /// Session restore (`crate::session`): the kept plugin windows still to open, and since when they wait.
+    /// Session restore (`crate::session_restore`): the kept plugin windows still to open, and since when they wait.
     pub(crate) session_plugins: Vec<usize>,
     pub(crate) session_since: Option<std::time::Instant>,
     /// The media player the desktop sees (`crate::mpris`; none in tests or without a session bus).
@@ -1780,15 +1766,12 @@ impl App {
             plugins: crate::plugins::Plugins::default(),
             journal: crate::journal::Journal::start(),
             state: State {
-                project: crate::locked::Locked::new(project),
+                session: crate::session::Session::new(project),
+                rack_views: Default::default(),
                 plugdb: Default::default(),
                 hosted_rows: Vec::new(),
                 pending_plugin: None,
                 pending_open: None,
-                sample_loads: Vec::new(),
-                retimed: false,
-                file: None,
-                path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
                 no_focus: false,
                 show_browser: true,
@@ -1866,12 +1849,9 @@ impl App {
                 midi: Default::default(),
                 link_box: None,
                 multilink: Default::default(),
-                link_moves: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
-                history: Default::default(),
-                control: Default::default(),
                 global_snap: Default::default(),
                 tiles: crate::tiles::Tiles::load(),
                 tile_anim: None,
@@ -2059,8 +2039,8 @@ impl App {
 
     pub fn title(&self) -> String {
         let s = &self.state;
-        let name = s.project.info.title.clone().filter(|t| !t.is_empty()).or_else(|| {
-            s.path.as_ref().and_then(|p| p.file_stem()).map(|n| n.to_string_lossy().into_owned())
+        let name = s.session.project.info.title.clone().filter(|t| !t.is_empty()).or_else(|| {
+            s.session.path.as_ref().and_then(|p| p.file_stem()).map(|n| n.to_string_lossy().into_owned())
         });
         match name {
             Some(n) => format!("[{n}]"),
@@ -2133,40 +2113,40 @@ impl App {
                 project.song_mode = Some(project.song_mode.unwrap_or(true));
                 project.current_pattern = Some(project.current_pattern.unwrap_or(1).max(1));
                 project.tempo = Some(project.tempo.unwrap_or(130.0));
-                s.project = crate::locked::Locked::new(project);
+                s.session.project = crate::locked::Locked::new(project);
                 // Opening in song mode sets the initial values (spec: flp/engine-events.md "Event 216"); the project
                 // is opened with them, not changed.
-                crate::init::apply(s);
+                crate::init::apply(&mut s.session);
                 crate::project_info::opened(s);
-                s.file = Some(file);
+                s.session.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
                 crate::templates::remember(&path);
                 crate::recent::add(&path);
-                s.path = Some(path);
+                s.session.path = Some(path);
                 // A converted project is not saved over its original, which its own version can still open: Save asks
                 // for a new file. A `.lemon` keeps its path.
-                if converted && s.path.as_deref().is_some_and(crate::project_files::is_flp) {
-                    s.message = s.path.take().map(|p| format!("Opened {}, converted from an older version", p.display()));
+                if converted && s.session.path.as_deref().is_some_and(crate::project_files::is_flp) {
+                    s.message = s.session.path.take().map(|p| format!("Opened {}, converted from an older version", p.display()));
                 }
                 s.piano.reset();
                 s.playlist.reset();
-                s.history.reset();
-                s.control.reset();
-                s.control.event(&crate::control::By::User, "opened", s.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
+                s.session.history.reset();
+                s.session.control.reset();
+                s.session.control.event(&crate::control::By::User, "opened", s.session.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
                 crate::playlist::load_view(s);
-                s.piano.dirty = true; // live notes use the new project
+                s.session.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 // A .lemon file's own state (icons, slot names and colours, Performance settings); its channel icons
                 // name channels by position, which the ids given here then follow.
-                self.state.control.settle(self.state.project.get_mut());
-                if let Some(f) = self.state.file.take() {
+                self.state.session.control.settle(self.state.session.project.get_mut());
+                if let Some(f) = self.state.session.file.take() {
                     crate::lemon_state::apply(&mut self.state, &mut self.plugins, &f);
                     // Saved by a version that has features this one does not: those parts do not play.
                     let unknown = crate::lemon_state::unknown_features(&f);
                     if !unknown.is_empty() {
                         self.state.message = Some(format!("{}. This version doesn't play: {}", self.state.message.take().unwrap_or_default(), unknown.join(", ")));
                     }
-                    self.state.file = Some(f);
+                    self.state.session.file = Some(f);
                 }
                 // The original's Patcher slots that are a plain serial chain open as containers (README.md slice 5).
                 if let Some(m) = crate::container::open_patchers(&mut self.state, &self.plugins.effects) {
@@ -2175,8 +2155,8 @@ impl App {
                 self.mark_saved();
                 self.journal_opened(Some(&opened));
                 crate::missing::opened(self);
-                self.loading = Some(crate::loading::Loading::start(&self.state.project));
-                self.state.playlist.wave_wait = true;
+                self.loading = Some(crate::loading::Loading::start(&self.state.session.project));
+                self.state.session.samples.wait = true;
                 self.invalidate();
                 true
             }
@@ -2199,7 +2179,7 @@ impl App {
     /// Saves the project to its file, or asks where (a project without one, or one opened from an FLP, which is never
     /// saved over: spec flp/lemon-format.md "Opening and saving"); then `next`, once it is saved.
     fn save_then(&mut self, next: Option<crate::dialog::Next>) {
-        let Some(path) = self.state.path.clone().filter(|p| !crate::project_files::is_flp(p)) else { return self.save_dialog(next) };
+        let Some(path) = self.state.session.path.clone().filter(|p| !crate::project_files::is_flp(p)) else { return self.save_dialog(next) };
         self.save_to(path);
         if let Some(n) = next {
             self.go_on_if_saved(n);
@@ -2209,7 +2189,7 @@ impl App {
     /// Save as: for a project never saved, Lemon Studio's Save as form while Ask for data folder says so (spec:
     /// ui/data-folder.md §7, `crate::save_form`), else the file dialog.
     fn save_dialog(&mut self, next: Option<crate::dialog::Next>) {
-        if self.state.path.is_none() && crate::save_form::asks_on_save() {
+        if self.state.session.path.is_none() && crate::save_form::asks_on_save() {
             return self.open_save_form(next);
         }
         self.save_file_dialog(next);
@@ -2219,7 +2199,7 @@ impl App {
     pub(crate) fn save_file_dialog(&mut self, next: Option<crate::dialog::Next>) {
         use crate::filedlg::{FileDlg, Mode};
         use crate::project_files::{as_lemon, EXT};
-        let path = self.state.path.clone();
+        let path = self.state.session.path.clone();
         let name = path.as_deref().map(as_lemon).and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| format!("Untitled.{EXT}"));
         let dlg = FileDlg::new(Mode::Save, "Save project as", "project", crate::dialog::Then::SaveProject(next))
             .filter("Lemon Studio project", &[EXT])
@@ -2306,14 +2286,14 @@ impl App {
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
         // them.
         for row in self.state.hosted_rows.clone() {
-            if self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
+            if self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
                 let lemon = self.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
                 if let Some(st) = self.plugins.state(row).filter(|_| lemon) {
-                    crate::plugins::store_sampler(&mut self.state.project.get_mut().channels[row], &st);
+                    crate::plugins::store_sampler(&mut self.state.session.project.get_mut().channels[row], &st);
                 }
                 if let Some(p) = self.plugins.sampler_path(row) {
                     // A placeholder path that still names the same file is kept as the project wrote it.
-                    let ch = &mut self.state.project.get_mut().channels[row];
+                    let ch = &mut self.state.session.project.get_mut().channels[row];
                     if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
                         continue;
                     }
@@ -2328,35 +2308,35 @@ impl App {
         }
         // What the save writes into the project from the interface (below) reaches playback like any edit: the engine
         // holds the project as it is.
-        let before = self.state.project.clone();
+        let before = self.state.session.project.clone();
         self.store_builtin_states();
         let s = &mut self.state;
         let tempo = s.tempo();
-        s.project.write_if(|p| p.tempo.replace(tempo) != Some(tempo));
+        s.session.project.write_if(|p| p.tempo.replace(tempo) != Some(tempo));
         // Kept as the project says, or pattern mode, as a new project's (an unsaved change of none).
-        s.project.write_if(|p| {
+        s.session.project.write_if(|p| {
             let unset = p.song_mode.is_none();
             p.song_mode.get_or_insert(false);
             unset
         });
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
         crate::playlist::store_view(s);
-        if s.project != before {
-            s.piano.dirty = true;
+        if s.session.project != before {
+            s.session.dirty = true;
         }
         // A file Lemon Studio made before the project had a playlist has no arrangement block (FL's files always have
         // one): build it again from the model, which holds everything that file stored.
-        let lacks_playlist = s.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_some_and(|p| p.arrangements.is_empty())
-            && !s.project.arrangements.is_empty();
+        let lacks_playlist = s.session.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_some_and(|p| p.arrangements.is_empty())
+            && !s.session.project.arrangements.is_empty();
         // A project that was not opened from a file gets a new FLP built from the model.
-        let mut file = if s.file.is_none() || lacks_playlist {
+        let mut file = if s.session.file.is_none() || lacks_playlist {
             // The new file's blocks are the model's channels and mixer tracks in order.
-            settle_origins(s.project.get_mut());
+            settle_origins(s.session.project.get_mut());
             // FL's files always have a playlist, and the mixer is stored after it (spec: flp/events/mixer.md).
-            if s.project.arrangements.is_empty() {
-                s.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
+            if s.session.project.arrangements.is_empty() {
+                s.session.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
             }
-            let mut first = s.project.clone();
+            let mut first = s.session.project.clone();
             crate::rack::as_saved(&mut first);
             crate::project_plugins::store_hosted(&mut first, &self.plugins);
             match os_flp::project::create(&first) {
@@ -2367,14 +2347,14 @@ impl App {
                 }
             }
         } else {
-            s.file.clone().expect("checked")
+            s.session.file.clone().expect("checked")
         };
         // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a
         // failed save leaves the loaded file as it was.
-        let lost = os_flp::project::unsaved_parts(&s.project, &file);
+        let lost = os_flp::project::unsaved_parts(&s.session.project, &file);
         // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
-        let mut proj = s.project.clone();
+        let mut proj = s.session.project.clone();
         crate::rack::as_saved(&mut proj);
         // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`).
         let extra = crate::lemon_state::events(s, &self.plugins);
@@ -2395,12 +2375,12 @@ impl App {
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
             // The saved file now holds the channels and mixer tracks in model order, and the plugins as written.
-            settle_origins(s.project.get_mut());
-            crate::project_plugins::adopt_saved(s.project.get_mut(), &proj);
-            s.file = Some(file);
+            settle_origins(s.session.project.get_mut());
+            crate::project_plugins::adopt_saved(s.session.project.get_mut(), &proj);
+            s.session.file = Some(file);
             crate::templates::remember(&target);
             crate::recent::add(&target);
-            s.path = Some(target.clone());
+            s.session.path = Some(target.clone());
             if self.copying {
                 // A copy (a backup, Save new version's...) is not the project's file: its saved point stays.
                 self.journal_copied(&target);
@@ -2424,9 +2404,9 @@ impl App {
             return None;
         }
         let s = &mut self.state;
-        let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone(), s.plugin_edited);
+        let keep = (s.session.project.clone(), s.session.path.clone(), s.session.file.clone(), s.message.take(), self.saved.clone(), s.plugin_edited);
         self.copying = true;
-        let written = s.project.written_at();
+        let written = s.session.project.written_at();
         // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a
         // recent one (spec: ui/recent-projects.md §2).
         let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
@@ -2441,26 +2421,26 @@ impl App {
             m => Err(m.map_or_else(String::new, |m| m.trim_start_matches("Save failed: ").to_string())),
         };
         let project;
-        (project, s.path, s.file, s.message, self.saved, s.plugin_edited) = keep;
-        s.project = crate::locked::Locked::restored(project, written);
+        (project, s.session.path, s.session.file, s.message, self.saved, s.session.plugin_edited) = keep;
+        s.session.project = crate::locked::Locked::restored(project, written);
         Some(done)
     }
 
     /// The project as it is now counts as saved (opened, saved, new).
     pub(crate) fn mark_saved(&mut self) {
         // New things get their ids before the copy, so ids alone are no unsaved change.
-        let control = &mut self.state.control;
-        self.state.project.write_if(|p| control.settle(p));
-        self.saved = (self.state.project.clone(), self.state.tempo(), crate::lemon_state::saved_form(&self.state, &self.plugins));
-        self.state.plugin_edited = false;
+        let control = &mut self.state.session.control;
+        self.state.session.project.write_if(|p| control.settle(p));
+        self.saved = (self.state.session.project.clone(), self.state.tempo(), crate::lemon_state::saved_form(&self.state, &self.plugins));
+        self.state.session.plugin_edited = false;
     }
 
     /// Whether the project changed since it was last opened, saved or created, a hosted plugin's settings included.
     pub fn unsaved(&self) -> bool {
-        !same_as_saved(&self.saved.0, &self.state.project)
+        !same_as_saved(&self.saved.0, &self.state.session.project)
             || self.saved.1 != self.state.tempo()
             || self.saved.2 != crate::lemon_state::saved_form(&self.state, &self.plugins)
-            || self.state.plugin_edited
+            || self.state.session.plugin_edited
     }
 
     /// The system asks the window to close (its close shortcut, a taskbar or dock). The dialog-like windows drawn
@@ -2546,7 +2526,7 @@ impl App {
         if !self.unsaved() || quiet {
             return self.go_on(next);
         }
-        let name = self.state.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+        let name = self.state.session.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
         let text = match &name {
             Some(n) => spans(&["Save the changes to ", n, &format!(" before {doing}?")]),
             None => spans(&[&format!("Save the changes to the new project before {doing}?")]),
@@ -2687,7 +2667,7 @@ impl App {
             Then::DeleteUnused(files) => self.delete_unused_done(files, &reply),
             Then::ExtInput(t) => {
                 if reply == Reply::Button(Answer::Yes) {
-                    crate::mixer::external_only(&mut self.state, t);
+                    crate::mixer::external_only(&mut self.state.session, t);
                 }
             }
             Then::SavePreset(key) => {
@@ -2787,7 +2767,7 @@ impl App {
             }
             Then::Proposal(n) => {
                 let s = &mut self.state;
-                let r = if reply == Reply::Button(Answer::Yes) { crate::control::accept(s, n).map(|_| ()) } else { crate::control::discard(s, n) };
+                let r = if reply == Reply::Button(Answer::Yes) { crate::control::accept(s, n).map(|_| ()) } else { crate::control::discard(&mut s.session, n) };
                 if let Err(e) = r {
                     s.message = Some(e);
                 }
@@ -2832,22 +2812,22 @@ impl App {
         self.transport.silence();
         self.reset_hosted();
         let s = &mut self.state;
-        s.project = crate::locked::Locked::new(default_project());
+        s.session.project = crate::locked::Locked::new(default_project());
         crate::project_info::created(s);
-        s.file = None;
-        s.path = None;
+        s.session.file = None;
+        s.session.path = None;
         s.set_tempo(130.0);
         s.set_pattern(1);
         // The reference's default template is saved in pattern mode (spec: flp/engine-events.md "Project").
         s.set_song_mode(false);
         s.piano.reset();
         s.playlist.reset();
-        s.history.reset();
-        s.control.reset();
-        s.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
+        s.session.history.reset();
+        s.session.control.reset();
+        s.session.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
         crate::playlist::load_view(s);
         s.rack.reset();
-        s.piano.dirty = true;
+        s.session.dirty = true;
         s.message = Some("New project".into());
         self.mark_saved();
         self.journal_opened(None);
@@ -2855,7 +2835,7 @@ impl App {
 
     /// FILE > Open: the open dialog, starting in the project's folder.
     fn open_dialog(&mut self) {
-        let start = self.state.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+        let start = self.state.session.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Open project", "project", crate::dialog::Then::OpenProject)
             .filter("Lemon Studio project", &["lemon", "flp", "zip"])
             .start(start.as_deref());
@@ -2865,7 +2845,7 @@ impl App {
     /// FILE > Save new version (Ctrl+N): saves next to the project as "name_2.lemon", "name_3.lemon", ... (the first
     /// free number; an FLP's versions too), which becomes the project's file. A project without a file asks for a name.
     fn save_new_version(&mut self) {
-        let Some(path) = self.state.path.clone() else { return self.save(true) };
+        let Some(path) = self.state.session.path.clone() else { return self.save(true) };
         let stem = path.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         let (base, n) = match stem.rsplit_once('_') {
             Some((b, d)) if !b.is_empty() && !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()) => (b.to_string(), d.parse::<u32>().unwrap_or(1)),
@@ -2884,7 +2864,7 @@ impl App {
         use crate::plugins::{EDISON_FILE_NAME, EQ_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME};
         for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
             let Some((t, k)) = crate::plugins::fx_of(key) else { continue };
-            let Some(slot) = self.state.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
+            let Some(slot) = self.state.session.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
             let st = match slot.name.as_str() {
                 EQ_FILE_NAME => self.plugins.eq_file_state(key),
                 EDISON_FILE_NAME => self.plugins.edison_file_state(key),
@@ -2896,11 +2876,11 @@ impl App {
                 slot.state = st;
             }
         }
-        crate::osc3::store(self.state.project.get_mut(), &self.plugins);
-        crate::citrus::store(self.state.project.get_mut(), &self.plugins);
-        crate::smith::store(self.state.project.get_mut(), &self.plugins);
-        crate::slicer::store(self.state.project.get_mut(), &self.plugins);
-        crate::drums::store(self.state.project.get_mut(), &self.plugins);
+        crate::osc3::store(self.state.session.project.get_mut(), &self.plugins);
+        crate::citrus::store(self.state.session.project.get_mut(), &self.plugins);
+        crate::smith::store(self.state.session.project.get_mut(), &self.plugins);
+        crate::slicer::store(self.state.session.project.get_mut(), &self.plugins);
+        crate::drums::store(self.state.session.project.get_mut(), &self.plugins);
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
@@ -2908,7 +2888,7 @@ impl App {
         self.surface_reload();
         self.plugins.clear();
         self.loading = None;
-        self.state.playlist.wave_wait = false;
+        self.state.session.samples.wait = false;
         self.state.hosted_rows.clear();
         self.sampler_failed.clear();
         self.fx_failed.clear();
@@ -2926,8 +2906,8 @@ impl App {
         let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) else { return true };
         let mut added = false;
         let mut done = true;
-        for row in 0..self.state.project.channels.len() {
-            let ch = &self.state.project.channels[row];
+        for row in 0..self.state.session.project.channels.len() {
+            let ch = &self.state.session.project.channels[row];
             if !ch.kind.is_sampler() || self.state.hosted_rows.contains(&row) || self.sampler_failed.contains(&row) {
                 continue;
             }
@@ -2958,7 +2938,7 @@ impl App {
         }
         if added {
             self.transport.set_instruments(self.plugins.instruments());
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
         }
         done
     }
@@ -2975,7 +2955,7 @@ impl App {
         // Then the plugin channels and mixer effects, under the same budget, then the samplers' played samples.
         if decoded && self.sync_samplers(Some(deadline)) && self.host_plugins(deadline) && self.loading.as_mut().is_some_and(|l| l.builds_done()) {
             self.loading = None;
-            self.state.playlist.wave_wait = false;
+            self.state.session.samples.wait = false;
             // What was not found is listed now (spec: ui/project-loading.md §6).
             crate::missing::loaded(self);
             return self.invalidate();
@@ -2997,7 +2977,7 @@ impl App {
         self.sync_drums();
         self.sync_native();
         self.host_deadline = None;
-        let samplers = self.state.hosted_rows.iter().filter(|&&r| self.state.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
+        let samplers = self.state.hosted_rows.iter().filter(|&&r| self.state.session.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
         let done = (self.plugins.hosted.len() + self.wrap_failed.len() + self.fx_failed.len() + self.native_failed.len()).saturating_sub(samplers);
         let more = self.host_more;
         if let Some(l) = &mut self.loading {
@@ -3046,7 +3026,7 @@ impl App {
         // can hold tens of megabytes of audio.
         let todo: Vec<(u16, u8, String)> = self
             .state
-            .project
+            .session.project
             .mixer
             .iter()
             .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
@@ -3073,7 +3053,7 @@ impl App {
                 _ => recreation.unwrap_or(TESLA),
             };
             let Some(index) = self.plugins.effect_index(name) else { continue };
-            let track = self.state.project.mixer.iter().find(|m| m.index == t);
+            let track = self.state.session.project.mixer.iter().find(|m| m.index == t);
             let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
             let st = if file == EQ_FILE_NAME {
                 Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
@@ -3101,7 +3081,7 @@ impl App {
             return;
         }
         self.transport.set_effects(self.plugins.effects());
-        self.state.piano.dirty = true;
+        self.state.session.dirty = true;
     }
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
@@ -3109,11 +3089,11 @@ impl App {
         self.session_tick();
         // Instances follow their channels by id (an undo, a command), before rows are looked at.
         self.follow_ids(true, false);
-        if std::mem::take(&mut self.state.retimed) {
+        if std::mem::take(&mut self.state.session.retimed) {
             self.transport.stop();
         }
         // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
-        let len = self.state.project.channels.len();
+        let len = self.state.session.project.channels.len();
         if self.plugins.hosted.range(len..crate::plugins::FX_KEY).next().is_some() {
             self.remap_rows(&|r| (r < len).then_some(r));
         }
@@ -3141,12 +3121,12 @@ impl App {
             self.sync_drums();
             self.sync_native();
         }
-        for (row, path) in std::mem::take(&mut self.state.sample_loads) {
+        for (row, path) in std::mem::take(&mut self.state.session.sample_loads) {
             if !self.state.hosted_rows.contains(&row) {
                 continue;
             }
             // The root note and stretch settings the load may have read from the file (`rack::read_tags`) go with it.
-            let set = self.state.project.channels.get(row).map(crate::plugins::tag_params).unwrap_or_default();
+            let set = self.state.session.project.channels.get(row).map(crate::plugins::tag_params).unwrap_or_default();
             // A row hosted this tick already started from its channel's sample.
             let new = self.plugins.sampler_path(row).as_deref() != Some(path.as_str());
             if !self.plugins.set_sampler(row, new.then_some(path.as_str()), &set) {
@@ -3170,7 +3150,7 @@ impl App {
                     self.plugins.added(row);
                     self.state.hosted_rows.push(row);
                     self.transport.set_instruments(self.plugins.instruments());
-                    self.state.piano.dirty = true;
+                    self.state.session.dirty = true;
                     self.state.message = Some(format!("Added {name}"));
                     self.state.pending_open = Some(row);
                 }
@@ -3186,7 +3166,7 @@ impl App {
         }
         #[cfg(plugin_windows)]
         if let Some(row) = self.state.pending_open.take().filter(|r| self.state.hosted_rows.contains(r)) {
-            if let Some(info) = channel_info(&self.state.project, row) {
+            if let Some(info) = channel_info(&self.state.session.project, row) {
                 match self.plugins.open_window(row, info) {
                     Ok(()) => {
                         self.state.raise(Win::Hosted(row));
@@ -3204,7 +3184,7 @@ impl App {
         #[cfg(plugin_windows)]
         let requests = {
             let members = self.member_infos();
-            let project = &self.state.project;
+            let project = &self.state.session.project;
             self.plugins.idle(|row| {
                 // A container's member (`crate::container`): its name over its slot's title.
                 if row >= crate::plugins::MEMBER_KEY {
@@ -3224,8 +3204,8 @@ impl App {
         // audio/track-io.md §1 "Signal": monitoring works while stopped).
         // The system's input device opens with the output only while a track with an input chosen hears it or is
         // armed, so the microphone is not held (and shown in use) the rest of the time.
-        crate::device::want_inputs(self.state.project.mixer.iter().any(|m| m.audio_in >= 0 && (m.monitored() || m.armed)));
-        let monitoring = self.state.project.mixer.iter().any(|m| m.monitored()) && crate::device::input_source().is_some();
+        crate::device::want_inputs(self.state.session.project.mixer.iter().any(|m| m.audio_in >= 0 && (m.monitored() || m.armed)));
+        let monitoring = self.state.session.project.mixer.iter().any(|m| m.monitored()) && crate::device::input_source().is_some();
         let listen = self.plugins.editor_open() || monitoring;
         if listen {
             self.sync_live();
@@ -3255,7 +3235,7 @@ impl App {
         {
             for r in requests {
                 use crate::plugins::Request;
-                let chans = &mut self.state.project.get_mut().channels;
+                let chans = &mut self.state.session.project.get_mut().channels;
                 match r {
                     // The window's own close: all its tabs (a tab's little x closes only that one).
                     #[cfg(target_os = "linux")]
@@ -3320,7 +3300,7 @@ impl App {
                         crate::playlist::fill_plugin_window_menu(&self.state, row, &mut menu);
                         // A channel's window: Replace ▸ lists the generators (an effect slot's stays greyed here; the
                         // mixer's slot menu has its own Replace ▸).
-                        if row < self.state.project.channels.len() {
+                        if row < self.state.session.project.channels.len() {
                             if let Some(i) = menu.items.iter_mut().find(|i| i.label == "Replace") {
                                 *i = crate::playlist::PItem::sub("Replace", crate::plugin_menu::items(&self.state, crate::plugin_menu::Target::Replace(row), true));
                             }
@@ -3375,7 +3355,7 @@ impl App {
                     Request::ToggleOn(row) => {
                         let _ = chans;
                         crate::control::knob_edit(&mut self.state, crate::rack::MUTE_SOLO, Region::Mutes, |s| {
-                            s.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled)
+                            s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled)
                         })
                     }
                     Request::Volume(row, v) => self.channel_control(row, ChannelControl::Volume, |c| c.volume = v),
@@ -3384,7 +3364,7 @@ impl App {
                     Request::PitchRange(row, r) => {
                         let _ = chans;
                         crate::control::edit(&mut self.state, "Channel pitch range", Region::Channel(row), |s| {
-                            s.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| {
+                            s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| {
                                 // A narrower range takes the pitch knob with it.
                                 c.misc.pitch_range = r.clamp(1, 48) as u8;
                                 let lim = 100 * i32::from(c.misc.pitch_range);
@@ -3394,7 +3374,7 @@ impl App {
                     }
                     Request::Track(row, t) => {
                         let _ = chans;
-                        let max = crate::mixer::max_insert(&self.state.project);
+                        let max = crate::mixer::max_insert(&self.state.session.project);
                         self.channel_control(row, ChannelControl::Track, |c| c.mixer_track = t.min(max));
                     }
                     Request::ShowTrack(row) => {
@@ -3438,7 +3418,7 @@ impl App {
                         continue;
                     }
                 }
-                self.state.piano.dirty = true;
+                self.state.session.dirty = true;
                 self.invalidate();
             }
             self.clip_docked();
@@ -3526,7 +3506,7 @@ impl App {
         };
         let run = crate::history::Run::Channel(row, which);
         crate::control::run_edit(&mut self.state, name, Region::Channel(row), run, knob, |s| {
-            if let Some(c) = s.project.get_mut().channels.get_mut(row) {
+            if let Some(c) = s.session.project.get_mut().channels.get_mut(row) {
                 f(c);
             }
         });
@@ -3827,7 +3807,7 @@ impl App {
         let s = &self.state;
         let r = match w {
             // The channel window without a channel draws no frame.
-            Win::Plugin if s.project.channels.get(s.plugin_channel).is_none() => None,
+            Win::Plugin if s.session.project.channels.get(s.plugin_channel).is_none() => None,
             w if crate::floating::floats(w) => crate::floating::rect(s, w),
             w => {
                 let ws = &s.wins[w.slot()?];
@@ -4011,8 +3991,8 @@ impl App {
             return;
         }
         let tick = now.tick as f32;
-        let ppq = f32::from(self.state.project.ppq.max(4));
-        let pattern_tick = if now.song { piano::pattern_tick_in_song(&self.state, now.tick).map(|t| t as f32) } else { Some(tick) };
+        let ppq = f32::from(self.state.session.project.ppq.max(4));
+        let pattern_tick = if now.song { piano::pattern_tick_in_song(&self.state.session, now.tick).map(|t| t as f32) } else { Some(tick) };
         if now.song
             && let Some(g) = self.pl_grid.filter(|_| self.state.shown(Win::Playlist))
         {
@@ -4110,7 +4090,7 @@ impl App {
 
     /// Every hosted instance for the monitor, rack rows then mixer slots.
     pub(crate) fn perf_sources(&self) -> Vec<crate::perf::Source> {
-        let p = &self.state.project;
+        let p = &self.state.session.project;
         self.plugins
             .hosted
             .iter()
@@ -4448,7 +4428,7 @@ impl App {
         self.transport.tap_click(accent);
         // A count's taps make one undo step; a new count, a new one.
         if bpm.is_none() {
-            self.state.history.end_run();
+            self.state.session.history.end_run();
         }
         if let Some(bpm) = bpm.filter(|_| crate::tapper::get().apply) {
             crate::control::edit_run(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, crate::history::Run::Tap, |app| app.set_tempo(bpm));
@@ -4474,7 +4454,7 @@ impl App {
         let t = bpm.clamp(10.0, 522.0);
         if self.state.tempo() != t {
             self.state.set_tempo(t);
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
             self.damage_band(TEMPO_RECT);
         }
         t
@@ -4540,7 +4520,7 @@ impl App {
         // Initialize controls automatically"). The engine sets them itself there; the project follows, so the controls
         // show them.
         let looped = now.playing && old.playing && now.song && old.song && !now.paused && now.tick < old.tick;
-        if looped && crate::init::apply(&mut self.state) {
+        if looped && crate::init::apply(&mut self.state.session) {
             self.invalidate();
         }
         if now.playing != old.playing || now.paused != old.paused || now.song != old.song {
@@ -4572,7 +4552,7 @@ impl App {
                 if let Some(g) = self.piano_geom() {
                     let grid = g.grid;
                     // In song mode the piano roll's playhead is where its pattern plays, while a clip of it does.
-                    let at = |t: f64| if now.song { piano::pattern_tick_in_song(&self.state, t) } else { Some(t) };
+                    let at = |t: f64| if now.song { piano::pattern_tick_in_song(&self.state.session, t) } else { Some(t) };
                     let xs: Vec<f32> = [at(old.tick), at(now.tick)].into_iter().flatten().map(|t| g.x_of(t as f32)).collect();
                     for &x in &xs {
                         self.damage_rect(Rect::new(x - 2.0, grid.y, 5.0, grid.h));
@@ -4889,10 +4869,12 @@ impl App {
 
     /// Periodic housekeeping; returns whether a repaint is needed.
     pub fn tick(&mut self) -> bool {
+        // Whatever the session reported has been followed by the views where it happened (`crate::follow::around`).
+        debug_assert_eq!(self.state.session.touched, Default::default(), "views left to follow");
         // Things the interface added get their ids before anything looks them up (`control::ids`).
         let s = &mut self.state;
-        let edited = s.piano.dirty || s.project.written_at().is_some();
-        s.control.settle_tick(&mut s.project, edited);
+        let edited = s.session.dirty || s.session.project.written_at().is_some();
+        s.session.control.settle_tick(&mut s.session.project, edited);
         self.control_tick();
         self.plugin_tick();
         // Playback loops over the time selection, as it is now (spec: ui/recording.md §5).
@@ -4985,10 +4967,10 @@ impl App {
         }
         // Audio clips follow their channel's stretch, pitch and the tempo (ui/playlist.md §9c). The lengths are worked
         // out, not edited: the saved copy gets them too, so a fit alone (an opened FL project) is not an unsaved change.
-        if let Some(fits) = crate::playlist::audio_fits(&self.state) {
-            if self.state.project.write_if(|p| crate::playlist::fit_clips(&mut p.arrangements, &fits)) {
+        if let Some(fits) = crate::playlist::audio_fits(&self.state.session) {
+            if self.state.session.project.write_if(|p| crate::playlist::fit_clips(&mut p.arrangements, &fits)) {
                 crate::playlist::fit_clips(&mut self.saved.0.arrangements, &fits);
-                self.state.piano.dirty = true;
+                self.state.session.dirty = true;
                 self.damage_win(Win::Playlist);
             }
         }
@@ -5002,17 +4984,17 @@ impl App {
         // Edits reach playback right away, also during a drag (at most once per tick): every write to the project
         // (`locked::Locked`), and the flag for what playback reads outside it (the tempo, song mode, the pattern shown;
         // control-plane step 5 moves those into the project).
-        let written = self.state.project.take_written();
+        let written = self.state.session.project.take_written();
         // A write alone that changes nothing playback reads (the project's info, a plugin state stored for a save) builds
         // no new engine.
-        let play = (written.is_some() && !self.state.piano.dirty).then(|| crate::rack::play_project(&self.state));
-        if self.state.piano.dirty || play.as_ref().is_some_and(|p| !self.transport.holds(p)) {
-            self.state.piano.dirty = false;
+        let play = (written.is_some() && !self.state.session.dirty).then(|| crate::rack::play_project(&self.state));
+        if self.state.session.dirty || play.as_ref().is_some_and(|p| !self.transport.holds(p)) {
+            self.state.session.dirty = false;
             self.journal.touch();
             // An edit in the interface (a command's change is its event already; an undo or redo is one too).
             let s = &mut self.state;
-            if s.control.changed_since_seen(&s.project, s.tempo()) {
-                s.control.event(&crate::control::By::User, "edit", "", Vec::new());
+            if s.session.control.changed_since_seen(&s.session.project, s.tempo()) {
+                s.session.control.event(&crate::control::By::User, "edit", "", Vec::new());
             }
             // Also while Play is still starting (not `playing` yet); ignored when stopped.
             self.transport.update(&play.unwrap_or_else(|| crate::rack::play_project(&self.state)));
@@ -5511,7 +5493,7 @@ impl App {
     /// Song playback from `tick` (Song mode; spec: ui/playlist.md §7).
     pub fn play_song_from(&mut self, tick: u32) {
         self.state.set_song_mode(true);
-        if self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
+        if self.state.session.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             // Nothing plays in SONG mode, so a pattern that was playing stops too.
             if self.transport.playing() {
                 self.transport.stop();
@@ -5520,8 +5502,8 @@ impl App {
             return self.invalidate();
         }
         // The initial values first (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
-        crate::init::apply(&mut self.state);
-        let mut p = self.state.project.clone();
+        crate::init::apply(&mut self.state.session);
+        let mut p = self.state.session.project.clone();
         p.tempo = Some(self.state.tempo());
         self.transport.stop();
         self.transport.set_loop(self.state.playlist.range);
@@ -5531,7 +5513,7 @@ impl App {
 
     /// Clip menu "Preview": play just this clip once (spec: ui/playlist.md §10).
     pub fn preview_clip(&self, c: &os_model::Clip) {
-        let mut p = self.state.project.clone();
+        let mut p = self.state.session.project.clone();
         p.tempo = Some(self.state.tempo());
         let mut clip = *c;
         clip.position = 0;
@@ -5610,7 +5592,7 @@ impl App {
     /// sample(s)" (`history::load_sample`).
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &self.state;
-        let row = views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler());
+        let row = views::rack::row_at(s, y).filter(|&r| s.session.project.channels[r].kind.is_sampler());
         self.sample_to_channel(path, row);
     }
 
@@ -5623,25 +5605,26 @@ impl App {
         let path = crate::data_folder::adopt(s, &path);
         let row = match row {
             Some(r) => {
-                crate::history::load_sample(s, r);
-                s.sample_loads.push((r, path.clone()));
-                crate::rack::auto_name(&mut s.project.get_mut().channels[r], std::path::Path::new(&path));
+                crate::history::load_sample(&mut s.session, r);
+                s.session.sample_loads.push((r, path.clone()));
+                crate::rack::auto_name(&mut s.session.project.get_mut().channels[r], std::path::Path::new(&path));
                 r
             }
             None => {
                 // The step covers the channel itself: undone, it goes.
-                crate::history::load_sample(s, s.project.channels.len());
-                let r = add_channel(s.project.get_mut());
-                s.project.get_mut().channels[r].name = stem.clone();
+                let row = s.session.project.channels.len();
+                crate::history::load_sample(&mut s.session, row);
+                let r = add_channel(s.session.project.get_mut());
+                s.session.project.get_mut().channels[r].name = stem.clone();
                 r
             }
         };
-        let ch = &mut s.project.get_mut().channels[row];
+        let ch = &mut s.session.project.get_mut().channels[row];
         crate::rack::read_tags(ch, std::path::Path::new(&path));
         ch.sample_path = Some(path);
         s.selected_channel = row;
         s.rack.select_only(row);
-        s.piano.dirty = true;
+        s.session.dirty = true;
         s.message = Some(format!("{} loaded in Lemon Sampler", stem.unwrap_or_default()));
         self.invalidate();
     }
@@ -5663,14 +5646,14 @@ impl App {
         let n = st.slices.len();
         crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
-            let row = add_plugin_channel(s.project.get_mut(), crate::slicer::LEMON_SLICER);
-            let ch = &mut s.project.get_mut().channels[row];
+            let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
+            let ch = &mut s.session.project.get_mut().channels[row];
             ch.name = Some(stem.clone());
             ch.plugin_state = Some(st.to_bytes());
             s.selected_channel = row;
             s.rack.select_only(row);
             crate::rack::autosize(s);
-            s.piano.dirty = true;
+            s.session.dirty = true;
         });
         self.state.message = Some(format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER));
         self.sync_slicer();
@@ -5686,7 +5669,7 @@ impl App {
         match to {
             os_hostlink::AudioTo::Channel => {
                 let s = &self.state;
-                let row = Some(s.selected_channel).filter(|&r| s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler()));
+                let row = Some(s.selected_channel).filter(|&r| s.session.project.channels.get(r).is_some_and(|c| c.kind.is_sampler()));
                 return self.sample_to_channel(path, row);
             }
             os_hostlink::AudioTo::Slicer => return self.sample_to_slicer(path),
@@ -5694,17 +5677,17 @@ impl App {
         }
         let s = &mut self.state;
         let start = s.playlist.pos;
-        let secs = s.playlist.wave(&path).map_or(0.0, |w| w.secs());
-        let p = &s.project;
+        let secs = s.session.samples.wave(&path).map_or(0.0, |w| w.secs());
+        let p = &s.session.project;
         let tempo = p.tick_tempo(s.tempo().max(1.0));
         let len = (secs * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
-        let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
+        let track = crate::playlist::free_track(&s.session, 0, start, start + len.max(1));
         let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         s.message = Some(match crate::playlist::add_audio_clip(s, &path, track, start) {
             Some(_) => format!("Added audio clip {name}"),
             None => format!("Could not read {name} as audio"),
         });
-        s.piano.dirty = true;
+        s.session.dirty = true;
         self.invalidate();
     }
 
@@ -5748,10 +5731,10 @@ impl App {
     fn sample_taken(&mut self, row: usize, path: &str, sampler: bool, taken: bool) {
         let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
         if taken {
-            if sampler && row < self.state.project.channels.len() {
-                crate::history::load_sample(&mut self.state, row);
+            if sampler && row < self.state.session.project.channels.len() {
+                crate::history::load_sample(&mut self.state.session, row);
             }
-            if let Some(ch) = self.state.project.get_mut().channels.get_mut(row).filter(|_| sampler) {
+            if let Some(ch) = self.state.session.project.get_mut().channels.get_mut(row).filter(|_| sampler) {
                 crate::rack::auto_name(ch, std::path::Path::new(path));
                 crate::rack::read_tags(ch, std::path::Path::new(path));
                 ch.sample_path = Some(path.to_string());
@@ -5778,7 +5761,7 @@ impl App {
         if self.loop_to_slicer(row, &p) {
             return;
         }
-        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
+        let sampler = self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
         let taken = sampler && self.plugins.load_sample(row, &p);
         self.sample_taken(row, &p, sampler, taken);
     }
@@ -5795,7 +5778,7 @@ impl App {
         let path = crate::data_folder::adopt(&mut self.state, path);
         self.state.message = Some(match self.plugins.load_slicer_loop(row, &path) {
             Some(Ok(n)) => {
-                self.state.plugin_edited = true;
+                self.state.session.plugin_edited = true;
                 format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER)
             }
             Some(Err(e)) => format!("{}: {e}", crate::slicer::LEMON_SLICER),
@@ -6129,12 +6112,12 @@ impl App {
         let items: Vec<PItem> = match label {
             // Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase list.
             views::settings::TIMEBASE => {
-                let now = self.state.project.ppq;
+                let now = self.state.session.project.ppq;
                 views::settings::TIMEBASES.iter().map(|&v| PItem::new(v.to_string(), Cmd::Timebase(v)).mark(Mark::Radio(v == now))).collect()
             }
             // The "Set as" mode (event 35).
             views::settings::SET_AS => {
-                let sig = self.state.project.bar_is_signature();
+                let sig = self.state.session.project.bar_is_signature();
                 vec![
                     PItem::new(views::settings::SET_AS_DIVISION, Cmd::TimeMode(false)).mark(Mark::Radio(!sig)),
                     PItem::new(views::settings::SET_AS_SIGNATURE, Cmd::TimeMode(true)).mark(Mark::Radio(sig)),
@@ -6142,13 +6125,13 @@ impl App {
             }
             // Project ▸ Advanced ▸ Panning law (event 23), two choices.
             views::settings::PANNING_LAW => {
-                let now = self.state.project.panning_law.unwrap_or(0);
+                let now = self.state.session.project.panning_law.unwrap_or(0);
                 views::settings::PANNING_LAWS.iter().map(|&(name, v)| PItem::new(name, Cmd::PanningLaw(v)).mark(Mark::Radio(v == now))).collect()
             }
             // One of the time signature's two numbers: a numerator is the beats per bar (the steps per beat stay), a
             // denominator d makes 16 / d steps per beat (events 17, 18).
             views::settings::NUMERATOR | views::settings::DENOMINATOR => {
-                let now = self.state.project.bar();
+                let now = self.state.session.project.bar();
                 let numerator = label == views::settings::NUMERATOR;
                 let choices = if numerator { views::settings::NUMERATORS } else { views::settings::DENOMINATORS };
                 choices
@@ -6287,12 +6270,12 @@ impl App {
 
     fn set_bar_now(&mut self, beats: u16, steps: u16) -> Option<String> {
         let bar = (beats.max(1), steps.max(1));
-        if self.state.project.bar() != bar {
-            self.state.project.get_mut().bar = Some(bar);
-            self.state.piano.dirty = true;
+        if self.state.session.project.bar() != bar {
+            self.state.session.project.get_mut().bar = Some(bar);
+            self.state.session.dirty = true;
         }
         self.invalidate();
-        Some(bar_text(&self.state.project))
+        Some(bar_text(&self.state.session.project))
     }
 
     /// Settings > Project ▸ Set as time signature / time division (event 35; spec: ui/settings-choices.md "Set as time
@@ -6304,17 +6287,17 @@ impl App {
 
     fn set_time_mode_now(&mut self, signature: bool) -> Option<String> {
         let s = &mut self.state;
-        let now = s.project.bar_is_signature();
+        let now = s.session.project.bar_is_signature();
         if now != signature {
             let memory = &mut s.settings.bar_memory;
-            memory[usize::from(now)] = Some(s.project.bar());
-            s.project.get_mut().bar = Some(memory[usize::from(signature)].unwrap_or(Project::BAR_DEFAULT));
-            s.project.get_mut().bar_as_signature = Some(signature);
-            s.piano.dirty = true;
+            memory[usize::from(now)] = Some(s.session.project.bar());
+            s.session.project.get_mut().bar = Some(memory[usize::from(signature)].unwrap_or(Project::BAR_DEFAULT));
+            s.session.project.get_mut().bar_as_signature = Some(signature);
+            s.session.dirty = true;
         }
         self.invalidate();
         let mode = if signature { views::settings::SET_AS_SIGNATURE } else { views::settings::SET_AS_DIVISION };
-        Some(format!("{mode}: {}", bar_text(&self.state.project)))
+        Some(format!("{mode}: {}", bar_text(&self.state.session.project)))
     }
 
     /// Settings > Project ▸ a time division's value box (`label`, `settings::LIVE_NUMBERS`) moved by `delta` (the
@@ -6326,19 +6309,19 @@ impl App {
             // Audio ▸ Browser preview track and Metronome track offer "---" and the open project's insert tracks; one
             // past them comes back in range (spec: ui/settings-choices.md "Mixer: Browser preview track").
             let track = n == &crate::prefs::BROWSER_PREVIEW_TRACK || n == &crate::prefs::METRONOME_TRACK;
-            let max = if track { n.max.min(crate::mixer::inserts(&self.state)) } else { n.max };
+            let max = if track { n.max.min(crate::mixer::inserts(&self.state.session)) } else { n.max };
             let v = (i32::from(crate::prefs::number(n)) + delta).clamp(i32::from(n.min), i32::from(max.max(n.min))) as u16;
             crate::prefs::set_number(n, v);
             if n == &crate::prefs::METRONOME_TRACK {
                 // The playing engines hear it from their next tick.
                 crate::metronome::switch().set_track(v);
             }
-            crate::history::trim(&mut self.state);
+            crate::history::trim(&mut self.state.session);
             self.invalidate();
             return Some(format!("{}: {}", n.label, crate::prefs::number_text(n)));
         }
         let (lo, hi) = views::settings::number_range(label)?;
-        let (beats, steps) = self.state.project.bar();
+        let (beats, steps) = self.state.session.project.bar();
         let beat_box = label == views::settings::BEATS_PER_BAR;
         let now = if beat_box { beats } else { steps };
         let v = (i32::from(now) + delta).clamp(i32::from(lo.min(now)), i32::from(hi.max(now))) as u16;
@@ -6353,12 +6336,12 @@ impl App {
     /// selections, clipboards and undo steps are rescaled with the project, so no undo brings back ticks of the old
     /// timebase; choosing the old timebase again rescales back (exactly, unless ticks were rounded on the way).
     pub fn set_timebase(&mut self, ppq: u16) -> Option<String> {
-        let (from, to) = (self.state.project.ppq.max(1), ppq.max(1));
+        let (from, to) = (self.state.session.project.ppq.max(1), ppq.max(1));
         if from != to {
             self.transport.stop();
             // One step, "Project settings", that brings the ticks back exactly (spec: ui/settings-choices.md "Undo
             // history: the four checks").
-            crate::history::timebase(&mut self.state);
+            crate::history::timebase(&mut self.state.session);
             retime(&mut self.state, from, to);
         }
         self.invalidate();
@@ -6370,9 +6353,9 @@ impl App {
     /// for any pan edit; the project counts as changed. A file without the event is Circular.
     pub fn set_panning_law(&mut self, law: u8) -> Option<String> {
         crate::control::edit(&mut self.state, "Panning law", crate::control::command::Region::Settings, |s| {
-            if s.project.panning_law.unwrap_or(0) != law {
-                s.project.get_mut().panning_law = Some(law);
-                s.piano.dirty = true;
+            if s.session.project.panning_law.unwrap_or(0) != law {
+                s.session.project.get_mut().panning_law = Some(law);
+                s.session.dirty = true;
             }
         });
         self.invalidate();
@@ -6382,9 +6365,9 @@ impl App {
     /// Settings > Project ▸ Advanced ▸ Play truncated notes in clips (spec: audio/song-structure.md "Play truncated
     /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
     fn toggle_play_truncated(&mut self) {
-        let on = !self.state.project.play_truncated;
-        crate::control::edit(&mut self.state, "Play truncated notes in clips", crate::control::command::Region::Settings, |s| s.project.get_mut().play_truncated = on);
-        self.state.piano.dirty = true;
+        let on = !self.state.session.project.play_truncated;
+        crate::control::edit(&mut self.state, "Play truncated notes in clips", crate::control::command::Region::Settings, |s| s.session.project.get_mut().play_truncated = on);
+        self.state.session.dirty = true;
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
     }
 
@@ -6393,11 +6376,11 @@ impl App {
     /// `playlist::follow_crossfades`); turned off, their lengths go to 0 (spec: audio/audio-clips.md "Automatic
     /// crossfades").
     fn toggle_auto_crossfades(&mut self) {
-        let on = !self.state.project.auto_crossfades.unwrap_or(false);
+        let on = !self.state.session.project.auto_crossfades.unwrap_or(false);
         // The whole project: switching sets the clips' crossfades.
         crate::control::edit(&mut self.state, "Automatic crossfades", crate::control::command::Region::Project, |s| {
-            s.project.get_mut().auto_crossfades = Some(on);
-            crate::playlist::crossfades_switched(s);
+            s.session.project.get_mut().auto_crossfades = Some(on);
+            crate::playlist::crossfades_switched(&mut s.session);
         });
         self.state.message = Some(format!("Automatic crossfades: {}", if on { "on" } else { "off" }));
     }
@@ -6594,10 +6577,10 @@ impl App {
     pub(crate) fn automation_target(&self, a: &Action) -> Option<(u32, String, f64)> {
         use os_model::target;
         let s = &self.state;
-        let chan = |row: usize| s.project.channels.get(row);
+        let chan = |row: usize| s.session.project.channels.get(row);
         let chan_name = |row: usize| chan(row).and_then(|c| c.name.clone()).unwrap_or_else(|| format!("Channel {}", row + 1));
         let mix_name = |t: u16| {
-            s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.name.clone()).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Bus {t}") })
+            s.session.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.name.clone()).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Bus {t}") })
         };
         Some(match *a {
             Action::Knob(crate::knobs::KnobId::ChanVol(row)) => {
@@ -6607,11 +6590,11 @@ impl App {
                 (target::channel(chan(row)?.index, target::CHANNEL_PAN), format!("{} - Channel panning", chan_name(row)), 0.5 + chan(row)?.pan / 2.0)
             }
             Action::Knob(crate::knobs::KnobId::MixPan(t)) => {
-                let pan = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.pan).unwrap_or(0.0);
+                let pan = s.session.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.pan).unwrap_or(0.0);
                 (target::mixer(t, target::MIXER_PAN), format!("{} - Pan", mix_name(t)), 0.5 + pan / 2.0)
             }
             Action::Fader(t) => {
-                let v = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
+                let v = s.session.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 (target::mixer(t, target::MIXER_VOLUME), format!("{} - Volume", mix_name(t)), v)
             }
             Action::Tempo => (target::TEMPO, "Tempo".into(), crate::playlist::tempo_value(s.tempo())),
@@ -6628,7 +6611,7 @@ impl App {
                 (target::channel(chan(row)?.index, target::CHANNEL_ON), format!("{} - Mute / solo", chan_name(row)), if chan(row)?.enabled { 1.0 } else { 0.0 })
             }
             Action::Knob(k @ crate::knobs::KnobId::Eq(t, b, f)) => {
-                s.project.mixer.iter().find(|m| m.index == t)?;
+                s.session.project.mixer.iter().find(|m| m.index == t)?;
                 let param = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f.min(2))] + b.min(2);
                 let text = s.knob_text(k);
                 let label = text.split_once(':').map_or(text.as_str(), |(a, _)| a);
@@ -6745,11 +6728,11 @@ impl App {
                     } else {
                         self.drag_notes(x0, y0, &orig, false);
                     }
-                    self.state.piano.dirty = true;
+                    self.state.session.dirty = true;
                 }
                 Drag::NoteResize { x0, orig } => {
                     self.drag_notes(x0, 0.0, &orig, true);
-                    self.state.piano.dirty = true;
+                    self.state.session.dirty = true;
                 }
                 Drag::NoteErase => self.erase_at(x, y),
                 Drag::NoteMute { on } => self.mute_at(x, y, on),
@@ -6809,7 +6792,7 @@ impl App {
                     self.damage_piano();
                 }
                 Drag::Velocity { last_x, last_y } => {
-                    self.state.piano.dirty = true;
+                    self.state.session.dirty = true;
                     self.paint_velocity(last_x, last_y, x, y);
                     self.drag = Some(Drag::Velocity { last_x: x, last_y: y });
                 }
@@ -6875,10 +6858,10 @@ impl App {
                 }
                 Drag::RackMixer { ch, y0, v0 } => {
                     // One insert per 10 px, up = higher (spec: ui/channel-rack.md §12).
-                    let v = (i32::from(v0) + ((y0 - y) / crate::rack::MIXER_DRAG).round() as i32).clamp(0, i32::from(crate::mixer::max_insert(&self.state.project))) as u16;
-                    if self.state.project.channels.get(ch).is_some_and(|c| c.mixer_track != v) {
+                    let v = (i32::from(v0) + ((y0 - y) / crate::rack::MIXER_DRAG).round() as i32).clamp(0, i32::from(crate::mixer::max_insert(&self.state.session.project))) as u16;
+                    if self.state.session.project.channels.get(ch).is_some_and(|c| c.mixer_track != v) {
                         self.channel_control(ch, ChannelControl::Track, |c| c.mixer_track = v);
-                        self.state.piano.dirty = true;
+                        self.state.session.dirty = true;
                     }
                     self.hint = Cow::Owned(format!("Target mixer track: {}", views::rack::insert_name(v)));
                     let r = self.hits.iter().rev().find(|h| h.action == Action::RackMixer(ch)).map(|h| h.rect);
@@ -6901,7 +6884,7 @@ impl App {
                 }
                 Drag::RackSel { from } => {
                     if let Some(r) = views::rack::row_at(&self.state, y) {
-                        let shown = crate::rack::shown(&self.state);
+                        let shown = crate::rack::shown(&self.state.session);
                         if let (Some(a), Some(b)) = (shown.iter().position(|&x| x == from), shown.iter().position(|&x| x == r)) {
                             self.state.rack.sel = shown[a.min(b)..=a.max(b)].iter().copied().collect();
                         }
@@ -6916,13 +6899,13 @@ impl App {
                     self.invalidate();
                 }
                 Drag::RackLen { y0, v0 } => {
-                    let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(0, crate::rack::max_steps(&self.state) as i32) as u32;
+                    let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(0, crate::rack::max_steps(&self.state.session) as i32) as u32;
                     crate::rack::set_len(&mut self.state, (v > 0).then_some(v));
                     self.hint = Cow::Owned(if v == 0 { "Pattern length: Auto".into() } else { format!("Pattern length: {v} steps") });
                     self.invalidate();
                 }
                 Drag::RackLoopLen { row, y0, v0 } => {
-                    let hint = crate::rack::set_loop_box(&mut self.state, row, v0 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32);
+                    let hint = crate::rack::set_loop_box(&mut self.state.session, row, v0 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32);
                     self.hint = Cow::Owned(hint);
                     self.invalidate();
                 }
@@ -6950,13 +6933,13 @@ impl App {
                 Drag::Fader { track, y0, v0, level, others } => {
                     let per_px = views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
                     let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
-                    if let Some(t) = self.state.project.get_mut().mixer.iter_mut().find(|t| t.index == track) {
+                    if let Some(t) = self.state.session.project.get_mut().mixer.iter_mut().find(|t| t.index == track) {
                         t.volume = Some(v);
-                        self.state.piano.dirty = true;
+                        self.state.session.dirty = true;
                     }
                     self.record_control(&Action::Fader(track));
                     for &(t, other) in &others {
-                        if let Some(m) = crate::mixer::track_mut(&mut self.state, t) {
+                        if let Some(m) = crate::mixer::track_mut(&mut self.state.session, t) {
                             m.volume = Some(crate::mixer::group_fader(other, level, v));
                         }
                         self.record_control(&Action::Fader(t));
@@ -7099,17 +7082,17 @@ impl App {
             if let Some(g) = self.pl_grid {
                 let s = &self.state;
                 let pg = crate::playlist::PGeom::new(s, g);
-                let hit = crate::playlist::clip_at(s, &pg, x, y);
+                let hit = crate::playlist::clip_at(&s.session, &pg, x, y);
                 // Automation clips show their points while hovered, audio clips their fade and gain handles (§9a).
                 let auto = hit.filter(|&i| {
-                    let c = &crate::playlist::clips(s)[i];
-                    matches!(c.source, os_model::ClipSource::Channel(ch) if s.project.automation(ch).is_some()) || crate::playlist::is_audio_clip(s, &pg, c)
+                    let c = &crate::playlist::clips(&s.session)[i];
+                    matches!(c.source, os_model::ClipSource::Channel(ch) if s.session.project.automation(ch).is_some()) || crate::playlist::is_audio_clip(&s.session, &pg, c)
                 });
                 let handle = hit.and_then(|i| crate::playlist::handle_at(s, &pg, i, x, y));
                 if auto != self.state.playlist.hover_clip || handle != self.state.playlist.hover_handle {
                     // Repaint only the clips that lost and gained them (or whose lit handle changed).
                     for i in [self.state.playlist.hover_clip, auto].into_iter().flatten() {
-                        match crate::playlist::clips(&self.state).get(i) {
+                        match crate::playlist::clips(&self.state.session).get(i) {
                             Some(c) => self.damage_rect(pg.clip_rect(c).outset(6.0)),
                             None => self.invalidate(),
                         }
@@ -7118,20 +7101,20 @@ impl App {
                     self.state.playlist.hover_handle = handle;
                 }
                 if let (Some(i), Some(h)) = (hit, handle) {
-                    hint = Cow::Owned(crate::playlist::handle_hint(&crate::playlist::clips(&self.state)[i], h));
+                    hint = Cow::Owned(crate::playlist::handle_hint(&crate::playlist::clips(&self.state.session)[i], h));
                 } else if let Some(i) = hit {
-                    let r = pg.clip_rect(&crate::playlist::clips(&self.state)[i]);
+                    let r = pg.clip_rect(&crate::playlist::clips(&self.state.session)[i]);
                     let z = crate::playlist::EDGE.min(r.w / 4.0);
                     let tool_resizes = matches!(self.state.playlist.tool, crate::playlist::PlTool::Draw | crate::playlist::PlTool::Paint | crate::playlist::PlTool::Select);
                     resize |= tool_resizes && (x <= r.x + z || x >= r.right() - z);
                     if hint.is_empty() || hint == "Arranger" {
-                        hint = Cow::Owned(crate::playlist::source_name(&self.state, crate::playlist::clips(&self.state)[i].source));
+                        hint = Cow::Owned(crate::playlist::source_name(&self.state.session, crate::playlist::clips(&self.state.session)[i].source));
                     }
                 }
             }
         } else if let Some(i) = self.state.playlist.hover_clip.take() {
             self.state.playlist.hover_handle = None;
-            let r = self.pl_grid.zip(crate::playlist::clips(&self.state).get(i)).map(|(g, c)| crate::playlist::PGeom::new(&self.state, g).clip_rect(c));
+            let r = self.pl_grid.zip(crate::playlist::clips(&self.state.session).get(i)).map(|(g, c)| crate::playlist::PGeom::new(&self.state, g).clip_rect(c));
             match r {
                 Some(r) => self.damage_rect(r.outset(6.0)),
                 None => self.invalidate(),
@@ -7194,7 +7177,7 @@ impl App {
                     | SAct::Plug(Plug::Folder(_) | Plug::Remove(_) | Plug::Prefer(_) | Plug::Sort(_) | Plug::Star(_) | Plug::Show(_))
             ),
             // A filled effect slot's name opens its window; an empty one's opens the effect menu.
-            Action::Mix(MHit::SlotName(i)) => crate::mixer::slot_name(&self.state, self.state.selected_mixer, *i).is_some(),
+            Action::Mix(MHit::SlotName(i)) => crate::mixer::slot_name(&self.state.session, self.state.selected_mixer, *i).is_some(),
             Action::Mix(h) => matches!(
                 h,
                 MHit::Led(_) | MHit::Polarity(_) | MHit::Swap(_) | MHit::Route(_) | MHit::Unroute(_) | MHit::Add | MHit::AddAfter | MHit::SlotLed(_)
@@ -7862,7 +7845,7 @@ impl App {
     pub fn scroll_get(&self, t: Scroll) -> f32 {
         let s = &self.state;
         match t {
-            Scroll::PianoX => s.piano.scroll_x * s.piano.px_per_beat / f32::from(s.project.ppq.max(4)),
+            Scroll::PianoX => s.piano.scroll_x * s.piano.px_per_beat / f32::from(s.session.project.ppq.max(4)),
             Scroll::PianoY => s.piano.scroll_y,
             Scroll::PitchY => piano::PITCH_RANGE as f32 - (s.piano.pitch_center as f32 + 241.0),
             Scroll::PlaylistX => s.playlist_scroll.0,
@@ -7885,7 +7868,7 @@ impl App {
         let v = v.clamp(0.0, max.max(0.0));
         let s = &mut self.state;
         match t {
-            Scroll::PianoX => s.piano.scroll_x = v / (s.piano.px_per_beat / f32::from(s.project.ppq.max(4))),
+            Scroll::PianoX => s.piano.scroll_x = v / (s.piano.px_per_beat / f32::from(s.session.project.ppq.max(4))),
             Scroll::PianoY => s.piano.scroll_y = v.round(),
             Scroll::PitchY => s.piano.pitch_center = piano::clamp_pitch_center((piano::PITCH_RANGE as f32 - 241.0 - v).round() as i32),
             Scroll::PlaylistX => s.playlist_scroll.0 = v,
@@ -7976,7 +7959,7 @@ impl App {
             // Measured from the end's time rather than the drawn thumb, so the press itself does not zoom.
             let grab = along - moved / units * b.len();
             if t == Scroll::PianoX {
-                self.state.piano.bar_span = Some(units * f32::from(self.state.project.ppq.max(4)));
+                self.state.piano.bar_span = Some(units * f32::from(self.state.session.project.ppq.max(4)));
             }
             self.drag = Some(Drag::BarEdge { t, right: end, fixed, units, grab });
             return self.invalidate();
@@ -8116,7 +8099,7 @@ impl App {
             Some(Action::PianoTarget) => {
                 // spec: ui/piano-target-channel.md §4
                 let row = self.state.selected_channel;
-                if row < self.state.project.channels.len() {
+                if row < self.state.session.project.channels.len() {
                     self.state.playlist.popup = None;
                     self.toggle_channel_window(row);
                 }
@@ -8222,7 +8205,7 @@ impl App {
             return;
         }
         if action == Some(Action::PianoVelocity) && self.state.piano.lane.is_channel() {
-            piano::snapshot(&mut self.state);
+            piano::snapshot(&mut self.state.session);
             self.drag = Some(Drag::ControlErase { last_x: x });
             self.erase_control_points(x, x);
             return;
@@ -8249,7 +8232,7 @@ impl App {
                 Tool::Select => self.piano_click(&a),
                 Tool::Zoom => self.zoom_toggle(),
                 _ => {
-                    piano::snapshot_as(&mut self.state, "Piano roll delete note");
+                    piano::snapshot_as(&mut self.state.session, "Piano roll delete note");
                     self.drag = Some(Drag::NoteErase);
                     self.erase_at(x, y);
                 }
@@ -8266,7 +8249,7 @@ impl App {
         self.shift_clone = false;
         self.release();
         // An undo step whose press changed nothing goes (spec: ui/settings-choices.md "Undo history").
-        crate::history::settle(&mut self.state);
+        crate::history::settle(&mut self.state.session);
     }
 
     fn release(&mut self) {
@@ -8315,7 +8298,7 @@ impl App {
         }
         self.hold_key(None, false);
         if matches!(self.drag, Some(Drag::Velocity { .. })) {
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
         }
         if let Some(Drag::Browser { item, started, .. }) = self.drag.clone() {
             self.drag = None;
@@ -8334,7 +8317,7 @@ impl App {
                 if let Some(g) = self.piano_geom() {
                     let t = crate::piano_snap::place(&self.state, &g, g.tick_at(self.mouse.0), self.alt);
                     if piano::slice(&mut self.state, t) > 0 {
-                        self.state.piano.dirty = true;
+                        self.state.session.dirty = true;
                     }
                 }
             }
@@ -8363,7 +8346,7 @@ impl App {
         }
         if matches!(self.drag, Some(Drag::NoteMove { .. } | Drag::NoteResize { .. } | Drag::NoteErase | Drag::NoteMute { .. } | Drag::NotePaint { .. })) {
             piano::finish_edit(&mut self.state);
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
             self.damage_piano();
             self.drag = None;
             return;
@@ -8384,12 +8367,12 @@ impl App {
         let mut held = None;
         let was_held = self.state.piano.held;
         let rects = |s: &State| -> Vec<Rect> {
-            let notes = piano::notes(s);
+            let notes = piano::notes(&s.session);
             orig.iter().filter_map(|&(i, _)| notes.get(i).and_then(|n| g.note_rect(n))).collect()
         };
         let mut dirty = rects(&self.state);
         let s = &mut self.state;
-        let p = piano::pattern_mut(s);
+        let p = piano::pattern_mut(&mut s.session);
         if resize {
             for &(i, o) in orig {
                 if let Some(n) = p.notes.get_mut(i) {
@@ -8458,7 +8441,7 @@ impl App {
         if let Some((row, k, _)) = self.mouse_note.take() {
             self.transport.note_off(row, k);
         }
-        let row = piano::channel(&self.state).and_then(|ch| self.state.project.channels.iter().position(|c| c.index == ch));
+        let row = piano::channel(&self.state).and_then(|ch| self.state.session.project.channels.iter().position(|c| c.index == ch));
         if let (Some(k), true, Some(row)) = (key, play, row) {
             let k = k.clamp(0, crate::piano::TOP_KEY) as u16;
             self.sync_live();
@@ -8493,7 +8476,7 @@ impl App {
             return;
         }
         let ch = piano::channel(&self.state);
-        let hit = piano::notes(&self.state)
+        let hit = piano::notes(&self.state.session)
             .iter()
             .enumerate()
             .rev()
@@ -8501,7 +8484,7 @@ impl App {
             .map(|(i, _)| i);
         if let Some(i) = hit {
             piano::delete(&mut self.state, vec![i]);
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
             self.damage_piano();
         }
     }
@@ -8513,11 +8496,11 @@ impl App {
             return;
         }
         let Some(i) = piano::note_at(&self.state, &g, x, y) else { return };
-        let p = piano::pattern_mut(&mut self.state);
+        let p = piano::pattern_mut(&mut self.state.session);
         if p.notes[i].muted() != on {
             p.notes[i].set_muted(on);
             let r = g.note_rect(&p.notes[i]);
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
             match r {
                 Some(r) => self.damage_notes(&[r]),
                 None => self.damage_piano(),
@@ -8541,20 +8524,20 @@ impl App {
                 continue;
             }
             let pos = pos as u32;
-            let taken = piano::notes(&self.state).iter().any(|n| n.channel == ch && i32::from(n.key) == key && n.position == pos);
+            let taken = piano::notes(&self.state.session).iter().any(|n| n.channel == ch && i32::from(n.key) == key && n.position == pos);
             if !taken {
                 let i = piano::add_note(&mut self.state, ch, pos, key);
-                piano::pattern_mut(&mut self.state).notes[i].length = len;
-                let before = piano::notes(&self.state).len();
+                piano::pattern_mut(&mut self.state.session).notes[i].length = len;
+                let before = piano::notes(&self.state.session).len();
                 let i = piano::paint_mono(&mut self.state, i);
-                deleted |= piano::notes(&self.state).len() < before;
-                added.push(piano::notes(&self.state)[i]);
+                deleted |= piano::notes(&self.state.session).len() < before;
+                added.push(piano::notes(&self.state.session)[i]);
             }
         }
         if deleted {
             self.damage_piano();
         } else if !added.is_empty() {
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
             let rects: Vec<Rect> = added.iter().filter_map(|n| g.note_rect(n)).collect();
             self.damage_notes(&rects);
         }
@@ -8565,8 +8548,8 @@ impl App {
     /// the next move (spec: ui/piano-roll.md §9).
     fn scrub(&mut self, from: f32, to: f32) {
         let Some(ch) = piano::channel(&self.state) else { return };
-        let Some(row) = self.state.project.channels.iter().position(|c| c.index == ch) else { return };
-        let want = piano::scrub_keys(&self.state, ch, from, to);
+        let Some(row) = self.state.session.project.channels.iter().position(|c| c.index == ch) else { return };
+        let want = piano::scrub_keys(&self.state.session, ch, from, to);
         let transport = &self.transport;
         self.scrub_notes.retain(|&(r, k, _)| {
             let keep = r == row && want.iter().any(|&(w, _)| w == k);
@@ -8598,7 +8581,7 @@ impl App {
         let (x1, y1) = self.mouse;
         let p = &mut self.state.piano;
         let back = (p.px_per_beat, p.scroll_x, p.scroll_y);
-        let ppq = f32::from(self.state.project.ppq.max(4));
+        let ppq = f32::from(self.state.session.project.ppq.max(4));
         if (x1 - x0).abs() < 4.0 {
             let tick = g.tick_at(x1);
             p.px_per_beat = (p.px_per_beat * 2.0).min(1600.0);
@@ -8642,7 +8625,7 @@ impl App {
         let (a, b) = (last_x.min(x), last_x.max(x));
         let from = crate::piano_snap::cell(&self.state, g.tick_at(a));
         let to = crate::piano_snap::cell(&self.state, g.tick_at(b));
-        if piano::erase_controls(&mut self.state, ch, param, from, to) > 0 {
+        if piano::erase_controls(&mut self.state.session, ch, param, from, to) > 0 {
             self.damage_rect(panel);
         }
     }
@@ -8671,7 +8654,7 @@ impl App {
                     let px = g.x_of(t as f32);
                     let at = if (x - last_x).abs() < 0.5 { 1.0 } else { ((px - last_x) / (x - last_x)).clamp(0.0, 1.0) };
                     let y_at = last_y + (y - last_y) * at;
-                    piano::set_control(&mut self.state, ch, param, t, lane.control_at(panel, y_at, center));
+                    piano::set_control(&mut self.state.session, ch, param, t, lane.control_at(panel, y_at, center));
                 }
                 if t >= hi {
                     break;
@@ -8688,14 +8671,14 @@ impl App {
         // or below a note's line sets it. A selection limits this to the selected notes, so
         // one of several notes that start together can be reached.
         let cand = piano::targets(&self.state);
-        let starts = || cand.iter().filter_map(|&i| piano::notes(&self.state).get(i)).map(|n| n.position);
+        let starts = || cand.iter().filter_map(|&i| piano::notes(&self.state.session).get(i)).map(|n| n.position);
         let anchor = starts().filter(|&p| p as f32 <= ta).max().or_else(|| starts().min());
         let hit: Vec<usize> = cand
             .iter()
             .copied()
-            .filter(|&i| piano::notes(&self.state).get(i).is_some_and(|n| Some(n.position) == anchor || (n.position as f32 >= ta && n.position as f32 <= tb)))
+            .filter(|&i| piano::notes(&self.state.session).get(i).is_some_and(|n| Some(n.position) == anchor || (n.position as f32 >= ta && n.position as f32 <= tb)))
             .collect();
-        let p = piano::pattern_mut(&mut self.state);
+        let p = piano::pattern_mut(&mut self.state.session);
         let mut span: Option<(f32, f32)> = None;
         let mut edited = None;
         for (i, n) in p.notes.iter_mut().enumerate() {
@@ -8970,7 +8953,7 @@ impl App {
             }
             let v = v + dy.signum() * id.notch() * if dy == 0.0 { 0.0 } else { 1.0 };
             if v.clamp(0.0, 1.0) != self.state.knob(id) {
-                crate::history::knob(&mut self.state, id, true);
+                crate::history::knob(&mut self.state.session, id, true);
             }
             self.state.set_knob(id, v);
             self.record_knob(id);
@@ -8983,18 +8966,18 @@ impl App {
             && dy != 0.0
         {
             let s = &mut self.state;
-            let v0 = crate::mixer::track(s, t).map(|m| m.volume.unwrap_or(0.8))?;
+            let v0 = crate::mixer::track(&s.session, t).map(|m| m.volume.unwrap_or(0.8))?;
             let v = (v0 + f64::from(dy.signum()) * views::mixer::FADER_NOTCH).clamp(0.0, 1.0);
             if v != v0 {
                 // One step for a run of notches on the fader (none with Undo knob tweaks off: a fader is a knob here).
-                if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) && !s.history.joins(crate::history::Run::Fader(t)) {
-                    crate::control::edit_press(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t));
-                    s.history.set_run(crate::history::Run::Fader(t));
+                if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) && !s.session.history.joins(crate::history::Run::Fader(t)) {
+                    crate::control::edit_press(&mut s.session, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t));
+                    s.session.history.set_run(crate::history::Run::Fader(t));
                 }
-                if let Some(m) = crate::mixer::track_mut(s, t) {
+                if let Some(m) = crate::mixer::track_mut(&mut s.session, t) {
                     m.volume = Some(v);
                 }
-                s.piano.dirty = true;
+                s.session.dirty = true;
                 self.record_control(&Action::Fader(t));
             }
             self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
@@ -9012,24 +8995,24 @@ impl App {
         let d = if dy + dx > 0.0 { 1 } else { -1 };
         match area {
             Some(Action::RackMixer(i)) => {
-                let max = crate::mixer::max_insert(&self.state.project);
-                if let Some(now) = self.state.project.channels.get(i).map(|c| c.mixer_track) {
+                let max = crate::mixer::max_insert(&self.state.session.project);
+                if let Some(now) = self.state.session.project.channels.get(i).map(|c| c.mixer_track) {
                     let v = (i32::from(now) + d).clamp(0, i32::from(max)) as u16;
                     self.channel_control(i, ChannelControl::Track, |c| c.mixer_track = v);
                     self.hint = Cow::Owned(format!("Target mixer track: {}", views::rack::insert_name(v)));
-                    self.state.piano.dirty = true;
+                    self.state.session.dirty = true;
                 }
                 return None;
             }
             Some(Action::RackLen) => {
-                let v = (crate::rack::len_value(&self.state) as i32 + d).clamp(0, crate::rack::max_steps(&self.state) as i32) as u32;
+                let v = (crate::rack::len_value(&self.state.session) as i32 + d).clamp(0, crate::rack::max_steps(&self.state.session) as i32) as u32;
                 crate::rack::set_len(&mut self.state, (v > 0).then_some(v));
                 return None;
             }
             Some(Action::RackLoopBox(i)) => {
-                crate::rack::loop_step(&mut self.state, crate::rack::LOOP_POINT_STEP);
-                let v = crate::rack::loop_box_value(&self.state, i) + d;
-                crate::rack::set_loop_box(&mut self.state, i, v);
+                crate::rack::loop_step(&mut self.state.session, crate::rack::LOOP_POINT_STEP);
+                let v = crate::rack::loop_box_value(&self.state.session, i) + d;
+                crate::rack::set_loop_box(&mut self.state.session, i, v);
                 return None;
             }
             // Shift+wheel over a channel's name button moves the channel (spec: ui/channel-rack.md §13).
@@ -9083,7 +9066,7 @@ impl App {
             // Shift+wheel over the track headers moves the selected track (spec: ui/playlist.md §6).
             Some(Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_)) if shift => {
                 let d = if dx + dy > 0.0 { -1 } else { 1 };
-                crate::playlist::snapshot(s);
+                crate::playlist::snapshot(&mut s.session);
                 crate::playlist::shift_tracks(s, d);
                 None
             }
@@ -9302,9 +9285,9 @@ impl App {
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") && self.state.shown(Win::PianoRoll) => {
                 let s = &mut self.state;
                 if let Some(ch) = piano::channel(s) {
-                    let all = piano::notes(s).iter().enumerate().filter(|(_, n)| n.channel == ch).map(|(i, _)| i).collect();
+                    let all = piano::notes(&s.session).iter().enumerate().filter(|(_, n)| n.channel == ch).map(|(i, _)| i).collect();
                     s.piano.select(s.pattern(), ch, all);
-                    s.piano.range = Some((0, piano::pattern_end(s)));
+                    s.piano.range = Some((0, piano::pattern_end(&s.session)));
                 }
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
@@ -9329,14 +9312,14 @@ impl App {
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") && self.state.shown(Win::PianoRoll) => {
                 let s = &mut self.state;
                 let sel = s.piano.selection(s.pattern(), piano::channel(s));
-                let notes = piano::notes(s);
+                let notes = piano::notes(&s.session);
                 s.piano.clipboard = sel.iter().filter_map(|&i| notes.get(i).copied()).collect();
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") && self.state.shown(Win::PianoRoll) => {
                 let clip = self.state.piano.clipboard.clone();
                 let at = piano::paste_tick(&self.state, &clip);
                 piano::paste(&mut self.state, &clip, at);
-                self.state.piano.dirty = true;
+                self.state.session.dirty = true;
             }
             Key::Named(k @ (NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::ArrowUp | NamedKey::ArrowDown))
                 if self.state.shown(Win::PianoRoll) =>
@@ -9349,7 +9332,7 @@ impl App {
                 let s = &mut self.state;
                 let idx = piano::targets(s);
                 if !idx.is_empty() {
-                    piano::snapshot_as(s, "Piano roll delete note");
+                    piano::snapshot_as(&mut s.session, "Piano roll delete note");
                     piano::delete(s, idx);
                 }
             }
@@ -9379,7 +9362,7 @@ impl App {
     fn piano_song_seek(&mut self, t: u32, press: bool) -> bool {
         let tp = &self.transport;
         let near = if tp.playing() && tp.song() { tp.tick() as u32 } else { self.state.playlist.pos };
-        let Some(at) = piano::song_tick_of(&self.state, t, near) else { return false };
+        let Some(at) = piano::song_tick_of(&self.state.session, t, near) else { return false };
         if press && tp.playing() && tp.song() && tp.paused() {
             tp.stop();
         }
@@ -9396,14 +9379,14 @@ impl App {
     /// `start_playback` after a recording count-in of `bars` bars (spec: ui/recording.md §3).
     pub(crate) fn start_playback_counted(&mut self, bars: u32) {
         let song = self.state.song_mode();
-        if song && !self.one_click_starting() && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
+        if song && !self.one_click_starting() && self.state.session.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             self.state.message = Some("The arranger is empty".into());
             self.invalidate();
             return;
         }
         // The song starts with the project's initial values (spec: ui/settings-choices.md "Advanced: Initialize
         // controls automatically").
-        if crate::init::apply(&mut self.state) {
+        if crate::init::apply(&mut self.state.session) {
             self.invalidate();
         }
         if song {
@@ -9526,7 +9509,7 @@ impl App {
         let key = 48 + semi + 12 * self.typing_octave;
         // A channel locked to the computer keyboard takes its notes (spec: ui/channel-rack.md §18 Receive notes from).
         let row = self.state.rack.note_row(crate::rack::NoteSrc::Typing, self.state.selected_channel);
-        if !(0..=127).contains(&key) || row >= self.state.project.channels.len() {
+        if !(0..=127).contains(&key) || row >= self.state.session.project.channels.len() {
             return true;
         }
         self.locked_hint(crate::rack::NoteSrc::Typing, row);
@@ -9546,7 +9529,7 @@ impl App {
         if row == self.state.selected_channel {
             return;
         }
-        let Some(c) = self.state.project.channels.get(row) else { return };
+        let Some(c) = self.state.session.project.channels.get(row) else { return };
         let name = c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1));
         self.state.message = Some(format!("{name} (locked to {})", src.label().to_lowercase()));
         self.invalidate();
@@ -9592,7 +9575,7 @@ impl App {
 
     /// Held typing-keyboard keys and MIDI notes light on the piano roll's keyboard (§4).
     pub(crate) fn typing_lit_changed(&mut self) {
-        let channels = &self.state.project.channels;
+        let channels = &self.state.session.project.channels;
         let midi = self.midi_play.lit().chain(self.state.touch.held.map(|(key, row)| (row, u16::from(key))));
         self.state.piano.typed = self.typing_held.iter().map(|&(_, row, key)| (row, key)).chain(midi).filter_map(|(row, key)| Some((channels.get(row)?.index, i32::from(key)))).collect();
         match self.piano_grid {
@@ -9616,7 +9599,7 @@ impl App {
             (ArrowLeft | ArrowRight, true, true, false) => {
                 let idx = piano::targets(&self.state);
                 if piano::rotate(&mut self.state, &idx, if left { -step } else { step }) {
-                    self.state.piano.dirty = true;
+                    self.state.session.dirty = true;
                 }
                 return;
             }
@@ -9638,7 +9621,7 @@ impl App {
         };
         let idx = piano::targets(&self.state);
         if piano::shift(&mut self.state, &idx, dt, dk) {
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
         }
     }
 
@@ -9679,29 +9662,29 @@ impl App {
             let note = if let Action::PianoNote(i) = *a { Some(i) } else { None };
             match tool {
                 Tool::Delete => {
-                    piano::snapshot_as(s, "Piano roll delete note");
+                    piano::snapshot_as(&mut s.session, "Piano roll delete note");
                     self.drag = Some(Drag::NoteErase);
                     self.erase_at(x, y);
                     return;
                 }
                 Tool::Mute => {
                     let Some(i) = note else { return };
-                    piano::snapshot(s);
-                    let on = !piano::notes(s)[i].muted();
+                    piano::snapshot(&mut s.session);
+                    let on = !piano::notes(&s.session)[i].muted();
                     self.drag = Some(Drag::NoteMute { on });
                     self.mute_at(x, y, on);
                     return;
                 }
                 Tool::Paint if note.is_none() => {
-                    piano::snapshot_as(s, "Piano roll add note");
+                    piano::snapshot_as(&mut s.session, "Piano roll add note");
                     s.piano.clear_selection();
                     let key = g.key_at(y).clamp(0, crate::piano::TOP_KEY);
                     let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
                     let i = piano::add_note(s, ch, start, key);
                     let i = piano::paint_mono(s, i);
-                    let n = piano::notes(s)[i];
+                    let n = piano::notes(&s.session)[i];
                     let len = n.length;
-                    s.piano.dirty = true;
+                    s.session.dirty = true;
                     self.drag = Some(Drag::NotePaint { key, start, len });
                     self.key_velocity = n.velocity;
                     let play = self.audition();
@@ -9753,11 +9736,11 @@ impl App {
         let s = &mut self.state;
         match *a {
             Action::PianoGrid => {
-                piano::snapshot_as(s, "Piano roll add note");
+                piano::snapshot_as(&mut s.session, "Piano roll add note");
                 s.piano.clear_selection();
                 let i = piano::add_note(s, ch, crate::piano_snap::place(s, &g, g.tick_at(x), self.alt), g.key_at(y));
                 let i = piano::paint_mono(s, i);
-                let n = piano::notes(s)[i];
+                let n = piano::notes(&s.session)[i];
                 s.piano.last_len = n.length;
                 self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig: vec![(i, n)] });
                 self.key_velocity = n.velocity;
@@ -9767,8 +9750,8 @@ impl App {
                 self.hold_start(crate::hold::Kind::NewNote);
             }
             Action::PianoNote(i) => {
-                let Some(&n) = piano::notes(s).get(i) else { return };
-                piano::snapshot(s);
+                let Some(&n) = piano::notes(&s.session).get(i) else { return };
+                piano::snapshot(&mut s.session);
                 let sel = s.piano.selection(s.pattern(), Some(ch));
                 let idx = if sel.contains(&i) && tool.moves_groups() {
                     sel
@@ -9776,7 +9759,7 @@ impl App {
                     s.piano.clear_selection();
                     vec![i]
                 };
-                let notes = piano::notes(s);
+                let notes = piano::notes(&s.session);
                 // The clicked note first: it is the one auditioned while dragging.
                 let orig: Vec<(usize, Note)> =
                     std::iter::once(i).chain(idx.into_iter().filter(|&j| j != i)).filter_map(|j| notes.get(j).map(|&m| (j, m))).collect();
@@ -9800,7 +9783,7 @@ impl App {
                 }
             }
             Action::PianoVelocity => {
-                piano::snapshot(s);
+                piano::snapshot(&mut s.session);
                 self.drag = Some(Drag::Velocity { last_x: x, last_y: y });
                 self.paint_velocity(x, y, x, y);
             }
@@ -9845,7 +9828,7 @@ impl App {
             }
             Action::PlLed(t) => pl::press_led(self, t, right),
             Action::PlGroupArrow(t) => {
-                pl::toggle_collapse(&mut self.state, t);
+                pl::toggle_collapse(&mut self.state.session, t);
                 self.invalidate();
             }
             Action::PlTool(t) if !right => {
@@ -9882,10 +9865,10 @@ impl App {
                         // On an audio or automation clip: its channel's menu, the channel selected in the rack (spec:
                         // ui/playlist.md §10a).
                         os_model::ClipSource::Channel(ch) => {
-                            if let Some(row) = self.state.project.channels.iter().position(|c| c.index == ch) {
+                            if let Some(row) = self.state.session.project.channels.iter().position(|c| c.index == ch) {
                                 self.state.rack.select_only(row);
                             }
-                            self.state.playlist.popup = Some(pl::pick_menu(&self.state, ch, x, y));
+                            self.state.playlist.popup = Some(pl::pick_menu(&self.state.session, ch, x, y));
                         }
                     }
                 }
@@ -10057,7 +10040,7 @@ impl App {
                     }
                     // A song position move: the initial values (spec: ui/settings-choices.md "Advanced: Initialize
                     // controls automatically").
-                    crate::init::apply(s);
+                    crate::init::apply(&mut s.session);
                 } else if let Some((a, _)) = s.piano.range.filter(|_| s.shown(Win::PianoRoll)) {
                     // spec: ui/recording.md §5: the piano roll's time selection, as in SONG mode.
                     s.piano.marker = a;
@@ -10104,7 +10087,7 @@ impl App {
                 let n = s.tempo_digits.get().iter().filter(|&&d| x >= d).count();
                 let step = [1.0, 0.1, 0.01, 0.001][n];
                 // One undo step for the drag (none when it doesn't change the tempo).
-                crate::control::edit_press(s, crate::control::command::TEMPO, crate::control::command::Region::Settings);
+                crate::control::edit_press(&mut s.session, crate::control::command::TEMPO, crate::control::command::Region::Settings);
                 self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo(), step });
             }
             Action::SongPos => self.song_pos_press(),
@@ -10179,7 +10162,7 @@ impl App {
             Action::Mix(crate::mixer::MHit::EqGraph) => {
                 if let Some(g) = self.top_hit(self.mouse.0, self.mouse.1).map(|h| h.rect) {
                     let (track, band) = (self.state.selected_mixer, crate::mixer::eq_band_at(&self.state, g, self.mouse.0));
-                    crate::control::edit_press(&mut self.state, "Mixer track equalizer", crate::control::command::Region::Track(track));
+                    crate::control::edit_press(&mut self.state.session, "Mixer track equalizer", crate::control::command::Region::Track(track));
                     self.drag = Some(Drag::EqGraph { track, band, g });
                     crate::mixer::eq_graph_drag(&mut self.state, track, band, g, self.mouse);
                     self.damage_eq();
@@ -10208,7 +10191,7 @@ impl App {
             Action::Fader(t) => {
                 let in_group = crate::mixer::in_group(s, t);
                 crate::mixer::select(s, t, self.ctrl || in_group);
-                let v0 = crate::mixer::volume(s, t);
+                let v0 = crate::mixer::volume(&s.session, t);
                 let mut others = if in_group { crate::mixer::group_levels(s) } else { Vec::new() };
                 let level = others.iter().find(|o| o.0 == t).map_or(v0, |o| o.1);
                 others.retain(|o| o.0 != t);
@@ -10216,7 +10199,7 @@ impl App {
                 // tweaks off: a fader is a knob here).
                 if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
                     let tracks = std::iter::once(t).chain(others.iter().map(|o| o.0));
-                    crate::control::edit_press_all(s, crate::history::MIXER_VOLUME, tracks.map(crate::control::command::Region::Track));
+                    crate::control::edit_press_all(&mut s.session, crate::history::MIXER_VOLUME, tracks.map(crate::control::command::Region::Track));
                 }
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0, level, others });
             }
@@ -10247,13 +10230,13 @@ impl App {
             }
             // An automation clip LFO's switch and mode: a click flips them, one undo step.
             Action::Knob(id @ crate::knobs::KnobId::AutoLfo(_, k)) if k.switch() => {
-                crate::history::knob(s, id, false);
+                crate::history::knob(&mut s.session, id, false);
                 s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
             // A MIDI Out check: a click flips it, one undo step.
             Action::Knob(id @ crate::knobs::KnobId::MidiOut(_, k)) if k.switch() => {
-                crate::history::knob(s, id, false);
+                crate::history::knob(&mut s.session, id, false);
                 s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
@@ -10263,7 +10246,7 @@ impl App {
                 self.reset_control(crate::knobs::Control::Knob(id));
             }
             Action::Knob(id) => {
-                crate::history::knob(s, id, false);
+                crate::history::knob(&mut s.session, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
@@ -10467,7 +10450,7 @@ impl App {
     /// Name button click (spec: ui/channel-rack.md §13): opens the channel's plugin window, or closes it when open.
     fn toggle_channel_window(&mut self, i: usize) {
         // A channel's container: its window (spec: plugins/patcher/README.md §4.4).
-        if self.state.project.channels.get(i).is_some_and(crate::container::is_container_channel) {
+        if self.state.session.project.channels.get(i).is_some_and(crate::container::is_container_channel) {
             let place = (i as u16, crate::container::CHANNEL);
             if self.state.shown(Win::Container) && self.state.container.at == place {
                 self.state.hide(Win::Container);
@@ -10483,7 +10466,7 @@ impl App {
             return;
         }
         let s = &mut self.state;
-        let sampler = s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler());
+        let sampler = s.session.project.channels.get(i).is_some_and(|c| c.kind.is_sampler());
         if !sampler && s.shown(Win::Plugin) && s.plugin_channel == i {
             s.hide(Win::Plugin);
         } else {
@@ -10494,9 +10477,9 @@ impl App {
     /// Open rack row `i`'s window (not hosted: Lemon Sampler's for a sampler or audio clip, else the channel window).
     pub(crate) fn open_channel_window(&mut self, i: usize) {
         let s = &mut self.state;
-        if s.project.channels.get(i).is_some_and(crate::container::is_container_channel) {
+        if s.session.project.channels.get(i).is_some_and(crate::container::is_container_channel) {
             crate::container::show(s, i as u16, crate::container::CHANNEL);
-        } else if s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
+        } else if s.session.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
             // Not hosted yet (just added): Lemon Sampler starts on the next tick and its window opens then.
             s.pending_open = Some(i);
             self.sampler_failed.retain(|&r| r != i);
@@ -10551,12 +10534,13 @@ impl App {
         let s = &mut self.state;
         s.piano.clear_selection();
         // One undo step for the press and the painting that follows.
-        crate::rack::snapshot(s);
+        crate::rack::snapshot(&mut s.session);
         // A step past an explicit length grows the pattern to the end of the pattern's bar holding it (§5, §23).
-        if let Some(l) = crate::rack::explicit_len(s) {
+        if let Some(l) = crate::rack::explicit_len(&s.session) {
             if k >= l {
-                let ps = crate::rack::per_step(s);
-                crate::rack::set_len(s, Some(s.project.pattern_bar_end(s.pattern(), (k + 1) * ps).div_ceil(ps)));
+                let ps = crate::rack::per_step(&s.session);
+                let len = s.session.project.pattern_bar_end(s.pattern(), (k + 1) * ps).div_ceil(ps);
+                crate::rack::set_len(s, Some(len));
             }
         }
         if crate::prefs::check(&crate::prefs::BOTH_MOUSE_BUTTONS) {
@@ -10606,7 +10590,7 @@ impl App {
         match *a {
             Action::RackSelect(i) => {
                 if double {
-                    self.state.rack.sel = rk::shown(&self.state).into_iter().collect();
+                    self.state.rack.sel = rk::shown(&self.state.session).into_iter().collect();
                 } else if shift {
                     let sel = &mut self.state.rack.sel;
                     if !sel.remove(&i) {
@@ -10633,7 +10617,7 @@ impl App {
                 if ctrl || alt {
                     rk::solo(s, i);
                 } else if shift {
-                    rk::toggle_lock(s, i);
+                    rk::toggle_lock(&mut s.session, i);
                 } else {
                     rk::toggle_mute(s, i);
                 }
@@ -10642,12 +10626,12 @@ impl App {
             Action::RackMixer(i) => {
                 let s = &mut self.state;
                 if double {
-                    if let Some(t) = s.project.channels.get(i).map(|c| c.mixer_track) {
+                    if let Some(t) = s.session.project.channels.get(i).map(|c| c.mixer_track) {
                         s.selected_mixer = t;
                         s.raise(Win::Mixer);
                     }
                 } else {
-                    let v0 = s.project.channels.get(i).map_or(0, |c| c.mixer_track);
+                    let v0 = s.session.project.channels.get(i).map_or(0, |c| c.mixer_track);
                     self.drag = Some(Drag::RackMixer { ch: i, y0: mouse.1, v0 });
                 }
             }
@@ -10656,22 +10640,25 @@ impl App {
                 self.state.playlist.popup = Some(p);
             }
             Action::RackFilter => {
-                let p = rk::filter_menu(&self.state, mouse.0, mouse.1 + 8.0);
+                let p = rk::filter_menu(&self.state.session, mouse.0, mouse.1 + 8.0);
                 self.state.playlist.popup = Some(p);
             }
             Action::RackDots => self.drag = Some(Drag::RackDots { x0: mouse.0, p0: self.state.rack.name_pct }),
             Action::RackSpeaker => self.rack_speaker(),
-            Action::RackLen => self.drag = Some(Drag::RackLen { y0: mouse.1, v0: rk::len_value(&self.state) }),
+            Action::RackLen => self.drag = Some(Drag::RackLen { y0: mouse.1, v0: rk::len_value(&self.state.session) }),
             Action::RackLoop => {
                 let s = &mut self.state;
-                rk::loop_step(s, rk::LOOP_MODE_STEP);
-                rk::relayout(s, |s| rk::set_loop_mode(s, !rk::loop_mode(s)));
-                s.piano.dirty = true;
+                rk::loop_step(&mut s.session, rk::LOOP_MODE_STEP);
+                rk::relayout(s, |s| {
+                    let on = !rk::loop_mode(&s.session);
+                    rk::set_loop_mode(&mut s.session, on);
+                });
+                s.session.dirty = true;
             }
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
             Action::RackLoopBox(i) => {
-                rk::loop_step(&mut self.state, rk::LOOP_POINT_STEP);
-                self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state, i) });
+                rk::loop_step(&mut self.state.session, rk::LOOP_POINT_STEP);
+                self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state.session, i) });
             }
             Action::RackGraphArea => {
                 crate::rack::graph_step(&mut self.state);
@@ -10697,8 +10684,8 @@ impl App {
             Action::ChannelEnable(i) => rk::led_menu(s, i, self.automation_target(a), x, y),
             Action::RackMixer(i) => rk::mixer_menu(s, i, self.automation_target(a), x, y),
             Action::Knob(k @ (KnobId::ChanVol(_) | KnobId::ChanPan(_) | KnobId::Swing)) => rk::knob_menu(s, k, self.automation_target(a), x, y),
-            Action::RackFilter => rk::filter_edit_menu(s, x, y),
-            Action::RackLen => rk::length_menu(s, x, y),
+            Action::RackFilter => rk::filter_edit_menu(&s.session, x, y),
+            Action::RackLen => rk::length_menu(&s.session, x, y),
             Action::RackLoop => rk::loop_menu(s, x, y),
             Action::RackSelect(i) => {
                 let sel = &mut self.state.rack.sel;
@@ -10740,12 +10727,12 @@ impl App {
         self.wrap_failed = self.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
         self.native_failed = self.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
         self.transport.set_instruments(self.plugins.instruments());
-        self.state.piano.dirty = true;
+        self.state.session.dirty = true;
     }
 
     /// A row's hosted instrument for cloning: (available plugin index, saved state).
     pub(crate) fn plugin_copy(&self, r: usize) -> Option<(usize, Vec<u8>)> {
-        let ch = self.state.project.channels.get(r)?;
+        let ch = self.state.session.project.channels.get(r)?;
         let name = match ch.kind {
             ChannelKind::Sampler | ChannelKind::AudioClip => crate::plugins::LEMON_SAMPLER.to_string(),
             // A hosted plugin is found by its identity (a wrapped channel's plugin name is the wrapper's).
@@ -11339,17 +11326,27 @@ pub(crate) fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_wind
 /// The timebase goes from `from` to `to` ticks per quarter (`App::set_timebase`, an undone or redone change): every tick
 /// count follows, the project's, the views', the history's and the clipboards'.
 pub(crate) fn retime(s: &mut State, from: u16, to: u16) {
+    crate::follow::around(s, |s| retime_in(&mut s.session, from, to));
+}
+
+/// `retime` in the session: the project's and the history's ticks; the views follow (`retime_views`).
+pub(crate) fn retime_in(s: &mut crate::session::Session, from: u16, to: u16) {
     if from == to {
         return;
     }
     s.project.get_mut().set_ppq(to);
+    crate::history::rescale(s, from, to);
+    s.touched.views.push(crate::session::View::Retimed(from, to));
+    s.dirty = true;
+}
+
+/// `retime`'s part in the views: their ticks and the step clipboard.
+pub(crate) fn retime_views(s: &mut State, from: u16, to: u16) {
     crate::piano::rescale(s, from, to);
     crate::playlist::rescale(s, from, to);
-    crate::history::rescale(s, from, to);
     if let Some(rows) = &mut s.rack.clipboard {
         rows.iter_mut().flatten().for_each(|n| n.rescale(from, to));
     }
-    s.piano.dirty = true;
 }
 
 /// A generator-plugin channel played by a hosted instrument, routed like `add_channel`. Returns its rack row.
@@ -11755,15 +11752,15 @@ mod tests {
     fn parametric_eq_slots_are_hosted() {
         use crate::plugins::{fx_key, EQ_FILE_NAME, LEMON_EQ};
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
+        a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         let mut fl = lemon_parametric_eq_2::params::default_state();
         lemon_parametric_eq_2::params::set_field(&mut fl, 1, -600);
-        a.state.project.get_mut().mixer[2].slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: EQ_FILE_NAME.into(), state: fl.clone() });
+        a.state.session.project.get_mut().mixer[2].slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: EQ_FILE_NAME.into(), state: fl.clone() });
         a.sync_effects();
         assert!(a.plugins.hosted.contains_key(&fx_key(2, 1)));
-        assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some(LEMON_EQ));
+        assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some(LEMON_EQ));
         assert_eq!(a.plugins.eq_file_state(fx_key(2, 1)), Some(fl));
         // A second pass changes nothing.
         let before = a.plugins.hosted.len();
@@ -11779,7 +11776,7 @@ mod tests {
         use crate::plugins::{fx_key, EDISON_FILE_NAME, TESLA};
         use tesla::sample::{Format, Sample};
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
+        a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         let saved = tesla::state::Saved {
@@ -11789,15 +11786,15 @@ mod tests {
             ..Default::default()
         };
         let fl = tesla::state::to_edison(&saved);
-        a.state.project.get_mut().mixer[0].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: EDISON_FILE_NAME.into(), state: fl });
+        a.state.session.project.get_mut().mixer[0].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: EDISON_FILE_NAME.into(), state: fl });
         a.sync_effects();
         let key = fx_key(0, 3);
         assert!(a.plugins.hosted.contains_key(&key));
-        assert_eq!(crate::mixer::slot_name(&a.state, 0, 3).as_deref(), Some(TESLA));
+        assert_eq!(crate::mixer::slot_name(&a.state.session, 0, 3).as_deref(), Some(TESLA));
         let back = tesla::state::from_edison(&a.plugins.edison_file_state(key).expect("an Edison state")).unwrap();
         assert_eq!((back.sample.frames(), back.sample.channels(), back.path.as_str(), back.rec.armed), (4410, 2, "take.wav", true));
         a.store_builtin_states();
-        let slot = a.state.project.mixer[0].slots[3].clone().unwrap();
+        let slot = a.state.session.project.mixer[0].slots[3].clone().unwrap();
         assert_eq!(slot.name, EDISON_FILE_NAME);
         assert_eq!(tesla::state::from_edison(&slot.state).map(|s| s.sample.frames()), Some(4410));
         // A second pass changes nothing.
@@ -11813,13 +11810,13 @@ mod tests {
         use crate::plugins::{LOVE_PHILTER_FILE_NAME, PULP_FILTER, fx_key};
         use os_engine::effects::love_philter::state::{MASTER, State};
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
+        a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         let mut st = State::new_default();
         st.globals[MASTER] = 77;
         let fl = st.to_bytes();
-        a.state.project.get_mut().mixer[1].slots[2] = Some(os_model::SlotPlugin {
+        a.state.session.project.get_mut().mixer[1].slots[2] = Some(os_model::SlotPlugin {
             id: os_model::Id::NONE,
             name: LOVE_PHILTER_FILE_NAME.into(),
             state: fl.clone(),
@@ -11828,12 +11825,12 @@ mod tests {
         let key = fx_key(1, 2);
         assert!(a.plugins.hosted.contains_key(&key));
         assert_eq!(
-            crate::mixer::slot_name(&a.state, 1, 2).as_deref(),
+            crate::mixer::slot_name(&a.state.session, 1, 2).as_deref(),
             Some(PULP_FILTER)
         );
         assert_eq!(a.plugins.love_philter_file_state(key), Some(fl.clone()));
         a.store_builtin_states();
-        let slot = a.state.project.mixer[1].slots[2].clone().unwrap();
+        let slot = a.state.session.project.mixer[1].slots[2].clone().unwrap();
         assert_eq!(
             (slot.name.as_str(), slot.state),
             (LOVE_PHILTER_FILE_NAME, fl)
@@ -11854,20 +11851,20 @@ mod tests {
         use crate::plugins::{MAXIMUS_FILE_NAME, PRESS, fx_key};
         use os_engine::effects::maximus::state::{P_LMH_MIX, State};
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
+        a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         let mut st = State::new_default();
         st.params[P_LMH_MIX] = 500;
         let fl = st.to_bytes();
-        a.state.project.get_mut().mixer[1].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: MAXIMUS_FILE_NAME.into(), state: fl.clone() });
+        a.state.session.project.get_mut().mixer[1].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: MAXIMUS_FILE_NAME.into(), state: fl.clone() });
         a.sync_effects();
         let key = fx_key(1, 3);
         assert!(a.plugins.hosted.contains_key(&key));
-        assert_eq!(crate::mixer::slot_name(&a.state, 1, 3).as_deref(), Some(PRESS));
+        assert_eq!(crate::mixer::slot_name(&a.state.session, 1, 3).as_deref(), Some(PRESS));
         assert_eq!(a.plugins.maximus_file_state(key), Some(fl.clone()));
         a.store_builtin_states();
-        let slot = a.state.project.mixer[1].slots[3].clone().unwrap();
+        let slot = a.state.session.project.mixer[1].slots[3].clone().unwrap();
         assert_eq!((slot.name.as_str(), slot.state), (MAXIMUS_FILE_NAME, fl));
         assert_eq!(crate::plugins::new_slot(PRESS).name, MAXIMUS_FILE_NAME);
         // A factory preset (a state preset) gives the slot its Maximus state, saved back under the file's name
@@ -11878,7 +11875,7 @@ mod tests {
         let max = press::fl_from_plugin_state(&blob).unwrap();
         assert_eq!(a.plugins.maximus_file_state(key), Some(max.clone()));
         a.store_builtin_states();
-        assert_eq!(a.state.project.mixer[1].slots[3].clone().unwrap().state, max);
+        assert_eq!(a.state.session.project.mixer[1].slots[3].clone().unwrap().state, max);
     }
 
     /// A project's Fruity Reeverb 2, Balance and Chorus slots (user report 2026-10-26: "This slot's plugin is not
@@ -11898,21 +11895,21 @@ mod tests {
         lemon_small_fx::params::set_field(&mut chorus, 1, d + 1);
         let cases = [(1u16, 0u8, "Fruity Reeverb 2", "Lemon Reverb", reverb), (2, 1, "Fruity Balance", "Lemon Balance", balance), (3, 2, "Fruity Chorus", "Lemon Chorus", chorus)];
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         for (t, k, file, _, fl) in &cases {
-            a.state.project.get_mut().mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: (*file).into(), state: fl.clone() });
+            a.state.session.project.get_mut().mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: (*file).into(), state: fl.clone() });
         }
         let shaper = os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Stereo Shaper".into(), state: Vec::new() };
-        a.state.project.get_mut().mixer[4].slots[0] = Some(shaper.clone());
+        a.state.session.project.get_mut().mixer[4].slots[0] = Some(shaper.clone());
         a.sync_effects();
         for (t, k, file, lemon, fl) in &cases {
             let key = fx_key(*t, *k);
             assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
-            assert_eq!(crate::mixer::slot_name(&a.state, *t, *k).as_deref(), Some(*lemon));
+            assert_eq!(crate::mixer::slot_name(&a.state.session, *t, *k).as_deref(), Some(*lemon));
             assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
         }
         assert!(!a.plugins.hosted.contains_key(&fx_key(4, 0)), "Stereo Shaper: the engine's");
@@ -11940,16 +11937,16 @@ mod tests {
         st.mode = lemon_drop::state::Mode::Spectrum;
         let fl = st.to_bytes();
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        a.state.project.get_mut().mixer[2].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Wave Candy".into(), state: fl.clone() });
+        a.state.session.project.get_mut().mixer[2].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Wave Candy".into(), state: fl.clone() });
         a.sync_effects();
         let key = fx_key(2, 3);
         assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(crate::plugins::LEMON_DROP.to_string()));
-        assert_eq!(crate::mixer::slot_name(&a.state, 2, 3).as_deref(), Some(crate::plugins::LEMON_DROP));
+        assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 3).as_deref(), Some(crate::plugins::LEMON_DROP));
         assert_eq!(a.plugins.recreation_file_state(key, "Wave Candy").as_ref(), Some(&fl));
         let path = std::env::temp_dir().join(format!("lemon-wave-candy-{}.flp", std::process::id()));
         a.save_to(path.clone());
@@ -11972,19 +11969,19 @@ mod tests {
         lemon_small_fx::params::set_field(&mut phaser, 6, 15);
         let cases = [(1u16, 0u8, "Fruity Flanger", "Lemon Flanger", flanger), (2, 1, "Fruity Phaser", "Lemon Phaser", phaser)];
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
         for (t, k, file, _, fl) in &cases {
-            a.state.project.get_mut().mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: (*file).into(), state: fl.clone() });
+            a.state.session.project.get_mut().mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: (*file).into(), state: fl.clone() });
         }
         a.sync_effects();
         for (t, k, file, lemon, fl) in &cases {
             let key = fx_key(*t, *k);
             assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
-            assert_eq!(crate::mixer::slot_name(&a.state, *t, *k).as_deref(), Some(*lemon));
+            assert_eq!(crate::mixer::slot_name(&a.state.session, *t, *k).as_deref(), Some(*lemon));
             assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
         }
         let path = std::env::temp_dir().join(format!("lemon-fl-modulation-{}.flp", std::process::id()));
@@ -12007,14 +12004,14 @@ mod tests {
         let mut fl = lemon_small_fx::params::default_state(lemon_small_fx::peak_controller::SPEC);
         lemon_small_fx::params::set_field(&mut fl, 3, 40);
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        a.state.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Peak Controller".into(), state: fl.clone() });
+        a.state.session.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Peak Controller".into(), state: fl.clone() });
         let link = os_model::ControllerLink { formula: Some("1-Input".into()), ..os_model::ControllerLink::new(0x7000 + 64, 1, 0x40_0000) };
-        a.state.project.get_mut().controller_links = vec![link.clone()];
+        a.state.session.project.get_mut().controller_links = vec![link.clone()];
         a.sync_effects();
         let key = fx_key(1, 0);
         assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_PEAK_CONTROLLER.to_string()));
@@ -12045,13 +12042,13 @@ mod tests {
         fl[at + 4 * dsp::CAR_INPUT..at + 4 * dsp::CAR_INPUT + 4].copy_from_slice(&2i32.to_le_bytes());
         fl[40] ^= 0x10;
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        a.state.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: VOCODEX_FILE_NAME.into(), state: fl.clone() });
-        assert_eq!(crate::project_plugins::slot_ports(&a.state.project, 1, 0), (0, 2), "the sidechain bus takes the carrier's input");
+        a.state.session.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: VOCODEX_FILE_NAME.into(), state: fl.clone() });
+        assert_eq!(crate::project_plugins::slot_ports(&a.state.session.project, 1, 0), (0, 2), "the sidechain bus takes the carrier's input");
         a.sync_effects();
         let key = fx_key(1, 0);
         assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_VOCODER.to_string()));
@@ -12078,14 +12075,14 @@ mod tests {
         tail.push(0);
         let fl = Settings { knobs: [46592, 65536, 32768], formula: "a+Sin(SongTime*Pi)*b*0.5".into(), tail }.to_state();
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        a.state.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Formula Controller".into(), state: fl.clone() });
+        a.state.session.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Formula Controller".into(), state: fl.clone() });
         let link = os_model::ControllerLink::new(0x7000 + 64, 0, 0x40_0000);
-        a.state.project.get_mut().controller_links = vec![link.clone()];
+        a.state.session.project.get_mut().controller_links = vec![link.clone()];
         a.sync_effects();
         let key = fx_key(1, 0);
         assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_FORMULA_CONTROLLER.to_string()));
@@ -12107,19 +12104,19 @@ mod tests {
         use crate::mixer::{slot_name, FxReq};
         use crate::plugins::TESLA;
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
+        a.state.session.project = crate::locked::Locked::new(test_project());
         a.reset_hosted();
         a.plugins.effects = crate::plugins::builtin_effects();
-        let first = a.state.project.mixer[0].slots.iter().position(Option::is_none).unwrap() as u8;
+        let first = a.state.session.project.mixer[0].slots.iter().position(Option::is_none).unwrap() as u8;
         a.audio_editor(0, false);
-        assert_eq!(slot_name(&a.state, 0, first).as_deref(), Some(TESLA));
-        assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 0, slot, .. } if *slot == first)));
-        a.state.mixer.pending.clear();
+        assert_eq!(slot_name(&a.state.session, 0, first).as_deref(), Some(TESLA));
+        assert!(a.state.session.fx_requests.iter().any(|r| matches!(r, FxReq::Create { track: 0, slot, .. } if *slot == first)));
+        a.state.session.fx_requests.clear();
         a.audio_editor(0, false);
-        assert_eq!(a.state.mixer.pending, vec![FxReq::Show { track: 0, slot: first }]);
-        a.state.mixer.pending.clear();
+        assert_eq!(a.state.session.fx_requests, vec![FxReq::Show { track: 0, slot: first }]);
+        a.state.session.fx_requests.clear();
         a.audio_editor(0, true);
-        let teslas = (0..10).filter(|&k| slot_name(&a.state, 0, k).as_deref() == Some(TESLA)).count();
+        let teslas = (0..10).filter(|&k| slot_name(&a.state.session, 0, k).as_deref() == Some(TESLA)).count();
         assert_eq!(teslas, 2);
         assert_eq!(toolbar_right(&Action::Util(Util::AudioEditor)), Some(Action::Util(Util::NewAudioEditor)));
     }
@@ -12133,12 +12130,12 @@ mod tests {
         std::fs::write(&path, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
         let p = path.to_string_lossy().into_owned();
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
+        a.state.session.project = crate::locked::Locked::new(test_project());
         a.state.playlist.pos = 384;
-        let before = a.state.project.channels.len();
+        let before = a.state.session.project.channels.len();
         a.sample_from_plugin(p.clone(), os_hostlink::AudioTo::Playlist);
-        assert_eq!(a.state.project.channels.len(), before + 1);
-        let clips = crate::playlist::clips(&a.state);
+        assert_eq!(a.state.session.project.channels.len(), before + 1);
+        let clips = crate::playlist::clips(&a.state.session);
         let i = *a.state.playlist.sel.first().expect("the new clip, selected");
         let clip = clips[i];
         assert_eq!(clip.position, 384);
@@ -12146,10 +12143,10 @@ mod tests {
         let overlaps = |c: &os_model::Clip| c.track == clip.track && c.position < clip.end() && c.end() > clip.position;
         assert_eq!(clips.iter().filter(|c| overlaps(c)).count(), 1, "alone on its track");
         // To the selected channel: a sampler takes it.
-        let row = a.state.project.channels.iter().position(|c| c.kind.is_sampler()).unwrap();
+        let row = a.state.session.project.channels.iter().position(|c| c.kind.is_sampler()).unwrap();
         a.state.selected_channel = row;
         a.sample_from_plugin(p.clone(), os_hostlink::AudioTo::Channel);
-        assert!(a.state.project.channels[row].sample_path.as_deref().is_some_and(|s| s.ends_with(".wav")));
+        assert!(a.state.session.project.channels[row].sample_path.as_deref().is_some_and(|s| s.ends_with(".wav")));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -12255,15 +12252,15 @@ mod tests {
     #[test]
     fn new_project_saves_and_reloads() {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.set_tempo(111.0);
-        app.state.project.get_mut().patterns[0].notes.push(Note::step(2, 48));
-        app.state.project.get_mut().patterns.push(Pattern { number: 2, name: Some("Two".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() });
+        app.state.session.project.get_mut().patterns[0].notes.push(Note::step(2, 48));
+        app.state.session.project.get_mut().patterns.push(Pattern { number: 2, name: Some("Two".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() });
         // A changed mixer is kept: the save gives the new file a playlist, which the mixer is stored after.
-        app.state.project.get_mut().mixer[3].name = Some("Drums".into());
-        app.state.project.get_mut().mixer[3].volume = Some(0.5);
+        app.state.session.project.get_mut().mixer[3].name = Some("Drums".into());
+        app.state.session.project.get_mut().mixer[3].volume = Some(0.5);
         let path = std::env::temp_dir().join(format!("openstudio-new-{}.flp", std::process::id()));
         app.save_to(path.clone());
         assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", app.state.message);
@@ -12280,7 +12277,7 @@ mod tests {
         assert_eq!(back.mixer.len(), 18);
         assert_eq!((back.mixer[3].name.as_deref(), back.mixer[3].volume), (Some("Drums"), Some(0.5)));
         // Saving again goes through apply on the same file.
-        app.state.project.get_mut().patterns[0].notes.push(Note::step(1, 96));
+        app.state.session.project.get_mut().patterns[0].notes.push(Note::step(1, 96));
         app.save_to(path.clone());
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -12299,11 +12296,11 @@ mod tests {
         use crate::views::settings::{SAct, DENOMINATOR, NUMERATOR, PROJECT, TRUNCATED_CHECK};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        (app.state.file, app.state.path) = (None, None);
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        (app.state.session.file, app.state.session.path) = (None, None);
         // A note ending at tick 300 of the current pattern: one 4/4 bar.
-        app.state.project.get_mut().patterns[0].notes = vec![Note { length: 276, ..Note::step(0, 24) }];
-        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern()), 384);
+        app.state.session.project.get_mut().patterns[0].notes = vec![Note { length: 276, ..Note::step(0, 24) }];
+        assert_eq!(crate::piano::pattern_length(&app.state.session, app.state.pattern()), 384);
         app.mark_saved();
         app.open_settings(PROJECT);
         frame(&mut app, &mut c, None);
@@ -12326,16 +12323,16 @@ mod tests {
             click(app, c, r);
         };
         pick(&mut app, &mut c, NUMERATOR, "3", 16);
-        assert_eq!(app.state.project.bar, Some((3, 4)), "three beats of four sixteenths");
+        assert_eq!(app.state.session.project.bar, Some((3, 4)), "three beats of four sixteenths");
         assert_eq!(app.state.message.as_deref(), Some("Time signature: 3/4"));
         assert!(app.unsaved(), "a change to the project");
         // Patterns are whole bars of the signature: 288 ticks in 3/4.
-        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern()), 576);
-        assert_eq!(crate::playlist::source_len(&app.state, os_model::ClipSource::Pattern(app.state.pattern())), 576);
+        assert_eq!(crate::piano::pattern_length(&app.state.session, app.state.pattern()), 576);
+        assert_eq!(crate::playlist::source_len(&app.state.session, os_model::ClipSource::Pattern(app.state.pattern())), 576);
         pick(&mut app, &mut c, DENOMINATOR, "8", 4);
-        assert_eq!(app.state.project.bar, Some((3, 2)), "an eighth is two sixteenths");
+        assert_eq!(app.state.session.project.bar, Some((3, 2)), "an eighth is two sixteenths");
         assert_eq!((shown(&app, NUMERATOR).as_deref(), shown(&app, DENOMINATOR).as_deref()), (Some("3"), Some("8")));
-        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern()), 432);
+        assert_eq!(crate::piano::pattern_length(&app.state.session, app.state.pattern()), 432);
         // Play truncated notes: on in a new project, as in the reference's default template (spec:
         // flp/engine-events.md "Event 30"), on File > New too; a click switches it.
         assert!(default_project().play_truncated);
@@ -12347,10 +12344,10 @@ mod tests {
             views::settings::Row::Check(k, v) if k == TRUNCATED_CHECK => Some(v),
             _ => None,
         });
-        assert_eq!((app.state.project.play_truncated, on(&app)), (true, Some(true)));
+        assert_eq!((app.state.session.project.play_truncated, on(&app)), (true, Some(true)));
         for want in [false, true] {
             click(&mut app, &mut c, r);
-            assert_eq!((app.state.project.play_truncated, on(&app)), (want, Some(want)));
+            assert_eq!((app.state.session.project.play_truncated, on(&app)), (want, Some(want)));
         }
         // Saved and opened again.
         let path = std::env::temp_dir().join(format!("lemon-project-settings-{}.flp", std::process::id()));
@@ -12359,7 +12356,7 @@ mod tests {
         assert!(!app.unsaved());
         let mut opened = App::new(None);
         opened.open(path.clone());
-        assert_eq!((opened.state.project.bar, opened.state.project.play_truncated), (Some((3, 2)), true));
+        assert_eq!((opened.state.session.project.bar, opened.state.session.project.play_truncated), (Some((3, 2)), true));
         // Changed in the opened project and saved over it (the file's events patched), then opened again.
         crate::playlist::run(&mut opened, crate::playlist::Cmd::Bar(7, 1));
         opened.settings_act(SAct::Check(TRUNCATED_CHECK));
@@ -12368,8 +12365,8 @@ mod tests {
         let mut again = App::new(None);
         again.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        assert_eq!((again.state.project.bar, again.state.project.play_truncated), (Some((7, 1)), false));
-        assert_eq!(again.state.project.signature(), Some((7, 16)));
+        assert_eq!((again.state.session.project.bar, again.state.session.project.play_truncated), (Some((7, 1)), false));
+        assert_eq!(again.state.session.project.signature(), Some((7, 16)));
     }
 
     /// A theme's workspace picture (spec: ui/flstheme.md §3, BackPicFilename): named relative to the theme file, it is
@@ -12822,8 +12819,8 @@ mod tests {
         use crate::views::settings::{Row, SAct, BEATS_PER_BAR, DENOMINATOR, NUMERATOR, PROJECT, SET_AS, SET_AS_DIVISION, SET_AS_SIGNATURE, STEPS_PER_BEAT};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        (app.state.file, app.state.path) = (None, None);
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        (app.state.session.file, app.state.session.path) = (None, None);
         app.mark_saved();
         app.open_settings(PROJECT);
         frame(&mut app, &mut c, None);
@@ -12849,7 +12846,7 @@ mod tests {
         project_pick(&mut app, &mut c, NUMERATOR, "3", 16);
         project_pick(&mut app, &mut c, DENOMINATOR, "8", 4);
         project_pick(&mut app, &mut c, SET_AS, SET_AS_DIVISION, 2);
-        assert_eq!((app.state.project.bar, app.state.project.bar_as_signature), (Some((4, 4)), Some(false)));
+        assert_eq!((app.state.session.project.bar, app.state.session.project.bar_as_signature), (Some((4, 4)), Some(false)));
         assert_eq!(shown(&app), (some(SET_AS_DIVISION), None, None, some("4"), some("4")));
         assert!(!app.hits.iter().any(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == NUMERATOR)), "no combos");
         // The wheel: up adds one, down takes one, inside the box's range.
@@ -12863,25 +12860,25 @@ mod tests {
         };
         wheel(&mut app, &mut c, BEATS_PER_BAR, 1.0, 1);
         wheel(&mut app, &mut c, STEPS_PER_BEAT, -1.0, 1);
-        assert_eq!(app.state.project.bar, Some((5, 3)));
+        assert_eq!(app.state.session.project.bar, Some((5, 3)));
         assert_eq!(app.state.message.as_deref(), Some("Time division: 5 beats of 3 steps"));
         assert_eq!((value(&app, BEATS_PER_BAR), value(&app, STEPS_PER_BEAT)), (some("5"), some("3")));
         // Five beats of three sixteenths: 360 ticks, what the editors' pattern lengths use.
-        assert_eq!(app.state.project.bar_ticks(), 360);
+        assert_eq!(app.state.session.project.bar_ticks(), 360);
         wheel(&mut app, &mut c, STEPS_PER_BEAT, -1.0, 5);
         wheel(&mut app, &mut c, BEATS_PER_BAR, 1.0, 40);
-        assert_eq!(app.state.project.bar, Some((32, 1)), "1..32 and 1..16");
+        assert_eq!(app.state.session.project.bar, Some((32, 1)), "1..32 and 1..16");
         wheel(&mut app, &mut c, STEPS_PER_BEAT, 1.0, 20);
-        assert_eq!(app.state.project.bar, Some((32, 16)));
+        assert_eq!(app.state.session.project.bar, Some((32, 16)));
         wheel(&mut app, &mut c, BEATS_PER_BAR, -1.0, 27);
         wheel(&mut app, &mut c, STEPS_PER_BEAT, -1.0, 13);
-        assert_eq!(app.state.project.bar, Some((5, 3)));
+        assert_eq!(app.state.session.project.bar, Some((5, 3)));
         // Each mode comes back with its own bar; none is converted.
         project_pick(&mut app, &mut c, SET_AS, SET_AS_SIGNATURE, 2);
-        assert_eq!((app.state.project.bar, app.state.project.bar_as_signature), (Some((3, 2)), Some(true)));
+        assert_eq!((app.state.session.project.bar, app.state.session.project.bar_as_signature), (Some((3, 2)), Some(true)));
         assert_eq!(shown(&app), (some(SET_AS_SIGNATURE), some("3"), some("8"), None, None));
         project_pick(&mut app, &mut c, SET_AS, SET_AS_DIVISION, 2);
-        assert_eq!(app.state.project.bar, Some((5, 3)));
+        assert_eq!(app.state.session.project.bar, Some((5, 3)));
         assert!(app.unsaved());
         // Saved and opened again: time division, five beats of three steps.
         let path = std::env::temp_dir().join(format!("lemon-project-division-{}.flp", std::process::id()));
@@ -12889,13 +12886,13 @@ mod tests {
         let mut opened = App::new(None);
         opened.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        assert_eq!((opened.state.project.bar, opened.state.project.bar_as_signature), (Some((5, 3)), Some(false)));
+        assert_eq!((opened.state.session.project.bar, opened.state.session.project.bar_as_signature), (Some((5, 3)), Some(false)));
         opened.open_settings(PROJECT);
         assert_eq!(shown(&opened), (some(SET_AS_DIVISION), None, None, some("5"), some("3")));
         // A time-signature file whose steps per beat make no signature still shows (and plays) its bar.
-        opened.state.project.get_mut().bar_as_signature = Some(true);
+        opened.state.session.project.get_mut().bar_as_signature = Some(true);
         assert_eq!((combo(&opened, NUMERATOR), combo(&opened, DENOMINATOR)), (some("5"), some("5.33")));
-        assert_eq!(opened.state.project.bar_ticks(), 360);
+        assert_eq!(opened.state.session.project.bar_ticks(), 360);
     }
 
     /// Settings > Project ▸ Timebase (PPQ) (spec: ui/settings-choices.md "Project"): the eleven choices, the
@@ -12910,11 +12907,11 @@ mod tests {
         use os_model::{Arrangement, Clip, ClipSource, TimeMarker};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        (app.state.file, app.state.path) = (None, None);
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        (app.state.session.file, app.state.session.path) = (None, None);
         let note = Note { length: 276, ..Note::step(0, 24) };
-        app.state.project.get_mut().patterns[0].notes = vec![note];
-        app.state.project.get_mut().arrangements = vec![Arrangement {
+        app.state.session.project.get_mut().patterns[0].notes = vec![note];
+        app.state.session.project.get_mut().arrangements = vec![Arrangement {
             clips: vec![Clip::new(192, 384, 0, ClipSource::Pattern(1))],
             markers: vec![TimeMarker::new(96, "Verse")],
             ..Default::default()
@@ -12922,12 +12919,12 @@ mod tests {
         // Editor state in ticks: the piano roll's marker, clipboard and an undo step; the song position and selection.
         app.state.piano.marker = 48;
         app.state.piano.clipboard = vec![note];
-        crate::piano::snapshot(&mut app.state);
-        app.state.project.get_mut().patterns[0].notes[0].position = 72;
+        crate::piano::snapshot(&mut app.state.session);
+        app.state.session.project.get_mut().patterns[0].notes[0].position = 72;
         app.state.playlist.pos = 96;
         app.state.playlist.range = Some((96, 192));
         app.mark_saved();
-        let before = app.state.project.clone();
+        let before = app.state.session.project.clone();
         app.open_settings(PROJECT);
         frame(&mut app, &mut c, None);
         let r = app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == TIMEBASE)).map(|h| h.rect).expect("Timebase works");
@@ -12939,7 +12936,7 @@ mod tests {
         app.state.playlist.popup = None;
         frame(&mut app, &mut c, None);
         project_pick(&mut app, &mut c, TIMEBASE, "192", 11);
-        let p = &app.state.project;
+        let p = &app.state.session.project;
         assert_eq!(p.ppq, 192);
         assert_eq!((p.patterns[0].notes[0].position, p.patterns[0].notes[0].length), (144, 552));
         let a = &p.arrangements[0];
@@ -12949,21 +12946,21 @@ mod tests {
         assert_eq!((app.state.piano.marker, app.state.piano.clipboard[0].position), (96, 48));
         assert_eq!((app.state.playlist.pos, app.state.playlist.range), (192, Some((192, 384))));
         // The pattern is still one 4/4 bar long, in the new ticks.
-        assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern()), 768);
+        assert_eq!(crate::piano::pattern_length(&app.state.session, app.state.pattern()), 768);
         // The change is one step, "Project settings": undone, the old timebase and its ticks, and the undo step made
         // before it then works in those; redone, both come back in the new ticks.
         assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::history::PROJECT_SETTINGS));
-        assert_eq!((app.state.project.ppq, app.state.project.patterns[0].notes[0].position), (96, 72));
+        assert_eq!((app.state.session.project.ppq, app.state.session.project.patterns[0].notes[0].position), (96, 72));
         assert_eq!((app.state.piano.marker, app.state.playlist.pos), (48, 96));
         assert!(crate::piano::undo(&mut app.state));
-        assert_eq!(app.state.project.patterns[0].notes[0].position, 24);
+        assert_eq!(app.state.session.project.patterns[0].notes[0].position, 24);
         crate::history::redo(&mut app.state);
         crate::history::redo(&mut app.state);
-        assert_eq!((app.state.project.ppq, app.state.project.patterns[0].notes[0].position), (192, 144));
-        assert!(std::mem::take(&mut app.state.retimed), "playback stops");
+        assert_eq!((app.state.session.project.ppq, app.state.session.project.patterns[0].notes[0].position), (192, 144));
+        assert!(std::mem::take(&mut app.state.session.retimed), "playback stops");
         // Back to 96: the same project as before (every tick was doubled, none rounded).
         project_pick(&mut app, &mut c, TIMEBASE, "96", 11);
-        assert!(app.state.project == before && !app.unsaved());
+        assert!(app.state.session.project == before && !app.unsaved());
         // Saved at 72: the header holds the new PPQ, the ticks are the new ones (rounded to the nearest).
         project_pick(&mut app, &mut c, TIMEBASE, "72", 11);
         let path = std::env::temp_dir().join(format!("lemon-project-timebase-{}.flp", std::process::id()));
@@ -12980,7 +12977,7 @@ mod tests {
     fn project_settings_show_the_unplayed_settings() {
         use crate::views::settings::Row;
         let mut app = App::new(None);
-        app.state.project.get_mut().auto_crossfades = None;
+        app.state.session.project.get_mut().auto_crossfades = None;
         let get = |app: &App| {
             let rows = project_rows(app);
             let pan = rows.iter().find_map(|r| match r {
@@ -12998,7 +12995,7 @@ mod tests {
             (pan, declick, fades)
         };
         assert_eq!(get(&app), (Some("Circular".into()), Some(false), Some(false)), "a project without the events");
-        let p = app.state.project.get_mut();
+        let p = app.state.session.project.get_mut();
         (p.panning_law, p.fast_declick, p.auto_crossfades) = (Some(2), Some(true), Some(true));
         assert_eq!(get(&app), (Some("Triangular".into()), Some(true), Some(true)));
         assert!(views::settings::PROJECT_COMBOS.contains(&"Panning law"), "the panning law works");
@@ -13024,11 +13021,11 @@ mod tests {
         assert!(!prefs::check(&AUTO_CROSSFADES_NEW));
         assert_eq!(app.state.message.as_deref(), Some("Enable automatic crossfades in new projects: off"));
         app.new_project();
-        assert_eq!(app.state.project.auto_crossfades, Some(false));
+        assert_eq!(app.state.session.project.auto_crossfades, Some(false));
         click(&mut app, &mut c, r);
         assert!(prefs::check(&AUTO_CROSSFADES_NEW));
         app.new_project();
-        assert_eq!(app.state.project.auto_crossfades, Some(true));
+        assert_eq!(app.state.session.project.auto_crossfades, Some(true));
         assert!(!app.unsaved());
         // The project's check shows and switches event 44.
         frame(&mut app, &mut c, None);
@@ -13042,7 +13039,7 @@ mod tests {
         assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(CROSSFADES_CHECK)), "it works");
         let r = hit_rect(&app, &Action::Settings(SAct::Check(CROSSFADES_CHECK)));
         click(&mut app, &mut c, r);
-        assert_eq!((app.state.project.auto_crossfades, shown(&app)), (Some(false), Some(false)));
+        assert_eq!((app.state.session.project.auto_crossfades, shown(&app)), (Some(false), Some(false)));
         assert_eq!(app.state.message.as_deref(), Some("Automatic crossfades: off"));
         assert!(app.unsaved());
         // Saved (44 = 0) and opened with the setting on: the file's value. Switched on there and saved over it, then
@@ -13051,14 +13048,14 @@ mod tests {
         app.save_to(path.clone());
         let mut opened = App::new(None);
         opened.open(path.clone());
-        assert_eq!(opened.state.project.auto_crossfades, Some(false));
+        assert_eq!(opened.state.session.project.auto_crossfades, Some(false));
         opened.settings_act(SAct::Check(CROSSFADES_CHECK));
         assert!(opened.unsaved());
         opened.save_to(path.clone());
         prefs::set_check(&AUTO_CROSSFADES_NEW, false);
         let mut again = App::new(None);
         again.open(path.clone());
-        assert_eq!(again.state.project.auto_crossfades, Some(true));
+        assert_eq!(again.state.session.project.auto_crossfades, Some(true));
         // A file without event 44 opens without one (shown off), whatever the setting.
         let mut p = test_project();
         p.auto_crossfades = None;
@@ -13067,7 +13064,7 @@ mod tests {
             prefs::set_check(&AUTO_CROSSFADES_NEW, on);
             let mut app = App::new(None);
             app.open(path.clone());
-            assert_eq!((app.state.project.auto_crossfades, shown(&app)), (None, Some(false)), "setting {on}");
+            assert_eq!((app.state.session.project.auto_crossfades, shown(&app)), (None, Some(false)), "setting {on}");
         }
         let _ = std::fs::remove_file(&path);
     }
@@ -13085,7 +13082,7 @@ mod tests {
         let mut app = App::new(None);
         app.plugins.available = crate::plugins::builtin();
         app.plugins.scale = 1.0;
-        app.state.project.get_mut().channels.push(Channel::default());
+        app.state.session.project.get_mut().channels.push(Channel::default());
         frame(&mut app, &mut c, None);
         let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         let info = |name: &str| ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
@@ -13156,7 +13153,7 @@ mod tests {
         let mut app = App::new(None);
         app.plugins.available = crate::plugins::builtin();
         app.plugins.scale = 1.0;
-        app.state.project.get_mut().channels.push(Channel::default());
+        app.state.session.project.get_mut().channels.push(Channel::default());
         frame(&mut app, &mut c, None);
         let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         let info = |name: &str| ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
@@ -13197,7 +13194,7 @@ mod tests {
         let mut app = App::new(None);
         app.plugins.available = crate::plugins::builtin();
         app.plugins.scale = 1.0;
-        app.state.project.get_mut().channels.extend([Channel::default(), Channel::default()]);
+        app.state.session.project.get_mut().channels.extend([Channel::default(), Channel::default()]);
         frame(&mut app, &mut c, None);
         let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         let info = |name: &str| ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
@@ -13346,13 +13343,13 @@ mod tests {
         use crate::prefs::{self, AUTOMATION_AT_PLAYBACK_POSITION as AT_POS};
         let mut app = App::new(None);
         let s = &mut app.state;
-        pl::arr_mut(s).clips.clear();
+        pl::arr_mut(&mut s.session).clips.clear();
         let current = s.pattern();
-        if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == current) {
+        if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == current) {
             (p.notes, p.length) = (Vec::new(), None);
         }
-        let bar = s.project.bar_ticks();
-        let last = |s: &State| pl::clips(s).last().map(|c| (c.position / bar, c.end() / bar, c.track)).unwrap();
+        let bar = s.session.project.bar_ticks();
+        let last = |s: &State| pl::clips(&s.session).last().map(|c| (c.position / bar, c.end() / bar, c.track)).unwrap();
         s.playlist.pos = 4 * bar;
         pl::create_automation(s, 0, "Auto", 0.5);
         assert_eq!(last(s), (4, 5, 0), "on, at bar 5");
@@ -13364,7 +13361,7 @@ mod tests {
         pl::create_automation(s, 0, "Auto", 0.5);
         assert_eq!(last(s), (1, 5, 2), "on, at bar 2");
         // A muted clip ending at bar 11 does not count; from bar 7 the song has ended: one pattern length.
-        pl::arr_mut(s).clips.push(os_model::Clip { muted: true, ..os_model::Clip::new(0, 10 * bar, 6, os_model::ClipSource::Pattern(1)) });
+        pl::arr_mut(&mut s.session).clips.push(os_model::Clip { muted: true, ..os_model::Clip::new(0, 10 * bar, 6, os_model::ClipSource::Pattern(1)) });
         s.playlist.pos = 6 * bar;
         pl::create_automation(s, 0, "Auto", 0.5);
         assert_eq!(last(s), (6, 7, 7));
@@ -13419,18 +13416,18 @@ mod tests {
         };
         let (kick6, kick12) = (wav("Grv Kick 06"), wav("Grv Kick 12"));
         let mut app = App::new(None);
-        let r = (0..app.state.project.channels.len()).find(|&r| app.state.project.channels[r].kind.is_sampler()).unwrap();
+        let r = (0..app.state.session.project.channels.len()).find(|&r| app.state.session.project.channels[r].kind.is_sampler()).unwrap();
         let y = views::rack::name_rect(&app.state, r).unwrap().cy();
         // The browser lists the folder's two samples; row `r` is the selected channel.
         app.state.browser_folders.push(dir.clone());
         app.state.browser_open.insert(crate::views::browser::disk_key(&dir));
         app.state.selected_channel = r;
         let now = |app: &App| {
-            let ch = &app.state.project.channels[r];
+            let ch = &app.state.session.project.channels[r];
             (ch.name.clone().unwrap_or_default(), ch.sample_path.clone().unwrap_or_default())
         };
         let had = |name: &str, path: &str| (name.to_string(), path.to_string());
-        app.state.project.get_mut().channels[r].name = Some("808 Snare".into());
+        app.state.session.project.get_mut().channels[r].name = Some("808 Snare".into());
         app.sample_to_rack(kick6.clone(), y);
         assert_eq!(now(&app), had("Grv Kick 06", &kick6), "on: a drop on the row");
         crate::rack::sample_chosen(&mut app, r, kick12.clone().into());
@@ -13438,7 +13435,7 @@ mod tests {
         app.browser_cmd(BCmd::Send(1));
         assert_eq!(now(&app), had("Grv Kick 06", &kick6), "on: the browser's send");
         prefs::set_check(&AUTO_NAME_CHANNELS, false);
-        app.state.project.get_mut().channels[r].name = Some("808 HiHat".into());
+        app.state.session.project.get_mut().channels[r].name = Some("808 HiHat".into());
         app.browser_cmd(BCmd::Send(1));
         assert_eq!(now(&app), had("808 HiHat", &kick12), "off: the browser's send");
         app.sample_to_rack(kick6.clone(), y);
@@ -13446,10 +13443,10 @@ mod tests {
         crate::rack::sample_chosen(&mut app, r, kick12.clone().into());
         assert_eq!(now(&app), had("808 HiHat", &kick12), "off: Load sample...");
         // Below the rows the drop makes a new channel, named after the file.
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         app.sample_to_rack(kick12.clone(), views::rack::rect(&app.state).bottom() + 40.0);
-        assert_eq!(app.state.project.channels.len(), n + 1);
-        assert_eq!(app.state.project.channels[app.state.selected_channel].name.as_deref(), Some("Grv Kick 12"));
+        assert_eq!(app.state.session.project.channels.len(), n + 1);
+        assert_eq!(app.state.session.project.channels[app.state.selected_channel].name.as_deref(), Some("Grv Kick 12"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13468,18 +13465,18 @@ mod tests {
         let mut app = App::new(None);
         app.state.browser_folders.push(dir.clone());
         app.state.browser_open.insert(crate::views::browser::disk_key(&dir));
-        let r = (0..app.state.project.channels.len()).find(|&r| app.state.project.channels[r].kind.is_sampler()).unwrap();
+        let r = (0..app.state.session.project.channels.len()).find(|&r| app.state.session.project.channels[r].kind.is_sampler()).unwrap();
         app.state.selected_channel = r;
-        let before = app.state.project.channels[r].sample_path.clone();
+        let before = app.state.session.project.channels[r].sample_path.clone();
         frame(&mut app, &mut c, None);
         let i = rows(&app.state).iter().position(|row| row.item == Item::Sample(path.clone())).expect("sample row");
         let at = hit_rect(&app, &Action::BrowserRow(i));
         app.mouse_move(at.cx(), at.cy());
         app.mouse_down_middle();
-        assert_eq!(app.state.project.channels[r].sample_path.as_deref(), Some(path.as_str()));
+        assert_eq!(app.state.session.project.channels[r].sample_path.as_deref(), Some(path.as_str()));
         assert_eq!(app.state.browser_sel.as_ref(), Some(&rows(&app.state)[i].key), "the row is selected");
         app.key(&winit::keyboard::Key::Character("z".into()), true, false);
-        assert_eq!(app.state.project.channels[r].sample_path, before, "one undo step");
+        assert_eq!(app.state.session.project.channels[r].sample_path, before, "one undo step");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13493,8 +13490,8 @@ mod tests {
         use crate::views::settings::{SAct, PANNING_LAW, PROJECT};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        (app.state.file, app.state.path) = (None, None);
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        (app.state.session.file, app.state.session.path) = (None, None);
         app.mark_saved();
         app.open_settings(PROJECT);
         frame(&mut app, &mut c, None);
@@ -13507,11 +13504,11 @@ mod tests {
         assert_eq!(items, vec![("Circular".to_string(), Mark::Radio(true)), ("Triangular".to_string(), Mark::Radio(false))], "a project without event 23");
         app.state.playlist.popup = None;
         frame(&mut app, &mut c, None);
-        app.state.piano.dirty = false;
+        app.state.session.dirty = false;
         project_pick(&mut app, &mut c, PANNING_LAW, "Triangular", 2);
-        assert_eq!(app.state.project.panning_law, Some(2));
+        assert_eq!(app.state.session.project.panning_law, Some(2));
         assert_eq!(app.state.message.as_deref(), Some("Panning law: Triangular"));
-        assert!(app.state.piano.dirty && app.unsaved(), "playback and the title follow");
+        assert!(app.state.session.dirty && app.unsaved(), "playback and the title follow");
         let shown = |app: &App| project_rows(app).into_iter().find_map(|r| match r {
             views::settings::Row::Combo(v, _, l) if l == PANNING_LAW => Some(v),
             _ => None,
@@ -13522,7 +13519,7 @@ mod tests {
         app.save_to(path.clone());
         let mut opened = App::new(None);
         opened.open(path.clone());
-        assert_eq!(opened.state.project.panning_law, Some(2));
+        assert_eq!(opened.state.session.project.panning_law, Some(2));
         crate::playlist::run(&mut opened, crate::playlist::Cmd::PanningLaw(0));
         assert!(opened.unsaved());
         opened.save_to(path.clone());
@@ -13559,52 +13556,52 @@ mod tests {
         let mut app = App::new(None);
         frame(&mut app, &mut a, None);
         let r = hit_rect(&app, &Action::Tempo);
-        let (t0, steps) = (app.state.tempo(), app.state.history.at());
+        let (t0, steps) = (app.state.tempo(), app.state.session.history.at());
         let x = app.state.tempo_digits.get()[0] - 4.0;
         app.mouse_move(x, r.cy());
         app.mouse_down();
         app.mouse_up();
-        assert_eq!(app.state.history.at(), steps, "a click on the tempo");
+        assert_eq!(app.state.session.history.at(), steps, "a click on the tempo");
         app.mouse_down();
         app.mouse_move(x, r.cy() - 10.0);
         app.mouse_move(x, r.cy() - 20.0);
         app.mouse_up();
-        assert_eq!((app.state.tempo(), app.state.history.at()), (t0 + 20.0, steps + 1));
+        assert_eq!((app.state.tempo(), app.state.session.history.at()), (t0 + 20.0, steps + 1));
         assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TEMPO));
         assert_eq!(app.state.tempo(), t0);
         assert_eq!(crate::history::redo(&mut app.state).as_deref(), Some(TEMPO));
         assert_eq!(app.state.tempo(), t0 + 20.0);
 
-        let bar = app.state.project.bar();
+        let bar = app.state.session.project.bar();
         app.set_bar(3, 4);
         assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
-        assert_eq!(app.state.project.bar(), bar);
+        assert_eq!(app.state.session.project.bar(), bar);
         crate::history::redo(&mut app.state);
-        assert_eq!(app.state.project.bar(), (3, 4));
-        let at = app.state.history.at();
+        assert_eq!(app.state.session.project.bar(), (3, 4));
+        let at = app.state.session.history.at();
         app.set_bar(3, 4);
-        assert_eq!(app.state.history.at(), at, "the bar it is already");
+        assert_eq!(app.state.session.history.at(), at, "the bar it is already");
         for _ in 0..3 {
             app.settings_number(views::settings::BEATS_PER_BAR, 1);
         }
-        assert_eq!((app.state.project.bar(), app.state.history.at()), ((6, 4), at + 1), "wheel notches in a row: one step");
+        assert_eq!((app.state.session.project.bar(), app.state.session.history.at()), ((6, 4), at + 1), "wheel notches in a row: one step");
         crate::history::undo(&mut app.state);
-        assert_eq!(app.state.project.bar(), (3, 4));
-        let signature = app.state.project.bar_is_signature();
+        assert_eq!(app.state.session.project.bar(), (3, 4));
+        let signature = app.state.session.project.bar_is_signature();
         app.set_time_mode(!signature);
         assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
-        assert_eq!((app.state.project.bar_is_signature(), app.state.project.bar()), (signature, (3, 4)));
+        assert_eq!((app.state.session.project.bar_is_signature(), app.state.session.project.bar()), (signature, (3, 4)));
         // The Project page's switches.
-        let before = app.state.project.clone();
+        let before = app.state.session.project.clone();
         app.set_panning_law(2);
         app.toggle_play_truncated();
         app.toggle_auto_crossfades();
-        let p = &app.state.project;
+        let p = &app.state.session.project;
         assert!(p.panning_law == Some(2) && p.play_truncated != before.play_truncated && p.auto_crossfades != before.auto_crossfades);
         for name in ["Automatic crossfades", "Play truncated notes in clips", "Panning law"] {
             assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(name));
         }
-        assert!(app.state.project == before);
+        assert!(app.state.session.project == before);
     }
 
     #[test]
@@ -13660,14 +13657,14 @@ mod tests {
         app.state.z = vec![Win::Mixer];
         app.state.selected_mixer = 1;
         frame(&mut app, &mut a, None);
-        let i = app.state.project.mixer.iter().position(|m| m.index == 1).unwrap();
+        let i = app.state.session.project.mixer.iter().position(|m| m.index == 1).unwrap();
         // Band 2's fader: up 40 px is a quarter of the range, +9 dB.
         let r = hit_rect(&app, &Action::Knob(KnobId::Eq(1, 1, 0)));
         app.mouse_move(r.cx(), r.cy());
         app.mouse_down();
         app.mouse_move(r.cx(), r.cy() - 40.0);
         app.mouse_up();
-        assert_eq!(app.state.project.mixer[i].eq[1][0], 900);
+        assert_eq!(app.state.session.project.mixer[i].eq[1][0], 900);
         frame(&mut app, &mut a, None);
         let hint = app.hits.iter().find(|h| h.action == Action::Knob(KnobId::Eq(1, 1, 0))).map(|h| h.hint.to_string());
         assert_eq!(hint.as_deref(), Some("EQ band 2 (peaking) level: 9.0dB"));
@@ -13681,7 +13678,7 @@ mod tests {
             app.mouse_down();
             app.mouse_move(r.cx(), r.cy() - 20.0);
             app.mouse_up();
-            assert!(app.state.project.mixer[i].eq[2][1] > os_model::EQ_DEFAULT[2][1]);
+            assert!(app.state.session.project.mixer[i].eq[2][1] > os_model::EQ_DEFAULT[2][1]);
         }
     }
 
@@ -13697,7 +13694,7 @@ mod tests {
         app.state.selected_mixer = 1;
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
-        let i = app.state.project.mixer.iter().position(|m| m.index == 1).unwrap();
+        let i = app.state.session.project.mixer.iter().position(|m| m.index == 1).unwrap();
         let g = hit_rect(&app, &Action::Mix(MHit::EqGraph));
         // Each change repaints the graph with the faders and knobs, and that matches a full repaint.
         let check = |app: &mut App, a: &mut Canvas, b: &mut Canvas, what: &str| {
@@ -13719,7 +13716,7 @@ mod tests {
         app.mouse_move(k.cx(), k.cy() - 30.0);
         check(&mut app, &mut a, &mut b, "fader drag");
         app.mouse_up();
-        app.state.project.get_mut().mixer[i].eq = os_model::EQ_DEFAULT;
+        app.state.session.project.get_mut().mixer[i].eq = os_model::EQ_DEFAULT;
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
         // The graph's hint reads the frequency under the cursor and the band a press would take: here band 2 (1500 Hz).
@@ -13733,7 +13730,7 @@ mod tests {
         app.mouse_move(x - 10.0, g.cy() - (g.h / 2.0 - 4.0) / 2.0);
         check(&mut app, &mut a, &mut b, "graph drag");
         app.mouse_up();
-        let eq = app.state.project.mixer[i].eq;
+        let eq = app.state.session.project.mixer[i].eq;
         assert_eq!(eq[1][0], 900, "half way up is +9 dB");
         let want = (crate::mixer::eq_graph_pos(g, x - 10.0) * 65536.0).round() as i32;
         assert_eq!(eq[1][1], want);
@@ -13780,7 +13777,7 @@ mod tests {
             app.wheel(0.0, 1.0, false, false);
             assert!((app.state.knob(id) - (before + id.notch()).min(1.0)).abs() < 1e-4, "wheel {id:?}");
         }
-        assert!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
+        assert!(app.state.session.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
     }
 
     /// The tiling layout's split gaps drag only where no floating window lies over them: over a floating window, its
@@ -13892,10 +13889,10 @@ mod tests {
     fn wheel_moves_a_mixer_fader() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::Mixer];
         frame(&mut app, &mut c, None);
-        let vol = |app: &App| crate::mixer::track(&app.state, 1).unwrap().volume.unwrap();
+        let vol = |app: &App| crate::mixer::track(&app.state.session, 1).unwrap().volume.unwrap();
         assert_eq!(vol(&app), 0.8);
         let r = hit_rect(&app, &Action::Fader(1));
         app.mouse_move(r.cx(), r.cy());
@@ -13921,13 +13918,13 @@ mod tests {
         use crate::knobs::{Control, KnobId};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.wins.iter_mut().for_each(|w| w.maxed = false);
         app.state.z = vec![Win::ChannelRack, Win::Mixer];
         frame(&mut app, &mut c, None);
         let value = |app: &App, c: Control| match c {
             Control::Knob(id) => app.state.knob(id),
-            Control::Fader(t) => crate::mixer::track(&app.state, t).and_then(|m| m.volume).unwrap_or(0.8) as f32,
+            Control::Fader(t) => crate::mixer::track(&app.state.session, t).and_then(|m| m.volume).unwrap_or(0.8) as f32,
             _ => unreachable!(),
         };
         let default = |c: Control| match c {
@@ -13939,7 +13936,7 @@ mod tests {
             let v = if default(c) < 0.5 { 0.875 } else { 0.125 };
             match c {
                 Control::Knob(id) => app.state.set_knob(id, v),
-                Control::Fader(t) => crate::mixer::track_mut(&mut app.state, t).unwrap().volume = Some(f64::from(v)),
+                Control::Fader(t) => crate::mixer::track_mut(&mut app.state.session, t).unwrap().volume = Some(f64::from(v)),
                 _ => unreachable!(),
             }
             assert!((value(app, c) - default(c)).abs() > 0.1, "{c:?} moved");
@@ -14077,7 +14074,7 @@ mod tests {
         let old = views::rack::bounds(&app.state);
         app.state.rack_pos = (700.0, 400.0);
         let new = views::rack::bounds(&app.state);
-        if let Some(t) = app.state.project.get_mut().mixer.iter_mut().find(|t| t.index == 3) {
+        if let Some(t) = app.state.session.project.get_mut().mixer.iter_mut().find(|t| t.index == 3) {
             t.volume = Some(0.35);
         }
         let col = app.hits.iter().find(|h| h.action == Action::Fader(3)).map(|h| h.rect).unwrap();
@@ -14100,9 +14097,9 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().patterns[0].notes = (0..16).step_by(2).map(|k| Note::step(0, k * 24)).collect();
-        app.state.project.get_mut().patterns[0].notes.extend((0..16).step_by(4).map(|k| Note::step(1, k * 24)));
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().patterns[0].notes = (0..16).step_by(2).map(|k| Note::step(0, k * 24)).collect();
+        app.state.session.project.get_mut().patterns[0].notes.extend((0..16).step_by(4).map(|k| Note::step(1, k * 24)));
         crate::playlist::place(&mut app.state, 0, 0);
         crate::playlist::place(&mut app.state, 1, 384);
         let play = |tick: f64, song: bool, sounding: Vec<(u16, u16)>| Shown { playing: true, paused: false, tick, song, sounding, tempo: None };
@@ -14157,8 +14154,8 @@ mod tests {
         let mut app = App::new(None);
         // Rounded (Lemon) windows: their corners are not part of what scrolling keeps (spec: ui/lemon-design.md §3).
         app.theme = design_theme(design, false);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().patterns[0].notes = (0..16).step_by(2).map(|k| Note::step(0, k * 24)).collect();
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().patterns[0].notes = (0..16).step_by(2).map(|k| Note::step(0, k * 24)).collect();
         for (track, tick) in [(0, 0), (1, 384), (2, 768), (0, 1536)] {
             crate::playlist::place(&mut app.state, track, tick);
         }
@@ -14190,7 +14187,7 @@ mod tests {
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
         let pg = crate::playlist::PGeom::new(&app.state, g);
-        let auto = *crate::playlist::clips(&app.state).last().unwrap();
+        let auto = *crate::playlist::clips(&app.state.session).last().unwrap();
         let ar = pg.clip_rect(&auto);
         app.mouse_move(ar.x + 20.0, ar.bottom() - 10.0);
         assert!(app.state.playlist.hover_clip.is_some(), "the automation clip is hovered");
@@ -14254,7 +14251,7 @@ mod tests {
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
         let pg = crate::playlist::PGeom::new(&app.state, app.pl_grid.unwrap());
-        let c0 = pg.clip_rect(&crate::playlist::clips(&app.state)[0]);
+        let c0 = pg.clip_rect(&crate::playlist::clips(&app.state.session)[0]);
         app.mouse_move(c0.x + 10.0, c0.y + 25.0);
         app.mouse_down();
         frame(&mut app, &mut a, None);
@@ -14267,7 +14264,7 @@ mod tests {
             }
             check(&mut app, &mut a, &mut b, "clip drag");
         }
-        let moved = crate::playlist::clips(&app.state)[0];
+        let moved = crate::playlist::clips(&app.state.session)[0];
         assert!(moved.position > 0 && moved.track == 2, "the clip was dragged: {} on track {}", moved.position, moved.track);
         app.mouse_up();
         frame(&mut app, &mut a, None);
@@ -14283,8 +14280,8 @@ mod tests {
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
         let pg = crate::playlist::PGeom::new(&app.state, app.pl_grid.unwrap());
-        let ci = crate::playlist::clips(&app.state).len() - 1;
-        let body = pg.body(&crate::playlist::clips(&app.state)[ci]);
+        let ci = crate::playlist::clips(&app.state.session).len() - 1;
+        let body = pg.body(&crate::playlist::clips(&app.state.session)[ci]);
         app.mouse_move(body.cx() + 30.0, body.cy());
         assert_eq!(app.state.playlist.hover_clip, Some(ci), "the audio clip is hovered");
         check(&mut app, &mut a, &mut b, "audio clip hovered");
@@ -14302,7 +14299,7 @@ mod tests {
             }
             check(&mut app, &mut a, &mut b, "fade drag");
         }
-        assert!(crate::playlist::clips(&app.state)[ci].fade_in().is_some(), "the fade was set");
+        assert!(crate::playlist::clips(&app.state.session)[ci].fade_in().is_some(), "the fade was set");
         app.mouse_up();
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
@@ -14311,7 +14308,7 @@ mod tests {
         app.invalidate();
         frame_damage(&mut app, &mut a, Some(None));
         let _ = app.take_damage();
-        let r = pg.clip_rect(&crate::playlist::clips(&app.state)[ci]);
+        let r = pg.clip_rect(&crate::playlist::clips(&app.state.session)[ci]);
         app.mouse_move(r.right() - 1.0, r.bottom() - 6.0);
         app.mouse_down();
         frame(&mut app, &mut a, None);
@@ -14355,8 +14352,8 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        let bar = 4 * u32::from(app.state.project.ppq);
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        let bar = 4 * u32::from(app.state.session.project.ppq);
         for t in 0..14u16 {
             pl::place(&mut app.state, t, u32::from(t) * bar);
         }
@@ -14400,9 +14397,9 @@ mod tests {
         let mut b = Canvas::new(w, h, scale).unwrap();
         let mut app = App::new(None);
         app.theme = design_theme(design, false);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().patterns[0].notes = (0..32).map(|i| Note { length: 30, key: 60 + (i % 7) as u16, ..Note::step(0, i * 24) }).collect();
-        let bar = 4 * u32::from(app.state.project.ppq);
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().patterns[0].notes = (0..32).map(|i| Note { length: 30, key: 60 + (i % 7) as u16, ..Note::step(0, i * 24) }).collect();
+        let bar = 4 * u32::from(app.state.session.project.ppq);
         for t in 0..14u16 {
             for k in 0..8u32 {
                 if (u32::from(t) + k) % 3 != 0 {
@@ -14412,10 +14409,10 @@ mod tests {
         }
         let ci = pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 4, bar / 2).expect("audio clip");
         let ch = pl::create_automation(&mut app.state, 0, "Auto", 0.5);
-        pl::add_point(&mut app.state, ch, 3.0, 0.9);
-        pl::add_point(&mut app.state, ch, 7.5, 0.1);
+        pl::add_point(&mut app.state.session, ch, 3.0, 0.9);
+        pl::add_point(&mut app.state.session, ch, 7.5, 0.1);
         {
-            let arr = pl::arr_mut(&mut app.state);
+            let arr = pl::arr_mut(&mut app.state.session);
             arr.clips[ci].set_fade_in(Some((300.0, 0.3)));
             arr.clips[ci].set_fade_out(Some((900.0, -0.4)));
             arr.markers.push(os_model::TimeMarker::new(2 * bar, "Drop"));
@@ -14759,7 +14756,7 @@ mod tests {
         let size = (1600, 900);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.plugins.effects = vec![crate::plugin_db::fake("A long effect name", os_host::Kind::Effect)];
         app.state.plugdb.rebuild(&app.plugins);
         app.state.browser_tab = 2;
@@ -14811,9 +14808,9 @@ mod tests {
         let size = (1600, 900);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
@@ -14822,7 +14819,7 @@ mod tests {
         let pi = rows(&app.state).iter().position(|r| r.item == Item::Pattern(1)).expect("pattern row");
         let src = hit_rect(&app, &Action::BrowserRow(pi));
         let grid = app.pl_grid().expect("grid");
-        let n0 = crate::playlist::clips(&app.state).len();
+        let n0 = crate::playlist::clips(&app.state.session).len();
         crate::anim::set_clock(true);
         let step = |app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str| {
             crate::anim::advance(16);
@@ -14856,7 +14853,7 @@ mod tests {
             }
             assert!(falls.contains(&frames), "{level:?}: the tag falls for {frames} frames");
             app.mouse_up();
-            assert_eq!(crate::playlist::clips(&app.state).len(), n0, "{level:?}: nothing dropped");
+            assert_eq!(crate::playlist::clips(&app.state.session).len(), n0, "{level:?}: nothing dropped");
         }
         crate::anim::set_level(Level::Playful);
         crate::anim::set_clock(false);
@@ -15059,30 +15056,30 @@ mod tests {
         app.state.raise(Win::ChannelRack);
         app.state.rack.graph_open = true;
         app.state.selected_channel = 0;
-        let ch = app.state.project.channels[0].index;
+        let ch = app.state.session.project.channels[0].index;
         let n = app.state.pattern().max(1);
-        crate::patterns::pat_mut(&mut app.state, n).notes.push(os_model::Note::step(ch, 0));
+        crate::patterns::pat_mut(&mut app.state.session, n).notes.push(os_model::Note::step(ch, 0));
         frame(&mut app, &mut c, None);
         let area = hit_rect(&app, &Action::RackGraphArea);
         let x = hit_rect(&app, &Action::Step(0, 0)).cx();
-        let vel = |app: &App| app.state.project.pattern(n).map(|p| p.notes[0].velocity);
-        let (before, steps) = (vel(&app), app.state.history.done());
+        let vel = |app: &App| app.state.session.project.pattern(n).map(|p| p.notes[0].velocity);
+        let (before, steps) = (vel(&app), app.state.session.history.done());
         app.mouse_move(x, area.y + area.h * 0.9);
         app.mouse_down();
         app.mouse_move(x, area.y + area.h * 0.6);
         app.mouse_move(x, area.y + area.h * 0.4);
         app.mouse_up();
         assert_ne!(vel(&app), before);
-        assert_eq!((app.state.history.done(), app.state.history.newest_done()), (steps + 1, Some("Graph editor change velocity")));
+        assert_eq!((app.state.session.history.done(), app.state.session.history.newest_done()), (steps + 1, Some("Graph editor change velocity")));
         assert!(crate::history::undo(&mut app.state).is_some());
         assert_eq!(vel(&app), before, "one step takes the whole drag back");
         app.state.set_pattern(n + 1);
         frame(&mut app, &mut c, None);
-        let steps = app.state.history.done();
+        let steps = app.state.session.history.done();
         app.mouse_move(x, area.y + area.h * 0.5);
         app.mouse_down();
         app.mouse_up();
-        assert_eq!((app.state.history.done(), vel(&app)), (steps, before), "a press in a pattern without steps changes nothing");
+        assert_eq!((app.state.session.history.done(), vel(&app)), (steps, before), "a press in a pattern without steps changes nothing");
     }
 
     fn hit_rect(app: &App, a: &Action) -> Rect {
@@ -15101,9 +15098,9 @@ mod tests {
         let size = (1280, 800);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         app.mouse_move(5.0, 700.0);
@@ -15216,9 +15213,9 @@ mod tests {
         let size = (1600, 900);
         let (Ok(mut c), Ok(mut whole), Ok(mut want)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.z = vec![Win::Mixer];
         frame(&mut app, &mut c, None);
@@ -15275,7 +15272,7 @@ mod tests {
         };
         let set_pan: &dyn Fn(&mut App, bool) = &|app, hi| app.state.set_knob(pan, if hi { 1.0 } else { 0.5 });
         let set_fader: &dyn Fn(&mut App, bool) = &|app, hi| {
-            let m = app.state.project.get_mut().mixer.iter_mut().find(|m| m.index == 1).expect("track 1");
+            let m = app.state.session.project.get_mut().mixer.iter_mut().find(|m| m.index == 1).expect("track 1");
             m.volume = Some(if hi { 0.9 } else { 0.3 });
         };
         // The value is there at once, whatever the picture does.
@@ -15310,9 +15307,9 @@ mod tests {
         let size = (1600, 900);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
@@ -15395,9 +15392,9 @@ mod tests {
         let size = (1600, 900);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.z = vec![Win::Mixer];
         frame(&mut app, &mut c, None);
@@ -15600,9 +15597,9 @@ mod tests {
         let size = (1600, 900);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         // A floating mixer over the playlist, and the palette over both: it is the active one.
         let slot = Win::Mixer.slot().expect("a slot");
         app.state.wins[slot].maxed = false;
@@ -15694,9 +15691,9 @@ mod tests {
         use crate::views::browser::{rows, Item};
         let Ok(mut c) = Canvas::new(1600, 900, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
@@ -15733,9 +15730,9 @@ mod tests {
         let size = (1600, 900);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
@@ -16240,7 +16237,7 @@ mod tests {
         assert_eq!((e.rect().x, e.rect().y), (300.0, 220.0), "the plugin window reopens where it was");
         // the channel window: next to the rack until moved, then where it was moved
         app.add_clip_channel(ChannelKind::Automation);
-        let row = app.state.project.channels.len() - 1;
+        let row = app.state.session.project.channels.len() - 1;
         assert!(app.state.shown(Win::Plugin), "an automation clip's channel window opens");
         let beside = app.state.plugin_pos;
         app.state.hide(Win::Plugin);
@@ -16401,13 +16398,13 @@ mod tests {
         app.open(path.clone());
         let _ = std::fs::remove_file(&path);
         assert!(app.state.dialogs.is_empty() && !app.modal_open());
-        assert_eq!(app.state.project.channels.len(), test_project().channels.len());
+        assert_eq!(app.state.session.project.channels.len(), test_project().channels.len());
         // The file kept for saving is the converted one: every channel block has its end event again.
-        let open = app.state.file.as_ref().expect("the project's file");
+        let open = app.state.session.file.as_ref().expect("the project's file");
         let events: Vec<os_flp::Event> = open.events().cloned().collect();
         assert_eq!(events.iter().filter(|e| e.id == 51).count(), test_project().channels.len());
         assert!(!os_flp::project::is_legacy(&events));
-        assert_eq!(app.state.path, None, "Save asks for a file");
+        assert_eq!(app.state.session.path, None, "Save asks for a file");
     }
 
     /// A project in the layout used before version 24.2, saved by version 20 or later, opens converted, and Save asks
@@ -16419,8 +16416,8 @@ mod tests {
         app.open(path.clone());
         let _ = std::fs::remove_file(&path);
         assert!(app.state.dialogs.is_empty(), "no dialog");
-        assert_eq!(app.state.project.channels.len(), test_project().channels.len());
-        assert_eq!(app.state.path, None, "Save asks for a file");
+        assert_eq!(app.state.session.project.channels.len(), test_project().channels.len());
+        assert_eq!(app.state.session.path, None, "Save asks for a file");
         assert!(app.state.message.as_deref().is_some_and(|m| m.contains("converted from an older version")), "{:?}", app.state.message);
     }
 
@@ -16433,7 +16430,7 @@ mod tests {
         std::fs::rename(&flp, &path).expect("rename");
         let mut app = App::new(None);
         app.open(path.clone());
-        assert_eq!(app.state.path.as_deref(), Some(path.as_path()), "{:?}", app.state.message);
+        assert_eq!(app.state.session.path.as_deref(), Some(path.as_path()), "{:?}", app.state.message);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -16562,7 +16559,7 @@ mod tests {
         for design in [Design::Citrus, Design::Lemon] {
             let mut app = App::new(None);
             app.set_design(design, false);
-            app.state.path = Some(dir.join("Song 00.flp"));
+            app.state.session.path = Some(dir.join("Song 00.flp"));
             app.menu_item(0, FILE_OPEN);
             frame(&mut app, &mut c, None);
             let f = top_file(&app);
@@ -16645,7 +16642,7 @@ mod tests {
             let name = format!("{design:?}").to_lowercase();
             let mut app = App::new(None);
             app.set_design(design, false);
-            app.state.path = Some(dir.join("Demo.flp"));
+            app.state.session.path = Some(dir.join("Demo.flp"));
             for (kind, title, text, buttons, tag) in [
                 (Kind::Question, "Confirm", spans(&["Save the changes to ", "Demo.flp", " before closing?"]), &[Answer::Yes, Answer::No, Answer::Cancel][..], "question"),
                 (Kind::Warning, "Confirm save as", spans(&["", "Demo.flp", " already exists.\nDo you want to replace it?"]), &[Answer::Yes, Answer::No][..], "warning"),
@@ -16893,10 +16890,10 @@ mod tests {
         crate::rack::run(&mut app, crate::rack::RCmd::CopyValue(KnobId::MasterVol));
         assert_eq!(labels(&app.state)[at + 1], ("Paste value (80%)".into(), true));
         pl::run(&mut app, Cmd::PointPaste(ch, 0));
-        let p0 = app.state.project.automation(ch).unwrap().points[0];
+        let p0 = app.state.session.project.automation(ch).unwrap().points[0];
         assert!((p0.value - 0.8).abs() < 1e-3 && p0.beat == 0.0, "{p0:?}");
         crate::history::undo(&mut app.state);
-        assert_eq!(app.state.project.automation(ch).unwrap().points[0].value, 0.25);
+        assert_eq!(app.state.session.project.automation(ch).unwrap().points[0].value, 0.25);
     }
 
     /// The CPU panel opens Settings > Audio; its combos open menus over the window and a choice becomes the audio
@@ -17038,7 +17035,7 @@ mod tests {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         crate::playlist::place(&mut app.state, 0, 0);
         crate::playlist::place(&mut app.state, 1, 1536);
         for w in [Win::Playlist, Win::PianoRoll] {
@@ -17053,7 +17050,7 @@ mod tests {
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut a, None);
         let g = app.pl_grid.expect("playlist shown");
-        let ppt = |app: &App| app.state.playlist_bar_w / (f32::from(app.state.project.ppq.max(4)) * 4.0);
+        let ppt = |app: &App| app.state.playlist_bar_w / (f32::from(app.state.session.project.ppq.max(4)) * 4.0);
         let tick_at = |app: &App, x: f32| f64::from(x / ppt(app));
         app.show_playback(play(0.0, true));
         let d = app.take_damage();
@@ -17101,7 +17098,7 @@ mod tests {
         app.state.z = vec![Win::PianoRoll];
         frame(&mut app, &mut a, None);
         let g = app.piano_grid.expect("piano roll shown");
-        let ppq = f64::from(app.state.project.ppq.max(4));
+        let ppq = f64::from(app.state.session.project.ppq.max(4));
         let tick = f64::from(g.w) * 0.9 / f64::from(app.state.piano.px_per_beat) * ppq;
         app.show_playback(play(0.0, false));
         app.show_playback(play(tick, false));
@@ -17118,13 +17115,13 @@ mod tests {
     fn piano_roll_follows_in_song_mode() {
         let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        crate::playlist::arr_mut(&mut app.state).clips.clear();
-        let bar = app.state.project.bar_ticks();
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        crate::playlist::arr_mut(&mut app.state.session).clips.clear();
+        let bar = app.state.session.project.bar_ticks();
         let c = crate::playlist::place(&mut app.state, 0, 2 * bar);
-        crate::playlist::arr_mut(&mut app.state).clips[c].length = 8 * bar;
+        crate::playlist::arr_mut(&mut app.state.session).clips[c].length = 8 * bar;
         let n = app.state.pattern();
-        app.state.project.get_mut().patterns.iter_mut().filter(|p| p.number == n).for_each(|p| p.length = Some(8 * bar));
+        app.state.session.project.get_mut().patterns.iter_mut().filter(|p| p.number == n).for_each(|p| p.length = Some(8 * bar));
         let ws = &mut app.state.wins[Win::PianoRoll.slot().unwrap()];
         ws.maxed = false;
         ws.rect = Rect::new(220.0, 90.0, 1000.0, 480.0);
@@ -17132,7 +17129,7 @@ mod tests {
         crate::autoscroll::toggle();
         frame(&mut app, &mut a, None);
         let g = app.piano_grid.expect("piano roll shown");
-        let ppq = f64::from(app.state.project.ppq.max(4));
+        let ppq = f64::from(app.state.session.project.ppq.max(4));
         let per_px = ppq / f64::from(app.state.piano.px_per_beat);
         let play = |tick: f64| Shown { playing: true, paused: false, tick, song: true, sounding: Vec::new(), tempo: None };
         app.show_playback(play(0.0));
@@ -17292,7 +17289,7 @@ mod tests {
         };
         assert!(crate::tapper::get().apply);
         assert_eq!(app.state.tempo(), 130.0);
-        let steps = app.state.history.at();
+        let steps = app.state.session.history.at();
         tap(&mut app, &mut c, 10.0);
         assert_eq!((app.state.tapper.count.tempo(), app.state.tempo()), (None, 130.0), "one tap: TAP stays");
         assert!(app.state.tapper.flash == 1.0 && app.animating(), "a tap lights the pad, which then fades");
@@ -17302,7 +17299,7 @@ mod tests {
         tap(&mut app, &mut c, 11.4);
         assert_eq!(app.state.tempo(), 129.0, "the average of every interval, rounded (128.57)");
         assert!(app.unsaved(), "a tapped tempo is a change to the project");
-        assert_eq!(app.state.history.at(), steps + 1, "a count's taps are one undo step");
+        assert_eq!(app.state.session.history.at(), steps + 1, "a count's taps are one undo step");
         // Off: the pad shows the tempo, the project keeps its own; turning it on applies the pad's.
         let apply = hit_rect(&app, &Action::Tapper(TapAct::Apply));
         click(&mut app, &mut c, apply);
@@ -17318,7 +17315,7 @@ mod tests {
         tap(&mut app, &mut c, 20.05);
         assert_eq!((app.state.tapper.count.tempo(), app.state.tempo()), (Some(1200.0), 522.0));
         // Steps: the first count, turning Apply tempo on, the new count; each undoes to the tempo before it.
-        assert_eq!(app.state.history.at(), steps + 3);
+        assert_eq!(app.state.session.history.at(), steps + 3);
         for want in [133.0, 129.0, 130.0] {
             assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::control::command::TEMPO));
             assert_eq!(app.state.tempo(), want);
@@ -17373,7 +17370,7 @@ mod tests {
     fn tempo_tapper_typing_and_touch_keys_tap() {
         use crate::touch::TouchAct;
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.selected_channel = 1;
         app.state.toggles.push("typing");
         let key = |app: &mut App, t: f64, code: KeyCode| {
@@ -17476,17 +17473,17 @@ mod tests {
             let index = app.plugins.index_of(crate::osc3::LEMON_TRIO).expect("Lemon Trio");
             let mut notes = Vec::new();
             for c in 0..n.parse::<u16>().unwrap_or(8) {
-                let row = add_plugin_channel(app.state.project.get_mut(), crate::osc3::LEMON_TRIO);
+                let row = add_plugin_channel(app.state.session.project.get_mut(), crate::osc3::LEMON_TRIO);
                 app.plugins.create(row, index).expect("a Lemon Trio instance");
                 app.state.hosted_rows.push(row);
-                let ch = app.state.project.channels[row].index;
+                let ch = app.state.session.project.channels[row].index;
                 for i in 0..16 {
                     for k in [0, 4, 7, 11] {
                         notes.push(os_model::Note { length: 96, key: 48 + c % 12 + k, ..os_model::Note::step(ch, i * 24) });
                     }
                 }
             }
-            app.state.project.get_mut().patterns[0].notes = notes;
+            app.state.session.project.get_mut().patterns[0].notes = notes;
             app.state.set_song_mode(false);
             app.transport.set_instruments(app.plugins.instruments());
         } else {
@@ -17499,10 +17496,10 @@ mod tests {
         }
         run(&mut app, 500);
         // Muted: the master track's volume at 0 (the engine renders the same).
-        if let Some(m) = app.state.project.get_mut().mixer.iter_mut().find(|m| m.index == 0) {
+        if let Some(m) = app.state.session.project.get_mut().mixer.iter_mut().find(|m| m.index == 0) {
             m.volume = Some(0.0);
         }
-        let (tempo, ppq) = (app.state.project.tempo.unwrap_or(140.0), app.state.project.ppq.max(1));
+        let (tempo, ppq) = (app.state.session.project.tempo.unwrap_or(140.0), app.state.session.project.ppq.max(1));
         eprintln!("{song}: {tempo} BPM, PPQ {ppq}, {} hosted rows", app.state.hosted_rows.len());
         eprintln!("driver | block | rate | tick | ahead min / mean / max (frames) | mean ms | driver latency | longest gap ms | load | dropouts");
         for &b in &buffers {
@@ -17533,7 +17530,7 @@ mod tests {
                 for _ in 0..seconds {
                     // An edit: the engine is rebuilt and swapped in at the position playing (LEMON_EDITS=0: none).
                     if var("LEMON_EDITS").is_none_or(|v| v != "0") {
-                        app.transport.update(&app.state.project);
+                        app.transport.update(&app.state.session.project);
                     }
                     run(&mut app, 1000);
                     load = load.max(app.transport.load());
@@ -17571,7 +17568,7 @@ mod tests {
         let mut app = App::new(None);
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
-        let row = add_plugin_channel(app.state.project.get_mut(), crate::osc3::LEMON_TRIO);
+        let row = add_plugin_channel(app.state.session.project.get_mut(), crate::osc3::LEMON_TRIO);
         let index = app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         app.plugins.create(row, index).unwrap();
         app.state.hosted_rows.push(row);
@@ -17622,7 +17619,7 @@ mod tests {
         let (du, v) = phase(&mut app, "live");
         assert!(du < 5 && v == 0, "live notes: {du} dropouts, {v} voices");
         // A pattern of the synth playing, with live notes on top, then Stop.
-        app.state.project.get_mut().patterns[0].notes = (0..16).map(|i| os_model::Note { length: 24, key: 48 + (i % 5) as u16 * 3, ..os_model::Note::step(app.state.project.channels[row].index, i * 24) }).collect();
+        app.state.session.project.get_mut().patterns[0].notes = (0..16).map(|i| os_model::Note { length: 24, key: 48 + (i % 5) as u16 * 3, ..os_model::Note::step(app.state.session.project.channels[row].index, i * 24) }).collect();
         app.act(Action::Play);
         run(&mut app, 300);
         let (du, _) = phase(&mut app, "playing");
@@ -17638,9 +17635,9 @@ mod tests {
         use crate::views::browser::{rows, Item};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
@@ -17657,7 +17654,7 @@ mod tests {
         assert_eq!(r[2].label, "Patterns");
         let pi = r.iter().position(|r| r.item == Item::Pattern(1)).expect("pattern row");
         // Drag pattern 1 onto the playlist grid: a pattern clip appears.
-        let n0 = crate::playlist::clips(&app.state).len();
+        let n0 = crate::playlist::clips(&app.state.session).len();
         let src = hit_rect(&app, &Action::BrowserRow(pi));
         let grid = app.pl_grid().expect("grid");
         app.mouse_move(src.cx(), src.cy());
@@ -17667,7 +17664,7 @@ mod tests {
         app.mouse_move(grid.x + 100.0, grid.y + 10.0);
         app.mouse_up();
         assert!(app.state.browser_drag.is_none());
-        let clips = crate::playlist::clips(&app.state);
+        let clips = crate::playlist::clips(&app.state.session);
         assert_eq!(clips.len(), n0 + 1);
         assert_eq!(clips.last().unwrap().source, os_model::ClipSource::Pattern(1));
         frame(&mut app, &mut c, None);
@@ -17676,7 +17673,7 @@ mod tests {
         let r0 = hit_rect(&app, &Action::BrowserRow(pat_hdr));
         click(&mut app, &mut c, r0);
         assert!(rows(&app.state).iter().all(|r| r.item != Item::Pattern(1)));
-        assert_eq!(crate::playlist::clips(&app.state).len(), n0 + 1);
+        assert_eq!(crate::playlist::clips(&app.state.session).len(), n0 + 1);
         // Plugin database tab: open Generators and its Sampler category, drag Lemon Sampler onto the playlist -> a new
         // channel.
         app.plugins = crate::plugins::Plugins::builtins();
@@ -17689,14 +17686,14 @@ mod tests {
             click(&mut app, &mut c, r0);
         }
         let si = rows(&app.state).iter().position(|r| r.item == Item::Generator(0)).expect("sampler row");
-        let ch0 = app.state.project.channels.len();
+        let ch0 = app.state.session.project.channels.len();
         let src = hit_rect(&app, &Action::BrowserRow(si));
         app.mouse_move(src.cx(), src.cy());
         app.mouse_down();
         app.mouse_move(grid.x + 200.0, grid.y + 60.0);
         app.mouse_move(grid.x + 210.0, grid.y + 60.0);
         app.mouse_up();
-        assert_eq!(app.state.project.channels.len(), ch0 + 1);
+        assert_eq!(app.state.session.project.channels.len(), ch0 + 1);
         // The favorites tab works (spec §10), empty without favorites; wheel never scrolls past the content. There is no
         // online content tab.
         assert!(app.hits.iter().any(|h| h.action == Action::BrowserTab(3)));
@@ -17754,8 +17751,8 @@ mod tests {
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
         let path = wav.to_string_lossy().into_owned();
         crate::playlist::add_audio_clip(&mut app.state, &path, 0, 0).expect("audio clip added");
-        let row = app.state.project.channels.len() - 1;
-        assert_eq!(app.state.project.channels[row].kind, ChannelKind::AudioClip);
+        let row = app.state.session.project.channels.len() - 1;
+        assert_eq!(app.state.session.project.channels[row].kind, ChannelKind::AudioClip);
         app.plugin_tick();
         assert!(app.state.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
         assert_eq!(app.plugins.sampler_path(row).as_deref(), Some(path.as_str()));
@@ -17774,13 +17771,13 @@ mod tests {
         let g = app.pl_grid.expect("playlist shown");
         let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../os-engine/tests/data");
         for name in ["sine_aac_itunes.m4a", "sine_alac.m4a"] {
-            let channels = app.state.project.channels.len();
+            let channels = app.state.session.project.channels.len();
             app.mouse_move(g.x + 40.0, g.y + 10.0);
             app.drop_file(data.join(name));
             let message = app.state.message.clone().unwrap_or_default();
             assert!(message.starts_with("Added audio clip"), "{name}: {message}");
-            assert_eq!(app.state.project.channels.len(), channels + 1, "{name}");
-            let ch = app.state.project.channels.last().unwrap();
+            assert_eq!(app.state.session.project.channels.len(), channels + 1, "{name}");
+            let ch = app.state.session.project.channels.last().unwrap();
             assert_eq!(ch.kind, ChannelKind::AudioClip, "{name}");
             assert_eq!(ch.sample_path.as_deref().map(|p| p.ends_with(name)), Some(true), "{name}");
         }
@@ -17812,7 +17809,7 @@ mod tests {
         bytes[4..8].copy_from_slice(&riff.to_le_bytes());
         std::fs::write(&wav, &bytes).unwrap();
         crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-        let ch = a.state.project.get_mut().channels.last_mut().unwrap();
+        let ch = a.state.session.project.get_mut().channels.last_mut().unwrap();
         assert_eq!(ch.sound.sampler_flags, Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), "FL's clip channel flags");
         ch.sound.sampler_flags = None;
         a.plugin_tick();
@@ -17868,7 +17865,7 @@ mod tests {
             a.plugins.available = crate::plugins::builtin();
             a.plugins.set_rate(48000);
             crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-            let row = a.state.project.channels.len() - 1;
+            let row = a.state.session.project.channels.len() - 1;
             a.plugin_tick();
             assert!(a.state.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
             let st = crate::plugins::with_params(&a.plugins.state(row).unwrap(), &[("keep_disk", json!({ "bool": keep }))]).unwrap();
@@ -17877,9 +17874,9 @@ mod tests {
                 assert!(lemon_sampler::stream::open_files() > 0, "the sample plays from disk");
             }
             a.transport.set_instruments(a.plugins.instruments());
-            let first = *crate::playlist::arr_mut(&mut a.state).clips.last().unwrap();
+            let first = *crate::playlist::arr_mut(&mut a.state.session).clips.last().unwrap();
             let second = os_model::Clip { position: first.position + first.length, length: first.length / 2, window: Some((10_000.0, 20_000.0)), ..first };
-            crate::playlist::arr_mut(&mut a.state).clips.push(second);
+            crate::playlist::arr_mut(&mut a.state.session).clips.push(second);
             let p = crate::rack::play_project(&a.state);
             let out = std::env::temp_dir().join(format!("os-app-keep-on-disk-{}-{keep}.wav", std::process::id()));
             // As `start_export` does with high quality off.
@@ -17927,19 +17924,19 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-crossfade-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
         crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-        let row = a.state.project.channels.len() - 1;
+        let row = a.state.session.project.channels.len() - 1;
         a.plugin_tick();
         assert!(a.state.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
         a.transport.set_instruments(a.plugins.instruments());
-        let first = *crate::playlist::arr_mut(&mut a.state).clips.last().unwrap();
+        let first = *crate::playlist::arr_mut(&mut a.state.session).clips.last().unwrap();
         let second = os_model::Clip { position: first.position + first.length / 2, ..first };
-        crate::playlist::arr_mut(&mut a.state).clips.push(second);
+        crate::playlist::arr_mut(&mut a.state.session).clips.push(second);
         // On (a new project takes the switch from the preferences); the next tick sets the crossfades from the overlap.
-        if !os_model::crossfade::on(&a.state.project) {
+        if !os_model::crossfade::on(&a.state.session.project) {
             a.toggle_auto_crossfades();
         }
         let tempo = a.state.tempo();
-        assert!(os_model::crossfade::derive(a.state.project.get_mut(), tempo), "the overlap makes a crossfade");
+        assert!(os_model::crossfade::derive(a.state.session.project.get_mut(), tempo), "the overlap makes a crossfade");
         let p = crate::rack::play_project(&a.state);
         let out = std::env::temp_dir().join(format!("os-app-crossfade-{}-export.wav", std::process::id()));
         a.plugins.set_offline(true);
@@ -17999,9 +17996,9 @@ mod tests {
         a.plugins = crate::plugins::Plugins::default();
         a.plugins.available = crate::plugins::builtin();
         a.sync_samplers(None);
-        let row = (0..a.state.project.channels.len()).find(|&r| a.state.project.channels[r].kind.is_sampler()).expect("a sampler channel");
+        let row = (0..a.state.session.project.channels.len()).find(|&r| a.state.session.project.channels[r].kind.is_sampler()).expect("a sampler channel");
         assert!(a.state.hosted_rows.contains(&row));
-        let untouched = a.state.project.channels[row].clone();
+        let untouched = a.state.session.project.channels[row].clone();
         let edits = [
             ("envvol_on", json!({ "bool": true })),
             ("envvol_att", json!({ "f32": 0.5 })),
@@ -18034,7 +18031,7 @@ mod tests {
         // Saving copies them into the channel, in the file's units.
         a.save_to(flp.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
-        let ch = &a.state.project.channels[row];
+        let ch = &a.state.session.project.channels[row];
         let vol = &ch.envelopes[os_model::Envelope::VOLUME];
         assert!(vol.enabled && vol.attack == 32768 && vol.flags & 1 == 1 && vol.lfo_amount == -64 && vol.lfo_shape == 2);
         // The pitch record's amount is in cents (±2400).
@@ -18065,7 +18062,7 @@ mod tests {
             b.plugin_tick();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let reopened = &b.state.project.channels[row];
+        let reopened = &b.state.session.project.channels[row];
         assert_eq!((reopened.envelopes, reopened.sound), (saved.envelopes, saved.sound));
         let (m, n) = (reopened.misc, saved.misc);
         assert_eq!((m.root, m.fine, m.main_pitch, m.add_key, m.key_range), (n.root, n.fine, n.main_pitch, n.add_key, n.key_range));
@@ -18154,10 +18151,10 @@ mod tests {
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 96000]).unwrap();
         let wav = wav.to_string_lossy().into_owned();
         let mut app = App::new(None);
-        for c in app.state.project.get_mut().channels.iter_mut().filter(|c| c.kind.is_sampler()) {
+        for c in app.state.session.project.get_mut().channels.iter_mut().filter(|c| c.kind.is_sampler()) {
             c.sample_path = Some(wav.clone());
         }
-        let rows: Vec<usize> = (0..app.state.project.channels.len()).filter(|&r| app.state.project.channels[r].kind.is_sampler()).collect();
+        let rows: Vec<usize> = (0..app.state.session.project.channels.len()).filter(|&r| app.state.session.project.channels[r].kind.is_sampler()).collect();
         assert!(rows.len() > 1);
         app.save_to(flp.clone());
         app.plugins = crate::plugins::Plugins::default();
@@ -18200,7 +18197,7 @@ mod tests {
         let mut a = App::new(None);
         a.plugins = crate::plugins::Plugins::default();
         let row = 0;
-        let untouched = a.state.project.channels[row].misc;
+        let untouched = a.state.session.project.channels[row].misc;
         // Values the file's units hold exactly.
         let first = [
             (M::LevelPan, 0.25),
@@ -18247,10 +18244,10 @@ mod tests {
         for (m, v) in first {
             crate::misc::set(&mut a, row, m, v);
         }
-        let want = a.state.project.channels[row].misc;
+        let want = a.state.session.project.channels[row].misc;
         assert_ne!(want, untouched);
         let mut b = reopen(&mut a);
-        assert_eq!(b.state.project.channels[row].misc, want);
+        assert_eq!(b.state.session.project.channels[row].misc, want);
 
         let second = [
             (M::LevelPan, 0.5),
@@ -18276,10 +18273,10 @@ mod tests {
         for (m, v) in second {
             crate::misc::set(&mut b, row, m, v);
         }
-        let want = b.state.project.channels[row].misc;
+        let want = b.state.session.project.channels[row].misc;
         let c = reopen(&mut b);
         let _ = std::fs::remove_file(&flp);
-        assert_eq!(c.state.project.channels[row].misc, want);
+        assert_eq!(c.state.session.project.channels[row].misc, want);
     }
 
     /// Opening, loading and saving leave no unsaved changes; an edit does; "Save new version" numbers the file.
@@ -18310,9 +18307,9 @@ mod tests {
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
         assert!(!app.unsaved(), "saved");
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
-        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_2.lemon").as_path()));
+        assert_eq!(app.state.session.path.as_deref(), Some(dir.join("Song_2.lemon").as_path()));
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
-        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_3.lemon").as_path()));
+        assert_eq!(app.state.session.path.as_deref(), Some(dir.join("Song_3.lemon").as_path()));
         assert!(dir.join("Song_2.lemon").exists() && dir.join("Song_3.lemon").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -18346,7 +18343,7 @@ mod tests {
         assert!(app.unsaved());
         fake::answer(Some(lemon.clone()));
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
-        assert_eq!(app.state.path.as_deref(), Some(lemon.as_path()), "the project now lives in the .lemon file");
+        assert_eq!(app.state.session.path.as_deref(), Some(lemon.as_path()), "the project now lives in the .lemon file");
         assert!(!app.unsaved());
         assert_eq!(std::fs::read(&flp).unwrap(), before, "the FLP is still not written");
         let file = os_flp::FlpFile::parse(&std::fs::read(&lemon).unwrap()).unwrap();
@@ -18358,7 +18355,7 @@ mod tests {
         assert_eq!(fake::shown().1, asked + 2);
         let mut back = App::new(None);
         back.open(lemon.clone());
-        assert_eq!((back.state.tempo(), back.state.path.as_deref()), (125.0, Some(lemon.as_path())));
+        assert_eq!((back.state.tempo(), back.state.session.path.as_deref()), (125.0, Some(lemon.as_path())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -18375,7 +18372,7 @@ mod tests {
         app.mouse_move(500.0, 500.0);
         app.mouse_down();
         app.mouse_up();
-        piano::pattern_mut(&mut app.state).notes[0].velocity = velocity;
+        piano::pattern_mut(&mut app.state.session).notes[0].velocity = velocity;
         frame(&mut app, &mut c, None);
         (app, c)
     }
@@ -18384,7 +18381,7 @@ mod tests {
     #[test]
     fn a_clicked_note_sounds_at_its_velocity() {
         let (mut app, mut c) = piano_with_note(37);
-        let key = piano::notes(&app.state)[0].key;
+        let key = piano::notes(&app.state.session)[0].key;
         app.mouse_down();
         assert_eq!(app.mouse_note.map(|n| (n.1, n.2)), Some((key, 37)));
         app.mouse_move(500.0, 400.0);
@@ -18401,11 +18398,11 @@ mod tests {
     #[test]
     fn the_playback_tool_holds_what_its_line_is_on() {
         let (mut app, mut c) = piano_with_note(37);
-        let n = piano::notes(&app.state)[0];
+        let n = piano::notes(&app.state.session)[0];
         let mut other = n;
         other.key += 3;
         other.velocity = 90;
-        piano::pattern_mut(&mut app.state).notes.push(other);
+        piano::pattern_mut(&mut app.state.session).notes.push(other);
         app.state.piano.tool = Tool::Playback;
         frame(&mut app, &mut c, None);
         let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
@@ -18428,7 +18425,7 @@ mod tests {
     #[test]
     fn right_modifiers_in_the_piano_roll_keep_the_notes() {
         let (mut app, mut c) = piano_with_note(37);
-        let n = piano::notes(&app.state)[0];
+        let n = piano::notes(&app.state.session)[0];
         let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
         app.mouse_move(r.cx(), r.cy());
         app.alt = true;
@@ -18437,7 +18434,7 @@ mod tests {
         app.mouse_up();
         app.alt = false;
         assert!(app.scrub_notes.is_empty());
-        assert_eq!(piano::notes(&app.state).len(), 1, "Alt+right kept the note");
+        assert_eq!(piano::notes(&app.state.session).len(), 1, "Alt+right kept the note");
         frame(&mut app, &mut c, None);
         let zoom = app.state.piano.px_per_beat;
         app.mouse_move(r.cx(), r.cy());
@@ -18446,14 +18443,14 @@ mod tests {
         app.mouse_move(r.cx() + 100.0, r.cy() + 60.0);
         app.mouse_up();
         app.ctrl = false;
-        assert_eq!(piano::notes(&app.state).len(), 1, "Ctrl+right kept the note");
+        assert_eq!(piano::notes(&app.state.session).len(), 1, "Ctrl+right kept the note");
         assert_ne!(app.state.piano.px_per_beat, zoom, "Ctrl+right-drag zoomed");
         let (mut app, _c) = piano_with_note(37);
-        let r = app.piano_geom().unwrap().note_rect(&piano::notes(&app.state)[0]).unwrap();
+        let r = app.piano_geom().unwrap().note_rect(&piano::notes(&app.state.session)[0]).unwrap();
         app.mouse_move(r.cx(), r.cy());
         app.mouse_down_right();
         app.mouse_up();
-        assert!(piano::notes(&app.state).is_empty(), "a plain right-click still deletes");
+        assert!(piano::notes(&app.state.session).is_empty(), "a plain right-click still deletes");
     }
 
     /// Ctrl+H is TOOLS > Stop sound, the key its menu entry shows; Shift+Ctrl+H stays Realign.
@@ -18484,7 +18481,7 @@ mod tests {
         assert!(app.shift_digit(&Key::Character("%".into()), 5));
         assert!(!app.shift_digit(&plus, 4));
         // In the playlist: a Turkish Shift+4 zooms out far.
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::Playlist];
         app.shift = true;
         app.code = Some(KeyCode::Digit4);
@@ -18503,9 +18500,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         // Something to export, so Ctrl+R gets as far as its file dialog.
-        app.state.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
+        app.state.session.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
         let song = dir.join("Song.lemon");
         app.save_to(song.clone());
         let before = std::fs::read(&song).unwrap();
@@ -18523,7 +18520,7 @@ mod tests {
         let other = dir.join("Other.lemon");
         fake::answer(Some(other.clone()));
         key(&mut app, "S", true);
-        assert_eq!(app.state.path.as_deref(), Some(other.as_path()));
+        assert_eq!(app.state.session.path.as_deref(), Some(other.as_path()));
         assert!(other.exists() && !app.unsaved(), "saved to the chosen file");
         assert_eq!(std::fs::read(&song).unwrap(), before, "the old file is left as it was");
 
@@ -18562,7 +18559,7 @@ mod tests {
         use crate::views::browser::{rows, Item};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
         app.state.plugdb.rebuild(&app.plugins);
         app.state.z = vec![Win::Mixer];
@@ -18578,7 +18575,7 @@ mod tests {
         app.mouse_move(dst.cx(), dst.cy());
         app.mouse_up();
         let t = app.state.selected_mixer;
-        assert_eq!(crate::mixer::slot_name(&app.state, t, 0).as_deref(), Some("Test FX"));
+        assert_eq!(crate::mixer::slot_name(&app.state.session, t, 0).as_deref(), Some("Test FX"));
     }
 
     // spec: plugins/patcher/README.md "3.3 Patcherize (slot menu, channel menu)" (Shift+drop)
@@ -18590,14 +18587,14 @@ mod tests {
         use crate::views::browser::{rows, Item};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.reset_hosted();
         app.plugins.effects = crate::plugins::builtin_effects();
         app.state.plugdb.rebuild(&app.plugins);
         app.state.z = vec![Win::Mixer];
         let lim = app.plugins.effects.iter().position(|e| e.desc.name == "Lemon Limiter").unwrap();
         run(&mut app, MCmd::AddEffect(0, lim));
-        app.state.control.settle(app.state.project.get_mut());
+        app.state.session.control.settle(app.state.session.project.get_mut());
         app.mixer_tick();
         app.follow_ids(false, true);
         app.state.browser_tab = 2;
@@ -18617,12 +18614,12 @@ mod tests {
             app.shift = false;
         };
         drop(&mut app, &mut c, 0, true);
-        assert_eq!(app.state.history.newest_done(), Some(crate::container::WRAP));
-        let list = crate::container::members(&app.state, t, 0).expect("a container");
+        assert_eq!(app.state.session.history.newest_done(), Some(crate::container::WRAP));
+        let list = crate::container::members(&app.state.session, t, 0).expect("a container");
         assert_eq!(list.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["Lemon Limiter"]);
         drop(&mut app, &mut c, 3, false);
-        assert_eq!(app.state.history.newest_done(), Some("Add effect"));
-        assert_eq!(crate::container::members(&app.state, t, 3), Some(vec![]));
+        assert_eq!(app.state.session.history.newest_done(), Some("Add effect"));
+        assert_eq!(crate::container::members(&app.state.session, t, 3), Some(vec![]));
     }
 
     /// The wheel over a mixer effect slot moves the effect a slot a notch, up for wheel up, trading places with its
@@ -18633,14 +18630,14 @@ mod tests {
         use crate::mixer::{run, slot_name, MCmd, MHit};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.plugins.effects = vec![crate::plugin_db::fake("FX A", os_host::Kind::Effect), crate::plugin_db::fake("FX B", os_host::Kind::Effect)];
         app.state.z = vec![Win::Mixer];
         run(&mut app, MCmd::AddEffect(0, 0));
         run(&mut app, MCmd::AddEffect(3, 1));
         frame(&mut app, &mut c, None);
         let t = app.state.selected_mixer;
-        let slots = |app: &App| (0..10).map(|k| slot_name(&app.state, t, k).unwrap_or_default()).collect::<Vec<_>>();
+        let slots = |app: &App| (0..10).map(|k| slot_name(&app.state.session, t, k).unwrap_or_default()).collect::<Vec<_>>();
         let at = |app: &App, k: u8| hit_rect(app, &Action::Mix(MHit::SlotName(k)));
         let r = at(&app, 0);
         app.mouse_move(r.cx(), r.cy());
@@ -18661,8 +18658,8 @@ mod tests {
     #[test]
     fn piano_arrows_tell_left_from_right_in_a_narrow_grid() {
         let mut app = App::new(None);
-        let ch = app.state.project.channels[app.state.selected_channel].index;
-        let ppq = u32::from(app.state.project.ppq.max(4));
+        let ch = app.state.session.project.channels[app.state.selected_channel].index;
+        let ppq = u32::from(app.state.session.project.ppq.max(4));
         crate::piano::center_keys(&mut app.state, 900.0);
         app.scroll_set(Scroll::PianoX, 2000.0);
         for (w, h) in [(300.0, 900.0), (1600.0, 700.0)] {
@@ -18685,14 +18682,14 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.z = vec![Win::PianoRoll];
-        let ch = app.state.project.channels[app.state.selected_channel].index;
+        let ch = app.state.session.project.channels[app.state.selected_channel].index;
         let grid = views::piano::grid_rect(&app.state);
         crate::piano::center_keys(&mut app.state, grid.h);
         let g = crate::piano::Geom::new(&app.state, grid);
         let at = |x: f32| g.tick_at(x) as u32;
         let (a, b, d) = (at(grid.x + 100.0), at(grid.x + 400.0), at(grid.x + 250.0) - at(grid.x + 100.0));
         let pattern = app.state.pattern();
-        let pat = app.state.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern).unwrap();
+        let pat = app.state.session.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern).unwrap();
         // Two copies of one note on C5; on D5 a note, and one starting halfway along it.
         pat.notes = vec![
             Note { key: 60, length: d, ..Note::step(ch, a) },
@@ -18723,22 +18720,22 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.z = vec![Win::PianoRoll];
-        let ch = app.state.project.channels[app.state.selected_channel].index;
-        let ppq = u32::from(app.state.project.ppq.max(4));
+        let ch = app.state.session.project.channels[app.state.selected_channel].index;
+        let ppq = u32::from(app.state.session.project.ppq.max(4));
         // C5 centred, then notes far above and below the rows shown around it.
         let pattern = app.state.pattern();
-        app.state.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern).unwrap().notes.clear();
+        app.state.session.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern).unwrap().notes.clear();
         let h = views::piano::grid_rect(&app.state).h;
         crate::piano::center_keys(&mut app.state, h);
         // Both under the grid's middle, so one is straight above and the other straight below.
         let mid = crate::piano::Geom::new(&app.state, views::piano::grid_rect(&app.state)).tick_at(views::piano::grid_rect(&app.state).cx()) as u32;
-        let pat = app.state.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern).unwrap();
+        let pat = app.state.session.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern).unwrap();
         pat.notes = vec![Note { key: 125, length: ppq, ..Note::step(ch, mid) }, Note { key: 2, length: ppq, ..Note::step(ch, mid) }];
         frame(&mut app, &mut c, None);
         let g = crate::piano::Geom::new(&app.state, views::piano::grid_rect(&app.state));
-        let (i, p) = crate::piano::off_view_note(&g, &app.state.project.patterns.iter().find(|p| p.number == app.state.pattern()).unwrap().notes, Some(ch)).expect("none in view");
+        let (i, p) = crate::piano::off_view_note(&g, &app.state.session.project.patterns.iter().find(|p| p.number == app.state.pattern()).unwrap().notes, Some(ch)).expect("none in view");
         // One arrow each way, the nearest note's the larger.
-        let notes_now = app.state.project.patterns.iter().find(|p| p.number == app.state.pattern()).unwrap().notes.clone();
+        let notes_now = app.state.session.project.patterns.iter().find(|p| p.number == app.state.pattern()).unwrap().notes.clone();
         let both = crate::piano::off_view_notes(&g, &notes_now, Some(ch));
         assert_eq!(both.len(), 2, "one above, one below");
         let other = hit_rect(&app, &Action::PianoSeek(both[1].0));
@@ -18756,7 +18753,7 @@ mod tests {
         frame(&mut app, &mut c, None);
         assert!(app.hits.iter().all(|h| !matches!(h.action, Action::PianoSeek(_))), "a note is in view: no arrow");
         let g = crate::piano::Geom::new(&app.state, grid);
-        let n = app.state.project.patterns.iter().find(|p| p.number == app.state.pattern()).unwrap().notes[i];
+        let n = app.state.session.project.patterns.iter().find(|p| p.number == app.state.pattern()).unwrap().notes[i];
         let nr = g.note_rect(&n).unwrap();
         // Centred as far as the roll scrolls (the lowest and highest keys stop at its ends).
         assert!(nr.intersect(&grid).h >= nr.h, "the note is in view: {nr:?} in {grid:?}");
@@ -18914,8 +18911,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(dir.join("Snare 01.wav")).unwrap(), 44100, &[0.0; 8]).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().patterns.push(os_model::Pattern { number: 2, name: Some("Verse".into()), ..Default::default() });
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().patterns.push(os_model::Pattern { number: 2, name: Some("Verse".into()), ..Default::default() });
         app.state.z = vec![Win::Playlist];
         app.state.browser_folders.push(dir.clone());
         app.state.browser_open.insert(disk_key(&dir));
@@ -18934,10 +18931,10 @@ mod tests {
         assert_eq!(labels[..3], ["Preview", "Send to selected channel", "Add to instrument rack"]);
         assert!(labels.iter().any(|l| l.starts_with("Show in ")));
         assert_eq!(labels[labels.len() - 2..], ["Collapse structure", "Reread structure"]);
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         pick(&mut app, &mut c, "Add to instrument rack");
-        assert_eq!(app.state.project.channels.len(), n + 1);
-        assert_eq!(app.state.project.channels[app.state.selected_channel].name.as_deref(), Some("Snare 01"));
+        assert_eq!(app.state.session.project.channels.len(), n + 1);
+        assert_eq!(app.state.session.project.channels[app.state.selected_channel].name.as_deref(), Some("Snare 01"));
         // The dropped root: Close / Open, then Remove from browser.
         let labels = right(&mut app, &mut c, |r| r.key == disk_key(&dir));
         assert_eq!(labels[0], "Close");
@@ -18954,11 +18951,11 @@ mod tests {
         pick(&mut app, &mut c, "Select pattern");
         assert_eq!(app.state.pattern(), 2);
         app.state.set_pattern(1);
-        let n = app.state.project.patterns.len();
+        let n = app.state.session.project.patterns.len();
         right(&mut app, &mut c, |r| r.item == Item::Pattern(2));
         pick(&mut app, &mut c, "Clone");
-        assert_eq!(app.state.project.patterns.len(), n + 1);
-        let copy = app.state.project.pattern(3).and_then(|p| p.name.clone()).unwrap_or_default();
+        assert_eq!(app.state.session.project.patterns.len(), n + 1);
+        let copy = app.state.session.project.pattern(3).and_then(|p| p.name.clone()).unwrap_or_default();
         assert!(app.state.pattern() == 3 && copy.starts_with("Verse"), "pattern 2 cloned, not the current one: {copy}");
         // A channel under Generators: selected from its menu.
         app.state.browser_open.insert(crate::views::browser::section_key("Generators").unwrap());
@@ -19053,8 +19050,8 @@ mod tests {
         use winit::keyboard::{Key, NamedKey, SmolStr};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().patterns.push(os_model::Pattern { number: 2, name: Some("Kick + Clap".into()), ..Default::default() });
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().patterns.push(os_model::Pattern { number: 2, name: Some("Kick + Clap".into()), ..Default::default() });
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         // The ▸ opens the menu; its items follow the spec.
@@ -19116,7 +19113,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         frame(&mut app, &mut c, None);
-        let order = |app: &App| (0..app.state.project.channels.len()).map(|r| crate::rack::channel_name(&app.state, r)).collect::<Vec<_>>();
+        let order = |app: &App| (0..app.state.session.project.channels.len()).map(|r| crate::rack::channel_name(&app.state.session, r)).collect::<Vec<_>>();
         let b = order(&app);
         assert!(b.len() >= 5);
         let rows = |ix: [usize; 5]| ix.map(|i| b[i].clone());
@@ -19131,7 +19128,7 @@ mod tests {
         assert_eq!(order(&app)[..5], rows([0, 2, 1, 3, 4]), "the same channel, two rows up");
         assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([1]));
         // Each move is a "Move channel" step, as the menu's: undo puts them back.
-        assert_eq!(app.state.history.newest_done(), Some("Move channel"));
+        assert_eq!(app.state.session.history.newest_done(), Some("Move channel"));
         while crate::history::undo(&mut app.state).is_some() {}
         assert_eq!(order(&app), b, "undone back to the start");
         frame(&mut app, &mut c, None);
@@ -19180,7 +19177,7 @@ mod tests {
         // Drag the mixer box up 20 px: +5 inserts, with damage repaint matching a full frame.
         let _ = app.take_damage();
         let mb = hit_rect(&app, &Action::RackMixer(0));
-        let t0 = app.state.project.channels[0].mixer_track;
+        let t0 = app.state.session.project.channels[0].mixer_track;
         let step = |app: &mut App, c: &mut Canvas, f: &dyn Fn(&mut App)| {
             f(app);
             let d = app.take_damage();
@@ -19189,7 +19186,7 @@ mod tests {
         step(&mut app, &mut a, &|ap| { ap.mouse_move(mb.cx(), mb.cy()); });
         step(&mut app, &mut a, &|ap| ap.mouse_down());
         step(&mut app, &mut a, &|ap| { ap.mouse_move(mb.cx(), mb.cy() - 20.0); });
-        assert_eq!(app.state.project.channels[0].mixer_track, t0 + 2, "10 px per insert (§12)");
+        assert_eq!(app.state.session.project.channels[0].mixer_track, t0 + 2, "10 px per insert (§12)");
         step(&mut app, &mut a, &|ap| ap.mouse_up());
 
         // Resize from the corner: wider shows more steps, taller more room.
@@ -19205,10 +19202,10 @@ mod tests {
         assert_same(&a, &b, "after mixer drag and resize");
 
         // A dimmed step (past the one-bar pattern) extends the pattern to two bars.
-        assert_eq!(crate::rack::pattern_steps(&app.state), 16);
+        assert_eq!(crate::rack::pattern_steps(&app.state.session), 16);
         let hr = hit_rect(&app, &Action::Step(0, 20));
         click(&mut app, &mut a, hr);
-        assert_eq!(crate::rack::pattern_steps(&app.state), 32);
+        assert_eq!(crate::rack::pattern_steps(&app.state.session), 32);
 
         // Sizes snap to whole steps / rows (the reference's widths plus the wider name button), down to four beats of
         // the project's signature but never under 16 steps (the title bar's buttons would collide), and one row.
@@ -19219,12 +19216,12 @@ mod tests {
         app.state.rack_size = (499.0 + d, 126.0);
         assert_eq!(views::rack::visible_steps(&app.state), 16);
         app.state.rack_size = keep;
-        let bar = app.state.project.bar;
-        app.state.project.get_mut().bar = Some((2, 8));
+        let bar = app.state.session.project.bar;
+        app.state.session.project.get_mut().bar = Some((2, 8));
         assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (499.0 + d + 16.0 * views::rack::STEP_W, 126.0));
-        app.state.project.get_mut().bar = Some((6, 2));
+        app.state.session.project.get_mut().bar = Some((6, 2));
         assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (499.0 + d, 126.0));
-        app.state.project.get_mut().bar = bar;
+        app.state.session.project.get_mut().bar = bar;
 
         // Piano-roll view toggle: rows become mini rolls; clicking one opens the Piano roll.
         assert!(!app.hits.iter().any(|h| matches!(h.action, Action::RackRoll(_))));
@@ -19243,7 +19240,7 @@ mod tests {
         // (spec: ui/plugin-menu.md §1, §6); Lemon Sampler adds a sampler channel at the bottom.
         app.plugins = crate::plugins::Plugins::builtins();
         app.state.plugdb.rebuild(&app.plugins);
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         for _ in 0..6 {
             let hr = hit_rect(&app, &Action::RackAdd);
             click(&mut app, &mut a, hr);
@@ -19252,8 +19249,8 @@ mod tests {
             app.close_plugin_palette();
             frame(&mut app, &mut a, None);
         }
-        assert_eq!(app.state.project.channels.len(), n + 6);
-        assert_eq!(app.state.project.channels.last().unwrap().mixer_track, 11, "after the highest insert in use (5)");
+        assert_eq!(app.state.session.project.channels.len(), n + 6);
+        assert_eq!(app.state.session.project.channels.last().unwrap().mixer_track, 11, "after the highest insert in use (5)");
         // Auto resize (minimum height, §7) grows the rack with its rows; with it off the rows overflow into a scroll bar.
         assert!(app.bar(Scroll::RackY).is_none_or(|b| b.max == 0.0), "auto resize fits the rows");
         app.state.rack.auto_resize = crate::rack::AutoResize::Off;
@@ -19380,7 +19377,7 @@ mod tests {
         app.mouse_down();
         app.mouse_move(f.cx(), f.cy() - 10.0);
         app.mouse_up();
-        let v = app.state.project.mixer.iter().find(|m| m.index == 1).and_then(|m| m.volume).unwrap();
+        let v = app.state.session.project.mixer.iter().find(|m| m.index == 1).and_then(|m| m.volume).unwrap();
         assert!(v > 0.8, "fader moved up: {v}");
     }
 
@@ -19420,7 +19417,7 @@ mod tests {
         assert!(app.transport.playing());
         app.key(&Key::Character("a".into()), true, false);
         app.key(&Key::Named(NamedKey::Delete), false, false);
-        assert!(piano::notes(&app.state).is_empty());
+        assert!(piano::notes(&app.state.session).is_empty());
         let mut loud = 0;
         for i in 0..120 {
             std::thread::sleep(std::time::Duration::from_millis(16));
@@ -19440,13 +19437,13 @@ mod tests {
         use crate::transport::State as T;
         let step = || std::thread::sleep(std::time::Duration::from_millis(250));
         let mut app = App::new(None);
-        let ch = app.state.project.channels[0].index;
-        app.state.project.get_mut().patterns = vec![Pattern {
+        let ch = app.state.session.project.channels[0].index;
+        app.state.session.project.get_mut().patterns = vec![Pattern {
             number: 1,
             notes: (0..8).map(|i| Note { length: 24, key: 60, ..Note::step(ch, i * 48) }).collect(),
             ..Pattern::default()
         }];
-        app.state.project.get_mut().arrangements = vec![os_model::Arrangement {
+        app.state.session.project.get_mut().arrangements = vec![os_model::Arrangement {
             number: 1,
             name: None,
             clips: vec![os_model::Clip::new(0, 384 * 4, 0, os_model::ClipSource::Pattern(1))],
@@ -19481,7 +19478,7 @@ mod tests {
         step();
         assert_eq!((app.transport.state(), app.transport.tick()), (T::Stopped, 0.0));
         // An empty playlist does not start SONG mode.
-        app.state.project.get_mut().arrangements.clear();
+        app.state.session.project.get_mut().arrangements.clear();
         app.act(Action::PatSong(true));
         app.act(Action::Play);
         step();
@@ -19535,13 +19532,13 @@ mod tests {
         app.state.z = vec![Win::PianoRoll];
         app.state.selected_channel = 0;
         let ch = piano::channel(&app.state).unwrap();
-        let p = piano::pattern_mut(&mut app.state);
+        let p = piano::pattern_mut(&mut app.state.session);
         p.notes.retain(|n| n.channel != ch);
         p.notes.extend([96, 192].map(|pos| os_model::Note { length: 48, key: 60, velocity: 64, ..os_model::Note::step(ch, pos) }));
         frame(&mut app, &mut c, None);
         let (g, panel) = (app.piano_geom().unwrap(), app.piano_panel.unwrap());
         let vel = |app: &App| -> Vec<u8> {
-            piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect()
+            piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect()
         };
         let (low, high) = (panel.bottom() - panel.h * 0.1, panel.y + panel.h * 0.1);
         let click = |app: &mut App, tick: f32, y: f32| {
@@ -19568,7 +19565,7 @@ mod tests {
         use crate::playlist as pl;
         use os_model::{Clip, ClipSource};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.set_pattern(1);
         app.state.set_song_mode(true);
         // Pattern 1 at bar 2 (window 0..384) and at bar 5 showing its second half only (window 192..384).
@@ -19576,18 +19573,18 @@ mod tests {
         cut.window = Some((192.0, 384.0));
         let mut whole = Clip::new(384, 384, 0, ClipSource::Pattern(1));
         whole.window = Some((0.0, 384.0));
-        pl::arr_mut(&mut app.state).clips = vec![whole, cut];
-        assert_eq!(piano::song_tick_of(&app.state, 96, 0), Some(480), "before both clips: the first that shows it");
-        assert_eq!(piano::song_tick_of(&app.state, 96, 1000), Some(480), "only the first clip shows tick 96");
-        assert_eq!(piano::song_tick_of(&app.state, 240, 1600), Some(1584), "the clip under the position");
-        assert_eq!(piano::song_tick_of(&app.state, 240, 800), Some(1584), "the next clip after the position");
-        assert_eq!(piano::pattern_tick_in_song(&app.state, 1584.0), Some(240.0));
-        assert_eq!(piano::pattern_tick_in_song(&app.state, 1000.0), None, "between the clips");
+        pl::arr_mut(&mut app.state.session).clips = vec![whole, cut];
+        assert_eq!(piano::song_tick_of(&app.state.session, 96, 0), Some(480), "before both clips: the first that shows it");
+        assert_eq!(piano::song_tick_of(&app.state.session, 96, 1000), Some(480), "only the first clip shows tick 96");
+        assert_eq!(piano::song_tick_of(&app.state.session, 240, 1600), Some(1584), "the clip under the position");
+        assert_eq!(piano::song_tick_of(&app.state.session, 240, 800), Some(1584), "the next clip after the position");
+        assert_eq!(piano::pattern_tick_in_song(&app.state.session, 1584.0), Some(240.0));
+        assert_eq!(piano::pattern_tick_in_song(&app.state.session, 1000.0), None, "between the clips");
         // Stopped: the press moves the song position.
         assert!(app.piano_song_seek(96, true));
         assert_eq!(app.state.playlist.pos, 480);
         // A tick no clip shows: nothing moves.
-        pl::arr_mut(&mut app.state).clips.truncate(1);
+        pl::arr_mut(&mut app.state.session).clips.truncate(1);
         assert!(!app.piano_song_seek(500, true));
         assert_eq!(app.state.playlist.pos, 480);
     }
@@ -19598,13 +19595,13 @@ mod tests {
         use crate::playlist as pl;
         use os_model::{Clip, ClipSource};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        pl::arr_mut(&mut app.state).clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1))];
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        pl::arr_mut(&mut app.state.session).clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1))];
         let i = 0;
-        let orig = pl::clips(&app.state)[i];
+        let orig = pl::clips(&app.state.session)[i];
         assert_eq!(orig.window, None, "a new pattern clip plays its whole pattern");
-        pl::resize_right(&mut app.state, i, &orig, 48);
-        let c = pl::clips(&app.state)[i];
+        pl::resize_right(&mut app.state.session, i, &orig, 48);
+        let c = pl::clips(&app.state.session)[i];
         assert_eq!((c.length, c.window), (48, Some((0.0, 48.0))));
     }
 
@@ -19655,7 +19652,7 @@ mod tests {
             frame(&mut app, &mut c, None);
         }
         let ch = piano::channel(&app.state);
-        assert!(piano::notes(&app.state).iter().all(|n| Some(n.channel) != ch), "{:?}", piano::notes(&app.state));
+        assert!(piano::notes(&app.state.session).iter().all(|n| Some(n.channel) != ch), "{:?}", piano::notes(&app.state.session));
         let mut loud = 0;
         for i in 0..150 {
             std::thread::sleep(std::time::Duration::from_millis(16));
@@ -19750,7 +19747,7 @@ mod tests {
         app.mouse_move(g.x_of(0.0) + 2.0, panel.bottom() - panel.h * 6.0 / 14.0);
         app.mouse_down();
         app.mouse_up();
-        let repeat = piano::notes(&app.state).iter().find(|n| n.channel == ch).map(|n| n.repeat);
+        let repeat = piano::notes(&app.state.session).iter().find(|n| n.channel == ch).map(|n| n.repeat);
         assert_eq!(repeat, Some(6));
 
         // Channel volume: a drag lays one point per snap step along the cursor path.
@@ -19765,7 +19762,7 @@ mod tests {
         }
         app.mouse_up();
         frame(&mut app, &mut c, None);
-        let pts: Vec<(u32, i32)> = piano::controls(&app.state).iter().filter(|p| p.channel() == ch).map(|p| (p.position, p.value)).collect();
+        let pts: Vec<(u32, i32)> = piano::controls(&app.state.session).iter().filter(|p| p.channel() == ch).map(|p| (p.position, p.value)).collect();
         let at: Vec<u32> = pts.iter().map(|p| p.0).collect();
         assert_eq!(at, vec![24, 48, 72, 96], "{pts:?}");
         assert!(pts.windows(2).all(|w| w[0].1 < w[1].1), "values rise with the cursor: {pts:?}");
@@ -19777,18 +19774,18 @@ mod tests {
         app.mouse_move(g.x_of(48.0) + 1.0, y0);
         app.mouse_down();
         app.mouse_up();
-        assert_eq!(piano::controls(&app.state).len(), 5);
+        assert_eq!(piano::controls(&app.state.session).len(), 5);
         app.state.piano.lane = piano::Lane::ChanVolume;
         frame(&mut app, &mut c, None);
         app.mouse_move(g.x_of(48.0) + 1.0, y0);
         app.mouse_down_right();
         app.mouse_move(g.x_of(72.0) + 1.0, y0);
         app.mouse_up();
-        let left: Vec<(u16, u32)> = piano::controls(&app.state).iter().map(|p| (p.param(), p.position)).collect();
+        let left: Vec<(u16, u32)> = piano::controls(&app.state.session).iter().map(|p| (p.param(), p.position)).collect();
         assert_eq!(left.len(), 3, "{left:?}");
         assert!(left.contains(&(os_model::ControlPoint::PAN, 48)), "pan point kept: {left:?}");
         assert!(piano::undo(&mut app.state));
-        assert_eq!(piano::controls(&app.state).len(), 5, "undo restores the erased points");
+        assert_eq!(piano::controls(&app.state.session).len(), 5, "undo restores the erased points");
     }
 
     /// The pitch lane's own scroll bar (spec: ui/piano-roll.md §7b): arrows move the window 455 cents, it stops at
@@ -19831,7 +19828,7 @@ mod tests {
         app.mouse_move(g.x_of(48.0) + 1.0, panel.y + panel.h / 2.0);
         app.mouse_down();
         app.mouse_up();
-        let v = piano::controls(&app.state).iter().find(|p| p.param() == os_model::ControlPoint::PITCH).map(|p| p.value);
+        let v = piano::controls(&app.state.session).iter().find(|p| p.param() == os_model::ControlPoint::PITCH).map(|p| p.value);
         assert!(v.is_some_and(|v| (v - 1365).abs() <= 2), "{v:?}");
     }
 
@@ -19846,7 +19843,7 @@ mod tests {
         app.state.piano.scroll_x = 0.0;
         frame(&mut app, &mut c, None);
         let ch = piano::channel(&app.state);
-        let mine = |app: &App| -> Vec<Note> { piano::notes(&app.state).iter().filter(|n| Some(n.channel) == ch).copied().collect() };
+        let mine = |app: &App| -> Vec<Note> { piano::notes(&app.state.session).iter().filter(|n| Some(n.channel) == ch).copied().collect() };
         let g = app.piano_geom().unwrap();
         let row = |k: i32| g.y_of(k) + 8.0;
         let click = |app: &mut App, c: &mut Canvas, x: f32, y: f32| {
@@ -19882,7 +19879,7 @@ mod tests {
             app.ctrl = false;
             let sel = app.state.piano.selection(app.state.pattern(), ch);
             assert_eq!(sel.len(), 1, "{tool:?}");
-            assert_eq!(piano::notes(&app.state)[sel[0]].position, 192);
+            assert_eq!(piano::notes(&app.state.session)[sel[0]].position, 192);
             assert_eq!(mine(&app), drawn);
         }
         // Without Ctrl, Draw still adds a note.
@@ -19901,7 +19898,7 @@ mod tests {
         app.state.selected_channel = 0;
         frame(&mut app, &mut c, None);
         let ch = piano::channel(&app.state);
-        let mine = |app: &App| -> Vec<Note> { piano::notes(&app.state).iter().filter(|n| Some(n.channel) == ch).copied().collect() };
+        let mine = |app: &App| -> Vec<Note> { piano::notes(&app.state.session).iter().filter(|n| Some(n.channel) == ch).copied().collect() };
         let g = app.piano_geom().unwrap();
         let row = |k: i32| g.y_of(k) + 8.0;
         let click = |app: &mut App, c: &mut Canvas, x: f32, y: f32| {
@@ -20011,10 +20008,10 @@ mod tests {
         swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, ry), (g.x_of(100.0), ry), true);
         assert_eq!(app.state.piano.range, Some((0, 96)));
         let sel = app.state.piano.selection(app.state.pattern(), ch);
-        let notes = piano::notes(&app.state);
+        let notes = piano::notes(&app.state.session);
         assert!(!sel.is_empty() && sel.iter().all(|&i| notes[i].position < 96));
         app.key(&Key::Character("a".into()), true, false);
-        assert_eq!(app.state.piano.range, Some((0, piano::pattern_end(&app.state))), "Ctrl+A: the whole pattern");
+        assert_eq!(app.state.piano.range, Some((0, piano::pattern_end(&app.state.session))), "Ctrl+A: the whole pattern");
     }
 
     /// Ctrl+B with a time selection (spec: ui/piano-roll.md §9, §10): the copies move by the range's length, keeping
@@ -20022,11 +20019,11 @@ mod tests {
     #[test]
     fn piano_duplicate_follows_the_time_selection() {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let ch = piano::channel(&app.state).expect("a channel");
-        piano::pattern_mut(&mut app.state).notes = vec![Note { length: 24, ..Note::step(ch, 48) }];
+        piano::pattern_mut(&mut app.state.session).notes = vec![Note { length: 24, ..Note::step(ch, 48) }];
         let starts = |app: &App| {
-            let mut v: Vec<u32> = piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.position).collect();
+            let mut v: Vec<u32> = piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| n.position).collect();
             v.sort_unstable();
             v
         };
@@ -20069,11 +20066,11 @@ mod tests {
         fn setup() -> Option<(App, Canvas)> {
             let mut c = Canvas::new(1920, 1080, 1.0).ok()?;
             let mut app = App::new(None);
-            app.state.project = crate::locked::Locked::new(test_project());
+            app.state.session.project = crate::locked::Locked::new(test_project());
             app.state.z = vec![Win::PianoRoll];
             app.state.selected_channel = 0;
             app.state.piano.snap = crate::snap::EditorSnap::Grid(crate::playlist::Snap::Line);
-            piano::pattern_mut(&mut app.state).notes = PLAIN.iter().map(|&(p, l, k)| Note { length: l, key: k, ..Note::step(0, p) }).collect();
+            piano::pattern_mut(&mut app.state.session).notes = PLAIN.iter().map(|&(p, l, k)| Note { length: l, key: k, ..Note::step(0, p) }).collect();
             if app.typing_on() {
                 app.toggle_typing();
             }
@@ -20140,18 +20137,18 @@ mod tests {
 
         /// Channel 0's notes as (pos, len, key), sorted.
         fn spans(app: &App) -> Vec<(u32, u32, u16)> {
-            let mut v: Vec<(u32, u32, u16)> = piano::notes(&app.state).iter().filter(|n| n.channel == 0).map(|n| (n.position, n.length, n.key)).collect();
+            let mut v: Vec<(u32, u32, u16)> = piano::notes(&app.state.session).iter().filter(|n| n.channel == 0).map(|n| (n.position, n.length, n.key)).collect();
             v.sort_unstable();
             v
         }
 
         fn select(app: &mut App, pos: u32, key: u16) {
-            let i = piano::notes(&app.state).iter().position(|n| n.position == pos && n.key == key).expect("the note");
+            let i = piano::notes(&app.state.session).iter().position(|n| n.position == pos && n.key == key).expect("the note");
             app.state.piano.select(app.state.pattern(), 0, vec![i]);
         }
 
         fn selected(app: &App) -> Vec<(u32, u16)> {
-            let all = piano::notes(&app.state);
+            let all = piano::notes(&app.state.session);
             let mut v: Vec<(u32, u16)> = app.state.piano.selection(app.state.pattern(), Some(0)).iter().map(|&i| (all[i].position, all[i].key)).collect();
             v.sort_unstable();
             v
@@ -20323,10 +20320,10 @@ mod tests {
             assert_eq!(spans(&app), moved(0, 0));
 
             letter(&mut app, 'm', ALT, 1);
-            assert!(piano::notes(&app.state).iter().all(|n| n.muted()), "nothing selected: all");
+            assert!(piano::notes(&app.state.session).iter().all(|n| n.muted()), "nothing selected: all");
             select(&mut app, 800, 60);
             letter(&mut app, 'm', ALT | SHIFT, 1);
-            assert_eq!(piano::notes(&app.state).iter().filter(|n| n.muted()).count(), 9);
+            assert_eq!(piano::notes(&app.state.session).iter().filter(|n| n.muted()).count(), 9);
 
             letter(&mut app, 'i', SHIFT, 1);
             assert_eq!(selected(&app).len(), 9);
@@ -20361,7 +20358,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey, SmolStr};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::ChannelRack];
         frame(&mut app, &mut c, None);
         let typ = |app: &mut App, text: &str| {
@@ -20469,7 +20466,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey, SmolStr};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::Mixer];
         frame(&mut app, &mut c, None);
         let typ = |app: &mut App, text: &str| {
@@ -20512,7 +20509,7 @@ mod tests {
         assert_eq!(e.text, "0.0dB");
         assert_eq!(crate::typein::caption(&app.state, Target::Fader(1)), "Value for Bus 1 - Volume");
         typ(&mut app, "-6");
-        let vol = |app: &App| crate::mixer::track(&app.state, 1).unwrap().volume.unwrap();
+        let vol = |app: &App| crate::mixer::track(&app.state.session, 1).unwrap().volume.unwrap();
         assert!(crate::mixer::level_text("Volume", vol(&app)).contains("-6.0dB"));
         frame(&mut app, &mut c, None);
         open(&mut app, &mut c, Action::Fader(1), true);
@@ -20534,11 +20531,11 @@ mod tests {
         use crate::playlist::Mark;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::PianoRoll];
         app.state.selected_channel = 0;
         // Notes on Kick, Clap and Hat (rows 0, 1, 2); Snare and Pluck have none.
-        let p = piano::pattern_mut(&mut app.state);
+        let p = piano::pattern_mut(&mut app.state.session);
         for ch in 0..3u16 {
             p.notes.push(Note::step(ch, u32::from(ch) * 24));
         }
@@ -20569,11 +20566,11 @@ mod tests {
         assert!(app.state.playlist.popup.is_none());
 
         // A filter group gets its own section, before Unsorted.
-        crate::rack::set_groups(&mut app.state, &[crate::rack::Group { name: "Drums".into(), members: [0, 3].into_iter().collect() }], None);
+        crate::rack::set_groups(&mut app.state.session, &[crate::rack::Group { name: "Drums".into(), members: [0, 3].into_iter().collect() }], None);
         let menu = crate::piano_tools::target_menu(&app.state, 0.0, 0.0);
         let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(labels[4..], ["Drums", "Kick", "Snare", "Unsorted", "Clap", "Hat", "Pluck", "", "Auto locate"]);
-        crate::rack::set_groups(&mut app.state, &[], None);
+        crate::rack::set_groups(&mut app.state.session, &[], None);
 
         // Wheel (§3): from Snare (no notes) down gives Kick (wrapping), up from Snare gives Hat.
         frame(&mut app, &mut c, None);
@@ -20593,7 +20590,7 @@ mod tests {
         app.state.selected_channel = 3;
         assert_eq!(wheel(&mut app, &mut c, 1.0), 2, "up from a channel without notes");
         // With one channel holding notes, every notch stays on it.
-        piano::pattern_mut(&mut app.state).notes.retain(|n| n.channel == 1);
+        piano::pattern_mut(&mut app.state.session).notes.retain(|n| n.channel == 1);
         assert_eq!(wheel(&mut app, &mut c, -1.0), 1);
         assert_eq!(wheel(&mut app, &mut c, -1.0), 1);
         assert_eq!(wheel(&mut app, &mut c, 1.0), 1);
@@ -20611,7 +20608,7 @@ mod tests {
     fn browser_title_icons() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.browser_tab = 2;
         app.state.browser_open.insert("2:Plugin library/Effects".into());
         frame(&mut app, &mut c, None);
@@ -20636,7 +20633,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::PianoRoll];
         app.state.selected_channel = 0;
         frame(&mut app, &mut c, None);
@@ -20646,10 +20643,10 @@ mod tests {
         let row = |k: i32| g.y_of(k) + 8.0;
         let x_of = |app: &App, t: f32| app.piano_geom().unwrap().x_of(t);
         let mine = |app: &App| -> Vec<(u32, u32, u16)> {
-            piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length, n.key)).collect()
+            piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length, n.key)).collect()
         };
         let put = |app: &mut App, notes: &[(u32, u32, u16)]| {
-            let p = piano::pattern_mut(&mut app.state);
+            let p = piano::pattern_mut(&mut app.state.session);
             p.notes.retain(|n| n.channel != ch);
             for &(pos, length, key) in notes {
                 p.notes.push(Note { length, key, ..Note::step(ch, pos) });
@@ -20680,7 +20677,7 @@ mod tests {
             frame(app, c, None);
             let x = x_of(app, t);
             click(app, c, x, row(60));
-            let p = piano::pattern_mut(&mut app.state);
+            let p = piano::pattern_mut(&mut app.state.session);
             let i = p.notes.iter().position(|n| n.channel == ch && n.key == 60).expect("a note was drawn");
             let at = p.notes.remove(i).position;
             frame(app, c, None);
@@ -20747,11 +20744,11 @@ mod tests {
             assert_eq!(place(&mut app, &mut c, t), want, "Events at {t}");
         }
         pick(&mut app, EditorSnap::Markers);
-        piano::pattern_mut(&mut app.state).markers = vec![os_model::TimeMarker::new(192, "M")];
+        piano::pattern_mut(&mut app.state.session).markers = vec![os_model::TimeMarker::new(192, "M")];
         for (t, want) in [(187.0, 192), (195.0, 192), (198.0, 198), (244.0, 244)] {
             assert_eq!(place(&mut app, &mut c, t), want, "Markers at {t}");
         }
-        piano::pattern_mut(&mut app.state).markers.clear();
+        piano::pattern_mut(&mut app.state.session).markers.clear();
 
         // Moving snaps the distance, so an off-grid note keeps its offset; a resize snaps the change of length,
         // down to one unit (one tick without a unit); Alt moves freely (§5, §8).
@@ -20836,17 +20833,17 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::PianoRoll];
         app.state.selected_channel = 0;
         let ch = piano::channel(&app.state).unwrap();
-        piano::pattern_mut(&mut app.state).notes.retain(|n| n.channel != ch);
+        piano::pattern_mut(&mut app.state.session).notes.retain(|n| n.channel != ch);
         frame(&mut app, &mut c, None);
         let hint = |app: &App, a: Action| app.hits.iter().rev().find(|h| h.action == a).map(|h| h.hint.to_string()).unwrap();
         let now = |app: &App| app.state.global_snap.now;
-        let mine = |app: &App| -> Vec<(u32, u32)> { piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length)).collect() };
+        let mine = |app: &App| -> Vec<(u32, u32)> { piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length)).collect() };
         let put = |app: &mut App, pos: u32, length: u32| {
-            let p = piano::pattern_mut(&mut app.state);
+            let p = piano::pattern_mut(&mut app.state.session);
             p.notes.retain(|n| n.channel != ch);
             p.notes.push(Note { length, key: 60, ..Note::step(ch, pos) });
             app.state.piano.clear_selection();
@@ -20857,7 +20854,7 @@ mod tests {
             let g = app.piano_geom().unwrap();
             click(app, c, Rect::new(g.x_of(t), g.y_of(60) + 8.0, 0.0, 0.0));
             frame(app, c, None);
-            let p = piano::pattern_mut(&mut app.state);
+            let p = piano::pattern_mut(&mut app.state.session);
             let i = p.notes.iter().position(|n| n.channel == ch && n.key == 60).expect("a note was drawn");
             p.notes.remove(i).position
         };
@@ -20929,14 +20926,14 @@ mod tests {
         // the global Beat on the nearest beat (§3, ui/playlist.md §4).
         app.state.z = vec![Win::Playlist];
         app.state.playlist.row_h = pl::ROW_H;
-        pl::arr_mut(&mut app.state).clips.clear();
+        pl::arr_mut(&mut app.state.session).clips.clear();
         frame(&mut app, &mut c, None);
         let g = pl::PGeom::new(&app.state, app.pl_grid().expect("playlist grid"));
-        let ppq = u32::from(app.state.project.ppq);
+        let ppq = u32::from(app.state.session.project.ppq);
         assert_eq!(app.state.playlist.snap, EditorSnap::Main);
         let draw = |app: &mut App, c: &mut Canvas, bars: f32, track: u16| -> u32 {
             click(app, c, Rect::new(g.x_of(bars * (4 * ppq) as f32), g.y_of(track) + 30.0, 0.0, 0.0));
-            pl::clips(&app.state).iter().find(|c| c.track == track).expect("a clip was placed").position
+            pl::clips(&app.state.session).iter().find(|c| c.track == track).expect("a clip was placed").position
         };
         assert_eq!(draw(&mut app, &mut c, 2.78, 0), 3 * 4 * ppq);
         assert_eq!(draw(&mut app, &mut c, 4.67, 1), 5 * 4 * ppq);
@@ -20951,8 +20948,8 @@ mod tests {
         // Markers: a click within 7 px of a time marker lands on it (in the reference 6.4 px did, 7.6 px did not; the
         // exact limit between them is unknown), farther off on the tick under the pointer; Events: on a clip's start
         // or end the same way. The song position on the ruler follows Markers too.
-        pl::arr_mut(&mut app.state).clips.clear();
-        pl::arr_mut(&mut app.state).markers = vec![os_model::TimeMarker::new(1000, "M")];
+        pl::arr_mut(&mut app.state.session).clips.clear();
+        pl::arr_mut(&mut app.state.session).markers = vec![os_model::TimeMarker::new(1000, "M")];
         app.state.playlist.snap = EditorSnap::Markers;
         let at = |app: &App, px: f32| pl::snap_place(&app.state, &g, g.tick_at(g.x_of(1000.0) + px), false);
         assert_eq!((at(&app, 4.0), at(&app, -5.0)), (1000, 1000));
@@ -20961,11 +20958,11 @@ mod tests {
         assert_eq!(pl::grid_snap(&app.state), Snap::None);
         app.state.playlist.snap = EditorSnap::Events;
         assert_eq!(at(&app, 3.0), g.tick_at(g.x_of(1000.0) + 3.0) as u32, "markers are not events");
-        pl::arr_mut(&mut app.state).clips.push(os_model::Clip::new(500, 500, 9, os_model::ClipSource::Pattern(1)));
+        pl::arr_mut(&mut app.state.session).clips.push(os_model::Clip::new(500, 500, 9, os_model::ClipSource::Pattern(1)));
         assert_eq!((at(&app, 3.0), at(&app, -4.0)), (1000, 1000), "the clip's end");
         app.state.playlist.snap = EditorSnap::Main;
-        pl::arr_mut(&mut app.state).clips.clear();
-        pl::arr_mut(&mut app.state).markers.clear();
+        pl::arr_mut(&mut app.state.session).clips.clear();
+        pl::arr_mut(&mut app.state.session).markers.clear();
         // Backspace with the playlist focused toggles too.
         backspace(&mut app);
         assert_eq!(now(&app), Snap::None);
@@ -20988,16 +20985,16 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::PianoRoll];
         app.state.selected_channel = 0;
         frame(&mut app, &mut c, None);
         let ch = piano::channel(&app.state).unwrap();
         let mine = |app: &App| -> Vec<(u32, u32, u16)> {
-            piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length, n.key)).collect()
+            piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length, n.key)).collect()
         };
         let put = |app: &mut App, notes: &[(u32, u32, u16)]| {
-            let p = piano::pattern_mut(&mut app.state);
+            let p = piano::pattern_mut(&mut app.state.session);
             p.notes.retain(|n| n.channel != ch);
             for &(pos, length, key) in notes {
                 p.notes.push(Note { length, key, ..Note::step(ch, pos) });
@@ -21037,7 +21034,7 @@ mod tests {
         assert_eq!(mine(&app), vec![(0, 48, 60), (48, 336, 62)]);
         // A selection limits the edit and follows the results.
         put(&mut app, &[(0, 72, 60), (96, 72, 62)]);
-        let first = piano::notes(&app.state).iter().position(|n| n.channel == ch && n.key == 60).unwrap();
+        let first = piano::notes(&app.state.session).iter().position(|n| n.channel == ch && n.key == 60).unwrap();
         app.state.piano.select(app.state.pattern(), ch, vec![first]);
         key(&mut app, "u", true, false, false);
         assert_eq!(mine(&app), vec![(0, 24, 60), (24, 24, 60), (48, 24, 60), (96, 72, 62)]);
@@ -21055,7 +21052,7 @@ mod tests {
             use crate::piano_dlg::{Act as DAct, Knob as DKnob, LCmd, Tool};
             put(&mut app, &[(0, 96, 60), (96, 48, 62)]);
             let before = mine(&app);
-            let (grid, end) = (crate::piano_snap::unit(&app.state).unwrap_or(1), piano::pattern_end(&app.state));
+            let (grid, end) = (crate::piano_snap::unit(&app.state).unwrap_or(1), piano::pattern_end(&app.state.session));
             key(&mut app, "r", false, true, false);
             assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Randomize);
             let first = mine(&app);
@@ -21085,7 +21082,7 @@ mod tests {
             assert_eq!(app.hint.as_ref(), "Velocity: +100%");
             app.act(Action::PianoDlg(DAct::RandPattern));
             assert_eq!(mine(&app), before, "Pattern off: the notes stay");
-            assert!(piano::notes(&app.state).iter().any(|n| n.channel == ch && n.velocity != 100), "VEL moved them");
+            assert!(piano::notes(&app.state.session).iter().any(|n| n.channel == ch && n.velocity != 100), "VEL moved them");
             app.act(Action::PianoDlg(DAct::RandPattern));
             frame(&mut app, &mut c, None);
             app.act(Action::PianoDlg(DAct::Accept));
@@ -21205,7 +21202,7 @@ mod tests {
                 app.mouse_up();
             };
             put(&mut app, &[(0, 96, 60), (96, 48, 64)]);
-            let ppq = u32::from(app.state.project.ppq);
+            let ppq = u32::from(app.state.session.project.ppq);
             key(&mut app, "f", false, true, false);
             assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Flam);
             let d = app.state.piano_dlg.flam.offset(ppq, app.state.tempo()).unsigned_abs() as u32;
@@ -21238,7 +21235,7 @@ mod tests {
                 app.wheel(0.0, -1.0, false, false);
             }
             assert_eq!(app.hint.as_ref(), "Multiplier: 69%");
-            let vels = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect::<Vec<_>>();
+            let vels = |app: &App| piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect::<Vec<_>>();
             assert_eq!(vels(&app), vec![69, 69], "FL: 100 × 68.75 % = 69");
             click(&mut app, Action::PianoDlg(DAct::Accept));
             assert!(!app.state.shown(Win::PianoDlg));
@@ -21335,10 +21332,10 @@ mod tests {
                 app.mouse_down();
                 app.mouse_up();
             };
-            let st = u32::from(app.state.project.ppq) / 4;
+            let st = u32::from(app.state.session.project.ppq) / 4;
             let steps: Vec<(u32, u32, u16)> = (0..8).map(|i| (i * st, st, 60 + i as u16)).collect();
             put(&mut app, &steps);
-            let first4: Vec<usize> = piano::notes(&app.state)
+            let first4: Vec<usize> = piano::notes(&app.state.session)
                 .iter()
                 .enumerate()
                 .filter(|(_, n)| n.channel == ch && n.position < 4 * st)
@@ -21390,9 +21387,9 @@ mod tests {
                 app.mouse_down();
                 app.mouse_up();
             };
-            let vels = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect::<Vec<_>>();
-            let vol = |app: &App| piano::controls(&app.state).iter().filter(|c| c.channel() == ch && c.param() == ControlPoint::VOLUME).map(|c| (c.position, c.value)).collect::<Vec<_>>();
-            let st = u32::from(app.state.project.ppq) / 4;
+            let vels = |app: &App| piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect::<Vec<_>>();
+            let vol = |app: &App| piano::controls(&app.state.session).iter().filter(|c| c.channel() == ch && c.param() == ControlPoint::VOLUME).map(|c| (c.position, c.value)).collect::<Vec<_>>();
+            let st = u32::from(app.state.session.project.ppq) / 4;
             put(&mut app, &(0..16).map(|i| (i * st, st, 60)).collect::<Vec<_>>());
             app.state.piano.lane = piano::Lane::Velocity;
             let before = vels(&app);
@@ -21450,8 +21447,8 @@ mod tests {
                 app.mouse_down();
                 app.mouse_up();
             };
-            let mine = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length)).collect::<Vec<_>>();
-            assert_eq!(app.state.project.ppq, 96);
+            let mine = |app: &App| piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length)).collect::<Vec<_>>();
+            assert_eq!(app.state.session.project.ppq, 96);
             put(&mut app, &[(5, 20, 60), (30, 30, 62), (50, 10, 64), (70, 40, 65)]);
             let before = mine(&app);
             key(&mut app, "q", false, true, false);
@@ -21492,7 +21489,7 @@ mod tests {
         // opening and × puts the notes back.
         {
             use crate::piano_dlg::{Act as DAct, Knob as DKnob, Tool};
-            let mine = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length, n.unk14)).collect::<Vec<_>>();
+            let mine = |app: &App| piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length, n.unk14)).collect::<Vec<_>>();
             put(&mut app, &[(0, 96, 60), (96, 48, 62)]);
             let before = mine(&app);
             key(&mut app, "u", false, true, false);
@@ -21531,7 +21528,7 @@ mod tests {
         {
             use crate::piano_dlg::Act as DAct;
             let pat = app.state.pattern();
-            let notes_of = |app: &App, n: u16| app.state.project.patterns.iter().find(|p| p.number == n).map(|p| p.notes.clone()).unwrap_or_default();
+            let notes_of = |app: &App, n: u16| app.state.session.project.patterns.iter().find(|p| p.number == n).map(|p| p.notes.clone()).unwrap_or_default();
             put(&mut app, &[(0, 96, 60), (96, 48, 62)]);
             let before = notes_of(&app, pat);
             for close in [Action::CloseWin(Win::PianoDlg), Action::PianoDlg(DAct::Accept)] {
@@ -21571,7 +21568,7 @@ mod tests {
         // Alt+T adds a time marker at the play-start marker (stopped), snapped to a step.
         app.state.piano.marker = 200;
         key(&mut app, "t", false, true, false);
-        assert_eq!(piano::pattern_mut(&mut app.state).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
+        assert_eq!(piano::pattern_mut(&mut app.state.session).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
         // It is saved with the pattern and comes back on open.
         let path = std::env::temp_dir().join(format!("os_piano_marker_{}.flp", std::process::id()));
         app.save_to(path.clone());
@@ -21580,11 +21577,11 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         app.state.z = vec![Win::PianoRoll];
         app.state.selected_channel = 0;
-        assert_eq!(piano::pattern_mut(&mut app.state).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
+        assert_eq!(piano::pattern_mut(&mut app.state.session).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
         frame(&mut app, &mut c, None);
 
         // Ctrl+K cycles to the next channel, wrapping; with the typing keyboard off G / K step too.
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         key(&mut app, "k", true, false, false);
         assert_eq!(app.state.selected_channel, 1);
         if app.typing_on() {
@@ -21595,7 +21592,7 @@ mod tests {
         assert_eq!(app.state.selected_channel, n - 1);
         // H / J skip channels without notes in the pattern.
         key(&mut app, "j", false, false, false);
-        assert!(piano::notes(&app.state).iter().any(|nt| Some(nt.channel) == piano::channel(&app.state)));
+        assert!(piano::notes(&app.state.session).iter().any(|nt| Some(nt.channel) == piano::channel(&app.state)));
         app.state.selected_channel = 0;
         frame(&mut app, &mut c, None);
 
@@ -21674,7 +21671,7 @@ mod tests {
         // Add a note (click), drag it up and right, release; resize it; draw a velocity; erase it.
         step(&mut app, &mut a, |ap| { ap.mouse_move(500.0, 500.0); });
         step(&mut app, &mut a, |ap| ap.mouse_down());
-        let key0 = piano::notes(&app.state)[0].key;
+        let key0 = piano::notes(&app.state.session)[0].key;
         for (x, y) in [(530.0, 490.0), (600.0, 450.0), (650.0, 430.0)] {
             step(&mut app, &mut a, move |ap| { ap.mouse_move(x, y); });
         }
@@ -21695,14 +21692,14 @@ mod tests {
         step(&mut app, &mut a, |ap| ap.mouse_up());
         assert_eq!(app.state.piano.held, None);
         assert_eq!(app.mouse_note, None, "the note stops with the button");
-        let n = piano::notes(&app.state)[0];
+        let n = piano::notes(&app.state.session)[0];
         assert!(n.position > 0 && n.key == key0 + 4, "note moved right and 4 keys up: {n:?}");
         let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
         step(&mut app, &mut a, |ap| { ap.mouse_move(r.right() - 1.0, r.cy()); });
         step(&mut app, &mut a, |ap| ap.mouse_down());
         step(&mut app, &mut a, |ap| { ap.mouse_move(r.right() + 60.0, r.cy()); });
         step(&mut app, &mut a, |ap| ap.mouse_up());
-        assert!(piano::notes(&app.state)[0].length > n.length, "note resized");
+        assert!(piano::notes(&app.state.session)[0].length > n.length, "note resized");
         let panel = app.piano_panel.unwrap();
         step(&mut app, &mut a, |ap| { ap.mouse_move(r.x + 1.0, panel.y + 20.0); });
         step(&mut app, &mut a, |ap| ap.mouse_down());
@@ -21713,7 +21710,7 @@ mod tests {
         step(&mut app, &mut a, |ap| { ap.mouse_move(r.x + 4.0, r.cy()); });
         step(&mut app, &mut a, |ap| ap.mouse_down_right());
         step(&mut app, &mut a, |ap| ap.mouse_up());
-        assert!(piano::notes(&app.state).is_empty(), "right-click erased the note");
+        assert!(piano::notes(&app.state.session).is_empty(), "right-click erased the note");
         frame(&mut app, &mut b, None);
         assert_same(&a, &b, "after erase");
         // Hold the left button on the keyboard and slide down: each key entered is held (lit).
@@ -21739,13 +21736,13 @@ mod tests {
 
     fn ruler_app(c: &mut Canvas) -> (App, Rect, crate::playlist::PGeom, u32) {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, c, None);
         let g = crate::playlist::PGeom::new(&app.state, app.pl_grid().expect("playlist grid"));
         let ruler = hit_rect(&app, &Action::PlRuler);
-        let bar = 4 * u32::from(app.state.project.ppq);
+        let bar = 4 * u32::from(app.state.session.project.ppq);
         (app, ruler, g, bar)
     }
 
@@ -21759,9 +21756,9 @@ mod tests {
         app.mouse_down();
         app.mouse_up();
         frame(&mut app, &mut c, None);
-        let n = crate::playlist::clips(&app.state).len();
+        let n = crate::playlist::clips(&app.state.session).len();
         assert!(n > 0, "a clip was drawn");
-        let clip = crate::playlist::clips(&app.state)[0];
+        let clip = crate::playlist::clips(&app.state.session)[0];
         let body = g.body(&clip);
         let (x, y) = (body.x + body.w / 2.0, body.y + body.h / 2.0);
         app.mouse_move(x, y);
@@ -21769,12 +21766,12 @@ mod tests {
         app.mouse_down_right();
         app.mouse_up();
         app.alt = false;
-        assert_eq!(crate::playlist::clips(&app.state).len(), n, "Alt+right kept the clip");
+        assert_eq!(crate::playlist::clips(&app.state.session).len(), n, "Alt+right kept the clip");
         frame(&mut app, &mut c, None);
         app.mouse_move(x, y);
         app.mouse_down_right();
         app.mouse_up();
-        assert_eq!(crate::playlist::clips(&app.state).len(), n - 1, "the plain right button deletes it");
+        assert_eq!(crate::playlist::clips(&app.state.session).len(), n - 1, "the plain right button deletes it");
     }
 
     fn ruler_press(app: &mut App, c: &mut Canvas, x0: f32, x1: f32, y: f32, right: bool) {
@@ -21797,7 +21794,7 @@ mod tests {
         assert!(!app.state.song_mode(), "a time selection keeps PAT");
         // The project's initial values follow the move (spec: ui/settings-choices.md "Advanced: Initialize controls
         // automatically").
-        app.state.project.get_mut().init_controls = vec![os_model::InitControl { head: 0, target: os_model::target::TEMPO, value: 140_000 }];
+        app.state.session.project.get_mut().init_controls = vec![os_model::InitControl { head: 0, target: os_model::target::TEMPO, value: 140_000 }];
         app.state.set_tempo(90.0);
         ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
         assert!(app.state.song_mode(), "a click on the ruler switches to SONG");
@@ -21819,9 +21816,9 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-stretch-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-        let ci = pl::clips(&app.state).len() - 1;
-        let row = app.state.project.channels.len() - 1;
-        let before = pl::clips(&app.state)[ci];
+        let ci = pl::clips(&app.state.session).len() - 1;
+        let row = app.state.session.project.channels.len() - 1;
+        let before = pl::clips(&app.state.session)[ci];
         pl::run(&mut app, pl::Cmd::StretchMode);
         assert!(app.state.playlist.stretch);
         frame(&mut app, &mut c, None);
@@ -21832,9 +21829,9 @@ mod tests {
         app.mouse_down();
         app.mouse_move(r.right() - 1.0 + r.w, y);
         app.mouse_up();
-        let after = pl::clips(&app.state)[ci];
+        let after = pl::clips(&app.state.session)[ci];
         // The time becomes the whole sample's length (1 s at the project tempo) times two; the multiplier stays at 1.
-        let sound = app.state.project.channels[row].sound;
+        let sound = app.state.session.project.channels[row].sound;
         let want = app.state.tempo() / 60.0 * 2.0;
         let beats = sound.stretch_time().expect("a stretch time");
         assert!((beats - want).abs() < 0.02 * want, "time {beats} beats, want {want}");
@@ -21842,10 +21839,10 @@ mod tests {
         assert!((f64::from(after.length) / f64::from(before.length) - 2.0).abs() < 0.02, "twice as long");
         assert_eq!(after.window, before.window, "the same part of the sample");
         app.key(&winit::keyboard::Key::Character("z".into()), true, false);
-        assert_eq!(app.state.project.channels[row].sound.stretch, [0; 4], "undo restores the channel");
+        assert_eq!(app.state.session.project.channels[row].sound.stretch, [0; 4], "undo restores the channel");
         // Saved with a new project's audio clip channel.
         app.key(&winit::keyboard::Key::Character("y".into()), true, false);
-        app.state.project.get_mut().channels[row].sound.set_stretch_multiplier(2.0);
+        app.state.session.project.get_mut().channels[row].sound.set_stretch_multiplier(2.0);
         let path = std::env::temp_dir().join(format!("os-app-stretch-{}.flp", std::process::id()));
         app.save_to(path.clone());
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
@@ -21853,8 +21850,8 @@ mod tests {
         assert_eq!(ch.sound.stretch, [0, 0, 10000, 0]);
         // And changed in that existing file (its event 215 patched).
         let mut app2 = App::new(Some(path.clone()));
-        let row2 = app2.state.project.channels.iter().position(|c| c.kind == ChannelKind::AudioClip).unwrap();
-        app2.state.project.get_mut().channels[row2].sound.set_stretch_multiplier(0.5);
+        let row2 = app2.state.session.project.channels.iter().position(|c| c.kind == ChannelKind::AudioClip).unwrap();
+        app2.state.session.project.get_mut().channels[row2].sound.set_stretch_multiplier(0.5);
         app2.save_to(path.clone());
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         assert_eq!(back.channels[row2].sound.stretch, [0, 0, (-10000i32) as u32, 0]);
@@ -21880,7 +21877,7 @@ mod tests {
             .collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &sine).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-        let clip = *pl::clips(&app.state).last().unwrap();
+        let clip = *pl::clips(&app.state.session).last().unwrap();
         let (w, h) = (1920, 1080);
         let shot = |app: &mut App, c: &mut Canvas| {
             frame(app, c, None);
@@ -21925,28 +21922,28 @@ mod tests {
         use crate::playlist as pl;
         use os_model::{Clip, ClipSource};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().ppq = 96;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().ppq = 96;
         app.state.set_tempo(130.0);
         app.state.playlist.reset();
         let wav = std::env::temp_dir().join(format!("os-app-fit-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 282240]).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-        let row = app.state.project.channels.len() - 1;
-        let src = ClipSource::Channel(app.state.project.channels[row].index);
+        let row = app.state.session.project.channels.len() - 1;
+        let src = ClipSource::Channel(app.state.session.project.channels[row].index);
         for (track, w) in [(1, (0.0, 3200.0)), (2, (1600.0, 4800.0))] {
-            pl::arr_mut(&mut app.state).clips.push(Clip { window: Some(w), ..Clip::new(0, 1, track, src) });
+            pl::arr_mut(&mut app.state.session).clips.push(Clip { window: Some(w), ..Clip::new(0, 1, track, src) });
         }
         let mut check = |app: &mut App, stretch: [u32; 4], pitch: i32, tempo: f64, want: [u32; 3], what: &str| {
-            app.state.project.get_mut().channels[row].sound.stretch = stretch;
-            app.state.project.get_mut().channels[row].pitch_cents = pitch;
+            app.state.session.project.get_mut().channels[row].sound.stretch = stretch;
+            app.state.session.project.get_mut().channels[row].pitch_cents = pitch;
             app.state.set_tempo(tempo);
-            pl::fit_audio(&mut app.state);
-            let got: Vec<u32> = pl::clips(&app.state).iter().filter(|c| c.source == src).map(|c| c.length).collect();
+            pl::fit_audio(&mut app.state.session);
+            let got: Vec<u32> = pl::clips(&app.state.session).iter().filter(|c| c.source == src).map(|c| c.length).collect();
             assert_eq!(got, want, "{what}");
             // An untrimmed clip shows the whole sample.
-            if let Some(whole) = pl::clips(&app.state).iter().find(|c| c.source == src && c.window.is_none()).copied() {
-                assert!((pl::window(&app.state, &whole).1 - 6400.0).abs() < 6.0, "{what}: {:?}", pl::window(&app.state, &whole));
+            if let Some(whole) = pl::clips(&app.state.session).iter().find(|c| c.source == src && c.window.is_none()).copied() {
+                assert!((pl::window(&app.state.session, &whole).1 - 6400.0).abs() < 6.0, "{what}: {:?}", pl::window(&app.state.session, &whole));
             }
         };
         let t = |units: f32| units.to_bits();
@@ -21960,22 +21957,22 @@ mod tests {
         check(&mut app, [0; 4], 0, 522.0, [5345, 2673, 2673], "the tempo without a TIME");
         check(&mut app, [t(2662.0), 0, 0, (-1i32) as u32], 0, 522.0, [1331, 666, 665], "the tempo with a TIME");
         // A clip resized in the playlist keeps its new end (it gets a trim end), refitted alike.
-        let i = pl::clips(&app.state).iter().position(|c| c.source == src && c.window.is_none()).unwrap();
+        let i = pl::clips(&app.state.session).iter().position(|c| c.source == src && c.window.is_none()).unwrap();
         check(&mut app, [0; 4], 0, 130.0, [1331, 666, 665], "plain again");
-        let orig = pl::clips(&app.state)[i];
-        pl::resize_right(&mut app.state, i, &orig, 1000);
-        assert!(!pl::fit_audio(&mut app.state), "a resize already fits");
+        let orig = pl::clips(&app.state.session)[i];
+        pl::resize_right(&mut app.state.session, i, &orig, 1000);
+        assert!(!pl::fit_audio(&mut app.state.session), "a resize already fits");
         check(&mut app, [0, 0, 10000, 0], 0, 130.0, [2000, 1331, 1331], "x2 after the resize");
         // The tick fits them. A fit alone is not an unsaved change (a project opens with other lengths); an edit is.
-        for c in &mut pl::arr_mut(&mut app.state).clips {
+        for c in &mut pl::arr_mut(&mut app.state.session).clips {
             c.length = 100;
         }
         app.mark_saved();
         app.tick();
-        let got: Vec<u32> = pl::clips(&app.state).iter().filter(|c| c.source == src).map(|c| c.length).collect();
+        let got: Vec<u32> = pl::clips(&app.state.session).iter().filter(|c| c.source == src).map(|c| c.length).collect();
         assert_eq!(got, [2000, 1331, 1331], "fitted by the tick");
         assert!(!app.unsaved(), "a fit is not an edit");
-        app.state.project.get_mut().channels[row].sound.stretch = [0; 4];
+        app.state.session.project.get_mut().channels[row].sound.stretch = [0; 4];
         app.tick();
         assert!(app.unsaved(), "a stretch edit is");
         let _ = std::fs::remove_file(&wav);
@@ -21988,24 +21985,24 @@ mod tests {
     fn audio_clips_fit_the_bars_beat() {
         use crate::playlist as pl;
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().ppq = 96;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().ppq = 96;
         app.state.set_tempo(140.0);
         app.state.playlist.reset();
         let wav = std::env::temp_dir().join(format!("os-app-fit-bar-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 176400]).unwrap();
-        app.state.project.get_mut().bar = Some((3, 2));
+        app.state.session.project.get_mut().bar = Some((3, 2));
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-        let row = app.state.project.channels.len() - 1;
-        let len = |app: &App| pl::clips(&app.state).last().unwrap().length;
+        let row = app.state.session.project.channels.len() - 1;
+        let len = |app: &App| pl::clips(&app.state.session).last().unwrap().length;
         assert_eq!(len(&app), 448, "3/8");
         for (bar, want) in [(Some((4, 4)), 896), (Some((3, 8)), 1792), (Some((5, 3)), 672), (Some((3, 2)), 448)] {
-            app.state.project.get_mut().bar = bar;
-            pl::fit_audio(&mut app.state);
+            app.state.session.project.get_mut().bar = bar;
+            pl::fit_audio(&mut app.state.session);
             assert_eq!(len(&app), want, "{bar:?}");
         }
-        app.state.project.get_mut().channels[row].sound.stretch = [488f32.to_bits(), 0, 0, 0];
-        pl::fit_audio(&mut app.state);
+        app.state.session.project.get_mut().channels[row].sound.stretch = [488f32.to_bits(), 0, 0, 0];
+        pl::fit_audio(&mut app.state.session);
         assert_eq!(len(&app), 244, "TIME 0:10:04 in 3/8");
         let _ = std::fs::remove_file(&wav);
     }
@@ -22018,22 +22015,22 @@ mod tests {
         use os_model::{Clip, ClipSource};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let (mut app, _, _, bar) = ruler_app(&mut c);
-        let ppq = u32::from(app.state.project.ppq);
+        let ppq = u32::from(app.state.session.project.ppq);
         app.state.playlist.snap = crate::snap::EditorSnap::Grid(pl::Snap::Step);
         let step = ppq / 4;
-        let a = pl::arr_mut(&mut app.state);
+        let a = pl::arr_mut(&mut app.state.session);
         a.clips = vec![Clip::new(step + 5, bar, 0, ClipSource::Pattern(1)), Clip::new(2 * bar - 3, bar, 2, ClipSource::Pattern(1))];
         // Each channel plays a note so the tracks make sound.
-        let ch = app.state.project.channels[0].index;
-        app.state.project.get_mut().patterns[0].notes = vec![os_model::Note { length: ppq, ..os_model::Note::step(ch, 0) }];
+        let ch = app.state.session.project.channels[0].index;
+        app.state.session.project.get_mut().patterns[0].notes = vec![os_model::Note { length: ppq, ..os_model::Note::step(ch, 0) }];
         let m = pl::run(&mut app, pl::Cmd::QuantizeStarts).unwrap();
         assert!(m.contains("moved 2"), "{m}");
-        let starts: Vec<u32> = pl::clips(&app.state).iter().map(|c| c.position).collect();
+        let starts: Vec<u32> = pl::clips(&app.state.session).iter().map(|c| c.position).collect();
         assert_eq!(starts, vec![step, 2 * bar], "nearest steps");
         app.key(&winit::keyboard::Key::Character("z".into()), true, false);
-        assert_eq!(pl::clips(&app.state)[0].position, step + 5, "one undo step");
+        assert_eq!(pl::clips(&app.state.session)[0].position, step + 5, "one undo step");
         // Export: two files (tracks 1 and 3), the same length, each with sound only where its clip is.
-        app.state.path = Some(std::env::temp_dir().join(format!("os-export-{}.flp", std::process::id())));
+        app.state.session.path = Some(std::env::temp_dir().join(format!("os-export-{}.flp", std::process::id())));
         let m = pl::run(&mut app, pl::Cmd::ExportTracks).unwrap();
         let dir = std::env::temp_dir().join("Rendered").join(format!("os-export-{} tracks", std::process::id()));
         assert!(m.starts_with("Exported 2 tracks"), "{m}");
@@ -22056,7 +22053,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let (mut app, _, _, bar) = ruler_app(&mut c);
         pl::place(&mut app.state, 0, 0);
-        let first = app.state.project.arrangement().unwrap().number;
+        let first = app.state.session.project.arrangement().unwrap().number;
         // The title's arrangement name opens the menu.
         frame(&mut app, &mut c, None);
         let title = hit_rect(&app, &Action::PlArrangement);
@@ -22065,23 +22062,23 @@ mod tests {
         app.state.playlist.popup = None;
         // Add one, named through the box.
         pl::run(&mut app, pl::Cmd::ArrAdd);
-        assert_eq!(app.state.project.arrangements.len(), 2);
-        let added = app.state.project.arrangement().unwrap().number;
+        assert_eq!(app.state.session.project.arrangements.len(), 2);
+        let added = app.state.session.project.arrangement().unwrap().number;
         assert_ne!(added, first);
-        assert!(pl::clips(&app.state).is_empty(), "a new arrangement is empty");
+        assert!(pl::clips(&app.state.session).is_empty(), "a new arrangement is empty");
         app.state.playlist.edit.as_mut().unwrap().text = "Verse".into();
         pl::commit_edit(&mut app.state);
-        assert_eq!(pl::arrangement_name(&app.state), "Verse");
-        app.state.project.get_mut().arrangement_mut().unwrap().clips.push(Clip::new(bar, bar, 1, ClipSource::Pattern(1)));
+        assert_eq!(pl::arrangement_name(&app.state.session), "Verse");
+        app.state.session.project.get_mut().arrangement_mut().unwrap().clips.push(Clip::new(bar, bar, 1, ClipSource::Pattern(1)));
         // Clone it, then merge the first arrangement's clips into the clone.
         pl::run(&mut app, pl::Cmd::ArrClone);
         pl::commit_edit(&mut app.state);
-        assert_eq!(pl::arrangement_name(&app.state), "Verse #2");
+        assert_eq!(pl::arrangement_name(&app.state.session), "Verse #2");
         pl::run(&mut app, pl::Cmd::ArrMerge(first));
-        assert_eq!(pl::clips(&app.state).len(), 2, "its own clip and the merged one");
+        assert_eq!(pl::clips(&app.state.session).len(), 2, "its own clip and the merged one");
         // Delete the clone: the one before it shows.
         pl::run(&mut app, pl::Cmd::ArrDelete);
-        assert_eq!((app.state.project.arrangements.len(), app.state.project.arrangement().unwrap().number), (2, added));
+        assert_eq!((app.state.session.project.arrangements.len(), app.state.session.project.arrangement().unwrap().number), (2, added));
         // Saved and read back with "Verse" shown.
         let path = std::env::temp_dir().join(format!("os-app-arrangements-{}.flp", std::process::id()));
         app.save_to(path.clone());
@@ -22114,10 +22111,10 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-handle-fades-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-        let ci = pl::clips(&app.state).len() - 1;
+        let ci = pl::clips(&app.state.session).len() - 1;
         frame(&mut app, &mut c, None);
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
-        let body = g.body(&pl::clips(&app.state)[ci]);
+        let body = g.body(&pl::clips(&app.state.session)[ci]);
         // How bright the gain handle's spot is.
         let spot = |c: &Canvas| c.pixmap.pixel(body.cx() as u32, (body.bottom() - 1.5) as u32).map_or(0, |p| u32::from(p.red()) + u32::from(p.green()) + u32::from(p.blue()));
         let off = spot(&c);
@@ -22163,11 +22160,11 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-loading-sweep-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-        let ci = pl::clips(&app.state).len() - 1;
-        app.state.playlist.wave_wait = true;
+        let ci = pl::clips(&app.state.session).len() - 1;
+        app.state.session.samples.wait = true;
         frame(&mut app, &mut c, None);
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
-        let body = g.body(&pl::clips(&app.state)[ci]);
+        let body = g.body(&pl::clips(&app.state.session)[ci]);
         let still = c.pixmap.clone();
         // Where along the body's middle row the frame is brightest above the still one.
         let lit_x = |c: &Canvas| {
@@ -22203,7 +22200,7 @@ mod tests {
         assert!(!app.animating() && lit_x(&c).is_none(), "none at Off");
         crate::anim::set_level(crate::anim::Level::Playful);
         crate::anim::set_clock(false);
-        app.state.playlist.wave_wait = false;
+        app.state.session.samples.wait = false;
         let _ = std::fs::remove_file(&wav);
     }
 
@@ -22218,11 +22215,11 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-clip-fades-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
-        let ci = pl::clips(&app.state).len() - 1;
-        assert_eq!(pl::clips(&app.state)[ci].gain(), 1.0, "a new audio clip stores gain 1.0");
+        let ci = pl::clips(&app.state.session).len() - 1;
+        assert_eq!(pl::clips(&app.state.session)[ci].gain(), 1.0, "a new audio clip stores gain 1.0");
         frame(&mut app, &mut c, None);
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
-        let body = g.body(&pl::clips(&app.state)[ci]);
+        let body = g.body(&pl::clips(&app.state.session)[ci]);
         let drag = |app: &mut App, c: &mut Canvas, (x0, y0): (f32, f32), (x1, y1): (f32, f32)| {
             app.mouse_move(x0, y0);
             app.mouse_down();
@@ -22235,8 +22232,8 @@ mod tests {
         };
         // Fade-in: the top-left triangle dragged 100 px right.
         drag(&mut app, &mut c, (body.x + 2.0, body.y + 2.0), (body.x + 102.0, body.y + 2.0));
-        let clip = pl::clips(&app.state)[ci];
-        let ms_per_tick = pl::to_src(&app.state, clip.source, 1.0);
+        let clip = pl::clips(&app.state.session)[ci];
+        let ms_per_tick = pl::to_src(&app.state.session, clip.source, 1.0);
         let ms = |px: f32| f64::from(px / g.ppt) * ms_per_tick;
         let (fin, t) = clip.fade_in().expect("a fade-in");
         // The fade ends under the mouse.
@@ -22244,24 +22241,24 @@ mod tests {
         assert_eq!(t, 0.0);
         // Fade-out: the top-right triangle dragged 60 px left.
         drag(&mut app, &mut c, (body.right() - 2.0, body.y + 2.0), (body.right() - 62.0, body.y + 2.0));
-        let (fout, _) = pl::clips(&app.state)[ci].fade_out().expect("a fade-out");
+        let (fout, _) = pl::clips(&app.state.session)[ci].fade_out().expect("a fade-out");
         assert!((f64::from(fout) - ms(62.0)).abs() < 2.0, "fade-out {fout} ms");
         // Tension: the fade-in's ring dragged up 10 px.
-        let (mx, my) = pl::fade_mid(body, body.x, pl::fade_xs(&app.state, &g, &pl::clips(&app.state)[ci]).0, 0.0, false);
+        let (mx, my) = pl::fade_mid(body, body.x, pl::fade_xs(&app.state.session, &g, &pl::clips(&app.state.session)[ci]).0, 0.0, false);
         app.mouse_move(mx, my);
         assert_eq!(app.state.playlist.hover_handle, Some(pl::Handle::TensionIn));
         drag(&mut app, &mut c, (mx, my), (mx, my - 10.0));
-        let t = pl::clips(&app.state)[ci].fade_in().unwrap().1;
+        let t = pl::clips(&app.state.session)[ci].fade_in().unwrap().1;
         assert!((t - 2.8).abs() < 0.01, "tension {t}");
         // Gain: the half-circle dragged up 20 px = +3 dB.
         drag(&mut app, &mut c, (body.cx(), body.bottom() - 2.0), (body.cx(), body.bottom() - 22.0));
-        let gain = pl::clips(&app.state)[ci].gain();
+        let gain = pl::clips(&app.state.session)[ci].gain();
         assert!((20.0 * gain.log10() - 3.0).abs() < 0.01, "gain {gain}");
         // Each drag is one undo step.
         app.key(&winit::keyboard::Key::Character("z".into()), true, false);
-        assert_eq!(pl::clips(&app.state)[ci].gain(), 1.0);
+        assert_eq!(pl::clips(&app.state.session)[ci].gain(), 1.0);
         app.key(&winit::keyboard::Key::Character("z".into()), true, false);
-        assert_eq!(pl::clips(&app.state)[ci].fade_in().unwrap().1, 0.0);
+        assert_eq!(pl::clips(&app.state.session)[ci].fade_in().unwrap().1, 0.0);
         let _ = std::fs::remove_file(&wav);
     }
 
@@ -22278,7 +22275,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let (mut app, _, _, _) = ruler_app(&mut c);
         app.state.playlist_bar_w = 400.0;
-        app.state.project.get_mut().auto_crossfades = Some(true);
+        app.state.session.project.get_mut().auto_crossfades = Some(true);
         app.state.set_tempo(130.0);
         let wav = std::env::temp_dir().join(format!("os-app-crossfades-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.5; 2 * 96000]).unwrap();
@@ -22286,10 +22283,10 @@ mod tests {
         let path = wav.to_string_lossy().into_owned();
         pl::add_audio_clip(&mut app.state, &path, 0, 0).expect("audio clip added");
         pl::add_audio_clip(&mut app.state, &path, 0, 192).expect("audio clip added");
-        let srcs: Vec<_> = pl::clips(&app.state).iter().map(|c| c.source).collect();
+        let srcs: Vec<_> = pl::clips(&app.state.session).iter().map(|c| c.source).collect();
         let (sa, sb) = (srcs[srcs.len() - 2], srcs[srcs.len() - 1]);
-        let idx = |app: &App, src| pl::clips(&app.state).iter().position(|c| c.source == src).unwrap();
-        let get = |app: &App, src| pl::clips(&app.state)[idx(app, src)];
+        let idx = |app: &App, src| pl::clips(&app.state.session).iter().position(|c| c.source == src).unwrap();
+        let get = |app: &App, src| pl::clips(&app.state.session)[idx(app, src)];
         // (the earlier clip's fade-out, the later clip's fade-in), as stored.
         let xf = |app: &App| (get(app, sa).stored_fade_out().map(|f| f.0), get(app, sb).stored_fade_in().map(|f| f.0));
         app.tick();
@@ -22335,7 +22332,7 @@ mod tests {
             app.invalidate();
             frame(&mut app, &mut ck, None);
             let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
-            let xfade = pl::crossfade(&app.state, &g, idx(&app, sb)).expect("a crossfade to draw");
+            let xfade = pl::crossfade(&app.state.session, &g, idx(&app, sb)).expect("a crossfade to draw");
             assert_eq!(xfade.a, idx(&app, sa));
             let (hx, hy, ry) = pl::xfade_handle(&g, &get(&app, sb), &xfade);
             assert_eq!(hy, ry, "at tension 0 both gains are 1/2 in the middle");
@@ -22347,7 +22344,7 @@ mod tests {
             app.mouse_move(hx + 40.0, hy - 30.0);
         }
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
-        let xfade = pl::crossfade(&app.state, &g, idx(&app, sb)).unwrap();
+        let xfade = pl::crossfade(&app.state.session, &g, idx(&app, sb)).unwrap();
         let (hx, hy, _) = pl::xfade_handle(&g, &get(&app, sb), &xfade);
         app.mouse_move(hx, hy);
         app.mouse_down();
@@ -22367,7 +22364,7 @@ mod tests {
 
         // Switched off: the lengths go to 0, the tensions stay, and no edit sets them; switched on: set again.
         app.settings_act(SAct::Check(CROSSFADES_CHECK));
-        assert_eq!(app.state.project.auto_crossfades, Some(false));
+        assert_eq!(app.state.session.project.auto_crossfades, Some(false));
         assert_eq!(xf(&app), (None, None));
         assert_eq!((get(&app, sb).fade_in_tension(), get(&app, sa).fade_out_tension()), (t, -t));
         app.tick();
@@ -22382,10 +22379,10 @@ mod tests {
         let bytes = |p: &Project| p.arrangements.iter().flat_map(|a| a.clips.iter().map(|c| c.raw[36..57].to_vec())).collect::<Vec<_>>();
         let mut opened = App::new(None);
         opened.open(flp.clone());
-        let read = bytes(&opened.state.project);
+        let read = bytes(&opened.state.session.project);
         opened.tick();
         assert!(!opened.unsaved(), "an opened project's crossfades are not a change");
-        assert_eq!(bytes(&opened.state.project), read);
+        assert_eq!(bytes(&opened.state.session.project), read);
         opened.save_to(flp.clone());
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&flp).unwrap()).unwrap()).unwrap();
         assert_eq!(bytes(&back), read);
@@ -22403,8 +22400,8 @@ mod tests {
         let (mut app, _, _, _) = ruler_app(&mut c);
         pl::run(&mut app, pl::Cmd::TrackGroup(1));
         pl::run(&mut app, pl::Cmd::TrackGroup(2));
-        assert!(pl::is_group_track(&app.state, 0));
-        assert_eq!((pl::group_track(&app.state, 2), pl::group_track(&app.state, 3)), (Some(0), None));
+        assert!(pl::is_group_track(&app.state.session, 0));
+        assert_eq!((pl::group_track(&app.state.session, 2), pl::group_track(&app.state.session, 3)), (Some(0), None));
         assert_eq!(pl::Rows::new(&app.state).top(3), 3.0 * pl::ROW_H);
         // A member collapses its group.
         pl::run(&mut app, pl::Cmd::GroupCollapse(2));
@@ -22431,8 +22428,8 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-clip-dblclick-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
         crate::playlist::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 1, 0).expect("audio clip added");
-        let row = app.state.project.channels.len() - 1;
-        app.state.project.get_mut().arrangements[0].clips.push(os_model::Clip::new(0, bar, 2, os_model::ClipSource::Pattern(1)));
+        let row = app.state.session.project.channels.len() - 1;
+        app.state.session.project.get_mut().arrangements[0].clips.push(os_model::Clip::new(0, bar, 2, os_model::ClipSource::Pattern(1)));
         frame(&mut app, &mut c, None);
         let _ = ruler;
         let tap = |app: &mut App, c: &mut Canvas, track: u16| {
@@ -22485,7 +22482,7 @@ mod tests {
         fn set(&mut self, clips: Vec<os_model::Clip>) {
             crate::anim::set_clock(false);
             self.app.state.motion.borrow_mut().ripples_over();
-            crate::playlist::arr_mut(&mut self.app.state).clips = clips;
+            crate::playlist::arr_mut(&mut self.app.state.session).clips = clips;
             self.app.state.playlist.sel.clear();
             self.app.invalidate();
             frame(&mut self.app, &mut self.c, None);
@@ -22554,7 +22551,7 @@ mod tests {
 
         /// A drag of clip 0 from (x, y) is under way.
         fn drag_move(&mut self, x: f32, y: f32, alt: bool) {
-            let orig = vec![(0, crate::playlist::clips(&self.app.state)[0])];
+            let orig = vec![(0, crate::playlist::clips(&self.app.state.session)[0])];
             self.app.mouse_move(x, y);
             self.app.alt = alt;
             self.app.drag = Some(Drag::Pl(crate::playlist::PlDrag::Move { x0: x, y0: y, orig, fresh: false }));
@@ -22572,7 +22569,7 @@ mod tests {
         b.app.add_clip_channel(ChannelKind::AudioClip);
         b.app.add_clip_channel(ChannelKind::Automation);
         b.app.state.z = vec![Win::Playlist];
-        let channel = |b: &ClipBench, kind| b.app.state.project.channels.iter().rfind(|c| c.kind == kind).expect("channel").index;
+        let channel = |b: &ClipBench, kind| b.app.state.session.project.channels.iter().rfind(|c| c.kind == kind).expect("channel").index;
         let sources = [
             ClipSource::Pattern(1),
             ClipSource::Channel(channel(&b, ChannelKind::AudioClip)),
@@ -22592,7 +22589,7 @@ mod tests {
             // The right button deletes what it is on.
             b.app.mouse_down_right();
             b.app.mouse_up();
-            assert!(pl::clips(&b.app.state).is_empty(), "{src:?} was deleted");
+            assert!(pl::clips(&b.app.state.session).is_empty(), "{src:?} was deleted");
             let seen = b.frames("the ripple", |b| [b.shows(x, y), b.shows(r.x, y), b.shows(r.x - 4.0, y), b.shows(r.x - 6.0, y)]);
             let all = format!("{src:?}: {seen:?}");
             assert!((43..=46).contains(&seen.len()), "about 700 ms: {all}");
@@ -22651,13 +22648,13 @@ mod tests {
         let clip = b.pattern_clip();
         b.set(vec![clip]);
         let there = b.grid_pixels(&b.c);
-        pl::snapshot_as(&mut b.app.state, "Arranger delete clip");
+        pl::snapshot_as(&mut b.app.state.session, "Arranger delete clip");
         pl::delete(&mut b.app.state, vec![0]);
         b.app.invalidate();
         b.step("the ripple");
         assert!(b.app.animating());
         assert!(crate::history::undo(&mut b.app.state).is_some());
-        assert_eq!(pl::clips(&b.app.state).len(), 1, "the clip is back");
+        assert_eq!(pl::clips(&b.app.state.session).len(), 1, "the clip is back");
         b.app.invalidate();
         b.step("the undo");
         assert!(!b.app.animating(), "nothing is rippling over it");
@@ -22673,14 +22670,14 @@ mod tests {
         let clip = b.pattern_clip();
         b.set(vec![clip]);
         pl::delete_track(&mut b.app.state, clip.track);
-        assert!(pl::clips(&b.app.state).is_empty());
+        assert!(pl::clips(&b.app.state.session).is_empty());
         b.app.invalidate();
         b.step("the track's delete");
         assert!(!b.app.animating(), "deleting a track has no ripple");
         b.set(vec![clip]);
         b.app.state.playlist.range = Some((b.bar, 2 * b.bar));
         assert!(pl::delete_space(&mut b.app.state));
-        assert!(pl::clips(&b.app.state).is_empty());
+        assert!(pl::clips(&b.app.state.session).is_empty());
         b.app.state.playlist.range = None;
         b.app.invalidate();
         b.step("the space's delete");
@@ -22769,7 +22766,7 @@ mod tests {
             b.set(vec![start]);
             b.drag_move(r0.x + 10.0, y, false);
             b.app.mouse_move(r0.x + 10.0 + b.g.bar_w, y);
-            assert_eq!(pl::clips(&b.app.state)[0].position, 2 * b.bar, "the clip is there at once");
+            assert_eq!(pl::clips(&b.app.state.session)[0].position, 2 * b.bar, "the clip is there at once");
             let seen = b.frames("the glide", |b| b.left_of(r0.x - 2.0, r1.right(), y));
             b.app.mouse_up();
             seen
@@ -22801,7 +22798,7 @@ mod tests {
         b.set(vec![start]);
         b.drag_move(r0.x + 2.0, y, false);
         b.app.mouse_move(r0.x + 2.0 + 3.0 * b.g.bar_w, y);
-        let to = b.g.clip_rect(&crate::playlist::clips(&b.app.state)[0]);
+        let to = b.g.clip_rect(&crate::playlist::clips(&b.app.state.session)[0]);
         let seen = b.frames("the long glide", |b| b.left_of(r0.x, to.right() + 1.0, y));
         b.app.mouse_up();
         assert!(seen[0] > r0.right() && seen[0] < to.x - to.w, "the first frame is between the two: {seen:?} of {} to {}", r0.x, to.x);
@@ -22820,15 +22817,15 @@ mod tests {
         b.set(vec![start]);
         b.drag_move(r0.x + 10.0, y, true);
         b.app.mouse_move(r0.x + 10.0 + 37.0, y);
-        let r1 = b.g.clip_rect(&pl::clips(&b.app.state)[0]);
+        let r1 = b.g.clip_rect(&pl::clips(&b.app.state.session)[0]);
         assert!(r1.x > r0.x + 30.0, "it moved: {} to {}", r0.x, r1.x);
         let seen = b.frames("the Alt drag", |b| b.left_of(r0.x - 2.0, r1.right(), y));
         assert_eq!(seen, [r1.x.floor()], "it is under the mouse at once");
         // Two tracks down.
-        let down = os_model::Clip { track: 5, ..pl::clips(&b.app.state)[0] };
+        let down = os_model::Clip { track: 5, ..pl::clips(&b.app.state.session)[0] };
         let r2 = b.g.clip_rect(&down);
         b.app.mouse_move(r0.x + 10.0 + 37.0, y + (r2.y - r1.y));
-        assert_eq!(pl::clips(&b.app.state)[0].track, 5, "it moved down");
+        assert_eq!(pl::clips(&b.app.state.session)[0].track, 5, "it moved down");
         let seen = b.frames("the Alt drag down", |b| b.top_of(r1.y - 2.0, r2.bottom(), r1.cx()));
         b.app.mouse_up();
         assert!(seen[0] > r1.y && seen[0] < r2.y, "on its way on the first frame: {seen:?} of {} to {}", r1.y, r2.y);
@@ -22851,7 +22848,7 @@ mod tests {
         b.app.mouse_move(r0.right(), y);
         b.app.drag = Some(Drag::Pl(PlDrag::ResizeR { x0: r0.right(), orig: vec![(0, start)] }));
         b.app.mouse_move(r0.right() + w, y);
-        assert_eq!(pl::clips(&b.app.state)[0].length, 2 * b.bar, "the clip is that long at once");
+        assert_eq!(pl::clips(&b.app.state.session)[0].length, 2 * b.bar, "the clip is that long at once");
         let seen = b.frames("the right edge", |b| (b.left_of(r0.x - 2.0, r0.right() + w + 2.0, y), b.right_of(r0.x - 2.0, r0.right() + w + 2.0, y)));
         b.app.mouse_up();
         assert!(seen.iter().all(|e| e.0 == r0.x), "the left edge stays: {seen:?}");
@@ -22862,7 +22859,7 @@ mod tests {
         b.app.mouse_move(r0.x, y);
         b.app.drag = Some(Drag::Pl(PlDrag::ResizeL { x0: r0.x, orig: vec![(0, start)] }));
         b.app.mouse_move(r0.x + w / 2.0, y);
-        assert_eq!(pl::clips(&b.app.state)[0].position, b.bar + b.bar / 2, "the clip starts there at once");
+        assert_eq!(pl::clips(&b.app.state.session)[0].position, b.bar + b.bar / 2, "the clip starts there at once");
         let seen = b.frames("the left edge", |b| (b.left_of(r0.x - 2.0, r0.right() + 2.0, y), b.right_of(r0.x - 2.0, r0.right() + 2.0, y)));
         b.app.mouse_up();
         assert!(seen.iter().all(|e| e.1 == r0.right()), "the right edge stays: {seen:?}");
@@ -22880,13 +22877,13 @@ mod tests {
         let s = &b.app.state;
         let px = |ticks: f32| ticks * b.g.ppt;
         let c = Clip { window: Some((192.0, 576.0)), ..Clip::new(b.bar, 384, 3, ClipSource::Pattern(1)) };
-        let drawn = pl::with_edges(s, &b.g, &c, px(-96.0), 0.0);
+        let drawn = pl::with_edges(&s.session, &b.g, &c, px(-96.0), 0.0);
         assert_eq!((drawn.position, drawn.length, drawn.window), (b.bar - 96, 480, Some((96.0, 576.0))), "the left edge out");
-        let drawn = pl::with_edges(s, &b.g, &c, px(96.0), 0.0);
+        let drawn = pl::with_edges(&s.session, &b.g, &c, px(96.0), 0.0);
         assert_eq!((drawn.position, drawn.length, drawn.window), (b.bar + 96, 288, Some((288.0, 576.0))), "the left edge in");
-        let drawn = pl::with_edges(s, &b.g, &c, 0.0, px(96.0));
+        let drawn = pl::with_edges(&s.session, &b.g, &c, 0.0, px(96.0));
         assert_eq!((drawn.position, drawn.length, drawn.window), (b.bar, 480, Some((192.0, 672.0))), "the right edge out");
-        let drawn = pl::with_edges(s, &b.g, &c, px(-384.0), 0.0);
+        let drawn = pl::with_edges(&s.session, &b.g, &c, px(-384.0), 0.0);
         assert_eq!((drawn.position, drawn.window.map(|w| w.0)), (b.bar - 384, Some(0.0)), "no further than the source's start");
     }
 
@@ -22897,7 +22894,7 @@ mod tests {
         use os_model::{Clip, ClipSource};
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(1920, 1080, 1.0), Canvas::new(1920, 1080, 1.0)) else { return };
         let (mut app, _, g, bar) = ruler_app(&mut c);
-        let clips = &mut crate::playlist::arr_mut(&mut app.state).clips;
+        let clips = &mut crate::playlist::arr_mut(&mut app.state.session).clips;
         clips.push(Clip::new(0, bar, 3, ClipSource::Pattern(1)));
         clips.push(Clip::new(bar, bar, 4, ClipSource::Pattern(1)));
         clips.push(Clip::new(bar, bar, 5, ClipSource::Pattern(2)));
@@ -22958,7 +22955,7 @@ mod tests {
         assert_eq!(app.state.pattern(), 2);
         assert_eq!(crate::playlist::source(&app.state), ClipSource::Pattern(2));
         crate::playlist::place(&mut app.state, 0, 0);
-        assert_eq!(crate::playlist::clips(&app.state).last().map(|c| c.source), Some(ClipSource::Pattern(2)));
+        assert_eq!(crate::playlist::clips(&app.state.session).last().map(|c| c.source), Some(ClipSource::Pattern(2)));
     }
 
     /// Double-click on audio clips follows General ▸ Input ▸ Manage shortcuts: the row whose modifier is held wins,
@@ -22972,7 +22969,7 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-clip-dblclick-sc-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
         crate::playlist::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 1, 0).expect("audio clip added");
-        let row = app.state.project.channels.len() - 1;
+        let row = app.state.session.project.channels.len() - 1;
         frame(&mut app, &mut c, None);
         let double = |app: &mut App, c: &mut Canvas, alt: bool| {
             let (x, y) = (g.x_of(10.0) + 10.0, g.y_of(1) + 30.0);
@@ -23011,9 +23008,9 @@ mod tests {
     fn ruler_click_takes_a_playing_pattern_to_the_song() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let (mut app, ruler, g, bar) = ruler_app(&mut c);
-        let ch = app.state.project.channels[0].index;
-        app.state.project.get_mut().patterns = vec![Pattern { number: 1, notes: vec![Note { length: 24, key: 60, ..Note::step(ch, 0) }], ..Pattern::default() }];
-        app.state.project.get_mut().arrangements = vec![os_model::Arrangement {
+        let ch = app.state.session.project.channels[0].index;
+        app.state.session.project.get_mut().patterns = vec![Pattern { number: 1, notes: vec![Note { length: 24, key: 60, ..Note::step(ch, 0) }], ..Pattern::default() }];
+        app.state.session.project.get_mut().arrangements = vec![os_model::Arrangement {
             number: 1,
             clips: vec![os_model::Clip::new(0, 8 * bar, 0, os_model::ClipSource::Pattern(1))],
             ..Default::default()
@@ -23037,15 +23034,15 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         let grid = app.pl_grid().expect("playlist grid");
         let g = pl::PGeom::new(&app.state, grid);
-        let bar = 4 * u32::from(app.state.project.ppq);
+        let bar = 4 * u32::from(app.state.session.project.ppq);
         // Clicks land 10 px into a cell: Cell places clips at its start (Line would round to the nearest beat).
         app.state.playlist.snap = crate::snap::EditorSnap::Grid(pl::Snap::Cell);
         let at = |t: u32, track: u16| (g.x_of(t as f32) + 10.0, g.y_of(track) + 30.0);
@@ -23060,12 +23057,12 @@ mod tests {
             frame(app, c, None);
         };
         let tap = |app: &mut App, c: &mut Canvas, p: (f32, f32), right: bool| drag(app, c, p, p, right);
-        let on_track = |app: &App, t: u16| -> Vec<os_model::Clip> { pl::clips(&app.state).iter().filter(|c| c.track == t).copied().collect() };
+        let on_track = |app: &App, t: u16| -> Vec<os_model::Clip> { pl::clips(&app.state.session).iter().filter(|c| c.track == t).copied().collect() };
 
         // Draw: a click places the current pattern (one bar when empty).
         tap(&mut app, &mut c, at(0, 0), false);
         tap(&mut app, &mut c, at(2 * bar, 2), false);
-        assert_eq!(pl::clips(&app.state).len(), 2);
+        assert_eq!(pl::clips(&app.state.session).len(), 2);
         let a = on_track(&app, 0)[0];
         assert_eq!((a.position, a.length, a.source), (0, bar, os_model::ClipSource::Pattern(1)));
         // Drag the body moves (snapped); dragging the right edge resizes.
@@ -23122,22 +23119,22 @@ mod tests {
         // The track LED mutes the track.
         let led = hit_rect(&app, &Action::PlLed(0));
         tap(&mut app, &mut c, (led.cx(), led.cy()), false);
-        assert!(!pl::track_on(&app.state, 0));
+        assert!(!pl::track_on(&app.state.session, 0));
 
         // An automation clip (tempo), then a left-click on its curve adds a point.
         app.state.playlist.range = None;
         pl::run(&mut app, pl::Cmd::CreateAutomation(os_model::target::TEMPO, "Tempo".into(), 0.5));
         frame(&mut app, &mut c, None);
-        let ch = app.state.project.automations.last().unwrap().channel;
-        let ac = *pl::clips(&app.state).iter().find(|c| c.source == os_model::ClipSource::Channel(ch)).unwrap();
+        let ch = app.state.session.project.automations.last().unwrap().channel;
+        let ac = *pl::clips(&app.state.session).iter().find(|c| c.source == os_model::ClipSource::Channel(ch)).unwrap();
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
         let body = g.body(&ac);
         let x = g.x_of((ac.position + ac.length / 4) as f32); // the midpoint is the tension handle
-        let n = app.state.project.automation(ch).unwrap().points.len();
+        let n = app.state.session.project.automation(ch).unwrap().points.len();
         app.mouse_move(x, pl::value_y(body, 0.5));
         app.mouse_down();
         app.mouse_up();
-        assert_eq!(app.state.project.automation(ch).unwrap().points.len(), n + 1);
+        assert_eq!(app.state.session.project.automation(ch).unwrap().points.len(), n + 1);
 
         // Save (new project) and read back.
         let path = std::env::temp_dir().join(format!("openstudio-pl-{}.flp", std::process::id()));
@@ -23145,7 +23142,7 @@ mod tests {
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
         let arr = back.arrangement().expect("arrangement saved");
-        assert_eq!(arr.clips.len(), pl::clips(&app.state).len());
+        assert_eq!(arr.clips.len(), pl::clips(&app.state.session).len());
         assert!(!arr.tracks[0].enabled);
         assert_eq!(back.automation(ch).map(|a| a.points.len()), Some(n + 1));
     }
@@ -23158,7 +23155,7 @@ mod tests {
         use crate::playlist::PlTool;
         use winit::keyboard::{Key, KeyCode};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.playlist.reset();
         // The piano roll behind: a letter the playlist leaves goes on to the piano roll's tools.
         app.state.z = vec![Win::PianoRoll, Win::Playlist];
@@ -23212,13 +23209,13 @@ mod tests {
         use winit::keyboard::Key;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.playlist.reset();
         app.state.playlist.row_h = pl::ROW_H;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         let g = pl::PGeom::new(&app.state, app.pl_grid().expect("playlist grid"));
-        let bar = 4 * u32::from(app.state.project.ppq);
+        let bar = 4 * u32::from(app.state.session.project.ppq);
         // Clicks land 10 px into a cell: Cell places clips at its start (Line would round to the nearest beat).
         app.state.playlist.snap = crate::snap::EditorSnap::Grid(pl::Snap::Cell);
         let at = |t: u32, track: u16| (g.x_of(t as f32) + 10.0, g.y_of(track) + 30.0);
@@ -23233,7 +23230,7 @@ mod tests {
             app.mouse_up();
             frame(app, c, None);
         };
-        let pos = |app: &App, t: u16| pl::clips(&app.state).iter().find(|c| c.track == t).map(|c| (c.position, c.group())).unwrap();
+        let pos = |app: &App, t: u16| pl::clips(&app.state.session).iter().find(|c| c.track == t).map(|c| (c.position, c.group())).unwrap();
         // Clips on tracks 0 and 1 grouped; a loose clip on track 2.
         for t in 0..3 {
             drag(&mut app, &mut c, at(t as u32 * bar, t), at(t as u32 * bar, t));
@@ -23256,8 +23253,8 @@ mod tests {
         assert_eq!(app.state.playlist.sel.len(), 1);
         assert!(pos(&app, 0).1 != 0 && pos(&app, 0).1 == pos(&app, 1).1);
         // Off: Shift+G groups just the selection (track 0 and the loose clip), leaving its old mate behind.
-        let i0 = pl::clips(&app.state).iter().position(|c| c.track == 0).unwrap();
-        let i2 = pl::clips(&app.state).iter().position(|c| c.track == 2).unwrap();
+        let i0 = pl::clips(&app.state.session).iter().position(|c| c.track == 0).unwrap();
+        let i2 = pl::clips(&app.state.session).iter().position(|c| c.track == 2).unwrap();
         app.state.playlist.sel = vec![i0, i2];
         app.shift = true;
         app.key(&Key::Character("G".into()), false, false);
@@ -23353,7 +23350,7 @@ mod tests {
         use crate::song_pos::{handle_x, PANEL};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project.get_mut().arrangements =
+        app.state.session.project.get_mut().arrangements =
             vec![os_model::Arrangement { number: 1, clips: vec![os_model::Clip::new(0, 3168, 0, os_model::ClipSource::Pattern(1))], ..Default::default() }];
         app.state.set_song_mode(true);
         app.state.playlist.pos = 0;
@@ -23408,7 +23405,7 @@ mod tests {
 
         // SONG mode with an empty playlist: disabled.
         app.state.set_song_mode(true);
-        app.state.project.get_mut().arrangements[0].clips.clear();
+        app.state.session.project.get_mut().arrangements[0].clips.clear();
         frame(&mut app, &mut c, None);
         assert!(app.hits.iter().all(|h| h.action != Action::SongPos));
         app.mouse_down_right();
@@ -23426,16 +23423,16 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.file = None;
-        app.state.path = None;
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
         app.state.playlist.reset();
         app.state.playlist.row_h = pl::ROW_H;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         let grid = app.pl_grid().expect("playlist grid");
         let g = pl::PGeom::new(&app.state, grid);
-        let bar = 4 * u32::from(app.state.project.ppq);
+        let bar = 4 * u32::from(app.state.session.project.ppq);
         // Clicks land 10 px into a cell: Cell places clips at its start (Line would round to the nearest beat).
         app.state.playlist.snap = crate::snap::EditorSnap::Grid(pl::Snap::Cell);
         let at = |t: u32, track: u16| (g.x_of(t as f32) + 10.0, g.y_of(track) + 30.0);
@@ -23450,7 +23447,7 @@ mod tests {
             frame(app, c, None);
         };
         let on_track = |app: &App, t: u16| -> Vec<os_model::Clip> {
-            let mut v: Vec<os_model::Clip> = pl::clips(&app.state).iter().filter(|c| c.track == t).copied().collect();
+            let mut v: Vec<os_model::Clip> = pl::clips(&app.state.session).iter().filter(|c| c.track == t).copied().collect();
             v.sort_by_key(|c| c.position);
             v
         };
@@ -23471,12 +23468,12 @@ mod tests {
         // Two clips, grouped with Shift+G: they select and move as one.
         drag(&mut app, &mut c, at(0, 0), at(0, 0));
         drag(&mut app, &mut c, at(bar, 1), at(bar, 1));
-        assert_eq!(pl::clips(&app.state).len(), 2);
+        assert_eq!(pl::clips(&app.state.session).len(), 2);
         app.key(&Key::Character("a".into()), true, false);
         app.shift = true;
         app.key(&Key::Character("G".into()), false, false);
         app.shift = false;
-        let groups: Vec<u16> = pl::clips(&app.state).iter().map(|c| c.group()).collect();
+        let groups: Vec<u16> = pl::clips(&app.state.session).iter().map(|c| c.group()).collect();
         assert!(groups[0] != 0 && groups[0] == groups[1], "{groups:?}");
         app.key(&Key::Character("d".into()), true, false);
         drag(&mut app, &mut c, at(0, 0), (g.x_of(2.0 * bar as f32) + 10.0, g.y_of(0) + 30.0));
@@ -23503,7 +23500,7 @@ mod tests {
         assert!(app.state.playlist.sel.is_empty(), "ungrouping deselects the clips, as in FL");
         // A new group takes the lowest number no clip uses: group 2 left, group 1 free again.
         app.key(&Key::Character("a".into()), true, false);
-        let loose: Vec<usize> = (0..pl::clips(&app.state).len()).filter(|&i| pl::clips(&app.state)[i].group() == 0).collect();
+        let loose: Vec<usize> = (0..pl::clips(&app.state.session).len()).filter(|&i| pl::clips(&app.state.session)[i].group() == 0).collect();
         app.state.playlist.sel = loose;
         app.shift = true;
         app.key(&Key::Character("G".into()), false, false);
@@ -23511,11 +23508,11 @@ mod tests {
         assert_eq!((on_track(&app, 0)[0].group(), on_track(&app, 1)[0].group()), (1, 1));
         app.key(&Key::Character("a".into()), true, false);
         app.key(&Key::Character("u".into()), false, true);
-        assert!(pl::clips(&app.state).iter().all(|c| c.group() == 0));
+        assert!(pl::clips(&app.state.session).iter().all(|c| c.group() == 0));
         app.key(&Key::Character("d".into()), true, false);
 
         // End zooms on the selection (all clips when none is selected).
-        app.state.playlist.sel = vec![pl::clips(&app.state).iter().position(|c| c.track == 0 && c.position == 2 * bar).unwrap()];
+        app.state.playlist.sel = vec![pl::clips(&app.state.session).iter().position(|c| c.track == 0 && c.position == 2 * bar).unwrap()];
         app.key(&Key::Named(NamedKey::End), false, false);
         assert!((app.state.playlist_bar_w - 600.0f32.min(grid.w)).abs() < 0.01, "one bar fills the view: {}", app.state.playlist_bar_w);
         assert!((app.state.playlist_scroll.0 - 2.0 * app.state.playlist_bar_w).abs() < 0.01);
@@ -23529,8 +23526,8 @@ mod tests {
         // Right-Shift+drag across clips from empty grid (Draw tool) slices them; no clip is placed. The left Shift
         // does not start a slice (it places a clip there).
         let g = pl::PGeom::new(&app.state, grid);
-        app.state.project.get_mut().arrangements[0].clips.push(os_model::Clip::new(0, 2 * bar, 4, os_model::ClipSource::Pattern(1)));
-        let n = pl::clips(&app.state).len();
+        app.state.session.project.get_mut().arrangements[0].clips.push(os_model::Clip::new(0, 2 * bar, 4, os_model::ClipSource::Pattern(1)));
+        let n = pl::clips(&app.state.session).len();
         app.shift = true;
         app.mouse_move(g.x_of(bar as f32), g.y_of(3) + 30.0);
         app.mouse_down();
@@ -23539,13 +23536,13 @@ mod tests {
         // Shift let go first: Ctrl+Shift+Z would redo.
         app.shift = false;
         app.key(&Key::Character("z".into()), true, false);
-        assert_eq!(pl::clips(&app.state).len(), n);
+        assert_eq!(pl::clips(&app.state.session).len(), n);
         app.shift = true;
         app.rshift = true;
         drag(&mut app, &mut c, (g.x_of(bar as f32), g.y_of(3) + 30.0), (g.x_of(bar as f32), g.y_of(5) + 30.0));
         app.shift = false;
         app.rshift = false;
-        assert_eq!(pl::clips(&app.state).len(), n + 1);
+        assert_eq!(pl::clips(&app.state.session).len(), n + 1);
         assert_eq!(on_track(&app, 4).iter().map(|c| (c.position, c.length)).collect::<Vec<_>>(), vec![(0, bar), (bar, bar)]);
 
         // Alt+wheel (headers, ruler or grid) changes the track height by 6 px a notch, 16..280 px; Ctrl+wheel over the
@@ -23613,11 +23610,11 @@ mod tests {
 
         // Ctrl+P and Ctrl+Shift+P switch performance mode (spec: ui/performance-mode.md §1).
         app.key(&Key::Character("p".into()), true, false);
-        assert_eq!((app.state.message.as_deref(), app.state.project.performance), (Some("Performance mode: on"), Some(true)));
+        assert_eq!((app.state.message.as_deref(), app.state.session.project.performance), (Some("Performance mode: on"), Some(true)));
         app.shift = true;
         app.key(&Key::Character("P".into()), true, false);
         app.shift = false;
-        assert_eq!((app.state.message.as_deref(), app.state.project.performance), (Some("Performance mode: off"), Some(false)));
+        assert_eq!((app.state.message.as_deref(), app.state.session.project.performance), (Some("Performance mode: off"), Some(false)));
 
         // The track height, time zoom and scroll are saved with the project and come back when it opens.
         app.state.playlist.row_h = 60.0;
@@ -23655,13 +23652,13 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
-        app.state.project.get_mut().patterns[0].notes = (0..16).map(|i| Note { length: 24, key: 60 + (i % 5) as u16 * 2, ..Note::step(0, i * 48) }).collect();
-        let bar = 4 * u32::from(app.state.project.ppq);
+        app.state.session.project.get_mut().patterns[0].notes = (0..16).map(|i| Note { length: 24, key: 60 + (i % 5) as u16 * 2, ..Note::step(0, i * 48) }).collect();
+        let bar = 4 * u32::from(app.state.session.project.ppq);
         {
-            let a = pl::arr_mut(&mut app.state);
+            let a = pl::arr_mut(&mut app.state.session);
             for k in 0..4 {
                 a.clips.push(os_model::Clip::new(k * 2 * bar, 2 * bar, 0, os_model::ClipSource::Pattern(1)));
             }
@@ -23673,12 +23670,12 @@ mod tests {
         app.state.playlist.sel = vec![2];
         app.state.playlist.range = Some((bar, 3 * bar));
         pl::run(&mut app, pl::Cmd::CreateAutomation(os_model::target::TEMPO, "Tempo".into(), 0.3));
-        let ch = app.state.project.automations.last().unwrap().channel;
-        pl::add_point(&mut app.state, ch, 6.0, 0.9);
-        pl::add_point(&mut app.state, ch, 11.0, 0.1);
+        let ch = app.state.session.project.automations.last().unwrap().channel;
+        pl::add_point(&mut app.state.session, ch, 6.0, 0.9);
+        pl::add_point(&mut app.state.session, ch, 11.0, 0.1);
         app.state.playlist.range = None;
         frame(&mut app, &mut c, None);
-        app.state.playlist.hover_clip = pl::clips(&app.state).iter().position(|c| c.source == os_model::ClipSource::Channel(ch));
+        app.state.playlist.hover_clip = pl::clips(&app.state.session).iter().position(|c| c.source == os_model::ClipSource::Channel(ch));
         let mut popup = pl::options_menu(&app.state, 220.0, 105.0);
         popup.sub = Some(0);
         app.state.playlist.popup = Some(popup);
@@ -23696,11 +23693,11 @@ mod tests {
         // designs. The audio clip's waveform is made up.
         app.state.playlist.row_h = pl::ROW_H;
         app.add_clip_channel(ChannelKind::AudioClip);
-        let audio = app.state.project.get_mut().channels.iter_mut().rfind(|c| c.kind == ChannelKind::AudioClip).unwrap();
+        let audio = app.state.session.project.get_mut().channels.iter_mut().rfind(|c| c.kind == ChannelKind::AudioClip).unwrap();
         audio.sample_path = Some("shot.wav".into());
         let peaks = (0..400).map(|i| (i as f32 / 9.0).sin().abs() * (1.0 - i as f32 / 400.0)).map(|a| (-a, a)).collect();
         let wave = pl::Wave { rate: 44100, frames: 400 * 64, per: 64, peaks };
-        app.state.playlist.waves.borrow_mut().insert("shot.wav".into(), Some(std::rc::Rc::new(wave)));
+        app.state.session.samples.waves.borrow_mut().insert("shot.wav".into(), Some(std::rc::Rc::new(wave)));
         for design in [Design::Citrus, Design::Lemon] {
             app.set_design(design, false);
             for (kind, list) in [(pl::PickKind::Pattern, "patterns"), (pl::PickKind::Audio, "audio"), (pl::PickKind::Automation, "automation")] {
@@ -23721,11 +23718,11 @@ mod tests {
         let dir = std::path::PathBuf::from(dir);
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::PianoRoll];
         app.state.selected_channel = 0;
-        app.state.project.get_mut().patterns[0].notes = (0..16).map(|i| Note { length: 24, key: 60 + (i % 5) as u16 * 2, ..Note::step(0, i * 48) }).collect();
-        app.state.project.get_mut().patterns[0].notes.push(Note { length: 96, key: 55, ..Note::step(1, 96) });
+        app.state.session.project.get_mut().patterns[0].notes = (0..16).map(|i| Note { length: 24, key: 60 + (i % 5) as u16 * 2, ..Note::step(0, i * 48) }).collect();
+        app.state.session.project.get_mut().patterns[0].notes.push(Note { length: 96, key: 55, ..Note::step(1, 96) });
         crate::piano_tools::add_marker(&mut app.state, 384);
         frame(&mut app, &mut c, None);
         let grid = app.piano_grid.unwrap();
@@ -23792,7 +23789,7 @@ mod tests {
         let dir = std::path::PathBuf::from(dir);
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.z = vec![Win::Mixer];
         app.state.show_browser = false;
         app.plugins.effects = vec![crate::plugin_db::fake("Test Delay", os_host::Kind::Effect)];
@@ -23800,12 +23797,12 @@ mod tests {
         mx::select(&mut app.state, 3, false);
         mx::route(&mut app.state, 5, false, false);
         mx::route(&mut app.state, 7, false, true);
-        app.state.project.get_mut().mixer[4].polarity = true;
-        app.state.project.get_mut().mixer[6].swap = true;
-        app.state.project.get_mut().mixer[2].enabled = false;
-        app.state.project.get_mut().mixer[3].name = Some("Drums".into());
-        app.state.project.get_mut().mixer[3].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Test Delay".into(), state: Vec::new() });
-        app.state.project.get_mut().mixer[3].slot_on[1] = false;
+        app.state.session.project.get_mut().mixer[4].polarity = true;
+        app.state.session.project.get_mut().mixer[6].swap = true;
+        app.state.session.project.get_mut().mixer[2].enabled = false;
+        app.state.session.project.get_mut().mixer[3].name = Some("Drums".into());
+        app.state.session.project.get_mut().mixer[3].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Test Delay".into(), state: Vec::new() });
+        app.state.session.project.get_mut().mixer[3].slot_on[1] = false;
         mx::select(&mut app.state, 6, true);
         mx::select(&mut app.state, 3, true);
         app.state.mixer.meters = (0..18)
@@ -23833,7 +23830,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.plugins = crate::plugins::Plugins::builtins();
         app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
         app.state.plugdb.rebuild(&app.plugins);
@@ -23860,10 +23857,10 @@ mod tests {
         assert_eq!(heads, [Row::Head { label: "Instruments".into(), major: true }, Row::Head { label: "Effects".into(), major: true }]);
         // An effect: the selected track's first empty slot.
         crate::mixer::select(&mut app.state, 2, false);
-        app.state.project.get_mut().mixer[2].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Taken".into(), state: Vec::new() });
+        app.state.session.project.get_mut().mixer[2].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Taken".into(), state: Vec::new() });
         pick(&mut app, &mut c, "Test FX");
         assert!(!pal::is_open(&app.state), "a pick closes it");
-        assert_eq!(crate::mixer::slot_name(&app.state, 2, 1).as_deref(), Some("Test FX"));
+        assert_eq!(crate::mixer::slot_name(&app.state.session, 2, 1).as_deref(), Some("Test FX"));
         // F8 twice: open, then closed.
         app.key(&f8, false, false);
         assert!(pal::is_open(&app.state));
@@ -23874,9 +23871,9 @@ mod tests {
         let b = hit_rect(&app, &Action::PickerOpen);
         click(&mut app, &mut c, b);
         assert!(pal::is_open(&app.state) && pal::rect(&app.state).y >= b.bottom(), "under the button");
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         pick(&mut app, &mut c, crate::osc3::LEMON_TRIO);
-        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.session.project.channels.len(), n + 1);
         assert_eq!(app.state.selected_channel, n);
         assert_eq!(app.state.pending_plugin, Some((n, app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap())));
         // An empty mixer slot's palette: effects only, into that slot.
@@ -23884,7 +23881,7 @@ mod tests {
         assert_eq!(pal::title(&app.state.palette), "Add effect");
         assert!(pal::rows(&app.state).iter().all(|r| !matches!(r, Row::Plugin { effect: false, .. })));
         pick(&mut app, &mut c, "Test FX");
-        assert_eq!(crate::mixer::slot_name(&app.state, 2, 4).as_deref(), Some("Test FX"));
+        assert_eq!(crate::mixer::slot_name(&app.state.session, 2, 4).as_deref(), Some("Test FX"));
     }
 
     /// The menu bar dropdown's ▸ entries (spec: ui/menus.md "Look"): a click opens the submenu, the app's popup, to the
@@ -23896,7 +23893,7 @@ mod tests {
         use views::menus::{DECLICK_LABEL, TOOLS_MENU};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
         app.sync_samplers(None);
@@ -23925,15 +23922,15 @@ mod tests {
         click(&mut app, &mut c, row);
         let item = hit_rect(&app, &Action::PlPopup(3));
         assert!(app.top_hit(item.cx(), item.cy()).is_some_and(|h| h.action == Action::PlPopup(3)), "the submenu is over the dropdown");
-        app.state.piano.dirty = false;
+        app.state.session.dirty = false;
         click(&mut app, &mut c, item);
         assert!(app.state.playlist.popup.is_none() && app.state.menu_open.is_none(), "a pick closes both");
-        let modes: Vec<u8> = app.state.project.channels.iter().map(|ch| ch.sound.declick).collect();
+        let modes: Vec<u8> = app.state.session.project.channels.iter().map(|ch| ch.sound.declick).collect();
         assert_eq!(modes, [0, 3, 0, 3, 0]);
-        assert!(app.unsaved() && app.state.piano.dirty, "a change to the project, played at once");
+        assert!(app.unsaved() && app.state.session.dirty, "a change to the project, played at once");
         // Lemon Sampler plays the new mode (and a save keeps it): the change reaches it on the next UI tick.
         app.plugin_tick();
-        let mut ch = app.state.project.channels[1].clone();
+        let mut ch = app.state.session.project.channels[1].clone();
         ch.sound.declick = 0;
         crate::plugins::store_sampler(&mut ch, &app.plugins.state(1).unwrap());
         assert_eq!(ch.sound.declick, 3);
@@ -23944,14 +23941,14 @@ mod tests {
         click(&mut app, &mut c, row);
         let item = hit_rect(&app, &Action::PlPopup(5));
         click(&mut app, &mut c, item);
-        assert_eq!(app.state.project.channels[1].sound.declick, 3);
+        assert_eq!(app.state.session.project.channels[1].sound.declick, 3);
         // The channel rack's options menu has the same submenu.
         app.state.rack.sel = [0].into();
         let rack = crate::rack::options_menu(&app.state, 0.0, 0.0);
         let sub = rack.items.iter().find(|i| i.label == DECLICK_LABEL).expect("in the rack's options menu");
         assert_eq!(sub.children, crate::rack::declick_items(&app.state));
         crate::playlist::run(&mut app, sub.children[4].cmd.clone());
-        assert_eq!(app.state.project.channels[0].sound.declick, 4);
+        assert_eq!(app.state.session.project.channels[0].sound.declick, 4);
     }
 
     /// TOOLS / the channel rack's options > Switch all plugin editors to ▸ (spec: ui/channel-rack.md §17, ui/plugin-window.md
@@ -23986,7 +23983,7 @@ mod tests {
         use views::menus::ADD_MENU;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.plugins = crate::plugins::Plugins::builtins();
         app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
         app.state.plugdb.rebuild(&app.plugins);
@@ -24006,17 +24003,17 @@ mod tests {
             let item = hit_rect(app, &Action::PlPopup(i));
             click(app, c, item);
         };
-        app.state.project.get_mut().mixer[2].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Taken".into(), state: Vec::new() });
+        app.state.session.project.get_mut().mixer[2].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Taken".into(), state: Vec::new() });
         pick(&mut app, &mut c);
-        assert_eq!(crate::mixer::slot_name(&app.state, 2, 1).as_deref(), Some("Test FX"));
+        assert_eq!(crate::mixer::slot_name(&app.state.session, 2, 1).as_deref(), Some("Test FX"));
         assert!(app.state.menu_open.is_none() && app.state.playlist.popup.is_none());
         // Every slot in use: nothing is added.
-        for slot in &mut app.state.project.get_mut().mixer[2].slots {
+        for slot in &mut app.state.session.project.get_mut().mixer[2].slots {
             slot.get_or_insert(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Taken".into(), state: Vec::new() });
         }
-        let before = app.state.project.mixer[2].slots.clone();
+        let before = app.state.session.project.mixer[2].slots.clone();
         pick(&mut app, &mut c);
-        assert_eq!(app.state.project.mixer[2].slots, before);
+        assert_eq!(app.state.session.project.mixer[2].slots, before);
         assert_eq!(app.state.message.as_deref(), Some("Every slot of this track is in use"));
     }
 
@@ -24031,7 +24028,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let index = |m: usize, label: &str| MENUS[m].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == label).unwrap();
         let (gens, pats, fx) = (section_key("Generators").unwrap(), section_key("Patterns").unwrap(), section_key("Effects").unwrap());
         let s = &mut app.state;
@@ -24116,8 +24113,8 @@ mod tests {
         use views::menus::{item_at, works, MENUS, PATTERNS};
         use winit::keyboard::Key;
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().patterns.push(os_model::Pattern { number: 2, name: Some("Drums".into()), ..Default::default() });
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().patterns.push(os_model::Pattern { number: 2, name: Some("Drums".into()), ..Default::default() });
         app.state.set_pattern(2);
         let (pats, fx) = (section_key("Patterns").unwrap(), section_key("Effects").unwrap());
         let reset = |app: &mut App| {
@@ -24179,7 +24176,7 @@ mod tests {
         }
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         frame(&mut app, &mut c, None);
         let hint = |app: &App, a: &Action| app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.hint.to_string()).unwrap();
         for (a, h) in [
@@ -24259,7 +24256,7 @@ mod tests {
         use crate::playlist::Mark;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         frame(&mut app, &mut c, None);
         let clock = hit_rect(&app, &Action::Clock);
         let pick = |app: &mut App, c: &mut Canvas, label: &str| {
@@ -24323,7 +24320,7 @@ mod tests {
         use views::menus::{label_now, shortcut_now, Kind, MENUS};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.rack.sel = [0, 1].into();
         let f = os_ui::Font::new(14);
         for (menu, m) in MENUS.iter().enumerate() {
@@ -24345,11 +24342,11 @@ mod tests {
     fn pattern_box_keeps_the_start_of_long_names() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.set_pattern(1);
         // The left end of the box's text area, drawn with pattern 1 named `name`.
         let left = |app: &mut App, c: &mut Canvas, name: &str| {
-            crate::patterns::pat_mut(&mut app.state, 1).name = Some(name.into());
+            crate::patterns::pat_mut(&mut app.state.session, 1).name = Some(name.into());
             frame(app, c, None);
             let pb = hit_rect(app, &Action::PatternNext);
             let (x0, y0) = (pb.x as u32 + 4, pb.y as u32 + 6);
@@ -24391,44 +24388,44 @@ mod tests {
         use crate::rack::{bar_steps, beat_steps, pattern_bars, pattern_steps, RCmd};
         use os_model::TimeMarker;
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.set_pattern(1);
-        crate::patterns::pat_mut(&mut app.state, 1).notes.clear();
+        crate::patterns::pat_mut(&mut app.state.session, 1).notes.clear();
         let set_to = |app: &App| -> Vec<u32> {
-            let items = crate::rack::length_menu(&app.state, 0.0, 0.0).items;
+            let items = crate::rack::length_menu(&app.state.session, 0.0, 0.0).items;
             items.into_iter().filter_map(|it| if let crate::playlist::Cmd::Rack(RCmd::SetLen(Some(v))) = it.cmd { Some(v) } else { None }).collect()
         };
         // 4/4 and no marker: one 16-step bar, beats of 4.
         let s = &app.state;
-        assert_eq!((pattern_steps(s), beat_steps(s), bar_steps(s)), (16, 4, 16));
+        assert_eq!((pattern_steps(&s.session), beat_steps(&s.session), bar_steps(&s.session)), (16, 4, 16));
         // A 3/8 pattern in a 4/4 project: 6 lit steps, 12 with step 8 on; the groups stay at 4; Set to counts 16-step
         // bars; the pattern's bars are 6 steps.
         let sig = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: 3, denominator: 8, ..TimeMarker::new(0, "3/8") };
-        crate::patterns::pat_mut(&mut app.state, 1).markers.push(sig);
-        assert_eq!((pattern_steps(&app.state), beat_steps(&app.state)), (6, 4));
+        crate::patterns::pat_mut(&mut app.state.session, 1).markers.push(sig);
+        assert_eq!((pattern_steps(&app.state.session), beat_steps(&app.state.session)), (6, 4));
         crate::rack::set_step(&mut app.state, 0, 7, true);
-        assert_eq!(pattern_steps(&app.state), 12);
+        assert_eq!(pattern_steps(&app.state.session), 12);
         assert_eq!(set_to(&app), [16, 32, 64, 128, 256, 512]);
-        assert_eq!(pattern_bars(&app.state, 12 * 24), [(0, 144), (144, 288)]);
+        assert_eq!(pattern_bars(&app.state.session, 12 * 24), [(0, 144), (144, 288)]);
         crate::rack::set_len(&mut app.state, Some(6));
         app.rack_step(0, 8, false);
         app.drag = None;
-        assert_eq!(pattern_steps(&app.state), 12, "grown to the second 3/8 bar");
+        assert_eq!(pattern_steps(&app.state.session), 12, "grown to the second 3/8 bar");
         // A 6/8 project: beats of 2 steps and bars of 12 (an empty pattern without a marker, Set to's 1 bar); 6/16:
         // beats of 1 and bars of 6.
-        app.state.project.get_mut().bar = Some((6, 2));
+        app.state.session.project.get_mut().bar = Some((6, 2));
         app.state.set_pattern(2);
         let s = &app.state;
-        assert_eq!((pattern_steps(s), beat_steps(s), bar_steps(s)), (12, 2, 12));
+        assert_eq!((pattern_steps(&s.session), beat_steps(&s.session), bar_steps(&s.session)), (12, 2, 12));
         assert_eq!(set_to(&app)[0], 12);
-        app.state.project.get_mut().bar = Some((6, 1));
+        app.state.session.project.get_mut().bar = Some((6, 1));
         let s = &app.state;
-        assert_eq!((pattern_steps(s), beat_steps(s)), (6, 1));
+        assert_eq!((pattern_steps(&s.session), beat_steps(&s.session)), (6, 1));
 
         // Drawn: in the 6/8 project the steps alternate in pairs; the 3/8 pattern's mini roll shades its two bars, each
         // half the width.
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
-        app.state.project.get_mut().bar = Some((6, 2));
+        app.state.session.project.get_mut().bar = Some((6, 2));
         app.state.raise(Win::ChannelRack);
         frame(&mut app, &mut c, None);
         let at = |c: &Canvas, x: f32, y: f32| c.pixmap.pixel(x as u32, y as u32).unwrap();
@@ -24455,17 +24452,17 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         app.state.rack_roll_view = true;
         app.state.rack_size.0 = views::rack::DEFAULT_SIZE.0 + 320.0;
-        let ch = app.state.project.channels[1].index;
-        let ps = crate::rack::per_step(&app.state);
+        let ch = app.state.session.project.channels[1].index;
+        let ps = crate::rack::per_step(&app.state.session);
         let n = app.state.pattern().max(1);
-        crate::patterns::pat_mut(&mut app.state, n).notes.push(os_model::Note { length: ps, ..os_model::Note::step(ch, 12 * ps) });
+        crate::patterns::pat_mut(&mut app.state.session, n).notes.push(os_model::Note { length: ps, ..os_model::Note::step(ch, 12 * ps) });
         app.state.raise(Win::ChannelRack);
         frame(&mut app, &mut c, None);
         let roll = hit_rect(&app, &Action::RackRoll(1));
         let button = hit_rect(&app, &Action::ChannelEnable(1));
         assert!(roll.contains(button.cx(), button.cy()), "the button is on the preview");
         click(&mut app, &mut c, button);
-        assert!(!app.state.project.channels[1].enabled);
+        assert!(!app.state.session.project.channels[1].enabled);
         crate::rack::run(&mut app, crate::rack::RCmd::Opt(crate::rack::PREVIEW_MUTE));
         frame(&mut app, &mut c, None);
         let led = hit_rect(&app, &Action::ChannelEnable(1));
@@ -24502,7 +24499,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         frame(&mut app, &mut c, None);
         assert_eq!(app.state.toolbar, Opts { separators: true, flat: false, hint_bar: false, hidden: false });
         // The menu, from the hint panel and from bare background.
@@ -24646,7 +24643,7 @@ mod tests {
         use crate::toolbar::{Layout, Panel};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.mouse_move(1300.0, 600.0);
         frame(&mut app, &mut c, None);
         let block = |c: &Canvas, x0: u32| (0..40).flat_map(|y| (0..192).map(move |x| (x, y))).map(|(x, y)| c.pixmap.pixel(x0 + x, y).unwrap()).collect::<Vec<_>>();
@@ -24680,7 +24677,7 @@ mod tests {
         use crate::toolbar::{BarHit, Layout, Panel, Tile};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.wins[0].maxed = false;
         app.state.wins[0].rect = Rect::new(400.0, 300.0, 900.0, 500.0);
         app.state.raise(Win::Playlist);
@@ -24864,11 +24861,11 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.wins.iter_mut().for_each(|w| w.maxed = false);
         app.menu_item(ADD_MENU, entry("Automation clip"));
-        let row = app.state.project.channels.len() - 1;
-        let ch = app.state.project.channels[row].clone();
+        let row = app.state.session.project.channels.len() - 1;
+        let ch = app.state.session.project.channels[row].clone();
         assert_eq!((ch.pan, ch.volume), (-1.0, 1.0), "a new clip's range is 0..1");
         assert!(app.state.shown(Win::Plugin) && app.state.plugin_channel == row);
         frame(&mut app, &mut c, None);
@@ -24876,8 +24873,8 @@ mod tests {
         assert_eq!(app.state.knob_text(KnobId::ChanVol(row)), "Maximum: 100%");
         assert_eq!(app.state.knob_text(KnobId::AutoLfo(row, LfoKnob::On)), "LFO: off");
         assert_eq!(app.state.knob_text(KnobId::AutoLfo(row, LfoKnob::Speed)), "LFO speed: 1.00 cycles per beat");
-        let lfo = |app: &App| app.state.project.automation(ch.index).unwrap().lfo.clone();
-        let steps = app.state.history.done();
+        let lfo = |app: &App| app.state.session.project.automation(ch.index).unwrap().lfo.clone();
+        let steps = app.state.session.history.done();
 
         // The switch and the mode: a click flips each.
         for k in [LfoKnob::On, LfoKnob::Mode] {
@@ -24898,10 +24895,10 @@ mod tests {
         let r = hit_rect(&app, &Action::Knob(KnobId::ChanPan(row)));
         assert!(app.state.plugin_pos.1 < r.y, "the knob is in the channel window");
         app.state.set_knob(KnobId::ChanPan(row), 0.25);
-        assert_eq!(app.state.project.channels[row].pan, -0.5);
+        assert_eq!(app.state.session.project.channels[row].pan, -0.5);
         assert_eq!(os_model::clip_lfo::range(-0.5, 1.0), (0.25, 0.75));
         // Each change is an undo step; undo puts them back.
-        assert_eq!(app.state.history.done(), steps + 3);
+        assert_eq!(app.state.session.history.done(), steps + 3);
         crate::history::undo(&mut app.state);
         assert_eq!(lfo(&app).amount, 64);
         crate::history::undo(&mut app.state);
@@ -24910,7 +24907,7 @@ mod tests {
         crate::history::redo(&mut app.state);
         // Middle click: the minimum goes back to 0, not to the centre.
         app.state.reset_knob(KnobId::ChanPan(row));
-        assert_eq!(app.state.project.channels[row].pan, -1.0);
+        assert_eq!(app.state.session.project.channels[row].pan, -1.0);
         app.state.set_knob(KnobId::ChanPan(row), 0.25);
         app.state.set_knob(KnobId::AutoLfo(row, LfoKnob::Pulse), 0.75);
         // Saved and loaded back: the levels as the range, the LFO's fields as set.
@@ -24937,47 +24934,47 @@ mod tests {
         use views::menus::{item_at, ADD_MENU};
         let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         // A file's groups: Drums, then Unsorted.
-        crate::rack::set_groups(&mut app.state, &[Group { name: "Drums".into(), members: [0, 3].into_iter().collect() }], Some(1));
+        crate::rack::set_groups(&mut app.state.session, &[Group { name: "Drums".into(), members: [0, 3].into_iter().collect() }], Some(1));
         app.state.rack.select_only(1);
         app.state.selected_channel = 1;
         let before = (app.state.playlist.source, app.state.playlist.picker);
-        let clips = pl::clips(&app.state).len();
-        let names = |app: &App| crate::rack::groups(&app.state.project).iter().map(|g| g.name.clone()).collect::<Vec<_>>();
+        let clips = pl::clips(&app.state.session).len();
+        let names = |app: &App| crate::rack::groups(&app.state.session.project).iter().map(|g| g.name.clone()).collect::<Vec<_>>();
         // Audio clip.
         app.menu_item(ADD_MENU, entry("Audio clip"));
         let s = &app.state;
-        let ch = s.project.channels.last().unwrap();
-        assert_eq!((s.project.channels.len(), ch.index, ch.kind, ch.name.as_deref()), (6, 5, ChannelKind::AudioClip, Some("Audio Clip")));
+        let ch = s.session.project.channels.last().unwrap();
+        assert_eq!((s.session.project.channels.len(), ch.index, ch.kind, ch.name.as_deref()), (6, 5, ChannelKind::AudioClip, Some("Audio Clip")));
         assert_eq!((ch.mixer_track, ch.sample_path.as_deref(), ch.sound), (0, None, Default::default()));
         assert_eq!((s.rack.sel.iter().copied().collect::<Vec<_>>(), s.selected_channel), (vec![5], 5));
-        assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.project), crate::rack::filter(&app.state.project)), (vec!["Drums".into(), "Audio".into()], Some(2), Filter::Group(1)));
+        assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.session.project), crate::rack::filter(&app.state.session.project)), (vec!["Drums".into(), "Audio".into()], Some(2), Filter::Group(1)));
         let s = &app.state;
-        assert_eq!(crate::rack::groups(&s.project)[1].members.iter().copied().collect::<Vec<_>>(), [5]);
-        assert_eq!((s.playlist.source, s.playlist.picker, pl::clips(s).len()), (Some(ClipSource::Channel(5)), PickKind::Audio, clips));
+        assert_eq!(crate::rack::groups(&s.session.project)[1].members.iter().copied().collect::<Vec<_>>(), [5]);
+        assert_eq!((s.playlist.source, s.playlist.picker, pl::clips(&s.session).len()), (Some(ClipSource::Channel(5)), PickKind::Audio, clips));
         assert_eq!(s.pending_open, Some(5), "its settings (Lemon Sampler's window) open");
         assert!(app.unsaved());
         // Automation clip.
         app.state.pending_open = None;
         app.menu_item(ADD_MENU, entry("Automation clip"));
         let s = &app.state;
-        let ch = s.project.channels.last().unwrap();
+        let ch = s.session.project.channels.last().unwrap();
         assert_eq!((ch.index, ch.kind, ch.name.as_deref(), ch.mixer_track), (6, ChannelKind::Automation, Some("Automation Clip"), 0));
-        let a = s.project.automation(6).expect("its points").clone();
+        let a = s.session.project.automation(6).expect("its points").clone();
         let pts: Vec<_> = a.points.iter().map(|p| (p.beat, p.value, p.tension, p.mode)).collect();
         assert_eq!(pts, [(0.0, 0.5, 0.0, AutoMode::Single), (4.0, 0.5, 0.0, AutoMode::Single)]);
         assert!(a.targets.is_empty() && a.lfo.mode == 1);
-        assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.project), crate::rack::filter(&app.state.project)), (vec!["Drums".into(), "Audio".into(), "Automation".into()], Some(3), Filter::Group(2)));
+        assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.session.project), crate::rack::filter(&app.state.session.project)), (vec!["Drums".into(), "Audio".into(), "Automation".into()], Some(3), Filter::Group(2)));
         let s = &app.state;
         assert!(s.shown(Win::Plugin) && s.plugin_channel == 6 && s.pending_open.is_none(), "its channel window opens");
         assert_eq!((s.playlist.source, s.playlist.picker), (Some(ClipSource::Channel(6)), PickKind::Automation));
         // Another audio clip: a unique name, the same group.
         app.menu_item(ADD_MENU, entry("Audio clip"));
         let s = &app.state;
-        assert_eq!(s.project.channels[7].name.as_deref(), Some("Audio Clip #2"));
-        assert_eq!((crate::rack::groups(&s.project).len(), crate::rack::filter(&s.project)), (3, Filter::Group(1)));
-        assert_eq!(crate::rack::groups(&s.project)[1].members.iter().copied().collect::<Vec<_>>(), [5, 7]);
+        assert_eq!(s.session.project.channels[7].name.as_deref(), Some("Audio Clip #2"));
+        assert_eq!((crate::rack::groups(&s.session.project).len(), crate::rack::filter(&s.session.project)), (3, Filter::Group(1)));
+        assert_eq!(crate::rack::groups(&s.session.project)[1].members.iter().copied().collect::<Vec<_>>(), [5, 7]);
         // Saved as FL stores them: types 4 and 5, the groups before Unsorted, the automation's points and no link.
         let path = std::env::temp_dir().join(format!("os_add_clips_{}.flp", std::process::id()));
         app.save_to(path.clone());
@@ -24992,15 +24989,15 @@ mod tests {
         // Undo (Ctrl+Z), one step each: the channel goes, the groups, filter, selection and clip source come back.
         let undo = |app: &mut App| crate::playlist::run(app, crate::playlist::Cmd::Undo);
         assert_eq!(undo(&mut app).as_deref(), Some("Undo: add audio clip"));
-        assert_eq!((app.state.project.channels.len(), crate::rack::groups(&app.state.project)[1].members.len()), (7, 1));
+        assert_eq!((app.state.session.project.channels.len(), crate::rack::groups(&app.state.session.project)[1].members.len()), (7, 1));
         assert_eq!(undo(&mut app).as_deref(), Some("Undo: add automation clip"));
         let s = &app.state;
-        assert_eq!((s.project.channels.len(), s.project.automation(6).is_none()), (6, true));
-        assert_eq!((names(&app), crate::rack::filter(&app.state.project), app.state.selected_channel), (vec!["Drums".into(), "Audio".into()], Filter::Group(1), 5));
+        assert_eq!((s.session.project.channels.len(), s.session.project.automation(6).is_none()), (6, true));
+        assert_eq!((names(&app), crate::rack::filter(&app.state.session.project), app.state.selected_channel), (vec!["Drums".into(), "Audio".into()], Filter::Group(1), 5));
         undo(&mut app);
         let s = &app.state;
-        assert_eq!(s.project.channels.len(), 5);
-        assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.project), crate::rack::filter(&app.state.project)), (vec!["Drums".into()], Some(1), Filter::All));
+        assert_eq!(s.session.project.channels.len(), 5);
+        assert_eq!((names(&app), crate::rack::unsorted_at(&app.state.session.project), crate::rack::filter(&app.state.session.project)), (vec!["Drums".into()], Some(1), Filter::All));
         let s = &app.state;
         assert_eq!((s.rack.sel.iter().copied().collect::<Vec<_>>(), s.selected_channel, (s.playlist.source, s.playlist.picker)), (vec![1], 1, before));
     }
@@ -25012,30 +25009,30 @@ mod tests {
         use views::menus::{item_at, works, ADD_MENU};
         let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         assert!(works(ADD_MENU, item_at(ADD_MENU, entry("Layer")).unwrap()));
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         app.state.rack.select_only(1);
         app.state.rack.sel.insert(3);
-        let wanted = vec![app.state.project.channels[1].index, app.state.project.channels[3].index];
+        let wanted = vec![app.state.session.project.channels[1].index, app.state.session.project.channels[3].index];
         app.menu_item(ADD_MENU, entry("Layer"));
         let s = &app.state;
-        let ch = s.project.channels.last().unwrap();
-        assert_eq!((s.project.channels.len(), ch.kind, ch.name.as_deref(), ch.volume), (n + 1, ChannelKind::Layer, Some("Layer"), 1.0));
+        let ch = s.session.project.channels.last().unwrap();
+        assert_eq!((s.session.project.channels.len(), ch.kind, ch.name.as_deref(), ch.volume), (n + 1, ChannelKind::Layer, Some("Layer"), 1.0));
         assert_eq!(ch.layer_children, wanted);
         assert_eq!((s.selected_channel, s.rack.sel.iter().copied().collect::<Vec<_>>()), (n, vec![n]));
         // A second one is named apart; with nothing else selected it has the first layer as its only child.
         app.menu_item(ADD_MENU, entry("Layer"));
-        let ch = app.state.project.channels.last().unwrap();
-        assert_eq!((ch.name.as_deref(), ch.layer_children.clone()), (Some("Layer #2"), vec![app.state.project.channels[n].index]));
+        let ch = app.state.session.project.channels.last().unwrap();
+        assert_eq!((ch.name.as_deref(), ch.layer_children.clone()), (Some("Layer #2"), vec![app.state.session.project.channels[n].index]));
         // The writer keeps it a layer with its children.
-        let back = os_flp::project::load(&os_flp::project::create(&app.state.project).unwrap()).unwrap();
+        let back = os_flp::project::load(&os_flp::project::create(&app.state.session.project).unwrap()).unwrap();
         let saved = back.channels.iter().find(|c| c.name.as_deref() == Some("Layer")).unwrap();
         assert_eq!((saved.kind, saved.layer_children.clone()), (ChannelKind::Layer, wanted));
         let undo = |app: &mut App| crate::playlist::run(app, crate::playlist::Cmd::Undo);
         assert_eq!(undo(&mut app).as_deref(), Some("Undo: add layer"));
         undo(&mut app);
-        assert_eq!(app.state.project.channels.len(), n);
+        assert_eq!(app.state.session.project.channels.len(), n);
     }
 
     /// PATTERNS > Split by channel (spec: ui/split-by-channel.md §2): rack order; the pattern keeps the first
@@ -25049,9 +25046,9 @@ mod tests {
         use os_model::{Clip, ClipSource, ControlPoint, TimeMarker};
         use views::menus::{item_at, pattern_popup, works, MENUS, PATTERNS};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         // Rack order Kick, Snare, Hat, Clap, Pluck (channel indices 0, 3, 2, 1, 4).
-        app.state.project.get_mut().channels.swap(1, 3);
+        app.state.session.project.get_mut().channels.swap(1, 3);
         let step = |ch: u16, k: u32| Note::step(ch, k * 24);
         let sig = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: 3, denominator: 4, ..TimeMarker::new(0, "3/4") };
         let color = Some(os_model::Rgb::new(0x45, 0x94, 0x6a));
@@ -25066,13 +25063,13 @@ mod tests {
         };
         let p2 = Pattern { number: 2, name: Some("Verse".into()), notes: vec![step(2, 0)], ..Pattern::default() };
         let p3 = Pattern { number: 3, notes: vec![step(2, 0), step(2, 4)], ..Pattern::default() };
-        app.state.project.get_mut().patterns = vec![p1.clone(), p2, p3];
+        app.state.session.project.get_mut().patterns = vec![p1.clone(), p2, p3];
         let mut cut = Clip::new(1536, 192, 2, ClipSource::Pattern(1));
         cut.window = Some((96.0, 288.0));
         let clips = vec![Clip::new(192, 384, 0, ClipSource::Pattern(1)), Clip::new(768, 384, 1, ClipSource::Pattern(2)), cut];
-        pl::arr_mut(&mut app.state).clips = clips.clone();
+        pl::arr_mut(&mut app.state.session).clips = clips.clone();
         app.state.playlist.sel = vec![1];
-        let before = (app.state.project.patterns.clone(), clips.clone());
+        let before = (app.state.session.project.patterns.clone(), clips.clone());
         app.state.set_pattern(1);
         let entry = MENUS[PATTERNS].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Split by instrument").unwrap();
         assert!(works(PATTERNS, item_at(PATTERNS, entry).unwrap()));
@@ -25081,7 +25078,7 @@ mod tests {
         assert!(it.enabled && it.cmd == Cmd::Pattern(PCmd::SplitByChannel), "also in the pattern menu");
         app.menu_item(PATTERNS, entry);
         let s = &app.state;
-        let pat = |n: u16| s.project.pattern(n).unwrap();
+        let pat = |n: u16| s.session.project.pattern(n).unwrap();
         let summary = |n: u16| (pat(n).name.clone().unwrap_or_default(), pat(n).notes.iter().map(|x| (x.channel, x.position)).collect::<Vec<_>>());
         assert_eq!(summary(1), ("Kick".into(), vec![(0, 24), (0, 72)]));
         assert_eq!(summary(2), ("Snare".into(), vec![(3, 48)]));
@@ -25100,22 +25097,22 @@ mod tests {
             .into_iter()
             .map(|(p, k)| at(&Clip { source: ClipSource::Pattern(p), ..clips[k] }))
             .collect();
-        assert_eq!(pl::clips(s).iter().map(at).collect::<Vec<_>>(), want);
+        assert_eq!(pl::clips(&s.session).iter().map(at).collect::<Vec<_>>(), want);
         assert!(s.playlist.sel.is_empty(), "nothing selected");
         assert!(app.unsaved());
         // One undo step.
         assert_eq!(pl::run(&mut app, Cmd::Undo).as_deref(), Some("Undo: split by instrument"));
-        assert_eq!((app.state.project.patterns.clone(), pl::clips(&app.state).to_vec()), before);
+        assert_eq!((app.state.session.project.patterns.clone(), pl::clips(&app.state.session).to_vec()), before);
         // A pattern with one channel's notes is only renamed; one without notes stays as it is.
         app.state.set_pattern(3);
-        let n = app.state.history.at();
+        let n = app.state.session.history.at();
         app.pattern_cmd(PCmd::SplitByChannel);
         let s = &app.state;
-        assert_eq!((s.project.patterns.len(), s.project.pattern(3).unwrap().name.as_deref(), pl::clips(s).len()), (3, Some("Hat"), 3));
-        assert_eq!(s.history.at(), n + 1);
+        assert_eq!((s.session.project.patterns.len(), s.session.project.pattern(3).unwrap().name.as_deref(), pl::clips(&s.session).len()), (3, Some("Hat"), 3));
+        assert_eq!(s.session.history.at(), n + 1);
         app.state.set_pattern(7);
         app.pattern_cmd(PCmd::SplitByChannel);
-        assert_eq!((app.state.project.patterns.len(), app.state.history.at()), (3, n + 1));
+        assert_eq!((app.state.session.project.patterns.len(), app.state.session.history.at()), (3, n + 1));
     }
 
     /// TOOLS / the channel rack's options > Switch all / selected audio clip channels to ▸ (spec: ui/channel-switches.md
@@ -25130,16 +25127,16 @@ mod tests {
         use views::menus::{CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, MENUS, TOOLS_MENU};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let wav = std::env::temp_dir().join(format!("os-app-switch-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 1, 0).expect("audio clip added");
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         let (a, b) = (n - 2, n - 1);
         // TIME 4 beats, PITCH +100 cents, MUL x1.19, Resample.
         let kept = [768f32.to_bits(), 100, 2540];
-        app.state.project.get_mut().channels[a].sound.stretch = [kept[0], kept[1], kept[2], 0];
+        app.state.session.project.get_mut().channels[a].sound.stretch = [kept[0], kept[1], kept[2], 0];
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
         app.sync_samplers(None);
@@ -25153,7 +25150,7 @@ mod tests {
             }
             st[3] as i32
         };
-        let methods = |app: &App| app.state.project.channels.iter().map(|ch| ch.sound.stretch_mode()).collect::<Vec<_>>();
+        let methods = |app: &App| app.state.session.project.channels.iter().map(|ch| ch.sound.stretch_mode()).collect::<Vec<_>>();
         // The submenu: the methods as audio/time-stretch.md names them, the second column from Auto.
         let labels: Vec<String> = crate::rack::stretch_items(true).iter().map(|i| if i.col { "|".into() } else { i.label.to_string() }).collect();
         let want = "Realtime Resample Stretch Stretch Pro Elastique e3 generic e3 mono Special Slice stretch Slice map | Auto Legacy e2 generic e2 transient e2 mono e2 speech";
@@ -25190,13 +25187,13 @@ mod tests {
         assert_eq!((methods(&app)[a], methods(&app)[b]), (0, 0));
         // Ok sets it on both audio clip channels, their other stretch settings kept; the sampler channels keep theirs.
         pick(&mut app, &mut c, "Stretch Pro");
-        app.state.piano.dirty = false;
+        app.state.session.dirty = false;
         let ok = hit_rect(&app, &Action::Dlg(DHit::Button(0)));
         click(&mut app, &mut c, ok);
         assert!(!app.modal_open());
         assert_eq!(methods(&app), [0, 0, 0, 0, 0, sm::STRETCH_PRO, sm::STRETCH_PRO]);
-        assert_eq!(app.state.project.channels[a].sound.stretch[..3], kept);
-        assert!(app.unsaved() && app.state.piano.dirty, "a change to the project, played at once");
+        assert_eq!(app.state.session.project.channels[a].sound.stretch[..3], kept);
+        assert!(app.unsaved() && app.state.session.dirty, "a change to the project, played at once");
         assert_eq!((sampler(&app, a), sampler(&app, b), sampler(&app, 0)), (sm::STRETCH_PRO, sm::STRETCH_PRO, 0), "Lemon Sampler follows");
         // The rack's options menu: Switch selected... > e2 speech, on the selected audio clip channel only (Enter = Ok).
         app.state.rack.sel = [0, b].into();
@@ -25220,7 +25217,7 @@ mod tests {
         assert_eq!(methods(&app)[a], sm::STRETCH_PRO);
         // A project without audio clip channels: nothing is asked.
         let mut plain = App::new(None);
-        plain.state.project = crate::locked::Locked::new(test_project());
+        plain.state.session.project = crate::locked::Locked::new(test_project());
         pl::run(&mut plain, Cmd::Rack(crate::rack::RCmd::StretchClips(true, sm::STRETCH)));
         assert!(!plain.modal_open());
         // Saving keeps the methods.
@@ -25248,9 +25245,9 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.set_pattern(1);
-        app.state.project.get_mut().patterns[0].markers = vec![TimeMarker::new(192, "Mid")];
+        app.state.session.project.get_mut().patterns[0].markers = vec![TimeMarker::new(192, "Mid")];
         app.mark_saved();
         let entry = MENUS[PATTERNS].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Set time signature...").unwrap();
         assert!(works(PATTERNS, item_at(PATTERNS, entry).unwrap()));
@@ -25261,7 +25258,7 @@ mod tests {
             Some(Body::TimeSig(f)) => Some(*f),
             _ => None,
         };
-        let start = |app: &App| app.state.project.pattern(1).unwrap().markers.iter().find(|m| m.position == 0 && m.kind == TimeMarker::SIGNATURE).cloned();
+        let start = |app: &App| app.state.session.project.pattern(1).unwrap().markers.iter().find(|m| m.position == 0 && m.kind == TimeMarker::SIGNATURE).cloned();
         // The dialog, at 4/4.
         app.menu_item(PATTERNS, entry);
         assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4, song: None }));
@@ -25299,14 +25296,14 @@ mod tests {
         assert_eq!(form(&app).map(|f| (f.num, f.den)), Some((3, 8)));
         assert!(start(&app).is_none() && !app.unsaved(), "nothing yet");
         // Accept: a 3/8 marker at the pattern's start, before its other markers.
-        app.state.piano.dirty = false;
+        app.state.session.dirty = false;
         frame(&mut app, &mut c, None);
         let accept = hit_rect(&app, &Action::Dlg(DHit::Accept));
         click(&mut app, &mut c, accept);
         assert!(!app.modal_open());
         let want = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: 3, denominator: 8, ..TimeMarker::new(0, "3/8") };
-        assert_eq!(app.state.project.pattern(1).unwrap().markers, [want.clone(), TimeMarker::new(192, "Mid")]);
-        assert!(app.unsaved() && app.state.piano.dirty);
+        assert_eq!(app.state.session.project.pattern(1).unwrap().markers, [want.clone(), TimeMarker::new(192, "Mid")]);
+        assert!(app.unsaved() && app.state.session.dirty);
         assert_eq!(crate::views::playlist::marker_label(&want), "3/8", "shown once in the marker lanes");
         // Saved with the pattern.
         let path = std::env::temp_dir().join(format!("os-app-timesig-{}.flp", std::process::id()));
@@ -25334,7 +25331,7 @@ mod tests {
         let close = hit_rect(&app, &Action::Dlg(DHit::Close));
         click(&mut app, &mut c, close);
         assert!(!app.modal_open());
-        assert_eq!(app.state.project.pattern(1).unwrap().markers, [TimeMarker::new(192, "Mid")]);
+        assert_eq!(app.state.session.project.pattern(1).unwrap().markers, [TimeMarker::new(192, "Mid")]);
         // No marker: straight to the dialog; Enter accepts. Another pattern gets its own.
         app.state.set_pattern(2);
         app.menu_item(PATTERNS, entry);
@@ -25342,7 +25339,7 @@ mod tests {
         app.key(&Key::Named(NamedKey::Enter), false, false);
         assert!(!app.modal_open());
         let four = TimeMarker { kind: TimeMarker::SIGNATURE, ..TimeMarker::new(0, "4/4") };
-        assert_eq!(app.state.project.pattern(2).unwrap().markers, [four]);
+        assert_eq!(app.state.session.project.pattern(2).unwrap().markers, [four]);
         assert!(start(&app).is_none(), "pattern 1 keeps none");
     }
 
@@ -25360,19 +25357,19 @@ mod tests {
         use views::playlist::marker_label;
         use winit::keyboard::{Key, NamedKey};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.set_pattern(1);
         let note = |end: u32| Note { length: 100, ..Note::step(0, end - 100) };
         let sig = |pos: u32, num: u8, den: u8| TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(pos, &format!("{num}/{den}")) };
         let len = |app: &App| {
-            let (playlist, piano) = (pl::source_len(&app.state, ClipSource::Pattern(1)), pattern_length(&app.state, 1));
+            let (playlist, piano) = (pl::source_len(&app.state.session, ClipSource::Pattern(1)), pattern_length(&app.state.session, 1));
             assert_eq!(playlist, piano, "the playlist and the piano roll agree");
             playlist
         };
         let set = |app: &mut App, project: (u16, u16), arr: Vec<TimeMarker>, own: Vec<TimeMarker>, end: u32| {
-            app.state.project.get_mut().bar = Some((project.0, 16 / project.1));
-            pl::arr_mut(&mut app.state).markers = arr;
-            let p = &mut app.state.project.get_mut().patterns[0];
+            app.state.session.project.get_mut().bar = Some((project.0, 16 / project.1));
+            pl::arr_mut(&mut app.state.session).markers = arr;
+            let p = &mut app.state.session.project.get_mut().patterns[0];
             (p.notes, p.markers, p.length) = (vec![note(end)], own, None);
         };
         // The table: 96 PPQ, the last note ends at 300; the clip at 768.
@@ -25384,7 +25381,7 @@ mod tests {
             ((4, 4), vec![], vec![sig(0, 3, 4)], 576),
             ((4, 4), vec![], vec![sig(192, 3, 4)], 480),
         ];
-        pl::arr_mut(&mut app.state).clips = vec![Clip::new(768, 384, 0, ClipSource::Pattern(1))];
+        pl::arr_mut(&mut app.state.session).clips = vec![Clip::new(768, 384, 0, ClipSource::Pattern(1))];
         for (i, (project, arr, own, want)) in rows.into_iter().enumerate() {
             set(&mut app, project, arr, own, 300);
             assert_eq!(len(&app), want, "row {}", i + 1);
@@ -25395,7 +25392,7 @@ mod tests {
         assert_eq!(len(&app), 576, "at least one bar");
         set(&mut app, (4, 4), vec![], vec![], 384);
         assert_eq!(len(&app), 384, "a note ending on a bar line");
-        app.state.project.get_mut().patterns[0].length = Some(192);
+        app.state.session.project.get_mut().patterns[0].length = Some(192);
         assert_eq!(len(&app), 192, "the channel rack's length wins");
         // The piano roll's grid at 3/4 from tick 192: 4/4 bars before it, a bar line at it, 3/4 bars after it.
         set(&mut app, (4, 4), vec![], vec![sig(192, 3, 4)], 300);
@@ -25409,18 +25406,18 @@ mod tests {
         let resized = Clip::new(384, 768, 1, ClipSource::Pattern(1));
         let cut = Clip { window: Some((96.0, 480.0)), ..Clip::new(1536, 384, 2, ClipSource::Pattern(1)) };
         let other = Clip::new(0, 384, 3, ClipSource::Pattern(2));
-        pl::arr_mut(&mut app.state).clips = vec![natural, resized, cut, other];
-        let mut second = app.state.project.arrangements[0].clone();
+        pl::arr_mut(&mut app.state.session).clips = vec![natural, resized, cut, other];
+        let mut second = app.state.session.project.arrangements[0].clone();
         second.clips = vec![natural];
-        app.state.project.get_mut().arrangements.push(second);
-        let lengths = |app: &App| app.state.project.arrangements.iter().map(|a| a.clips.iter().map(|c| c.length).collect::<Vec<_>>()).collect::<Vec<_>>();
+        app.state.session.project.get_mut().arrangements.push(second);
+        let lengths = |app: &App| app.state.session.project.arrangements.iter().map(|a| a.clips.iter().map(|c| c.length).collect::<Vec<_>>()).collect::<Vec<_>>();
         assert_eq!(len(&app), 384);
         pl::run(&mut app, Cmd::Pattern(crate::patterns::Cmd::TimeSignature));
         app.sig_pick(false, 3);
         app.sig_pick(true, 8);
         app.key(&Key::Named(NamedKey::Enter), false, false);
         assert!(!app.modal_open());
-        let marker = &app.state.project.pattern(1).unwrap().markers[0];
+        let marker = &app.state.session.project.pattern(1).unwrap().markers[0];
         assert_eq!((marker, marker.name.as_str(), marker_label(marker).as_str()), (&sig(0, 3, 8), "3/8", "3/8"));
         assert_eq!(len(&app), 432, "three bars of 144");
         assert_eq!(lengths(&app), [vec![432, 768, 384, 384], vec![432]]);
@@ -25431,14 +25428,14 @@ mod tests {
         assert_eq!((bars, beats), (vec![0, 6, 12], vec![0, 2, 4, 6, 8, 10, 12]), "a bar every 6 steps, a beat every 2");
         assert_eq!(g.bar_lines(500.0), [(0, 1), (144, 2), (288, 3), (432, 4)]);
         // An empty 3/8 pattern is one 3/8 bar (§4).
-        app.state.project.get_mut().patterns[0].notes.clear();
+        app.state.session.project.get_mut().patterns[0].notes.clear();
         assert_eq!(len(&app), 144);
-        app.state.project.get_mut().patterns[0].notes = vec![note(300)];
+        app.state.session.project.get_mut().patterns[0].notes = vec![note(300)];
         // Yes to the conflict question takes the marker away at once: back to 4/4 bars and lengths.
         pl::run(&mut app, Cmd::Pattern(crate::patterns::Cmd::TimeSignature));
         app.key(&Key::Character("y".into()), false, false);
         app.key(&Key::Named(NamedKey::Escape), false, false);
-        assert!(!app.modal_open() && app.state.project.pattern(1).unwrap().markers.is_empty());
+        assert!(!app.modal_open() && app.state.session.project.pattern(1).unwrap().markers.is_empty());
         assert_eq!(len(&app), 384);
         assert_eq!(lengths(&app), [vec![384, 768, 384, 384], vec![384]]);
         // The playlist's own time-signature markers ("4/4", from the same dialog) are shown once too; they leave the
@@ -25446,7 +25443,7 @@ mod tests {
         pl::run(&mut app, Cmd::AddSignature);
         assert!(crate::timesig::form_open(&app.state));
         app.key(&Key::Named(NamedKey::Enter), false, false);
-        let m = pl::arr_mut(&mut app.state).markers.last().cloned().unwrap();
+        let m = pl::arr_mut(&mut app.state.session).markers.last().cloned().unwrap();
         assert_eq!((m.name.as_str(), marker_label(&m).as_str()), ("4/4", "4/4"));
         assert_eq!(len(&app), 384);
         // A named signature marker still shows its name after the signature.
@@ -25472,7 +25469,7 @@ mod tests {
         assert!(items(&app).iter().all(|i| i.enabled));
         assert_eq!(items(&app)[0].mark, Mark::Radio(true));
         assert_eq!(crate::playlist::jump_unit(&app.state), None);
-        let ppq = u32::from(app.state.project.ppq);
+        let ppq = u32::from(app.state.session.project.ppq);
         for (k, unit) in [(1, ppq), (2, ppq * 4), (5, ppq * 32)] {
             let c = items(&app)[k].cmd.clone();
             crate::playlist::run(&mut app, c);
@@ -25490,13 +25487,13 @@ mod tests {
         use os_model::{Arrangement, Clip, ClipSource, TimeMarker as M};
         use winit::keyboard::{Key, NamedKey};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().arrangements = vec![Arrangement { clips: (0..5).map(|i| Clip::new(384 * i, 384, 0, ClipSource::Pattern(1))).collect(), ..Default::default() }];
-        pl::arr_mut(&mut app.state);
-        let marks = |app: &App| pl::markers(&app.state).iter().map(|m| (m.position, m.kind, m.name.clone())).collect::<Vec<_>>();
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().arrangements = vec![Arrangement { clips: (0..5).map(|i| Clip::new(384 * i, 384, 0, ClipSource::Pattern(1))).collect(), ..Default::default() }];
+        pl::arr_mut(&mut app.state.session);
+        let marks = |app: &App| pl::markers(&app.state.session).iter().map(|m| (m.position, m.kind, m.name.clone())).collect::<Vec<_>>();
         let mk = |p: u32, k: u8, n: &str| (p, k, n.to_string());
         let set = |app: &mut App, list: &[(u32, u8, &str)]| {
-            pl::arr_mut(&mut app.state).markers = list.iter().map(|&(p, k, n)| M { kind: k, ..M::new(p, n) }).collect();
+            pl::arr_mut(&mut app.state.session).markers = list.iter().map(|&(p, k, n)| M { kind: k, ..M::new(p, n) }).collect();
         };
 
         // The ▸ menu's submenu; Add two... is greyed without a time selection.
@@ -25526,13 +25523,13 @@ mod tests {
         app.state.playlist.range = None;
 
         // Add auto and Add jump to next bar, at the song position, kept in position order; each one undo step.
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         app.state.playlist.pos = 768;
         pl::run(&mut app, Cmd::AddAutoMarker);
         app.state.playlist.pos = 384;
         pl::run(&mut app, Cmd::AddJumpMarker);
         assert_eq!(marks(&app), [mk(384, M::SKIP, " "), mk(768, M::PLAIN, "Auto"), mk(768, M::PLAIN, " ")]);
-        assert_eq!(app.state.history.len(), steps + 2);
+        assert_eq!(app.state.session.history.len(), steps + 2);
         pl::run(&mut app, Cmd::Undo);
         assert_eq!(marks(&app), [mk(768, M::PLAIN, "Auto")]);
 
@@ -25565,26 +25562,26 @@ mod tests {
 
         // Move content right on B (A 384, B 768, C 1536, clips to 1920): B's section and C's trade places.
         set(&mut app, &[(384, M::PLAIN, "A"), (768, M::PLAIN, "B"), (1536, M::PLAIN, "C")]);
-        let before = app.state.project.arrangements[0].clone();
+        let before = app.state.session.project.arrangements[0].clone();
         pl::run(&mut app, Cmd::MoveContent(1, true));
-        let starts = |app: &App| pl::clips(&app.state).iter().map(|c| c.position).collect::<Vec<_>>();
+        let starts = |app: &App| pl::clips(&app.state.session).iter().map(|c| c.position).collect::<Vec<_>>();
         assert_eq!(starts(&app), [0, 384, 1152, 1536, 768]);
         assert_eq!(marks(&app), [mk(384, M::PLAIN, "A"), mk(768, M::PLAIN, "C"), mk(1152, M::PLAIN, "B")]);
         // Move content left on B is its mirror: everything is back.
         pl::run(&mut app, Cmd::MoveContent(2, false));
-        assert_eq!(app.state.project.arrangements[0], before);
+        assert_eq!(app.state.session.project.arrangements[0], before);
         // Nothing to trade with: no change, no undo step.
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         pl::run(&mut app, Cmd::MoveContent(2, true));
         pl::run(&mut app, Cmd::MoveContent(0, false));
-        assert_eq!((&app.state.project.arrangements[0], app.state.history.len()), (&before, steps));
+        assert_eq!((&app.state.session.project.arrangements[0], app.state.session.history.len()), (&before, steps));
         // One undo step takes a move back.
         pl::run(&mut app, Cmd::MoveContent(1, true));
         pl::run(&mut app, Cmd::Undo);
-        assert_eq!(app.state.project.arrangements[0], before);
+        assert_eq!(app.state.session.project.arrangements[0], before);
 
         // The marker menu: the row's items at the clicked tick, the header, then the actions with the marker's own.
-        let m = pl::marker_menu(&app.state, 0, 400, 0.0, 0.0);
+        let m = pl::marker_menu(&app.state.session, 0, 400, 0.0, 0.0);
         let labels: Vec<&str> = m.items.iter().map(|it| &*it.label).collect();
         assert_eq!(labels[..10], ["Add marker...", "Add time signature...", "Place loop", "A at 2:01:00", "Delete", "Rename...", "", "Move content left", "Move content right", "Action"]);
         assert_eq!(labels[10..], ["None", "Start", "Loop", "Marker loop", "Marker skip", "Marker pause", "Time signature", "Start recording", "Stop recording"]);
@@ -25612,12 +25609,12 @@ mod tests {
         let grid = Rect::new(300.0, 200.0, 1200.0, 600.0);
         let g = pl::PGeom::new(&app.state, grid);
         app.mouse = (g.x_of(768.0) + 4.0, 190.0);
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         pl::press_markers(&mut app, grid, false);
         assert_eq!(app.state.playlist.pos, 768);
         let Some(Drag::Pl(d @ PlDrag::Marker { .. })) = app.drag.take() else { panic!("a marker drag") };
         pl::drag_end(&mut app, d, grid);
-        assert_eq!(app.state.history.len(), steps);
+        assert_eq!(app.state.session.history.len(), steps);
         // A right click away from the markers: the row's menu at the snapped tick.
         app.mouse = (g.x_of(1100.0), 190.0);
         pl::press_markers(&mut app, grid, true);
@@ -25632,12 +25629,12 @@ mod tests {
         // selection's ends (bars 7 to 9 give 2304 and 3072); one undo step.
         set(&mut app, &[]);
         app.state.playlist.range = Some((2304, 3072));
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         pl::run(&mut app, Cmd::AddTwoMarkers);
         app.state.playlist.edit.as_mut().expect("the base name box").text = "Sec".into();
         pl::commit_edit(&mut app.state);
         assert_eq!(marks(&app), [mk(2304, M::PLAIN, "Sec -  start"), mk(3072, M::PLAIN, "Sec -  end")]);
-        assert_eq!(app.state.history.len(), steps + 1);
+        assert_eq!(app.state.session.history.len(), steps + 1);
         // Without a selection it does nothing.
         app.state.playlist.range = None;
         pl::run(&mut app, Cmd::AddTwoMarkers);
@@ -25652,7 +25649,7 @@ mod tests {
         // Every kind's tab paints, with the Start marker's darker pre-roll.
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let kinds = [M::PLAIN, M::MARKER_LOOP, M::SKIP, M::PAUSE, M::LOOP, M::START, M::SIGNATURE, M::PUNCH_IN, M::PUNCH_OUT, M::KEY];
-        pl::arr_mut(&mut app.state).markers = kinds.iter().enumerate().map(|(i, &k)| M { kind: k, ..M::new(192 * i as u32, "Name") }).collect();
+        pl::arr_mut(&mut app.state.session).markers = kinds.iter().enumerate().map(|(i, &k)| M { kind: k, ..M::new(192 * i as u32, "Name") }).collect();
         frame(&mut app, &mut c, None);
     }
 
@@ -25663,9 +25660,9 @@ mod tests {
         use crate::playlist::{self as pl, Cmd, Mark};
         use os_model::{Arrangement, TimeMarker as M};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
-        app.state.project.get_mut().arrangements = vec![Arrangement::default()];
-        pl::arr_mut(&mut app.state);
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().arrangements = vec![Arrangement::default()];
+        pl::arr_mut(&mut app.state.session);
         // The list: Root note C … B (C checked), a column break, Scale: Default, Black notes (checked), the 37 scales.
         pl::run(&mut app, Cmd::KeyMarkerMenu);
         let list = app.state.playlist.popup.clone().expect("the list opens");
@@ -25690,11 +25687,11 @@ mod tests {
         assert_eq!((Some((again.x, again.y)), again.items[3].mark), (was, Mark::Radio(true)));
         // A scale adds the marker at the song position and closes the list; one undo step.
         app.state.playlist.pos = 1536;
-        let steps = app.state.history.len();
+        let steps = app.state.session.history.len();
         pl::run(&mut app, Cmd::AddKeyMarker(0));
         assert!(app.state.playlist.popup.is_none());
-        assert_eq!(app.state.history.len(), steps + 1);
-        let m = pl::markers(&app.state)[0].clone();
+        assert_eq!(app.state.session.history.len(), steps + 1);
+        let m = pl::markers(&app.state.session)[0].clone();
         assert_eq!((m.position, m.kind, m.name.as_str(), m.root, m.flag, m.scale_index, m.scale), (1536, M::KEY, "D Major (Ionian)", 2, 0, 0, 0x94A));
         assert_eq!(pl::key_items(&app.state)[18].mark, Mark::Check(true), "the scale added is checked");
         // FL's saves, each marker's events 46, 45, 168 and 101.
@@ -25713,7 +25710,7 @@ mod tests {
         assert_eq!(ev(2, -1), ("Default".into(), 2, 1, -1, 4095));
         // Undo takes it away.
         pl::run(&mut app, Cmd::Undo);
-        assert!(pl::markers(&app.state).is_empty());
+        assert!(pl::markers(&app.state.session).is_empty());
     }
 
     /// Settings > Plugins (spec: ui/plugin-manager.md §2, §4): Add folder... keeps the folder and scans it in the
@@ -25826,7 +25823,7 @@ mod tests {
         let shots = std::env::var_os("OS_SHOT_DIR").map(PathBuf::from);
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(test_project());
+        a.state.session.project = crate::locked::Locked::new(test_project());
         a.plugins = crate::plugins::Plugins::builtins();
         let rate = crate::transport::Transport::device_rate().unwrap_or(48000);
         a.state.plugdb.rebuild(&a.plugins);
@@ -25879,7 +25876,7 @@ mod tests {
 
         // Kars from the rack's Add one ▸ menu: with VST2 preferred, its one entry is the VST2 copy.
         let add = crate::rack::add_one_items(&a.state).into_iter().find(|it| it.label == "Kars").expect("Add one lists Kars");
-        let row = a.state.project.channels.len();
+        let row = a.state.session.project.channels.len();
         pl::run(&mut a, add.cmd);
         for _ in 0..200 {
             a.tick();
@@ -25891,7 +25888,7 @@ mod tests {
         assert!(a.state.hosted_rows.contains(&row), "Kars hosted: {:?}", a.state.message);
         assert_eq!(a.plugins.descriptor(row).map(|d| d.format), Some(Format::Vst2));
         // 3BandEQ in the first slot of Kars' insert, from the slot's menu.
-        let track = a.state.project.channels[row].mixer_track;
+        let track = a.state.session.project.channels[row].mixer_track;
         crate::mixer::select(&mut a.state, track, false);
         let eq = a.plugins.effects.iter().position(|e| e.desc.format == Format::Vst2 && e.desc.name.replace(' ', "") == "3BandEQ").expect("3BandEQ");
         let menu = crate::plugin_menu::items(&a.state, crate::plugin_menu::Target::Fx(Some(0)), true);
@@ -25908,18 +25905,18 @@ mod tests {
         }
         assert_eq!(a.plugins.descriptor(key).map(|d| d.format), Some(Format::Vst2), "the EQ is hosted: {:?}", a.state.message);
         // Eight C5 notes, a beat each, on the pattern placed at the song's start.
-        let ch = a.state.project.channels[row].index;
-        let ppq = u32::from(a.state.project.ppq);
-        a.state.project.get_mut().patterns[0].notes = (0..8).map(|i| os_model::Note { length: ppq, key: 60, ..os_model::Note::step(ch, i * ppq) }).collect();
+        let ch = a.state.session.project.channels[row].index;
+        let ppq = u32::from(a.state.session.project.ppq);
+        a.state.session.project.get_mut().patterns[0].notes = (0..8).map(|i| os_model::Note { length: ppq, key: 60, ..os_model::Note::step(ch, i * ppq) }).collect();
         a.state.playlist.reset();
-        pl::arr_mut(&mut a.state).clips.push(os_model::Clip::new(0, 8 * ppq, 0, os_model::ClipSource::Pattern(1)));
+        pl::arr_mut(&mut a.state.session).clips.push(os_model::Clip::new(0, 8 * ppq, 0, os_model::ClipSource::Pattern(1)));
         // The EQ's master gain automated from its lowest to its highest over the eight beats.
         a.params_tick();
         let master = a.state.params.lists[&key].params.iter().position(|p| p.name == "Master").expect("a Master parameter");
         println!("automate: {:?}", a.params_automate(key, master));
-        let auto = a.state.project.channels.last().unwrap().index;
+        let auto = a.state.session.project.channels.last().unwrap().index;
         {
-            let x = a.state.project.get_mut().automation_mut(auto).unwrap();
+            let x = a.state.session.project.get_mut().automation_mut(auto).unwrap();
             assert_eq!(x.points.len(), 2);
             x.points[0].value = 0.0;
             x.points[1].value = 1.0;
@@ -25927,7 +25924,7 @@ mod tests {
         let tempo = f64::from(a.state.tempo());
         let export = |a: &mut App, tag: &str| -> Vec<f32> {
             let path = std::env::temp_dir().join(format!("lemon-vst2-{tag}-{}.wav", std::process::id()));
-            a.transport.export(&a.state.project, os_engine::PlayMode::Song, rate, crate::export::Job::wav(&path));
+            a.transport.export(&a.state.session.project, os_engine::PlayMode::Song, rate, crate::export::Job::wav(&path));
             let t0 = std::time::Instant::now();
             let _secs = loop {
                 match a.transport.export_status() {
@@ -25981,7 +25978,7 @@ mod tests {
                 assert!(p.set_param(info.id, info.default));
             }
             a.transport.take_peaks();
-            a.transport.play(&a.state.project, os_engine::PlayMode::Pattern(1), 0.0);
+            a.transport.play(&a.state.session.project, os_engine::PlayMode::Pattern(1), 0.0);
             std::thread::sleep(Duration::from_millis(1200));
             let heard = a.transport.take_peaks();
             let tick = a.transport.tick();
@@ -26021,7 +26018,7 @@ mod tests {
         let slot = saved.mixer.iter().find(|m| m.index == track).and_then(|m| m.slots[0].as_ref());
         let s = slot.and_then(crate::project_plugins::wrapped_slot).expect("a wrapped slot");
         assert_eq!((s.format.as_str(), s.state == fx_state), ("vst2", true));
-        let target = a.state.project.automations.last().unwrap().target();
+        let target = a.state.session.project.automations.last().unwrap().target();
         assert!(saved.automations.iter().any(|x| x.target() == target), "the clip is saved");
         println!("saved: Kars state {} bytes ({:?}...), 3BandEQ state {} bytes", ch_state.len(), &ch_state[..ch_state.len().min(25)], fx_state.len());
 
@@ -26115,7 +26112,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let note = |ch: u16, key: u16, at: u32, len: u32| Note { key, length: len, ..Note::step(ch, at) };
         let keys = |app: &App, ch: u16| {
-            let mut v: Vec<(u16, u32)> = piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.key, n.position)).collect();
+            let mut v: Vec<(u16, u32)> = piano::notes(&app.state.session).iter().filter(|n| n.channel == ch).map(|n| (n.key, n.position)).collect();
             v.sort_unstable();
             v
         };
@@ -26127,7 +26124,7 @@ mod tests {
             // A draw-tool click: an eighth-long G5 (ppq 96) over channel 1's C5; channel 2's G5 and channel 1's later
             // D5 are not under it. The click's drag then moves the new note a beat on (it still is the one dragged).
             let start = vec![note(0, 60, 0, 96), note(1, 67, 0, 96), note(0, 62, 384, 96)];
-            piano::pattern_mut(&mut app.state).notes = start.clone();
+            piano::pattern_mut(&mut app.state.session).notes = start.clone();
             frame(&mut app, &mut c, None);
             let g = app.piano_geom().expect("piano roll shown");
             let at = |g: &Geom, key: i32, tick: u32| (g.x_of(tick as f32) + 2.0, g.y_of(key) + g.row / 2.0);
@@ -26141,11 +26138,11 @@ mod tests {
             assert_eq!(keys(&app, 0), want, "draw click, check {on}");
             assert_eq!(keys(&app, 1), vec![(67, 0)], "another channel's notes stay");
             assert!(piano::undo(&mut app.state));
-            assert_eq!(piano::notes(&app.state), &start[..], "one undo step, check {on}");
+            assert_eq!(piano::notes(&app.state.session), &start[..], "one undo step, check {on}");
 
             // A paint drag of E5s an eighth apart over a run of C5s: each E5 deletes the C5 under it.
             let run: Vec<Note> = (0..3).map(|k| note(0, 60, 96 * k, 48)).collect();
-            piano::pattern_mut(&mut app.state).notes = run.clone();
+            piano::pattern_mut(&mut app.state.session).notes = run.clone();
             app.state.piano.last_len = 48;
             app.act(Action::PianoTool(Tool::Paint));
             frame(&mut app, &mut c, None);
@@ -26162,7 +26159,7 @@ mod tests {
             want.sort_unstable();
             assert_eq!(keys(&app, 0), want, "paint drag, check {on}");
             assert!(piano::undo(&mut app.state));
-            assert_eq!(piano::notes(&app.state), &run[..], "one undo step for the drag, check {on}");
+            assert_eq!(piano::notes(&app.state.session), &run[..], "one undo step for the drag, check {on}");
         }
         set_check(&MONO_PAINTING, false);
     }
@@ -26379,12 +26376,12 @@ mod tests {
         let out = std::path::PathBuf::from(out);
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.set_pattern(1);
         // Kick on every beat, a clap on 2 and 4; two clips of the pattern.
         let note = |ch: u16, at: u32| Note { length: 48, ..Note::step(ch, at) };
-        app.state.project.get_mut().patterns[0].notes = vec![note(0, 0), note(1, 96), note(0, 192), note(1, 288), note(0, 384), note(1, 480)];
-        crate::playlist::arr_mut(&mut app.state).clips = vec![
+        app.state.session.project.get_mut().patterns[0].notes = vec![note(0, 0), note(1, 96), note(0, 192), note(1, 288), note(0, 384), note(1, 480)];
+        crate::playlist::arr_mut(&mut app.state.session).clips = vec![
             os_model::Clip::new(0, 768, 0, os_model::ClipSource::Pattern(1)),
             os_model::Clip::new(1536, 768, 2, os_model::ClipSource::Pattern(1)),
         ];
@@ -26468,8 +26465,8 @@ mod tests {
         // beat; its mini roll over the pattern's bars; then the same in a 6/8 project.
         app.state.set_pattern(1);
         let sig = os_model::TimeMarker { kind: os_model::TimeMarker::SIGNATURE, numerator: 3, denominator: 8, ..os_model::TimeMarker::new(0, "3/8") };
-        app.state.project.get_mut().patterns[0].markers = vec![sig];
-        app.state.project.get_mut().patterns[0].length = None;
+        app.state.session.project.get_mut().patterns[0].markers = vec![sig];
+        app.state.session.project.get_mut().patterns[0].length = None;
         crate::rack::run(&mut app, crate::rack::RCmd::SetFilter(crate::rack::Filter::All));
         app.state.rack_size.0 = views::rack::DEFAULT_SIZE.0 + 320.0;
         app.state.raise(Win::ChannelRack);
@@ -26477,7 +26474,7 @@ mod tests {
         app.state.rack_roll_view = true;
         save(&mut app, &mut c, "16_rack_mini_38");
         app.state.rack_roll_view = false;
-        app.state.project.get_mut().bar = Some((6, 2));
+        app.state.session.project.get_mut().bar = Some((6, 2));
         save(&mut app, &mut c, "17_rack_project_68");
     }
 
@@ -26486,30 +26483,30 @@ mod tests {
     fn picker_audio_and_automation_items_have_their_channel_menu() {
         use crate::playlist::{self as pl, Cmd, PickCmd};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let auto = pl::create_automation(&mut app.state, os_model::target::TEMPO, "Tempo", 0.5);
-        pl::add_point(&mut app.state, auto, 2.0, 0.9);
+        pl::add_point(&mut app.state.session, auto, 2.0, 0.9);
         let labels = |p: &pl::Popup| p.items.iter().filter(|i| !i.sep).map(|i| i.label.to_string()).collect::<Vec<_>>();
-        let menu = pl::pick_menu(&app.state, auto, 0.0, 0.0);
+        let menu = pl::pick_menu(&app.state.session, auto, 0.0, 0.0);
         let want = ["Select in arranger", "Group selected...", "Rename, color and icon...", "Change color...", "Random color", "Change icon...", "Chokes itself", "Clone", "Clone with links", "Delete..."];
         assert_eq!(labels(&menu), want);
-        app.state.project.get_mut().channels[0].kind = ChannelKind::AudioClip;
-        let audio = app.state.project.channels[0].index;
+        app.state.session.project.get_mut().channels[0].kind = ChannelKind::AudioClip;
+        let audio = app.state.session.project.channels[0].index;
         let want = ["Preview", "Select in arranger", "Group selected...", "Rename, color and icon...", "Change color...", "Random color", "Change icon...", "Load sample...", "Edit sample...", "Chokes itself", "Clone", "Delete..."];
-        assert_eq!(labels(&pl::pick_menu(&app.state, audio, 0.0, 0.0)), want);
+        assert_eq!(labels(&pl::pick_menu(&app.state.session, audio, 0.0, 0.0)), want);
         // Select in playlist: every clip of the source.
         app.state.playlist.sel.clear();
         pl::run(&mut app, Cmd::Pick(PickCmd::SelectInPlaylist, auto));
-        let of_auto: Vec<usize> = pl::clips(&app.state).iter().enumerate().filter(|(_, c)| c.source == os_model::ClipSource::Channel(auto)).map(|(i, _)| i).collect();
+        let of_auto: Vec<usize> = pl::clips(&app.state.session).iter().enumerate().filter(|(_, c)| c.source == os_model::ClipSource::Channel(auto)).map(|(i, _)| i).collect();
         assert!(!of_auto.is_empty());
         assert_eq!(app.state.playlist.sel, of_auto);
         // Clone: a channel "<name> #2" whose clip has the same curve and targets.
-        let n = app.state.project.channels.len();
-        let name = app.state.project.channel(auto).and_then(|c| c.name.clone()).unwrap();
+        let n = app.state.session.project.channels.len();
+        let name = app.state.session.project.channel(auto).and_then(|c| c.name.clone()).unwrap();
         pl::run(&mut app, Cmd::Pick(PickCmd::Clone, auto));
-        assert_eq!(app.state.project.channels.len(), n + 1);
-        let copy = app.state.project.channels.iter().find(|c| c.name.as_deref() == Some(&format!("{name} #2"))).expect("the clone").index;
-        let (a, b) = (app.state.project.automation(auto).unwrap(), app.state.project.automation(copy).unwrap());
+        assert_eq!(app.state.session.project.channels.len(), n + 1);
+        let copy = app.state.session.project.channels.iter().find(|c| c.name.as_deref() == Some(&format!("{name} #2"))).expect("the clone").index;
+        let (a, b) = (app.state.session.project.automation(auto).unwrap(), app.state.session.project.automation(copy).unwrap());
         assert_eq!((&a.points, &a.targets), (&b.points, &b.targets));
         // Delete asks first.
         pl::run(&mut app, Cmd::Pick(PickCmd::Delete, copy));
@@ -26522,7 +26519,7 @@ mod tests {
     fn channel_window_reopens_where_it_was_moved() {
         let mut app = App::new(None);
         app.add_clip_channel(ChannelKind::Automation);
-        let row = app.state.project.channels.len() - 1;
+        let row = app.state.session.project.channels.len() - 1;
         assert!(app.state.shown(Win::Plugin), "an automation clip's channel window opens");
         let beside = app.state.plugin_pos;
         app.state.hide(Win::Plugin);
@@ -26537,7 +26534,7 @@ mod tests {
     #[test]
     fn typed_notes_end_when_their_key_is_up() {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.selected_channel = 1;
         app.state.toggles.push("typing");
         assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
@@ -26759,7 +26756,7 @@ mod detach_tests {
     fn keyboard_popups_go_to_the_window_with_the_keyboard() {
         use winit::keyboard::{Key, NamedKey};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.raise(Win::Mixer);
         app.set_detached(Win::Mixer, true);
         let (w, h) = app.state.detached_size(Win::Mixer).unwrap();
@@ -26787,7 +26784,7 @@ mod detach_tests {
     fn a_browser_effect_drops_into_a_detached_mixer() {
         use crate::views::browser::{rows, Item};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
         app.state.plugdb.rebuild(&app.plugins);
         app.state.browser_tab = 2;
@@ -26813,7 +26810,7 @@ mod detach_tests {
         app.mouse_up_from(None);
         assert!(app.drag.is_none() && app.state.drag_on.is_none());
         let t = app.state.selected_mixer;
-        assert_eq!(crate::mixer::slot_name(&app.state, t, 0).as_deref(), Some("Test FX"));
+        assert_eq!(crate::mixer::slot_name(&app.state.session, t, 0).as_deref(), Some("Test FX"));
     }
 
     /// A browser generator dragged onto the detached Channel rack's window adds a channel; dragged back over the main
@@ -26822,7 +26819,7 @@ mod detach_tests {
     fn a_browser_generator_drops_into_a_detached_rack() {
         use crate::views::browser::{rows, Item};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.plugins.available.push(crate::plugin_db::fake("Test Synth", os_host::Kind::Instrument));
         let synth = app.plugins.available.len() - 1;
         app.state.plugdb.rebuild(&app.plugins);
@@ -26836,7 +26833,7 @@ mod detach_tests {
         app.paint_detached(Win::ChannelRack, &mut c);
         let Some(i) = rows(&app.state).iter().position(|r| r.item == Item::Generator(synth)) else { panic!("generator row") };
         let src = hit_of(&app.hits, &Action::BrowserRow(i)).expect("the browser row");
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         let drag = |app: &mut App, back: bool| {
             app.mouse_move(src.cx(), src.cy());
             app.mouse_down();
@@ -26848,9 +26845,9 @@ mod detach_tests {
             app.mouse_up_from(None);
         };
         drag(&mut app, true);
-        assert_eq!(app.state.project.channels.len(), n, "dropped back on the browser");
+        assert_eq!(app.state.session.project.channels.len(), n, "dropped back on the browser");
         drag(&mut app, false);
-        assert_eq!(app.state.project.channels.len(), n + 1, "a new channel");
+        assert_eq!(app.state.session.project.channels.len(), n + 1, "a new channel");
     }
 
     /// A scroll-bar right-drag in the detached Mixer holds the cursor as in the main window: the moves the shell gives
@@ -26858,7 +26855,7 @@ mod detach_tests {
     #[test]
     fn a_scroll_bar_holds_the_cursor_in_a_detached_window() {
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(test_project());
+        app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.raise(Win::Mixer);
         app.set_detached(Win::Mixer, true);
         app.set_detached_size(Win::Mixer, (500.0, 400.0));

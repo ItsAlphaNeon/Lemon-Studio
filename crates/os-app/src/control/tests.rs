@@ -13,9 +13,9 @@ use crate::app::App;
 
 fn app() -> App {
     let mut a = App::new(None);
-    a.state.project = crate::locked::Locked::new(crate::app::test_project());
-    a.state.project.get_mut().arrangements = vec![os_flp::project::default_arrangement()];
-    a.state.control.settle(a.state.project.get_mut());
+    a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+    a.state.session.project.get_mut().arrangements = vec![os_flp::project::default_arrangement()];
+    a.state.session.control.settle(a.state.session.project.get_mut());
     a
 }
 
@@ -28,11 +28,11 @@ fn test_client() -> By {
 fn reading(a: &App) -> (os_model::Project, Value, f64) {
     let mut q = query::project(&a.state);
     q.as_object_mut().unwrap().remove("selected_channel");
-    (a.state.project.clone(), q, a.state.tempo())
+    (a.state.session.project.clone(), q, a.state.tempo())
 }
 
 fn ids(a: &App) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
-    let p = &a.state.project;
+    let p = &a.state.session.project;
     (p.channels.iter().map(|c| c.id.0).collect(), p.mixer.iter().map(|m| m.id.0).collect(), p.patterns.iter().map(|q| q.id.0).collect())
 }
 
@@ -43,13 +43,13 @@ fn cmd(v: Value) -> Command {
 /// Applies `c` as a client would and checks that one undo puts everything back and one redo gives the change again.
 fn round_trip(a: &mut App, c: Value) -> Vec<Value> {
     let before = reading(a);
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     let what = c.to_string();
     let r = apply(&mut a.state, &test_client(), None, vec![cmd(c)]).unwrap_or_else(|e| panic!("{what}: {e}"));
-    a.state.control.settle(a.state.project.get_mut());
+    a.state.session.control.settle(a.state.session.project.get_mut());
     let after = reading(a);
     assert_ne!(before, after, "{what} changes something");
-    assert_eq!(a.state.history.at(), steps + 1, "{what} is one step");
+    assert_eq!(a.state.session.history.at(), steps + 1, "{what} is one step");
     crate::history::undo(&mut a.state).unwrap();
     assert_eq!(reading(a), before, "{what} undone");
     crate::history::redo(&mut a.state).unwrap();
@@ -110,12 +110,12 @@ fn new_things_name_their_ids() {
     let r = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_channel", "name": "Bass"})), cmd(json!({"op": "add_pattern"}))]).unwrap();
     let ch = r[0]["channel"].as_u64().unwrap() as u32;
     let pat = r[1]["pattern"].as_u64().unwrap() as u32;
-    let p = &a.state.project;
+    let p = &a.state.session.project;
     assert_eq!(p.channels.last().map(|c| (c.id.0, c.name.clone())), Some((ch, Some("Bass".into()))));
     assert!(p.patterns.iter().any(|q| q.id.0 == pat));
     // The new channel's id names it in the next command.
     apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": ch, "volume": 0.1}))]).unwrap();
-    assert_eq!(a.state.project.channels.last().unwrap().volume, 0.1);
+    assert_eq!(a.state.session.project.channels.last().unwrap().volume, 0.1);
 }
 
 #[test]
@@ -123,17 +123,17 @@ fn a_transaction_is_one_named_step_and_all_or_nothing() {
     let mut a = app();
     let kick = ids(&a).0[0];
     let before = reading(&a);
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     let bad = vec![cmd(json!({"op": "set_tempo", "bpm": 90})), cmd(json!({"op": "set_channel", "channel": 9999, "volume": 0.5}))];
     let e = apply(&mut a.state, &test_client(), Some("Two things"), bad).unwrap_err();
     assert!(e.contains("command 1") && e.contains("no channel 9999"), "{e}");
     assert_eq!(reading(&a), before, "the first command is taken back");
-    assert_eq!(a.state.history.at(), steps, "no step");
+    assert_eq!(a.state.session.history.at(), steps, "no step");
 
     let good = vec![cmd(json!({"op": "set_tempo", "bpm": 90})), cmd(json!({"op": "set_channel", "channel": kick, "volume": 0.5}))];
     apply(&mut a.state, &test_client(), Some("Build Drum Kit"), good).unwrap();
-    assert_eq!(a.state.history.at(), steps + 1);
-    let h = &a.state.history;
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    let h = &a.state.session.history;
     let name = h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string());
     assert_eq!(name.as_deref(), Some("Test: build Drum Kit"), "named after the client");
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Test: build Drum Kit"));
@@ -149,16 +149,16 @@ fn a_transaction_is_one_named_step_and_all_or_nothing() {
 fn the_interface_and_the_commands_share_one_history() {
     let mut a = app();
     let kick = ids(&a).0[0];
-    crate::history::knob(&mut a.state, crate::knobs::KnobId::ChanVol(0), false);
-    a.state.project.get_mut().channels[0].volume = 0.3;
+    crate::history::knob(&mut a.state.session, crate::knobs::KnobId::ChanVol(0), false);
+    a.state.session.project.get_mut().channels[0].volume = 0.3;
     apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": kick, "volume": 0.6}))]).unwrap();
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Test: channel settings"));
-    assert_eq!(a.state.project.channels[0].volume, 0.3);
+    assert_eq!(a.state.session.project.channels[0].volume, 0.3);
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Channel volume"));
-    assert_eq!(a.state.project.channels[0].volume, 0.78125);
+    assert_eq!(a.state.session.project.channels[0].volume, 0.78125);
     crate::history::redo(&mut a.state);
     crate::history::redo(&mut a.state);
-    assert_eq!(a.state.project.channels[0].volume, 0.6);
+    assert_eq!(a.state.session.project.channels[0].volume, 0.6);
 }
 
 #[test]
@@ -167,14 +167,14 @@ fn ids_stay_with_their_things() {
     let (ch, ..) = ids(&a);
     apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "delete_channel", "channel": ch[1]}))]).unwrap();
     // The channel below it moved up a row and kept its id; commands still find it.
-    assert_eq!(a.state.project.channels[1].id.0, ch[2]);
+    assert_eq!(a.state.session.project.channels[1].id.0, ch[2]);
     apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": ch[2], "name": "Still me"}))]).unwrap();
-    assert_eq!(a.state.project.channels[1].name.as_deref(), Some("Still me"));
+    assert_eq!(a.state.session.project.channels[1].name.as_deref(), Some("Still me"));
     // The interface's edits keep them too: a clone gets a new id, the original keeps its own.
     crate::rack::clone_rows(&mut a, &[0]);
-    a.state.control.settle(a.state.project.get_mut());
-    assert_eq!(a.state.project.channels[0].id.0, ch[0]);
-    assert!(!ch.contains(&a.state.project.channels[1].id.0), "the clone's id is new");
+    a.state.session.control.settle(a.state.session.project.get_mut());
+    assert_eq!(a.state.session.project.channels[0].id.0, ch[0]);
+    assert!(!ch.contains(&a.state.session.project.channels[1].id.0), "the clone's id is new");
     // A deleted channel's id names nothing; an undo brings it back with its id.
     let e = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": ch[1], "volume": 0.5}))]).unwrap_err();
     assert!(e.contains("no channel"), "{e}");
@@ -185,10 +185,10 @@ fn ids_are_not_an_unsaved_change() {
     let mut a = app();
     a.mark_saved();
     assert!(!a.unsaved());
-    let first = a.state.project.channels[0].clone();
-    a.state.project.get_mut().channels.push(first);
-    a.state.control.settle(a.state.project.get_mut());
-    a.state.project.get_mut().channels.pop();
+    let first = a.state.session.project.channels[0].clone();
+    a.state.session.project.get_mut().channels.push(first);
+    a.state.session.control.settle(a.state.session.project.get_mut());
+    a.state.session.project.get_mut().channels.pop();
     assert!(!a.unsaved(), "a copy's new id alone changes nothing");
 }
 
@@ -197,25 +197,25 @@ fn a_proposal_leaves_the_project_until_accepted() {
     let mut a = app();
     let kick = ids(&a).0[0];
     let before = reading(&a);
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     let cmds = vec![cmd(json!({"op": "set_tempo", "bpm": 150})), cmd(json!({"op": "set_channel", "channel": kick, "name": "Boom"})), cmd(json!({"op": "add_channel", "name": "New"}))];
     let (n, changes) = propose(&mut a.state, &test_client(), "Faster", cmds).unwrap();
     assert_eq!(reading(&a), before, "nothing changed");
-    assert_eq!(a.state.history.at(), steps);
-    assert!(a.state.sample_loads.is_empty() && a.state.control.host.is_empty());
+    assert_eq!(a.state.session.history.at(), steps);
+    assert!(a.state.session.sample_loads.is_empty() && a.state.session.control.host.is_empty());
     let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
     assert!(paths.contains(&"tempo"), "{paths:?}");
     assert!(paths.contains(&format!("channels.{kick}.name").as_str()), "{paths:?}");
     assert!(paths.iter().any(|p| p.starts_with("channels.") && changes.iter().any(|c| c.path == *p && c.before.is_null())), "the new channel: {paths:?}");
-    assert_eq!(a.state.control.proposals.len(), 1);
+    assert_eq!(a.state.session.control.proposals.len(), 1);
     accept(&mut a.state, n).unwrap();
     assert_eq!(a.state.tempo(), 150.0);
-    assert_eq!(a.state.project.channels[0].name.as_deref(), Some("Boom"));
-    assert_eq!(a.state.history.at(), steps + 1);
-    assert!(a.state.control.proposals.is_empty());
+    assert_eq!(a.state.session.project.channels[0].name.as_deref(), Some("Boom"));
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    assert!(a.state.session.control.proposals.is_empty());
     assert!(accept(&mut a.state, n).is_err(), "only once");
     let (n, _) = propose(&mut a.state, &test_client(), "Slower", vec![cmd(json!({"op": "set_tempo", "bpm": 60}))]).unwrap();
-    discard(&mut a.state, n).unwrap();
+    discard(&mut a.state.session, n).unwrap();
     assert_eq!(a.state.tempo(), 150.0);
 }
 
@@ -239,19 +239,19 @@ fn proposals_ask_the_user() {
 #[test]
 fn events_tell_clients_what_changed() {
     let mut a = app();
-    a.state.control.watched = true;
-    let (_, last) = a.state.control.events_since(0);
+    a.state.session.control.watched = true;
+    let (_, last) = a.state.session.control.events_since(0);
     apply(&mut a.state, &test_client(), Some("Faster"), vec![cmd(json!({"op": "set_tempo", "bpm": 150}))]).unwrap();
     crate::history::undo(&mut a.state);
-    let (ev, newest) = a.state.control.events_since(last);
+    let (ev, newest) = a.state.session.control.events_since(last);
     assert_eq!(ev.len(), 1);
     assert_eq!((ev[0].kind, ev[0].name.as_str(), ev[0].ops.clone(), ev[0].by.as_str()), ("apply", "Faster", vec!["set_tempo"], "Test"));
     assert_eq!(newest, ev[0].seq);
     // An edit in the interface is an event on the next tick.
-    a.state.project.get_mut().channels[0].volume = 0.1;
-    a.state.piano.dirty = true;
+    a.state.session.project.get_mut().channels[0].volume = 0.1;
+    a.state.session.dirty = true;
     a.tick();
-    let (ev, _) = a.state.control.events_since(newest);
+    let (ev, _) = a.state.session.control.events_since(newest);
     assert_eq!(ev.iter().map(|e| (e.kind, e.by.as_str())).collect::<Vec<_>>(), [("edit", "user")]);
 }
 
@@ -268,12 +268,12 @@ fn rpc_requests_and_errors() {
     assert_eq!(st["result"]["channels"][0]["name"], "Kick");
     let r = call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 3, "method": "apply", "params": {"name": "Louder kick", "commands": [{"op": "set_channel", "channel": kick, "volume": 1.0}]}}));
     assert!(r.get("error").is_none(), "{r}");
-    assert_eq!(a.state.project.channels[0].volume, 1.0);
+    assert_eq!(a.state.session.project.channels[0].volume, 1.0);
     let h = call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 4, "method": "history"}));
     assert!(h["result"]["steps"].as_array().unwrap().iter().any(|s| s["name"] == "Assistant: louder kick"), "{h}");
     let r = call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 5, "method": "undo"}));
     assert_eq!(r["result"]["step"], "Assistant: louder kick");
-    assert_eq!(a.state.project.channels[0].volume, 0.78125);
+    assert_eq!(a.state.session.project.channels[0].volume, 0.78125);
     // Errors: the codes of JSON-RPC 2.0, and -32000 / -32001 for a failed or refused request.
     let code = |r: Value| r["error"]["code"].as_i64();
     assert_eq!(code(serde_json::from_str(&a.rpc_line(&mut c, "{not json").unwrap()).unwrap()), Some(-32700));
@@ -287,7 +287,7 @@ fn rpc_requests_and_errors() {
     // A notification (no id) gets no answer.
     assert!(a.rpc_line(&mut c, &json!({"jsonrpc": "2.0", "method": "undo"}).to_string()).is_none());
     // Notes read back as commands write them.
-    let pat = a.state.project.patterns[0].id.0;
+    let pat = a.state.session.project.patterns[0].id.0;
     call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 11, "method": "apply", "params": {"command": {"op": "set_notes", "pattern": pat, "notes": [{"channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64}]}}}));
     let n = call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 12, "method": "notes", "params": {"pattern": pat}}));
     assert_eq!(n["result"]["notes"], json!([{"channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64}]));
@@ -386,7 +386,7 @@ fn clients_connect_over_a_local_socket() {
     let r2 = ask(&mut a, json!({"jsonrpc": "2.0", "id": 2, "method": "apply", "params": {"command": {"op": "set_tempo", "bpm": 111}}}));
     assert!(r2.get("error").is_none(), "{r2}");
     assert_eq!(a.state.tempo(), 111.0);
-    let h = &a.state.history;
+    let h = &a.state.session.history;
     assert_eq!(h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string()).as_deref(), Some("Socket: tempo"), "the client's name stays with its connection");
     let _ = std::fs::remove_file(&path);
 }
@@ -420,31 +420,31 @@ fn saving_asks_the_user_unless_headless() {
     let r = a.rpc(&mut c, "save", &json!({"path": path})).ok().unwrap();
     assert_eq!(r["saved"], json!(path.display().to_string()));
     let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
-    assert_eq!(saved.channels.len(), a.state.project.channels.len());
+    assert_eq!(saved.channels.len(), a.state.session.project.channels.len());
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn a_first_clip_makes_the_playlist_and_its_undo_takes_it_away() {
     let mut a = app();
-    a.state.project.get_mut().arrangements.clear();
+    a.state.session.project.get_mut().arrangements.clear();
     let pat = ids(&a).2[0];
     let r = round_trip(&mut a, json!({"op": "add_clip", "track": 1, "position": 0, "pattern": pat}));
     assert!(r[0]["clip"].as_u64().is_some());
     crate::history::undo(&mut a.state);
-    assert!(a.state.project.arrangements.is_empty());
+    assert!(a.state.session.project.arrangements.is_empty());
 }
 
 /// Does `f` (an edit in the interface) and checks it is one undo step named `name` that undo and redo take back and
 /// give again exactly.
 fn ui_round_trip(a: &mut App, name: &str, f: impl FnOnce(&mut App)) {
     let before = reading(a);
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     f(a);
-    a.state.control.settle(a.state.project.get_mut());
+    a.state.session.control.settle(a.state.session.project.get_mut());
     let after = reading(a);
     assert_ne!(before, after, "{name} changes something");
-    assert_eq!(a.state.history.at(), steps + 1, "{name} is one step");
+    assert_eq!(a.state.session.history.at(), steps + 1, "{name} is one step");
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(name));
     let now = reading(a);
     assert!(now == before, "{name} undone: {:?}, the model alike: {}", query::changes(&before.1, &now.1), now.0 == before.0);
@@ -488,7 +488,7 @@ fn the_mixer_s_edits_are_undoable() {
     ui_round_trip(&mut a, "Mixer track reset", |a| {
         run(a, MCmd::Reset(1));
     });
-    crate::mixer::track_mut(&mut a.state, 3).unwrap().routes = vec![5];
+    crate::mixer::track_mut(&mut a.state.session, 3).unwrap().routes = vec![5];
     ui_round_trip(&mut a, "Mixer routing", |a| {
         a.state.mixer.sel.clear();
         run(a, MCmd::ResetRouting(3));
@@ -510,7 +510,7 @@ fn the_mixer_s_edits_are_undoable() {
         run(a, MCmd::AddEffect(0, 0));
     });
     run(&mut a, MCmd::AddEffect(0, 0));
-    a.state.control.settle(a.state.project.get_mut());
+    a.state.session.control.settle(a.state.session.project.get_mut());
     ui_round_trip(&mut a, "Move effect", |a| {
         run(a, MCmd::SlotMove(0, 1));
     });
@@ -518,23 +518,23 @@ fn the_mixer_s_edits_are_undoable() {
     crate::playlist::start_edit(&mut a.state, crate::playlist::EditTarget::SlotName(2, 1), (0.0, 0.0));
     a.state.playlist.edit.as_mut().unwrap().text = "Glue".into();
     crate::playlist::commit_edit(&mut a.state);
-    assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some("Glue"));
+    assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Slot name"));
-    assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some("Test FX"));
+    assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Test FX"));
     assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some("Slot name"));
-    assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some("Glue"));
+    assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
     ui_round_trip(&mut a, "Remove effect", |a| {
         run(a, MCmd::SlotDelete(1));
     });
     // A fader drag is one step; a press that doesn't move it is none.
-    let steps = a.state.history.at();
-    crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
-    crate::history::settle(&mut a.state);
-    assert_eq!(a.state.history.at(), steps, "a click without a drag");
+    let steps = a.state.session.history.at();
+    crate::control::edit_press(&mut a.state.session, "Mixer track volume", command::Region::Track(1));
+    crate::history::settle(&mut a.state.session);
+    assert_eq!(a.state.session.history.at(), steps, "a click without a drag");
     ui_round_trip(&mut a, "Mixer track volume", |a| {
-        crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
-        a.state.project.get_mut().mixer[1].volume = Some(0.3);
-        crate::history::settle(&mut a.state);
+        crate::control::edit_press(&mut a.state.session, "Mixer track volume", command::Region::Track(1));
+        a.state.session.project.get_mut().mixer[1].volume = Some(0.3);
+        crate::history::settle(&mut a.state.session);
     });
 }
 
@@ -694,12 +694,12 @@ fn a_dry_run_leaves_the_instruments_and_the_selections() {
 #[test]
 fn slot_names_come_back_with_their_track() {
     let mut a = app();
-    crate::mixer::set_slot_label(&mut a.state, 3, 1, Some("Crunch".into()));
+    crate::mixer::set_slot_label(&mut a.state.session, 3, 1, Some("Crunch".into()));
     crate::mixer::run(&mut a, crate::mixer::MCmd::Delete(2));
-    assert_eq!(crate::mixer::slot_names_of(&a.state.project).get(&(2, 1)).map(String::as_str), Some("Crunch"), "moved left with its track");
+    assert_eq!(crate::mixer::slot_names_of(&a.state.session.project).get(&(2, 1)).map(String::as_str), Some("Crunch"), "moved left with its track");
     crate::history::undo(&mut a.state);
-    assert_eq!(crate::mixer::slot_names_of(&a.state.project).get(&(3, 1)).map(String::as_str), Some("Crunch"));
-    assert_eq!(crate::mixer::slot_names_of(&a.state.project).len(), 1);
+    assert_eq!(crate::mixer::slot_names_of(&a.state.session.project).get(&(3, 1)).map(String::as_str), Some("Crunch"));
+    assert_eq!(crate::mixer::slot_names_of(&a.state.session.project).len(), 1);
 }
 
 #[test]
@@ -805,7 +805,7 @@ fn edits_in_a_plugin_s_window_are_undo_steps() {
     let desc = crate::plugins::builtin()[0].desc.clone();
     let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.25, 0.5], events: Vec::new() }));
     let mut h = crate::plugins::Hosted::new(knob.clone());
-    h.owner = a.state.project.channels[0].id;
+    h.owner = a.state.session.project.channels[0].id;
     a.plugins.hosted.insert(0, h);
     a.params_tick();
     // The plugin moves its knobs as its window is dragged: the values are the plugin's at once, the events follow.
@@ -825,11 +825,11 @@ fn edits_in_a_plugin_s_window_are_undo_steps() {
         a.host_commands();
         knob.lock().unwrap().value
     };
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     drag(&mut a, vec![Begin(7), Value(7, 0.4), Value(7, 0.6)]);
-    assert_eq!(a.state.history.at(), steps, "nothing until the gesture ends");
+    assert_eq!(a.state.session.history.at(), steps, "nothing until the gesture ends");
     drag(&mut a, vec![Value(7, 0.7), End(7)]);
-    assert_eq!(a.state.history.at(), steps + 1, "a gesture is one step");
+    assert_eq!(a.state.session.history.at(), steps + 1, "a gesture is one step");
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PARAMETER));
     assert_eq!(value(&mut a)[0], 0.25, "back to the value before the gesture");
     // Undo, tweak, undo: the tweak moves from the value the undo put back.
@@ -838,17 +838,17 @@ fn edits_in_a_plugin_s_window_are_undo_steps() {
     assert_eq!(value(&mut a)[0], 0.25);
     crate::history::redo(&mut a.state);
     assert_eq!(value(&mut a)[0], 0.5);
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     // A gesture that ends where it began is none; so is the plugin echoing a value the host set.
     drag(&mut a, vec![Begin(7), Value(7, 0.9), Value(7, 0.5), End(7)]);
     drag(&mut a, vec![Value(7, 0.5)]);
-    assert_eq!(a.state.history.at(), steps);
+    assert_eq!(a.state.session.history.at(), steps);
     // Values sent without a gesture (an X-Y pad, some VST2 plugins) make one step while they come in a row, whichever
     // parameters they move.
     drag(&mut a, vec![Value(7, 0.1), Value(8, 0.2)]);
     drag(&mut a, vec![Value(7, 0.15), Value(8, 0.3)]);
     drag(&mut a, vec![Value(8, 0.4)]);
-    assert_eq!(a.state.history.at(), steps + 1);
+    assert_eq!(a.state.session.history.at(), steps + 1);
     crate::history::undo(&mut a.state);
     assert_eq!(value(&mut a), [0.5, 0.5], "both back to before the run");
     crate::history::redo(&mut a.state);
@@ -872,9 +872,9 @@ fn preset_loads_are_undo_steps() {
     let desc = crate::plugins::builtin()[0].desc.clone();
     let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc: desc.clone(), value: [0.25, 0.5], events: Vec::new() }));
     let mut h = crate::plugins::Hosted::new(knob.clone());
-    h.owner = a.state.project.channels[0].id;
+    h.owner = a.state.session.project.channels[0].id;
     a.plugins.hosted.insert(0, h);
-    a.state.project.get_mut().channels[0].name = Some("808 Snare".into());
+    a.state.session.project.get_mut().channels[0].name = Some("808 Snare".into());
     a.params_tick();
     let dir = std::env::temp_dir().join(format!("os-preset-undo-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -888,20 +888,20 @@ fn preset_loads_are_undo_steps() {
     // What the instance on `row` and its channel hold, once the app's tick has put back what an undo or redo took.
     let seen = |a: &mut App, row: usize| {
         a.host_commands();
-        (knob.lock().unwrap().value, a.state.project.channels[row].name.clone().unwrap_or_default(), a.plugins.preset_name(row))
+        (knob.lock().unwrap().value, a.state.session.project.channels[row].name.clone().unwrap_or_default(), a.plugins.preset_name(row))
     };
     let at = |v: [f64; 2], name: &str, preset: Option<&str>| (v, name.to_string(), preset.map(str::to_string));
 
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     assert_eq!(load_into(&mut a, 0, &bright).as_deref(), Some("Preset: Bright"));
-    assert_eq!((a.state.history.at(), a.state.history.newest_done()), (steps + 1, Some(command::PLUGIN_PRESET)));
+    assert_eq!((a.state.session.history.at(), a.state.session.history.newest_done()), (steps + 1, Some(command::PLUGIN_PRESET)));
     assert_eq!(seen(&mut a, 0), at([0.9, 0.1], "Bright", Some("Bright")), "Auto name channels is on by default");
     load_into(&mut a, 0, &dark);
     load_into(&mut a, 0, &dark);
-    assert_eq!(a.state.history.at(), steps + 2, "the same preset again changes nothing");
+    assert_eq!(a.state.session.history.at(), steps + 2, "the same preset again changes nothing");
 
     // The channel moves without a step of its own: the instance follows it, and so does the undo.
-    a.state.project.get_mut().channels.swap(0, 1);
+    a.state.session.project.get_mut().channels.swap(0, 1);
     a.follow_ids(true, false);
     assert!(a.plugins.hosted.contains_key(&1));
     assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PRESET));
@@ -933,12 +933,12 @@ fn preset_loads_are_undo_steps() {
     let fx = crate::plugins::fx_key(1, 0);
     let slot_knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
     a.plugins.hosted.insert(fx, crate::plugins::Hosted::new(slot_knob.clone()));
-    crate::mixer::track_mut(&mut a.state, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
-    let slot = |a: &App| crate::mixer::slot_name(&a.state, 1, 0).unwrap_or_default();
+    crate::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
+    let slot = |a: &App| crate::mixer::slot_name(&a.state.session, 1, 0).unwrap_or_default();
     let plain = slot(&a);
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     load_into(&mut a, fx, &bright);
-    assert_eq!((a.state.history.at(), slot(&a), slot_knob.lock().unwrap().value), (steps + 1, "Bright".to_string(), [0.9, 0.1]));
+    assert_eq!((a.state.session.history.at(), slot(&a), slot_knob.lock().unwrap().value), (steps + 1, "Bright".to_string(), [0.9, 0.1]));
     crate::history::undo(&mut a.state);
     a.host_commands();
     assert_eq!((slot(&a), slot_knob.lock().unwrap().value, a.plugins.preset_name(fx)), (plain.clone(), [0.5, 0.5], None));
@@ -947,10 +947,10 @@ fn preset_loads_are_undo_steps() {
     assert_eq!((slot(&a), slot_knob.lock().unwrap().value), ("Bright".to_string(), [0.9, 0.1]));
 
     // A preset dropped where a new instance was made loads into it as part of the step that made it.
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     a.plugins.preset_waits.push((1, dark.clone(), std::time::Instant::now()));
     crate::presets::pending_tick(&mut a);
-    assert_eq!((a.state.history.at(), knob.lock().unwrap().value), (steps, [0.1, 0.9]));
+    assert_eq!((a.state.session.history.at(), knob.lock().unwrap().value), (steps, [0.1, 0.9]));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -991,29 +991,29 @@ fn mutes_follow_fl_s_history() {
     let mut a = app();
     ui_round_trip(&mut a, crate::rack::MUTE_SOLO, |a| crate::rack::toggle_mute(&mut a.state, 0));
     ui_round_trip(&mut a, crate::rack::MUTE_SOLO, |a| crate::rack::solo(&mut a.state, 1));
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     crate::mixer::hit(&mut a, crate::mixer::MHit::Led(2));
     crate::mixer::run(&mut a, crate::mixer::MCmd::Solo(1));
-    assert_eq!(a.state.history.at(), steps, "a mixer track's mute and solo make no steps");
-    let on = |a: &App| (a.state.project.channels.iter().map(|c| c.enabled).collect::<Vec<_>>(), a.state.project.mixer.iter().map(|m| m.enabled).collect::<Vec<_>>());
+    assert_eq!(a.state.session.history.at(), steps, "a mixer track's mute and solo make no steps");
+    let on = |a: &App| (a.state.session.project.channels.iter().map(|c| c.enabled).collect::<Vec<_>>(), a.state.session.project.mixer.iter().map(|m| m.enabled).collect::<Vec<_>>());
     // A step on channel 0, then a mixer track muted: its undo and redo keep the track muted.
-    let track = a.state.project.channels[0].mixer_track;
+    let track = a.state.session.project.channels[0].mixer_track;
     a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 5);
     crate::mixer::hit(&mut a, crate::mixer::MHit::Led(3));
     let now = on(&a);
     crate::history::undo(&mut a.state).unwrap();
-    assert_eq!(a.state.project.channels[0].mixer_track, track, "undone");
+    assert_eq!(a.state.session.project.channels[0].mixer_track, track, "undone");
     assert_eq!(on(&a), now, "the mutes stay through the undo");
     crate::history::redo(&mut a.state).unwrap();
     assert_eq!(on(&a), now, "and the redo");
     // With Undo knob tweaks off, a channel's mute makes no step either, and an undo of an earlier step keeps it.
     let was = crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS);
     crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, false);
-    let steps = a.state.history.at();
+    let steps = a.state.session.history.at();
     crate::rack::toggle_mute(&mut a.state, 0);
     let now = on(&a);
     crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, was);
-    assert_eq!(a.state.history.at(), steps, "no step with Undo knob tweaks off");
+    assert_eq!(a.state.session.history.at(), steps, "no step with Undo knob tweaks off");
     crate::history::undo(&mut a.state).unwrap();
     assert_eq!(on(&a), now, "the mute stays through an undo of the step before it");
 }
@@ -1029,7 +1029,7 @@ fn a_hosted_slots_scaling_and_help() {
     let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
     let fx = crate::plugins::fx_key(1, 0);
     a.plugins.hosted.insert(fx, crate::plugins::Hosted::new(knob));
-    crate::mixer::track_mut(&mut a.state, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Lemon Sampler"));
+    crate::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Lemon Sampler"));
     crate::mixer::select(&mut a.state, 1, false);
     let scaling = |a: &App| slot_menu(a, 0, 0.0, 0.0).items.into_iter().find(|i| i.label == "Scaling").unwrap();
     let m = scaling(&a);
@@ -1069,8 +1069,8 @@ fn a_write_reaches_playback_with_no_flag_set() {
         a.tick();
     }
     let n = a.transport.updates_for_tests();
-    a.state.piano.dirty = false;
-    a.state.project.get_mut().main_volume = Some(1234);
+    a.state.session.dirty = false;
+    a.state.session.project.get_mut().main_volume = Some(1234);
     a.tick();
     assert_eq!(a.transport.updates_for_tests(), n + 1);
     a.tick();

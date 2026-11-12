@@ -134,9 +134,9 @@ impl App {
         }
         j.known.clear();
         j.reading = Some(crate::control::query::project(&self.state));
-        j.notes = self.state.project.patterns.iter().map(|p| (p.id.0, p.notes.clone())).collect();
+        j.notes = self.state.session.project.patterns.iter().map(|p| (p.id.0, p.notes.clone())).collect();
         j.dirty = false;
-        j.history = (self.state.history.steps(), self.state.history.done());
+        j.history = (self.state.session.history.steps(), self.state.session.history.done());
         j.plugin_hash.clear();
     }
 
@@ -168,7 +168,7 @@ impl App {
 
     /// Each tick: undo steps, the project's changes and the edited plugins' states into the journal.
     pub(crate) fn journal_tick(&mut self) {
-        let h = &self.state.history;
+        let h = &self.state.session.history;
         let now = (h.steps(), h.done());
         let was = self.journal.history;
         if now != was {
@@ -207,7 +207,7 @@ impl App {
             }
         }
         j.reading = Some(now);
-        let p = &self.state.project;
+        let p = &self.state.session.project;
         for q in &p.patterns {
             let was = j.notes.get(&q.id.0);
             if was.is_some_and(|w| *w == q.notes) {
@@ -262,7 +262,7 @@ impl App {
     /// The state of the instance under `key`, into the journal when it differs from the last written. False when the
     /// audio thread had the instance: not read.
     pub(crate) fn journal_plugin(&mut self, key: usize) -> bool {
-        let Some(owner) = crate::control::command::key_owner(&self.state, key) else { return true };
+        let Some(owner) = crate::control::command::key_owner(&self.state.session, key) else { return true };
         let Ok(state) = self.plugins.state_if_free(key) else { return false };
         let Some(state) = state else { return true };
         let hash = {
@@ -281,7 +281,7 @@ impl App {
         }
         let plugin = self.plugins.descriptor(key).map(|d| json!({ "name": d.name, "format": d.format.as_str(), "id": d.id }));
         let place = match crate::plugins::fx_of(key) {
-            None => json!({ "channel": self.state.project.channels.get(key).map(|c| c.name.clone()) }),
+            None => json!({ "channel": self.state.session.project.channels.get(key).map(|c| c.name.clone()) }),
             Some((t, k)) => json!({ "track": t, "slot": k }),
         };
         let data = (state.len() <= STATE_MAX).then(|| base64(&state));
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn the_journal_follows_the_project() {
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.journal_opened(None);
         let kinds = |a: &App, from: u64| a.journal.since(from).0.iter().map(|e| e["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let start = a.journal.since(0).1;
@@ -523,7 +523,7 @@ mod tests {
         // A note added, then moved: one added; then one removed and one added, with every field.
         let mark = a.journal.since(0).1;
         let n = os_model::Note { position: 0, length: 24, channel: 0, key: 60, velocity: 100, pan: 64, fine_pitch: 120, mod_x: 128, mod_y: 128, release: 64, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
-        crate::patterns::pat_mut(&mut a.state, 1).notes.push(n);
+        crate::patterns::pat_mut(&mut a.state.session, 1).notes.push(n);
         a.journal.touch();
         a.journal.read_at = None;
         a.journal_tick();
@@ -532,7 +532,7 @@ mod tests {
         assert_eq!((notes[0]["added"].as_array().unwrap().len(), notes[0]["removed"].as_array().unwrap().len()), (1, 0));
         assert_eq!(notes[0]["added"][0]["fine_pitch"], 120);
         let mark = a.journal.since(0).1;
-        crate::patterns::pat_mut(&mut a.state, 1).notes.iter_mut().find(|m| **m == n).unwrap().position = 48;
+        crate::patterns::pat_mut(&mut a.state.session, 1).notes.iter_mut().find(|m| **m == n).unwrap().position = 48;
         a.journal.touch();
         a.journal.read_at = None;
         a.journal_tick();

@@ -202,7 +202,7 @@ mod tests {
     fn a_dump_goes_into_the_audio_editor() {
         use crate::mixer::FxReq;
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         app.plugins.effects = crate::plugins::builtin_effects();
         crate::settings_file::set_flag(ON, false);
         assert!(app.dump_audio_log().contains("off"));
@@ -212,8 +212,8 @@ mod tests {
         app.audio_log.keep(&tone, 48000, 5);
         let msg = app.dump_audio_log();
         assert!(msg.starts_with("Recorded Audio log_") && msg.ends_with(" into the audio editor"), "{msg}");
-        let Some(FxReq::Create { track: 0, state: Some(st), .. }) = app.state.mixer.pending.last().cloned() else {
-            panic!("{:?}", app.state.mixer.pending)
+        let Some(FxReq::Create { track: 0, state: Some(st), .. }) = app.state.session.fx_requests.last().cloned() else {
+            panic!("{:?}", app.state.session.fx_requests)
         };
         let saved = tesla::state::from_plugin_state(&st).unwrap();
         assert_eq!((saved.sample.frames(), saved.sample.rate), (4800, 48000));

@@ -264,46 +264,22 @@ impl State {
 
     pub fn knob(&self, id: KnobId) -> f32 {
         match id {
-            KnobId::MixPan(t) => {
-                let pan = self.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.pan).unwrap_or(0.0);
-                (0.5 + pan as f32 / 2.0).clamp(0.0, 1.0)
-            }
-            KnobId::MixSep(t) => {
-                let sep = self.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.stereo_separation).unwrap_or(0.0);
-                (0.5 + sep as f32 / 2.0).clamp(0.0, 1.0)
-            }
-            KnobId::SlotMix(t, k) => self.project.mixer.iter().find(|m| m.index == t).map_or(1.0, |m| m.slot_mix[usize::from(k).min(9)] as f32),
-            KnobId::Send(a, b) => crate::mixer::send(self, a, b).unwrap_or(0.8) as f32,
-            KnobId::ChanVol(i) => self.project.channels.get(i).map_or(0.8, |c| c.volume as f32).clamp(0.0, 1.0),
-            KnobId::ChanPan(i) => self.project.channels.get(i).map_or(0.5, |c| 0.5 + c.pan as f32 / 2.0).clamp(0.0, 1.0),
-            // Main swing is project data, 0..=128 (spec: flp/events/project-info.md, event 11).
-            KnobId::Swing => f32::from(self.project.swing.unwrap_or(0).min(128)) / 128.0,
-            KnobId::MasterVol => f32::from(self.project.main_volume.unwrap_or(os_model::Project::MAIN_VOLUME_DEFAULT).min(16000)) / 16000.0,
-            KnobId::MasterPitch => (0.5 + f32::from(self.project.main_pitch.unwrap_or(0)) / 2400.0).clamp(0.0, 1.0),
-            KnobId::Eq(t, b, f) => {
-                let (b, f) = (usize::from(b.min(2)), usize::from(f.min(2)));
-                let eq = self.project.mixer.iter().find(|m| m.index == t).map_or(os_model::EQ_DEFAULT, |m| m.eq);
-                eq_pos(f as u8, eq[b][f])
-            }
             KnobId::Strum(k) => (self.strum.set.get(k) + 1.0) / 2.0,
             KnobId::Arp(k) => self.arp.set.get(k),
             KnobId::PianoDlg(k) => self.piano_dlg.get(k),
-            KnobId::AutoLfo(row, k) => k.pos(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
-            KnobId::MidiOut(row, k) => k.pos(&crate::lemon_midi_out::row_settings(&self.project, row).unwrap_or_default()),
+            // What the chain plays while its list is open (`container::shown_level`).
             KnobId::Member(t, k, id, wet) => crate::container::shown_level(self, t, k, id, wet),
+            _ => self.session.knob(id).unwrap_or(0.0),
         }
     }
 
     /// The LFO of the automation clip on channel row `row`.
     pub fn clip_lfo(&self, row: usize) -> Option<&os_model::clip_lfo::ClipLfo> {
-        let ch = self.project.channels.get(row)?;
-        self.project.automation(ch.index).map(|a| &a.lfo)
+        self.session.clip_lfo(row)
     }
 
-    /// Channel row `row` is an automation clip's: its pan and volume knobs are the clip's minimum and maximum (spec:
-    /// audio/automation.md "Range").
     pub fn is_clip_row(&self, row: usize) -> bool {
-        self.project.channels.get(row).is_some_and(|c| c.kind == os_model::ChannelKind::Automation)
+        self.session.is_clip_row(row)
     }
 
     /// The value a knob goes back to: an automation clip's range is 0..1 (stored pan 0, volume 12800).
@@ -312,80 +288,15 @@ impl State {
             KnobId::ChanVol(row) if self.is_clip_row(row) => 1.0,
             KnobId::ChanPan(row) if self.is_clip_row(row) => 0.0,
             // An instrument member's levels as Add starts them: wet and dry (a layer).
-            KnobId::Member(t, k, member, false) if crate::container::is_instrument(self, t, k, member) => 1.0,
+            KnobId::Member(t, k, member, false) if crate::container::is_instrument(&self.session, t, k, member) => 1.0,
             _ => id.default_value(),
         }
     }
 
     pub fn set_knob(&mut self, id: KnobId, v: f32) {
-        let mut v = v.clamp(0.0, 1.0);
-        if id == KnobId::MasterPitch {
-            // Smooth, but pulled onto a whole semitone (+-12 range, 100 cents each) when within SNAP of it.
-            let nearest = (v * 24.0).round() / 24.0;
-            if (v - nearest).abs() * 24.0 < PITCH_SNAP {
-                v = nearest;
-            }
-        }
+        let v = v.clamp(0.0, 1.0);
         match id {
-            KnobId::MixPan(t) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
-                    m.pan = Some(f64::from((v - 0.5) * 2.0));
-                    self.piano.dirty = true;
-                }
-            }
-            KnobId::MixSep(t) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
-                    // In 64ths, as the file keeps it and FL's knob sets it (12% merged is 8, a typed 1% is 1).
-                    m.stereo_separation = Some((f64::from((v - 0.5) * 2.0) * 64.0).round() / 64.0);
-                    self.piano.dirty = true;
-                }
-            }
-            KnobId::SlotMix(t, k) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
-                    m.slot_mix[usize::from(k).min(9)] = f64::from(v);
-                    self.piano.dirty = true;
-                }
-            }
-            KnobId::Send(a, b) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == a) {
-                    m.send_levels.retain(|&(d, _)| d != b);
-                    m.send_levels.push((b, f64::from(v)));
-                    m.send_levels.sort_by_key(|&(d, _)| d);
-                    self.piano.dirty = true;
-                }
-            }
-            KnobId::ChanVol(i) => {
-                if let Some(c) = self.project.get_mut().channels.get_mut(i) {
-                    c.volume = f64::from(v);
-                    self.piano.dirty = true;
-                }
-            }
-            KnobId::ChanPan(i) => {
-                if let Some(c) = self.project.get_mut().channels.get_mut(i) {
-                    c.pan = f64::from((v - 0.5) * 2.0);
-                    self.piano.dirty = true;
-                }
-            }
-            KnobId::Swing => {
-                self.project.get_mut().swing = Some((v * 128.0).round() as u8);
-                self.piano.dirty = true;
-            }
-            KnobId::MasterVol => {
-                self.project.get_mut().main_volume = Some((v * 16000.0).round() as u16);
-                self.piano.dirty = true;
-            }
-            KnobId::MasterPitch => {
-                self.project.get_mut().main_pitch = Some(((v - 0.5) * 2400.0).round() as i16);
-                self.piano.dirty = true;
-            }
-            KnobId::Eq(t, b, f) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
-                    let stored = if f == 0 { ((v * 2.0 - 1.0) * 1800.0).round() as i32 } else { (v * 65536.0).round() as i32 };
-                    m.eq[usize::from(b.min(2))][usize::from(f.min(2))] = stored;
-                    self.piano.dirty = true;
-                }
-            }
-            // The notes follow at once (the dialog previews, §1).
+            // The piano roll dialogs' knobs are the interface's. The notes follow at once (the dialog previews, §1).
             KnobId::Strum(k) => {
                 self.strum.set.set(k, v * 2.0 - 1.0);
                 crate::strum::preview(self);
@@ -404,39 +315,26 @@ impl State {
                     crate::piano_dlg::preview(self);
                 }
             }
-            KnobId::AutoLfo(row, k) => {
-                let Some(ch) = self.project.channels.get(row).map(|c| c.index) else { return };
-                if let Some(a) = self.project.get_mut().automation_mut(ch) {
-                    k.store(&mut a.lfo, v);
-                    self.piano.dirty = true;
-                }
-            }
-            KnobId::MidiOut(row, k) => {
-                let Some(mut st) = crate::lemon_midi_out::row_settings(&self.project, row) else { return };
-                k.store(&mut st, v);
-                if crate::lemon_midi_out::set_row_settings(self.project.get_mut(), row, &st) {
-                    self.piano.dirty = true;
-                }
-            }
             // No undo step here: a drag's is taken at the press (`history::knob`).
-            KnobId::Member(t, k, id, wet) => crate::container::put_level(self, t, k, id, wet, v),
+            KnobId::Member(t, k, member, wet) => crate::container::put_level(self, t, k, member, wet, v),
+            _ => self.session.set_knob(id, v),
         }
     }
 
     /// Knob `id` back to its default, as an undo step.
     pub fn reset_knob(&mut self, id: KnobId) {
-        crate::history::knob(self, id, false);
+        crate::history::knob(&mut self.session, id, false);
         self.set_knob(id, self.knob_default(id));
     }
 
     /// The hint-bar text of a knob at its current value.
     pub fn knob_text(&self, id: KnobId) -> String {
         match id {
-            KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.project.ppq.max(4))),
+            KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.session.project.ppq.max(4))),
             KnobId::Arp(k) => self.arp.set.text(k),
-            KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.project.ppq.max(4))),
+            KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.session.project.ppq.max(4))),
             KnobId::AutoLfo(row, k) => k.text(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
-            KnobId::MidiOut(row, k) => k.text(&crate::lemon_midi_out::row_settings(&self.project, row).unwrap_or_default()),
+            KnobId::MidiOut(row, k) => k.text(&crate::lemon_midi_out::row_settings(&self.session.project, row).unwrap_or_default()),
             _ => self.knob_text_at(id, self.knob(id)).unwrap_or_default(),
         }
     }
@@ -463,7 +361,7 @@ impl State {
             KnobId::ChanVol(row) if self.is_clip_row(row) => format!("Maximum: {:.0}%", n * 100.0),
             KnobId::ChanPan(_) => format!("Channel panning: {}", pan_text(bipolar)),
             KnobId::MixSep(_) => crate::mixer::sep_text(f64::from(bipolar)),
-            KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::mixer::name(self, b)), f64::from(n)),
+            KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::mixer::name(&self.session, b)), f64::from(n)),
             KnobId::SlotMix(..) => format!("Mix level: {:.0}%", n * 100.0),
             // spec: ui/channel-rack.md §11: "Channel volume: 78%  -5.2dB  0.55".
             KnobId::ChanVol(_) => {
@@ -474,7 +372,7 @@ impl State {
             KnobId::Swing => format!("Main swing: {:.0}%", n * 100.0),
             // "Lemon Limiter wet: 60%".
             KnobId::Member(t, k, id, wet) => {
-                let name = crate::container::members(self, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
+                let name = crate::container::members(&self.session, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
                 crate::container::level_text(&name, wet, n)
             }
             // "EQ band 1 (low shelf) level: 0.0dB", "... freq: 90Hz", "... width: 0.27" (spec: ui/mixer.md §8).
@@ -505,18 +403,18 @@ impl crate::app::App {
             Control::Fader(t) => {
                 let v = os_model::MixerTrack::new(t).volume.unwrap_or(0.8);
                 crate::control::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t), |s| {
-                    if let Some(m) = crate::mixer::track_mut(s, t) {
+                    if let Some(m) = crate::mixer::track_mut(&mut s.session, t) {
                         m.volume = Some(v);
-                        s.piano.dirty = true;
+                        s.session.dirty = true;
                     }
                 });
                 self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
             }
             Control::ChanPitch(row) => {
                 crate::control::edit(s, "Channel pitch", crate::control::command::Region::Channel(row), |s| {
-                    if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
+                    if let Some(ch) = s.session.project.get_mut().channels.get_mut(row) {
                         ch.pitch_cents = 0;
-                        s.piano.dirty = true;
+                        s.session.dirty = true;
                     }
                 });
             }
@@ -560,9 +458,9 @@ mod tests {
     #[test]
     fn stereo_separation_moves_in_64ths() {
         let mut app = crate::app::App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.set_knob(KnobId::MixSep(1), 0.5 + 0.01 / 2.0);
-        let sep = |app: &crate::app::App| crate::mixer::track(&app.state, 1).unwrap().stereo_separation;
+        let sep = |app: &crate::app::App| crate::mixer::track(&app.state.session, 1).unwrap().stereo_separation;
         assert_eq!(sep(&app), Some(1.0 / 64.0));
         assert_eq!(app.state.knob_text(KnobId::MixSep(1)), "Stereo separation: 2% merged");
         app.state.set_knob(KnobId::MixSep(1), 0.5 - 0.125 / 2.0);
@@ -587,7 +485,7 @@ mod tests {
         s.set_knob(KnobId::MixPan(1), 0.75);
         assert_eq!(s.knob_text(KnobId::MixPan(1)), "Panning: 50% right");
         assert_eq!(s.knob_text(KnobId::Swing), "Main swing: 0%");
-        s.project.get_mut().channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
+        s.session.project.get_mut().channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
         assert_eq!(s.knob_text(KnobId::ChanVol(0)), "Channel volume: 78%  -5.2dB  0.55");
     }
 
@@ -597,7 +495,7 @@ mod tests {
         use crate::app::Action;
         use crate::views::settings::SAct;
         let mut app = crate::app::App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         assert_eq!(Control::of(&Action::Knob(KnobId::Swing)), Some(Control::Knob(KnobId::Swing)));
         assert_eq!(Control::of(&Action::Fader(2)), Some(Control::Fader(2)));
         assert_eq!(Control::of(&Action::Settings(SAct::ThemeKnob(3))), Some(Control::Theme(3)));
@@ -611,13 +509,13 @@ mod tests {
         }
         assert!(crate::history::undo(&mut app.state).is_some(), "an undo step");
         assert_ne!(app.state.knob(KnobId::SlotMix(1, 0)), 1.0, "undone");
-        crate::mixer::track_mut(&mut app.state, 1).unwrap().volume = Some(0.2);
+        crate::mixer::track_mut(&mut app.state.session, 1).unwrap().volume = Some(0.2);
         app.reset_control(Control::Fader(1));
-        assert_eq!(crate::mixer::track(&app.state, 1).unwrap().volume, Some(0.8));
+        assert_eq!(crate::mixer::track(&app.state.session, 1).unwrap().volume, Some(0.8));
         assert_eq!(app.hint, "Volume: 100%  0.0dB  1.00");
-        app.state.project.get_mut().channels[0].pitch_cents = 250;
+        app.state.session.project.get_mut().channels[0].pitch_cents = 250;
         app.reset_control(Control::ChanPitch(0));
-        assert_eq!(app.state.project.channels[0].pitch_cents, 0);
+        assert_eq!(app.state.session.project.channels[0].pitch_cents, 0);
         let s = &crate::prefs::SMOOTHING;
         crate::prefs::set_slider(s, 3);
         app.reset_control(Control::Slider(s.label));
@@ -628,7 +526,7 @@ mod tests {
     fn eq_knobs() {
         let mut app = crate::app::App::new(None);
         let s = &mut app.state;
-        let t = s.project.mixer[1].index;
+        let t = s.session.project.mixer[1].index;
         assert_eq!(s.knob_text(KnobId::Eq(t, 0, 0)), "EQ band 1 (low shelf) level: 0.0dB");
         assert_eq!(s.knob_text(KnobId::Eq(t, 0, 1)), "EQ band 1 (low shelf) freq: 90Hz");
         assert_eq!(s.knob_text(KnobId::Eq(t, 2, 1)), "EQ band 3 (high shelf) freq: 8000Hz");
@@ -637,10 +535,147 @@ mod tests {
             assert_eq!(s.knob(KnobId::Eq(t, b, f)), KnobId::Eq(t, b, f).default_value(), "starts at the default");
         }
         s.set_knob(KnobId::Eq(t, 1, 0), 0.25);
-        assert_eq!(s.project.mixer[1].eq[1][0], -900);
+        assert_eq!(s.session.project.mixer[1].eq[1][0], -900);
         assert_eq!(s.knob_text(KnobId::Eq(t, 1, 0)), "EQ band 2 (peaking) level: -9.0dB");
         s.set_knob(KnobId::Eq(t, 2, 1), 0.5);
-        assert_eq!(s.project.mixer[1].eq[2][1], 32768);
-        assert!(s.piano.dirty);
+        assert_eq!(s.session.project.mixer[1].eq[2][1], 32768);
+        assert!(s.session.dirty);
+    }
+}
+
+/// The project's knobs (`State`'s are these and the interface's own).
+impl crate::session::Session {
+    /// The project's value of control `id` as its knob shows it (0..1); `None` for the piano roll dialogs' knobs,
+    /// which are the interface's.
+    pub fn knob(&self, id: KnobId) -> Option<f32> {
+        Some(match id {
+            KnobId::MixPan(t) => {
+                let pan = self.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.pan).unwrap_or(0.0);
+                (0.5 + pan as f32 / 2.0).clamp(0.0, 1.0)
+            }
+            KnobId::MixSep(t) => {
+                let sep = self.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.stereo_separation).unwrap_or(0.0);
+                (0.5 + sep as f32 / 2.0).clamp(0.0, 1.0)
+            }
+            KnobId::SlotMix(t, k) => self.project.mixer.iter().find(|m| m.index == t).map_or(1.0, |m| m.slot_mix[usize::from(k).min(9)] as f32),
+            KnobId::Send(a, b) => crate::mixer::send(self, a, b).unwrap_or(0.8) as f32,
+            KnobId::ChanVol(i) => self.project.channels.get(i).map_or(0.8, |c| c.volume as f32).clamp(0.0, 1.0),
+            KnobId::ChanPan(i) => self.project.channels.get(i).map_or(0.5, |c| 0.5 + c.pan as f32 / 2.0).clamp(0.0, 1.0),
+            // Main swing is project data, 0..=128 (spec: flp/events/project-info.md, event 11).
+            KnobId::Swing => f32::from(self.project.swing.unwrap_or(0).min(128)) / 128.0,
+            KnobId::MasterVol => f32::from(self.project.main_volume.unwrap_or(os_model::Project::MAIN_VOLUME_DEFAULT).min(16000)) / 16000.0,
+            KnobId::MasterPitch => (0.5 + f32::from(self.project.main_pitch.unwrap_or(0)) / 2400.0).clamp(0.0, 1.0),
+            KnobId::Eq(t, b, f) => {
+                let (b, f) = (usize::from(b.min(2)), usize::from(f.min(2)));
+                let eq = self.project.mixer.iter().find(|m| m.index == t).map_or(os_model::EQ_DEFAULT, |m| m.eq);
+                eq_pos(f as u8, eq[b][f])
+            }
+            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) => return None,
+            KnobId::AutoLfo(row, k) => k.pos(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
+            KnobId::MidiOut(row, k) => k.pos(&crate::lemon_midi_out::row_settings(&self.project, row).unwrap_or_default()),
+            KnobId::Member(t, k, id, wet) => crate::container::level(self, t, k, id, wet).unwrap_or(0.0),
+        })
+    }
+
+    /// The LFO of the automation clip on channel row `row`.
+    pub fn clip_lfo(&self, row: usize) -> Option<&os_model::clip_lfo::ClipLfo> {
+        let ch = self.project.channels.get(row)?;
+        self.project.automation(ch.index).map(|a| &a.lfo)
+    }
+
+    /// Channel row `row` is an automation clip's: its pan and volume knobs are the clip's minimum and maximum (spec:
+    /// audio/automation.md "Range").
+    pub fn is_clip_row(&self, row: usize) -> bool {
+        self.project.channels.get(row).is_some_and(|c| c.kind == os_model::ChannelKind::Automation)
+    }
+
+    /// Control `id` of the project set from its knob's position `v` (0..1); the piano roll dialogs' knobs are the
+    /// interface's (`State::set_knob`).
+    pub fn set_knob(&mut self, id: KnobId, v: f32) {
+        let mut v = v.clamp(0.0, 1.0);
+        if id == KnobId::MasterPitch {
+            // Smooth, but pulled onto a whole semitone (+-12 range, 100 cents each) when within SNAP of it.
+            let nearest = (v * 24.0).round() / 24.0;
+            if (v - nearest).abs() * 24.0 < PITCH_SNAP {
+                v = nearest;
+            }
+        }
+        match id {
+            KnobId::MixPan(t) => {
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
+                    m.pan = Some(f64::from((v - 0.5) * 2.0));
+                    self.dirty = true;
+                }
+            }
+            KnobId::MixSep(t) => {
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
+                    // In 64ths, as the file keeps it and FL's knob sets it (12% merged is 8, a typed 1% is 1).
+                    m.stereo_separation = Some((f64::from((v - 0.5) * 2.0) * 64.0).round() / 64.0);
+                    self.dirty = true;
+                }
+            }
+            KnobId::SlotMix(t, k) => {
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
+                    m.slot_mix[usize::from(k).min(9)] = f64::from(v);
+                    self.dirty = true;
+                }
+            }
+            KnobId::Send(a, b) => {
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == a) {
+                    m.send_levels.retain(|&(d, _)| d != b);
+                    m.send_levels.push((b, f64::from(v)));
+                    m.send_levels.sort_by_key(|&(d, _)| d);
+                    self.dirty = true;
+                }
+            }
+            KnobId::ChanVol(i) => {
+                if let Some(c) = self.project.get_mut().channels.get_mut(i) {
+                    c.volume = f64::from(v);
+                    self.dirty = true;
+                }
+            }
+            KnobId::ChanPan(i) => {
+                if let Some(c) = self.project.get_mut().channels.get_mut(i) {
+                    c.pan = f64::from((v - 0.5) * 2.0);
+                    self.dirty = true;
+                }
+            }
+            KnobId::Swing => {
+                self.project.get_mut().swing = Some((v * 128.0).round() as u8);
+                self.dirty = true;
+            }
+            KnobId::MasterVol => {
+                self.project.get_mut().main_volume = Some((v * 16000.0).round() as u16);
+                self.dirty = true;
+            }
+            KnobId::MasterPitch => {
+                self.project.get_mut().main_pitch = Some(((v - 0.5) * 2400.0).round() as i16);
+                self.dirty = true;
+            }
+            KnobId::Eq(t, b, f) => {
+                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
+                    let stored = if f == 0 { ((v * 2.0 - 1.0) * 1800.0).round() as i32 } else { (v * 65536.0).round() as i32 };
+                    m.eq[usize::from(b.min(2))][usize::from(f.min(2))] = stored;
+                    self.dirty = true;
+                }
+            }
+            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) => {}
+            KnobId::AutoLfo(row, k) => {
+                let Some(ch) = self.project.channels.get(row).map(|c| c.index) else { return };
+                if let Some(a) = self.project.get_mut().automation_mut(ch) {
+                    k.store(&mut a.lfo, v);
+                    self.dirty = true;
+                }
+            }
+            KnobId::MidiOut(row, k) => {
+                let Some(mut st) = crate::lemon_midi_out::row_settings(&self.project, row) else { return };
+                k.store(&mut st, v);
+                if crate::lemon_midi_out::set_row_settings(self.project.get_mut(), row, &st) {
+                    self.dirty = true;
+                }
+            }
+            // No undo step here: a drag's is taken at the press (`history::knob`).
+            KnobId::Member(t, k, id, wet) => crate::container::put_level_in(self, t, k, id, wet, v),
+        }
     }
 }

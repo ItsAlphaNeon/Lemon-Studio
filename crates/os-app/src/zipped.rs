@@ -182,7 +182,7 @@ fn copy(r: &mut impl Read, mut w: impl Write, done: &AtomicU64) -> io::Result<()
 /// FILE > Export zipped project...: a Save dialog for the .zip, in the project's folder, named after it.
 pub fn export_dialog(app: &mut App) {
     use crate::filedlg::{FileDlg, Mode};
-    let path = app.state.path.clone();
+    let path = app.state.session.path.clone();
     let stem = path.as_deref().and_then(Path::file_stem).map_or_else(|| "Untitled".to_string(), |s| s.to_string_lossy().into_owned());
     let dlg = FileDlg::new(Mode::Save, "Export zipped project", "zipped project", Then::ExportZip)
         .filter("Zip file", &["zip"])
@@ -246,7 +246,7 @@ impl Pack {
 fn prepare(app: &mut App, zip: &Path) -> Result<(Vec<u8>, Pack), String> {
     // The project goes in as Save writes it: a .lemon file (an FLP's name with .lemon).
     let ext = crate::project_files::EXT;
-    let project = app.state.path.as_deref().and_then(Path::file_stem).map_or_else(
+    let project = app.state.session.path.as_deref().and_then(Path::file_stem).map_or_else(
         || format!("{}.{ext}", zip.file_stem().map_or_else(|| "Untitled".into(), |s| s.to_string_lossy())),
         |n| format!("{}.{ext}", n.to_string_lossy()),
     );
@@ -434,22 +434,22 @@ mod tests {
         std::fs::write(d.join("one/Kick.wav"), &wav).unwrap();
         std::fs::write(d.join("two/Kick.wav"), &wav[..wav.len() - 2]).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::default_project());
-        let rows: Vec<usize> = (0..4).map(|_| crate::app::add_channel(app.state.project.get_mut())).collect();
+        app.state.session.project = crate::locked::Locked::new(crate::app::default_project());
+        let rows: Vec<usize> = (0..4).map(|_| crate::app::add_channel(app.state.session.project.get_mut())).collect();
         let one = d.join("one/Kick.wav").to_string_lossy().into_owned();
         let two = d.join("two/Kick.wav").to_string_lossy().into_owned();
-        app.state.project.get_mut().channels[rows[0]].sample_path = Some(one.clone());
-        app.state.project.get_mut().channels[rows[1]].sample_path = Some(two.clone());
-        app.state.project.get_mut().channels[rows[2]].sample_path = Some(one.clone());
-        app.state.project.get_mut().channels[rows[3]].sample_path = Some(d.join("Gone.wav").to_string_lossy().into_owned());
-        app.state.file = None;
+        app.state.session.project.get_mut().channels[rows[0]].sample_path = Some(one.clone());
+        app.state.session.project.get_mut().channels[rows[1]].sample_path = Some(two.clone());
+        app.state.session.project.get_mut().channels[rows[2]].sample_path = Some(one.clone());
+        app.state.session.project.get_mut().channels[rows[3]].sample_path = Some(d.join("Gone.wav").to_string_lossy().into_owned());
+        app.state.session.file = None;
         app.save_to(d.join("Song.flp"));
-        let before = app.state.project.clone();
+        let before = app.state.session.project.clone();
         let zip = d.join("out").join("Song.zip");
         std::fs::create_dir_all(d.join("out")).unwrap();
         let (flp, pack) = prepare(&mut app, &zip).unwrap();
-        assert_eq!(app.state.project, before, "the project is not changed");
-        assert_eq!(app.state.path.as_deref(), Some(d.join("Song.flp").as_path()));
+        assert_eq!(app.state.session.project, before, "the project is not changed");
+        assert_eq!(app.state.session.path.as_deref(), Some(d.join("Song.flp").as_path()));
         assert_eq!(pack.missing, vec!["Gone.wav".to_string()]);
         let (done, total) = (AtomicU64::new(0), AtomicU64::new(0));
         write_zip(&zip, &flp, &pack, &done, &total).unwrap();
@@ -460,7 +460,7 @@ mod tests {
         std::fs::remove_dir_all(d.join("two")).unwrap();
         let project = unzip(&zip, None, &done, &total).unwrap();
         app.open(project);
-        let resolved = |row: usize| crate::plugins::resolve_sample(app.state.project.channels[row].sample_path.as_deref().unwrap());
+        let resolved = |row: usize| crate::plugins::resolve_sample(app.state.session.project.channels[row].sample_path.as_deref().unwrap());
         let unzipped = d.join("out").join("Song");
         assert_eq!(resolved(rows[0]), unzipped.join("Kick.wav").to_string_lossy());
         assert_eq!(resolved(rows[1]), unzipped.join("Kick_2.wav").to_string_lossy());

@@ -84,7 +84,7 @@ pub struct Credits {
 
 /// The project's time spent at `now`, in days: what it was opened or created with, plus this session's clock.
 pub fn spent_days(s: &State, now: Instant) -> f64 {
-    s.project.work_time.map_or(0.0, |w| w.spent) + s.credits.clock.elapsed(now).as_secs_f64() / 86_400.0
+    s.session.project.work_time.map_or(0.0, |w| w.spent) + s.credits.clock.elapsed(now).as_secs_f64() / 86_400.0
 }
 
 /// The date and time now, as a project's start (days since 1899-12-30): fixed in a test that runs the motions' clock
@@ -100,7 +100,7 @@ fn work_time_now() -> WorkTime {
 /// The project as it is saved (`App::save_to`): its time spent includes the session's clock (spec:
 /// flp/events/project-info.md "Writer notes": "then adds the time spent").
 pub(crate) fn stamp(s: &State, p: &mut Project) {
-    let started = s.project.work_time.map_or_else(|| work_time_now().started, |w| w.started);
+    let started = s.session.project.work_time.map_or_else(|| work_time_now().started, |w| w.started);
     p.work_time = Some(WorkTime { started, spent: spent_days(s, crate::anim::now()) });
 }
 
@@ -108,15 +108,15 @@ pub(crate) fn stamp(s: &State, p: &mut Project) {
 /// (spec: flp/events/project-info.md "Writer notes"); the clock starts again; the Song info box shows when the project
 /// asks for it (event 10).
 pub(crate) fn opened(s: &mut State) {
-    s.project.get_mut().work_time.get_or_insert_with(work_time_now);
+    s.session.project.get_mut().work_time.get_or_insert_with(work_time_now);
     s.credits.clock.restart(crate::anim::now());
-    s.credits.song_box = s.project.show_info == Some(true);
+    s.credits.song_box = s.session.project.show_info == Some(true);
     (s.credits.song_since, s.credits.song_alpha) = (None, 1.0);
 }
 
 /// A new project: started now, nothing spent (spec: ui/settings-choices.md "Info": "A new project starts now").
 pub(crate) fn created(s: &mut State) {
-    s.project.get_mut().work_time = Some(work_time_now());
+    s.session.project.get_mut().work_time = Some(work_time_now());
     s.credits.clock.restart(crate::anim::now());
     s.credits.song_box = false;
 }
@@ -194,7 +194,7 @@ pub fn mixer_tracks(p: &Project) -> usize {
 /// The Info page's footer (spec: ui/settings-choices.md "Info"): the start, plus the version that saved the file when
 /// the project was loaded from one (event 199 as loaded: saving does not change it); the time spent; the counts.
 pub fn footer(s: &State, now: Instant) -> Vec<String> {
-    let p = &s.project;
+    let p = &s.session.project;
     let mut lines = Vec::new();
     if let Some(date) = p.work_time.and_then(|w| date_text(w.started)) {
         let saved_by = p.saved_by.trim_matches(|c: char| c == '\0' || c.is_whitespace());
@@ -242,7 +242,7 @@ pub(crate) fn paint_song_info(ui: &mut Ui, s: &State) {
     let ink = color(SONG_INK);
     let (big, small) = (Font::new(22).bold(), Font::new(14));
     let inner = r.inset(12.0);
-    let i = &s.project.info;
+    let i = &s.session.project.info;
     let head = [i.author.as_deref(), i.title.as_deref()].into_iter().flatten().filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" - ");
     let genre = i.genre.as_deref().unwrap_or("");
     let (big_h, lh) = (ui.c.line_height(big), ui.c.line_height(small));
@@ -276,7 +276,7 @@ impl App {
         }
         accept_info(s);
         let mut text = Field::default();
-        text.set(field.get(&s.project.info).as_deref().unwrap_or(""));
+        text.set(field.get(&s.session.project.info).as_deref().unwrap_or(""));
         s.settings.info_edit = Some(InfoEdit { field, text });
         self.invalidate();
     }
@@ -316,7 +316,7 @@ impl App {
     /// then `GENRES`, the project's genre marked (spec: ui/settings-choices.md "Info").
     pub(crate) fn genre_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
-        let now = self.state.project.info.genre.as_deref().unwrap_or("");
+        let now = self.state.session.project.info.genre.as_deref().unwrap_or("");
         let items = std::iter::once(PItem::new("(none)", Cmd::Genre(None)).mark(Mark::Radio(now.is_empty())))
             .chain(GENRES.iter().map(|&g| PItem::new(g, Cmd::Genre(Some(g))).mark(Mark::Radio(now == g))))
             .collect();
@@ -330,7 +330,7 @@ impl App {
         let s = &mut self.state;
         accept_info(s);
         crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
-            let value = &mut s.project.get_mut().info.genre;
+            let value = &mut s.session.project.get_mut().info.genre;
             if value.as_deref().unwrap_or("") != genre.unwrap_or("") {
                 *value = genre.map(str::to_string);
             }
@@ -361,9 +361,9 @@ impl App {
     /// (the session's time is not in it, `WorkClock`): the saved copy then forgets its time so the two differ.
     pub(crate) fn reset_work_time(&mut self) {
         let s = &mut self.state;
-        s.project.get_mut().work_time.get_or_insert_with(os_flp::project::work_time_now).spent = 0.0;
+        s.session.project.get_mut().work_time.get_or_insert_with(os_flp::project::work_time_now).spent = 0.0;
         s.credits.clock.restart(crate::anim::now());
-        if self.saved.0.work_time == s.project.work_time {
+        if self.saved.0.work_time == s.session.project.work_time {
             self.saved.0.work_time = None;
         }
         s.message = Some("Working time reset".into());
@@ -372,7 +372,7 @@ impl App {
 
     /// Info ▸ Show info on opening (event 10): switched for the project and saved with it.
     pub(crate) fn toggle_show_info(&mut self) {
-        let p = self.state.project.get_mut();
+        let p = self.state.session.project.get_mut();
         let on = !p.show_info.unwrap_or(false);
         p.show_info = Some(on);
         self.state.message = Some(format!("Show info on opening: {}", if on { "on" } else { "off" }));
@@ -479,7 +479,7 @@ pub(crate) fn accept_info(s: &mut State) {
     let Some(e) = s.settings.info_edit.take() else { return };
     let text = if e.field.multiline() { e.text.text } else { e.text.text.trim().to_string() };
     crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
-        let value = e.field.get_mut(&mut s.project.get_mut().info);
+        let value = e.field.get_mut(&mut s.session.project.get_mut().info);
         if value.as_deref().unwrap_or("") != text {
             *value = (!text.is_empty()).then_some(text);
         }
@@ -552,40 +552,40 @@ mod tests {
         named(&mut app, NamedKey::ArrowLeft);
         typed(&mut app, "!");
         assert_eq!(app.state.settings.info_edit.as_ref().unwrap().text.text, "Xy tu!n");
-        assert!(app.state.project.info.title.is_none(), "nothing written while typing");
+        assert!(app.state.session.project.info.title.is_none(), "nothing written while typing");
         app.key(&Key::Character("a".into()), true, false);
         typed(&mut app, "  Song  ");
         named(&mut app, NamedKey::Enter);
         assert!(!app.info_editing());
-        assert_eq!(app.state.project.info.title.as_deref(), Some("Song"), "trimmed");
+        assert_eq!(app.state.session.project.info.title.as_deref(), Some("Song"), "trimmed");
         assert!(app.unsaved());
         assert_eq!(app.title(), "[Song]");
         // The accepted box is one undo step.
         assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
-        assert!(app.state.project.info.title.is_none());
+        assert!(app.state.session.project.info.title.is_none());
         assert_eq!(crate::history::redo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
-        assert_eq!(app.state.project.info.title.as_deref(), Some("Song"));
+        assert_eq!(app.state.session.project.info.title.as_deref(), Some("Song"));
     }
 
     /// Esc drops the edit; an emptied box clears its field; an unchanged one changes nothing.
     #[test]
     fn escape_cancels_and_empty_clears() {
         let mut app = app();
-        app.state.project.get_mut().info.author = Some("Someone".into());
-        let before = app.state.project.clone();
+        app.state.session.project.get_mut().info.author = Some("Someone".into());
+        let before = app.state.session.project.clone();
         app.act(Action::Settings(SAct::Info(InfoField::Author)));
         typed(&mut app, " else");
         named(&mut app, NamedKey::Escape);
         assert!(!app.info_editing() && app.state.settings.open, "Esc leaves the window open");
-        assert_eq!(app.state.project.info.author.as_deref(), Some("Someone"));
+        assert_eq!(app.state.session.project.info.author.as_deref(), Some("Someone"));
         app.act(Action::Settings(SAct::Info(InfoField::Author)));
         named(&mut app, NamedKey::Enter);
-        assert_eq!(app.state.project, before, "unchanged");
+        assert_eq!(app.state.session.project, before, "unchanged");
         app.act(Action::Settings(SAct::Info(InfoField::Author)));
         app.key(&Key::Character("a".into()), true, false);
         named(&mut app, NamedKey::Backspace);
         named(&mut app, NamedKey::Enter);
-        assert_eq!(app.state.project.info.author, None);
+        assert_eq!(app.state.session.project.info.author, None);
     }
 
     /// Comments: Enter starts a new line, Home / End / Up / Down go by lines; clicking another box accepts it.
@@ -605,7 +605,7 @@ mod tests {
         typed(&mut app, "Z");
         assert_eq!(app.state.settings.info_edit.as_ref().unwrap().text.text, "abXcY\nZde");
         app.act(Action::Settings(SAct::Info(InfoField::Url)));
-        assert_eq!(app.state.project.info.comments.as_deref(), Some("abXcY\nZde"));
+        assert_eq!(app.state.session.project.info.comments.as_deref(), Some("abXcY\nZde"));
         assert_eq!(app.state.settings.info_edit.as_ref().map(|e| e.field), Some(InfoField::Url));
     }
 
@@ -628,12 +628,12 @@ mod tests {
         typed(&mut app, "end");
         app.paint(&mut c, None);
         click(&mut app, &mut c, Action::Settings(SAct::Info(InfoField::Title)));
-        assert!(app.state.project.info.comments.as_deref().is_some_and(|t| t.ends_with(" \nend")));
+        assert!(app.state.session.project.info.comments.as_deref().is_some_and(|t| t.ends_with(" \nend")));
         typed(&mut app, "Clicked");
         click(&mut app, &mut c, Action::Settings(SAct::Tab(settings::DEBUG)));
         assert_eq!(app.state.settings.tab, settings::DEBUG);
         assert!(!app.info_editing());
-        assert_eq!(app.state.project.info.title.as_deref(), Some("Clicked"));
+        assert_eq!(app.state.session.project.info.title.as_deref(), Some("Clicked"));
     }
 
     /// Typed credits are saved in a new project's file, and edited again in the opened file; they read back after
@@ -654,7 +654,7 @@ mod tests {
         app.save_to(path.clone());
         assert!(!app.unsaved(), "{:?}", app.state.message);
         app.open(path.clone());
-        assert_eq!((app.state.project.info.title.as_deref(), app.state.project.info.comments.as_deref()), (Some("Saved song"), Some("one")));
+        assert_eq!((app.state.session.project.info.title.as_deref(), app.state.session.project.info.comments.as_deref()), (Some("Saved song"), Some("one")));
         // In the opened file: changed, added and cleared.
         edit(&mut app, InfoField::Title, "Renamed");
         edit(&mut app, InfoField::Url, "https://example.org");
@@ -662,7 +662,7 @@ mod tests {
         app.save_to(path.clone());
         app.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        let i = &app.state.project.info;
+        let i = &app.state.session.project.info;
         assert_eq!((i.title.as_deref(), i.url.as_deref(), i.comments.as_deref()), (Some("Renamed"), Some("https://example.org"), None));
     }
 
@@ -683,7 +683,7 @@ mod tests {
         assert!(!app.typing_key(winit::keyboard::KeyCode::KeyZ, true, false, false));
         typed(&mut app, "z");
         named(&mut app, NamedKey::Enter);
-        assert_eq!(app.state.project.info.genre.as_deref(), Some("z"));
+        assert_eq!(app.state.session.project.info.genre.as_deref(), Some("z"));
     }
 
     /// Picks the row labelled `label` of the open popup.
@@ -698,7 +698,7 @@ mod tests {
     fn genre_menu_fills_the_box() {
         use crate::playlist::Mark;
         let mut app = app();
-        app.state.project.get_mut().info.genre = Some("House".into());
+        app.state.session.project.get_mut().info.genre = Some("House".into());
         app.act(Action::Settings(SAct::Genres(10.0, 20.0)));
         let p = app.state.playlist.popup.as_ref().expect("menu");
         assert_eq!((p.x, p.y), (10.0, 21.0));
@@ -709,20 +709,20 @@ mod tests {
         assert_eq!(marked, ["House"]);
         pick(&mut app, "Lo-Fi");
         assert!(app.state.playlist.popup.is_none());
-        assert_eq!(app.state.project.info.genre.as_deref(), Some("Lo-Fi"));
+        assert_eq!(app.state.session.project.info.genre.as_deref(), Some("Lo-Fi"));
         app.act(Action::Settings(SAct::Genres(10.0, 20.0)));
         pick(&mut app, "(none)");
-        assert_eq!(app.state.project.info.genre, None);
+        assert_eq!(app.state.session.project.info.genre, None);
         // An empty genre (as FL writes it) marks "(none)", and "(none)" leaves it as it is.
-        app.state.project.get_mut().info.genre = Some(String::new());
+        app.state.session.project.get_mut().info.genre = Some(String::new());
         app.act(Action::Settings(SAct::Genres(10.0, 20.0)));
         assert_eq!(app.state.playlist.popup.as_ref().unwrap().items[0].mark, Mark::Radio(true));
         pick(&mut app, "(none)");
-        assert_eq!(app.state.project.info.genre.as_deref(), Some(""));
+        assert_eq!(app.state.session.project.info.genre.as_deref(), Some(""));
         app.act(Action::Settings(SAct::Info(InfoField::Genre)));
         typed(&mut app, "Nu disco");
         named(&mut app, NamedKey::Enter);
-        assert_eq!(app.state.project.info.genre.as_deref(), Some("Nu disco"));
+        assert_eq!(app.state.session.project.info.genre.as_deref(), Some("Nu disco"));
     }
 
     /// The painted genre button: hint "MP3 music genres"; a click accepts the box being edited and opens the menu under
@@ -746,17 +746,17 @@ mod tests {
         let r = h.rect;
         click_at(&mut app, r);
         assert!(!app.info_editing());
-        assert_eq!(app.state.project.info.genre.as_deref(), Some("x"));
+        assert_eq!(app.state.session.project.info.genre.as_deref(), Some("x"));
         let p = app.state.playlist.popup.as_ref().expect("menu");
         assert_eq!((p.x, p.y), (r.x, r.bottom() + 1.0));
         pick(&mut app, "Jazz");
-        assert_eq!(app.state.project.info.genre.as_deref(), Some("Jazz"));
+        assert_eq!(app.state.session.project.info.genre.as_deref(), Some("Jazz"));
         assert!(app.unsaved());
         let path = std::env::temp_dir().join(format!("lemonstudio-genre-{}.flp", std::process::id()));
         app.save_to(path.clone());
         app.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        assert_eq!(app.state.project.info.genre.as_deref(), Some("Jazz"));
+        assert_eq!(app.state.session.project.info.genre.as_deref(), Some("Jazz"));
     }
 
     /// The footer's wording (spec: ui/settings-choices.md "Info"): the start in short date and time, the time spent in
@@ -782,12 +782,12 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert!(lines[0].starts_with("This project was started on ") && !lines[0].contains("last saved"), "{lines:?}");
         assert_eq!(lines[1], "Less than a minute was spent working on it.");
-        app.state.project.get_mut().saved_by = "24.1.1.4285\0".into();
-        app.state.project.get_mut().work_time = Some(WorkTime { started: 42_146.675_951_990_74, spent: 6.122_916_666_7 });
+        app.state.session.project.get_mut().saved_by = "24.1.1.4285\0".into();
+        app.state.session.project.get_mut().work_time = Some(WorkTime { started: 42_146.675_951_990_74, spent: 6.122_916_666_7 });
         let lines = footer(&app.state, Instant::now());
         assert_eq!(lines[0], "This project was started on 5/22/2015 4:13 PM, last saved in 24.1.1.4285");
         assert_eq!(lines[1], "Total time spent on it:  146 hours 57 minutes.");
-        let c = counts(&app.state.project);
+        let c = counts(&app.state.session.project);
         assert_eq!(lines[2], format!("Plugins: {}, Channels: {}, Mixer Tracks: {}", c.plugins, c.channels, c.mixer_tracks));
         assert_eq!(lines[3], format!("Arrangements: {}, PL tracks: {}, PL clips: {}, Notes: {}", c.arrangements, c.pl_tracks, c.pl_clips, c.notes));
     }
@@ -862,7 +862,7 @@ mod tests {
     fn song_info_fades_and_any_click_closes() {
         let secs = Duration::from_secs_f32;
         let mut app = app();
-        app.state.project.get_mut().show_info = Some(true);
+        app.state.session.project.get_mut().show_info = Some(true);
         opened(&mut app.state);
         let t = Instant::now() + secs(60.0);
         app.song_info_tick(t);
@@ -880,7 +880,7 @@ mod tests {
         assert!(app.state.credits.song_box && app.state.credits.song_alpha == 1.0);
         for press in [App::mouse_down, App::mouse_down_right, App::mouse_down_middle] {
             let mut app = self::app();
-            app.state.project.get_mut().show_info = Some(true);
+            app.state.session.project.get_mut().show_info = Some(true);
             opened(&mut app.state);
             app.mouse_move(2.0, 2.0);
             press(&mut app);
@@ -915,11 +915,11 @@ mod tests {
     #[test]
     fn working_time_is_saved() {
         let mut app = app();
-        let w = app.state.project.work_time.expect("a new project starts now");
+        let w = app.state.session.project.work_time.expect("a new project starts now");
         assert_eq!(w.spent, 0.0);
         assert!((w.started - os_flp::project::work_time_now().started).abs() < 1.0 / 24.0);
-        app.state.project.get_mut().work_time = Some(WorkTime { started: 42_146.5, spent: 1.0 });
-        app.saved.0.work_time = app.state.project.work_time;
+        app.state.session.project.get_mut().work_time = Some(WorkTime { started: 42_146.5, spent: 1.0 });
+        app.saved.0.work_time = app.state.session.project.work_time;
         app.state.credits.clock = WorkClock::default();
         app.state.credits.clock.focus(true, Instant::now() - Duration::from_secs(600));
         assert!(!app.unsaved(), "counting is no change");
@@ -932,7 +932,7 @@ mod tests {
         assert!((saved.spent - (1.0 + 10.0 * WorkTime::MINUTE)).abs() < WorkTime::MINUTE / 2.0, "{saved:?}");
         app.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        assert_eq!(app.state.project.work_time, Some(saved));
+        assert_eq!(app.state.session.project.work_time, Some(saved));
         assert!(spent_days(&app.state, Instant::now()) - saved.spent < WorkTime::MINUTE / 2.0, "the clock starts again");
     }
 
@@ -941,12 +941,12 @@ mod tests {
     #[test]
     fn reset_working_time() {
         let mut app = app();
-        app.state.project.get_mut().work_time = Some(WorkTime { started: 42_146.5, spent: 0.25 });
-        app.saved.0 = app.state.project.clone();
+        app.state.session.project.get_mut().work_time = Some(WorkTime { started: 42_146.5, spent: 0.25 });
+        app.saved.0 = app.state.session.project.clone();
         app.state.credits.clock.focus(true, Instant::now() - Duration::from_secs(300));
         assert!(!app.unsaved());
         app.act(Action::Settings(SAct::Button(settings::RESET_WORK_TIME)));
-        assert_eq!(app.state.project.work_time, Some(WorkTime { started: 42_146.5, spent: 0.0 }));
+        assert_eq!(app.state.session.project.work_time, Some(WorkTime { started: 42_146.5, spent: 0.0 }));
         assert!(spent_days(&app.state, Instant::now()) < WorkTime::MINUTE / 2.0);
         assert!(app.unsaved());
         assert!(footer(&app.state, Instant::now())[1].starts_with("Less than a minute"));
@@ -964,11 +964,11 @@ mod tests {
         assert_eq!((b.w, b.right()), (150.0, url.right()));
         assert!(b.y > url.bottom() + 16.0 * 2.0);
         assert!(!app.hits.iter().any(|h| h.rect == b && matches!(h.action, Action::Placeholder(_))), "not greyed out");
-        app.state.project.get_mut().work_time.as_mut().unwrap().spent = 1.0;
+        app.state.session.project.get_mut().work_time.as_mut().unwrap().spent = 1.0;
         app.mouse_move(b.cx(), b.cy());
         app.mouse_down();
         app.mouse_up();
-        assert_eq!(app.state.project.work_time.unwrap().spent, 0.0);
+        assert_eq!(app.state.session.project.work_time.unwrap().spent, 0.0);
     }
 
     /// "Show info on opening" is live and saved (event 10); opening the project then shows the Song info box, 502 x 272
@@ -977,14 +977,14 @@ mod tests {
     fn show_info_on_opening() {
         assert_eq!(song_box_rect((1920.0, 1040.0)), Rect::new(709.0, 384.0, 502.0, 272.0));
         let mut app = app();
-        assert_eq!(app.state.project.show_info, None);
+        assert_eq!(app.state.session.project.show_info, None);
         app.act(Action::Settings(SAct::Check(settings::SHOW_INFO_CHECK)));
-        assert_eq!(app.state.project.show_info, Some(true));
+        assert_eq!(app.state.session.project.show_info, Some(true));
         assert!(app.unsaved());
         assert!(!app.state.credits.song_box, "only opening shows it");
-        app.state.project.get_mut().info.title = Some("Bien Duro".into());
-        app.state.project.get_mut().info.author = Some("Astes".into());
-        app.state.project.get_mut().info.comments = Some("line one\nline two".into());
+        app.state.session.project.get_mut().info.title = Some("Bien Duro".into());
+        app.state.session.project.get_mut().info.author = Some("Astes".into());
+        app.state.session.project.get_mut().info.comments = Some("line one\nline two".into());
         let path = std::env::temp_dir().join(format!("lemonstudio-showinfo-{}.flp", std::process::id()));
         app.save_to(path.clone());
         let bytes = std::fs::read(&path).expect("saved");
@@ -1006,11 +1006,11 @@ mod tests {
         }
         // Switched off: saved as 0, and opening shows nothing.
         app.act(Action::Settings(SAct::Check(settings::SHOW_INFO_CHECK)));
-        assert_eq!(app.state.project.show_info, Some(false));
+        assert_eq!(app.state.session.project.show_info, Some(false));
         app.save_to(path.clone());
         app.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        assert_eq!(app.state.project.show_info, Some(false));
+        assert_eq!(app.state.session.project.show_info, Some(false));
         assert!(!app.state.credits.song_box);
     }
 }

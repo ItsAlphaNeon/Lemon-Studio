@@ -417,7 +417,7 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
 }
 
 fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
-    let p = &s.project;
+    let p = &s.session.project;
     for &(name, icon) in PROJECT {
         if name == INITIALIZED_CONTROLS && p.init_controls.is_empty() {
             continue;
@@ -435,9 +435,9 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
         match name {
             // Undone steps grey, their arrow mirrored (spec: ui/settings-choices.md "Undo history: the four checks").
             "History" => {
-                for (e, step) in s.history.entries() {
-                    let icon = if s.history.undone(e) { Icon::Redo } else { Icon::Undo };
-                    let (bright, item) = (s.history.current(e), Item::History(e));
+                for (e, step) in s.session.history.entries() {
+                    let icon = if s.session.history.undone(e) { Icon::Redo } else { Icon::Undo };
+                    let (bright, item) = (s.session.history.current(e), Item::History(e));
                     out.push(Row { key: format!("{parent}/{e}"), depth: 2, label: step.into(), icon, cat, open: None, bright, item, path: None });
                 }
             }
@@ -455,9 +455,9 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                     let label = channel_label(s, i).unwrap_or_default();
                     plugin_node(s, out, &parent, label, Icon::Plug, cat, i == s.selected_channel, Item::Channel(i), i);
                     // A channel's container's plugins follow it, in its order (plugins/patcher §4.4).
-                    for mem in crate::container::members(s, i as u16, crate::container::CHANNEL).unwrap_or_default() {
-                        let Some(key) = crate::container::member_key(s, i, mem.id) else { continue };
-                        let label = crate::container::member_label(s, key).unwrap_or_default();
+                    for mem in crate::container::members(&s.session, i as u16, crate::container::CHANNEL).unwrap_or_default() {
+                        let Some(key) = crate::container::member_key(&s.session, i, mem.id) else { continue };
+                        let label = crate::container::member_label(&s.session, key).unwrap_or_default();
                         let icon = if mem.instrument { Icon::Plug } else { Icon::Speaker };
                         plugin_node(s, out, &parent, label, icon, cat, false, Item::None, key);
                     }
@@ -466,13 +466,13 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             "Effects" => {
                 for m in &p.mixer {
                     for k in (0..m.slots.len()).filter(|&k| m.slots[k].is_some()) {
-                        let label = crate::params::effect_label(s, m.index, k as u8).unwrap_or_default();
+                        let label = crate::params::effect_label(&s.session, m.index, k as u8).unwrap_or_default();
                         plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, crate::plugins::fx_key(m.index, k as u8));
                         // A container's effects follow it, in its order (Lemon Studio's design: plugins/patcher §4.2).
-                        let list = crate::container::members(s, m.index, k as u8).unwrap_or_default();
+                        let list = crate::container::members(&s.session, m.index, k as u8).unwrap_or_default();
                         for mem in &list {
-                            let Some(key) = crate::container::member_key(s, crate::container::place_key(m.index, k as u8), mem.id) else { continue };
-                            let label = crate::container::member_label(s, key).unwrap_or_default();
+                            let Some(key) = crate::container::member_key(&s.session, crate::container::place_key(m.index, k as u8), mem.id) else { continue };
+                            let label = crate::container::member_label(&s.session, key).unwrap_or_default();
                             plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, key);
                         }
                     }
@@ -515,7 +515,7 @@ fn data_folder_rows(s: &State, root: &str, dir: &Path, cat: u8, out: &mut Vec<Ro
 
 /// A channel's row label under Generators.
 pub fn channel_label(s: &State, i: usize) -> Option<String> {
-    let c = s.project.channels.get(i)?;
+    let c = s.session.project.channels.get(i)?;
     Some(c.name.clone().or_else(|| crate::project_plugins::plugin_title(c)).unwrap_or_else(|| format!("Channel {}", i + 1)))
 }
 
@@ -903,7 +903,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             c => cats[usize::from(c).min(1)],
         };
         let c = if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
-        let c = if matches!(row.item, Item::History(e) if s.history.undone(e)) { t.text_faint } else { c };
+        let c = if matches!(row.item, Item::History(e) if s.session.history.undone(e)) { t.text_faint } else { c };
         // Expander: only an opened node shows its ▾ in the gutter (spec §2).
         if row.open == Some(true) && s.browser_search.is_empty() {
             let (ax, cy) = (x - 9.0, y + ROW_H / 2.0);

@@ -176,7 +176,7 @@ pub fn render(o: &Opts) -> Result<(), String> {
 
 /// What plays each channel and mixer slot: the hosted plugin (name, format) or the engine.
 fn report(app: &crate::app::App) { // This code is a part of L e m o n S t u d i o.
-    let p = &app.state.project;
+    let p = &app.state.session.project;
     for (row, c) in p.channels.iter().enumerate() {
         if matches!(c.kind, ChannelKind::Automation | ChannelKind::Layer) {
             continue;

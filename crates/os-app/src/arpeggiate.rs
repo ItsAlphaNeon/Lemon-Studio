@@ -633,8 +633,8 @@ pub fn open(s: &mut State) {
 
 /// Arpeggiate the targets with the dialog's settings; `step` names the undo step (none for a preview).
 fn run(s: &mut State, step: Option<&'static str>) -> bool {
-    let (set, pat, ppq) = (s.arp.set, s.arp.pattern.clone(), u32::from(s.project.ppq.max(4)));
-    let mut used: Vec<u16> = piano::notes(s).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
+    let (set, pat, ppq) = (s.arp.set, s.arp.pattern.clone(), u32::from(s.session.project.ppq.max(4)));
+    let mut used: Vec<u16> = piano::notes(&s.session).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
     used.sort_unstable();
     used.dedup();
     crate::piano_tools::apply_as(s, |_, ns| arpeggiate(ns, &pat, &set, ppq, &used), step)
@@ -645,7 +645,7 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
 /// session again from them.
 pub fn preview(s: &mut State) {
     let Some(ch) = piano::channel(s) else { return };
-    let now = piano::notes(s).to_vec();
+    let now = piano::notes(&s.session).to_vec();
     let fresh = match &s.arp.session {
         Some(se) => se.pattern != s.pattern() || se.channel != ch || se.last != now,
         None => true,
@@ -656,7 +656,7 @@ pub fn preview(s: &mut State) {
     }
     restore(s);
     run(s, None);
-    let last = piano::notes(s).to_vec();
+    let last = piano::notes(&s.session).to_vec();
     if let Some(se) = &mut s.arp.session {
         se.last = last;
     }
@@ -665,17 +665,17 @@ pub fn preview(s: &mut State) {
 /// The session's notes and selection back, when the notes are still what its last preview left.
 fn restore(s: &mut State) -> bool {
     let Some(se) = &s.arp.session else { return false };
-    if se.pattern != s.pattern() || piano::notes(s) != se.last.as_slice() && !se.last.is_empty() {
+    if se.pattern != s.pattern() || piano::notes(&s.session) != se.last.as_slice() && !se.last.is_empty() {
         return false;
     }
     let (base, sel, ch) = (se.base.clone(), se.base_sel.clone(), se.channel);
-    piano::pattern_mut(s).notes = base;
+    piano::pattern_mut(&mut s.session).notes = base;
     if sel.is_empty() {
         s.piano.clear_selection();
     } else {
         s.piano.select(s.pattern(), ch, sel);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 

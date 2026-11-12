@@ -93,8 +93,8 @@ impl crate::app::App {
         }
         let Some(index) = self.plugins.index_of(LEMON_SLICER) else { return };
         let pending = self.state.pending_plugin.map(|(r, _)| r);
-        let rows: Vec<usize> = (0..self.state.project.channels.len())
-            .filter(|&r| is_slicer(&self.state.project.channels[r]))
+        let rows: Vec<usize> = (0..self.state.session.project.channels.len())
+            .filter(|&r| is_slicer(&self.state.session.project.channels[r]))
             .filter(|&r| !self.state.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && Some(r) != pending)
             .collect();
         if rows.is_empty() {
@@ -105,7 +105,7 @@ impl crate::app::App {
             if self.past_deadline() {
                 break;
             }
-            let fl = self.state.project.channels[row].plugin_state.clone().unwrap_or_default();
+            let fl = self.state.session.project.channels[row].plugin_state.clone().unwrap_or_default();
             match self.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
                 Ok(_) => {
                     self.state.hosted_rows.push(row);
@@ -119,7 +119,7 @@ impl crate::app::App {
         }
         if added {
             self.transport.set_instruments(self.plugins.instruments());
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
         }
         self.invalidate();
     }
@@ -130,13 +130,13 @@ impl crate::app::App {
     pub(crate) fn notes_from_plugin(&mut self, row: usize, notes: &[os_hostlink::NoteOut]) {
         let row = if crate::plugins::fx_of(row).is_some() { self.state.selected_channel } else { row };
         let s = &mut self.state;
-        let Some(ch) = s.project.channels.get(row).map(|c| c.index) else { return };
+        let Some(ch) = s.session.project.channels.get(row).map(|c| c.index) else { return };
         if notes.is_empty() {
             return;
         }
-        let ppq = f64::from(s.project.ppq.max(1));
-        crate::piano::snapshot_as(s, "Dump to piano roll");
-        let p = crate::piano::pattern_mut(s);
+        let ppq = f64::from(s.session.project.ppq.max(1));
+        crate::piano::snapshot_as(&mut s.session, "Dump to piano roll");
+        let p = crate::piano::pattern_mut(&mut s.session);
         p.notes.retain(|n| n.channel != ch);
         for n in notes {
             let start = (n.start * ppq).round().max(0.0) as u32;
@@ -144,7 +144,7 @@ impl crate::app::App {
             p.notes.push(Note { length: end - start, key: u16::from(n.key), velocity: n.velocity, ..Note::step(ch, start) });
         }
         crate::piano::finish_edit(s);
-        s.piano.dirty = true;
+        s.session.dirty = true;
         s.message = Some(format!("Dumped {} notes to the piano roll", notes.len()));
         self.invalidate();
     }
@@ -237,12 +237,12 @@ mod tests {
         let file = std::env::temp_dir().join(format!("openstudio-slicer-{}.flp", std::process::id()));
         let wav = loop_file("reopen");
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.plugins.available = crate::plugins::builtin();
-        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), LEMON_SLICER);
-        let ch = &a.state.project.channels[row];
+        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_SLICER);
+        let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_SLICER));
         a.sync_slicer();
@@ -253,7 +253,7 @@ mod tests {
 
         let fl = state_for(&wav);
         assert!(a.plugins.set_state(row, &plugin_state(&fl)));
-        a.state.project.get_mut().channels[row].plugin = Some("Fruity slicer".into());
+        a.state.session.project.get_mut().channels[row].plugin = Some("Fruity slicer".into());
         a.save_to(file.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&file).unwrap()).unwrap()).unwrap();
         assert_eq!(saved.channels[row].plugin.as_deref(), Some("Fruity slicer"));
@@ -280,13 +280,13 @@ mod tests {
         }
         std::fs::write(&path, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.plugins.available = crate::plugins::builtin();
-        let before = a.state.project.channels.len();
+        let before = a.state.session.project.channels.len();
         a.sample_from_plugin(path.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
-        assert_eq!(a.state.project.channels.len(), before + 1, "{:?}", a.state.message);
+        assert_eq!(a.state.session.project.channels.len(), before + 1, "{:?}", a.state.message);
         let row = before;
-        let ch = &a.state.project.channels[row];
+        let ch = &a.state.session.project.channels[row];
         assert!(is_slicer(ch));
         assert_eq!(ch.name.as_deref(), Some(format!("openstudio-to-slicer-{}", std::process::id()).as_str()));
         let st = State::parse(ch.plugin_state.as_deref().unwrap()).unwrap();
@@ -296,7 +296,7 @@ mod tests {
         assert!(a.state.hosted_rows.contains(&row));
         assert!(a.state.message.as_deref().is_some_and(|m| m.contains("3 slices")));
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
-        assert_eq!(a.state.project.channels.len(), before);
+        assert_eq!(a.state.session.project.channels.len(), before);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -312,23 +312,23 @@ mod tests {
         s.cues.push(Cue { id: 2, name: "Part 2".into(), pos: 22050, len: Some(22050) });
         std::fs::write(&first, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.plugins.available = crate::plugins::builtin();
         a.sample_from_plugin(first.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
-        let row = a.state.project.channels.len() - 1;
-        let channels = a.state.project.channels.len();
+        let row = a.state.session.project.channels.len() - 1;
+        let channels = a.state.session.project.channels.len();
         let loaded = |a: &App| State::parse(&a.plugins.slicer_file_state(row).unwrap()).unwrap();
         assert_eq!(loaded(&a).slices.len(), 2);
 
         let dropped = loop_file("dropped");
-        a.state.plugin_edited = false;
+        a.state.session.plugin_edited = false;
         a.file_on_plugin_window(row, dropped.clone());
         let st = loaded(&a);
         assert_eq!(st.path(), dropped.to_string_lossy());
         assert!(!st.slices.is_empty() && st.slices.iter().all(|s| s.name() != "Part 2"), "sliced anew");
-        assert_eq!(a.state.project.channels.len(), channels, "no new channel");
+        assert_eq!(a.state.session.project.channels.len(), channels, "no new channel");
         assert!(a.state.message.as_deref().is_some_and(|m| m.contains("loaded in Lemon Slicer")), "{:?}", a.state.message);
-        assert!(a.state.plugin_edited, "the project counts as changed");
+        assert!(a.state.session.plugin_edited, "the project counts as changed");
 
         let bad = std::env::temp_dir().join(format!("openstudio-drop-slicer-{}.wav.txt", std::process::id()));
         std::fs::write(&bad, b"not audio").unwrap();
@@ -346,26 +346,26 @@ mod tests {
     #[test]
     fn dumped_notes_replace_the_channels_notes() {
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), LEMON_SLICER);
-        let ch = a.state.project.channels[row].index;
-        let other = a.state.project.channels[0].index;
-        a.state.project.get_mut().ppq = 96;
-        let p = crate::piano::pattern_mut(&mut a.state);
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_SLICER);
+        let ch = a.state.session.project.channels[row].index;
+        let other = a.state.session.project.channels[0].index;
+        a.state.session.project.get_mut().ppq = 96;
+        let p = crate::piano::pattern_mut(&mut a.state.session);
         p.notes = vec![Note::step(ch, 0), Note::step(other, 48)];
         let notes: Vec<os_hostlink::NoteOut> = [(0.0, 0.5625, 60), (0.5625, 1.125, 61)]
             .into_iter()
             .map(|(start, end, key)| os_hostlink::NoteOut { start, end, key, velocity: 100 })
             .collect();
         a.notes_from_plugin(row, &notes);
-        let got: Vec<(u16, u32, u32, u16)> = crate::piano::notes(&a.state).iter().map(|n| (n.channel, n.position, n.length, n.key)).collect();
+        let got: Vec<(u16, u32, u32, u16)> = crate::piano::notes(&a.state.session).iter().map(|n| (n.channel, n.position, n.length, n.key)).collect();
         assert_eq!(got, [(ch, 0, 54, 60), (other, 48, 0, 60), (ch, 54, 54, 61)]);
         assert!(crate::piano::undo(&mut a.state));
-        assert_eq!(crate::piano::notes(&a.state).len(), 2);
+        assert_eq!(crate::piano::notes(&a.state.session).len(), 2);
         // An effect's notes (Tesla's Convert to score, from a mixer slot) go to the selected channel.
         a.state.selected_channel = 0;
         a.notes_from_plugin(crate::plugins::fx_key(0, 3), &notes[..1]);
-        let mut got: Vec<(u16, u32, u16)> = crate::piano::notes(&a.state).iter().map(|n| (n.channel, n.position, n.key)).collect();
+        let mut got: Vec<(u16, u32, u16)> = crate::piano::notes(&a.state.session).iter().map(|n| (n.channel, n.position, n.key)).collect();
         got.sort();
         let mut want = vec![(ch, 0, 60), (other, 0, 60)];
         want.sort();

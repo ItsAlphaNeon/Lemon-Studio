@@ -63,9 +63,9 @@ fn open(path: &std::path::Path) -> App {
     // `OS_CHECK_REPLACE=<plugin>=<plugin>`: the channels of the first plugin get the second, as Replace ▸ gives it.
     if let Some((from, to)) = std::env::var("OS_CHECK_REPLACE").ok().as_deref().and_then(|v| v.split_once('=')) {
         let index = app.plugins.index_of(to).unwrap_or_else(|| panic!("no plugin {to}"));
-        let rows: Vec<usize> = (0..app.state.project.channels.len())
+        let rows: Vec<usize> = (0..app.state.session.project.channels.len())
             .filter(|&r| {
-                let ch = &app.state.project.channels[r];
+                let ch = &app.state.session.project.channels[r];
                 ch.plugin.as_deref() == Some(from) || ch.name.as_deref() == Some(from)
             })
             .collect();

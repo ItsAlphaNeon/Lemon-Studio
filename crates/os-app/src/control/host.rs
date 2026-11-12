@@ -20,7 +20,7 @@ impl App {
     /// tick, so a sampler comes back from its kept state, not from the channel's settings); `fx_too`: mixer slot
     /// instances (after the mixer's own requests moved them, `mixer_tick`) and the slots that came back.
     pub(crate) fn follow_ids(&mut self, rows_too: bool, fx_too: bool) {
-        let p = &self.state.project;
+        let p = &self.state.session.project;
         let rows: HashMap<u32, usize> = p.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
         let slots: HashMap<u32, (u16, u8)> = p
             .mixer
@@ -66,17 +66,17 @@ impl App {
         if !fx_map.is_empty() {
             self.plugins.remap_fx(&|t, k| fx_map.get(&(t, k)).copied().unwrap_or(Some((t, k))));
             self.transport.set_effects(self.plugins.effects());
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
         }
 
         // Instances without an owner (just hosted) take the id of what is under their key; a container's effect, the id
         // made of its container's slot's and its own (`member_owner`), once the slot has one.
-        let p = &self.state.project;
+        let p = &self.state.session.project;
         let row_id = |r: usize| p.channels.get(r).map(|c| c.id);
         let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.id);
-        let members = &self.state.params.members;
+        let members = &self.state.session.plugin_members;
         let state = &self.state;
-        let member_id = |key: usize| members.get(&key).and_then(|&(t, k, id)| crate::control::command::member_owner(crate::container::place_id(state, t, k)?.0, id)).map(Id);
+        let member_id = |key: usize| members.get(&key).and_then(|&(t, k, id)| crate::control::command::member_owner(crate::container::place_id(&state.session, t, k)?.0, id)).map(Id);
         for (&key, h) in self.plugins.hosted.iter_mut() {
             if h.owner.is_none() {
                 h.owner = match fx_of(key) {
@@ -121,7 +121,7 @@ impl App {
             if made && fx {
                 self.transport.set_effects(self.plugins.effects());
             }
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
         }
     }
 }
@@ -130,10 +130,10 @@ impl App {
     /// The plugins commands added (`HostReq`) are hosted, and the parameter values they set reach their instances.
     /// Unlike the plugin menus, nothing opens a window: the user didn't ask for one.
     pub(crate) fn host_commands(&mut self) {
-        let reqs = std::mem::take(&mut self.state.control.host);
+        let reqs = std::mem::take(&mut self.state.session.control.host);
         let mut relink = (false, false);
         for r in reqs {
-            let p = &self.state.project;
+            let p = &self.state.session.project;
             match r {
                 crate::control::HostReq::Instrument { channel, plugin } => {
                     let Some(row) = p.channels.iter().position(|c| c.id.0 == channel.0) else { continue };
@@ -174,11 +174,11 @@ impl App {
         if relink.0 || relink.1 {
             self.follow_ids(false, false);
         }
-        for row in std::mem::take(&mut self.state.control.misc) {
+        for row in std::mem::take(&mut self.state.session.control.misc) {
             crate::misc::follow(self, row);
         }
-        for (owner, param, v) in std::mem::take(&mut self.state.control.params) {
-            let Some(key) = crate::control::command::owner_key(&self.state, owner) else { continue };
+        for (owner, param, v) in std::mem::take(&mut self.state.session.control.params) {
+            let Some(key) = crate::control::command::owner_key(&self.state.session, owner) else { continue };
             let set = self.plugins.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.set_param(param, v));
             if set {
                 self.plugins.mark_edited(key);
@@ -188,14 +188,14 @@ impl App {
         // Plugin states an undo or redo put back (`Taken::Plugin`): the state and preset each one replaces become the
         // other side of its step (or of a redo still in this list), then it goes in. A side never filled (its plugin
         // was not hosted) puts nothing back.
-        let mut states = std::mem::take(&mut self.state.control.states);
+        let mut states = std::mem::take(&mut self.state.session.control.states);
         for i in 0..states.len() {
             let (owner, fill) = (states[i].0, states[i].2);
-            let Some(key) = crate::control::command::owner_key(&self.state, owner).filter(|k| self.plugins.hosted.contains_key(k)) else { continue };
+            let Some(key) = crate::control::command::owner_key(&self.state.session, owner).filter(|k| self.plugins.hosted.contains_key(k)) else { continue };
             let (now, preset) = (self.plugins.state(key).unwrap_or_default(), self.plugins.presets.get(&key).cloned());
             match states[i + 1..].iter_mut().find(|e| e.1.fill == fill) {
                 Some((_, side, _)) => (side.state, side.preset, side.fill) = (now, preset, 0),
-                None => crate::history::fill_plugin_side(&mut self.state, fill, &now, preset.as_deref()),
+                None => crate::history::fill_plugin_side(&mut self.state.session, fill, &now, preset.as_deref()),
             }
             let side = &states[i].1;
             if side.fill != 0 || side.state.is_empty() || !self.plugins.set_state(key, &side.state) {
@@ -206,7 +206,7 @@ impl App {
             self.state.params.reread(key);
             for info in self.plugins.param_infos(key) {
                 if let Some(v) = self.plugins.param_value(key, info.id) {
-                    self.state.control.saw_param(owner, info.id, v);
+                    self.state.session.control.saw_param(owner, info.id, v);
                 }
             }
             self.invalidate();
@@ -218,7 +218,7 @@ impl App {
             self.transport.set_effects(self.plugins.effects());
         }
         if relink.0 || relink.1 {
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
             self.invalidate();
         }
     }

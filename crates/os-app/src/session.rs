@@ -1,177 +1,155 @@
 // Copyright (C) 2026 ItsAlphaNeon
-// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Session restore: closing costs nothing. With General ▸ Miscellaneous ▸ Startup project on "Last used project"
-//! (cutting-edge's default), a start opens the project the app closed with and opens again the windows that were open
-//! in it, back to front: the arranger, mixer, piano roll, instrument rack, the channel window (on its channel), the tool
-//! windows and the plugin windows. A plugin's window opens once its plugin has loaded (`App::session_tick`). Where
-//! the windows were is `layout`'s, as before.
-//!
-//! Kept as the app closes, in `settings.txt`: `session_project` (the project's file) and `session_windows` (tokens,
-//! back to front: a window's name, `channel:<row>` for the channel window, `plugin:<key>` for a plugin's window by its
-//! hosted key, a rack row or a mixer slot's `plugins::fx_key`). The windows come back only with that same project.
+
+//! The session: the open project and what goes with it (its history, the command layer, where it is saved, what
+//! playback still has to be told), apart from the interface's state. It lives inside `app::State` for now; the edits
+//! take it alone, and it moves to a crate of its own later (specs `roadmap/control-plane.md`, part 2, steps 6 and 9).
+
+#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 
 use std::path::PathBuf;
 
-use crate::app::{App, Win};
-use crate::settings_file::{get, write};
+pub struct Session {
+    pub project: crate::locked::Locked,
+    /// The project's undo history (spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
+    pub history: crate::history::History,
+    /// The control plane: ids, its commands' requests for the app, events, proposals (`crate::control`).
+    pub control: crate::control::Control,
+    pub file: Option<os_flp::FlpFile>,
+    pub path: Option<PathBuf>,
+    /// What playback reads outside the project changed since the playing engine last got it; `App::tick` sends it to
+    /// the transport (a write to the project says so by itself: `crate::locked`).
+    pub dirty: bool,
+    /// Samples to load into rows' Lemon Sampler instances on the next tick (browser send, drops on a rack row).
+    pub sample_loads: Vec<(usize, String)>,
+    /// An undo or redo changed the timebase (`history::Timebase`): playback stops on the next tick.
+    pub retimed: bool,
+    /// A setting inside a hosted plugin changed since the project was opened or saved (its knobs, its own window): the
+    /// project counts as unsaved, as the plugin's state is saved with it.
+    pub plugin_edited: bool,
+    /// The loop type last chosen while loop mode was off, and the pattern it was chosen in (FL keeps it in memory, not
+    /// in the file: `rack::loop_type`).
+    pub loop_type: u8,
+    pub loop_type_of: u16,
+    /// What a command or an undo changed that the interface's views follow, taken by them after it (`crate::follow`).
+    pub touched: Touched,
+    /// The project's samples as decoded (`playlist::Samples`).
+    pub samples: crate::playlist::Samples,
+    /// Requests for the mixer's slot plugins, handled on the next tick (`mixer::FxReq`).
+    pub fx_requests: Vec<crate::mixer::FxReq>,
+    /// The remote control links the edit under way moved with what they drive (`remote::follow`), as (target before
+    /// the edit, target now): its undo step puts them back (`control::edit`).
+    pub link_moves: Vec<(crate::typein::Target, crate::typein::Target)>,
+    /// The effects inside containers, by hosted key: mixer track, slot and member id (`App::sync_containers`). The
+    /// plugin host's, kept here until it is the session's (control-plane step 7): commands find plugins by it.
+    pub plugin_members: std::collections::BTreeMap<usize, (u16, u8, u32)>,
+}
 
-const PROJECT: &str = "session_project";
-const WINDOWS: &str = "session_windows";
+/// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
+/// did; the interface knows what that means for its selections and windows.
+#[derive(Debug, Default, PartialEq)]
+pub struct Touched {
+    /// The project was put back whole: the channels' ids by row before, the rows the views pointed at.
+    pub rows: Option<Vec<u32>>,
+    /// Clips moved in the playlist's list (the selection is kept by id).
+    pub clips: bool,
+    /// Mixer tracks may have gone.
+    pub tracks: bool,
+    /// A pattern's notes were put back.
+    pub notes: bool,
+    /// Undo step `.0`, which holds the rack's side of adding a channel, was undone or redone.
+    pub rack_step: Option<u64>,
+    /// What the views follow in this order, before the rest above.
+    pub views: Vec<View>,
+}
 
-/// How long a plugin's window waits for its plugin to load before it is given up.
-const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// The windows kept by name.
-const NAMES: [(Win, &str); 9] = [
-    (Win::Playlist, "arranger"),
-    (Win::Mixer, "mixer"),
-    (Win::PianoRoll, "piano-roll"),
-    (Win::ChannelRack, "instrument-rack"),
-    (Win::Perf, "plugin-performance"),
-    (Win::Tapper, "tempo-tapper"),
-    (Win::Touch, "touch-controller"),
-    (Win::Strum, "strum"),
-    (Win::Arp, "arpeggiate"),
-];
-
-/// What a start puts back.
+/// A change the interface's views follow, in order (`Touched::views`).
 #[derive(Debug, Clone, PartialEq)]
-pub enum Token {
-    Win(Win),
-    Channel(usize),
-    Plugin(usize),
+pub enum View {
+    /// Mixer places moved: each track's new number by its old one, and each slot's new place, `None` for what went
+    /// (what is not listed stays where it is).
+    Places { tracks: Vec<Option<u16>>, slots: std::collections::HashMap<(u16, u8), Option<(u16, u8)>> },
+    /// The mixer's selection follows tracks renumbered (`tracks` as in `Places`).
+    MixerRenumbered(Vec<Option<u16>>),
+    /// Mixer track `.0` becomes the current one, the only one selected.
+    MixerSelect(u16),
+    /// Patterns were renumbered: the clip and note selections go.
+    PatternsRenumbered,
+    /// The channels' rows moved: each row's new row, `None` for a channel that went (`rack::remap_state`).
+    Rows(Vec<Option<usize>>),
+    /// The channel rack's rows changed in number: its height follows (`rack::autosize`).
+    RackAutosize,
+    /// A container member's level knob was set: the open list shows it (`container::show_level`).
+    MemberLevel { t: u16, k: u8, id: u32, wet: bool, v: f32 },
+    /// The playlist's clips were put back: its selection goes.
+    ClipsCleared,
+    /// The timebase went from `.0` to `.1` ticks per quarter: the views' ticks and the clipboards follow (`app::retime`).
+    Retimed(u16, u16),
+    /// A message for the hint bar.
+    Message(String),
 }
 
-fn parse(t: &str) -> Option<Token> {
-    if let Some(n) = t.strip_prefix("channel:") {
-        return n.parse().ok().map(Token::Channel);
+impl View {
+    /// `Places` for mixer places moved by `track` and `slot` (as `os_model::target::moved` takes them), over the
+    /// project's tracks.
+    pub fn places(p: &os_model::Project, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) -> View {
+        let n = p.mixer.len() as u16 + 1;
+        let tracks = (0..n).map(track).collect();
+        let slots = (0..n).flat_map(|t| (0..10u8).map(move |k| (t, k))).map(|(t, k)| ((t, k), slot(t, k))).filter(|&(at, to)| to != Some(at)).collect();
+        View::Places { tracks, slots }
     }
-    if let Some(n) = t.strip_prefix("plugin:") {
-        return n.parse().ok().map(Token::Plugin);
-    }
-    NAMES.iter().find(|(_, n)| *n == t).map(|(w, _)| Token::Win(*w))
 }
 
-fn text(t: &Token) -> String {
-    match t {
-        Token::Win(w) => NAMES.iter().find(|(x, _)| x == w).map_or(String::new(), |(_, n)| n.to_string()),
-        Token::Channel(r) => format!("channel:{r}"),
-        Token::Plugin(k) => format!("plugin:{k}"),
-    }
-}
-
-/// The open windows of `app`, back to front.
-pub fn tokens(app: &App) -> Vec<Token> {
-    let s = &app.state;
-    let z = crate::float_layer::whole_z(s);
-    z.iter()
-        .filter_map(|&w| match w {
-            Win::Plugin => Some(Token::Channel(s.plugin_channel)),
-            Win::Hosted(k) => app.plugins.hosted.get(&k).filter(|h| h.window.is_some()).map(|_| Token::Plugin(k)),
-            w => NAMES.iter().any(|(x, _)| *x == w).then_some(Token::Win(w)),
-        })
-        .chain(
-            // Plugin windows of their own (not in the window stack): after the rest.
-            app.plugins.hosted.iter().filter(|(k, h)| h.window.is_some() && !z.contains(&Win::Hosted(**k))).map(|(k, _)| Token::Plugin(*k)),
-        )
-        .collect()
-}
-
-/// The app closes: its project and open windows, for the next start.
-pub fn save(app: &App) {
-    let path = app.state.path.as_ref().map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()));
-    write(PROJECT, &path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
-    write(WINDOWS, &tokens(app).iter().map(text).collect::<Vec<_>>().join(" "));
-}
-
-/// The windows kept for the project now open (`None`: another project, or nothing kept).
-pub fn kept(app: &App) -> Option<Vec<Token>> {
-    let project = PathBuf::from(get(PROJECT)?);
-    let now = app.state.path.as_ref().map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()))?;
-    (project == now).then(|| get(WINDOWS).unwrap_or_default().split_whitespace().filter_map(parse).collect())
-}
-
-impl App {
-    /// After the start's project opened: its windows as they were (`kept`); the plugin windows wait for their plugins.
-    pub(crate) fn restore_session(&mut self) {
-        let Some(tokens) = kept(self) else { return };
-        let rows = self.state.project.channels.len();
-        for t in tokens {
-            match t {
-                Token::Win(w) => self.state.raise(w),
-                Token::Channel(r) if r < rows => self.open_channel_window(r),
-                Token::Channel(_) => {}
-                Token::Plugin(k) => self.session_plugins.push(k),
-            }
-        }
-        self.session_since = Some(std::time::Instant::now());
-        self.invalidate();
-    }
-
-    /// The kept plugin windows whose plugins have loaded open, in the order kept; the rest wait (`WAIT` at most).
-    pub(crate) fn session_tick(&mut self) {
-        let Some(since) = self.session_since else { return };
-        if since.elapsed() > WAIT {
-            self.session_plugins.clear();
-        }
-        while let Some(&k) = self.session_plugins.first() {
-            if !self.plugins.hosted.contains_key(&k) {
-                break;
-            }
-            self.session_plugins.remove(0);
-            match crate::plugins::fx_of(k) {
-                Some((track, slot)) => self.open_fx(track, slot),
-                None => self.state.pending_open = Some(k),
-            }
-            // One a tick: `pending_open` holds one.
-            break;
-        }
-        if self.session_plugins.is_empty() {
-            self.session_since = None;
+impl Session {
+    pub fn new(project: os_model::Project) -> Self {
+        Session {
+            project: crate::locked::Locked::new(project),
+            history: Default::default(),
+            control: Default::default(),
+            file: None,
+            path: None,
+            dirty: false,
+            sample_loads: Vec::new(),
+            retimed: false,
+            plugin_edited: false,
+            loop_type: 0,
+            loop_type_of: 0,
+            touched: Touched::default(),
+            samples: Default::default(),
+            fx_requests: Vec::new(),
+            link_moves: Vec::new(),
+            plugin_members: Default::default(),
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tokens_read_back() {
-        for t in [Token::Win(Win::Mixer), Token::Channel(3), Token::Plugin(crate::plugins::fx_key(2, 1)), Token::Win(Win::ChannelRack)] {
-            assert_eq!(parse(&text(&t)), Some(t));
-        }
-        assert_eq!(parse("browser"), None);
+    /// SONG (or PAT) on the toolbar: the project's song mode (event 9). As in FL it is no undo step and no unsaved
+    /// change (`ui/undo-steps.md`): `App::unsaved` leaves it out, and an undo or redo of another step leaves it.
+    pub fn song_mode(&self) -> bool {
+        self.project.song_mode.unwrap_or(false)
     }
 
-    /// The windows open when the app closed come back with the same project, back to front; another project gets its
-    /// usual ones.
-    #[test]
-    fn windows_come_back_with_their_project() {
-        let dir = std::env::temp_dir().join(format!("lemon-session-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let song = dir.join("Song.flp");
-        let mut a = App::new(None);
-        a.save_to(song.clone());
-        a.state.raise(Win::Mixer);
-        a.state.raise(Win::Tapper);
-        a.state.raise(Win::ChannelRack);
-        save(&a);
-        let before = tokens(&a);
-        let mut b = App::new(None);
-        b.open(song.clone());
-        b.state.hide(Win::Mixer);
-        b.state.hide(Win::Tapper);
-        b.restore_session();
-        let order: Vec<Win> = b.state.z.iter().copied().filter(|w| matches!(w, Win::Mixer | Win::Tapper | Win::ChannelRack)).collect();
-        assert_eq!(order, [Win::Mixer, Win::Tapper, Win::ChannelRack], "back to front");
-        assert_eq!(tokens(&b), before);
-        let mut c = App::new(None);
-        c.save_to(dir.join("Other.flp"));
-        assert_eq!(kept(&c), None, "another project");
-        let _ = std::fs::remove_dir_all(&dir);
+    pub fn set_song_mode(&mut self, on: bool) {
+        self.project.write_if(|p| p.song_mode.replace(on) != Some(on));
+    }
+
+    /// The pattern shown: the project's (event 67), so a save opens on it again with its loops. As in FL, showing
+    /// another is no undo step but an unsaved change (`ui/undo-steps.md`); an undo leaves it (control::command).
+    pub fn pattern(&self) -> u16 {
+        self.project.current_pattern.unwrap_or(1).max(1)
+    }
+
+    pub fn set_pattern(&mut self, n: u16) {
+        self.project.write_if(|p| p.current_pattern.replace(n) != Some(n));
+    }
+
+    /// The tempo: the project's (BPM). Its edits are undo steps, as FL's "Knob tweak (tempo)" (`ui/undo-steps.md`).
+    pub fn tempo(&self) -> f64 {
+        self.project.tempo.unwrap_or(130.0)
+    }
+
+    pub fn set_tempo(&mut self, bpm: f64) {
+        self.project.write_if(|p| p.tempo.replace(bpm) != Some(bpm));
     }
 }

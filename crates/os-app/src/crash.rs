@@ -118,10 +118,10 @@ impl App {
     pub(crate) fn open_crash_backup(&mut self, project: Option<PathBuf>, b: PathBuf) {
         match project.filter(|p| p.is_file()) {
             Some(p) => {
-                if self.state.path.as_deref() != Some(p.as_path()) {
+                if self.state.session.path.as_deref() != Some(p.as_path()) {
                     self.open(p.clone());
                 }
-                if self.state.path.as_deref() == Some(p.as_path()) {
+                if self.state.session.path.as_deref() == Some(p.as_path()) {
                     self.revert_from(b);
                 } else {
                     // Opened converted, without its path: the backup as itself.

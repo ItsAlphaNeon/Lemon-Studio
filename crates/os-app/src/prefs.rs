@@ -280,7 +280,7 @@ pub const BOTH_MOUSE_BUTTONS: Check =
 
 /// General ▸ Miscellaneous: the project Lemon Studio starts with when no project file is passed to it
 /// (`App::startup_project`). Spec: ui/settings-choices.md, as above. Cutting-edge: "Last used project" by default, and
-/// it puts the windows back too (`crate::session`): closing costs nothing.
+/// it puts the windows back too (`crate::session_restore`): closing costs nothing.
 pub const STARTUP_PROJECT: Combo =
     Combo { key: "startup_project", label: "Startup project", choices: &["Empty project", "Default template", "Last used project"], default: 2 };
 

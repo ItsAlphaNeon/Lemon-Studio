@@ -106,7 +106,7 @@ pub fn resolve(p: &Project, path: Option<&Path>) -> Option<PathBuf> {
 
 /// The open project's data folder (`resolve`).
 pub fn folder(s: &State) -> Option<PathBuf> {
-    resolve(&s.project, s.path.as_deref())
+    resolve(&s.session.project, s.session.path.as_deref())
 }
 
 /// The path the Project page shows beside the folder button: the data folder with a trailing separator, or `(none)`.
@@ -116,7 +116,7 @@ pub fn path_text(s: &State) -> String {
 
 /// Whether Rename can be used: the project has a data folder and was saved (spec: ui/data-folder.md §1).
 pub fn can_rename(s: &State) -> bool {
-    s.path.is_some() && choice(&s.project) != DataFolder::NONE && folder(s).is_some()
+    s.session.path.is_some() && choice(&s.session.project) != DataFolder::NONE && folder(s).is_some()
 }
 
 /// Before the project is written as `proj`: event 202 gets the data folder in use, which for "relative" is the project
@@ -124,7 +124,7 @@ pub fn can_rename(s: &State) -> bool {
 /// folder is the one of the file the project was opened from or last saved as, so Save as writes the folder it leaves
 /// (flp/events/project-info.md, event 202). Other choices keep 202 as it is.
 pub fn stamp(s: &State, proj: &mut Project) {
-    if choice(&s.project) != DataFolder::RELATIVE {
+    if choice(&s.session.project) != DataFolder::RELATIVE {
         return;
     }
     if let (Some(dir), Some(df)) = (folder(s), proj.data_folder.as_mut()) {
@@ -138,7 +138,7 @@ pub fn stamp(s: &State, proj: &mut Project) {
 /// counts: a project from another computer, whose specified folder is not on this one, backs up to the global folder
 /// (Lemon Studio rule). Tests: only data folders in the system's temporary folder.
 pub fn backup_folder(s: &State, path: Option<&Path>) -> Option<PathBuf> {
-    let dir = resolve(&s.project, path).filter(|d| d.is_dir());
+    let dir = resolve(&s.session.project, path).filter(|d| d.is_dir());
     #[cfg(test)]
     let dir = dir.filter(|d| d.starts_with(std::env::temp_dir()));
     match dir {
@@ -222,7 +222,7 @@ impl App {
     /// The Data folder combo was clicked: its three choices under its box (`x`, `y`), the project's marked.
     pub(crate) fn data_folder_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
-        let now = choice(&self.state.project);
+        let now = choice(&self.state.session.project);
         let items = (0..CHOICES.len() as u32).map(|i| PItem::new(CHOICES[i as usize], Cmd::DataFolder(DCmd::Choice(i))).mark(Mark::Radio(i == now))).collect();
         self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None, scroll: [0; 2] });
         self.invalidate();
@@ -249,10 +249,10 @@ impl App {
     /// Save as and New project forms copy into the folder they make). Returns the message.
     pub(crate) fn copy_used_samples_to(&mut self, dir: &Path) -> String {
         let (mut copied, mut failed) = (0, 0);
-        for row in 0..self.state.project.channels.len() {
+        for row in 0..self.state.session.project.channels.len() {
             // A hosted Lemon Sampler's own sample is the one it plays; it loads the copy too.
             let hosted = self.plugins.sampler_path(row);
-            let listed = self.state.project.channels[row].sample_path.as_deref().filter(|p| !p.is_empty()).map(crate::plugins::resolve_sample);
+            let listed = self.state.session.project.channels[row].sample_path.as_deref().filter(|p| !p.is_empty()).map(crate::plugins::resolve_sample);
             let Some(src) = hosted.clone().filter(|p| !p.is_empty()).or(listed) else { continue };
             match copy_sample(Path::new(&src), dir) {
                 Ok(to) => {
@@ -260,7 +260,7 @@ impl App {
                     if hosted.is_some_and(|h| h != to) {
                         self.plugins.load_sample(row, &to);
                     }
-                    self.state.project.get_mut().channels[row].sample_path = Some(to);
+                    self.state.session.project.get_mut().channels[row].sample_path = Some(to);
                     copied += 1;
                 }
                 Err(_) => failed += 1,
@@ -286,7 +286,7 @@ impl App {
 
     /// The data folder becomes `dir`, with the choice "Store data in the specified folder" (a change of the project).
     pub(crate) fn set_data_folder(&mut self, dir: &Path) {
-        let df = self.state.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
+        let df = self.state.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
         df.choice = DataFolder::SPECIFIED;
         df.folder = folder_text(dir);
         self.invalidate();
@@ -316,7 +316,7 @@ impl App {
                     if crate::prefs::check(&crate::prefs::COPY_USED_SAMPLES) {
                         self.copy_used_samples();
                     }
-                    let name = crate::backup::project_name(self.state.path.as_deref());
+                    let name = crate::backup::project_name(self.state.session.path.as_deref());
                     self.save_to(dir.join(format!("{name}.{}", crate::project_files::EXT)));
                     reread(&self.state);
                 }
@@ -337,7 +337,7 @@ impl App {
     /// project file is renamed, in its folder (Lemon Studio rule). Then the project is saved (the file it replaces goes
     /// to the backups, as on any save). A name that is taken is refused with a message, and nothing changes.
     pub(crate) fn rename_project(&mut self, name: &str, folder_name: Option<&str>) {
-        let Some(file) = self.state.path.clone() else { return };
+        let Some(file) = self.state.session.path.clone() else { return };
         // The folder's rename (old, new), where the project file is after it, and its new name.
         let folder_move = match folder_name.map(str::trim) {
             Some(f) => {
@@ -367,11 +367,11 @@ impl App {
             if let Err(e) = std::fs::rename(old, new) {
                 return self.rename_failed(old, &e);
             }
-            self.state.path = Some(file_after.clone());
+            self.state.session.path = Some(file_after.clone());
             // The samples inside the folder are found in the renamed one.
-            for row in 0..self.state.project.channels.len() {
+            for row in 0..self.state.session.project.channels.len() {
                 let hosted = self.plugins.sampler_path(row);
-                let ch = &mut self.state.project.get_mut().channels[row];
+                let ch = &mut self.state.session.project.get_mut().channels[row];
                 let Some(p) = hosted.clone().filter(|p| !p.is_empty()).or_else(|| ch.sample_path.as_deref().map(crate::plugins::resolve_sample)) else { continue };
                 let Ok(rel) = Path::new(&p).strip_prefix(old) else { continue };
                 let moved = new.join(rel).to_string_lossy().into_owned();
@@ -380,7 +380,7 @@ impl App {
                     self.plugins.load_sample(row, &moved);
                 }
             }
-            if let Some(df) = self.state.project.get_mut().data_folder.as_mut().filter(|d| d.choice == DataFolder::SPECIFIED) {
+            if let Some(df) = self.state.session.project.get_mut().data_folder.as_mut().filter(|d| d.choice == DataFolder::SPECIFIED) {
                 df.folder = folder_text(new);
             }
         }
@@ -388,7 +388,7 @@ impl App {
             if let Err(e) = std::fs::rename(&file_after, &target) {
                 return self.rename_failed(&file_after, &e);
             }
-            self.state.path = Some(target.clone());
+            self.state.session.path = Some(target.clone());
         }
         self.save_to(target);
         reread(&self.state);
@@ -417,15 +417,15 @@ impl App {
     pub(crate) fn set_data_folder_choice(&mut self, i: u32) -> Option<String> {
         let s = &mut self.state;
         let Some(&label) = CHOICES.get(i as usize) else { return None };
-        if i != choice(&s.project) {
+        if i != choice(&s.session.project) {
             let now = folder(s);
-            let df = s.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
+            let df = s.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
             df.choice = i;
             match i {
                 DataFolder::NONE => df.folder.clear(),
                 _ => {
                     // Relative: the project file's folder; specified: the folder in use, else the one 202 holds.
-                    let dir = if i == DataFolder::RELATIVE { s.path.as_deref().and_then(Path::parent).map(Path::to_path_buf) } else { now };
+                    let dir = if i == DataFolder::RELATIVE { s.session.path.as_deref().and_then(Path::parent).map(Path::to_path_buf) } else { now };
                     if let Some(d) = dir {
                         df.folder = folder_text(&d);
                     }
@@ -486,7 +486,7 @@ mod tests {
     fn choosing_and_saving_the_data_folder() {
         let dir = scratch("choose");
         let mut app = App::new(None);
-        assert_eq!((choice_text(&app.state.project), path_text(&app.state)), (CHOICES[0], NONE_TEXT.to_string()));
+        assert_eq!((choice_text(&app.state.session.project), path_text(&app.state)), (CHOICES[0], NONE_TEXT.to_string()));
         app.set_data_folder_choice(DataFolder::RELATIVE);
         assert!(app.unsaved());
         assert_eq!(folder(&app.state), None, "never saved: none yet");
@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(path_text(&app.state), format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR));
         app.save_to(song.clone());
         let opened = App::new(Some(song.clone()));
-        assert_eq!(opened.state.project.data_folder, Some(DataFolder { choice: DataFolder::RELATIVE, folder: folder_text(&dir) }));
+        assert_eq!(opened.state.session.project.data_folder, Some(DataFolder { choice: DataFolder::RELATIVE, folder: folder_text(&dir) }));
         // A copy elsewhere still names `dir` in 202: opened, its data folder is its own folder; saved, 202 follows.
         let other = dir.join("moved");
         std::fs::create_dir_all(&other).unwrap();
@@ -504,13 +504,13 @@ mod tests {
         let mut moved = App::new(Some(other.join("song.flp")));
         assert_eq!(folder(&moved.state), Some(other.clone()));
         moved.save_to(other.join("song.flp"));
-        assert_eq!(App::new(Some(other.join("song.flp"))).state.project.data_folder.clone().unwrap().folder, folder_text(&other));
+        assert_eq!(App::new(Some(other.join("song.flp"))).state.session.project.data_folder.clone().unwrap().folder, folder_text(&other));
         // Specified keeps the folder; none empties 202.
         moved.set_data_folder_choice(DataFolder::SPECIFIED);
-        assert_eq!(moved.state.project.data_folder.as_ref().unwrap().folder, folder_text(&other));
+        assert_eq!(moved.state.session.project.data_folder.as_ref().unwrap().folder, folder_text(&other));
         assert_eq!(folder(&moved.state), Some(other.clone()));
         moved.set_data_folder_choice(DataFolder::NONE);
-        assert_eq!(moved.state.project.data_folder, Some(DataFolder::default()));
+        assert_eq!(moved.state.session.project.data_folder, Some(DataFolder::default()));
         assert_eq!(path_text(&moved.state), NONE_TEXT);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -535,13 +535,13 @@ mod tests {
         app.state.set_tempo(98.0);
         app.save_to(work.join("t.flp"));
         assert_eq!((count(&global), count(&work.join(BACKUP_DIR))), (1, 1), "into <data folder>/Backup");
-        let path = app.state.path.clone();
+        let path = app.state.session.path.clone();
         assert_eq!(backup_folder(&app.state, path.as_deref()), Some(work.join(BACKUP_DIR)));
         crate::prefs::set_choice(&crate::prefs::BACKUP_LOCATION, 0);
         assert_eq!(backup_folder(&app.state, path.as_deref()), Some(global.clone()), "Always save to the global folder");
         crate::prefs::set_choice(&crate::prefs::BACKUP_LOCATION, 1);
         // A specified folder that does not exist (a project from another computer): the global folder.
-        app.state.project.get_mut().data_folder = Some(DataFolder { choice: DataFolder::SPECIFIED, folder: folder_text(&dir.join("gone")) });
+        app.state.session.project.get_mut().data_folder = Some(DataFolder { choice: DataFolder::SPECIFIED, folder: folder_text(&dir.join("gone")) });
         assert_eq!(backup_folder(&app.state, path.as_deref()), Some(global.clone()));
         crate::backup::TEST_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(p.items[0].mark, crate::playlist::Mark::Radio(true));
         let r = hit(&app, &Action::PlPopup(1)).unwrap();
         click(&mut app, &mut c, r);
-        assert_eq!(choice(&app.state.project), DataFolder::RELATIVE);
+        assert_eq!(choice(&app.state.session.project), DataFolder::RELATIVE);
         assert_eq!(app.state.message.as_deref(), Some("Data folder: Store data relative to the project file"));
         // Saved: Rename and Copy work; the path shows the folder.
         app.save_to(dir.join("p.flp"));
@@ -656,7 +656,7 @@ mod tests {
         let mut app = saved_with_folder(&dir, "song");
         let kick = dir.join("lib").join("kick.wav");
         file(&kick, 12);
-        app.state.project.get_mut().channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
+        app.state.session.project.get_mut().channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
         app.mark_saved();
         // Don't copy.
         app.toggle_copy_samples();
@@ -672,19 +672,19 @@ mod tests {
         app.dialog_click(crate::dialog::DHit::Button(0));
         let copy = dir.join("song").join(SAMPLES_DIR).join("kick.wav");
         assert!(copy.is_file());
-        assert_eq!(app.state.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
+        assert_eq!(app.state.session.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
         assert!(app.unsaved(), "a change of the project");
         // The next save writes the new path.
         app.save_to(dir.join("song").join("song.flp"));
         let opened = App::new(Some(dir.join("song").join("song.flp")));
-        assert_eq!(opened.state.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
+        assert_eq!(opened.state.session.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
         // A sample loaded while it is ticked.
         let snare = dir.join("lib").join("snare.wav");
         file(&snare, 5);
         crate::rack::sample_chosen(&mut app, 0, snare.clone());
         let copy = dir.join("song").join(SAMPLES_DIR).join("snare.wav");
         assert!(copy.is_file());
-        assert_eq!(app.state.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
+        assert_eq!(app.state.session.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -697,7 +697,7 @@ mod tests {
         let mut app = saved_with_folder(&dir, "song");
         let kick = dir.join("lib").join("kick.wav");
         file(&kick, 12);
-        app.state.project.get_mut().channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
+        app.state.session.project.get_mut().channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
         let picked = dir.join("picked");
         std::fs::create_dir_all(&picked).unwrap();
         // Don't save to the folder.
@@ -705,8 +705,8 @@ mod tests {
         app.data_folder_pick();
         assert_eq!(top_msg(&app), Some((ATTENTION.into(), CHANGED_QUESTION.into(), CHANGED_LABELS.to_vec())));
         app.dialog_click(crate::dialog::DHit::Button(1));
-        assert_eq!(app.state.project.data_folder, Some(DataFolder { choice: DataFolder::SPECIFIED, folder: folder_text(&picked) }));
-        assert_eq!(app.state.path, Some(dir.join("song").join("song.flp")), "nothing saved");
+        assert_eq!(app.state.session.project.data_folder, Some(DataFolder { choice: DataFolder::SPECIFIED, folder: folder_text(&picked) }));
+        assert_eq!(app.state.session.path, Some(dir.join("song").join("song.flp")), "nothing saved");
         assert!(std::fs::read_dir(&picked).unwrap().next().is_none());
         // Save to the folder, with Copy ticked.
         crate::prefs::set_check(&crate::prefs::COPY_USED_SAMPLES, true);
@@ -715,12 +715,12 @@ mod tests {
         crate::dialog::fake::answer(Some(other.clone()));
         app.data_folder_pick();
         app.dialog_click(crate::dialog::DHit::Button(0));
-        assert_eq!(app.state.path, Some(other.join("song.lemon")));
+        assert_eq!(app.state.session.path, Some(other.join("song.lemon")));
         assert!(!app.unsaved());
         let opened = App::new(Some(other.join("song.lemon")));
-        assert_eq!(opened.state.project.data_folder, Some(DataFolder { choice: DataFolder::SPECIFIED, folder: folder_text(&other) }));
+        assert_eq!(opened.state.session.project.data_folder, Some(DataFolder { choice: DataFolder::SPECIFIED, folder: folder_text(&other) }));
         let copy = other.join(SAMPLES_DIR).join("kick.wav");
-        assert_eq!(opened.state.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
+        assert_eq!(opened.state.session.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
         assert!(dir.join("song").join("song.flp").is_file(), "the old file stays");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -737,7 +737,7 @@ mod tests {
         let mut app = saved_with_folder(&dir, "t2spec");
         let kick = dir.join("t2spec").join(SAMPLES_DIR).join("kick.wav");
         file(&kick, 12);
-        app.state.project.get_mut().channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
+        app.state.session.project.get_mut().channels[0].sample_path = Some(kick.to_string_lossy().into_owned());
         app.save_to(dir.join("t2spec").join("t2spec.flp"));
         app.open_rename();
         let form = |app: &App| match &app.state.dialogs.last().unwrap().body {
@@ -755,18 +755,18 @@ mod tests {
         app.dialog_click(crate::dialog::DHit::Button(0));
         let new = dir.join("T3");
         assert!(!dir.join("t2spec").exists() && new.join("T3.flp").is_file() && !new.join("t2spec.flp").exists());
-        assert_eq!(app.state.path, Some(new.join("T3.flp")));
+        assert_eq!(app.state.session.path, Some(new.join("T3.flp")));
         let moved = new.join(SAMPLES_DIR).join("kick.wav");
         let opened = App::new(Some(new.join("T3.flp")));
-        assert_eq!(opened.state.project.channels[0].sample_path.as_deref(), Some(moved.to_string_lossy().as_ref()));
-        assert_eq!(opened.state.project.data_folder.clone().unwrap().folder, folder_text(&new), "the save wrote the folder");
+        assert_eq!(opened.state.session.project.channels[0].sample_path.as_deref(), Some(moved.to_string_lossy().as_ref()));
+        assert_eq!(opened.state.session.project.data_folder.clone().unwrap().folder, folder_text(&new), "the save wrote the folder");
         let backups: Vec<String> = std::fs::read_dir(new.join(BACKUP_DIR)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert!(backups.iter().any(|n| n.starts_with("T3 (overwritten on ")), "the replaced file went to Backup: {backups:?}");
         // A folder name that is taken: refused, nothing changes.
         std::fs::create_dir_all(dir.join("Taken")).unwrap();
         app.rename_project("Taken", Some("Taken"));
         assert_eq!(top_msg(&app).map(|m| m.0), Some(Rename::TITLE.to_string()));
-        assert!(new.join("T3.flp").is_file() && app.state.path == Some(new.join("T3.flp")));
+        assert!(new.join("T3.flp").is_file() && app.state.session.path == Some(new.join("T3.flp")));
         app.dialog_click(crate::dialog::DHit::Button(0));
         // Unticked: only the file.
         app.open_rename();

@@ -210,12 +210,12 @@ fn value_part(s: String) -> String {
 
 /// The mixer tracks the banks step over: master and the inserts.
 fn track_count(s: &State) -> usize {
-    usize::from(crate::mixer::inserts(s)) + 1
+    usize::from(crate::mixer::inserts(&s.session)) + 1
 }
 
 /// The rack rows the pads and channel pages step over (the rack's filter).
 fn rows(s: &State) -> Vec<usize> {
-    crate::rack::shown(s)
+    crate::rack::shown(&s.session)
 }
 
 /// A plugin parameter map: the parameters encoders 1–8 turn, by the plugin's parameter index, with a name (the
@@ -338,13 +338,13 @@ fn plugin_target(s: &State, page: usize) -> Option<PluginTarget> {
     let (key, title, name, sampler) = match s.focused() {
         Some(Win::Hosted(key)) if crate::plugins::fx_of(key).is_some() => {
             let (t, slot) = crate::plugins::fx_of(key)?;
-            let plugin = crate::mixer::track(s, t)?.slots.get(usize::from(slot))?.as_ref()?.name.clone();
-            (key, crate::mixer::name(s, t), plugin, false)
+            let plugin = crate::mixer::track(&s.session, t)?.slots.get(usize::from(slot))?.as_ref()?.name.clone();
+            (key, crate::mixer::name(&s.session, t), plugin, false)
         }
         _ => {
             let row = s.selected_channel;
-            let ch = s.project.channels.get(row)?;
-            let title = crate::rack::channel_name(s, row);
+            let ch = s.session.project.channels.get(row)?;
+            let title = crate::rack::channel_name(&s.session, row);
             match ch.kind {
                 os_model::ChannelKind::Sampler | os_model::ChannelKind::AudioClip => (row, title, String::new(), true),
                 os_model::ChannelKind::Plugin => (row, title, ch.plugin.clone()?, false),
@@ -769,7 +769,7 @@ impl App {
         let t = (cur + by).rem_euclid(n) as u16;
         crate::mixer::select(&mut self.state, t, false);
         self.invalidate();
-        let name = crate::mixer::name(&self.state, t);
+        let name = crate::mixer::name(&self.state.session, t);
         self.notify(if t == 0 { "Track".to_string() } else { format!("Track {t}") }, name);
     }
 
@@ -862,9 +862,9 @@ impl App {
         let t = t as u16;
         if arm {
             crate::mixer::hit(self, crate::mixer::MHit::Arm(t));
-        } else if let Some(m) = crate::mixer::track_mut(&mut self.state, t) {
+        } else if let Some(m) = crate::mixer::track_mut(&mut self.state.session, t) {
             m.enabled = !m.enabled;
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
         }
         self.invalidate();
     }
@@ -886,7 +886,7 @@ impl App {
         let Some(&row) = rows.get(i) else { return };
         let others = !self.drive().pads_held.is_empty();
         self.drive().pads_held.push((pad, row));
-        let extra = Extra { channel: Some(self.state.project.channels[row].index), ..Extra::default() };
+        let extra = Extra { channel: Some(self.state.session.project.channels[row].index), ..Extra::default() };
         self.midi_play_note(src, 60, row, 60, vel, extra);
         if !others && self.state.selected_channel != row {
             self.state.rack.select_only(row);
@@ -909,7 +909,7 @@ impl App {
             return self.note_off_from(src, 64);
         }
         let row = self.state.selected_channel;
-        let Some(ch) = self.state.project.channels.get(row) else { return };
+        let Some(ch) = self.state.session.project.channels.get(row) else { return };
         let extra = Extra { channel: Some(ch.index), ..Extra::default() };
         self.midi_play_note(src, note, row, u16::from(note), vel, extra);
     }
@@ -919,7 +919,7 @@ impl App {
         let s = &self.state;
         match t {
             Target::Knob(k) => f64::from(s.knob(k)),
-            Target::Fader(m) => crate::mixer::track(s, m).and_then(|m| m.volume).unwrap_or(0.8),
+            Target::Fader(m) => crate::mixer::track(&s.session, m).and_then(|m| m.volume).unwrap_or(0.8),
             Target::Param(key, i) => crate::params::param_value(s, key, i).unwrap_or(0.0),
             Target::Tempo => self.transport.tempo().unwrap_or(s.tempo()),
         }
@@ -932,19 +932,19 @@ impl App {
         let s = &mut self.state;
         match t {
             Target::Knob(k) => {
-                crate::history::knob(s, k, !first);
+                crate::history::knob(&mut s.session, k, !first);
                 s.set_knob(k, v as f32);
                 self.record_knob(k);
             }
             Target::Fader(m) => {
                 let run = crate::history::Run::Fader(m);
                 if first {
-                    crate::history::settle(s);
+                    crate::history::settle(&mut s.session);
                 }
                 crate::control::run_edit(s, crate::history::MIXER_VOLUME, Region::Track(m), run, true, |s| {
-                    if let Some(tr) = crate::mixer::track_mut(s, m) {
+                    if let Some(tr) = crate::mixer::track_mut(&mut s.session, m) {
                         tr.volume = Some(v);
-                        s.piano.dirty = true;
+                        s.session.dirty = true;
                     }
                 });
             }
@@ -1096,7 +1096,7 @@ impl App {
         let (name, value) = match i {
             0 => {
                 // Off a beat: right goes to the next beat, left back to this one's start. On a beat: a beat either way.
-                let beat = self.state.project.beat_ticks().max(1);
+                let beat = self.state.session.project.beat_ticks().max(1);
                 let pos = self.song_pos_now();
                 let on = pos % beat == 0;
                 let to = match (steps > 0, on) {
@@ -1141,7 +1141,7 @@ impl App {
                 let bpm = self.target_value(Target::Tempo) + k;
                 let first = self.gesture(i, Target::Tempo);
                 if first {
-                    crate::control::edit_press(&mut self.state, crate::control::command::TEMPO, Region::Settings);
+                    crate::control::edit_press(&mut self.state.session, crate::control::command::TEMPO, Region::Settings);
                 }
                 let bpm = self.set_tempo(bpm);
                 self.invalidate();
@@ -1160,7 +1160,7 @@ impl App {
     /// The next (`by` 1) or previous playlist marker.
     fn marker_step(&mut self, by: i32) {
         let pos = self.song_pos_now();
-        let mut at: Vec<u32> = crate::playlist::markers(&self.state)
+        let mut at: Vec<u32> = crate::playlist::markers(&self.state.session)
             .iter()
             .filter(|m| m.kind != os_model::TimeMarker::SIGNATURE)
             .map(|m| m.position)
@@ -1214,7 +1214,7 @@ impl App {
             let first = self.gesture_fader(i);
             self.target_set(Target::Fader(t), v, first);
         }
-        let name = crate::mixer::name(&self.state, t);
+        let name = crate::mixer::name(&self.state.session, t);
         let level = db_text(os_engine::laws::fader_gain(self.target_value(Target::Fader(t))));
         let d = self.drive();
         let m = d.model();
@@ -1293,7 +1293,7 @@ impl App {
         if faders == Some(Faders::Volume) {
             for i in 0..8u8 {
                 let t = mbank + usize::from(i);
-                let c = match crate::mixer::track(s, t as u16).filter(|_| t < n) {
+                let c = match crate::mixer::track(&s.session, t as u16).filter(|_| t < n) {
                     None => lk::OFF,
                     Some(m) if arm => if m.armed { lk::RED } else { lk::DARK_RED },
                     Some(m) if !m.enabled => lk::OFF,
@@ -1311,13 +1311,13 @@ impl App {
                         None => lk::OFF,
                         Some(_) if pads_held.contains(&pad) => lk::GREEN,
                         Some(&r) if r == s.selected_channel => lk::WHITE,
-                        Some(&r) => Colour::of(s.project.channels[r].color.unwrap_or(DEFAULT_COLOUR)),
+                        Some(&r) => Colour::of(s.session.project.channels[r].color.unwrap_or(DEFAULT_COLOUR)),
                     };
                     lights.push((Led::Pad(pad), c, false));
                 }
             }
             Some(Pads::Drum) => {
-                let c = s.project.channels.get(s.selected_channel).map_or(lk::OFF, |ch| Colour::of(ch.color.unwrap_or(DEFAULT_COLOUR)));
+                let c = s.session.project.channels.get(s.selected_channel).map_or(lk::OFF, |ch| Colour::of(ch.color.unwrap_or(DEFAULT_COLOUR)));
                 for note in lk::DRUM_NOTES {
                     lights.push((Led::Drum(note), c, false));
                 }
@@ -1345,8 +1345,8 @@ impl App {
                     }
                 }
                 None => {
-                    if let Some(row) = (s.selected_channel < s.project.channels.len()).then_some(s.selected_channel) {
-                        let title = crate::rack::channel_name(s, row);
+                    if let Some(row) = (s.selected_channel < s.session.project.channels.len()).then_some(s.selected_channel) {
+                        let title = crate::rack::channel_name(&s.session, row);
                         for i in 0..8 {
                             texts.push((display::ENCODER_1 + i, unused(title.clone())));
                         }
@@ -1358,7 +1358,7 @@ impl App {
                     let t = match page {
                         0 | 1 => match rows.get(cbank * BANK + i) {
                             Some(&r) => {
-                                let name = crate::rack::channel_name(s, r);
+                                let name = crate::rack::channel_name(&s.session, r);
                                 if page == 0 {
                                     let v = f64::from(s.knob(KnobId::ChanVol(r)));
                                     Text::three(name, "Level", db_text(os_engine::laws::channel_gain(v)))
@@ -1373,10 +1373,10 @@ impl App {
                             if t >= n {
                                 unused(String::new())
                             } else if page == 2 {
-                                let v = crate::mixer::track(s, t as u16).and_then(|m| m.volume).unwrap_or(0.8);
-                                Text::three(crate::mixer::name(s, t as u16), "Level", db_text(os_engine::laws::fader_gain(v)))
+                                let v = crate::mixer::track(&s.session, t as u16).and_then(|m| m.volume).unwrap_or(0.8);
+                                Text::three(crate::mixer::name(&s.session, t as u16), "Level", db_text(os_engine::laws::fader_gain(v)))
                             } else {
-                                Text::three(crate::mixer::name(s, t as u16), "Pan", pan_text(f64::from(s.knob(KnobId::MixPan(t as u16)))))
+                                Text::three(crate::mixer::name(&s.session, t as u16), "Pan", pan_text(f64::from(s.knob(KnobId::MixPan(t as u16)))))
                             }
                         }
                         _ if i < 6 => {
@@ -1384,7 +1384,7 @@ impl App {
                             let (band, gain) = ((i / 2) as u8, i % 2 == 1);
                             let k = KnobId::Eq(t, band, if gain { 0 } else { 1 });
                             let label = ["Low Shelf", "Peaking", "High Shelf"][usize::from(band)];
-                            Text::three(crate::mixer::name(s, t), label, value_part(s.knob_text(k)))
+                            Text::three(crate::mixer::name(&s.session, t), label, value_part(s.knob_text(k)))
                         }
                         _ => unused(String::new()),
                     };
@@ -1400,7 +1400,7 @@ impl App {
         }
         let tempo = self.transport.tempo().unwrap_or(s.tempo());
         let master_again = d.master_again.filter(|t| *t <= Instant::now()).is_some();
-        let master = (crate::mixer::name(s, 0), crate::mixer::track(s, 0).and_then(|m| m.volume).unwrap_or(0.8));
+        let master = (crate::mixer::name(&s.session, 0), crate::mixer::track(&s.session, 0).and_then(|m| m.volume).unwrap_or(0.8));
         let shown = plugin.as_ref().zip(reread).filter(|(_, (read, _))| *read).map(|(pt, (_, texts))| (now, pt.key, pt.page, texts));
         let d = self.drive();
         if shown.is_some() {

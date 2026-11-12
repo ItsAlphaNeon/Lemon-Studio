@@ -319,16 +319,16 @@ mod tests {
     #[test]
     fn the_host_entry_creates_an_automation_clip() {
         let (mut a, _fake, done) = app();
-        let clips = a.state.project.automations.len();
+        let clips = a.state.session.project.automations.len();
         a.params_tick();
         assert!(a.show_plugin_menu(0, &menu(5), (0.0, 0.0)));
         let create = a.state.playlist.popup.as_ref().unwrap().items.iter().find(|i| i.label == "Create automation clip").unwrap().cmd.clone();
         crate::playlist::run(&mut a, create);
         assert_eq!(*done.lock().unwrap(), [(5, Some(11))]);
         a.params_tick();
-        assert_eq!(a.state.project.automations.len(), clips + 1);
-        let ch = a.state.project.channels[0].index;
-        assert_eq!(a.state.project.automations.last().and_then(|x| x.target()), Some(os_model::target::channel_param(ch, 0)));
+        assert_eq!(a.state.session.project.automations.len(), clips + 1);
+        let ch = a.state.session.project.channels[0].index;
+        assert_eq!(a.state.session.project.automations.last().and_then(|x| x.target()), Some(os_model::target::channel_param(ch, 0)));
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Created automation clip")), "{:?}", a.state.message);
     }
 

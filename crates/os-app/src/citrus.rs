@@ -117,8 +117,8 @@ impl crate::app::App {
         }
         let Some(index) = self.plugins.index_of(CITRUS) else { return };
         let pending = self.state.pending_plugin.map(|(r, _)| r);
-        let rows: Vec<usize> = (0..self.state.project.channels.len())
-            .filter(|&r| is_sytrus(&self.state.project.channels[r]))
+        let rows: Vec<usize> = (0..self.state.session.project.channels.len())
+            .filter(|&r| is_sytrus(&self.state.session.project.channels[r]))
             .filter(|&r| !self.state.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && Some(r) != pending)
             .collect();
         if rows.is_empty() {
@@ -129,7 +129,7 @@ impl crate::app::App {
             if self.past_deadline() {
                 break;
             }
-            let fl = self.state.project.channels[row].plugin_state.clone().unwrap_or_default();
+            let fl = self.state.session.project.channels[row].plugin_state.clone().unwrap_or_default();
             let st = citrus::plugin_state_from_fl(&fl);
             match self.plugins.create_with(row, index, Some(&st)) {
                 Ok(_) => {
@@ -144,7 +144,7 @@ impl crate::app::App {
         }
         if added {
             self.transport.set_instruments(self.plugins.instruments());
-            self.state.piano.dirty = true;
+            self.state.session.dirty = true;
         }
         self.invalidate();
     }
@@ -194,12 +194,12 @@ mod tests {
     fn sytrus_channels_save_and_reopen() {
         let path = std::env::temp_dir().join(format!("openstudio-citrus-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.project = crate::locked::Locked::new(crate::app::test_project());
-        a.state.file = None;
-        a.state.path = None;
+        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.file = None;
+        a.state.session.path = None;
         a.plugins.available = crate::plugins::builtin();
-        let row = crate::app::add_plugin_channel(a.state.project.get_mut(), CITRUS);
-        let ch = &a.state.project.channels[row];
+        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), CITRUS);
+        let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(CITRUS));
         a.sync_citrus();

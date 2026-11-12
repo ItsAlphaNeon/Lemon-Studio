@@ -46,7 +46,7 @@ mod mpris;
 mod rt;
 mod omarchy;
 mod one_click;
-mod session;
+mod session_restore;
 mod track_rec;
 mod audio_log;
 mod score_log;
@@ -134,6 +134,9 @@ mod ppi;
 mod prefs;
 mod settings_window;
 pub mod locked;
+pub mod session;
+pub mod edit;
+mod follow;
 mod preview_track;
 mod project_files;
 mod project_forms;
@@ -872,7 +875,7 @@ impl ApplicationHandler for Shell {
             layout::save_main(m);
         }
         layout::save(&self.app.state);
-        session::save(&self.app);
+        session_restore::save(&self.app);
         self.app.surface_exit();
         // Stopped by a signal with changes unsaved: nobody was asked, so they go to a backup, and without `closed` the
         // next start offers it (`crate::crash`).
@@ -1683,7 +1686,7 @@ fn screenshot(args: &[String]) {
         app.state.rack_size.1 = h;
     }
     if rack_all {
-        rack::set_filter(&mut app.state, rack::Filter::All);
+        rack::set_filter(&mut app.state.session, rack::Filter::All);
     }
     if let Some(r) = rack_scroll {
         app.state.rack_scroll = r * views::rack::ROW_H;

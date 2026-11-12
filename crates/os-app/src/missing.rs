@@ -62,7 +62,7 @@ pub struct Search {
 /// its data folder and that folder's Samples folder, then the folders picked in the missing files box (`picked`).
 pub fn search_folders(s: &State, picked: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let project = s.path.as_deref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()).map(PathBuf::from);
+    let project = s.session.path.as_deref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()).map(PathBuf::from);
     let data = crate::data_folder::folder(s);
     let samples = data.as_ref().map(|d| d.join(crate::data_folder::SAMPLES_DIR));
     for d in project.into_iter().chain(data).chain(samples).chain(picked.iter().cloned()) {
@@ -91,7 +91,7 @@ pub fn apply(app: &App) {
 /// The channels whose sample is not found (sampler and audio clip channels, and a 3x Osc's custom shape): row and the
 /// path the project stores.
 pub fn missing_samples(s: &State) -> Vec<(usize, String)> {
-    s.project
+    s.session.project
         .channels
         .iter()
         .enumerate()
@@ -156,7 +156,7 @@ fn missing_box(samples: &[String], plugins: &[String]) -> Msg {
 /// Find samples...: a folder picker, starting in the project's folder.
 pub fn pick_folder(app: &mut App) {
     use crate::filedlg::{FileDlg, Mode};
-    let start = app.state.path.as_deref().and_then(Path::parent).filter(|d| d.is_dir()).map(PathBuf::from);
+    let start = app.state.session.path.as_deref().and_then(Path::parent).filter(|d| d.is_dir()).map(PathBuf::from);
     let dlg = FileDlg::new(Mode::Folder, "Find missing samples", "missing samples", Then::SampleFolder).start(start.as_deref());
     app.file_dialog(dlg);
 }
@@ -250,10 +250,10 @@ fn relink(app: &mut App, before: &[(usize, String)]) -> usize {
             continue;
         }
         found += 1;
-        let Some(ch) = app.state.project.get_mut().channels.get_mut(*row) else { continue };
+        let Some(ch) = app.state.session.project.get_mut().channels.get_mut(*row) else { continue };
         ch.sample_path = Some(now.clone());
         if ch.kind.is_sampler() {
-            app.state.sample_loads.push((*row, now));
+            app.state.session.sample_loads.push((*row, now));
         }
     }
     found
@@ -332,19 +332,19 @@ pub(crate) mod tests {
         let wav = wav(4410);
         std::fs::write(dir.join("Here.wav"), &wav).unwrap();
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::default_project());
-        let a = crate::app::add_channel(app.state.project.get_mut());
-        let b = crate::app::add_channel(app.state.project.get_mut());
-        app.state.project.get_mut().channels[a].sample_path = Some(r"C:\Users\someone\AppData\Local\Temp\Image-Line\x\Here.wav".into());
-        app.state.project.get_mut().channels[b].sample_path = Some(r"C:\Users\someone\Downloads\Gone.wav".into());
-        app.state.file = None;
+        app.state.session.project = crate::locked::Locked::new(crate::app::default_project());
+        let a = crate::app::add_channel(app.state.session.project.get_mut());
+        let b = crate::app::add_channel(app.state.session.project.get_mut());
+        app.state.session.project.get_mut().channels[a].sample_path = Some(r"C:\Users\someone\AppData\Local\Temp\Image-Line\x\Here.wav".into());
+        app.state.session.project.get_mut().channels[b].sample_path = Some(r"C:\Users\someone\Downloads\Gone.wav".into());
+        app.state.session.file = None;
         app.save_to(dir.join("Song.flp"));
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
         app.open(dir.join("Song.flp"));
         let missing = missing_samples(&app.state);
         assert_eq!(missing.iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![b], "only the sample that is nowhere");
-        assert_eq!(crate::plugins::resolve_sample(app.state.project.channels[a].sample_path.as_deref().unwrap()), dir.join("Here.wav").to_string_lossy());
+        assert_eq!(crate::plugins::resolve_sample(app.state.session.project.channels[a].sample_path.as_deref().unwrap()), dir.join("Here.wav").to_string_lossy());
         let t0 = Instant::now();
         while app.loading() && t0.elapsed() < Duration::from_secs(20) {
             app.plugin_tick();
@@ -363,7 +363,7 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(missing_samples(&app.state).is_empty(), "{:?}", app.state.message);
-        assert_eq!(app.state.project.channels[b].sample_path.as_deref(), Some(dir.join("elsewhere").join("deep").join("Gone.wav").to_string_lossy().as_ref()));
+        assert_eq!(app.state.session.project.channels[b].sample_path.as_deref(), Some(dir.join("elsewhere").join("deep").join("Gone.wav").to_string_lossy().as_ref()));
         assert!(app.unsaved(), "a relinked sample is a change to save");
         os_engine::sample::set_search_folders(Vec::new());
         let _ = std::fs::remove_dir_all(&dir);

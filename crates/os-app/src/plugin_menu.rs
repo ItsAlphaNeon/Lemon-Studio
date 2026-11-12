@@ -208,13 +208,13 @@ pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize
     let d = app.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
-    let mut ch = if sampler { crate::app::add_channel(s.project.get_mut()) } else { crate::app::add_plugin_channel(s.project.get_mut(), &d.name) };
+    let mut ch = if sampler { crate::app::add_channel(s.session.project.get_mut()) } else { crate::app::add_plugin_channel(s.session.project.get_mut(), &d.name) };
     if sampler {
         s.pending_open = Some(ch);
     } else {
         s.pending_plugin = Some((ch, index));
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     if let Some(r) = after.filter(|&r| r + 1 < ch) {
         let order: Vec<usize> = (0..=r).chain([ch]).chain(r + 1..ch).collect();
         crate::rack::reorder(app, &order);
@@ -245,19 +245,19 @@ pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<Stri
 
 fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<String> {
     let d = app.plugins.available.get(index)?.desc.clone();
-    app.state.project.channels.get(row)?;
+    app.state.session.project.channels.get(row)?;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
     app.plugins.keep(row);
     app.plugins.drop_key(row);
     app.state.hosted_rows.retain(|&r| r != row);
     app.transport.set_instruments(app.plugins.instruments());
     let s = &mut app.state;
-    let ch = &mut s.project.get_mut().channels[row];
+    let ch = &mut s.session.project.get_mut().channels[row];
     ch.plugin_state = None;
     // A new id at once, before the new instance is hosted and takes its channel's.
     ch.id = os_model::Id::NONE;
-    s.control.settle(s.project.get_mut());
-    let ch = &mut s.project.get_mut().channels[row];
+    s.session.control.settle(s.session.project.get_mut());
+    let ch = &mut s.session.project.get_mut().channels[row];
     if sampler {
         ch.kind = os_model::ChannelKind::Sampler;
         ch.plugin = None;
@@ -275,7 +275,7 @@ fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<Stri
         }
         s.pending_plugin = Some((row, index));
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     s.selected_channel = row;
     s.rack.select_only(row);
     Some(format!("Replaced with {}", d.name))
@@ -285,7 +285,7 @@ fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<Stri
 pub fn add_effect(app: &mut App, index: usize, slot: Option<u8>) -> Option<String> {
     let s = &app.state;
     let t = s.selected_mixer;
-    let slot = slot.or_else(|| s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8));
+    let slot = slot.or_else(|| s.session.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8));
     match slot {
         Some(k) => crate::mixer::run(app, crate::mixer::MCmd::AddEffect(k, index)),
         None => Some("Every slot of this track is in use".into()),

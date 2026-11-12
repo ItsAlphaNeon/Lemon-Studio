@@ -164,17 +164,17 @@ pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
 /// A Misc tab edit of rack row `row`: the channel model, its hosted Lemon Sampler (root / fine), then playback.
 /// An undo step; a slider's drag or wheel notches one step (`control::run_edit`).
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
-    if app.state.project.channels.get(row).is_none() {
+    if app.state.session.project.channels.get(row).is_none() {
         return;
     }
     let run = crate::history::Run::Channel(row, crate::history::ChannelControl::Misc(m));
     crate::control::run_edit(&mut app.state, "Channel settings", crate::control::command::Region::Channel(row), run, mp::draggable(m), |s| {
-        if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
+        if let Some(ch) = s.session.project.get_mut().channels.get_mut(row) {
             put(&mut ch.misc, m, v);
         }
     });
     sync(app, row, &[m]);
-    app.state.piano.dirty = true;
+    app.state.session.dirty = true;
     app.invalidate();
 }
 
@@ -186,7 +186,7 @@ pub fn follow(app: &mut crate::app::App, row: usize) {
 
 /// Rack row `row`'s Lemon Sampler takes Misc values `ms` it plays.
 fn sync(app: &mut crate::app::App, row: usize, ms: &[M]) {
-    let Some(ch) = app.state.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { return };
+    let Some(ch) = app.state.session.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { return };
     let misc = ch.misc;
     for &m in ms {
         if let Some((name, plain)) = sampler_param(&misc, m) {
@@ -204,7 +204,7 @@ pub fn menu(app: &crate::app::App, row: usize, m: M, x: f32, y: f32) -> crate::p
     if mp::draggable(m) && !mp::list_on_right(m) {
         return Popup { x, y, items: vec![PItem::new("Reset", Cmd::Misc(row, m, mp::default_of(m)))], sub: None, scroll: [0; 2] };
     }
-    let cur = app.state.project.channels.get(row).map_or(mp::default_of(m), |ch| get(&ch.misc, m));
+    let cur = app.state.session.project.channels.get(row).map_or(mp::default_of(m), |ch| get(&ch.misc, m));
     let items = mp::list_entries(m)
         .into_iter()
         .map(|(label, v)| PItem::new(label, Cmd::Misc(row, m, v)).mark(Mark::Radio((v - cur).abs() < 0.5)))
@@ -222,7 +222,7 @@ mod tests {
     fn knob_and_slider_menus_reset() {
         use crate::playlist::Cmd;
         let mut app = crate::app::App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         for m in [M::LevelPan, M::TimeGate, M::VolMid, M::Fine] {
             let menu = menu(&app, 0, m, 0.0, 0.0);
             assert_eq!(menu.items.len(), 1, "{m:?}");

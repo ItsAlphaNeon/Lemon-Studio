@@ -65,7 +65,7 @@ impl App {
         crate::settings_file::write(KEY, &chosen.as_deref().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default());
         self.transport.set_factory(dir());
         for row in self.state.hosted_rows.clone() {
-            let Some(ch) = self.state.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { continue };
+            let Some(ch) = self.state.session.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { continue };
             let Some(path) = ch.sample_path.as_deref().filter(|p| os_engine::SampleLibrary::has_placeholder(p)) else { continue };
             if self.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER) {
                 self.plugins.load_sample(row, &crate::plugins::resolve_sample(path));

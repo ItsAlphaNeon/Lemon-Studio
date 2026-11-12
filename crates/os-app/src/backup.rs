@@ -145,15 +145,15 @@ impl App {
 
     /// Whether the project changed since it was last backed up, and since it was last saved (or opened, or created).
     pub(crate) fn changed_since_backup(&self) -> bool {
-        self.unsaved() && self.backup.last.as_ref().is_none_or(|(p, t)| *p != self.state.project || *t != self.state.tempo())
+        self.unsaved() && self.backup.last.as_ref().is_none_or(|(p, t)| *p != self.state.session.project || *t != self.state.tempo())
     }
 
     /// Writes a backup of the project as it is now, named for local time `t`, then deletes its oldest autosaves beyond
     /// Maximum (`prefs::BACKUP_MAXIMUM`). Returns the file (one already written in the same minute is not
     /// overwritten); None while the project cannot be written now.
     pub(crate) fn write_backup(&mut self, t: NaiveDateTime) -> Option<Result<PathBuf, String>> {
-        let Some(dir) = crate::data_folder::backup_folder(&self.state, self.state.path.as_deref()) else { return Some(Err("no user folder".into())) };
-        let name = project_name(self.state.path.as_deref());
+        let Some(dir) = crate::data_folder::backup_folder(&self.state, self.state.session.path.as_deref()) else { return Some(Err("no user folder".into())) };
+        let name = project_name(self.state.session.path.as_deref());
         let target = dir.join(file_name(&name, "autosaved", t));
         if target.exists() {
             return Some(Ok(target));
@@ -161,7 +161,7 @@ impl App {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return Some(Err(format!("{}: {e}", dir.display())));
         }
-        let snap = (self.state.project.clone(), self.state.tempo());
+        let snap = (self.state.session.project.clone(), self.state.tempo());
         let done = self.save_copy(target.clone())?;
         if done.is_ok() {
             self.backup.last = Some(snap);
@@ -253,7 +253,7 @@ mod tests {
         let files = names(&dir);
         assert_eq!(files.len(), 1, "{files:?}");
         assert!(autosaved_at(&files[0], "untitled").is_some(), "{files:?}");
-        assert!(app.unsaved() && app.state.path.is_none() && app.state.message.as_deref() == Some("hello"), "a copy, not a save");
+        assert!(app.unsaved() && app.state.session.path.is_none() && app.state.message.as_deref() == Some("hello"), "a copy, not a save");
         let opened = App::new(Some(dir.join(&files[0])));
         assert_eq!(opened.state.tempo(), app.state.tempo(), "the backup holds the change");
         // Backed up already: the next interval writes nothing.
@@ -305,7 +305,7 @@ mod tests {
         let auto: Vec<String> = names(&dir).into_iter().filter(|n| autosaved_at(n, "song").is_some()).collect();
         assert_eq!(auto, [file_name("song", "autosaved", at(10, 1, 12, 6)), file_name("song", "autosaved", at(10, 1, 13, 0))]);
         prefs::set_number(&prefs::BACKUP_MAXIMUM, prefs::BACKUP_MAXIMUM.default);
-        assert_eq!(app.state.path.as_deref(), Some(song.as_path()));
+        assert_eq!(app.state.session.path.as_deref(), Some(song.as_path()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

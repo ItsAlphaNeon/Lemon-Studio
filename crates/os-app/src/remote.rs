@@ -250,7 +250,7 @@ pub fn retarget(pairs: &[(Target, Target)]) {
 /// The links follow what they drive as it moves (mixer places, rack rows): `f` gives a target's new one, `None` when
 /// what it drove went, and the link with it. The moves join the edit's (`State::link_moves`), so its undo step puts
 /// them back; a link that went does not come back.
-pub fn follow(s: &mut State, f: impl Fn(Target) -> Option<Target>) {
+pub fn follow(s: &mut crate::session::Session, f: impl Fn(Target) -> Option<Target>) {
     let old = links();
     let mut all = old.clone();
     let before = std::mem::take(&mut s.link_moves);
@@ -286,11 +286,11 @@ pub fn label(s: &State, l: &Link) -> String {
     let what = match l.target {
         Target::Knob(KnobId::ChanVol(r) | KnobId::ChanPan(r)) if !l.omni => format!("{} - {name}", channel(r)),
         Target::RackTrack(r) | Target::RackLed(r) => format!("{} - {name}", channel(r)),
-        Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::mixer::name(s, a)),
+        Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::mixer::name(&s.session, a)),
         Target::Param(key, index) => crate::params::clip_name(s, key, index),
-        Target::MemberParam(m, k, id, index) => match crate::container::member_key(s, crate::container::place_key(m, k), id) {
+        Target::MemberParam(m, k, id, index) => match crate::container::member_key(&s.session, crate::container::place_key(m, k), id) {
             Some(key) => crate::params::clip_name(s, key, index),
-            None => format!("{} - {name}", crate::container::place_name(s, m, k)),
+            None => format!("{} - {name}", crate::container::place_name(&s.session, m, k)),
         },
         _ => name,
     };
@@ -643,14 +643,14 @@ impl App {
         let v = v.clamp(0.0, 1.0);
         match t {
             Target::Knob(k) => {
-                crate::history::knob(&mut self.state, k, true);
+                crate::history::knob(&mut self.state.session, k, true);
                 self.state.set_knob(k, v);
                 self.record_knob(k);
             }
             Target::Fader(m) => {
-                if let Some(tr) = crate::mixer::track_mut(&mut self.state, m) {
+                if let Some(tr) = crate::mixer::track_mut(&mut self.state.session, m) {
                     tr.volume = Some(f64::from(v));
-                    self.state.piano.dirty = true;
+                    self.state.session.dirty = true;
                 }
                 self.record_control(&crate::app::Action::Fader(m));
             }
@@ -660,7 +660,7 @@ impl App {
             }
             // An effect inside a container: its instance while it is loaded.
             Target::MemberParam(m, k, id, index) => {
-                if let Some(key) = crate::container::member_key(&self.state, crate::container::place_key(m, k), id) {
+                if let Some(key) = crate::container::member_key(&self.state.session, crate::container::place_key(m, k), id) {
                     crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
                     self.record_plugin_param(key, index, f64::from(v));
                 }
@@ -668,7 +668,7 @@ impl App {
             // A container member's level: one undo step while it keeps moving; recorded as its automation target.
             Target::Member(m, k, id, wet) => {
                 crate::container::set_level_run(&mut self.state, m, k, id, wet, v);
-                if let Some(target) = crate::container::level_target(&self.state, m, k, id, wet) {
+                if let Some(target) = crate::container::level_target(&self.state.session, m, k, id, wet) {
                     self.record_param(target, (0.0, 1.0), f64::from(v));
                 }
             }
@@ -708,12 +708,12 @@ impl App {
                 let (sw, sh) = self.state.screen;
                 let at = ((self.mouse.0 - 20.0).clamp(0.0, (sw - w).max(0.0)), (self.mouse.1 - 20.0).clamp(0.0, (sh - h).max(0.0)));
                 // An effect inside a container links by its place and id (`params::link_target`).
-                let targets = params.into_iter().map(|i| crate::params::link_target(&self.state, key, i)).collect();
+                let targets = params.into_iter().map(|i| crate::params::link_target(&self.state.session, key, i)).collect();
                 self.state.link_box = Some(LinkBox::group(targets, at));
                 self.state.message = Some("Move the MIDI controller for the first parameter".into());
             }
             RCmd::LinkTrack(t) => {
-                let targets = track_targets(&self.state, t);
+                let targets = track_targets(&self.state.session, t);
                 if targets.is_empty() {
                     return self.invalidate();
                 }
@@ -829,12 +829,12 @@ impl App {
 /// What Link all parameters... links (the box's field, its hint): the plugin's name, or the mixer track's.
 pub fn group_name(s: &State, b: &LinkBox) -> String {
     match b.target {
-        Target::Param(key, _) => crate::params::owner_name(s, key),
-        Target::MemberParam(m, k, id, _) => match crate::container::member_key(s, crate::container::place_key(m, k), id) {
-            Some(key) => crate::params::owner_name(s, key),
-            None => crate::container::place_name(s, m, k),
+        Target::Param(key, _) => crate::params::owner_name(&s.session, key),
+        Target::MemberParam(m, k, id, _) => match crate::container::member_key(&s.session, crate::container::place_key(m, k), id) {
+            Some(key) => crate::params::owner_name(&s.session, key),
+            None => crate::container::place_name(&s.session, m, k),
         },
-        Target::Fader(t) => crate::mixer::name(s, t),
+        Target::Fader(t) => crate::mixer::name(&s.session, t),
         t => crate::typein::caption(s, t).trim_start_matches("Value for ").to_string(),
     }
 }
@@ -842,7 +842,7 @@ pub fn group_name(s: &State, b: &LinkBox) -> String {
 /// The mixer's Link all parameters... (Lemon Studio's design): track `t`'s own controls in the strip's order: volume,
 /// pan, stereo separation, the equaliser's three bands (gain, frequency, width each), the send levels of its routes,
 /// then the mix levels of its filled slots.
-pub fn track_targets(s: &State, t: u16) -> Vec<Target> {
+pub fn track_targets(s: &crate::session::Session, t: u16) -> Vec<Target> {
     let Some(track) = crate::mixer::track(s, t) else { return Vec::new() };
     let mut v = vec![Target::Fader(t), Target::Knob(KnobId::MixPan(t)), Target::Knob(KnobId::MixSep(t))];
     v.extend((0..3).flat_map(|b| (0..3).map(move |f| Target::Knob(KnobId::Eq(t, b, f)))));
@@ -897,7 +897,7 @@ mod tests {
         use crate::views::browser::{rows, section_key, REMOTE_CONTROL};
         use crate::views::menus::{item_at, works, VIEW};
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         set_links(&[]);
         add(Link::new(0, 7, Target::Knob(KnobId::ChanVol(1))), true);
         add(Link { omni: true, ..Link::new(1, 10, Target::Knob(KnobId::ChanPan(0))) }, true);
@@ -909,7 +909,7 @@ mod tests {
         let key = section_key(REMOTE_CONTROL).unwrap();
         assert!(app.state.show_browser && app.state.browser_open.contains(&key) && app.state.browser_sel.as_ref() == Some(&key));
         let listed: Vec<String> = rows(&app.state).into_iter().filter(|r| r.key.starts_with(&format!("{key}/"))).map(|r| r.label).collect();
-        let bus2 = crate::mixer::name(&app.state, 2);
+        let bus2 = crate::mixer::name(&app.state.session, 2);
         assert_eq!(listed, ["Clap - Channel volume: channel 1, ctrl 7".to_string(), "Channel panning: channel 2, ctrl 10, omni".into(), format!("{bus2} - Volume: channel 16, ctrl 74")]);
         set_links(&[]);
     }
@@ -945,10 +945,10 @@ mod tests {
     fn the_mixer_links_a_tracks_controls() {
         use crate::playlist::Cmd;
         let mut app = App::new(None);
-        app.state.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         set_links(&[]);
         app.state.selected_mixer = 1;
-        if let Some(t) = crate::mixer::track_mut(&mut app.state, 1) {
+        if let Some(t) = crate::mixer::track_mut(&mut app.state.session, 1) {
             t.routes = vec![2, 0];
         }
         let menu = crate::mixer::options_menu(&app.state, 0.0, 0.0);
@@ -960,7 +960,7 @@ mod tests {
         let mut want = vec![Target::Fader(1), Target::Knob(KnobId::MixPan(1)), Target::Knob(KnobId::MixSep(1))];
         want.extend((0..3).flat_map(|b| (0..3).map(move |f| Target::Knob(KnobId::Eq(1, b, f)))));
         want.extend([Target::Knob(KnobId::Send(1, 0)), Target::Knob(KnobId::Send(1, 2))]);
-        want.extend((0..10u8).filter(|&k| crate::mixer::slot_name(&app.state, 1, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(1, k))));
+        want.extend((0..10u8).filter(|&k| crate::mixer::slot_name(&app.state.session, 1, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(1, k))));
         assert_eq!((b.target, &b.all), (Target::Fader(1), &want));
         // The controller moved: every control linked, controllers 20 and on.
         app.remote_cc("Test", 0, 20, 64);
@@ -968,10 +968,10 @@ mod tests {
         let made = links();
         assert_eq!(made.iter().map(|l| l.target).collect::<Vec<_>>(), want);
         assert_eq!(made.iter().map(|l| l.cc).collect::<Vec<_>>(), (20..20 + want.len() as u8).collect::<Vec<_>>());
-        assert!(app.state.message.as_deref().is_some_and(|m| m.contains(&crate::mixer::name(&app.state, 1))), "{:?}", app.state.message);
+        assert!(app.state.message.as_deref().is_some_and(|m| m.contains(&crate::mixer::name(&app.state.session, 1))), "{:?}", app.state.message);
         // The volume follows its controller.
         assert!(app.remote_cc("Test", 0, 20, 127));
-        assert_eq!(crate::mixer::track(&app.state, 1).and_then(|t| t.volume), Some(1.0));
+        assert_eq!(crate::mixer::track(&app.state.session, 1).and_then(|t| t.volume), Some(1.0));
         set_links(&[]);
     }
 
