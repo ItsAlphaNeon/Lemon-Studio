@@ -1890,7 +1890,7 @@ impl App {
                 self.mark_saved();
                 crate::missing::opened(self);
                 self.loading = Some(crate::loading::Loading::start(&self.state.session.project));
-                self.state.playlist.wave_wait = true;
+                self.state.session.samples.wait = true;
                 self.invalidate();
             }
             Err(e) => self.state.message = Some(format!("Could not open {}: {e}", path.display())),
@@ -2554,7 +2554,7 @@ impl App {
     pub(crate) fn reset_hosted(&mut self) {
         self.plugins.clear();
         self.loading = None;
-        self.state.playlist.wave_wait = false;
+        self.state.session.samples.wait = false;
         self.state.hosted_rows.clear();
         self.sampler_failed.clear();
         self.fx_failed.clear();
@@ -2621,7 +2621,7 @@ impl App {
         // Then the plugin channels and mixer effects, under the same budget, then the samplers' played samples.
         if decoded && self.sync_samplers(Some(deadline)) && self.host_plugins(deadline) && self.loading.as_mut().is_some_and(|l| l.builds_done()) {
             self.loading = None;
-            self.state.playlist.wave_wait = false;
+            self.state.session.samples.wait = false;
             // What was not found is listed now (spec: ui/project-loading.md §6).
             crate::missing::loaded(self);
             return self.invalidate();
@@ -4382,7 +4382,7 @@ impl App {
         }
         // Audio clips follow their channel's stretch, pitch and the tempo (ui/playlist.md §9c). The lengths are worked
         // out, not edited: the saved copy gets them too, so a fit alone (an opened FL project) is not an unsaved change.
-        if let Some(fits) = crate::playlist::audio_fits(&self.state) {
+        if let Some(fits) = crate::playlist::audio_fits(&self.state.session) {
             if self.state.session.project.write_if(|p| crate::playlist::fit_clips(&mut p.arrangements, &fits)) {
                 crate::playlist::fit_clips(&mut self.saved.0.arrangements, &fits);
                 self.state.session.dirty = true;
@@ -5025,7 +5025,7 @@ impl App {
         }
         let s = &mut self.state;
         let start = s.playlist.pos;
-        let secs = s.playlist.wave(&path).map_or(0.0, |w| w.secs());
+        let secs = s.session.samples.wave(&path).map_or(0.0, |w| w.secs());
         let p = &s.session.project;
         let tempo = p.tick_tempo(s.tempo().max(1.0));
         let len = (secs * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
@@ -5596,7 +5596,7 @@ impl App {
             self.transport.stop();
             // One step, "Project settings", that brings the ticks back exactly (spec: ui/settings-choices.md "Undo
             // history: the four checks").
-            crate::history::timebase(&mut self.state);
+            crate::history::timebase(&mut self.state.session);
             retime(&mut self.state, from, to);
         }
         self.invalidate();
@@ -7056,7 +7056,7 @@ impl App {
             return;
         }
         if action == Some(Action::PianoVelocity) && self.state.piano.lane.is_channel() {
-            piano::snapshot(&mut self.state);
+            piano::snapshot(&mut self.state.session);
             self.drag = Some(Drag::ControlErase { last_x: x });
             self.erase_control_points(x, x);
             return;
@@ -7083,7 +7083,7 @@ impl App {
                 Tool::Select => self.piano_click(&a),
                 Tool::Zoom => self.zoom_toggle(),
                 _ => {
-                    piano::snapshot_as(&mut self.state, "Piano roll delete note");
+                    piano::snapshot_as(&mut self.state.session, "Piano roll delete note");
                     self.drag = Some(Drag::NoteErase);
                     self.erase_at(x, y);
                 }
@@ -7848,7 +7848,7 @@ impl App {
                 return None;
             }
             Some(Action::RackLoopBox(i)) => {
-                crate::rack::loop_step(&mut self.state, crate::rack::LOOP_POINT_STEP);
+                crate::rack::loop_step(&mut self.state.session, crate::rack::LOOP_POINT_STEP);
                 let v = crate::rack::loop_box_value(&self.state.session, i) + d;
                 crate::rack::set_loop_box(&mut self.state.session, i, v);
                 return None;
@@ -8140,7 +8140,7 @@ impl App {
                 let s = &mut self.state;
                 let idx = piano::targets(s);
                 if !idx.is_empty() {
-                    piano::snapshot_as(s, "Piano roll delete note");
+                    piano::snapshot_as(&mut s.session, "Piano roll delete note");
                     piano::delete(s, idx);
                 }
             }
@@ -8470,21 +8470,21 @@ impl App {
             let note = if let Action::PianoNote(i) = *a { Some(i) } else { None };
             match tool {
                 Tool::Delete => {
-                    piano::snapshot_as(s, "Piano roll delete note");
+                    piano::snapshot_as(&mut s.session, "Piano roll delete note");
                     self.drag = Some(Drag::NoteErase);
                     self.erase_at(x, y);
                     return;
                 }
                 Tool::Mute => {
                     let Some(i) = note else { return };
-                    piano::snapshot(s);
+                    piano::snapshot(&mut s.session);
                     let on = !piano::notes(&s.session)[i].muted();
                     self.drag = Some(Drag::NoteMute { on });
                     self.mute_at(x, y, on);
                     return;
                 }
                 Tool::Paint if note.is_none() => {
-                    piano::snapshot_as(s, "Piano roll add note");
+                    piano::snapshot_as(&mut s.session, "Piano roll add note");
                     s.piano.clear_selection();
                     let key = g.key_at(y).clamp(0, crate::piano::TOP_KEY);
                     let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
@@ -8544,7 +8544,7 @@ impl App {
         let s = &mut self.state;
         match *a {
             Action::PianoGrid => {
-                piano::snapshot_as(s, "Piano roll add note");
+                piano::snapshot_as(&mut s.session, "Piano roll add note");
                 s.piano.clear_selection();
                 let i = piano::add_note(s, ch, crate::piano_snap::place(s, &g, g.tick_at(x), self.alt), g.key_at(y));
                 let i = piano::paint_mono(s, i);
@@ -8559,7 +8559,7 @@ impl App {
             }
             Action::PianoNote(i) => {
                 let Some(&n) = piano::notes(&s.session).get(i) else { return };
-                piano::snapshot(s);
+                piano::snapshot(&mut s.session);
                 let sel = s.piano.selection(s.pattern(), Some(ch));
                 let idx = if sel.contains(&i) && tool.moves_groups() {
                     sel
@@ -8591,7 +8591,7 @@ impl App {
                 }
             }
             Action::PianoVelocity => {
-                piano::snapshot(s);
+                piano::snapshot(&mut s.session);
                 self.drag = Some(Drag::Velocity { last_x: x, last_y: y });
                 self.paint_velocity(x, y, x, y);
             }
@@ -9304,7 +9304,7 @@ impl App {
         let s = &mut self.state;
         s.piano.clear_selection();
         // One undo step for the press and the painting that follows.
-        crate::rack::snapshot(s);
+        crate::rack::snapshot(&mut s.session);
         // A step past an explicit length grows the pattern to the end of the pattern's bar holding it (§5, §23).
         if let Some(l) = crate::rack::explicit_len(&s.session) {
             if k >= l {
@@ -9418,7 +9418,7 @@ impl App {
             Action::RackLen => self.drag = Some(Drag::RackLen { y0: mouse.1, v0: rk::len_value(&self.state.session) }),
             Action::RackLoop => {
                 let s = &mut self.state;
-                rk::loop_step(s, rk::LOOP_MODE_STEP);
+                rk::loop_step(&mut s.session, rk::LOOP_MODE_STEP);
                 rk::relayout(s, |s| {
                     let on = !rk::loop_mode(&s.session);
                     rk::set_loop_mode(&mut s.session, on);
@@ -9427,7 +9427,7 @@ impl App {
             }
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
             Action::RackLoopBox(i) => {
-                rk::loop_step(&mut self.state, rk::LOOP_POINT_STEP);
+                rk::loop_step(&mut self.state.session, rk::LOOP_POINT_STEP);
                 self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state.session, i) });
             }
             Action::RackGraphArea => {
@@ -10911,7 +10911,7 @@ mod tests {
         assert!(app.unsaved(), "a change to the project");
         // Patterns are whole bars of the signature: 288 ticks in 3/4.
         assert_eq!(crate::piano::pattern_length(&app.state.session, app.state.pattern()), 576);
-        assert_eq!(crate::playlist::source_len(&app.state, os_model::ClipSource::Pattern(app.state.pattern())), 576);
+        assert_eq!(crate::playlist::source_len(&app.state.session, os_model::ClipSource::Pattern(app.state.pattern())), 576);
         pick(&mut app, &mut c, DENOMINATOR, "8", 4);
         assert_eq!(app.state.session.project.bar, Some((3, 2)), "an eighth is two sixteenths");
         assert_eq!((shown(&app, NUMERATOR).as_deref(), shown(&app, DENOMINATOR).as_deref()), (Some("3"), Some("8")));
@@ -11502,7 +11502,7 @@ mod tests {
         // Editor state in ticks: the piano roll's marker, clipboard and an undo step; the song position and selection.
         app.state.piano.marker = 48;
         app.state.piano.clipboard = vec![note];
-        crate::piano::snapshot(&mut app.state);
+        crate::piano::snapshot(&mut app.state.session);
         app.state.session.project.get_mut().patterns[0].notes[0].position = 72;
         app.state.playlist.pos = 96;
         app.state.playlist.range = Some((96, 192));
@@ -17422,7 +17422,7 @@ mod tests {
         let i = 0;
         let orig = pl::clips(&app.state.session)[i];
         assert_eq!(orig.window, None, "a new pattern clip plays its whole pattern");
-        pl::resize_right(&mut app.state, i, &orig, 48);
+        pl::resize_right(&mut app.state.session, i, &orig, 48);
         let c = pl::clips(&app.state.session)[i];
         assert_eq!((c.length, c.window), (48, Some((0.0, 48.0))));
     }
@@ -19760,12 +19760,12 @@ mod tests {
             app.state.session.project.get_mut().channels[row].sound.stretch = stretch;
             app.state.session.project.get_mut().channels[row].pitch_cents = pitch;
             app.state.set_tempo(tempo);
-            pl::fit_audio(&mut app.state);
+            pl::fit_audio(&mut app.state.session);
             let got: Vec<u32> = pl::clips(&app.state.session).iter().filter(|c| c.source == src).map(|c| c.length).collect();
             assert_eq!(got, want, "{what}");
             // An untrimmed clip shows the whole sample.
             if let Some(whole) = pl::clips(&app.state.session).iter().find(|c| c.source == src && c.window.is_none()).copied() {
-                assert!((pl::window(&app.state, &whole).1 - 6400.0).abs() < 6.0, "{what}: {:?}", pl::window(&app.state, &whole));
+                assert!((pl::window(&app.state.session, &whole).1 - 6400.0).abs() < 6.0, "{what}: {:?}", pl::window(&app.state.session, &whole));
             }
         };
         let t = |units: f32| units.to_bits();
@@ -19782,8 +19782,8 @@ mod tests {
         let i = pl::clips(&app.state.session).iter().position(|c| c.source == src && c.window.is_none()).unwrap();
         check(&mut app, [0; 4], 0, 130.0, [1331, 666, 665], "plain again");
         let orig = pl::clips(&app.state.session)[i];
-        pl::resize_right(&mut app.state, i, &orig, 1000);
-        assert!(!pl::fit_audio(&mut app.state), "a resize already fits");
+        pl::resize_right(&mut app.state.session, i, &orig, 1000);
+        assert!(!pl::fit_audio(&mut app.state.session), "a resize already fits");
         check(&mut app, [0, 0, 10000, 0], 0, 130.0, [2000, 1331, 1331], "x2 after the resize");
         // The tick fits them. A fit alone is not an unsaved change (a project opens with other lengths); an edit is.
         for c in &mut pl::arr_mut(&mut app.state.session).clips {
@@ -19820,11 +19820,11 @@ mod tests {
         assert_eq!(len(&app), 448, "3/8");
         for (bar, want) in [(Some((4, 4)), 896), (Some((3, 8)), 1792), (Some((5, 3)), 672), (Some((3, 2)), 448)] {
             app.state.session.project.get_mut().bar = bar;
-            pl::fit_audio(&mut app.state);
+            pl::fit_audio(&mut app.state.session);
             assert_eq!(len(&app), want, "{bar:?}");
         }
         app.state.session.project.get_mut().channels[row].sound.stretch = [488f32.to_bits(), 0, 0, 0];
-        pl::fit_audio(&mut app.state);
+        pl::fit_audio(&mut app.state.session);
         assert_eq!(len(&app), 244, "TIME 0:10:04 in 3/8");
         let _ = std::fs::remove_file(&wav);
     }
@@ -19983,7 +19983,7 @@ mod tests {
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
         let ci = pl::clips(&app.state.session).len() - 1;
-        app.state.playlist.wave_wait = true;
+        app.state.session.samples.wait = true;
         frame(&mut app, &mut c, None);
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
         let body = g.body(&pl::clips(&app.state.session)[ci]);
@@ -20022,7 +20022,7 @@ mod tests {
         assert!(!app.animating() && lit_x(&c).is_none(), "none at Off");
         crate::anim::set_level(crate::anim::Level::Playful);
         crate::anim::set_clock(false);
-        app.state.playlist.wave_wait = false;
+        app.state.session.samples.wait = false;
         let _ = std::fs::remove_file(&wav);
     }
 
@@ -20055,7 +20055,7 @@ mod tests {
         // Fade-in: the top-left triangle dragged 100 px right.
         drag(&mut app, &mut c, (body.x + 2.0, body.y + 2.0), (body.x + 102.0, body.y + 2.0));
         let clip = pl::clips(&app.state.session)[ci];
-        let ms_per_tick = pl::to_src(&app.state, clip.source, 1.0);
+        let ms_per_tick = pl::to_src(&app.state.session, clip.source, 1.0);
         let ms = |px: f32| f64::from(px / g.ppt) * ms_per_tick;
         let (fin, t) = clip.fade_in().expect("a fade-in");
         // The fade ends under the mouse.
@@ -20699,13 +20699,13 @@ mod tests {
         let s = &b.app.state;
         let px = |ticks: f32| ticks * b.g.ppt;
         let c = Clip { window: Some((192.0, 576.0)), ..Clip::new(b.bar, 384, 3, ClipSource::Pattern(1)) };
-        let drawn = pl::with_edges(s, &b.g, &c, px(-96.0), 0.0);
+        let drawn = pl::with_edges(&s.session, &b.g, &c, px(-96.0), 0.0);
         assert_eq!((drawn.position, drawn.length, drawn.window), (b.bar - 96, 480, Some((96.0, 576.0))), "the left edge out");
-        let drawn = pl::with_edges(s, &b.g, &c, px(96.0), 0.0);
+        let drawn = pl::with_edges(&s.session, &b.g, &c, px(96.0), 0.0);
         assert_eq!((drawn.position, drawn.length, drawn.window), (b.bar + 96, 288, Some((288.0, 576.0))), "the left edge in");
-        let drawn = pl::with_edges(s, &b.g, &c, 0.0, px(96.0));
+        let drawn = pl::with_edges(&s.session, &b.g, &c, 0.0, px(96.0));
         assert_eq!((drawn.position, drawn.length, drawn.window), (b.bar, 480, Some((192.0, 672.0))), "the right edge out");
-        let drawn = pl::with_edges(s, &b.g, &c, px(-384.0), 0.0);
+        let drawn = pl::with_edges(&s.session, &b.g, &c, px(-384.0), 0.0);
         assert_eq!((drawn.position, drawn.window.map(|w| w.0)), (b.bar - 384, Some(0.0)), "no further than the source's start");
     }
 
@@ -21519,7 +21519,7 @@ mod tests {
         audio.sample_path = Some("shot.wav".into());
         let peaks = (0..400).map(|i| (i as f32 / 9.0).sin().abs() * (1.0 - i as f32 / 400.0)).map(|a| (-a, a)).collect();
         let wave = pl::Wave { rate: 44100, frames: 400 * 64, per: 64, peaks };
-        app.state.playlist.waves.borrow_mut().insert("shot.wav".into(), Some(std::rc::Rc::new(wave)));
+        app.state.session.samples.waves.borrow_mut().insert("shot.wav".into(), Some(std::rc::Rc::new(wave)));
         for design in [Design::Citrus, Design::Lemon] {
             app.set_design(design, false);
             for (kind, list) in [(pl::PickKind::Pattern, "patterns"), (pl::PickKind::Audio, "audio"), (pl::PickKind::Automation, "automation")] {
@@ -23126,7 +23126,7 @@ mod tests {
         let note = |end: u32| Note { length: 100, ..Note::step(0, end - 100) };
         let sig = |pos: u32, num: u8, den: u8| TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(pos, &format!("{num}/{den}")) };
         let len = |app: &App| {
-            let (playlist, piano) = (pl::source_len(&app.state, ClipSource::Pattern(1)), pattern_length(&app.state.session, 1));
+            let (playlist, piano) = (pl::source_len(&app.state.session, ClipSource::Pattern(1)), pattern_length(&app.state.session, 1));
             assert_eq!(playlist, piano, "the playlist and the piano roll agree");
             playlist
         };

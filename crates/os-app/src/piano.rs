@@ -575,16 +575,16 @@ pub fn erase_controls(s: &mut crate::session::Session, channel: u16, param: u16,
 
 /// Remember the current pattern's notes and control points for undo: a step of the project's undo history
 /// (`crate::history`).
-pub fn snapshot(s: &mut State) {
+pub fn snapshot(s: &mut crate::session::Session) {
     snapshot_as(s, "Piano roll edit");
 }
 
 /// `snapshot`, the step named `name` (as the browser's History lists it; spec: ui/settings-choices.md "Undo history:
 /// the four checks (2026-10-16)").
-pub fn snapshot_as(s: &mut State, name: &'static str) {
-    s.session.dirty = true;
+pub fn snapshot_as(s: &mut crate::session::Session, name: &'static str) {
+    s.dirty = true;
     let snap = crate::history::Snap::pattern(s, s.pattern());
-    crate::history::record(&mut s.session, name, snap);
+    crate::history::record(s, name, snap);
 }
 
 /// Undo the newest step of the project's history; returns false when there is nothing to undo.
@@ -745,7 +745,7 @@ pub fn shift(s: &mut State, idx: &[usize], dt: i64, dk: i32) -> bool {
     if !ok || idx.is_empty() {
         return false;
     }
-    snapshot(s);
+    snapshot(&mut s.session);
     let p = pattern_mut(&mut s.session);
     for &i in idx {
         if let Some(n) = p.notes.get_mut(i) {
@@ -769,7 +769,7 @@ pub fn slice(s: &mut State, tick: u32) -> usize {
     if cut.is_empty() {
         return 0;
     }
-    snapshot(s);
+    snapshot(&mut s.session);
     let p = pattern_mut(&mut s.session);
     for &i in &cut {
         let n = p.notes[i];
@@ -814,7 +814,7 @@ pub fn rotate(s: &mut State, idx: &[usize], dt: i64) -> bool {
         return false;
     }
     let end = i64::from(pattern_end(&s.session));
-    snapshot(s);
+    snapshot(&mut s.session);
     let p = pattern_mut(&mut s.session);
     for &i in idx {
         if let Some(n) = p.notes.get_mut(i) {
@@ -829,7 +829,7 @@ pub fn rotate(s: &mut State, idx: &[usize], dt: i64) -> bool {
 pub fn paste(s: &mut State, clip: &[Note], at: u32) {
     let Some(ch) = channel(s) else { return };
     let Some(first) = clip.iter().map(|n| n.position).min() else { return };
-    snapshot(s);
+    snapshot(&mut s.session);
     let p = pattern_mut(&mut s.session);
     let start = p.notes.len();
     for n in clip {
@@ -1002,7 +1002,7 @@ mod tests {
     fn control_points_edit_and_undo() {
         let mut a = app();
         let s = &mut a.state;
-        snapshot(s);
+        snapshot(&mut s.session);
         set_control(&mut s.session, 0, ControlPoint::VOLUME, 48, 100);
         set_control(&mut s.session, 0, ControlPoint::PAN, 24, 6400);
         set_control(&mut s.session, 0, ControlPoint::VOLUME, 48, 200);
@@ -1052,11 +1052,11 @@ mod tests {
     fn add_sort_select_undo() {
         let mut a = app();
         let s = &mut a.state;
-        snapshot(s);
+        snapshot(&mut s.session);
         let i = add_note(s, 4, 192, 72);
         assert_eq!(notes(&s.session)[i].length, 48, "first note is PPQ/2 long");
         assert_eq!(notes(&s.session)[i].velocity, 100);
-        snapshot(s);
+        snapshot(&mut s.session);
         let j = add_note(s, 4, 0, 60);
         s.piano.select(s.pattern(), 4, vec![j]);
         finish_edit(s);

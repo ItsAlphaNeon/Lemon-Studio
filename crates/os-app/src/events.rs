@@ -634,12 +634,12 @@ impl App {
             s.events.line = Some(((tick, level), (tick, level)));
             Stroke::Line
         } else if s.events.tool == Tool::Erase {
-            piano::snapshot_as(s, EDIT);
+            piano::snapshot_as(&mut s.session, EDIT);
             let u = unit(s, alt);
             erase(s, tick, tick + u - 1);
             Stroke::Erase(tick)
         } else {
-            piano::snapshot_as(s, EDIT);
+            piano::snapshot_as(&mut s.session, EDIT);
             let u = unit(s, alt);
             draw(s, (tick, level), (tick, level), u);
             Stroke::Draw((tick, level))
@@ -714,7 +714,7 @@ impl App {
             _ => return,
         };
         if let Some((a, b)) = line {
-            piano::snapshot_as(s, EDIT);
+            piano::snapshot_as(&mut s.session, EDIT);
             match stroke {
                 Stroke::Interpolate(smooth) => {
                     interpolate(s, a, b, smooth);
@@ -738,14 +738,14 @@ impl App {
             }
             EvCmd::Cut => {
                 if copy(s) {
-                    piano::snapshot_as(s, EDIT);
+                    piano::snapshot_as(&mut s.session, EDIT);
                     delete(s);
                 }
                 None
             }
             EvCmd::Paste => {
                 if s.events.clipboard.is_some() {
-                    piano::snapshot_as(s, EDIT);
+                    piano::snapshot_as(&mut s.session, EDIT);
                     paste(s);
                 }
                 None
@@ -755,23 +755,23 @@ impl App {
                 None
             }
             EvCmd::Delete => {
-                piano::snapshot_as(s, EDIT);
+                piano::snapshot_as(&mut s.session, EDIT);
                 delete(s);
                 None
             }
             EvCmd::InsertValue => {
-                piano::snapshot_as(s, EDIT);
+                piano::snapshot_as(&mut s.session, EDIT);
                 insert_value(s);
                 None
             }
             EvCmd::Duplicate => {
-                piano::snapshot_as(s, EDIT);
+                piano::snapshot_as(&mut s.session, EDIT);
                 duplicate(s);
                 None
             }
             EvCmd::InsertSpace | EvCmd::DeleteSpace => {
                 if s.events.sel.is_some() {
-                    piano::snapshot_as(s, EDIT);
+                    piano::snapshot_as(&mut s.session, EDIT);
                     space(s, c == EvCmd::InsertSpace);
                 }
                 None

@@ -153,8 +153,8 @@ fn position_offset(sync: u8, at: u32, z: u32, len: u32, ppq: u32) -> u32 {
 /// Clip `c` placed on `track` at `at`, its first `skip` ticks cut off (its window moved by as much).
 fn placed(s: &State, c: &Clip, track: u16, at: u32, skip: u32) -> Clip {
     let mut k = *c;
-    let (w0, w1) = window(s, c);
-    let d = to_src(s, c.source, f64::from(skip));
+    let (w0, w1) = window(&s.session, c);
+    let d = to_src(&s.session, c.source, f64::from(skip));
     k.position = at;
     k.length = c.length - skip;
     k.track = track;
@@ -414,8 +414,8 @@ fn cut_at(s: &State, l: &Live, at: u32) -> Vec<Clip> {
     let mut v: Vec<Clip> = l.passes.iter().filter(|c| c.position < at).copied().collect();
     if let Some(c) = v.last_mut().filter(|c| c.end() > at) {
         let keep = at - c.position;
-        let (w0, _) = window(s, c);
-        c.window = Some((w0, w0 + to_src(s, c.source, f64::from(keep))));
+        let (w0, _) = window(&s.session, c);
+        c.window = Some((w0, w0 + to_src(&s.session, c.source, f64::from(keep))));
         c.length = keep;
     }
     v
@@ -598,8 +598,8 @@ pub fn record(s: &mut State, stop: u32) -> usize {
         all.retain(|c| c.track != t || c.position < from || c.position >= to);
         for c in all.iter_mut().filter(|c| c.track == t && c.position >= z && c.position < from && c.end() > from) {
             let keep = from - c.position;
-            let (w0, _) = window(s, c);
-            c.window = Some((w0, w0 + to_src(s, c.source, f64::from(keep))));
+            let (w0, _) = window(&s.session, c);
+            c.window = Some((w0, w0 + to_src(&s.session, c.source, f64::from(keep))));
             c.length = keep;
         }
         made += v.len();
@@ -742,8 +742,8 @@ pub fn apply(s: &State, p: &mut Project) {
         }
         for c in a.clips.iter_mut().filter(|c| c.track == t && c.position >= z && c.position < to && c.end() > from) {
             if c.position < from {
-                let (w0, _) = window(s, c);
-                c.window = Some((w0, w0 + to_src(s, c.source, f64::from(from - c.position))));
+                let (w0, _) = window(&s.session, c);
+                c.window = Some((w0, w0 + to_src(&s.session, c.source, f64::from(from - c.position))));
                 c.length = from - c.position;
             } else {
                 c.muted = true;

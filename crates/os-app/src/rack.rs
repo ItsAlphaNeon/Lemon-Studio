@@ -908,7 +908,7 @@ fn cut_rows(s: &mut State, rows: &[usize]) {
         return;
     }
     copy_rows(s, rows);
-    snapshot(s);
+    snapshot(&mut s.session);
     for &r in rows {
         set_row_notes(&mut s.session, r, Vec::new());
     }
@@ -920,7 +920,7 @@ fn paste_at(s: &mut State, r: usize) {
     let Some(rows) = s.rack.clipboard.clone() else { return };
     let shown = shown(&s.session);
     let below = shown.iter().position(|&x| x == r).map_or(vec![r], |i| shown[i..].to_vec());
-    snapshot(s);
+    snapshot(&mut s.session);
     for (to, notes) in below.into_iter().zip(rows) {
         set_row_notes(&mut s.session, to, notes);
     }
@@ -955,9 +955,9 @@ pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
 
 /// Before a step-sequencer edit of the current pattern: a "Step seq edit" step of the project's undo history
 /// (`crate::history`; spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
-pub fn snapshot(s: &mut State) {
+pub fn snapshot(s: &mut crate::session::Session) {
     let snap = crate::history::Snap::pattern(s, s.pattern().max(1));
-    crate::history::record(&mut s.session, crate::history::STEP_SEQ_EDIT, snap);
+    crate::history::record(s, crate::history::STEP_SEQ_EDIT, snap);
 }
 
 /// Toggle step `k` of row `r`; returns its new state (§9).
@@ -2533,7 +2533,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Fill(r, n) => {
-            snapshot(s);
+            snapshot(&mut s.session);
             fill_each(s, r, n);
             None
         }
@@ -2542,7 +2542,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Rotate(r, d) => {
-            snapshot(s);
+            snapshot(&mut s.session);
             rotate(s, r, d);
             None
         }
@@ -2639,7 +2639,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::LoopType(t) => {
-            loop_step(s, LOOP_MODE_STEP);
+            loop_step(&mut s.session, LOOP_MODE_STEP);
             set_loop_type(&mut s.session, t);
             None
         }
@@ -2820,7 +2820,7 @@ pub fn open_fill(s: &mut State, r: usize) {
 /// (ui/playlist.md §9c).
 fn restretch_all(app: &mut App) -> Option<String> {
     let rows: Vec<usize> = (0..app.state.session.project.channels.len()).filter(|&r| tempo_fitted(&app.state.session.project.channels[r])).collect();
-    if let Some(fits) = crate::playlist::audio_fits(&app.state) {
+    if let Some(fits) = crate::playlist::audio_fits(&app.state.session) {
         if crate::playlist::fit_clips(&mut app.state.session.project.get_mut().arrangements, &fits) {
             crate::playlist::fit_clips(&mut app.saved.0.arrangements, &fits);
             app.damage_win(Win::Playlist);
@@ -3015,7 +3015,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
 /// Accept in the Advanced fill dialog: write the sequence to the channel.
 pub fn fill_accept(s: &mut State) {
     if let Some(f) = s.rack.fill.take() {
-        snapshot(s);
+        snapshot(&mut s.session);
         write_sequence(&mut s.session, f.row, &f.steps);
     }
 }
@@ -3104,16 +3104,16 @@ pub const LOOP_POINT_STEP: &str = "Set advanced looping settings";
 
 /// One undo step for a loop edit in the shown pattern (a drag's press takes it; one that changes nothing goes on
 /// release, as the graph editor's).
-pub fn loop_step(s: &mut State, name: &'static str) {
+pub fn loop_step(s: &mut crate::session::Session, name: &'static str) {
     let snap = crate::history::Snap::pattern(s, s.pattern().max(1));
-    crate::history::record(&mut s.session, name, snap);
+    crate::history::record(s, name, snap);
 }
 
 /// A press in the graph editor (§14): one undo step for the drag, dropped on release when it changed nothing (spec:
 /// ui/undo-steps.md, "Graph editor change velocity", one per drag). Only the velocity tab's name was measured.
 pub fn graph_step(s: &mut State) {
     let name = if s.rack.graph_tab == Tab::Vel { "Graph editor change velocity" } else { "Graph editor change" };
-    let snap = crate::history::Snap::pattern(s, s.pattern().max(1));
+    let snap = crate::history::Snap::pattern(&s.session, s.pattern().max(1));
     crate::history::record(&mut s.session, name, snap);
 }
 
@@ -3286,7 +3286,7 @@ mod tests {
         a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
         a.state.set_pattern(1);
         a.mark_saved();
-        loop_step(&mut a.state, LOOP_MODE_STEP);
+        loop_step(&mut a.state.session, LOOP_MODE_STEP);
         set_loop_mode(&mut a.state.session, true);
         crate::history::settle(&mut a.state);
         assert_eq!(a.state.session.history.newest_done(), Some(LOOP_MODE_STEP));
@@ -5021,7 +5021,7 @@ mod tests {
         let src = os_model::ClipSource::Channel(app.state.session.project.channels.last().unwrap().index);
         let len = |app: &App| pl::clips(&app.state.session).iter().find(|c| c.source == src).map(|c| c.length);
         // 6.4 s at 130 BPM, PPQ 96 (ui/playlist.md §9c); at 120 BPM 1229 ticks.
-        pl::fit_audio(&mut app.state);
+        pl::fit_audio(&mut app.state.session);
         assert_eq!(len(&app), Some(1331));
         app.state.set_tempo(120.0);
         assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("Restretched 1 channel to 120 BPM"));

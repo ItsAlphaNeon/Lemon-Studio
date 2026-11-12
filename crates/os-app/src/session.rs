@@ -35,6 +35,8 @@ pub struct Session {
     pub loop_type_of: u16,
     /// What a command or an undo changed that the interface's views follow, taken by them after it (`crate::follow`).
     pub touched: Touched,
+    /// The project's samples as decoded (`playlist::Samples`).
+    pub samples: crate::playlist::Samples,
 }
 
 /// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
@@ -68,6 +70,7 @@ impl Session {
             loop_type: 0,
             loop_type_of: 0,
             touched: Touched::default(),
+            samples: Default::default(),
         }
     }
 

@@ -104,7 +104,7 @@ pub fn project(s: &State) -> Value {
                 "number": q.number,
                 "name": crate::patterns::name_of(&s.session, q.number),
                 "color": color_text(q.color),
-                "length": crate::playlist::source_len(s, os_model::ClipSource::Pattern(q.number)),
+                "length": crate::playlist::source_len(&s.session, os_model::ClipSource::Pattern(q.number)),
                 "auto_length": q.length.is_none(),
                 "notes": q.notes.len(),
             })

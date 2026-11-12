@@ -135,7 +135,7 @@ impl crate::app::App {
             return;
         }
         let ppq = f64::from(s.session.project.ppq.max(1));
-        crate::piano::snapshot_as(s, "Dump to piano roll");
+        crate::piano::snapshot_as(&mut s.session, "Dump to piano roll");
         let p = crate::piano::pattern_mut(&mut s.session);
         p.notes.retain(|n| n.channel != ch);
         for n in notes {

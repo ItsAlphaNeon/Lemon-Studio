@@ -137,7 +137,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             }
             let all = piano::notes(&s.session);
             s.piano.clipboard = sel.iter().filter_map(|&i| all.get(i).copied()).collect();
-            piano::snapshot(s);
+            piano::snapshot(&mut s.session);
             piano::delete(s, sel);
             app.invalidate();
             return true;
@@ -421,7 +421,7 @@ pub(crate) fn apply_as(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<N
         return false;
     }
     if let Some(name) = step {
-        piano::snapshot_as(s, name);
+        piano::snapshot_as(&mut s.session, name);
     }
     let p = piano::pattern_mut(&mut s.session);
     let mut notes: Vec<Note> = p.notes.iter().enumerate().filter(|(i, _)| !idx.contains(i)).map(|(_, n)| *n).collect();

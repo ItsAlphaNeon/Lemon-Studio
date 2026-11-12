@@ -103,8 +103,8 @@ pub struct Timebase {
 
 impl Timebase {
     /// The project's timebase and ticks now.
-    pub fn now(s: &State) -> Timebase {
-        let p = &s.session.project;
+    pub fn now(s: &crate::session::Session) -> Timebase {
+        let p = &s.project;
         Timebase { ppq: p.ppq, patterns: p.patterns.clone(), arrangements: p.arrangements.clone() }
     }
 }
@@ -133,8 +133,8 @@ impl RackSide {
 
 impl Snap {
     /// Pattern `number` as it is now.
-    pub fn pattern(s: &State, number: u16) -> Snap {
-        let p = s.session.project.pattern(number);
+    pub fn pattern(s: &crate::session::Session, number: u16) -> Snap {
+        let p = s.project.pattern(number);
         Snap::Pattern {
             number,
             notes: p.map(|p| p.notes.clone()).unwrap_or_default(),
@@ -155,7 +155,7 @@ impl Snap {
     /// What this covers, as the project has it now.
     fn now(&self, s: &State) -> Snap {
         match self {
-            Snap::Pattern { number, .. } => Snap::pattern(s, *number),
+            Snap::Pattern { number, .. } => Snap::pattern(&s.session, *number),
             Snap::Playlist(_) => Snap::Playlist(Box::new(crate::playlist::capture(&s.session))),
             Snap::Knob(id, _) => Snap::Knob(*id, knob_value(s, *id)),
             // A track gone since is left as the step has it (`put` does nothing then).
@@ -169,7 +169,7 @@ impl Snap {
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
             // What each command would put back, as it is now (`swap` applies them).
             Snap::Commands(v) => Snap::Commands(v.iter().map(|c| c.now(s)).collect()),
-            Snap::Timebase(_) => Snap::Timebase(Box::new(Timebase::now(s))),
+            Snap::Timebase(_) => Snap::Timebase(Box::new(Timebase::now(&s.session))),
         }
     }
 
@@ -276,9 +276,9 @@ impl Snap {
 
 /// Before the timebase changes (Settings > Project, a new project's Save as form): one step, "Project settings",
 /// holding the timebase and the project's ticks, so an undo brings back the ticks exactly.
-pub fn timebase(s: &mut State) {
+pub fn timebase(s: &mut crate::session::Session) {
     let snap = Snap::Timebase(Box::new(Timebase::now(s)));
-    record(&mut s.session, PROJECT_SETTINGS, snap);
+    record(s, PROJECT_SETTINGS, snap);
 }
 
 /// Puts the rack's side `r` back (`Snap::Rack`).
@@ -786,7 +786,7 @@ mod tests {
         let s = &mut app.state;
         let start = note_count(s);
         for k in 0..2 {
-            let snap = Snap::pattern(s, s.pattern());
+            let snap = Snap::pattern(&s.session, s.pattern());
             record(&mut s.session, STEP_SEQ_EDIT, snap);
             crate::rack::set_step(s, 0, 10 + k, true);
         }
@@ -797,7 +797,7 @@ mod tests {
         assert_eq!((redo(s).as_deref(), note_count(s)), (Some(STEP_SEQ_EDIT), start + 1));
         assert!(s.session.history.undone(2) && s.session.history.current(1) && !s.session.history.undone(1));
         // A new action: the undone step is gone.
-        let snap = Snap::pattern(s, s.pattern());
+        let snap = Snap::pattern(&s.session, s.pattern());
         record(&mut s.session, "Piano roll add note", snap);
         crate::rack::set_step(s, 0, 14, true);
         assert_eq!(s.session.history.entries().iter().map(|e| e.1).collect::<Vec<_>>(), [LAST_RESET, STEP_SEQ_EDIT, "Piano roll add note"]);
@@ -805,7 +805,7 @@ mod tests {
         // Three levels kept: the oldest go.
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, 3);
         for k in 0..3 {
-            let snap = Snap::pattern(s, s.pattern());
+            let snap = Snap::pattern(&s.session, s.pattern());
             record(&mut s.session, "Piano roll edit", snap);
             crate::rack::set_step(s, 0, 20 + k, true);
         }
@@ -823,11 +823,11 @@ mod tests {
     fn settle_and_wheel_runs() {
         let mut app = App::new(None);
         let s = &mut app.state;
-        let snap = Snap::pattern(s, s.pattern());
+        let snap = Snap::pattern(&s.session, s.pattern());
         record(&mut s.session, "Piano roll edit", snap);
         settle(s);
         assert_eq!(s.session.history.len(), 0, "nothing changed");
-        let snap = Snap::pattern(s, s.pattern());
+        let snap = Snap::pattern(&s.session, s.pattern());
         record(&mut s.session, "Piano roll edit", snap);
         crate::rack::set_step(s, 0, 9, !crate::rack::row_steps(&s.session, 0, 10)[9]);
         settle(s);
@@ -1032,7 +1032,7 @@ mod tests {
         let mut app = App::new(None);
         let s = &mut app.state;
         s.set_pattern(1);
-        crate::piano::snapshot_as(s, "Piano roll edit");
+        crate::piano::snapshot_as(&mut s.session, "Piano roll edit");
         crate::patterns::pat_mut(&mut s.session, 1).notes.push(os_model::Note::step(0, 0));
         let edited = s.session.project.pattern(1).map(|p| p.notes.clone());
         s.set_pattern(2);

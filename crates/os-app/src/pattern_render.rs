@@ -135,7 +135,7 @@ pub fn replace_clips(s: &mut State, pattern: u16, ch: u16) -> usize {
         return 0;
     }
     let windows: Vec<Option<(f64, f64)>> =
-        found.iter().map(|c| c.window.map(|(a, b)| (crate::playlist::to_src(s, src, a), crate::playlist::to_src(s, src, b)))).collect();
+        found.iter().map(|c| c.window.map(|(a, b)| (crate::playlist::to_src(&s.session, src, a), crate::playlist::to_src(&s.session, src, b)))).collect();
     let mut windows = windows.into_iter();
     let a = crate::playlist::arr_mut(&mut s.session);
     let mut clips = Vec::with_capacity(a.clips.len() + found.len());
@@ -163,7 +163,7 @@ pub fn replace_clips(s: &mut State, pattern: u16, ch: u16) -> usize {
 /// one undo step. Returns the hint bar's message.
 pub fn place(s: &mut State, p: &Pending, path: &Path) -> String {
     let text = path.to_string_lossy().into_owned();
-    if s.playlist.wave(&text).is_none() {
+    if s.session.samples.wave(&text).is_none() {
         return format!("{text} could not be read");
     }
     let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!((c[4].position, c[4].length, c[4].track), (8 * ppq, 2 * ppq, 5));
         assert!(c[4].muted, "a muted pattern clip gives a muted audio clip");
         let (w0, w1) = c[4].window.expect("cut as the pattern clip");
-        let ms = |t: u32| crate::playlist::to_src(s, ClipSource::Channel(ch), f64::from(t));
+        let ms = |t: u32| crate::playlist::to_src(&s.session, ClipSource::Channel(ch), f64::from(t));
         assert!((w0 - ms(ppq)).abs() < 1e-9 && (w1 - ms(3 * ppq)).abs() < 1e-9);
         assert_eq!(s.playlist.sel, [1, 4]);
         assert_eq!(replace_clips(s, 7, ch), 0, "no clips: nothing changes");

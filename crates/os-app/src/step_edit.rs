@@ -149,7 +149,7 @@ impl App {
             pos
         };
         let len = step(s);
-        let snap = crate::history::Snap::pattern(s, s.pattern());
+        let snap = crate::history::Snap::pattern(&s.session, s.pattern());
         crate::history::record(&mut s.session, crate::history::STEP_EDIT, snap);
         let mut new = Vec::with_capacity(keys.len());
         for &(key, velocity) in keys {

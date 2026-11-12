@@ -526,7 +526,7 @@ fn events_run(s: &mut State, step: Option<&'static str>) -> bool {
         return false;
     }
     if let Some(name) = step {
-        piano::snapshot_as(s, name);
+        piano::snapshot_as(&mut s.session, name);
     }
     crate::events::replace(s, a, b, &new);
     true
@@ -670,7 +670,7 @@ fn randomize_notes(s: &mut State, step: Option<&'static str>) -> bool {
         return false;
     }
     if let Some(name) = step {
-        piano::snapshot_as(s, name);
+        piano::snapshot_as(&mut s.session, name);
     }
     let p = piano::pattern_mut(&mut s.session);
     let mut notes: Vec<Note> = p.notes.iter().filter(|n| n.channel != ch).copied().collect();
@@ -696,7 +696,7 @@ fn lfo_points(s: &mut State, set: &lfo::Settings, lane: Lane, ppq: u32, len: u32
         return false;
     }
     if let Some(name) = step {
-        piano::snapshot_as(s, name);
+        piano::snapshot_as(&mut s.session, name);
     }
     piano::pattern_mut(&mut s.session).controls = ctl;
     s.session.dirty = true;

@@ -195,7 +195,7 @@ pub fn write(s: &mut State, text: &str) -> String {
     let end = crate::piano::notes(&s.session).iter().filter(|n| n.channel == ch).map(|n| n.position + n.length.max(1)).max();
     let at = end.map_or(0, |e| e.div_ceil(bar) * bar);
     let new = notes(&chords, ch, at, bar);
-    crate::piano::snapshot_as(s, STEP);
+    crate::piano::snapshot_as(&mut s.session, STEP);
     let p = crate::piano::pattern_mut(&mut s.session);
     let first = p.notes.len();
     p.notes.extend(new);

@@ -345,7 +345,7 @@ impl App {
             }
             None => false,
         };
-        let snap = crate::history::Snap::pattern(s, pattern);
+        let snap = crate::history::Snap::pattern(&s.session, pattern);
         crate::history::record(&mut s.session, crate::score_log::DUMPED, snap);
         let n = new.len();
         if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
@@ -582,7 +582,7 @@ impl App {
             return;
         }
         let pattern = s.pattern();
-        let snap = crate::history::Snap::pattern(s, pattern);
+        let snap = crate::history::Snap::pattern(&s.session, pattern);
         let snap = if song {
             crate::playlist::arr_mut(&mut s.session);
             crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(crate::playlist::capture(&s.session))), snap])

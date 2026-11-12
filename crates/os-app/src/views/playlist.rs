@@ -570,7 +570,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
         }
         (PickKind::Audio, ClipSource::Channel(ch)) if tall => {
             let Some(path) = s.session.project.channel(ch).and_then(|c| c.sample_path.clone()) else { return };
-            let Some(w) = s.playlist.wave(&path) else { return };
+            let Some(w) = s.session.samples.wave(&path) else { return };
             if w.peaks.is_empty() {
                 return;
             }
@@ -854,7 +854,7 @@ fn clip_gliding(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, (left, ri
         at.scroll_x -= left;
         clip_paint(ui, s, &at, i, c);
     } else {
-        clip_paint(ui, s, &at, i, &pl::with_edges(s, g, c, left, right));
+        clip_paint(ui, s, &at, i, &pl::with_edges(&s.session, g, c, left, right));
     }
 }
 
@@ -1027,7 +1027,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 if !c.muted {
                     fades(ui, s, g, i, c, body_at, dim(wave));
                 }
-                if s.playlist.wave_wait {
+                if s.session.samples.wait {
                     loading(ui, s, body_at.r);
                 }
             }
@@ -1091,7 +1091,7 @@ fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body
         return;
     }
     let br = body.r;
-    let (w0, wl) = pl::window(s, c);
+    let (w0, wl) = pl::window(&s.session, c);
     let (lo, hi) = p.notes.iter().fold((u16::MAX, 0u16), |(lo, hi), n| (lo.min(n.key), hi.max(n.key)));
     let span = f32::from(hi - lo + 1);
     let h = ((br.h - 4.0) / span).clamp(1.0, 3.0);
@@ -1127,10 +1127,10 @@ fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body
 #[allow(clippy::too_many_arguments)]
 fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color, colours: Option<(&Waves, &dyn Fn(Color) -> Color)>) {
     let Some(path) = s.session.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
-    let Some(w) = s.playlist.wave(&path) else { return };
+    let Some(w) = s.session.samples.wave(&path) else { return };
     let Some(area) = ui.c.paint_bounds() else { return };
-    let (w0, _) = pl::window(s, c);
-    let ms_per_tick = pl::to_src(s, c.source, 1.0);
+    let (w0, _) = pl::window(&s.session, c);
+    let ms_per_tick = pl::to_src(&s.session, c.source, 1.0);
     let frames_per_ms = f64::from(w.rate) / 1000.0;
     let br = body.r;
     let mid = f64::from(br.y) + f64::from(br.h) / 2.0;
@@ -1213,7 +1213,7 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     outline.extend(bottom.into_iter().rev());
     // Colorful waveforms (spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"): the same shape,
     // each device-pixel column in the colour of the frames it shows; silence keeps the plain colour.
-    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.playlist.tones(&path));
+    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.session.samples.tones(&path));
     match (colours, tones) {
         (Some((waves, dim)), Some(tones)) => {
             let frames = |d: f64| (w0 + d / ppt * ms_per_tick) * frames_per_ms;
@@ -1377,7 +1377,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
         return;
     }
     // The beat under content x (measured from the clip's start, as `pl::beat_at`).
-    let (w0, _) = pl::window(s, c);
+    let (w0, _) = pl::window(&s.session, c);
     let clip_x = g.x64(f64::from(c.position));
     let beat = |x: f64| w0 + (x - clip_x) / f64::from(g.ppt) / f64::from(g.ppq);
     let point = |x: f64| (pl::snap(x), pl::value_y(body, a.value_at(beat(x)).unwrap_or(0.0)));
@@ -1388,7 +1388,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
         k += 1.0;
     }
     pts.push(point(x1));
-    let pts = with_points(pts, a, (x0 as f32, x1 as f32), |b| pl::point_x(s, g, c, b), |v| pl::value_y(body, v));
+    let pts = with_points(pts, a, (x0 as f32, x1 as f32), |b| pl::point_x(&s.session, g, c, b), |v| pl::value_y(body, v));
     let (x0, x1) = (pl::snap(x0), pl::snap(x1));
     let mut area = pts.clone();
     area.push((x1, body.bottom()));
@@ -1398,7 +1398,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
     // Points and tension handles while the mouse is over the clip (§8).
     if s.playlist.hover_clip == Some(i) {
         for (k, p) in a.points.iter().enumerate() {
-            let px = pl::point_x(s, g, c, p.beat);
+            let px = pl::point_x(&s.session, g, c, p.beat);
             if px < body.x - 4.0 || px > body.right() + 4.0 {
                 continue;
             }
@@ -1407,10 +1407,10 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
             ui.c.stroke_circle(px, py, 4.0, 1.5, col);
             if k > 0 {
                 let q = a.points[k - 1];
-                let x_a = pl::point_x(s, g, c, q.beat);
+                let x_a = pl::point_x(&s.session, g, c, q.beat);
                 if p.mode.has_tension() && p.mode != AutoMode::Hold && px - x_a > 16.0 {
                     let mid = (q.beat + p.beat) / 2.0;
-                    let hx = pl::point_x(s, g, c, mid);
+                    let hx = pl::point_x(&s.session, g, c, mid);
                     let hy = pl::value_y(body, a.value_at(mid).unwrap_or(0.0));
                     ui.c.stroke_circle(hx, hy, 2.5, 1.0, col.with_alpha(200));
                 }

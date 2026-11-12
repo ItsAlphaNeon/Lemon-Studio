@@ -391,7 +391,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let label = shorten(ui, nf, &label, tb.w - 8.0);
         ui.c.push_clip(nb.inset(1.0));
         // Show waveform preview (§18, Lemon Studio's design): the sample's waveform across the face, under the name.
-        if let Some(w) = rk::wave_preview(s, i).and_then(|p| s.playlist.wave(p)) {
+        if let Some(w) = rk::wave_preview(s, i).and_then(|p| s.session.samples.wave(p)) {
             name_wave(ui, nb.inset(2.0), &w, col.mix(base, 0.6));
         }
         if let Some(ic) = icon {

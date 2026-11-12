@@ -1043,7 +1043,7 @@ impl Command {
                     return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
                 }
                 // Else the source's own length, as a clip placed in the playlist gets.
-                let length = length.filter(|&l| l > 0).unwrap_or_else(|| crate::playlist::source_len(s, source));
+                let length = length.filter(|&l| l > 0).unwrap_or_else(|| crate::playlist::source_len(&s.session, source));
                 let a = crate::playlist::arr_mut(&mut s.session);
                 let at = a.clips.partition_point(|c| c.position <= position);
                 a.clips.insert(at, Clip::new(position, length, track - 1, source));
@@ -1163,7 +1163,7 @@ fn put(s: &mut State, t: Taken) {
         }
         // `apply` set it already.
         Taken::Param(..) | Taken::Plugin(..) => {}
-        Taken::Project(side) => restore(s, *side),
+        Taken::Project(side) => restore(&mut s.session, *side),
         Taken::Links(pairs) => crate::remote::retarget(&pairs),
         Taken::Mutes(on) => {
             for (id, v) in on {
@@ -1183,29 +1183,29 @@ fn mutes(p: &Project) -> Taken {
 
 /// The whole project back (an undo of adding or deleting channels, tracks or patterns): the rack's own state with it,
 /// the selections kept where their things still are.
-fn restore(s: &mut State, side: Side) {
-    let old: Vec<u32> = s.session.project.channels.iter().map(|c| c.id.0).collect();
+fn restore(s: &mut crate::session::Session, side: Side) {
+    let old: Vec<u32> = s.project.channels.iter().map(|c| c.id.0).collect();
     let new_row: std::collections::HashMap<u32, usize> = side.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
     let Side { project, tempo, pattern, loop_type } = side;
     let shown = s.pattern();
     let numbers = |p: &Project| p.patterns.iter().map(|q| q.number).collect::<std::collections::BTreeSet<_>>();
-    let patterns_before = numbers(&s.session.project);
-    let mutes = Mutes::of(&s.session.project);
-    s.session.project = crate::locked::Locked::new(project);
-    mutes.keep(s.session.project.get_mut());
+    let patterns_before = numbers(&s.project);
+    let mutes = Mutes::of(&s.project);
+    s.project = crate::locked::Locked::new(project);
+    mutes.keep(s.project.get_mut());
     s.set_tempo(tempo);
     s.set_pattern(pattern);
-    crate::rack::remap_session(&mut s.session, &map);
+    crate::rack::remap_session(s, &map);
     // The views follow the rows by id (`crate::follow`).
-    s.session.touched.rows.get_or_insert(old);
-    (s.session.loop_type, s.session.loop_type_of) = loop_type;
+    s.touched.rows.get_or_insert(old);
+    (s.loop_type, s.loop_type_of) = loop_type;
     // The pattern shown now stays shown, as in FL (an undo leaves the pattern shown); a step that made or removed
     // patterns (a clone, a delete) shows the pattern it showed. Each pattern's loops are its own, put back with it.
-    if numbers(&s.session.project) == patterns_before {
+    if numbers(&s.project) == patterns_before {
         s.set_pattern(shown);
     }
-    s.session.touched.tracks = true;
+    s.touched.tracks = true;
 }
 
 /// Muting and soloing are steps of their own (a channel's, `Taken::Mutes`) or none (a mixer track's, as in FL), and
