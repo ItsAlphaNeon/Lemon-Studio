@@ -110,32 +110,23 @@ impl Timebase {
 }
 
 /// The rack's side of ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the added channel at `row`
-/// (`None` while it doesn't exist; only the last row comes and goes), the rack's filter groups, filter and selection,
-/// and the playlist's clip source.
+/// (`None` while it doesn't exist; only the last row comes and goes) and the filter groups. The selection and the
+/// playlist's clip source that go back with it are the interface's (`crate::follow::RackView`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RackSide {
     pub row: usize,
     pub ch: Option<os_model::Channel>,
     /// The project's filter groups: their names, each channel's group and the filter shown.
     pub groups: (Vec<String>, Vec<Option<u32>>, Option<u32>),
-    pub sel: std::collections::BTreeSet<usize>,
-    pub selected: usize,
-    pub source: Option<os_model::ClipSource>,
-    pub picker: crate::playlist::PickKind,
 }
 
 impl RackSide {
     /// Row `row`'s side as the rack has it now.
-    pub fn now(s: &State, row: usize) -> RackSide {
-        let r = &s.rack;
+    pub fn now(s: &crate::session::Session, row: usize) -> RackSide {
         RackSide {
             row,
-            ch: s.session.project.channels.get(row).cloned(),
-            groups: (s.session.project.groups.clone(), s.session.project.channels.iter().map(|c| c.rack.group).collect(), s.session.project.current_group),
-            sel: r.sel.clone(),
-            selected: s.selected_channel,
-            source: s.playlist.source,
-            picker: s.playlist.picker,
+            ch: s.project.channels.get(row).cloned(),
+            groups: (s.project.groups.clone(), s.project.channels.iter().map(|c| c.rack.group).collect(), s.project.current_group),
         }
     }
 }
@@ -174,7 +165,7 @@ impl Snap {
             Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.session.project.channels.get(*row).cloned().map(Box::new) },
             Snap::Init(t, _) => Snap::Init(*t, crate::init::entry(s, *t)),
             Snap::Patterns { .. } => Snap::Patterns { patterns: s.session.project.patterns.clone(), current: s.pattern() },
-            Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(s, r.row))),
+            Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(&s.session, r.row))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
             // What each command would put back, as it is now (`swap` applies them).
             Snap::Commands(v) => Snap::Commands(v.iter().map(|c| c.now(s)).collect()),
@@ -183,6 +174,15 @@ impl Snap {
     }
 
     /// Whether this holds the playlist (`forget_playlist`).
+    /// Whether this holds the rack's side of adding a channel (`Snap::Rack`).
+    fn has_rack(&self) -> bool {
+        match self {
+            Snap::Rack(_) => true,
+            Snap::Several(v) => v.iter().any(Snap::has_rack),
+            _ => false,
+        }
+    }
+
     fn has_playlist(&self) -> bool {
         match self {
             Snap::Playlist(_) => true,
@@ -226,7 +226,7 @@ impl Snap {
                 let p = crate::patterns::pat_mut(&mut s.session, number);
                 (p.notes, p.controls, p.length) = (notes, controls, length);
                 (p.loops, p.loop_mode) = loops;
-                s.piano.clear_selection();
+                s.session.touched.notes = true;
             }
             Snap::Playlist(p) => crate::playlist::restore(s, *p),
             Snap::Knob(id, v) => set_knob_value(s, id, v),
@@ -254,7 +254,7 @@ impl Snap {
             Snap::Patterns { patterns, current } => {
                 s.session.project.get_mut().patterns = patterns;
                 s.set_pattern(current);
-                s.piano.clear_selection();
+                s.session.touched.notes = true;
             }
             Snap::Rack(r) => put_rack(s, *r),
             Snap::Several(v) => v.into_iter().rev().for_each(|x| x.put(s)),
@@ -283,7 +283,7 @@ pub fn timebase(s: &mut State) {
 
 /// Puts the rack's side `r` back (`Snap::Rack`).
 fn put_rack(s: &mut State, r: RackSide) {
-    let RackSide { row, ch, groups: (names, of, shown), sel, selected, source, picker } = r;
+    let RackSide { row, ch, groups: (names, of, shown) } = r;
     match ch {
         None if row + 1 == s.session.project.channels.len() => crate::rack::remove_last(s),
         Some(c) if row == s.session.project.channels.len() => crate::rack::push_channel(s, c),
@@ -297,8 +297,6 @@ fn put_rack(s: &mut State, r: RackSide) {
         }
         before != (p.groups.clone(), p.current_group, p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>())
     });
-    (s.rack.sel, s.selected_channel) = (sel, selected);
-    (s.playlist.source, s.playlist.picker) = (source, picker);
 }
 
 /// The model's value of a knob: the channels' volume and pan as stored (exact), the others as the knob reads them.
@@ -357,6 +355,8 @@ fn knob_name(id: KnobId) -> &'static str {
 struct Step {
     name: Cow<'static, str>,
     snap: Snap,
+    /// Its number, never reused: what the interface keeps for a step is filed under it (`crate::follow`).
+    id: u64,
 }
 
 /// The project's undo history (`State::history`).
@@ -372,6 +372,8 @@ pub struct History {
     run: Option<Run>,
     /// The newest step was recorded since the last button release (`settle` looks at it then).
     fresh: bool,
+    /// The number the next step gets (`Step::id`).
+    next_id: u64,
 }
 
 /// A run of changes that make one step (`History::run`).
@@ -464,6 +466,16 @@ impl History {
     }
 
     /// Drops the oldest steps past Maximum undo levels (undone steps last).
+    /// The newest step's number (`Step::id`).
+    pub fn newest_id(&self) -> Option<u64> {
+        self.steps.last().map(|st| st.id)
+    }
+
+    /// Whether step `id` is still in the history.
+    pub fn has_step(&self, id: u64) -> bool {
+        self.steps.iter().any(|st| st.id == id)
+    }
+
     fn trim(&mut self) {
         let max = usize::from(prefs::number(&prefs::MAX_UNDO_LEVELS));
         while self.steps.len() > max && self.done > 0 {
@@ -489,7 +501,8 @@ pub fn record(s: &mut crate::session::Session, name: &'static str, snap: Snap) {
 pub fn record_named(s: &mut crate::session::Session, name: Cow<'static, str>, snap: Snap) {
     let h = &mut s.history;
     h.steps.truncate(h.done);
-    h.steps.push(Step { name, snap });
+    h.next_id += 1;
+    h.steps.push(Step { name, snap, id: h.next_id });
     h.done = h.steps.len();
     h.undid = false;
     h.run = None;
@@ -600,6 +613,10 @@ pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
 }
 
 fn swap(s: &mut State, i: usize) {
+    crate::follow::around(s, |s| swap_step(s, i));
+}
+
+fn swap_step(s: &mut State, i: usize) {
     s.motion.borrow_mut().ripples_over();
     if let Snap::Commands(v) = &mut s.session.history.steps[i].snap {
         let v = std::mem::take(v);
@@ -610,7 +627,11 @@ fn swap(s: &mut State, i: usize) {
     }
     let now = s.session.history.steps[i].snap.now(s);
     let old = std::mem::replace(&mut s.session.history.steps[i].snap, now);
+    let rack = old.has_rack();
     old.put(s);
+    if rack {
+        s.session.touched.rack_step = Some(s.session.history.steps[i].id);
+    }
 }
 
 /// Undoes the newest done step; its name, or `None` when nothing is done.

@@ -11,6 +11,7 @@
 // audio/track-io.md (audio inputs and outputs)
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
+#[cfg(test)]
 use std::collections::HashMap;
 
 use os_model::{MixerTrack, Rgb};

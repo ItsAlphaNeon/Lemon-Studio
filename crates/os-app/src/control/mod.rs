@@ -259,6 +259,10 @@ fn op(c: &Command) -> &'static str {
 /// Applies `commands` in order, all or none; returns each one's result and the commands that undo them all (in the
 /// order to apply them). Records nothing.
 pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
+    crate::follow::around(s, |s| run_commands(s, commands))
+}
+
+fn run_commands(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
     s.session.control.settle(s.session.project.get_mut());
     let queues = Queues::of(s);
     let known = s.session.control.known.clone();
@@ -288,6 +292,10 @@ pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Val
 /// Applies undo commands (from `run`, in their order), returning the commands that redo them (in theirs). An undo
 /// that fails (the project was changed under it in a way it can't follow) stops there.
 pub fn take_back(s: &mut State, undo: Vec<Command>) -> Vec<Command> {
+    crate::follow::around(s, |s| take_back_commands(s, undo))
+}
+
+fn take_back_commands(s: &mut State, undo: Vec<Command>) -> Vec<Command> {
     let mut redo = Vec::with_capacity(undo.len());
     for c in undo {
         match c.apply(s) {

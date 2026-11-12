@@ -33,6 +33,24 @@ pub struct Session {
     /// in the file: `rack::loop_type`).
     pub loop_type: u8,
     pub loop_type_of: u16,
+    /// What a command or an undo changed that the interface's views follow, taken by them after it (`crate::follow`).
+    pub touched: Touched,
+}
+
+/// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
+/// did; the interface knows what that means for its selections and windows.
+#[derive(Debug, Default)]
+pub struct Touched {
+    /// The project was put back whole: the channels' ids by row before, the rows the views pointed at.
+    pub rows: Option<Vec<u32>>,
+    /// Clips moved in the playlist's list (the selection is kept by id).
+    pub clips: bool,
+    /// Mixer tracks may have gone.
+    pub tracks: bool,
+    /// A pattern's notes were put back.
+    pub notes: bool,
+    /// Undo step `.0`, which holds the rack's side of adding a channel, was undone or redone.
+    pub rack_step: Option<u64>,
 }
 
 impl Session {
@@ -49,6 +67,7 @@ impl Session {
             plugin_edited: false,
             loop_type: 0,
             loop_type_of: 0,
+            touched: Touched::default(),
         }
     }
 

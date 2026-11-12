@@ -2278,12 +2278,13 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     // ui/settings-choices.md "Advanced: Initialize controls automatically").
     let init = crate::init::automatic(tgt, value);
     arr_mut(&mut s.session);
-    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
     let mut snaps = vec![crate::history::Snap::Playlist(Box::new(capture(&s.session))), rack];
     if init.is_some() {
         snaps.push(crate::history::Snap::Init(tgt, crate::init::entry(s, tgt)));
     }
     crate::history::record(&mut s.session, crate::history::CREATE_AUTOMATION, crate::history::Snap::Several(snaps));
+    crate::follow::keep_rack_view(s);
     let name = &unique_channel_name(&s.session, name);
     let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
@@ -2336,9 +2337,10 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
 /// source, as ADD > Automation clip makes one. One undo step, which also holds the selected pattern (whose events
 /// the caller then takes away). Returns its rack row.
 pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os_model::AutoPoint>) -> usize {
-    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
     let before = crate::history::Snap::Several(vec![rack, crate::history::Snap::pattern(s, s.pattern())]);
     snapshot_with(&mut s.session, crate::events::TURN_INTO_CLIP, before);
+    crate::follow::keep_rack_view(s);
     let name = unique_channel_name(&s.session, name);
     let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     s.session.project.get_mut().channels.push(Channel {
@@ -2400,8 +2402,9 @@ pub fn unique_channel_name(s: &crate::session::Session, name: &str) -> String {
 pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     let audio = kind == ChannelKind::AudioClip;
     let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
     snapshot_with(&mut s.session, if audio { "Add audio clip" } else { "Add automation clip" }, before);
+    crate::follow::keep_rack_view(s);
     let name = unique_channel_name(&s.session, if audio { "Audio Clip" } else { "Automation Clip" });
     s.session.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
@@ -2443,8 +2446,9 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
 pub fn add_layer_channel(s: &mut State) -> usize {
     let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let children: Vec<u16> = s.rack.sel.iter().filter_map(|&r| s.session.project.channels.get(r)).map(|c| c.index).collect();
-    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
     snapshot_with(&mut s.session, "Add layer", before);
+    crate::follow::keep_rack_view(s);
     let name = unique_channel_name(&s.session, "Layer");
     s.session.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,

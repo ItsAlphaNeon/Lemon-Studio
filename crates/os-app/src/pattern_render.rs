@@ -166,8 +166,9 @@ pub fn place(s: &mut State, p: &Pending, path: &Path) -> String {
     if s.playlist.wave(&text).is_none() {
         return format!("{text} could not be read");
     }
-    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.session.project.channels.len())));
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
     crate::playlist::snapshot_with(&mut s.session, if p.replace { REPLACE } else { QUICK }, before);
+    crate::follow::keep_rack_view(s);
     let ch = add_channel(s, &text, p.pattern);
     let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if !p.replace {

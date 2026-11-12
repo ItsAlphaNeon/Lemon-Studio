@@ -1055,6 +1055,8 @@ impl State {
 pub struct State {
     /// The open project and what goes with it (`crate::session`).
     pub session: crate::session::Session,
+    /// The rack's view an undo step puts back, by step (`crate::follow`).
+    pub rack_views: std::collections::HashMap<u64, crate::follow::RackView>,
     /// The toolbar's scope / analyzer and peak bars (fed from the audio tap in `App::tick`).
     pub monitor: crate::monitor::Monitor,
     /// The plugin database: choices, last scan, the plugin menus' lists, the plugin manager's table (spec:
@@ -1558,6 +1560,7 @@ impl App {
             plugins: crate::plugins::Plugins::default(),
             state: State {
                 session: crate::session::Session::new(project),
+                rack_views: Default::default(),
                 plugdb: Default::default(),
                 hosted_rows: Vec::new(),
                 pending_plugin: None,

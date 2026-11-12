@@ -125,6 +125,7 @@ mod prefs;
 mod settings_window;
 pub mod locked;
 pub mod session;
+mod follow;
 mod preview_track;
 mod project_files;
 mod project_forms;

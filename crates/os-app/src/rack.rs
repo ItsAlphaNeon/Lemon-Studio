@@ -1420,6 +1420,20 @@ pub(crate) fn remap_state(s: &mut State, map: &[Option<usize>]) {
 
 /// `remap_state`'s part in the app state, for a project already renumbered (`map` as there).
 pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
+    remap_session(&mut s.session, map);
+    remap_view(s, map);
+}
+
+/// `remap_ui`'s part in the session: the samples queued for loading follow their rows.
+pub(crate) fn remap_session(s: &mut crate::session::Session, map: &[Option<usize>]) {
+    let m = |r: usize| map.get(r).copied().flatten();
+    s.sample_loads = std::mem::take(&mut s.sample_loads).into_iter().filter_map(|(r, p)| m(r).map(|r| (r, p))).collect();
+    s.dirty = true;
+}
+
+/// `remap_ui`'s part in the interface: the rack's state, the selections, the plugin window and the plugin host's
+/// requests follow their rows.
+pub(crate) fn remap_view(s: &mut State, map: &[Option<usize>]) {
     let m = |r: usize| map.get(r).copied().flatten();
     let len = s.session.project.channels.len().max(1);
     s.rack.remap(&m);
@@ -1430,11 +1444,9 @@ pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
     }
     s.plugin_channel = keep(s.plugin_channel);
     s.hosted_rows = s.hosted_rows.iter().filter_map(|&r| m(r)).collect();
-    s.session.sample_loads = std::mem::take(&mut s.session.sample_loads).into_iter().filter_map(|(r, p)| m(r).map(|r| (r, p))).collect();
     s.pending_open = s.pending_open.and_then(m);
     s.pending_plugin = s.pending_plugin.and_then(|(r, i)| m(r).map(|r| (r, i)));
     s.piano.clear_selection();
-    s.session.dirty = true;
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
     if s.rack.sel.is_empty() && !s.session.project.channels.is_empty() {

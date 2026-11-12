@@ -1044,20 +1044,18 @@ impl Command {
                 }
                 // Else the source's own length, as a clip placed in the playlist gets.
                 let length = length.filter(|&l| l > 0).unwrap_or_else(|| crate::playlist::source_len(s, source));
-                let sel = selected_clips(s);
                 let a = crate::playlist::arr_mut(&mut s.session);
                 let at = a.clips.partition_point(|c| c.position <= position);
                 a.clips.insert(at, Clip::new(position, length, track - 1, source));
                 s.session.control.settle(s.session.project.get_mut());
                 let id = crate::playlist::clips(&s.session)[at].id;
-                reselect_clips(s, &sel);
+                s.session.touched.clips = true;
                 Ok(id_result("clip", id))
             }
             Command::DeleteClip { clip } => {
                 let i = clip_place(&s.session.project, clip)?;
-                let sel = selected_clips(s);
                 crate::playlist::arr_mut(&mut s.session).clips.remove(i);
-                reselect_clips(s, &sel);
+                s.session.touched.clips = true;
                 none
             }
             Command::SetClip { clip, position, track, length, muted } => {
@@ -1070,7 +1068,6 @@ impl Command {
                 if length == Some(0) {
                     return Err("a clip's length can't be 0".into());
                 }
-                let sel = selected_clips(s);
                 let a = crate::playlist::arr_mut(&mut s.session);
                 let mut c = a.clips.remove(i);
                 c.position = position.unwrap_or(c.position);
@@ -1079,7 +1076,7 @@ impl Command {
                 c.muted = muted.unwrap_or(c.muted);
                 let at = a.clips.partition_point(|x| x.position <= c.position);
                 a.clips.insert(at, c);
-                reselect_clips(s, &sel);
+                s.session.touched.clips = true;
                 none
             }
             Command::SetPlaylistTrack { track, name, color, enabled } => {
@@ -1159,11 +1156,10 @@ fn put(s: &mut State, t: Taken) {
             }
         }
         Taken::Arrangement(a) => {
-            let sel = selected_clips(s);
             if let Some(cur) = s.session.project.get_mut().arrangements.iter_mut().find(|x| x.id.0 == a.id.0) {
                 *cur = *a;
             }
-            reselect_clips(s, &sel);
+            s.session.touched.clips = true;
         }
         // `apply` set it already.
         Taken::Param(..) | Taken::Plugin(..) => {}
@@ -1189,7 +1185,6 @@ fn mutes(p: &Project) -> Taken {
 /// the selections kept where their things still are.
 fn restore(s: &mut State, side: Side) {
     let old: Vec<u32> = s.session.project.channels.iter().map(|c| c.id.0).collect();
-    let sel_clips = selected_clips(s);
     let new_row: std::collections::HashMap<u32, usize> = side.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
     let Side { project, tempo, pattern, loop_type } = side;
@@ -1201,17 +1196,16 @@ fn restore(s: &mut State, side: Side) {
     mutes.keep(s.session.project.get_mut());
     s.set_tempo(tempo);
     s.set_pattern(pattern);
-    crate::rack::remap_ui(s, &map);
+    crate::rack::remap_session(&mut s.session, &map);
+    // The views follow the rows by id (`crate::follow`).
+    s.session.touched.rows.get_or_insert(old);
     (s.session.loop_type, s.session.loop_type_of) = loop_type;
     // The pattern shown now stays shown, as in FL (an undo leaves the pattern shown); a step that made or removed
     // patterns (a clone, a delete) shows the pattern it showed. Each pattern's loops are its own, put back with it.
     if numbers(&s.session.project) == patterns_before {
         s.set_pattern(shown);
     }
-    let tracks = crate::mixer::inserts(&s.session);
-    s.selected_mixer = s.selected_mixer.min(tracks);
-    s.mixer.sel.retain(|&t| t <= tracks);
-    reselect_clips(s, &sel_clips);
+    s.session.touched.tracks = true;
 }
 
 /// Muting and soloing are steps of their own (a channel's, `Taken::Mutes`) or none (a mixer track's, as in FL), and
@@ -1247,19 +1241,6 @@ impl Mutes {
             }
         }
     }
-}
-
-/// The playlist's selected clips by id (an edit that moves clips in the list keeps them selected).
-fn selected_clips(s: &State) -> Vec<u32> {
-    let clips = crate::playlist::clips(&s.session);
-    s.playlist.sel.iter().filter_map(|&i| clips.get(i).map(|c| c.id.0)).collect()
-}
-
-fn reselect_clips(s: &mut State, ids: &[u32]) {
-    let clips = crate::playlist::clips(&s.session);
-    let sel: Vec<usize> = clips.iter().enumerate().filter(|(_, c)| ids.contains(&c.id.0)).map(|(i, _)| i).collect();
-    s.playlist.sel = sel;
-    s.playlist.hover_clip = None;
 }
 
 /// Notes as the model stores them.
