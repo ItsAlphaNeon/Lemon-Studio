@@ -152,7 +152,7 @@ impl crate::app::App {
 /// Hosts Lemon Trio on every 3x Osc channel without an instance, started from the channel's saved state (a new
 /// instance's state when the channel has none). A row waiting for the picker's own instance is left to it; a row
 /// whose instance failed is not tried again.
-pub(crate) fn sync_osc3(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+pub(crate) fn sync_osc3(s: &mut crate::session::Session) {
     // The installed 3x Osc plays these channels instead (`host_native`).
     if crate::project_plugins::native_first() {
         return;
@@ -194,7 +194,7 @@ pub(crate) fn sync_osc3(s: &mut crate::session::Session, transport: &crate::tran
         }
     }
     if added {
-        transport.set_instruments(s.plugins.instruments());
+        s.transport.set_instruments(s.plugins.instruments());
         s.dirty = true;
     }
     s.touched.repaint = true;

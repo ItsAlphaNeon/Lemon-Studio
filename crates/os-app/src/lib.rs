@@ -1998,7 +1998,7 @@ pub fn run() {
     // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
     splash::step(&splash, splash::MIDI, "Opening MIDI devices");
     app.midi = midi_in::MidiIn::open(wake_ui);
-    app.midi_out = midi_out::MidiOut::start(app.transport.watch());
+    app.midi_out = midi_out::MidiOut::start(app.state.session.transport.watch());
     let message = app.state.message.clone();
     app.midi_refresh(false);
     if message.is_some() {

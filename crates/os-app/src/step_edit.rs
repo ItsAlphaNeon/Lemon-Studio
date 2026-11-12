@@ -100,7 +100,7 @@ impl App {
     /// Whether step editing takes notes now: the switch is on and the transport is stopped (while playing it writes
     /// nothing: Lemon Studio's choice).
     fn step_edit_live(&self) -> bool {
-        on() && !self.transport.playing()
+        on() && !self.state.session.transport.playing()
     }
 
     /// A note started sounding (typing keyboard or MIDI): collected while step editing takes notes.
@@ -342,17 +342,17 @@ mod tests {
         tap(&mut app, KeyCode::KeyZ);
         assert!(nothing(&app), "off");
         ctrl_e(&mut app);
-        app.transport.pretend_playing();
+        app.state.session.transport.pretend_playing();
         typed(&mut app, KeyCode::KeyZ, true);
         assert_eq!(app.state.piano.typed.len(), 1, "the note sounds");
         typed(&mut app, KeyCode::KeyZ, false);
         assert!(nothing(&app), "playing");
-        app.transport.stop();
+        app.state.session.transport.stop();
         typed(&mut app, KeyCode::KeyZ, true);
-        app.transport.pretend_playing();
+        app.state.session.transport.pretend_playing();
         typed(&mut app, KeyCode::KeyZ, false);
         assert!(nothing(&app), "playback started while the key was held");
-        app.transport.stop();
+        app.state.session.transport.stop();
         typed(&mut app, KeyCode::KeyZ, true);
         ctrl_e(&mut app);
         ctrl_e(&mut app);

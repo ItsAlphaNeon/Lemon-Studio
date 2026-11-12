@@ -961,7 +961,7 @@ impl App {
         self.state.session.plugins.keep(row);
         self.state.session.plugins.drop_key(row);
         self.state.session.hosted_rows.retain(|&r| r != row);
-        self.transport.set_instruments(self.state.session.plugins.instruments());
+        self.state.session.transport.set_instruments(self.state.session.plugins.instruments());
         let s = &mut self.state;
         let ch = &mut s.session.project.get_mut().channels[row];
         // A new id at once, before the container plays the channel.
@@ -1274,7 +1274,7 @@ impl App {
             });
         }
         if channels {
-            self.transport.set_instruments(self.state.session.plugins.instruments());
+            self.state.session.transport.set_instruments(self.state.session.plugins.instruments());
         }
         if changed {
             // Which member each hosted key is, for its parameters' targets and links (`params::target_of`).
@@ -1288,7 +1288,7 @@ impl App {
                     }
                 }
             }
-            self.transport.set_effects(self.state.session.plugins.effects());
+            self.state.session.transport.set_effects(self.state.session.plugins.effects());
             self.state.session.dirty = true;
         }
         self.mirror_levels();

@@ -253,7 +253,7 @@ impl App {
     /// Arms; while stopped this starts playback when "Recording starts playback" is on.
     fn arm(&mut self) {
         self.state.rec.armed = true;
-        if !self.transport.playing() && !self.state.rec.waiting && Opt::StartsPlayback.on() {
+        if !self.state.session.transport.playing() && !self.state.rec.waiting && Opt::StartsPlayback.on() {
             self.play_from_stop();
         }
         self.invalidate();
@@ -363,7 +363,7 @@ impl App {
     /// Hands the looping time selection to the playback (`Transport::set_loop`); returns it.
     pub(crate) fn sync_loop_range(&self) -> Option<(u32, u32)> {
         let sel = self.selection_loop();
-        self.transport.set_loop(sel);
+        self.state.session.transport.set_loop(sel);
         sel
     }
 
@@ -394,7 +394,7 @@ impl App {
     pub(crate) fn play_counted_if_armed(&mut self) {
         let bars = if self.state.rec.armed && Opt::Precount.on() { precount_bars() } else { 0 };
         self.start_playback_counted(bars);
-        if bars > 0 && self.transport.playing() {
+        if bars > 0 && self.state.session.transport.playing() {
             let p = &self.state.session.project;
             let tempo = p.tick_tempo(self.state.tempo().max(1.0));
             let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
@@ -482,7 +482,7 @@ impl App {
     /// Nothing is recorded during a count-in (spec §3).
     fn rec_live(&self, what: Opt) -> bool {
         let r = &self.state.rec;
-        r.armed && r.count.is_none() && what.on() && self.transport.playing() && !self.transport.paused()
+        r.armed && r.count.is_none() && what.on() && self.state.session.transport.playing() && !self.state.session.transport.paused()
     }
 
     /// A knob moved (`record_control`).
@@ -519,8 +519,8 @@ impl App {
 
     /// Writes a control point on target word `kind` at the playback position, replacing the move's earlier points.
     fn record_point(&mut self, kind: u32, value: i32) {
-        let song = self.transport.song();
-        let t = self.transport.tick();
+        let song = self.state.session.transport.song();
+        let t = self.state.session.transport.tick();
         self.open_take(song);
         let Some(at) = self.rec_pattern_tick(t, song) else { return };
         let tick = at.max(0.0).round() as u32;
@@ -549,11 +549,11 @@ impl App {
             return;
         }
         let Some(channel) = target else { return };
-        let song = self.transport.song();
+        let song = self.state.session.transport.song();
         if song && self.state.rec.punched_out {
             return;
         }
-        let start = self.transport.tick();
+        let start = self.state.session.transport.tick();
         self.open_take(song);
         let Some(at) = self.rec_pattern_tick(start, song) else { return };
         let r = &mut self.state.rec;
@@ -571,7 +571,7 @@ impl App {
         let Some(i) = r.held.iter().position(|h| h.src == src) else { return };
         let mut h = r.held.remove(i);
         h.release = release;
-        let now = if self.transport.playing() && !self.transport.paused() { Some(self.transport.tick()) } else { r.last };
+        let now = if self.state.session.transport.playing() && !self.state.session.transport.paused() { Some(self.state.session.transport.tick()) } else { r.last };
         self.write_held(h, now);
     }
 
@@ -713,7 +713,7 @@ impl App {
         // something else starts playback.
         if let Some(c) = self.state.rec.count {
             let left = c.left();
-            if left == 0 || !self.transport.playing() || self.transport.paused() {
+            if left == 0 || !self.state.session.transport.playing() || self.state.session.transport.paused() {
                 self.state.rec.count = None;
                 self.invalidate();
             } else if left != self.state.rec.shown {
@@ -721,18 +721,18 @@ impl App {
                 self.invalidate();
             }
         }
-        if self.state.rec.waiting && self.transport.playing() {
+        if self.state.rec.waiting && self.state.session.transport.playing() {
             self.state.rec.waiting = false;
             self.invalidate();
         }
         let run_on = self.state.rec.armed && !Opt::Loop.on();
         crate::transport::run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
         let sel = self.sync_loop_range();
-        let live = self.transport.playing() && !self.transport.paused();
+        let live = self.state.session.transport.playing() && !self.state.session.transport.paused();
         // Punch (spec §5): armed with Loop record off, playback stops at the selection's end; held notes end there.
         if let Some((_, end)) = sel.filter(|_| live && run_on && self.state.rec.count.is_none()) {
             let end = f64::from(end);
-            if self.transport.tick() >= end && self.state.rec.last.is_some_and(|l| l < end) {
+            if self.state.session.transport.tick() >= end && self.state.rec.last.is_some_and(|l| l < end) {
                 self.state.rec.last = Some(end);
                 self.end_take();
                 self.act(crate::app::Action::Stop);
@@ -741,7 +741,7 @@ impl App {
         }
         // Playback went back to the start (a loop, or a jump back): the pass's take ends there, its held notes at the
         // pattern's end; the next note starts a new take (spec §4).
-        let now = self.transport.tick();
+        let now = self.state.session.transport.tick();
         if live && self.state.rec.last.is_some_and(|l| now < l) && self.state.rec.take.is_some() {
             let held = std::mem::take(&mut self.state.rec.held);
             for h in held {
@@ -753,7 +753,7 @@ impl App {
         // there (held notes end on it) and later notes are not recorded (measured in FL: notes after the marker were
         // not); passing a Start recording marker records again (Lemon Studio's choice). Recording before any of them
         // goes on as usual: FL recorded from the song's start with a Start recording marker later on.
-        if live && self.transport.song() {
+        if live && self.state.session.transport.song() {
             let from = self.state.rec.last.filter(|&l| l <= now);
             let mut passed: Vec<(u32, u8)> = crate::playlist::markers(&self.state.session)
                 .iter()
@@ -776,7 +776,7 @@ impl App {
             self.state.rec.punched_out = false;
         }
         // SONG mode: a note held past the take's clip makes it longer as playback runs (spec §2).
-        if live && self.transport.song() && !self.state.rec.held.is_empty() && grow_take_clip(&mut self.state, now).is_some_and(|(_, g)| g) {
+        if live && self.state.session.transport.song() && !self.state.rec.held.is_empty() && grow_take_clip(&mut self.state, now).is_some_and(|(_, g)| g) {
             self.invalidate();
         }
         if live {
@@ -785,7 +785,7 @@ impl App {
         // Performance mode (spec: ui/performance-mode.md §3b): a stop with Record armed (since playback started) writes
         // what the launched tracks played.
         let r = &self.state.rec;
-        if r.was_live && !live && r.armed && r.since.is_some() && self.transport.song()
+        if r.was_live && !live && r.armed && r.since.is_some() && self.state.session.transport.song()
             && let Some(stop) = r.last
         {
             let n = crate::perform::record(&mut self.state, stop.max(0.0) as u32);
@@ -798,7 +798,7 @@ impl App {
         let changed = r.take.as_ref().is_some_and(|t| t.pattern != self.state.pattern());
         if (r.was_live && !live) || changed {
             self.end_take();
-            if !self.transport.playing() && self.state.rec.armed && Opt::DisarmOnStop.on() {
+            if !self.state.session.transport.playing() && self.state.rec.armed && Opt::DisarmOnStop.on() {
                 self.state.rec.armed = false;
                 self.invalidate();
             }
@@ -817,7 +817,7 @@ impl App {
     /// undone; notes still held are dropped. The undone takes can be redone.
     pub(crate) fn cancel_recording(&mut self) -> String {
         let r = &self.state.rec;
-        if !r.armed || !(self.transport.playing() || r.count.is_some() || r.waiting) {
+        if !r.armed || !(self.state.session.transport.playing() || r.count.is_some() || r.waiting) {
             return "Nothing is being recorded".into();
         }
         let since = r.since;
@@ -929,13 +929,13 @@ mod tests {
 
     /// Typing key `code` going down or up at playback tick `t`.
     fn key(app: &mut App, code: KeyCode, down: bool, t: f64, song: bool) {
-        app.transport.pretend_at(t, song);
+        app.state.session.transport.pretend_at(t, song);
         app.record_tick();
         assert!(app.typing_key(code, down, false, false));
     }
 
     fn stop(app: &mut App) {
-        app.transport.stop();
+        app.state.session.transport.stop();
         app.record_tick();
     }
 
@@ -1058,7 +1058,7 @@ mod tests {
         // A note held when playback stops ends where playback last was; Line leaves times as played.
         app.state.global_snap.now = Snap::Line;
         key(&mut app, KeyCode::KeyV, true, 301.0, false);
-        app.transport.pretend_at(333.0, false);
+        app.state.session.transport.pretend_at(333.0, false);
         app.record_tick();
         stop(&mut app);
         assert!(notes(&app).contains(&(301, 32, 0)), "{:?}", notes(&app));
@@ -1072,20 +1072,20 @@ mod tests {
         let mut app = app();
         app.toggle_record();
         let groups = |app: &App| -> Vec<u8> { app.state.session.project.pattern(1).map_or(vec![], |p| p.notes.iter().map(|n| n.group & 0x0F).collect()) };
-        app.transport.pretend_at(0.0, false);
+        app.state.session.transport.pretend_at(0.0, false);
         app.record_tick();
         app.midi_notes(vec![Msg::On { ch: 4, key: 60, vel: 100 }]);
-        app.transport.pretend_at(24.0, false);
+        app.state.session.transport.pretend_at(24.0, false);
         app.record_tick();
         app.midi_notes(vec![Msg::Off { ch: 4, key: 60, vel: 64 }]);
         stop(&mut app);
         assert_eq!(groups(&app), [4]);
         crate::rack::run(&mut app, crate::rack::RCmd::Through(0));
         assert!(!crate::rack::through(&app.state, 0));
-        app.transport.pretend_at(48.0, false);
+        app.state.session.transport.pretend_at(48.0, false);
         app.record_tick();
         app.midi_notes(vec![Msg::On { ch: 4, key: 62, vel: 100 }]);
-        app.transport.pretend_at(72.0, false);
+        app.state.session.transport.pretend_at(72.0, false);
         app.record_tick();
         app.midi_notes(vec![Msg::Off { ch: 4, key: 62, vel: 64 }]);
         stop(&mut app);
@@ -1177,7 +1177,7 @@ mod tests {
         assert_eq!(held_notes(&app.state, 50.0).iter().map(|n| (n.position, n.length)).collect::<Vec<_>>(), [(48, 2)]);
         let held = |at: f64| held_notes(&app.state, at).iter().map(|n| (n.position, n.length)).collect::<Vec<_>>();
         assert_eq!(held(500.0), [(48, 452)]);
-        app.transport.pretend_at(f64::from(2 * bar + 100), true);
+        app.state.session.transport.pretend_at(f64::from(2 * bar + 100), true);
         app.record_tick();
         assert_eq!(crate::playlist::clips(&app.state.session)[0].length, 3 * bar);
         key(&mut app, KeyCode::KeyW, false, f64::from(2 * bar + 200), true);
@@ -1227,12 +1227,12 @@ mod tests {
         assert_eq!(app.selection_loop(), Some((96, 192)));
         app.toggle_record();
         key(&mut app, KeyCode::KeyZ, true, 120.0, false);
-        app.transport.pretend_at(170.0, false);
+        app.state.session.transport.pretend_at(170.0, false);
         app.record_tick();
         assert_eq!(app.state.piano.range, Some((96, 192)), "recording keeps the selection");
-        app.transport.pretend_at(200.0, false);
+        app.state.session.transport.pretend_at(200.0, false);
         app.record_tick();
-        assert!(!app.transport.playing(), "punched out");
+        assert!(!app.state.session.transport.playing(), "punched out");
         assert_eq!(notes(&app), [(120, 72, 0)], "the held note ends at the selection's end");
         assert_eq!(app.state.piano.marker, 96);
         app.state.piano.range = None;
@@ -1257,7 +1257,7 @@ mod tests {
         key(&mut app, KeyCode::KeyZ, false, 72.0, true);
         // Held over the Stop recording marker: it ends there.
         key(&mut app, KeyCode::KeyX, true, 1488.0, true);
-        app.transport.pretend_at(1560.0, true);
+        app.state.session.transport.pretend_at(1560.0, true);
         app.record_tick();
         assert!(!app.state.rec.recording(), "the take ended on the marker");
         key(&mut app, KeyCode::KeyX, false, 1600.0, true);
@@ -1326,13 +1326,13 @@ mod tests {
         app.paint(&mut c, None);
         let k = hit_rect(&app, &Action::Knob(KnobId::ChanVol(1)));
         app.toggle_record();
-        app.transport.pretend_at(48.0, false);
+        app.state.session.transport.pretend_at(48.0, false);
         app.record_tick();
         app.mouse_move(k.cx(), k.cy());
         app.mouse_down();
         app.mouse_move(k.cx(), k.cy() + 10.0);
         let mid = (app.state.knob(KnobId::ChanVol(1)) * 12800.0).round() as i32;
-        app.transport.pretend_at(96.0, false);
+        app.state.session.transport.pretend_at(96.0, false);
         app.mouse_move(k.cx(), k.cy() + 20.0);
         app.mouse_up();
         let end = (app.state.knob(KnobId::ChanVol(1)) * 12800.0).round() as i32;
@@ -1351,7 +1351,7 @@ mod tests {
 
         // Automation off: knob moves write nothing.
         Opt::Automation.toggle();
-        app.transport.pretend_at(10.0, false);
+        app.state.session.transport.pretend_at(10.0, false);
         app.record_tick();
         app.state.set_knob(KnobId::ChanVol(1), 0.1);
         app.record_knob(KnobId::ChanVol(1));
@@ -1381,13 +1381,13 @@ mod tests {
             app.state.session.project.get_mut().mixer = (0..3).map(os_model::MixerTrack::new).collect();
         }
         app.toggle_record();
-        app.transport.pretend_at(24.0, false);
+        app.state.session.transport.pretend_at(24.0, false);
         app.record_tick();
         let m = crate::mixer::track_mut(&mut app.state.session, 1).unwrap();
         (m.volume, m.pan) = (Some(0.5), Some(-0.25));
         app.record_control(&Action::Fader(1));
         app.record_control(&Action::Knob(KnobId::MixPan(1)));
-        app.transport.pretend_at(48.0, false);
+        app.state.session.transport.pretend_at(48.0, false);
         app.state.set_tempo(150.0);
         app.record_control(&Action::Tempo);
         app.record_param(target::slot_param(1, 2, 0), (-64.0, 64.0), 0.75);
@@ -1480,7 +1480,7 @@ mod tests {
         Opt::Wait.toggle();
         app.toggle_record();
         app.act(Action::Play);
-        assert!(app.state.rec.waiting && !app.transport.playing());
+        assert!(app.state.rec.waiting && !app.state.session.transport.playing());
         app.act(Action::Play);
         assert!(!app.state.rec.waiting, "Play again cancels");
         app.act(Action::Play);
@@ -1490,7 +1490,7 @@ mod tests {
         assert!(app.state.rec.waiting, "Notes are off in the filter");
         Opt::Notes.toggle();
         assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
-        assert!(!app.state.rec.waiting && app.transport.playing() && app.transport.tick() == 0.0);
+        assert!(!app.state.rec.waiting && app.state.session.transport.playing() && app.state.session.transport.tick() == 0.0);
         assert!(app.state.rec.recording(), "the note that started playback is recorded");
         key(&mut app, KeyCode::KeyZ, false, 48.0, false);
         stop(&mut app);
@@ -1499,7 +1499,7 @@ mod tests {
         Opt::WaitArmed.toggle();
         app.toggle_record();
         app.act(Action::Play);
-        assert!(!app.state.rec.waiting && app.transport.playing());
+        assert!(!app.state.rec.waiting && app.state.session.transport.playing());
         app.act(Action::Stop);
     }
 
@@ -1578,7 +1578,7 @@ mod tests {
         assert_eq!(app.cancel_recording(), "Recording canceled: 2 takes undone");
         app.record_tick();
         assert_eq!(notes(&app), [(24, 72, 0)]);
-        assert!(!app.transport.playing() && !app.state.rec.recording() && app.state.rec.armed);
+        assert!(!app.state.session.transport.playing() && !app.state.rec.recording() && app.state.rec.armed);
         assert_eq!(app.state.session.history.newest_done(), Some(RECORDED), "the earlier take is still in the history");
     }
 

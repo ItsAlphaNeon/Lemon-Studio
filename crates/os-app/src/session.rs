@@ -55,6 +55,8 @@ pub struct Session {
     pub pending_open: Option<usize>,
     /// The hosted plugins' parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
+    /// Playback: the audio thread and what it plays (`crate::transport`). Last, so it goes after the plugins it plays.
+    pub transport: crate::transport::Transport,
 }
 
 /// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
@@ -115,7 +117,7 @@ impl View {
 }
 
 impl Session {
-    pub fn new(project: os_model::Project) -> Self {
+    pub fn new(project: os_model::Project, transport: crate::transport::Transport) -> Self {
         Session {
             project: crate::locked::Locked::new(project),
             history: Default::default(),
@@ -138,6 +140,7 @@ impl Session {
             pending_plugin: None,
             pending_open: None,
             params: Default::default(),
+            transport,
         }
     }
 

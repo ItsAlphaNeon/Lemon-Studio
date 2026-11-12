@@ -1047,11 +1047,11 @@ fn idle_ticks_hand_playback_nothing() {
     for _ in 0..3 {
         a.tick();
     }
-    let n = a.transport.updates_for_tests();
+    let n = a.state.session.transport.updates_for_tests();
     for _ in 0..20 {
         a.tick();
     }
-    assert_eq!(a.transport.updates_for_tests(), n, "an idle tick writes nothing");
+    assert_eq!(a.state.session.transport.updates_for_tests(), n, "an idle tick writes nothing");
 }
 
 #[test]
@@ -1060,13 +1060,13 @@ fn a_write_reaches_playback_with_no_flag_set() {
     for _ in 0..3 {
         a.tick();
     }
-    let n = a.transport.updates_for_tests();
+    let n = a.state.session.transport.updates_for_tests();
     a.state.session.dirty = false;
     a.state.session.project.get_mut().main_volume = Some(1234);
     a.tick();
-    assert_eq!(a.transport.updates_for_tests(), n + 1);
+    assert_eq!(a.state.session.transport.updates_for_tests(), n + 1);
     a.tick();
-    assert_eq!(a.transport.updates_for_tests(), n + 1, "once");
+    assert_eq!(a.state.session.transport.updates_for_tests(), n + 1, "once");
 }
 
 #[test]
@@ -1075,9 +1075,9 @@ fn a_proposal_hands_playback_nothing() {
     for _ in 0..3 {
         a.tick();
     }
-    let n = a.transport.updates_for_tests();
+    let n = a.state.session.transport.updates_for_tests();
     let kick = ids(&a).0[0];
     propose(&mut a.state, &test_client(), "Boom", vec![cmd(json!({"op": "set_channel", "channel": kick, "name": "Boom"}))]).unwrap();
     a.tick();
-    assert_eq!(a.transport.updates_for_tests(), n, "the dry run took its change back");
+    assert_eq!(a.state.session.transport.updates_for_tests(), n, "the dry run took its change back");
 }

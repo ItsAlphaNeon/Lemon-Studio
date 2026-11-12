@@ -120,19 +120,19 @@ impl App {
     /// or resuming the transport (`AutoClose::poll`).
     pub(crate) fn auto_close_at(&mut self, now: Instant, ours: bool) {
         let on = crate::prefs::check(&crate::prefs::AUTO_CLOSE);
-        let playing = self.transport.state() == crate::transport::State::Playing;
+        let playing = self.state.session.transport.state() == crate::transport::State::Playing;
         match self.auto_close.poll(now, on, ours, playing) {
             Some(Step::Close { pause }) => {
                 if pause {
-                    self.transport.pause();
+                    self.state.session.transport.pause();
                 }
-                self.transport.close_device();
+                self.state.session.transport.close_device();
                 self.invalidate();
             }
             Some(Step::Open { resume }) => {
-                self.transport.open_device();
+                self.state.session.transport.open_device();
                 if resume {
-                    self.transport.resume();
+                    self.state.session.transport.resume();
                 }
                 self.invalidate();
             }
@@ -218,7 +218,7 @@ mod tests {
         app.auto_close_at(t0 + 2 * GRACE, false);
         app.auto_close_at(t0 + 3 * GRACE, false);
         assert!(app.auto_close.closed());
-        assert_eq!(app.transport.state(), crate::transport::State::Stopped, "nothing was playing");
+        assert_eq!(app.state.session.transport.state(), crate::transport::State::Stopped, "nothing was playing");
         app.auto_close_at(t0 + 4 * GRACE, true);
         assert!(!app.auto_close.closed(), "back in front");
         app.auto_close_at(t0 + 5 * GRACE, false);

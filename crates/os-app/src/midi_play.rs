@@ -154,7 +154,7 @@ impl App {
         // The bent row returns to the centre when another is selected (spec §4).
         if let Some(row) = self.midi_play.bend_row.filter(|&r| r != self.state.selected_channel) {
             self.midi_play.bend_row = None;
-            self.transport.midi(row, [0xe0, 0, 64], 200.0);
+            self.state.session.transport.midi(row, [0xe0, 0, 64], 200.0);
         }
         self.midi_out_tick();
     }
@@ -227,7 +227,7 @@ impl App {
                     if row < self.state.session.project.channels.len() {
                         self.sync_live();
                         if let Some(b) = ev.msg.bytes() {
-                            self.transport.midi(row, b, 200.0);
+                            self.state.session.transport.midi(row, b, 200.0);
                         }
                         self.midi_play.bend_row = Some(row);
                     }
@@ -252,7 +252,7 @@ impl App {
         let row = self.state.selected_channel;
         let Some(b) = m.bytes().filter(|_| row < self.state.session.project.channels.len()) else { return };
         self.sync_live();
-        self.transport.midi(row, b, 200.0);
+        self.state.session.transport.midi(row, b, 200.0);
     }
 
     fn midi_note_on(&mut self, ch: u8, key: u8, vel: u8) {
@@ -305,19 +305,19 @@ impl App {
             self.midi_end(h, h.up.unwrap_or(64));
         }
         self.sync_live();
-        self.transport.note_on_midi(row, play, vel, midi);
+        self.state.session.transport.note_on_midi(row, play, vel, midi);
         self.midi_play.held.push(Held { key, src, row, play, up: None });
         self.step_edit_down_with(src, play, vel, extra);
     }
 
     fn midi_end(&mut self, h: Held, release: u8) {
-        self.transport.note_off(h.row, h.play);
+        self.state.session.transport.note_off(h.row, h.play);
         self.step_edit_up_with(h.src, Some(release));
     }
 
     /// A key of the Performance mode MIDI channel (spec: ui/performance-mode.md §3).
     pub(crate) fn perform_note(&mut self, key: u8, vel: u8, down: bool) {
-        let now = self.transport.playing().then(|| self.transport.tick().max(0.0) as u32);
+        let now = self.state.session.transport.playing().then(|| self.state.session.transport.tick().max(0.0) as u32);
         if let Some(m) = crate::perform::midi_note(&mut self.state, key, vel, down, now) {
             self.state.message = Some(m);
         }
@@ -414,12 +414,12 @@ impl App {
         let ahead = (f64::from(ahead_ms) / 1000.0 * self.state.tempo() / 60.0 * f64::from(ppq)).round() as u32;
         match m {
             Msg::Start => {
-                self.transport.stop();
+                self.state.session.transport.stop();
                 self.ext_position(ahead);
                 self.start_playback();
             }
-            Msg::Continue => match self.transport.state() {
-                T::Paused => self.transport.resume(),
+            Msg::Continue => match self.state.session.transport.state() {
+                T::Paused => self.state.session.transport.resume(),
                 T::Stopped => {
                     if ahead > 0 {
                         let at = if self.state.song_mode() { self.state.playlist.pos } else { self.state.piano.marker };
@@ -430,15 +430,15 @@ impl App {
                 T::Playing => {}
             },
             Msg::Stop => {
-                if self.transport.state() == T::Playing {
-                    self.transport.pause();
+                if self.state.session.transport.state() == T::Playing {
+                    self.state.session.transport.pause();
                 }
             }
             Msg::Spp(sixteenths) => {
                 let t = u32::from(sixteenths) * ppq / 4;
-                let running = self.transport.state() == T::Playing;
+                let running = self.state.session.transport.state() == T::Playing;
                 // The position counts from a stop: a paused playback would resume where it paused.
-                self.transport.stop();
+                self.state.session.transport.stop();
                 self.ext_position(t);
                 if running {
                     self.start_playback();
@@ -837,7 +837,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         let mut app = App::new(None);
         app.midi = crate::midi_in::MidiIn::open(|| {});
-        app.midi_out = crate::midi_out::MidiOut::start(app.transport.watch());
+        app.midi_out = crate::midi_out::MidiOut::start(app.state.session.transport.watch());
         let name = app.midi.outputs.iter().find(|n| n.contains("LemonKeys")).cloned().expect("a LemonKeys output");
         let input = midir::MidiInput::new("Lemon Studio clock test").unwrap();
         let port = input.ports().into_iter().find(|p| input.port_name(p).is_ok_and(|n| n.contains("LemonKeys")));

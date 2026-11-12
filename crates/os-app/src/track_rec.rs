@@ -79,7 +79,7 @@ impl App {
     /// Whether the armed tracks record now: Record armed with Audio in the filter, playing, not paused or counting in.
     fn track_rec_live(&self) -> bool {
         let r = &self.state.rec;
-        r.armed && r.count.is_none() && Opt::Audio.on() && self.transport.playing() && !self.transport.paused()
+        r.armed && r.count.is_none() && Opt::Audio.on() && self.state.session.transport.playing() && !self.state.session.transport.paused()
     }
 
     /// Every tick: starts a take when the armed tracks start recording, ends it when they stop, and places its files
@@ -101,7 +101,7 @@ impl App {
         if armed.is_empty() {
             return;
         }
-        let rate = self.transport.opened().map_or(48000, |d| d.rate);
+        let rate = self.state.session.transport.opened().map_or(48000, |d| d.rate);
         let dir = folder(s);
         let now = chrono::Local::now().naive_local();
         let project = crate::backup::project_name(s.session.path.as_deref());
@@ -125,7 +125,7 @@ impl App {
             }
         }
         let song_pos = (!self.state.song_mode()).then_some(self.state.playlist.pos);
-        self.transport.record_tracks(Some(takes.clone()));
+        self.state.session.transport.record_tracks(Some(takes.clone()));
         self.track_rec = Some(TrackRec { takes, recs, rate, song_pos, ending: false });
         self.invalidate();
     }
@@ -133,13 +133,13 @@ impl App {
     /// The take ends: the engine stops handing over, and each writer makes its file, the input's delay left out of a
     /// track that records an input (spec: audio/track-io.md §2.5 "Where the take goes").
     fn track_rec_end(&mut self) {
-        self.transport.record_tracks(None);
+        self.state.session.transport.record_tracks(None);
         let p = &self.state.session.project;
         let tempo = p.tick_tempo(self.state.tempo().max(1.0));
         let Some(r) = self.track_rec.as_mut() else { return };
         r.takes.on.store(false, Ordering::Release);
         let tick = os_engine::laws::tick_to_frame(1.0, p.ppq.max(1), tempo, r.rate).max(1);
-        let delay = self.transport.input_delay(tick) as i64;
+        let delay = self.state.session.transport.input_delay(tick) as i64;
         for (t, w) in &r.recs {
             let Some(w) = w else { continue };
             let m = p.mixer.iter().find(|m| m.index == *t);
@@ -246,7 +246,7 @@ mod tests {
         let msg = app.arm_tracks(&[1], true);
         assert!(msg.is_some_and(|m| m.contains("Audio on")) && Opt::Audio.on());
         assert!(app.arm_tracks(&[1], true).is_none(), "already armed: says nothing");
-        app.transport.pretend_at(0.0, true);
+        app.state.session.transport.pretend_at(0.0, true);
         app.track_rec_tick();
         assert!(app.track_rec.is_none(), "Record is not armed");
         app.state.rec.armed = true;
@@ -256,7 +256,7 @@ mod tests {
         takes.push(1, 96, &vec![0.25; 9600]);
         takes.push(1, 97, &vec![0.25; 9600]);
         let channels = app.state.session.project.channels.len();
-        app.transport.stop();
+        app.state.session.transport.stop();
         for _ in 0..500 {
             app.track_rec_tick();
             if app.track_rec.is_none() {

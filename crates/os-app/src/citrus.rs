@@ -118,7 +118,7 @@ impl crate::app::App {
 /// Hosts Citrus on every Sytrus channel without an instance, started from the channel's saved state (the default
 /// patch when the channel has none). A row waiting for the picker's own instance is left to it; a row whose
 /// instance failed is not tried again.
-pub(crate) fn sync_citrus(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+pub(crate) fn sync_citrus(s: &mut crate::session::Session) {
     // The installed Sytrus plays these channels instead (`host_native`).
     if crate::project_plugins::native_first() {
         return;
@@ -151,7 +151,7 @@ pub(crate) fn sync_citrus(s: &mut crate::session::Session, transport: &crate::tr
         }
     }
     if added {
-        transport.set_instruments(s.plugins.instruments());
+        s.transport.set_instruments(s.plugins.instruments());
         s.dirty = true;
     }
     s.touched.repaint = true;

@@ -130,7 +130,7 @@ impl App {
             return;
         }
         if let Some((k, row)) = self.state.touch.held.take() {
-            self.transport.note_off(row, u16::from(k));
+            self.state.session.transport.note_off(row, u16::from(k));
             self.step_edit_up(crate::step_edit::Src::Touch(k));
         }
         // A channel locked to the Touch controller takes its notes (spec: ui/channel-rack.md §18 Receive notes from).
@@ -138,7 +138,7 @@ impl App {
         if let Some(k) = key.filter(|_| row < self.state.session.project.channels.len()) {
             self.locked_hint(crate::rack::NoteSrc::Touch, row);
             self.sync_live();
-            self.transport.note_on(row, u16::from(k), VELOCITY);
+            self.state.session.transport.note_on(row, u16::from(k), VELOCITY);
             self.state.touch.held = Some((k, row));
             self.step_edit_down(crate::step_edit::Src::Touch(k), u16::from(k), VELOCITY);
         }

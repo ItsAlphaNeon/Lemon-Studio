@@ -90,7 +90,7 @@ impl App {
         p.tempo = Some(self.state.tempo());
         crate::preview_track::route(&mut p, &self.state.session.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
         let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
-        self.transport.preview_for(p, limit);
+        self.state.session.transport.preview_for(p, limit);
     }
 
     /// A browser options-menu command (spec §4); returns a message.

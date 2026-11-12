@@ -1353,7 +1353,6 @@ impl State {
 pub struct App {
     pub state: State,
     pub theme: Theme,
-    pub transport: Transport,
     /// The dropout log's watch (`crate::dropout_log`), and whether the transport played at the last tick: a start is
     /// logged.
     #[cfg(target_os = "linux")]
@@ -1534,7 +1533,7 @@ impl App {
             #[cfg(target_os = "linux")]
             audio_playing: false,
             state: State {
-                session: crate::session::Session::new(project),
+                session: crate::session::Session::new(project, transport),
                 rack_views: Default::default(),
                 plugdb: Default::default(),
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -1632,7 +1631,6 @@ impl App {
                 drop_on: None,
             },
             theme: load_theme(),
-            transport,
             hits: Vec::new(),
             keep: Keep::default(),
             live: Vec::new(),
@@ -1737,14 +1735,14 @@ impl App {
         if cfg!(test) {
             return;
         }
-        let playing = self.transport.playing();
+        let playing = self.state.session.transport.playing();
         let context = |a: &App| format!("{} ({})", a.title(), crate::audio_cfg::AudioCfg::current().text().replace('\n', " ").trim());
         if playing && !self.audio_playing {
             crate::dropout_log::write(&format!("play: {}", context(self)));
         }
         self.audio_playing = playing;
         let (_, demoted) = crate::rt::counts();
-        let drops = self.transport.drops().into();
+        let drops = self.state.session.transport.drops().into();
         if let Some(line) = self.audio_watch.check(drops, demoted, crate::rt::roles(), "") {
             crate::dropout_log::write(&format!("{line}{}", context(self)));
         }
@@ -1799,7 +1797,7 @@ impl App {
         }
         match result {
             Ok((file, project)) => {
-                self.transport.silence();
+                self.state.session.transport.silence();
                 self.reset_hosted();
                 let s = &mut self.state;
                 s.selected_channel = 0;
@@ -1924,7 +1922,7 @@ impl App {
         self.state.session.plugins.set_offline(job.options.hq);
         // Lemon Sampler voices playing from disk wait for their frames in every export, high quality or not.
         lemon_sampler::stream::export_started();
-        self.transport.export(&p, mode, rate, job);
+        self.state.session.transport.export(&p, mode, rate, job);
         self.export = Some((name, 0.0));
         self.invalidate();
     }
@@ -1933,7 +1931,7 @@ impl App {
     /// `pattern_render_done`).
     pub(crate) fn export_tick(&mut self) {
         let Some((name, _)) = self.export.clone() else { return };
-        match self.transport.export_status() {
+        match self.state.session.transport.export_status() {
             crate::transport::Export::Running(p) => {
                 self.export = Some((name, p));
                 self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
@@ -2442,7 +2440,7 @@ impl App {
 
     /// The built-in new project (FILE ▸ New with Empty, New from template ▸ Empty).
     pub(crate) fn empty_project(&mut self) {
-        self.transport.silence();
+        self.state.session.transport.silence();
         self.reset_hosted();
         let s = &mut self.state;
         s.session.project = crate::locked::Locked::new(default_project());
@@ -2525,8 +2523,8 @@ impl App {
         self.state.session.plugins.fx_failed.clear();
         self.state.session.plugins.wrap_failed.clear();
         self.state.session.plugins.native_failed.clear();
-        self.transport.set_instruments(Vec::new());
-        self.transport.set_effects(Vec::new());
+        self.state.session.transport.set_instruments(Vec::new());
+        self.state.session.transport.set_effects(Vec::new());
     }
 
     /// Every sampler channel is played and edited by Lemon Sampler (owner, 2026-10-10; spec: plugins/lemon-sampler.md §7):
@@ -2568,7 +2566,7 @@ impl App {
             }
         }
         if added {
-            self.transport.set_instruments(self.state.session.plugins.instruments());
+            self.state.session.transport.set_instruments(self.state.session.plugins.instruments());
             self.state.session.dirty = true;
         }
         done
@@ -2627,11 +2625,11 @@ impl App {
         self.state.session.plugins.past_deadline()
     }
 
-    /// `f`, the plugin host's part of a tick on the session and the transport, with the views following it and the
+    /// `f`, the plugin host's part of a tick on the session, with the views following it and the
     /// window drawn again when it asks.
-    pub(crate) fn host<R>(&mut self, f: impl FnOnce(&mut crate::session::Session, &crate::transport::Transport) -> R) -> R {
+    pub(crate) fn host<R>(&mut self, f: impl FnOnce(&mut crate::session::Session) -> R) -> R {
         let b = crate::follow::before(&self.state);
-        let r = f(&mut self.state.session, &self.transport);
+        let r = f(&mut self.state.session);
         if crate::follow::after(&mut self.state, b) | std::mem::take(&mut self.state.session.touched.repaint) {
             self.invalidate();
         }
@@ -2665,7 +2663,7 @@ impl App {
         // Instances follow their channels by id (an undo, a command), before rows are looked at.
         self.follow_ids(true, false);
         if std::mem::take(&mut self.state.session.retimed) {
-            self.transport.stop();
+            self.state.session.transport.stop();
         }
         // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
         let len = self.state.session.project.channels.len();
@@ -2758,7 +2756,7 @@ impl App {
         if listen {
             self.sync_live();
         }
-        self.transport.listen(listen);
+        self.state.session.transport.listen(listen);
         // Keys pressed while a plugin window has the focus still play the typing keyboard.
         #[cfg(any(windows, target_os = "macos"))]
         for k in crate::plugin_window::take_keys() {
@@ -2919,9 +2917,9 @@ impl App {
                         // The plugin's own keyboard plays on the live stream, like the typing keyboard.
                         if on {
                             self.sync_live();
-                            self.transport.note_on(row, u16::from(key), vel);
+                            self.state.session.transport.note_on(row, u16::from(key), vel);
                         } else {
-                            self.transport.note_off(row, u16::from(key));
+                            self.state.session.transport.note_off(row, u16::from(key));
                         }
                         continue;
                     }
@@ -3842,7 +3840,7 @@ impl App {
             }
             // Held while playing (§6): the engine runs 2 % slower / faster until the release; stopped, it does nothing.
             TapAct::Nudge(n) => {
-                if self.transport.playing() && !self.transport.paused() {
+                if self.state.session.transport.playing() && !self.state.session.transport.paused() {
                     crate::transport::nudge_flag().store(n.signum(), std::sync::atomic::Ordering::Relaxed);
                 }
             }
@@ -3862,7 +3860,7 @@ impl App {
         #[cfg(test)]
         tp.test_clicks.push(accent);
         #[cfg(not(test))]
-        self.transport.tap_click(accent);
+        self.state.session.transport.tap_click(accent);
         // A count's taps make one undo step; a new count, a new one.
         if bpm.is_none() {
             self.state.session.history.end_run();
@@ -3931,14 +3929,14 @@ impl App {
 
     /// The playback state now, as the frame should show it.
     fn play_state(&self) -> Shown {
-        let playing = self.transport.playing();
+        let playing = self.state.session.transport.playing();
         Shown {
             playing,
-            paused: self.transport.paused(),
-            tick: self.transport.tick(),
-            song: self.transport.song(),
-            sounding: if playing { self.transport.sounding() } else { Vec::new() },
-            tempo: self.transport.tempo(),
+            paused: self.state.session.transport.paused(),
+            tick: self.state.session.transport.tick(),
+            song: self.state.session.transport.song(),
+            sounding: if playing { self.state.session.transport.sounding() } else { Vec::new() },
+            tempo: self.state.session.transport.tempo(),
         }
     }
 
@@ -4068,7 +4066,7 @@ impl App {
     /// The monitor is moving (a signal or a decay), or the tapper's pad fading, or the CPU panel counting frames (View
     /// FPS): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
-        self.transport.playing()
+        self.state.session.transport.playing()
             || matches!(self.drag, Some(Drag::SongPosHold { .. }))
             || self.state.monitor.active()
             || self.state.mixer.meters.iter().any(|m| m.active())
@@ -4187,18 +4185,19 @@ impl App {
         {
             // Scope / analyzer / peak bars: from the audio tap; repaint just the monitor when it changed.
             // The monitor advances at its own refresh rate, however often we tick.
-            let (tp, rate) = (&self.transport, self.transport.sample_rate());
+            let (tp, rate) = (&self.state.session.transport, self.state.session.transport.sample_rate());
             if self.state.monitor.update(std::time::Instant::now(), rate, || tp.take_peaks(), |b| tp.tap(b)) {
                 self.damage_band(MONITOR_RECT);
             }
         }
-        if let Some(e) = self.transport.take_error() {
+        if let Some(e) = self.state.session.transport.take_error() {
             self.state.message = Some(format!("Audio: {e}"));
             self.invalidate();
         }
         self.follow_device();
         // Options ▸ Focus selected channel on playback and Auto switch display filter (spec: ui/channel-rack.md §17).
-        if crate::rack::focus_tick(&mut self.state, self.transport.playing()) | crate::rack::filter_tick(&mut self.state) {
+        let playing = self.state.session.transport.playing();
+        if crate::rack::focus_tick(&mut self.state, playing) | crate::rack::filter_tick(&mut self.state) {
             self.invalidate();
         }
         self.record_tick();
@@ -4224,7 +4223,7 @@ impl App {
         os_engine::engine::auto_bypass::set_enabled(crate::prefs::check(&crate::prefs::SMART_DISABLE));
         self.follow_settings();
         if self.state.cpu.due(now) {
-            let tp = &self.transport;
+            let tp = &self.state.session.transport;
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
             // Every stream's engine voices and every hosted instrument's (spec: audio/voices.md §5).
             let voices = tp.engine_voices() + self.state.session.plugins.voices();
@@ -4260,7 +4259,7 @@ impl App {
             self.damage_rect(views::tapper::pad_rect(&self.state));
         }
         // Mixer meters (spec: ui/mixer.md §9): fall back after playback stops.
-        let peaks = self.transport.take_track_peaks();
+        let peaks = self.state.session.transport.take_track_peaks();
         if crate::mixer::feed_meters(&mut self.state, &peaks) && self.state.shown(Win::Mixer) {
             self.damage_live(Live::Meter);
         }
@@ -4276,7 +4275,7 @@ impl App {
         crate::playlist::follow_crossfades(self);
         // Resumed from a Marker pause: playback counts as started on the marker, so Stop returns there (spec:
         // audio/transport.md "Time markers in SONG mode").
-        if let Some(t) = self.transport.take_marker_resumed() {
+        if let Some(t) = self.state.session.transport.take_marker_resumed() {
             self.state.playlist.pos = t;
             self.damage_win(Win::Playlist);
         }
@@ -4287,7 +4286,7 @@ impl App {
         // A write alone that changes nothing playback reads (the project's info, a plugin state stored for a save) builds
         // no new engine.
         let play = (written.is_some() && !self.state.session.dirty).then(|| crate::rack::play_project(&self.state));
-        if self.state.session.dirty || play.as_ref().is_some_and(|p| !self.transport.holds(p)) {
+        if self.state.session.dirty || play.as_ref().is_some_and(|p| !self.state.session.transport.holds(p)) {
             self.state.session.dirty = false;
             // An edit in the interface (a command's change is its event already; an undo or redo is one too).
             let s = &mut self.state;
@@ -4295,7 +4294,7 @@ impl App {
                 s.session.control.event(&crate::control::By::User, "edit", "", Vec::new());
             }
             // Also while Play is still starting (not `playing` yet); ignored when stopped.
-            self.transport.update(&play.unwrap_or_else(|| crate::rack::play_project(&self.state)));
+            self.state.session.transport.update(&play.unwrap_or_else(|| crate::rack::play_project(&self.state)));
         }
         self.playback_damage();
         self.has_damage()
@@ -4317,7 +4316,7 @@ impl App {
             tick: self.shown.tick,
             song: self.shown.song,
             tempo: self.shown.tempo.unwrap_or(self.state.tempo()),
-            peaks: self.transport.peaks(),
+            peaks: self.state.session.transport.peaks(),
             sounding: self.shown.sounding.clone(),
             song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
             bar_drag: match self.drag {
@@ -4727,8 +4726,8 @@ impl App {
         self.state.set_song_mode(true);
         if self.state.session.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
             // Nothing plays in SONG mode, so a pattern that was playing stops too.
-            if self.transport.playing() {
-                self.transport.stop();
+            if self.state.session.transport.playing() {
+                self.state.session.transport.stop();
             }
             self.state.message = Some("The arranger is empty: nothing to play as a song".into());
             return self.invalidate();
@@ -4737,9 +4736,9 @@ impl App {
         crate::init::apply(&mut self.state.session);
         let mut p = self.state.session.project.clone();
         p.tempo = Some(self.state.tempo());
-        self.transport.stop();
-        self.transport.set_loop(self.state.playlist.range);
-        self.transport.play(&p, PlayMode::Song, f64::from(tick));
+        self.state.session.transport.stop();
+        self.state.session.transport.set_loop(self.state.playlist.range);
+        self.state.session.transport.play(&p, PlayMode::Song, f64::from(tick));
         self.invalidate();
     }
 
@@ -4752,7 +4751,7 @@ impl App {
         clip.track = 0;
         clip.muted = false;
         p.arrangements = vec![os_model::Arrangement { clips: vec![clip], ..Default::default() }];
-        self.transport.preview_song(p);
+        self.state.session.transport.preview_song(p);
     }
 
     /// A file dropped on the window: audio onto the playlist becomes an audio clip; a project opens.
@@ -5200,7 +5199,7 @@ impl App {
     /// The Audio page's status lines from the stream that is open; returns whether they changed.
     fn audio_status(&mut self) -> bool {
         use crate::device::{ASIO, WASAPI_EXCLUSIVE};
-        let tp = &self.transport;
+        let tp = &self.state.session.transport;
         let opened = tp.opened();
         let asio_open = opened.as_ref().is_some_and(|o| o.host == ASIO);
         let instead = opened.as_ref().and_then(|o| o.instead.clone());
@@ -5382,7 +5381,7 @@ impl App {
         if let Some(rate) = Transport::device_rate() {
             self.state.session.plugins.set_rate(rate);
         }
-        self.transport.reopen();
+        self.state.session.transport.reopen();
         self.audio_page();
         let st = &self.state.settings;
         self.state.message = Some(format!("Audio: {}, {} Hz", st.device, st.rate.unwrap_or(0)));
@@ -5477,7 +5476,7 @@ impl App {
     pub fn set_timebase(&mut self, ppq: u16) -> Option<String> {
         let (from, to) = (self.state.session.project.ppq.max(1), ppq.max(1));
         if from != to {
-            self.transport.stop();
+            self.state.session.transport.stop();
             // One step, "Project settings", that brings the ticks back exactly (spec: ui/settings-choices.md "Undo
             // history: the four checks").
             crate::history::timebase(&mut self.state.session);
@@ -5677,7 +5676,7 @@ impl App {
                 }
             }
             SAct::Button("Load theme...") => self.theme_dialog(),
-            SAct::Button(views::settings::SHOW_ASIO_PANEL) => self.transport.asio_panel(),
+            SAct::Button(views::settings::SHOW_ASIO_PANEL) => self.state.session.transport.asio_panel(),
             SAct::Button(views::settings::CHECK_UPDATES) => self.check_updates_now(),
             SAct::Button(views::settings::WEBSITE) => self.open_web(crate::help_links::WEBSITE_URL),
             SAct::Button(views::settings::WIKI) => self.open_web(crate::help_links::HELP_INDEX_URL),
@@ -7057,7 +7056,7 @@ impl App {
             Some(Drag::Bar(d)) => self.bar_drop(d),
             Some(Drag::PianoSplit { .. }) => crate::piano_split::save(self.state.piano.split),
             Some(Drag::BrowserSplit { .. }) => crate::browser::save_width(self.state.browser_w),
-            Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
+            Some(Drag::Marker) if self.state.session.transport.playing() && !self.state.session.transport.song() => {
                 self.start_playback();
             }
             Some(Drag::SongRuler) => self.song_pos_release(),
@@ -7149,7 +7148,7 @@ impl App {
     /// key, until another key is held or the button is released (§8).
     /// Notes clicked or dragged in the piano roll are auditioned, except while playback runs (it is heard already).
     fn audition(&self) -> bool {
-        !(self.transport.playing() && !self.transport.paused())
+        !(self.state.session.transport.playing() && !self.state.session.transport.paused())
     }
 
     /// Velocity of a click on the piano roll's keyboard at `x`: soft at the keys' left end, loud at their tips (as FL).
@@ -7165,14 +7164,14 @@ impl App {
         }
         self.state.piano.held = key;
         if let Some((row, k, _)) = self.mouse_note.take() {
-            self.transport.note_off(row, k);
+            self.state.session.transport.note_off(row, k);
         }
         let row = piano::channel(&self.state).and_then(|ch| self.state.session.project.channels.iter().position(|c| c.index == ch));
         if let (Some(k), true, Some(row)) = (key, play, row) {
             let k = k.clamp(0, crate::piano::TOP_KEY) as u16;
             self.sync_live();
             let velocity = std::mem::replace(&mut self.key_velocity, TYPING_VELOCITY);
-            self.transport.note_on(row, k, velocity);
+            self.state.session.transport.note_on(row, k, velocity);
             self.mouse_note = Some((row, k, velocity));
         }
         // The keyboard column.
@@ -7276,7 +7275,7 @@ impl App {
         let Some(ch) = piano::channel(&self.state) else { return };
         let Some(row) = self.state.session.project.channels.iter().position(|c| c.index == ch) else { return };
         let want = piano::scrub_keys(&self.state.session, ch, from, to);
-        let transport = &self.transport;
+        let transport = &self.state.session.transport;
         self.scrub_notes.retain(|&(r, k, _)| {
             let keep = r == row && want.iter().any(|&(w, _)| w == k);
             if !keep {
@@ -7289,7 +7288,7 @@ impl App {
             self.sync_live();
         }
         for (k, velocity) in new {
-            self.transport.note_on(row, k, velocity);
+            self.state.session.transport.note_on(row, k, velocity);
             self.scrub_notes.push((row, k, velocity));
         }
     }
@@ -7297,7 +7296,7 @@ impl App {
     /// The Playback tool's notes stop with the button.
     fn scrub_release(&mut self) {
         for (row, key, _) in std::mem::take(&mut self.scrub_notes) {
-            self.transport.note_off(row, key);
+            self.state.session.transport.note_off(row, key);
         }
     }
 
@@ -7937,7 +7936,7 @@ impl App {
             // Space starts and stops (rewinding); Ctrl+Space starts and pauses, like the Play button (FL's manual,
             // keyboard shortcuts: "Start/Stop Playback", "Start/Pause Playback").
             Key::Named(NamedKey::Space) if ctrl => self.act(Action::Play),
-            Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
+            Key::Named(NamedKey::Space) => self.act(if self.state.session.transport.playing() { Action::Stop } else { Action::Play }),
             // L flips the PAT / SONG switch, as in FL (the typing keyboard, when on, takes L first).
             Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("l") => self.act(Action::PatSong(!self.state.song_mode())),
             // spec: ui/tempo-tapper.md §1
@@ -8052,7 +8051,7 @@ impl App {
     /// when dragging); a paused one stops there, so Play resumes from that point. False: the pattern does not play
     /// that tick anywhere in the song.
     fn piano_song_seek(&mut self, t: u32, press: bool) -> bool {
-        let tp = &self.transport;
+        let tp = &self.state.session.transport;
         let near = if tp.playing() && tp.song() { tp.tick() as u32 } else { self.state.playlist.pos };
         let Some(at) = piano::song_tick_of(&self.state.session, t, near) else { return false };
         if press && tp.playing() && tp.song() && tp.paused() {
@@ -8093,12 +8092,12 @@ impl App {
         };
         // The engine gets the loop range before its first tick.
         self.sync_loop_range();
-        self.transport.play_counted(&p, self.play_mode(), start, bars);
+        self.state.session.transport.play_counted(&p, self.play_mode(), start, bars);
     }
 
     /// TOOLS > Stop sound (Ctrl+H): stops playback and every voice, and the effects' tails.
     fn stop_sound(&mut self) {
-        self.transport.silence();
+        self.state.session.transport.silence();
         self.state.message = Some("Sound stopped".into());
     }
 
@@ -8164,7 +8163,7 @@ impl App {
             }
             let Some(i) = self.typing_held.iter().position(|h| h.0 == code) else { return false };
             let (_, row, key) = self.typing_held.remove(i);
-            self.transport.note_off(row, key);
+            self.state.session.transport.note_off(row, key);
             self.typing_lit_changed();
             self.step_edit_up(crate::step_edit::Src::Typing(code));
             return true;
@@ -8207,7 +8206,7 @@ impl App {
         self.locked_hint(crate::rack::NoteSrc::Typing, row);
         self.sync_live();
         let key = key as u16;
-        self.transport.note_on(row, key, TYPING_VELOCITY);
+        self.state.session.transport.note_on(row, key, TYPING_VELOCITY);
         self.typing_held.push((code, row, key));
         self.step_edit_down(crate::step_edit::Src::Typing(code), key, TYPING_VELOCITY);
         self.typing_lit_changed();
@@ -8231,7 +8230,7 @@ impl App {
     pub(crate) fn sync_live(&mut self) {
         if !self.typing_synced {
             self.typing_synced = true;
-            self.transport.update(&crate::rack::play_project(&self.state));
+            self.state.session.transport.update(&crate::rack::play_project(&self.state));
         }
     }
 
@@ -8240,7 +8239,7 @@ impl App {
     pub fn typing_release_all(&mut self) {
         self.step_chord.clear();
         if let Some((row, key, _)) = self.mouse_note.take() {
-            self.transport.note_off(row, key);
+            self.state.session.transport.note_off(row, key);
         }
         self.scrub_release();
         for (_, note) in std::mem::take(&mut self.perf_typed) {
@@ -8250,7 +8249,7 @@ impl App {
             return;
         }
         for (_, row, key) in std::mem::take(&mut self.typing_held) {
-            self.transport.note_off(row, key);
+            self.state.session.transport.note_off(row, key);
         }
         self.typing_lit_changed();
     }
@@ -8712,16 +8711,16 @@ impl App {
             Action::Bar(h) => self.bar_hit(h),
             Action::Play => {
                 self.perf_transport();
-                match self.transport.state() {
+                match self.state.session.transport.state() {
                     // Play toggles pause (the position is held in place); Stop rewinds.
-                    TransportState::Playing => self.transport.pause(),
-                    TransportState::Paused => self.transport.resume(),
+                    TransportState::Playing => self.state.session.transport.pause(),
+                    TransportState::Paused => self.state.session.transport.resume(),
                     TransportState::Stopped => self.play_from_stop(),
                 }
             }
             Action::Stop => {
                 self.perf_transport();
-                self.transport.stop();
+                self.state.session.transport.stop();
                 self.record_stopped();
                 // Stop rewinds to where playback started: the song position (or the piano roll's play-start marker)
                 // stays where it was put, so the next start plays from there again; with a time selection, its start.
@@ -8744,9 +8743,9 @@ impl App {
                 s.set_song_mode(song);
                 // The running playback follows the switch: it restarts in the new mode (a paused one is stopped),
                 // so the playheads always show what is heard.
-                if changed && self.transport.playing() {
-                    let was_playing = !self.transport.paused();
-                    self.transport.stop();
+                if changed && self.state.session.transport.playing() {
+                    let was_playing = !self.state.session.transport.paused();
+                    self.state.session.transport.stop();
                     if was_playing {
                         self.start_playback();
                     }
@@ -9207,12 +9206,12 @@ impl App {
 
     /// Speaker (spec: ui/channel-rack.md §7): plays the current pattern; while it plays, pauses / resumes.
     fn rack_speaker(&mut self) {
-        match self.transport.state() {
-            TransportState::Playing if !self.state.song_mode() => self.transport.pause(),
-            TransportState::Paused if !self.state.song_mode() => self.transport.resume(),
+        match self.state.session.transport.state() {
+            TransportState::Playing if !self.state.song_mode() => self.state.session.transport.pause(),
+            TransportState::Paused if !self.state.song_mode() => self.state.session.transport.resume(),
             _ => {
-                if self.transport.playing() {
-                    self.transport.stop();
+                if self.state.session.transport.playing() {
+                    self.state.session.transport.stop();
                 }
                 self.state.set_song_mode(false);
                 self.start_playback();
@@ -9374,7 +9373,7 @@ impl App {
     /// Rack rows were renumbered (`m(old) = new`, `None` = deleted): hosted plugins, their windows and playback follow.
     pub(crate) fn remap_rows(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
         self.typing_release_all();
-        self.host(|s, t| remap_rows_in(s, t, m));
+        self.host(|s| remap_rows_in(s, m));
     }
 
     /// A row's hosted instrument for cloning: (available plugin index, saved state).
@@ -9397,7 +9396,7 @@ impl App {
 
     /// Host a copy of an instrument (`plugin_copy`) on row `row`.
     pub(crate) fn plugin_paste(&mut self, row: usize, index: usize, blob: &[u8]) {
-        self.host(|s, t| plugin_paste_in(s, t, row, index, blob));
+        self.host(|s| plugin_paste_in(s, row, index, blob));
     }
 
     /// A PATTERNS command from the menu bar, the pattern menu or its key: the ones that open dialogs here, the others
@@ -9598,7 +9597,7 @@ impl App {
 /// settings (spec: plugins/tesla/README.md "Opening Edison slots"), Love Philter's as Pulp Filter and Maximus's as
 /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6), and the FL effects
 /// another Lemon effect recreates (`plugins::FL_RECREATIONS`: Reeverb 2, Balance, Chorus, ...) by that effect.
-pub(crate) fn sync_effects(ses: &mut crate::session::Session, transport: &crate::transport::Transport) {
+pub(crate) fn sync_effects(ses: &mut crate::session::Session) {
     use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
     // The installed EQ plays these slots instead (`host_native`).
     if crate::project_plugins::native_first() {
@@ -9660,7 +9659,7 @@ pub(crate) fn sync_effects(ses: &mut crate::session::Session, transport: &crate:
     if !made {
         return;
     }
-    transport.set_effects(ses.plugins.effects());
+    ses.transport.set_effects(ses.plugins.effects());
     ses.dirty = true;
 }
 
@@ -15149,12 +15148,12 @@ mod tests {
         // A nudge is held while playing only, and any release lets it go (spec §6).
         app.act(Action::Tapper(TapAct::Nudge(1)));
         assert_eq!(crate::tapper::nudging(), 0, "stopped: nothing");
-        app.transport.pretend_at(0.0, false);
+        app.state.session.transport.pretend_at(0.0, false);
         app.act(Action::Tapper(TapAct::Nudge(-1)));
         assert_eq!(crate::tapper::nudging(), -1);
         app.release();
         assert_eq!(crate::tapper::nudging(), 0);
-        app.transport.stop();
+        app.state.session.transport.stop();
         for name in [
             "Resynchronize to taps",
             "Mute all audio during first taps (during playback)",
@@ -15367,7 +15366,7 @@ mod tests {
             }
             app.state.session.project.get_mut().patterns[0].notes = notes;
             app.state.set_song_mode(false);
-            app.transport.set_instruments(app.state.session.plugins.instruments());
+            app.state.session.transport.set_instruments(app.state.session.plugins.instruments());
         } else {
             app.open(song.clone().into());
         }
@@ -15387,18 +15386,18 @@ mod tests {
         for &b in &buffers {
             for _ in 0..runs {
                 AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false, input: None, jack: false }.apply();
-                app.transport.reopen();
+                app.state.session.transport.reopen();
                 let t0 = Instant::now();
                 let info = loop {
                     run(&mut app, 50);
                     // The stream before the reopen may still be the one open for a moment: wait for the new length (a
                     // driver that refuses it runs at its own).
                     let settled = |i: &crate::device::DeviceInfo| i.fixed == Some(b) || t0.elapsed() > Duration::from_secs(3);
-                    if let Some(i) = app.transport.opened().filter(|i| i.host == crate::device::ASIO && i.name == driver && settled(i)) {
+                    if let Some(i) = app.state.session.transport.opened().filter(|i| i.host == crate::device::ASIO && i.name == driver && settled(i)) {
                         break Some(i);
                     }
                     if t0.elapsed() > Duration::from_secs(15) {
-                        eprintln!("{driver} did not open: {:?}", app.transport.take_error());
+                        eprintln!("{driver} did not open: {:?}", app.state.session.transport.take_error());
                         break None;
                     }
                 };
@@ -15406,29 +15405,29 @@ mod tests {
                 app.act(Action::Play);
                 run(&mut app, 2000);
                 eprintln!("{} instruments and {} effects hosted", app.state.session.hosted_rows.len(), app.state.session.plugins.hosted.len() - app.state.session.hosted_rows.len());
-                let _ = app.transport.take_ahead();
-                let u0 = app.transport.underruns();
+                let _ = app.state.session.transport.take_ahead();
+                let u0 = app.state.session.transport.underruns();
                 let (mut min, mut max, mut sum, mut blocks, mut gap, mut load) = (u64::MAX, 0u64, 0.0f64, 0u64, 0u64, 0.0f32);
                 for _ in 0..seconds {
                     // An edit: the engine is rebuilt and swapped in at the position playing (LEMON_EDITS=0: none).
                     if var("LEMON_EDITS").is_none_or(|v| v != "0") {
-                        app.transport.update(&app.state.session.project);
+                        app.state.session.transport.update(&app.state.session.project);
                     }
                     run(&mut app, 1000);
-                    load = load.max(app.transport.load());
-                    if let Some(a) = app.transport.take_ahead() {
+                    load = load.max(app.state.session.transport.load());
+                    if let Some(a) = app.state.session.transport.take_ahead() {
                         (min, max, gap) = (min.min(a.min), max.max(a.max), gap.max(a.gap));
                         sum += a.mean * a.blocks as f64;
                         blocks += a.blocks;
                     }
                 }
-                let du = app.transport.underruns() - u0;
+                let du = app.state.session.transport.underruns() - u0;
                 let rate = f64::from(info.rate);
                 let mean = sum / blocks.max(1) as f64;
                 let tick = rate * 60.0 / (tempo * f64::from(ppq));
                 eprintln!(
                     "{driver} | {} | {} | {tick:.0} | {min} / {mean:.0} / {max} | {:.2} | {:?} | {:.1} | {load:.2} | {du}",
-                    app.transport.block(),
+                    app.state.session.transport.block(),
                     info.rate,
                     mean * 1000.0 / rate,
                     info.latency,
@@ -15454,7 +15453,7 @@ mod tests {
         let index = app.state.session.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
         app.state.session.plugins.create(row, index).unwrap();
         app.state.session.hosted_rows.push(row);
-        app.transport.set_instruments(app.state.session.plugins.instruments());
+        app.state.session.transport.set_instruments(app.state.session.plugins.instruments());
         app.state.selected_channel = row;
         app.state.toggles.push("typing");
         let run = |app: &mut App, ms: u64| {
@@ -15466,7 +15465,7 @@ mod tests {
         };
         run(&mut app, 300);
         // Past the live stream's first 4095 ticks (about 18 s at 140 BPM): it used to go silent there.
-        let u0 = app.transport.underruns();
+        let u0 = app.state.session.transport.underruns();
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_secs(25) {
             app.typing_key(KeyCode::KeyZ, true, false, false);
@@ -15474,12 +15473,12 @@ mod tests {
             app.typing_key(KeyCode::KeyZ, false, false, false);
             run(&mut app, 300);
         }
-        let du = app.transport.underruns() - u0;
+        let du = app.state.session.transport.underruns() - u0;
         eprintln!("long live: {du} dropouts");
         assert!(du < 5, "long live run: {du} dropouts");
         let keys = [KeyCode::KeyZ, KeyCode::KeyX, KeyCode::KeyC, KeyCode::KeyV, KeyCode::KeyB, KeyCode::KeyN, KeyCode::KeyM, KeyCode::KeyQ, KeyCode::KeyW, KeyCode::KeyE];
         let phase = |app: &mut App, name: &str| {
-            let u0 = app.transport.underruns();
+            let u0 = app.state.session.transport.underruns();
             for round in 0..30 {
                 for (i, &k) in keys.iter().enumerate() {
                     if (round + i) % 3 != 0 {
@@ -15493,8 +15492,8 @@ mod tests {
                 run(app, 15);
             }
             run(app, 1500);
-            let du = app.transport.underruns() - u0;
-            let voices = app.transport.engine_voices() + app.state.session.plugins.voices();
+            let du = app.state.session.transport.underruns() - u0;
+            let voices = app.state.session.transport.engine_voices() + app.state.session.plugins.voices();
             eprintln!("{name}: {du} dropouts, {voices} voices after");
             (du, voices)
         };
@@ -15507,7 +15506,7 @@ mod tests {
         let (du, _) = phase(&mut app, "playing");
         app.act(Action::Stop);
         run(&mut app, 500);
-        let v = app.transport.engine_voices() + app.state.session.plugins.voices();
+        let v = app.state.session.transport.engine_voices() + app.state.session.plugins.voices();
         assert!(du < 5 && v == 0, "while playing: {du} dropouts; {v} voices after Stop");
     }
 
@@ -15695,14 +15694,14 @@ mod tests {
         assert_eq!(ch.sound.sampler_flags, Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), "FL's clip channel flags");
         ch.sound.sampler_flags = None;
         a.plugin_tick();
-        a.transport.set_instruments(a.state.session.plugins.instruments());
+        a.state.session.transport.set_instruments(a.state.session.plugins.instruments());
         let p = crate::rack::play_project(&a.state);
         let out = std::env::temp_dir().join(format!("os-app-long-clip-{}-export.wav", std::process::id()));
         a.state.session.plugins.set_offline(true);
-        a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
+        a.state.session.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
         let t0 = std::time::Instant::now();
         loop {
-            match a.transport.export_status() {
+            match a.state.session.transport.export_status() {
                 crate::transport::Export::Done(r) => break assert!(r.is_ok(), "{r:?}"),
                 _ if t0.elapsed() > Duration::from_secs(120) => panic!("export did not finish"),
                 _ => std::thread::sleep(Duration::from_millis(10)),
@@ -15755,7 +15754,7 @@ mod tests {
             if keep {
                 assert!(lemon_sampler::stream::open_files() > 0, "the sample plays from disk");
             }
-            a.transport.set_instruments(a.state.session.plugins.instruments());
+            a.state.session.transport.set_instruments(a.state.session.plugins.instruments());
             let first = *crate::playlist::arr_mut(&mut a.state.session).clips.last().unwrap();
             let second = os_model::Clip { position: first.position + first.length, length: first.length / 2, window: Some((10_000.0, 20_000.0)), ..first };
             crate::playlist::arr_mut(&mut a.state.session).clips.push(second);
@@ -15764,10 +15763,10 @@ mod tests {
             // As `start_export` does with high quality off.
             a.state.session.plugins.set_offline(false);
             lemon_sampler::stream::export_started();
-            a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
+            a.state.session.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
             let t0 = std::time::Instant::now();
             loop {
-                match a.transport.export_status() {
+                match a.state.session.transport.export_status() {
                     crate::transport::Export::Done(r) => break assert!(r.is_ok(), "{r:?}"),
                     _ if t0.elapsed() > Duration::from_secs(120) => panic!("export did not finish"),
                     _ => std::thread::sleep(Duration::from_millis(10)),
@@ -15809,7 +15808,7 @@ mod tests {
         let row = a.state.session.project.channels.len() - 1;
         a.plugin_tick();
         assert!(a.state.session.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
-        a.transport.set_instruments(a.state.session.plugins.instruments());
+        a.state.session.transport.set_instruments(a.state.session.plugins.instruments());
         let first = *crate::playlist::arr_mut(&mut a.state.session).clips.last().unwrap();
         let second = os_model::Clip { position: first.position + first.length / 2, ..first };
         crate::playlist::arr_mut(&mut a.state.session).clips.push(second);
@@ -15822,10 +15821,10 @@ mod tests {
         let p = crate::rack::play_project(&a.state);
         let out = std::env::temp_dir().join(format!("os-app-crossfade-{}-export.wav", std::process::id()));
         a.state.session.plugins.set_offline(true);
-        a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
+        a.state.session.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
         let t0 = std::time::Instant::now();
         loop {
-            match a.transport.export_status() {
+            match a.state.session.transport.export_status() {
                 crate::transport::Export::Done(r) => break assert!(r.is_ok(), "{r:?}"),
                 _ if t0.elapsed() > Duration::from_secs(60) => panic!("export did not finish"),
                 _ => std::thread::sleep(Duration::from_millis(10)),
@@ -16342,7 +16341,7 @@ mod tests {
         app.state.message = None;
         app.key(&Key::Character("h".into()), true, false);
         assert_eq!(app.state.message.as_deref(), Some("Sound stopped"));
-        assert!(!app.transport.playing());
+        assert!(!app.state.session.transport.playing());
     }
 
     /// Shift+4 and Shift+5 go by the number row's key: a Turkish layout's Shift+4 types "+" and is still Shift+4.
@@ -17190,7 +17189,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(16));
             app.tick();
         }
-        assert!(app.transport.playing());
+        assert!(app.state.session.transport.playing());
         app.key(&Key::Character("a".into()), true, false);
         app.key(&Key::Named(NamedKey::Delete), false, false);
         assert!(piano::notes(&app.state.session).is_empty());
@@ -17198,7 +17197,7 @@ mod tests {
         for i in 0..120 {
             std::thread::sleep(std::time::Duration::from_millis(16));
             app.tick();
-            if i > 20 && !app.transport.sounding().is_empty() {
+            if i > 20 && !app.state.session.transport.sounding().is_empty() {
                 loud += 1;
             }
         }
@@ -17229,36 +17228,36 @@ mod tests {
         app.act(Action::PatSong(true));
         app.act(Action::Play);
         let start = std::time::Instant::now();
-        while app.transport.tick() <= 10.0 && start.elapsed() < std::time::Duration::from_secs(3) {
+        while app.state.session.transport.tick() <= 10.0 && start.elapsed() < std::time::Duration::from_secs(3) {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert_eq!(app.transport.state(), T::Playing);
-        assert!(app.transport.song() && app.transport.tick() > 10.0, "song tick {}", app.transport.tick());
+        assert_eq!(app.state.session.transport.state(), T::Playing);
+        assert!(app.state.session.transport.song() && app.state.session.transport.tick() > 10.0, "song tick {}", app.state.session.transport.tick());
         // Pause holds the tick in place; Play resumes from it (no restart).
         app.act(Action::Play);
         step();
-        let held = app.transport.tick();
-        assert_eq!(app.transport.state(), T::Paused);
+        let held = app.state.session.transport.tick();
+        assert_eq!(app.state.session.transport.state(), T::Paused);
         step();
-        assert_eq!(app.transport.tick(), held, "paused tick holds");
+        assert_eq!(app.state.session.transport.tick(), held, "paused tick holds");
         app.act(Action::Play);
         step();
-        assert!(app.transport.tick() > held, "resumed from {held}: {}", app.transport.tick());
+        assert!(app.state.session.transport.tick() > held, "resumed from {held}: {}", app.state.session.transport.tick());
         // Switching to PAT restarts in pattern mode, which loops inside one bar.
         app.act(Action::PatSong(false));
         step();
-        assert!(app.transport.playing() && !app.transport.song());
-        assert!(app.transport.tick() < 384.0 + 1.0);
+        assert!(app.state.session.transport.playing() && !app.state.session.transport.song());
+        assert!(app.state.session.transport.tick() < 384.0 + 1.0);
         // Stop rewinds and stays stopped.
         app.act(Action::Stop);
         step();
-        assert_eq!((app.transport.state(), app.transport.tick()), (T::Stopped, 0.0));
+        assert_eq!((app.state.session.transport.state(), app.state.session.transport.tick()), (T::Stopped, 0.0));
         // An empty playlist does not start SONG mode.
         app.state.session.project.get_mut().arrangements.clear();
         app.act(Action::PatSong(true));
         app.act(Action::Play);
         step();
-        assert_eq!(app.transport.state(), T::Stopped);
+        assert_eq!(app.state.session.transport.state(), T::Stopped);
     }
 
     /// Stop goes back to where playback started: the song position and the piano roll's marker stay where they were
@@ -17407,7 +17406,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(16));
             app.tick();
         }
-        assert!(!app.transport.sounding().is_empty() || app.transport.peaks().0 > 0.0, "playing notes");
+        assert!(!app.state.session.transport.sounding().is_empty() || app.state.session.transport.peaks().0 > 0.0, "playing notes");
         // Right-drag across all rows to erase.
         frame(&mut app, &mut c, None);
         let g = app.piano_geom().unwrap();
@@ -17433,11 +17432,11 @@ mod tests {
         for i in 0..150 {
             std::thread::sleep(std::time::Duration::from_millis(16));
             app.tick();
-            if i > 20 && !app.transport.sounding().is_empty() {
+            if i > 20 && !app.state.session.transport.sounding().is_empty() {
                 loud += 1;
             }
         }
-        assert_eq!(loud, 0, "erased notes still sounding: {:?}", app.transport.sounding());
+        assert_eq!(loud, 0, "erased notes still sounding: {:?}", app.state.session.transport.sounding());
     }
 
     /// The grid / event panel splitter (spec: ui/event-panel-splitter.md): drag with the minimums and collapsing,
@@ -19575,7 +19574,7 @@ mod tests {
         ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
         assert!(app.state.song_mode(), "a click on the ruler switches to SONG");
         assert_eq!(app.state.playlist.pos, 4 * bar);
-        assert!(!app.transport.playing(), "and does not start playback");
+        assert!(!app.state.session.transport.playing(), "and does not start playback");
         assert_eq!(app.state.tempo(), 140.0, "the initial tempo");
     }
 
@@ -20793,11 +20792,11 @@ mod tests {
         }];
         app.act(Action::Play);
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(app.transport.playing() && !app.transport.song());
+        assert!(app.state.session.transport.playing() && !app.state.session.transport.song());
         ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(app.state.song_mode() && app.transport.playing() && app.transport.song(), "the song plays");
-        let tick = app.transport.tick();
+        assert!(app.state.song_mode() && app.state.session.transport.playing() && app.state.session.transport.song(), "the song plays");
+        let tick = app.state.session.transport.tick();
         assert!(tick >= f64::from(4 * bar) && tick < f64::from(5 * bar), "from the clicked bar: {tick}");
         app.act(Action::Stop);
     }
@@ -23642,10 +23641,10 @@ mod tests {
         let tempo = f64::from(a.state.tempo());
         let export = |a: &mut App, tag: &str| -> Vec<f32> {
             let path = std::env::temp_dir().join(format!("lemon-vst2-{tag}-{}.wav", std::process::id()));
-            a.transport.export(&a.state.session.project, os_engine::PlayMode::Song, rate, crate::export::Job::wav(&path));
+            a.state.session.transport.export(&a.state.session.project, os_engine::PlayMode::Song, rate, crate::export::Job::wav(&path));
             let t0 = std::time::Instant::now();
             let _secs = loop {
-                match a.transport.export_status() {
+                match a.state.session.transport.export_status() {
                     crate::transport::Export::Done(r) => break r.expect("export").0,
                     _ if t0.elapsed() > Duration::from_secs(60) => panic!("export did not finish"),
                     _ => std::thread::sleep(Duration::from_millis(10)),
@@ -23695,16 +23694,16 @@ mod tests {
                 let info = p.param_info(master).unwrap();
                 assert!(p.set_param(info.id, info.default));
             }
-            a.transport.take_peaks();
-            a.transport.play(&a.state.session.project, os_engine::PlayMode::Pattern(1), 0.0);
+            a.state.session.transport.take_peaks();
+            a.state.session.transport.play(&a.state.session.project, os_engine::PlayMode::Pattern(1), 0.0);
             std::thread::sleep(Duration::from_millis(1200));
-            let heard = a.transport.take_peaks();
-            let tick = a.transport.tick();
-            a.transport.stop();
+            let heard = a.state.session.transport.take_peaks();
+            let tick = a.state.session.transport.tick();
+            a.state.session.transport.stop();
             std::thread::sleep(Duration::from_millis(100));
-            a.transport.take_peaks();
+            a.state.session.transport.take_peaks();
             std::thread::sleep(Duration::from_millis(200));
-            let after = a.transport.take_peaks();
+            let after = a.state.session.transport.take_peaks();
             println!("live: peaks {heard:?} while playing (at tick {tick:.0}), {after:?} from 100 ms after Stop");
             assert!(heard.0 > 0.01, "heard while playing");
             assert!(heard.0 < 1.0, "played at a level the speakers take, not clipped ({:.2})", heard.0);
@@ -24029,7 +24028,7 @@ mod tests {
         // As picked on the page: the driver is let go of, and the device opens in exclusive mode with the first note.
         app.set_audio(Set::Mode(true));
         let t = std::time::Instant::now();
-        while app.transport.opened().is_some() && t.elapsed() < std::time::Duration::from_secs(3) {
+        while app.state.session.transport.opened().is_some() && t.elapsed() < std::time::Duration::from_secs(3) {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         app.open_settings(AUDIO);
@@ -24602,23 +24601,23 @@ mod detach_tests {
 
 /// `App::remap_rows` in the session: the instances follow rows that moved (`m` gives each row's new row), after the
 /// notes held from the keyboard ended.
-pub(crate) fn remap_rows_in(s: &mut crate::session::Session, transport: &crate::transport::Transport, m: &dyn Fn(usize) -> Option<usize>) {
+pub(crate) fn remap_rows_in(s: &mut crate::session::Session, m: &dyn Fn(usize) -> Option<usize>) {
     s.plugins.remap(m);
     // The rows hosted are the instances' rows.
     s.hosted_rows = s.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
     s.plugins.sampler_failed = s.plugins.sampler_failed.iter().filter_map(|&r| m(r)).collect();
     s.plugins.wrap_failed = s.plugins.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
     s.plugins.native_failed = s.plugins.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
-    transport.set_instruments(s.plugins.instruments());
+    s.transport.set_instruments(s.plugins.instruments());
     s.dirty = true;
 }
 
 /// `App::plugin_paste` in the session: row `row` hosts available plugin `index` from saved state `blob`.
-pub(crate) fn plugin_paste_in(s: &mut crate::session::Session, transport: &crate::transport::Transport, row: usize, index: usize, blob: &[u8]) {
+pub(crate) fn plugin_paste_in(s: &mut crate::session::Session, row: usize, index: usize, blob: &[u8]) {
     if s.plugins.create_with(row, index, Some(blob)).is_ok() {
         if !s.hosted_rows.contains(&row) {
             s.hosted_rows.push(row);
         }
-        transport.set_instruments(s.plugins.instruments());
+        s.transport.set_instruments(s.plugins.instruments());
     }
 }

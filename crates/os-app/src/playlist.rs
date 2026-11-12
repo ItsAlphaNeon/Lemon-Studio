@@ -2476,7 +2476,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     // Performance mode: a click on a clip in the zone launches it, a right click stops its track (spec:
     // ui/performance-mode.md §3).
     if let Some((ci, (t, _))) = hit.and_then(|ci| crate::perform::slot_of(s, ci).map(|slot| (ci, slot))) {
-        let now = app.transport.playing().then(|| app.transport.tick().max(0.0) as u32);
+        let now = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
         let s = &mut app.state;
         if right {
             crate::perform::stop(s, t, now, alt);
@@ -3117,7 +3117,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
     }
     match d {
         PlDrag::Perform => {
-            let now = app.transport.playing().then(|| app.transport.tick().max(0.0) as u32);
+            let now = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
             crate::perform::release(&mut app.state, now);
         }
         PlDrag::Slice { .. } => {
@@ -3129,16 +3129,16 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
         PlDrag::ZoomBox { x0, y0 } => zoom_to(app, grid, x0, y0),
-        PlDrag::Playback => app.transport.stop(),
+        PlDrag::Playback => app.state.session.transport.stop(),
         PlDrag::SongPos => {
             // The song jumps to the new position; a running pattern goes on as the song from there, a paused one
             // stops, as with the PAT / SONG switch (§7, audio/transport.md).
-            if app.transport.playing() {
-                if app.transport.song() || !app.transport.paused() {
+            if app.state.session.transport.playing() {
+                if app.state.session.transport.song() || !app.state.session.transport.paused() {
                     let p = app.state.playlist.pos;
                     app.play_song_from(p);
                 } else {
-                    app.transport.stop();
+                    app.state.session.transport.stop();
                 }
             }
         }
@@ -3158,7 +3158,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
                 s.session.dirty = true;
             }
             // The song position went to the marker: playback follows, as from the ruler (§7a).
-            if app.transport.playing() && (app.transport.song() || !app.transport.paused()) {
+            if app.state.session.transport.playing() && (app.state.session.transport.song() || !app.state.session.transport.paused()) {
                 let p = app.state.playlist.pos;
                 app.play_song_from(p);
             }
@@ -3368,7 +3368,7 @@ pub fn press_header(app: &mut App, t: u16, right: bool, at: (f32, f32)) {
     // Performance mode: a click on a playing track's header stops it at the next sync point, with Alt at once (spec:
     // ui/performance-mode.md §3).
     if crate::perform::zone(s).is_some() && s.playlist.perform.live.contains_key(&t) {
-        let playing = app.transport.playing().then(|| app.transport.tick().max(0.0) as u32);
+        let playing = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
         crate::perform::stop(&mut app.state, t, playing, app.alt);
     }
     let s = &mut app.state;
