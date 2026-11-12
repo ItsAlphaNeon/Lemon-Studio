@@ -1554,7 +1554,7 @@ fn screenshot(args: &[String]) {
         None => {}
     }
     if let Some(p) = pattern {
-        app.state.pattern = p;
+        app.state.set_pattern(p);
     }
     if let Some(c) = channel {
         app.state.selected_channel = c;
@@ -1639,7 +1639,7 @@ fn screenshot(args: &[String]) {
         app.state.rack_size.1 = h;
     }
     if rack_all {
-        app.state.rack.filter = rack::Filter::All;
+        rack::set_filter(&mut app.state, rack::Filter::All);
     }
     if let Some(r) = rack_scroll {
         app.state.rack_scroll = r * views::rack::ROW_H;

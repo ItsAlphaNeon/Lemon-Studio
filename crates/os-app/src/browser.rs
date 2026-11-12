@@ -60,7 +60,7 @@ impl App {
                 }
                 match row.item {
                     Item::Pattern(n) => {
-                        s.pattern = n;
+                        s.set_pattern(n);
                     }
                     Item::Channel(c) => {
                         s.selected_channel = c;
@@ -87,7 +87,7 @@ impl App {
     /// Clicking a sample plays it once (spec §7): cut off after `PREVIEW_LIMIT` unless "Full sample preview" is ticked.
     pub(crate) fn preview_sample(&self, path: &str) {
         let mut p = crate::app::preview_project(path);
-        p.tempo = Some(self.state.tempo);
+        p.tempo = Some(self.state.tempo());
         crate::preview_track::route(&mut p, &self.state.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
         let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
         self.transport.preview_for(p, limit);
@@ -265,7 +265,7 @@ impl App {
                 s.browser_search.clear();
                 s.browser_open.insert(view::project_root());
                 s.browser_open.insert(key.clone());
-                let cur = view::Item::Pattern(s.pattern);
+                let cur = view::Item::Pattern(s.pattern());
                 let row = view::rows(s).into_iter().find(|r| r.item == cur).map(|r| r.key);
                 select(s, row.as_ref().unwrap_or(&key));
                 reveal(s);
@@ -593,7 +593,7 @@ impl App {
                     let i = pl::place(s, track, tick);
                     s.playlist.sel = vec![i];
                 } else if matches!(win, Some(Win::PianoRoll | Win::ChannelRack)) {
-                    s.pattern = n;
+                    s.set_pattern(n);
                 }
             }
             Item::Channel(c) => {
@@ -736,7 +736,7 @@ impl App {
             }
             // What a click on the row does, without the click's open / close.
             RowCmd::Activate => match row.item {
-                Item::Pattern(n) => s.pattern = n,
+                Item::Pattern(n) => s.set_pattern(n),
                 Item::Channel(c) => {
                     s.selected_channel = c;
                     s.rack.select_only(c);
@@ -746,7 +746,7 @@ impl App {
             },
             RowCmd::Pattern(pc) => {
                 let Item::Pattern(n) = row.item else { return None };
-                s.pattern = n;
+                s.set_pattern(n);
                 return self.pattern_cmd(pc);
             }
             RowCmd::ChannelWindow => {

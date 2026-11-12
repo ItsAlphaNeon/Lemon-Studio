@@ -328,7 +328,7 @@ impl App {
         if new.is_empty() {
             return Some(format!("The score log has no notes from the last {minutes} minutes"));
         }
-        let pattern = s.pattern;
+        let pattern = s.pattern();
         let full = s.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty());
         let replace = match replace {
             Some(r) => r,
@@ -371,7 +371,7 @@ impl App {
     /// playlist's in SONG mode; one with no length does not count.
     pub(crate) fn selection_loop(&self) -> Option<(u32, u32)> {
         let s = &self.state;
-        let r = if s.song_mode { s.playlist.range } else if s.shown(crate::app::Win::PianoRoll) { s.piano.range } else { None };
+        let r = if s.song_mode() { s.playlist.range } else if s.shown(crate::app::Win::PianoRoll) { s.piano.range } else { None };
         r.filter(|r| r.1 > r.0)
     }
 
@@ -396,7 +396,7 @@ impl App {
         self.start_playback_counted(bars);
         if bars > 0 && self.transport.playing() {
             let p = &self.state.project;
-            let tempo = p.tick_tempo(self.state.tempo.max(1.0));
+            let tempo = p.tick_tempo(self.state.tempo().max(1.0));
             let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
             let beats = bars * u32::from(p.bar().0.max(1));
             self.state.rec.count = Some(CountIn { from: std::time::Instant::now(), beat, beats });
@@ -578,10 +578,10 @@ impl App {
     /// The take starts: one undo step for it, with the playlist too in SONG mode (a clip may be placed).
     fn open_take(&mut self, song: bool) {
         let s = &mut self.state;
-        if s.rec.take.as_ref().is_some_and(|t| t.pattern == s.pattern) {
+        if s.rec.take.as_ref().is_some_and(|t| t.pattern == s.pattern()) {
             return;
         }
-        let pattern = s.pattern;
+        let pattern = s.pattern();
         let snap = crate::history::Snap::pattern(s, pattern);
         let snap = if song {
             crate::playlist::arr_mut(s);
@@ -607,7 +607,7 @@ impl App {
             return Some(p);
         }
         let bar = s.project.bar_ticks().max(1);
-        let pattern = s.pattern;
+        let pattern = s.pattern();
         let whole = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none();
         let ti = t.max(0.0) as u32;
         if let Some(p) = crate::piano::pattern_tick_in_song(s, t) {
@@ -795,7 +795,7 @@ impl App {
             }
         }
         let r = &self.state.rec;
-        let changed = r.take.as_ref().is_some_and(|t| t.pattern != self.state.pattern);
+        let changed = r.take.as_ref().is_some_and(|t| t.pattern != self.state.pattern());
         if (r.was_live && !live) || changed {
             self.end_take();
             if !self.transport.playing() && self.state.rec.armed && Opt::DisarmOnStop.on() {
@@ -845,7 +845,7 @@ impl App {
 /// The notes held for the current pattern's take, from their start (quantized as they will be written) to playback
 /// tick `now` (spec §2 "Shown while held").
 pub fn held_notes(s: &State, now: f64) -> Vec<Note> {
-    if s.rec.take.as_ref().is_none_or(|t| t.pattern != s.pattern) {
+    if s.rec.take.as_ref().is_none_or(|t| t.pattern != s.pattern()) {
         return Vec::new();
     }
     let note = |h: &Held| {
@@ -866,7 +866,7 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
         return None;
     }
     let bar = s.project.bar_ticks().max(1);
-    let pattern = s.pattern;
+    let pattern = s.pattern();
     let c = crate::playlist::arr_mut(s)
         .clips
         .iter_mut()
@@ -901,7 +901,7 @@ fn point_of(s: &State, a: &crate::app::Action) -> Option<(u32, i32)> {
             let id = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f)] + b;
             (target::mixer(t, id), track(t)?.eq[usize::from(b)][usize::from(f)])
         }
-        Action::Tempo => (target::TEMPO, r(s.tempo * 1000.0)),
+        Action::Tempo => (target::TEMPO, r(s.tempo() * 1000.0)),
         _ => return None,
     })
 }
@@ -921,7 +921,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.selected_channel = 0;
-        app.state.pattern = 1;
+        app.state.set_pattern(1);
         app.state.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         app.state.global_snap.now = Snap::Step;
         app
@@ -1367,7 +1367,7 @@ mod tests {
     fn timing_follows_the_tempo_playing() {
         let mut app = app();
         app.state.project.get_mut().tempo = Some(140.0);
-        app.state.tempo = 70.0;
+        app.state.set_tempo(70.0);
         let p = &app.state.project;
         let at_70 = f64::from(p.ppq) * p.tick_tempo(70.0) / 60.0;
         assert!((crate::score_log::ticks_per_second(&app.state) - at_70).abs() < 1e-9);
@@ -1388,13 +1388,13 @@ mod tests {
         app.record_control(&Action::Fader(1));
         app.record_control(&Action::Knob(KnobId::MixPan(1)));
         app.transport.pretend_at(48.0, false);
-        app.state.tempo = 150.0;
+        app.state.set_tempo(150.0);
         app.record_control(&Action::Tempo);
         app.record_param(target::slot_param(1, 2, 0), (-64.0, 64.0), 0.75);
         app.record_param(target::slot_param(1, 2, 1), (0.0, 1.0), 0.25);
         app.record_knob(KnobId::Swing);
         let points = |app: &App| {
-            let p = app.state.project.pattern(app.state.pattern).map(|p| p.controls.clone()).unwrap_or_default();
+            let p = app.state.project.pattern(app.state.pattern()).map(|p| p.controls.clone()).unwrap_or_default();
             p.into_iter().map(|c| (c.position, c.kind, c.value)).collect::<Vec<_>>()
         };
         assert_eq!(

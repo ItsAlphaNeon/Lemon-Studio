@@ -72,8 +72,8 @@ pub fn job(s: &State, dir: &Path, stem: &str) -> ex::Job {
         reveal: false,
         ..Options::default()
     };
-    let tempo = s.project.tick_tempo(s.tempo);
-    let ticks = crate::piano::pattern_length(s, s.pattern);
+    let tempo = s.project.tick_tempo(s.tempo());
+    let ticks = crate::piano::pattern_length(s, s.pattern());
     ex::Job {
         options,
         folder: dir.to_path_buf(),
@@ -112,6 +112,7 @@ pub fn add_channel(s: &mut State, path: &str, pattern: u16) -> u16 {
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
+        lemon_icon: None,
     });
     let row = s.project.channels.len() - 1;
     s.selected_channel = row;
@@ -187,7 +188,7 @@ impl App {
             return;
         }
         let s = &self.state;
-        let pattern = s.pattern.max(1);
+        let pattern = s.pattern().max(1);
         if !s.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty()) {
             let text = format!("Nothing to render: {} has no notes.", crate::patterns::name_of(s, pattern));
             return self.tell(crate::dialog::Kind::Warning, TITLE, crate::dialog::spans(&[&text]));
@@ -211,7 +212,7 @@ impl App {
             return;
         }
         let s = &self.state;
-        let pattern = s.pattern.max(1);
+        let pattern = s.pattern().max(1);
         if !s.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty()) {
             let text = format!("Nothing to render: {} has no notes.", crate::patterns::name_of(s, pattern));
             return self.tell(crate::dialog::Kind::Warning, TITLE, crate::dialog::spans(&[&text]));
@@ -237,7 +238,7 @@ impl App {
             return self.invalidate();
         }
         let job = self.export_job(f);
-        self.pattern_render = Some(Pending { pattern: self.state.pattern.max(1), replace: false });
+        self.pattern_render = Some(Pending { pattern: self.state.pattern().max(1), replace: false });
         self.start_export(job, false);
     }
 
@@ -269,7 +270,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::locked::Locked::new(crate::app::test_project());
         app.state.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
-        app.state.song_mode = false;
+        app.state.set_song_mode(false);
         app
     }
 
@@ -394,7 +395,7 @@ mod tests {
         crate::history::undo(&mut app.state);
         assert_eq!(app.state.project.channels.len(), channels, "one undo step");
         // A pattern with no notes: a warning, no render.
-        app.state.pattern = 2;
+        app.state.set_pattern(2);
         app.pattern_cmd(crate::patterns::Cmd::QuickRender);
         assert!(app.export.is_none() && app.pattern_render.is_none() && !app.state.dialogs.is_empty());
         let _ = std::fs::remove_dir_all(&d);
@@ -407,7 +408,7 @@ mod tests {
         let mut app = app();
         let d = temp("form");
         with_data_folder(&mut app, &d);
-        app.state.song_mode = true;
+        app.state.set_song_mode(true);
         let channels = app.state.project.channels.len();
         app.pattern_cmd(crate::patterns::Cmd::RenderAsClip);
         let Some(crate::dialog::Modal { body: crate::dialog::Body::Project(crate::project_forms::Form::Export(f)), .. }) = app.state.dialogs.last() else {

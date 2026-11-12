@@ -446,7 +446,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 pats.sort_by_key(|p| p.number);
                 for pat in pats {
                     let label = pat.name.clone().unwrap_or_else(|| format!("Pattern {}", pat.number));
-                    leaf(out, &parent, label, Icon::Note, cat, pat.number == s.pattern, Item::Pattern(pat.number));
+                    leaf(out, &parent, label, Icon::Note, cat, pat.number == s.pattern(), Item::Pattern(pat.number));
                 }
             }
             // Hosted plugins open into their parameters (spec: plugins/plugin-parameters.md §6).

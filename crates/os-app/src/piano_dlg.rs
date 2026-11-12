@@ -584,7 +584,7 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
     match d.tool {
         Tool::Flam => {
             let set = d.flam;
-            let off = set.offset(u32::from(s.project.ppq.max(4)), s.tempo);
+            let off = set.offset(u32::from(s.project.ppq.max(4)), s.tempo());
             let mut used: Vec<u16> = piano::notes(s).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
             used.sort_unstable();
             used.dedup();
@@ -616,13 +616,13 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
         }
         Tool::Lfo => {
             let (set, lane, ppq) = (d.lfo, s.piano.lane, u32::from(s.project.ppq.max(4)));
-            let len = piano::pattern_length(s, s.pattern);
+            let len = piano::pattern_length(s, s.pattern());
             if lane.is_channel() {
                 return lfo_points(s, &set, lane, ppq, len, step);
             }
             // With a selection the time starts at its first note and End is reached a tick before its end
             // (piano-lfo.md §3).
-            let sel = piano::channel(s).is_some_and(|ch| !s.piano.selection(s.pattern, Some(ch)).is_empty());
+            let sel = piano::channel(s).is_some_and(|ch| !s.piano.selection(s.pattern(), Some(ch)).is_empty());
             crate::piano_tools::apply_as(
                 s,
                 |_, ns| {
@@ -678,7 +678,7 @@ fn randomize_notes(s: &mut State, step: Option<&'static str>) -> bool {
     notes.extend(out);
     let end = notes.len();
     p.notes = notes;
-    s.piano.select(s.pattern, ch, (start..end).collect());
+    s.piano.select(s.pattern(), ch, (start..end).collect());
     piano::finish_edit(s);
     s.piano.dirty = true;
     true
@@ -714,7 +714,7 @@ pub fn preview(s: &mut State) {
     };
     let (mut now, mut now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
     let fresh = match &s.piano_dlg.session {
-        Some(se) => se.pattern != s.pattern || se.channel != ch || se.last != now || se.last_ctl != now_ctl,
+        Some(se) => se.pattern != s.pattern() || se.channel != ch || se.last != now || se.last_ctl != now_ctl,
         None => true,
     };
     if fresh {
@@ -722,8 +722,8 @@ pub fn preview(s: &mut State) {
         if restore(s) {
             (now, now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
         }
-        let base_sel = s.piano.selection(s.pattern, Some(ch));
-        let se = Session { pattern: s.pattern, channel: ch, base: now, base_sel, base_ctl: now_ctl, last: Vec::new(), last_ctl: Vec::new(), shown: false };
+        let base_sel = s.piano.selection(s.pattern(), Some(ch));
+        let se = Session { pattern: s.pattern(), channel: ch, base: now, base_sel, base_ctl: now_ctl, last: Vec::new(), last_ctl: Vec::new(), shown: false };
         s.piano_dlg.session = Some(se);
     }
     restore(s);
@@ -760,7 +760,7 @@ pub fn accept(s: &mut State) -> String {
     let (tool, on_events) = (s.piano_dlg.tool, s.piano_dlg.on_events);
     let who = if on_events { "Event editor" } else { "Piano roll" };
     // Accept applies what was previewed: after a switch to another pattern, the previewed one only gets its notes back.
-    let here = s.piano_dlg.session.as_ref().is_some_and(|se| se.pattern == s.pattern);
+    let here = s.piano_dlg.session.as_ref().is_some_and(|se| se.pattern == s.pattern());
     if !restore(s) || !here {
         s.piano_dlg.session = None;
         return format!("{who}: nothing to change");

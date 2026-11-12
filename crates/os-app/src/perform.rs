@@ -630,7 +630,7 @@ pub fn toggle(s: &mut State) -> String {
     let on = !on(s);
     s.project.get_mut().performance = Some(on);
     if on {
-        s.song_mode = true;
+        s.set_song_mode(true);
     } else {
         s.playlist.perform = Perform::default();
     }
@@ -672,7 +672,7 @@ pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
     a.markers.push(TimeMarker { kind: TimeMarker::START, ..TimeMarker::new(start, "Start") });
     a.markers.sort_by_key(|m| m.position);
     s.project.get_mut().performance = Some(true);
-    s.song_mode = true;
+    s.set_song_mode(true);
     s.playlist.pos = start;
     s.piano.dirty = true;
     format!("Prepared for performance mode: {count} columns, Start marker at bar {}", start / bar + 1)
@@ -1174,13 +1174,13 @@ mod tests {
         let m = markers(s);
         assert_eq!(m.len(), 17);
         assert_eq!((m[1].position, m[15].position, m[16].kind, m[16].position), (1536, 23040, TimeMarker::START, 24960));
-        assert_eq!((s.project.performance, s.song_mode, s.playlist.pos), (Some(true), true, 24960));
+        assert_eq!((s.project.performance, s.song_mode(), s.playlist.pos), (Some(true), true, 24960));
         assert_eq!(columns(s).len(), 16);
         assert_eq!(toggle(s), "Performance mode: off");
         assert_eq!(zone(s), None);
-        s.song_mode = false;
+        s.set_song_mode(false);
         assert_eq!(toggle(s), "Performance mode: on");
-        assert!(s.song_mode);
+        assert!(s.song_mode());
     }
 
     /// §1: Prepare asks first, then Marker settings sets the count and spacing; Cancel leaves the project alone.

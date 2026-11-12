@@ -211,7 +211,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         for (cat, name) in [("Minimal", "Basic with limiter"), ("Utility", "Scoring")] {
             let mut a = App::new(None);
-            a.state.tempo = 140.0;
+            a.state.set_tempo(140.0);
             let ch = a.state.project.channels[0].clone();
             a.state.project.get_mut().channels.push(ch);
             let at = dir.join(cat).join(name);
@@ -289,7 +289,7 @@ mod tests {
         app.set_template("Minimal/Basic with limiter");
         app.menu_item(0, crate::views::menus::FILE_NEW);
         assert!(app.state.dialogs.is_empty(), "nothing to discard");
-        assert_eq!(app.state.tempo, 140.0);
+        assert_eq!(app.state.tempo(), 140.0);
         assert_eq!(app.state.project.channels.len(), 6);
         assert_eq!(app.state.path, None, "untitled: Save asks where");
         assert!(app.state.file.is_some(), "the template's events are kept for the save");
@@ -310,7 +310,7 @@ mod tests {
         std::fs::remove_dir_all(dir.join("Minimal")).unwrap();
         assert_eq!(name(), "Empty");
         app.menu_item(0, crate::views::menus::FILE_NEW);
-        assert_eq!((app.state.tempo, app.state.project.channels.len(), app.state.file.is_none()), (130.0, 1, true));
+        assert_eq!((app.state.tempo(), app.state.project.channels.len(), app.state.file.is_none()), (130.0, 1, true));
         assert_eq!(app.state.message.as_deref(), Some("New project"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -327,23 +327,23 @@ mod tests {
         // Default template.
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.path.clone()), (140.0, None));
+        assert_eq!((a.state.tempo(), a.state.path.clone()), (140.0, None));
         // Empty project.
         prefs::set_choice(&prefs::STARTUP_PROJECT, 0);
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.project.channels.len(), a.state.file.is_none()), (130.0, 5, true), "App::new's project, untouched");
+        assert_eq!((a.state.tempo(), a.state.project.channels.len(), a.state.file.is_none()), (130.0, 5, true), "App::new's project, untouched");
         // Last used project: the file last saved; a backup copy does not count.
         prefs::set_choice(&prefs::STARTUP_PROJECT, 2);
         let song = dir.join("Last.flp");
-        app.state.tempo = 111.0;
+        app.state.set_tempo(111.0);
         app.save_to(song.clone());
         assert_eq!(last_project(), Some(std::path::absolute(&song).unwrap()));
         assert!(app.save_copy(dir.join("copy.flp")).is_some_and(|r| r.is_ok()));
         assert_eq!(last_project(), Some(std::path::absolute(&song).unwrap()), "a copy is not the last used project");
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.path.as_deref()), (111.0, Some(std::path::absolute(&song).unwrap().as_path())));
+        assert_eq!((a.state.tempo(), a.state.path.as_deref()), (111.0, Some(std::path::absolute(&song).unwrap().as_path())));
         // Opening another file makes it the last used project.
         let other = dir.join("Other.flp");
         std::fs::copy(&song, &other).unwrap();
@@ -353,11 +353,11 @@ mod tests {
         std::fs::remove_file(&other).unwrap();
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.path.clone()), (140.0, None));
+        assert_eq!((a.state.tempo(), a.state.path.clone()), (140.0, None));
         std::fs::write(&other, b"not a project").unwrap();
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.path.clone()), (140.0, None));
+        assert_eq!((a.state.tempo(), a.state.path.clone()), (140.0, None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

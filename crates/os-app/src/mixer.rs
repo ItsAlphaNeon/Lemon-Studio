@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use os_model::{MixerTrack, Rgb};
 
 use crate::app::{App, State};
-use crate::playlist::IconOwner;
 use crate::control::{command::Region, edit};
 
 /// Undo step names of the mixer's edits.
@@ -221,11 +220,6 @@ pub struct MixerUi {
     /// Selected tracks besides the current one (Ctrl+click, §2).
     pub sel: Vec<u16>,
     pub layout: u8,
-    /// Slot names typed in the rename box (session only).
-    pub slot_names: HashMap<(u16, u8), String>,
-    /// Slot colours from the slot menu's Change color... / Random color (session only, as the names; Lemon Studio's
-    /// design: drawn as a bar at the slot's left edge).
-    pub slot_colors: HashMap<(u16, u8), Rgb>,
     pub pending: Vec<FxReq>,
     /// Meter state per track (`meters::Meter`), fed by `feed_meters`.
     pub meters: Vec<crate::meters::Meter>,
@@ -279,7 +273,7 @@ pub const WAVE_LEN: usize = 600;
 
 impl Default for MixerUi {
     fn default() -> Self {
-        MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), slot_colors: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
+        MixerUi { sel: Vec::new(), layout: WIDE, pending: Vec::new(), meters: Vec::new(),
             meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None, waveforms: false, waves: Vec::new(), extra: true,
             faders: FaderGroup::default() }
     }
@@ -374,25 +368,16 @@ pub fn receives(s: &State, n: u16) -> bool {
 /// The slot's shown name (renamed, else the plugin's name).
 pub fn slot_name(s: &State, t: u16, slot: u8) -> Option<String> {
     let p = track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
-    Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| crate::project_plugins::slot_title(p)))
+    Some(slot_label(s, t, slot).unwrap_or_else(|| crate::project_plugins::slot_title(p)))
 }
 
 /// The slot's colour, when it holds a plugin and was given one.
 pub fn slot_color(s: &State, t: u16, slot: u8) -> Option<Rgb> {
-    track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
-    s.mixer.slot_colors.get(&(t, slot)).copied()
+    let m = track(s, t)?;
+    m.slots.get(usize::from(slot))?.as_ref()?;
+    m.slot_colors[usize::from(slot)]
 }
 
-/// The slots' session-only names and colours follow their slots: `f` says where (track, slot) goes, None drops it.
-fn remap_slot_ui(s: &mut State, f: impl Fn(u16, u8) -> Option<(u16, u8)>) {
-    let ui = &mut s.mixer;
-    ui.slot_names = std::mem::take(&mut ui.slot_names).into_iter().filter_map(|((t, k), v)| Some((f(t, k)?, v))).collect();
-    ui.slot_colors = std::mem::take(&mut ui.slot_colors).into_iter().filter_map(|((t, k), v)| Some((f(t, k)?, v))).collect();
-    remap_icons(s, |o| match o {
-        IconOwner::Slot(t, k) => f(t, k).map(|(t, k)| IconOwner::Slot(t, k)),
-        o => Some(o),
-    });
-}
 
 /// Automation and controllers follow mixer places that moved (`track` and `slot` as `target::moved` takes them; spec:
 /// audio/automation.md "Targets follow moves"): the project's targets (`Project::follow_mixer_places`), the event
@@ -442,22 +427,44 @@ fn moved_link(l: crate::typein::Target, track: &dyn Fn(u16) -> Option<u16>, slot
     })
 }
 
-/// Moves the tracks' icons as the tracks move (`m`: old index to new, `None` deleted).
-fn remap_track_ui(s: &mut State, m: impl Fn(u16) -> Option<u16>) {
-    remap_icons(s, |o| match o {
-        IconOwner::Track(t) => m(t).map(IconOwner::Track),
-        o => Some(o),
+/// Forgets slot `k` of track `t`'s name, colour and icon (a new or removed plugin).
+fn forget_slot_ui(s: &mut State, t: u16, k: u8) {
+    s.project.write_if(|p| {
+        let Some(m) = p.mixer.iter_mut().find(|m| m.index == t) else { return false };
+        let k = usize::from(k);
+        let had = m.slot_names[k].is_some() || m.slot_colors[k].is_some() || m.slot_icons[k].is_some();
+        (m.slot_names[k], m.slot_colors[k], m.slot_icons[k]) = (None, None, None);
+        had
     });
 }
 
-fn remap_icons(s: &mut State, f: impl Fn(IconOwner) -> Option<IconOwner>) {
-    let icons = &mut s.playlist.icons;
-    *icons = std::mem::take(icons).into_iter().filter_map(|(o, i)| Some((f(o)?, i))).collect();
+/// Every slot's name typed in Lemon Studio, by (track, slot).
+pub fn slot_names_of(p: &os_model::Project) -> HashMap<(u16, u8), String> {
+    p.mixer.iter().flat_map(|m| m.slot_names.iter().enumerate().filter_map(move |(k, n)| Some(((m.index, k as u8), n.clone()?)))).collect()
 }
 
-/// Forgets slot `k` of track `t`'s name and colour (a new or removed plugin).
-fn forget_slot_ui(s: &mut State, t: u16, k: u8) {
-    remap_slot_ui(s, |a, b| ((a, b) != (t, k)).then_some((a, b)));
+/// Every slot's colour, by (track, slot).
+pub fn slot_colors_of(p: &os_model::Project) -> HashMap<(u16, u8), Rgb> {
+    p.mixer.iter().flat_map(|m| m.slot_colors.iter().enumerate().filter_map(move |(k, c)| Some(((m.index, k as u8), (*c)?)))).collect()
+}
+
+/// Lemon Studio's name typed for slot `k` of track `t` (the rename box), if any.
+pub fn slot_label(s: &State, t: u16, k: u8) -> Option<String> {
+    track(s, t)?.slot_names.get(usize::from(k))?.clone()
+}
+
+/// Names slot `k` of track `t` (`None`: its plugin's name again).
+pub fn set_slot_label(s: &mut State, t: u16, k: u8, name: Option<String>) {
+    s.project.write_if(|p| {
+        p.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_names.get_mut(usize::from(k))).is_some_and(|v| std::mem::replace(v, name) != *v)
+    });
+}
+
+/// Colours slot `k` of track `t` (`None`: none).
+pub fn set_slot_color(s: &mut State, t: u16, k: u8, color: Option<Rgb>) {
+    s.project.write_if(|p| {
+        p.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_colors.get_mut(usize::from(k))).is_some_and(|v| std::mem::replace(v, color) != *v)
+    });
 }
 
 /// Tesla's "For" index of 5 minutes (Edison's menu: Forever, 1, 3, 5 minutes, ...), the audio logger's length.
@@ -1385,8 +1392,6 @@ fn remove_tracks(s: &mut State, gone: &[u16]) -> Option<String> {
     follow_places(s, &m, &|t, k| Some((m(t)?, k)));
     s.selected_mixer = m(s.selected_mixer).unwrap_or(1).min(inserts(s));
     s.mixer.sel = s.mixer.sel.iter().filter_map(|&t| m(t)).collect();
-    remap_slot_ui(s, |t, k| Some((m(t)?, k)));
-    remap_track_ui(s, &m);
     changed(s);
     Some(format!("Removed {} unused mixer track(s)", gone.len()))
 }
@@ -1493,8 +1498,6 @@ fn renumber(s: &mut State, m: &dyn Fn(u16) -> u16, from: u16, to: u16, d: i32) {
     follow_places(s, &|t| Some(m(t)), &|t, k| Some((m(t), k)));
     s.selected_mixer = m(s.selected_mixer);
     s.mixer.sel = s.mixer.sel.iter().map(|&t| m(t)).collect();
-    remap_slot_ui(s, |t, k| Some((m(t), k)));
-    remap_track_ui(s, |t| Some(m(t)));
     let mut map = Vec::new();
     for t in &old {
         for k in 0..10u8 {
@@ -1537,8 +1540,6 @@ pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
     for k in 0..10 {
         s.mixer.pending.push(FxReq::Delete { track: n, slot: k });
     }
-    remap_slot_ui(s, |t, k| (t != n).then_some((t, k)));
-    remap_track_ui(s, |t| (t != n).then_some(t));
     // The hidden last track stays last; the default track comes before it (spec: flp/events/mixer.md "The last track").
     let hidden = len - 1;
     let m = move |t: u16| if t > n && t < hidden { t - 1 } else { t };
@@ -1573,8 +1574,6 @@ pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
         }
     }
     s.mixer.pending.push(FxReq::Remap(map));
-    remap_slot_ui(s, |t, k| Some((m(t), k)));
-    remap_track_ui(s, |t| Some(m(t)));
     s.mixer.sel.clear();
     s.selected_mixer = n.min(inserts(s)).max(1);
     changed(s);
@@ -2334,10 +2333,12 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 m.slot_on.swap(a, b);
                 m.slot_mix.swap(a, b);
                 m.slot_cpu.swap(a, b);
+                m.slot_names.swap(a, b);
+                m.slot_colors.swap(a, b);
+                m.slot_icons.swap(a, b);
             }
             let (ka, kb) = (a as u8, b as u8);
             let swap = move |u: u16, k: u8| Some((u, if u != t { k } else if k == ka { kb } else if k == kb { ka } else { k }));
-            remap_slot_ui(s, swap);
             follow_places(s, &Some, &swap);
             s.mixer.pending.push(FxReq::Remap(vec![((t, a as u8), (t, b as u8)), ((t, b as u8), (t, a as u8))]));
             changed(s);
@@ -2345,16 +2346,13 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::SlotColor(slot, c) => {
             let t = s.selected_mixer;
-            match c {
-                Some(c) => s.mixer.slot_colors.insert((t, slot), c),
-                None => s.mixer.slot_colors.remove(&(t, slot)),
-            };
+            set_slot_color(s, t, slot, c);
             None
         }
         MCmd::SlotRandomColor(slot) => {
             let t = s.selected_mixer;
             let c = crate::patterns::random_color((u64::from(t) << 8 | u64::from(slot)).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed()));
-            s.mixer.slot_colors.insert((t, slot), c);
+            set_slot_color(s, t, slot, Some(c));
             None
         }
         MCmd::SlotRename(slot) => {
@@ -2696,7 +2694,7 @@ impl App {
         }
         #[cfg(plugin_windows)]
         {
-            let info = fx_info(&self.state.project, &self.state.mixer, key);
+            let info = fx_info(&self.state.project, key);
             match info.map(|i| self.plugins.open_window(key, i)) {
                 Some(Ok(())) => {
                     self.state.raise(crate::app::Win::Hosted(key));
@@ -2740,10 +2738,10 @@ impl App {
 
 /// The plugin frame's title for a mixer slot: "Name (Insert N)" / "(Master)" (§7).
 #[cfg(plugin_windows)]
-pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate::plugin_window::ChannelInfo> {
+pub fn fx_info(p: &os_model::Project, key: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let (t, k) = crate::plugins::fx_of(key)?;
     let m = p.mixer.iter().find(|m| m.index == t)?;
-    let name = ui.slot_names.get(&(t, k)).cloned().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(crate::project_plugins::slot_title))?;
+    let name = m.slot_names.get(usize::from(k)).cloned().flatten().or_else(|| m.slots.get(usize::from(k))?.as_ref().map(crate::project_plugins::slot_title))?;
     Some(crate::plugin_window::ChannelInfo {
         misc: None,
         icon: None,
@@ -2931,7 +2929,7 @@ mod tests {
     fn latency_settings_are_typed_in_and_undo() {
         use crate::typein::{accept, parse, LatUnit, Target};
         let mut a = app();
-        a.state.tempo = 120.0;
+        a.state.set_tempo(120.0);
         // The app's tick gives the tracks their ids, which the undo steps name them by.
         a.state.control.settle(a.state.project.get_mut());
         let labels = |p: &Popup| p.items.iter().map(|i| (i.label.to_string(), i.enabled)).collect::<Vec<_>>();
@@ -3111,15 +3109,15 @@ mod tests {
         use crate::playlist::IconOwner;
         let mut a = app();
         let red = Rgb { r: 200, g: 0, b: 0 };
-        a.state.mixer.slot_colors.insert((3, 0), red);
-        a.state.playlist.icons.insert(IconOwner::Track(3), crate::icons::Icon::Play);
+        crate::mixer::set_slot_color(&mut a.state, 3, 0, Some(red));
+        crate::playlist::put_icon(&mut a.state, IconOwner::Track(3), Some(crate::icons::Icon::Star));
         run(&mut a, MCmd::Delete(2));
-        assert_eq!(a.state.mixer.slot_colors.get(&(2, 0)), Some(&red), "the colour follows its track left");
+        assert_eq!(crate::mixer::slot_colors_of(&a.state.project).get(&(2, 0)), Some(&red), "the colour follows its track left");
         crate::history::undo(&mut a.state);
-        assert_eq!(a.state.mixer.slot_colors.get(&(3, 0)), Some(&red));
-        assert_eq!(a.state.mixer.slot_colors.get(&(2, 0)), None);
-        assert_eq!(a.state.playlist.icons.get(&IconOwner::Track(3)), Some(&crate::icons::Icon::Play));
-        assert_eq!(a.state.playlist.icons.get(&IconOwner::Track(2)), None);
+        assert_eq!(crate::mixer::slot_colors_of(&a.state.project).get(&(3, 0)), Some(&red));
+        assert_eq!(crate::mixer::slot_colors_of(&a.state.project).get(&(2, 0)), None);
+        assert_eq!(crate::playlist::icons(&a.state.project).get(&IconOwner::Track(3)), Some(&crate::icons::Icon::Star));
+        assert_eq!(crate::playlist::icons(&a.state.project).get(&IconOwner::Track(2)), None);
     }
 
     #[test]
@@ -3659,7 +3657,7 @@ mod tests {
     fn render_to_wave_file_opens_the_form_for_the_tracks() {
         let mut a = app();
         a.state.project.get_mut().patterns[0].notes.push(os_model::Note::step(0, 0));
-        a.state.song_mode = false;
+        a.state.set_song_mode(false);
         let file = track_items(&a.state, 2).into_iter().find(|i| i.label == "File").unwrap();
         assert_eq!(file.children[3].cmd, Cmd::Mixer(MCmd::RenderWave(2)));
         track_mut(&mut a.state, 2).unwrap().name = Some("Bass: sub".into());
@@ -3736,7 +3734,7 @@ mod tests {
         assert!(slot_color(&a.state, 3, 1).is_some());
         run(&mut a, MCmd::SlotDelete(1));
         assert_eq!(slot_color(&a.state, 3, 1), None, "goes with the plugin");
-        assert!(a.state.mixer.slot_colors.is_empty());
+        assert!(crate::mixer::slot_colors_of(&a.state.project).is_empty());
     }
 
     /// Change icon... on the track menu and the slot menu (Lemon Studio's design, session only): the icon moves with its
@@ -3754,7 +3752,7 @@ mod tests {
             assert!(e.enabled);
             e.children.iter().find(|i| i.label == label).unwrap().cmd.clone()
         };
-        let icon = |a: &App, key: usize| crate::playlist::window_icon(&a.state.project, &a.state.playlist.icons, key);
+        let icon = |a: &App, key: usize| crate::playlist::window_icon(&a.state.project, key);
         let star = pick(&track_menu(&a.state, 2, 0.0, 0.0), "Star");
         crate::playlist::run(&mut a, star);
         let keys = pick(&slot_menu(&a, 0, 0.0, 0.0), "Keys");
@@ -3768,7 +3766,7 @@ mod tests {
         assert_eq!((icon(&a, TRACK_ICON_KEY + 2), icon(&a, TRACK_ICON_KEY + 3)), (None, Some(Icon::Star)), "and with its track");
         assert_eq!(icon(&a, crate::plugins::fx_key(3, 1)), Some(Icon::PianoRoll));
         run(&mut a, MCmd::Delete(3));
-        assert!(a.state.playlist.icons.is_empty(), "a deleted track takes its icons");
+        assert!(crate::playlist::icons(&a.state.project).is_empty(), "a deleted track takes its icons");
     }
 
     /// The slot menu's CPU entries are the plugin's switches, as in its window menu, one undo step each (spec:

@@ -322,7 +322,7 @@ fn transport(ui: &mut Ui, c: &Ctx) {
     let song = a.span(384.0, 418.0, 20.0, 35.0);
     ui.hit(pat, Action::PatSong(false), "Pattern: play the current pattern");
     ui.hit(song, Action::PatSong(true), "Song: play the arrangement");
-    for (r, label, active) in [(pat, "PAT", !s.song_mode), (song, "SONG", s.song_mode)] {
+    for (r, label, active) in [(pat, "PAT", !s.song_mode()), (song, "SONG", s.song_mode())] {
         if active && lemon {
             os_ui::kit::lemon::lit_in(ui.c, ui.t, Rect::new(r.x + 2.0, r.y + 1.0, r.w - 3.0, r.h - 1.5), 4.0, false);
         } else if active {
@@ -481,7 +481,7 @@ fn time(ui: &mut Ui, c: &Ctx) {
     let ppq = f64::from(s.project.ppq.max(1));
     // A bar that makes no signature (3 steps per beat) counts its beats as quarters.
     let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
-    let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo.max(1.0));
+    let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo().max(1.0));
     let ticks96 = f.tick * 96.0 / ppq;
     // The bars count from the Start marker's bar (spec: ui/playlist.md §7a, ui/performance-mode.md §1).
     let start = crate::playlist::start_marker(s).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);
@@ -871,7 +871,7 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
     ui.c.fill_rrect(prev, if lemon { 4.0 } else { 2.0 }, t.button);
     icons::draw(ui.c, Icon::ArrowRight, prev.inset(2.0), t.glyph);
     let pb = a.span(855.0, 948.0, 47.0, 76.0);
-    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(s, s.pattern.max(1)));
+    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(s, s.pattern().max(1)));
     if lemon {
         os_ui::kit::lemon::well(ui.c, t, pb, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
     } else {
@@ -881,9 +881,9 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
         .project
         .patterns
         .iter()
-        .find(|p| p.number == s.pattern)
+        .find(|p| p.number == s.pattern())
         .and_then(|p| p.name.clone())
-        .unwrap_or_else(|| format!("Pattern {}", s.pattern));
+        .unwrap_or_else(|| format!("Pattern {}", s.pattern()));
     // Right-aligned before the spin arrow; a name too long for that keeps its start and is cut at the arrow, as FL
     // cuts long labels (long names were not measured here: Lemon Studio's choice).
     let pf = Font::condensed(21, 7);

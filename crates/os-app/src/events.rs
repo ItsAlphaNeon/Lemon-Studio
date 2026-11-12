@@ -222,7 +222,7 @@ fn set_value(s: &mut State, tick: u32, v: i32) {
 
 /// What Copy and Duplicate take without a selection: the pattern's length, or to the last event when that lies later.
 fn whole(s: &State) -> (u32, u32) {
-    (0, s.project.pattern_length(s.pattern).max(points(s).last().map_or(0, |p| p.0 + 1)).max(1))
+    (0, s.project.pattern_length(s.pattern()).max(points(s).last().map_or(0, |p| p.0 + 1)).max(1))
 }
 
 /// Deletes the control's events from `from` to `to` (both included); returns how many went.
@@ -364,7 +364,7 @@ pub fn delete(s: &mut State) -> usize {
 
 /// Edit ▸ Select all: the pattern's whole length, or to the last event when that lies later.
 pub fn select_all(s: &mut State) {
-    let end = s.project.pattern_length(s.pattern).max(points(s).last().map_or(0, |p| p.0 + 1));
+    let end = s.project.pattern_length(s.pattern()).max(points(s).last().map_or(0, |p| p.0 + 1));
     s.events.sel = Some((0, end.max(1)));
 }
 

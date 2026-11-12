@@ -993,9 +993,9 @@ impl App {
             m.cpu = track.slot_cpu[usize::from(k)];
             // An emptied slot's name, colour and icon go with its effect; the container's slot keeps its own.
             if k != slot {
-                m.label = self.state.mixer.slot_names.get(&(t, k)).cloned();
-                m.color = self.state.mixer.slot_colors.get(&(t, k)).copied();
-                m.icon = self.state.playlist.icons.get(&crate::playlist::IconOwner::Slot(t, k)).copied();
+                m.label = crate::mixer::slot_label(&self.state, t, k);
+                m.color = crate::mixer::slot_color(&self.state, t, k);
+                m.icon = crate::playlist::icon_of(&self.state.project, crate::playlist::IconOwner::Slot(t, k));
             }
             moves.push(Move { from: (t, k), ids: Ids::Plugin(list.len() as u32 + 1) });
             list.push(m);
@@ -1012,9 +1012,9 @@ impl App {
         }
         let n = list.len();
         // The slot's name, colour and icon go with the container (`clear_slot` forgets them).
-        let name = self.state.mixer.slot_names.get(&(t, slot)).cloned();
-        let color = self.state.mixer.slot_colors.get(&(t, slot)).copied();
-        let icon = self.state.playlist.icons.get(&crate::playlist::IconOwner::Slot(t, slot)).copied();
+        let name = crate::mixer::slot_label(&self.state, t, slot);
+        let color = crate::mixer::slot_color(&self.state, t, slot);
+        let icon = crate::playlist::icon_of(&self.state.project, crate::playlist::IconOwner::Slot(t, slot));
         for &k in &taken {
             // The hosted instances go with an undo kept (`FxReq::Delete`), the slots' names, colours and icons too.
             crate::mixer::clear_slot(&mut self.state, t, k);
@@ -1027,14 +1027,14 @@ impl App {
         }
         let moved = Moved { to: (t, slot), index: 0, moves };
         let stuck = moved.retarget(&mut self.state);
-        if let Some(v) = name {
-            self.state.mixer.slot_names.insert((t, slot), v);
+        if name.is_some() {
+            crate::mixer::set_slot_label(&mut self.state, t, slot, name);
         }
-        if let Some(v) = color {
-            self.state.mixer.slot_colors.insert((t, slot), v);
+        if color.is_some() {
+            crate::mixer::set_slot_color(&mut self.state, t, slot, color);
         }
-        if let Some(v) = icon {
-            self.state.playlist.icons.insert(crate::playlist::IconOwner::Slot(t, slot), v);
+        if icon.is_some() {
+            crate::playlist::put_icon(&mut self.state, crate::playlist::IconOwner::Slot(t, slot), icon);
         }
         self.state.piano.dirty = true;
         let mut msg = format!("{} effect{} in a container", n, if n == 1 { "" } else { "s" });
@@ -1294,7 +1294,7 @@ impl App {
         let mut v = std::collections::HashMap::new();
         for (&slot_key, live) in &self.plugins.containers {
             let info = match fx_of(slot_key) {
-                Some(_) => crate::mixer::fx_info(&self.state.project, &self.state.mixer, slot_key),
+                Some(_) => crate::mixer::fx_info(&self.state.project, slot_key),
                 None => crate::app::channel_info(&self.state.project, slot_key),
             };
             let Some(info) = info else { continue };
@@ -1552,8 +1552,8 @@ mod tests {
             m.slot_mix[1] = 0.5;
         }
         // The slot's name and colour go with the container; the emptied slot's go.
-        a.state.mixer.slot_names.insert((2, 1), "Echo".into());
-        a.state.mixer.slot_colors.insert((2, 0), os_model::Rgb { r: 1, g: 2, b: 3 });
+        crate::mixer::set_slot_label(&mut a.state, 2, 1, Some("Echo".into()));
+        crate::mixer::set_slot_color(&mut a.state, 2, 0, Some(os_model::Rgb { r: 1, g: 2, b: 3 }));
         let menu = crate::mixer::slot_menu(&a, 1, 0.0, 0.0);
         let item = |label: &str| menu.items.iter().find(|i| i.label == label).unwrap().clone();
         assert!(item(WRAP).enabled && item(WRAP_ALL).enabled);
@@ -1564,8 +1564,8 @@ mod tests {
         assert!(t.slots[0].is_none(), "the other slot is emptied");
         assert_eq!(t.slots[1].as_ref().map(|p| p.name.as_str()), Some(CONTAINER));
         assert_eq!((t.slot_mix[1], t.slot_on[1]), (1.0, true));
-        assert_eq!(a.state.mixer.slot_names.get(&(2, 1)).map(String::as_str), Some("Echo"));
-        assert!(a.state.mixer.slot_colors.is_empty());
+        assert_eq!(crate::mixer::slot_names_of(&a.state.project).get(&(2, 1)).map(String::as_str), Some("Echo"));
+        assert!(crate::mixer::slot_colors_of(&a.state.project).is_empty());
         let list = members(&a.state, 2, 1).unwrap();
         assert_eq!(names(&a, 1), [first.clone(), second.clone()]);
         assert_eq!((list[0].id, list[1].id), (1, 2));
@@ -1944,7 +1944,7 @@ mod tests {
         // the preset); no name is touched.
         let shown = std::path::PathBuf::from("C:/x/Before.fst");
         let side = PluginSide { state: a.plugins.state(key).unwrap(), preset: Some(shown.clone()), name: None, fill: 0 };
-        let names = a.state.mixer.slot_names.clone();
+        let names = crate::mixer::slot_names_of(&a.state.project).clone();
         crate::control::state_edit(&mut a.state, key, PLUGIN_PRESET, side);
         assert_eq!(a.state.history.newest_done(), Some(PLUGIN_PRESET));
         assert_eq!(a.plugins.presets.get(&key), None);
@@ -1954,7 +1954,7 @@ mod tests {
         crate::history::redo(&mut a.state);
         a.host_commands();
         assert_eq!(a.plugins.presets.get(&key), None, "and the redo takes the preset away again");
-        assert_eq!(a.state.mixer.slot_names, names);
+        assert_eq!(crate::mixer::slot_names_of(&a.state.project), names);
     }
     /// An app with Lemon Studio's instruments and effects, rack row 0 played by Lemon Trio; its ticks.
     fn trio_channel() -> App {
@@ -2266,8 +2266,8 @@ mod tests {
         use crate::playlist::{fill_plugin_window_menu, plugin_window_menu};
         let (mut a, first, second) = two_effects();
         let red = os_model::Rgb::new(0xc8, 0x50, 0x4a);
-        a.state.mixer.slot_names.insert((2, 0), "Glue".into());
-        a.state.mixer.slot_colors.insert((2, 0), red);
+        crate::mixer::set_slot_label(&mut a.state, 2, 0, Some("Glue".into()));
+        crate::mixer::set_slot_color(&mut a.state, 2, 0, Some(red));
         if let Some(m) = crate::mixer::track_mut(&mut a.state, 2) {
             m.slot_cpu[0].smart_disable = true;
         }

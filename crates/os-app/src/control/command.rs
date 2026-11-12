@@ -304,7 +304,7 @@ impl PluginSide {
             // A container's effect has no name of its own (a preset renames nothing).
             None if key >= crate::plugins::MEMBER_KEY => None,
             None => s.project.channels[key].name.clone(),
-            Some(slot) => s.mixer.slot_names.get(&slot).cloned(),
+            Some((t, k)) => crate::mixer::slot_label(s, t, k),
         })
     }
 
@@ -313,14 +313,7 @@ impl PluginSide {
         let Some(key) = owner_key(s, owner).filter(|&k| k < crate::plugins::MEMBER_KEY) else { return };
         match crate::plugins::fx_of(key) {
             None => s.project.get_mut().channels[key].name = self.name.clone(),
-            Some(slot) => match &self.name {
-                Some(n) => {
-                    s.mixer.slot_names.insert(slot, n.clone());
-                }
-                None => {
-                    s.mixer.slot_names.remove(&slot);
-                }
-            },
+            Some((t, k)) => crate::mixer::set_slot_label(s, t, k, self.name.clone()),
         }
     }
 }
@@ -345,7 +338,7 @@ impl Settings {
     fn of(s: &State) -> Settings {
         let p = &s.project;
         Settings {
-            tempo: s.tempo,
+            tempo: s.tempo(),
             swing: p.swing,
             main_volume: p.main_volume,
             main_pitch: p.main_pitch,
@@ -358,37 +351,21 @@ impl Settings {
     }
 
     fn put(self, s: &mut State) {
+        s.set_tempo(self.tempo);
         let p = s.project.get_mut();
-        s.tempo = self.tempo;
         (p.swing, p.main_volume, p.main_pitch, p.bar, p.bar_as_signature, p.info) =
             (self.swing, self.main_volume, self.main_pitch, self.bar, self.bar_as_signature, self.info);
         (p.panning_law, p.play_truncated) = (self.panning_law, self.play_truncated);
     }
 }
 
-/// The whole project with the state of it the interface holds: the tempo, the rack's groups, filter, zipped and locked
-/// rows and loops, and the mixer's slot names, colours and icons.
+/// The whole project, the pattern shown, and the loop type the rack remembers while loop mode is off.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Side {
     pub project: Project,
     pub tempo: f64,
     pub pattern: u16,
-    pub groups: Vec<crate::rack::Group>,
-    pub unsorted_at: Option<usize>,
-    pub filter: crate::rack::Filter,
-    pub zipped: std::collections::BTreeSet<usize>,
-    pub locked: std::collections::BTreeSet<usize>,
-    pub loop_len: std::collections::BTreeMap<usize, u32>,
-    /// The mixer's slot names typed in this session (they follow tracks and slots as they move).
-    pub slot_names: std::collections::HashMap<(u16, u8), String>,
-    /// The slots' colours and the channels', slots' and tracks' icons, which follow them the same way.
-    pub slot_colors: std::collections::HashMap<(u16, u8), os_model::Rgb>,
-    pub icons: std::collections::HashMap<crate::playlist::IconOwner, crate::icons::Icon>,
-    /// Advanced looping's loop points by row, beside the loop lengths.
-    pub loop_unit: std::collections::BTreeMap<usize, crate::rack::LoopUnit>,
-    /// Loop mode and type, which say with the lengths what `pattern`'s loops are.
-    pub loop_mode: bool,
-    pub loop_type: u8,
+    pub loop_type: (u8, u16),
 }
 
 impl Side {
@@ -396,20 +373,9 @@ impl Side {
         let r = &s.rack;
         Side {
             project: s.project.clone(),
-            tempo: s.tempo,
-            pattern: s.pattern,
-            groups: r.groups.clone(),
-            unsorted_at: r.unsorted_at,
-            filter: r.filter,
-            zipped: r.zipped.clone(),
-            locked: r.locked.clone(),
-            loop_len: r.loop_len.clone(),
-            slot_names: s.mixer.slot_names.clone(),
-            slot_colors: s.mixer.slot_colors.clone(),
-            icons: s.playlist.icons.clone(),
-            loop_unit: r.loop_unit.clone(),
-            loop_mode: r.loop_mode,
-            loop_type: r.loop_type,
+            tempo: s.tempo(),
+            pattern: s.pattern(),
+            loop_type: (r.loop_type, r.type_of),
         }
     }
 }
@@ -724,7 +690,7 @@ impl Command {
         let none = Ok(Value::Null);
         match self {
             Command::SetTempo { bpm } => {
-                s.tempo = unit("bpm", bpm, 10.0, 522.0)?;
+                s.set_tempo(unit("bpm", bpm, 10.0, 522.0)?);
                 none
             }
             Command::SetSwing { swing } => {
@@ -968,12 +934,12 @@ impl Command {
                     Some(k) => return Err(format!("slots are 0..=9, not {k}")),
                     None => m.slots.iter().position(Option::is_none).ok_or("the track has no empty slot")?,
                 };
-                let (t, m) = (m.index, &mut s.project.get_mut().mixer[place]);
+                let m = &mut s.project.get_mut().mixer[place];
                 m.slots[k] = Some(crate::plugins::new_slot(&plugin));
                 m.slot_on[k] = true;
                 m.slot_mix[k] = 1.0;
                 m.slot_cpu[k] = os_model::PluginCpu::default();
-                s.mixer.slot_names.remove(&(t, k as u8));
+                m.slot_names[k] = None;
                 s.control.settle(s.project.get_mut());
                 let id = s.project.mixer[place].slots[k].as_ref().map_or(Id::NONE, |x| x.id);
                 s.control.host.push(super::HostReq::Effect { slot: id, plugin });
@@ -1175,10 +1141,10 @@ fn put(s: &mut State, t: Taken) {
                 if ch.misc != c.misc && c.kind.is_sampler() {
                     s.control.misc.push(row);
                 }
-                // Muting is a step of its own: the channel stays muted or not (`Mutes`).
-                let on = ch.enabled;
+                // Muting is a step of its own, a lock and a zip none: the channel stays as it is in those (`Mutes`).
+                let (on, locked, zipped) = (ch.enabled, ch.rack.locked, ch.rack.zipped);
                 *ch = *c;
-                ch.enabled = on;
+                (ch.enabled, ch.rack.locked, ch.rack.zipped) = (on, locked, zipped);
             }
         }
         Taken::Track(m) => {
@@ -1227,51 +1193,53 @@ fn restore(s: &mut State, side: Side) {
     let sel_clips = selected_clips(s);
     let new_row: std::collections::HashMap<u32, usize> = side.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
-    let Side { project, tempo, pattern, groups, unsorted_at, filter, zipped, locked, loop_len, slot_names, slot_colors, icons, loop_unit, loop_mode, loop_type } = side;
-    let shown = s.pattern;
+    let Side { project, tempo, pattern, loop_type } = side;
+    let shown = s.pattern();
     let numbers = |p: &Project| p.patterns.iter().map(|q| q.number).collect::<std::collections::BTreeSet<_>>();
     let patterns_before = numbers(&s.project);
-    (s.mixer.slot_names, s.mixer.slot_colors, s.playlist.icons) = (slot_names, slot_colors, icons);
     let mutes = Mutes::of(&s.project);
     s.project = crate::locked::Locked::new(project);
     mutes.keep(s.project.get_mut());
-    s.tempo = tempo;
-    s.pattern = pattern;
+    s.set_tempo(tempo);
+    s.set_pattern(pattern);
     crate::rack::remap_ui(s, &map);
-    let r = &mut s.rack;
-    (r.groups, r.unsorted_at, r.filter, r.zipped, r.locked, r.loop_len, r.loop_unit) = (groups, unsorted_at, filter, zipped, locked, loop_len, loop_unit);
-    (r.loop_mode, r.loop_type) = (loop_mode, loop_type);
-    // The loops put back are those of the pattern shown when the step was made. The pattern shown now stays shown, as
-    // in FL (an undo leaves the pattern shown), and gets its own loops; a step that made or removed patterns (a clone,
-    // a delete) shows the pattern it showed.
-    r.loops_of = s.pattern;
+    (s.rack.loop_type, s.rack.type_of) = loop_type;
+    // The pattern shown now stays shown, as in FL (an undo leaves the pattern shown); a step that made or removed
+    // patterns (a clone, a delete) shows the pattern it showed. Each pattern's loops are its own, put back with it.
     if numbers(&s.project) == patterns_before {
-        s.pattern = shown;
+        s.set_pattern(shown);
     }
-    crate::rack::follow_pattern(s);
     let tracks = crate::mixer::inserts(s);
     s.selected_mixer = s.selected_mixer.min(tracks);
     s.mixer.sel.retain(|&t| t <= tracks);
     reselect_clips(s, &sel_clips);
 }
 
-/// Muting and soloing are steps of their own (a channel's, `Taken::Mutes`) or none (a mixer track's, as in FL): an undo
-/// or redo of another step leaves every channel and mixer track that is still there muted or not as it is now. The
-/// states by id.
+/// Muting and soloing are steps of their own (a channel's, `Taken::Mutes`) or none (a mixer track's, as in FL), and
+/// locking a channel's mute state is none (`ui/undo-steps.md`): an undo or redo of another step leaves every channel
+/// and mixer track that is still there muted, and every channel locked and zipped (no step either), or not as it is now,
+/// and the song mode as it is. The states by id.
 struct Mutes {
-    channels: std::collections::HashMap<u32, bool>,
+    channels: std::collections::HashMap<u32, (bool, bool, bool)>,
     tracks: std::collections::HashMap<u32, bool>,
+    /// The song mode: no step either.
+    song_mode: Option<bool>,
 }
 
 impl Mutes {
     fn of(p: &Project) -> Mutes {
-        Mutes { channels: p.channels.iter().map(|c| (c.id.0, c.enabled)).collect(), tracks: p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect() }
+        Mutes {
+            channels: p.channels.iter().map(|c| (c.id.0, (c.enabled, c.rack.locked, c.rack.zipped))).collect(),
+            tracks: p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect(),
+            song_mode: p.song_mode,
+        }
     }
 
     fn keep(&self, p: &mut Project) {
+        p.song_mode = self.song_mode;
         for c in &mut p.channels {
-            if let Some(&on) = self.channels.get(&c.id.0) {
-                c.enabled = on;
+            if let Some(&(on, locked, zipped)) = self.channels.get(&c.id.0) {
+                (c.enabled, c.rack.locked, c.rack.zipped) = (on, locked, zipped);
             }
         }
         for m in &mut p.mixer {

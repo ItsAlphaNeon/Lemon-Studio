@@ -462,6 +462,14 @@ impl PlaylistView {
 pub const UNSORTED_GROUP: &str = "Unsorted";
 
 impl Project {
+    /// The index the file gives channels in no group: the "Unsorted" entry of [`Project::groups`], or one past the end
+    /// when the list has none.
+    pub fn unsorted_group(&self) -> u32 {
+        self.groups.iter().position(|g| g == UNSORTED_GROUP).unwrap_or(self.groups.len()) as u32
+    }
+}
+
+impl Project {
     /// Index into `arrangements` of the current arrangement (the first when unset or not found).
     pub fn arrangement_index(&self) -> usize {
         self.current_arrangement.and_then(|n| self.arrangements.iter().position(|a| a.number == n)).unwrap_or(0)
@@ -711,6 +719,8 @@ pub struct Channel {
     /// Sound settings the engine reads that have no other place in the model (filter, sampler flags, declick,
     /// stretch).
     pub sound: ChannelSound,
+    /// Lemon Studio's icon for the channel (by name), kept in `.lemon`; FL's own is [`ChannelRack::icon`].
+    pub lemon_icon: Option<String>,
 }
 
 impl Channel {
@@ -1192,8 +1202,9 @@ pub struct ChannelRack {
     pub locked: bool,
     /// Zipped row (event 15).
     pub zipped: bool,
-    /// Filter group index into [`Project::groups`] (event 145).
-    pub group: u32,
+    /// Filter group: an index into [`Project::groups`] (event 145); `None` in no group, which the file writes as the
+    /// "Unsorted" entry's index ([`Project::unsorted_group`]).
+    pub group: Option<u32>,
     /// The colour event 128 holds, whether or not it is a custom colour: the playlist draws audio and automation
     /// clips with it (spec: ui/playlist.md §2, "Channel-colour rule"). Display only; saving writes `Channel::color`.
     pub stored_color: Option<Rgb>,
@@ -1307,12 +1318,14 @@ pub struct Pattern {
     /// Length set in the channel rack's pattern length box, in ticks; `None` = Auto (whole bars past the last
     /// note). Stored as metadata event 164 plus a "Length" marker (spec: flp/events/patterns.md).
     pub length: Option<u32>,
-    /// Per-channel loop lengths `(channel, steps)` in channel order (events 160/161 after the notes);
-    /// steps [`Pattern::LOOP_FOLLOW`] = a channel that only follows "Loop all channels".
+    /// Per-channel loop points `(channel, value)` in channel order (events 160/161 after the notes), as FL 24.1.1 writes
+    /// them: a length in steps, 0 = no loop, or [`Pattern::LOOP_STEP`], [`Pattern::LOOP_BEAT`], [`Pattern::LOOP_BAR`]
+    /// (Advanced looping's units; Bar is also what "Loop all channels" writes for a channel that loops).
     pub loops: Vec<(u16, u32)>,
-    /// Loop mode off with loop lengths kept: the loop type value (metadata events 26 = 1 and 162; 3 = loop step
-    /// channels, 2 = loop all channels). `None` = loop mode on (or no loops).
-    pub loop_off: Option<u32>,
+    /// Loop mode on, with its type: event 162 after event 26 = 1 in the metadata block, 1 = Loop step channels, 2 = Loop
+    /// all channels, 3 = Advanced looping. FL 24.1.1 writes them while loop mode is on (spec: flp/events/patterns.md
+    /// "Loop settings on FL 24.1.1"; what FL 26 writes is REQUESTS #15). `None` = loop mode off.
+    pub loop_mode: Option<u32>,
     /// The pattern's own time markers (piano-roll Alt+T markers, time signatures, kinds kept as read), sorted by
     /// position; the "Length" marker is not among them (it follows `length`). Metadata marker groups (spec:
     /// flp/events/patterns.md, metadata block).
@@ -1320,8 +1333,12 @@ pub struct Pattern {
 }
 
 impl Pattern {
-    /// Stored loop length of channels that follow "Loop all channels" (0xFFFFFFFD).
-    pub const LOOP_FOLLOW: u32 = 0xFFFF_FFFD;
+    /// Loop points of [`Pattern::loops`]: Advanced looping's Step, Beat and Bar (−1, −2, −3).
+    pub const LOOP_STEP: u32 = 0xFFFF_FFFF;
+    pub const LOOP_BEAT: u32 = 0xFFFF_FFFE;
+    pub const LOOP_BAR: u32 = 0xFFFF_FFFD;
+    /// What "Loop all channels" writes for a channel that loops: Bar.
+    pub const LOOP_FOLLOW: u32 = Self::LOOP_BAR;
 }
 
 /// One point of a pattern's channel control lane (event 223 record). `kind` is
@@ -1534,6 +1551,13 @@ pub struct MixerTrack {
     pub monitor: u8,
     /// Per slot: the slot plugin's CPU switches (event 212 flags; they follow the plugin when it moves).
     pub slot_cpu: [PluginCpu; 10],
+    /// Lemon Studio's own per slot: a name typed for it, its colour and its icon (by name), kept in `.lemon` (FL's file
+    /// has none); they follow the slot's track when it moves.
+    pub slot_names: [Option<String>; 10],
+    pub slot_colors: [Option<Rgb>; 10],
+    pub slot_icons: [Option<String>; 10],
+    /// Lemon Studio's icon for the track (by name), kept in `.lemon`; FL's own is [`MixerTrack::icon`].
+    pub lemon_icon: Option<String>,
     /// Armed for disk recording (the strip's record button). Not saved, and not part of the track: tracks that differ
     /// only here are equal (spec: audio/track-io.md §1.5).
     pub armed: bool,
@@ -1576,6 +1600,10 @@ impl PartialEq for MixerTrack {
             rec_source,
             monitor,
             slot_cpu,
+            slot_names,
+            slot_colors,
+            slot_icons,
+            lemon_icon,
             armed: _,
             origin: _,
         } = self;
@@ -1606,6 +1634,10 @@ impl PartialEq for MixerTrack {
             && *rec_source == o.rec_source
             && *monitor == o.monitor
             && *slot_cpu == o.slot_cpu
+            && *slot_names == o.slot_names
+            && *slot_colors == o.slot_colors
+            && *slot_icons == o.slot_icons
+            && *lemon_icon == o.lemon_icon
     }
 }
 
@@ -1656,6 +1688,10 @@ impl MixerTrack {
             rec_source: REC_POST_EQ,
             monitor: MONITOR_ARMED,
             slot_cpu: [PluginCpu::default(); 10],
+            slot_names: Default::default(),
+            slot_colors: Default::default(),
+            slot_icons: Default::default(),
+            lemon_icon: None,
             armed: false,
             origin: None,
         }

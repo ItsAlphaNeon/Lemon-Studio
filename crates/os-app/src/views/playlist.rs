@@ -377,7 +377,7 @@ fn source_icon(s: &State, src: ClipSource, kind: PickKind) -> Icon {
         ClipSource::Channel(ch) => s.project.channels.iter().position(|c| c.index == ch),
         ClipSource::Pattern(_) => None,
     };
-    row.and_then(|r| pl::window_icon(&s.project, &s.playlist.icons, r)).unwrap_or_else(|| kind_icon(kind))
+    row.and_then(|r| pl::window_icon(&s.project, r)).unwrap_or_else(|| kind_icon(kind))
 }
 
 /// Picker panel: kind tabs, then the list of clip sources of that kind (§1).

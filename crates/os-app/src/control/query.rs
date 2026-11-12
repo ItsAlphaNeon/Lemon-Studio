@@ -134,7 +134,7 @@ pub fn project(s: &State) -> Value {
     let i = &p.info;
     json!({
         "ppq": p.ppq,
-        "tempo": s.tempo,
+        "tempo": s.tempo(),
         "time_signature": if p.bar_is_signature() { json!([beats, 16 / steps.max(1)]) } else { Value::Null },
         "bar": { "beats": beats, "steps_per_beat": steps },
         "swing": f64::from(p.swing.unwrap_or(0)) / 128.0,
@@ -142,8 +142,8 @@ pub fn project(s: &State) -> Value {
         "main_pitch": p.main_pitch.unwrap_or(0),
         "info": { "title": i.title, "author": i.author, "genre": i.genre, "comments": i.comments, "url": i.url },
         "file": s.path.as_ref().map(|p| p.display().to_string()),
-        "song_mode": s.song_mode,
-        "current_pattern": p.pattern(s.pattern).map(|q| q.id.0),
+        "song_mode": s.song_mode(),
+        "current_pattern": p.pattern(s.pattern()).map(|q| q.id.0),
         "selected_channel": p.channels.get(s.selected_channel).map(|c| c.id.0),
         "channels": channels,
         "mixer": tracks,

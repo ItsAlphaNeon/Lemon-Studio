@@ -67,27 +67,82 @@ fn hash(v: &impl fmt::Debug) -> u64 {
     h.0
 }
 
+/// The project without what `side` holds (the tempo, the pattern shown, the song mode, the rack's groups, locks, zips
+/// and loops): a build may keep those in the interface until a save or in the project itself (control-plane step 5),
+/// and they are compared once, in `side`. What a save writes of them is checked by the save and reopen checks.
+fn project_part(p: &os_model::Project) -> os_model::Project {
+    let mut p = p.clone();
+    (p.tempo, p.current_pattern, p.song_mode, p.current_group) = (None, None, None, None);
+    p.groups.clear();
+    for c in &mut p.channels {
+        (c.rack.locked, c.rack.zipped, c.rack.group) = (false, false, None);
+        // Lemon Studio's own (the `lemon` part compares them, as `.lemon` stores them).
+        c.lemon_icon = None;
+    }
+    for m in &mut p.mixer {
+        (m.slot_names, m.slot_colors, m.slot_icons, m.lemon_icon) = Default::default();
+    }
+    for q in &mut p.patterns {
+        (q.loops, q.loop_mode) = (Vec::new(), None);
+    }
+    p
+}
+
+/// The fingerprint of `project_part`, its channels' groups left out of the text too: `side` compares the groups, and
+/// the model's type for a channel's group may change (control-plane step 5 made it optional).
+fn project_hash(p: &os_model::Project) -> u64 {
+    let text = format!("{:?}", project_part(p));
+    let mut out = String::with_capacity(text.len());
+    let (mut from, mut search) = (0, 0);
+    const KEY: &str = ", group: ";
+    while let Some(k) = text[search..].find(KEY) {
+        let i = search + k;
+        // `ChannelRack`'s group follows its zip (a note's group is another field).
+        if text[..i].ends_with("zipped: true") || text[..i].ends_with("zipped: false") {
+            out.push_str(&text[from..i]);
+            let after = &text[i + KEY.len()..];
+            from = i + KEY.len() + after.find([',', '}']).unwrap_or(after.len());
+            search = from;
+        } else {
+            search = i + 1;
+        }
+    }
+    out.push_str(&text[from..]);
+    // The fields step 5 added for what `.lemon` keeps, as `project_part` leaves them: out of the text, as before them.
+    let ten = ["None"; 10].join(", ");
+    let out = out.replace(&format!(", slot_names: [{ten}], slot_colors: [{ten}], slot_icons: [{ten}], lemon_icon: None"), "").replace(", lemon_icon: None", "");
+    // Step 5 renamed a pattern's `loop_off` (cleared above) to `loop_mode`: the text keeps the name it was recorded with.
+    let out = out.replace(", loop_mode: None, ", ", loop_off: None, ");
+    let mut h = Fnv::new();
+    let _ = write!(h, "{out}");
+    h.0
+}
+
 /// Project state the interface holds until save (specs: control-plane.md part 2, "Where main is"), as one value: a
 /// field per line, so a difference names its field.
 fn side(app: &App) -> String {
-    let (s, r) = (&app.state, &app.state.rack);
+    let s = &app.state;
+    // Since step 5 the project's (`rack::groups`, `rack::filter`, `rack::unsorted_at`), read as the rack held them.
+    let groups = crate::rack::groups(&s.project);
     // "Unsorted" at the end of the group list reads as None (last) or as its place there: the same thing.
-    let unsorted = r.unsorted_at.filter(|&u| u < r.groups.len());
+    let unsorted = crate::rack::unsorted_at(&s.project).filter(|&u| u < groups.len());
     let mut out = String::new();
     let mut f = |name: &str, v: &dyn fmt::Debug| {
         let _ = writeln!(out, "{name}: {v:#?}");
     };
-    f("tempo", &s.tempo.to_bits());
-    f("pattern", &s.pattern);
-    f("song_mode", &s.song_mode);
-    f("filter", &r.filter);
-    f("groups", &r.groups);
-    f("zipped", &r.zipped);
-    f("locked", &r.locked);
-    f("loop_mode", &r.loop_mode);
-    f("loop_len", &r.loop_len);
-    f("loop_unit", &r.loop_unit);
-    f("loop_type", &r.loop_type);
+    f("tempo", &s.tempo().to_bits());
+    f("pattern", &s.pattern());
+    f("song_mode", &s.song_mode());
+    f("filter", &crate::rack::filter(&s.project));
+    f("groups", &groups);
+    f("zipped", &crate::rack::zipped_rows(&s.project));
+    // Since step 5 a channel's own (`rack.locked`); read the same way as when the rack kept the rows.
+    f("locked", &crate::rack::locked_rows(&s.project));
+    // Since step 5 the shown pattern's (`rack::loop_mode` and the rest), read as the rack held them.
+    f("loop_mode", &crate::rack::loop_mode(s));
+    f("loop_len", &crate::rack::loop_lens(s));
+    f("loop_unit", &crate::rack::loop_units(s));
+    f("loop_type", &crate::rack::loop_type(s));
     f("unsorted_at", &unsorted);
     out
 }
@@ -102,7 +157,7 @@ impl Fp {
         let side = hash(&side(app));
         let history = hash(&(s.history.entries(), s.history.at()));
         Fp(vec![
-            ("project", hash(&s.project)),
+            ("project", project_hash(&s.project)),
             ("side", side),
             ("lemon", hash(&crate::lemon_state::saved_form(s, &app.plugins))),
             ("history", history),
@@ -545,7 +600,8 @@ impl Rig {
             self.tick();
         }
         self.after_step(self.app.transport.generation_for_tests());
-        if let Some(d) = difference(&canonical(opened), &canonical(&self.app.state.project), false) {
+        // The project's part only: what `side` holds is compared there (the end only: what undo leaves, as FL does).
+        if let Some(d) = difference(&canonical(&project_part(opened)), &canonical(&project_part(&self.app.state.project)), false) {
             bad.push(format!("undo-to-start({undone}:{d})"));
         }
         // Redo as many steps as were done at the end: steps the trace itself undid stay undone.
@@ -556,7 +612,7 @@ impl Rig {
             self.tick();
         }
         self.after_step(self.app.transport.generation_for_tests());
-        if let Some(d) = difference(&canonical(&last), &canonical(&self.app.state.project), false) {
+        if let Some(d) = difference(&canonical(&project_part(&last)), &canonical(&project_part(&self.app.state.project)), false) {
             bad.push(format!("redo-to-end({d})"));
         }
         let now_side = side(&self.app);
@@ -632,7 +688,7 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
     // keeps no loop lengths: FL keeps none for a pattern without notes (flp/events/patterns.md "Loop lengths").
     for q in &mut p.patterns {
         if q.notes.is_empty() {
-            (q.loops, q.loop_off) = (Vec::new(), None);
+            (q.loops, q.loop_mode) = (Vec::new(), None);
         }
     }
     p.patterns.retain(|q| {
@@ -1202,7 +1258,7 @@ fn equiv_show() {
         rig.undo_start(&mut start);
         let s = &rig.app.state;
         eprintln!("  undo: {:?} ({} steps), message: {:?}", s.history.newest_done(), s.history.done(), s.message);
-        if let Some(d) = difference(&before, &s.project, false) {
+        for d in differences(&before, &s.project, false).iter().take(8) {
             eprintln!("  changed: {d}");
         }
         // What playback was handed (the engine's part of the fingerprint).

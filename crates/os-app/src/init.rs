@@ -86,7 +86,7 @@ pub fn items(s: &State, control: Option<(u32, f64)>) -> [PItem; 2] {
 /// or playback loops back to the song's start). Not an undo step. A record whose units aren't known, or whose control
 /// the project doesn't have, is left alone. Returns whether a value changed; the project then goes to playback.
 pub fn apply(s: &mut State) -> bool {
-    if !s.song_mode {
+    if !s.song_mode() {
         return false;
     }
     let mut changed = false;
@@ -111,7 +111,10 @@ fn set<T: PartialEq>(x: &mut T, v: T) -> bool {
 fn set_value(s: &mut State, c: InitControl) -> bool {
     let main = matches!(c.target, InitControl::MAIN_VOLUME | InitControl::MAIN_SWING | InitControl::MAIN_PITCH);
     if !main && matches!(target::decode(c.target), Target::Tempo) {
-        return set(&mut s.tempo, (f64::from(c.value) / 1000.0).clamp(10.0, 522.0));
+        let bpm = (f64::from(c.value) / 1000.0).clamp(10.0, 522.0);
+        let changed = s.tempo() != bpm;
+        s.set_tempo(bpm);
+        return changed;
     }
     s.project.write_if(|p| set_in_project(p, c))
 }
@@ -334,16 +337,16 @@ mod tests {
         // The clip's channel: the only selected one, in the "Automation" group with the filter on it, as the original's
         // rack shows after every Create automation clip.
         let row = a.state.project.channels.len() - 1;
-        let g = a.state.rack.groups.iter().position(|g| g.name == "Automation").expect("the group");
-        assert_eq!((a.state.selected_channel, a.state.rack.filter), (row, crate::rack::Filter::Group(g)));
-        assert!(a.state.rack.groups[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
+        let g = crate::rack::groups(&a.state.project).iter().position(|g| g.name == "Automation").expect("the group");
+        assert_eq!((a.state.selected_channel, crate::rack::filter(&a.state.project)), (row, crate::rack::Filter::Group(g)));
+        assert!(crate::rack::groups(&a.state.project)[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
         let channels = a.state.project.channels.len();
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert!(a.state.project.init_controls.is_empty() && pl::clips(&a.state).is_empty());
         assert_eq!(a.state.project.channels.len(), channels - 1, "the clip's channel goes with the undo");
-        assert!(a.state.rack.groups.iter().all(|g| g.name != "Automation") && a.state.rack.filter == crate::rack::Filter::All);
+        assert!(crate::rack::groups(&a.state.project).iter().all(|g| g.name != "Automation") && crate::rack::filter(&a.state.project) == crate::rack::Filter::All);
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert_eq!((a.state.project.channels.len(), a.state.rack.filter), (channels, crate::rack::Filter::Group(g)));
+        assert_eq!((a.state.project.channels.len(), crate::rack::filter(&a.state.project)), (channels, crate::rack::Filter::Group(g)));
         assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 10000)], 1));
         // A second clip on the moved knob: its new value replaces the old one; undo brings that back.
         a.state.project.get_mut().channels[0].volume = 0.5;
@@ -374,12 +377,12 @@ mod tests {
     /// The listed controls moved away from their initial values.
     fn moved(a: &mut App) {
         a.state.project.get_mut().channels[0].volume = 1.0;
-        a.state.tempo = 90.0;
+        a.state.set_tempo(90.0);
     }
 
     /// (channel 1's volume, tempo).
     fn controls(a: &App) -> (f64, f64) {
-        (a.state.project.channels[0].volume, a.state.tempo)
+        (a.state.project.channels[0].volume, a.state.tempo())
     }
 
     /// Playback at tick 900, then back at tick 12 (the song looped), then stopped.
@@ -397,14 +400,14 @@ mod tests {
         const MOVED: (f64, f64) = (1.0, 90.0);
         let mut a = song_app();
         // Pattern mode: nothing.
-        a.state.song_mode = false;
+        a.state.set_song_mode(false);
         moved(&mut a);
         a.set_song_pos(96, false);
         loop_back(&mut a, false);
         assert_eq!(controls(&a), MOVED);
 
         // Song mode: the position slider.
-        a.state.song_mode = true;
+        a.state.set_song_mode(true);
         a.set_song_pos(192, false);
         assert_eq!(controls(&a), INIT);
         // Playback start, then Stop (the position goes back to where playback started).
@@ -447,25 +450,25 @@ mod tests {
             (q.channels[0].volume, q.tempo.unwrap())
         };
         let mut a = song_app();
-        a.state.song_mode = true;
+        a.state.set_song_mode(true);
         moved(&mut a);
         a.save_to(path.clone());
         assert_eq!(stored(&path), MOVED);
         let mut b = App::new(None);
         b.open(path.clone());
-        assert!(b.state.song_mode);
+        assert!(b.state.song_mode());
         assert_eq!(controls(&b), INIT);
         assert!(!b.unsaved() && b.state.history.len() == 0, "opened, not changed");
         b.save_to(resaved.clone());
         assert_eq!(stored(&resaved), INIT, "saved as the stored values");
 
         // Saved in pattern mode, with the clips: opened in pattern mode, the stored values.
-        a.state.song_mode = false;
+        a.state.set_song_mode(false);
         a.save_to(path.clone());
         let mut c = App::new(None);
-        c.state.song_mode = true;
+        c.state.set_song_mode(true);
         c.open(path.clone());
-        assert!(!c.state.song_mode && !pl::clips(&c.state).is_empty());
+        assert!(!c.state.song_mode() && !pl::clips(&c.state).is_empty());
         assert_eq!(controls(&c), MOVED);
         // Without event 9 (a file from before Lemon Studio wrote it): song mode, even with no clips.
         pl::arr_mut(&mut a.state).clips.clear();
@@ -479,7 +482,7 @@ mod tests {
         std::fs::write(&path, f.to_bytes().unwrap()).unwrap();
         let mut d = App::new(None);
         d.open(path.clone());
-        assert!(d.state.song_mode);
+        assert!(d.state.song_mode());
         assert_eq!(controls(&d), INIT);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&resaved);

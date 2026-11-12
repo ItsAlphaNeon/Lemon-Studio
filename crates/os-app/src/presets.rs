@@ -606,7 +606,7 @@ fn side(app: &App, key: usize) -> Option<crate::control::command::PluginSide> {
         // A container's effect: no name of its own to put back.
         None if key >= crate::plugins::MEMBER_KEY => None,
         None => app.state.project.channels.get(key)?.name.clone(),
-        Some(slot) => app.state.mixer.slot_names.get(&slot).cloned(),
+        Some((t, k)) => crate::mixer::slot_label(&app.state, t, k),
     };
     Some(crate::control::command::PluginSide { state: app.plugins.state(key)?, preset: app.plugins.presets.get(&key).cloned(), name, fill: 0 })
 }
@@ -678,7 +678,7 @@ fn auto_name(app: &mut App, key: usize, path: &Path) {
     let s = &mut app.state;
     match crate::plugins::fx_of(key) {
         Some(slot) if crate::prefs::check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS) => {
-            s.mixer.slot_names.insert(slot, shown_name(path));
+            crate::mixer::set_slot_label(s, slot.0, slot.1, Some(shown_name(path)));
         }
         Some(_) => {}
         None => {
@@ -1324,7 +1324,7 @@ mod tests {
         run(&mut app, PCmd::Load(fx, chorus));
         assert_eq!(slot(&app), "Chorus");
         #[cfg(plugin_windows)]
-        assert_eq!(crate::mixer::fx_info(&app.state.project, &app.state.mixer, fx).unwrap().name, "Chorus", "window title");
+        assert_eq!(crate::mixer::fx_info(&app.state.project, fx).unwrap().name, "Chorus", "window title");
         // The name stays with the check off, until a rename by hand or the next preset with it on.
         prefs::set_check(&AUTO_NAME_EFFECT_SLOTS, false);
         run(&mut app, PCmd::Load(fx, bandpass.clone()));

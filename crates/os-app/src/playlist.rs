@@ -688,8 +688,6 @@ pub struct PlaylistState {
     pub perf_plus_scene: bool,
     /// A Performance mode MIDI note's velocity picks the slot's sub-clip (§3a).
     pub perf_velocity_subclips: bool,
-    /// Change icon... (Lemon Studio's design): the icon each channel or effect slot shows, for the session.
-    pub icons: HashMap<IconOwner, crate::icons::Icon>,
 }
 
 /// Change icon... (Lemon Studio's design, spec: ui/plugin-window.md "Change icon"): the icons a channel or an effect slot
@@ -748,8 +746,53 @@ fn icon_owner(p: &os_model::Project, key: usize) -> Option<IconOwner> {
 }
 
 /// The icon chosen for `key` (a rack row, a mixer track's `TRACK_ICON_KEY + track` or an `fx_key`), if any.
-pub fn window_icon(p: &os_model::Project, icons: &HashMap<IconOwner, crate::icons::Icon>, key: usize) -> Option<crate::icons::Icon> {
-    icons.get(&icon_owner(p, key)?).copied()
+pub fn window_icon(p: &os_model::Project, key: usize) -> Option<crate::icons::Icon> {
+    icon_of(p, icon_owner(p, key)?)
+}
+
+/// The icon `owner` shows: the project's (the channel's, the track's or the slot's `lemon_icon` / `slot_icons`, by
+/// name; kept in `.lemon`).
+pub fn icon_of(p: &os_model::Project, owner: IconOwner) -> Option<crate::icons::Icon> {
+    let name = match owner {
+        IconOwner::Channel(id) => p.channels.iter().find(|c| c.id.0 == id)?.lemon_icon.as_deref()?,
+        IconOwner::Track(t) => p.mixer.iter().find(|m| m.index == t)?.lemon_icon.as_deref()?,
+        IconOwner::Slot(t, k) => p.mixer.iter().find(|m| m.index == t)?.slot_icons.get(usize::from(k))?.as_deref()?,
+    };
+    ICONS.iter().find(|(n, _)| *n == name).map(|&(_, i)| i)
+}
+
+/// Every icon chosen, by owner.
+pub fn icons(p: &os_model::Project) -> HashMap<IconOwner, crate::icons::Icon> {
+    let mut v = HashMap::new();
+    for c in &p.channels {
+        if let Some(i) = icon_of(p, IconOwner::Channel(c.id.0)) {
+            v.insert(IconOwner::Channel(c.id.0), i);
+        }
+    }
+    for m in &p.mixer {
+        if let Some(i) = icon_of(p, IconOwner::Track(m.index)) {
+            v.insert(IconOwner::Track(m.index), i);
+        }
+        for k in 0..10u8 {
+            if let Some(i) = icon_of(p, IconOwner::Slot(m.index, k)) {
+                v.insert(IconOwner::Slot(m.index, k), i);
+            }
+        }
+    }
+    v
+}
+
+/// Sets (`None`: clears) the icon `owner` shows; the project is written only when it changes.
+pub fn put_icon(s: &mut State, owner: IconOwner, icon: Option<crate::icons::Icon>) {
+    let name = icon.and_then(|i| ICONS.iter().find(|(_, x)| *x == i)).map(|&(n, _)| n.to_string());
+    s.project.write_if(|p| {
+        let slot = match owner {
+            IconOwner::Channel(id) => p.channels.iter_mut().find(|c| c.id.0 == id).map(|c| &mut c.lemon_icon),
+            IconOwner::Track(t) => p.mixer.iter_mut().find(|m| m.index == t).map(|m| &mut m.lemon_icon),
+            IconOwner::Slot(t, k) => p.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_icons.get_mut(usize::from(k))),
+        };
+        slot.is_some_and(|v| std::mem::replace(v, name) != *v)
+    });
 }
 
 /// Change icon... ▸: None, then [`ICONS`], the current one ticked; each sets the icon of `key` (a rack row, a mixer
@@ -758,15 +801,15 @@ pub fn icon_items(s: &State, key: usize) -> Vec<PItem> {
     // A container's member: its own icon, saved with the container (`crate::container::Member::icon`).
     let cur = match crate::container::of_key(s, key) {
         Some((t, k, id)) => crate::container::member(s, t, k, id).and_then(|m| m.icon),
-        None => window_icon(&s.project, &s.playlist.icons, key),
+        None => window_icon(&s.project, key),
     };
     let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];
     v.extend(ICONS.iter().enumerate().map(|(i, &(name, icon))| PItem::new(name, Cmd::SetIcon(key, Some(i))).mark(Mark::Check(cur == Some(icon)))));
     v
 }
 
-/// Sets (or with `None` clears) the icon of `key`; no undo step (it is not part of the project). A container member's
-/// icon is part of its container's state: one undo step.
+/// Sets (or with `None` clears) the icon of `key`. A container member's icon is part of its container's state: one undo
+/// step.
 fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
     if let Some((t, k, id)) = crate::container::of_key(s, key) {
         let icon = icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i);
@@ -774,10 +817,7 @@ fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
         return;
     }
     let Some(owner) = icon_owner(&s.project, key) else { return };
-    match icon.and_then(|i| ICONS.get(i)) {
-        Some(&(_, i)) => s.playlist.icons.insert(owner, i),
-        None => s.playlist.icons.remove(&owner),
-    };
+    put_icon(s, owner, icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i));
 }
 
 impl Default for PlaylistState {
@@ -821,7 +861,6 @@ impl Default for PlaylistState {
             perf_track_progress: false,
             perf_plus_scene: false,
             perf_velocity_subclips: true,
-            icons: HashMap::new(),
         }
     }
 }
@@ -1190,7 +1229,7 @@ pub fn track_name(s: &State, t: u16) -> String {
 
 /// The current clip source (the current pattern unless another was picked).
 pub fn source(s: &State) -> ClipSource {
-    s.playlist.source.unwrap_or(ClipSource::Pattern(s.pattern.max(1)))
+    s.playlist.source.unwrap_or(ClipSource::Pattern(s.pattern().max(1)))
 }
 
 /// The source Draw and Paint place on `track`: the one it is locked to, else the current one (`source`).
@@ -1315,7 +1354,7 @@ pub fn audio_speed(s: &State, src: ClipSource) -> f64 {
     } else {
         // A fitted time needs the sample's duration (the multiplier alone does not).
         let duration = if sound.stretch_time().is_some() { sample_secs(s, ch) } else { 0.0 };
-        1.0 / sound.stretch_factor(duration, s.project.tick_tempo(s.tempo))
+        1.0 / sound.stretch_factor(duration, s.project.tick_tempo(s.tempo()))
     };
     let pitched = sound.channel_pitch_applies() && !os_model::stretch_mode::realtime(sound.stretch_mode());
     if !pitched {
@@ -1367,7 +1406,7 @@ pub fn audio_fits(s: &State) -> Option<Fits> {
 /// with the edit that made them. As with the fits, the saved copy gets them too: an opened project's crossfades are
 /// not an unsaved change.
 pub fn follow_crossfades(app: &mut App) {
-    let tempo = app.state.tempo;
+    let tempo = app.state.tempo();
     if !(app.state.piano.dirty || app.state.project.written_at().is_some()) || !app.state.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
         return;
     }
@@ -1416,7 +1455,7 @@ fn audio_ticks(s: &State, ch: &os_model::Channel) -> f64 {
     let ppq = f64::from(ppq(s));
     let base = match sound.stretch_time() {
         Some(_) => f64::from(f32::from_bits(sound.stretch[0])) * ppq / 192.0,
-        None => secs * s.project.tick_tempo(s.tempo.max(1.0)) / 60.0 * ppq,
+        None => secs * s.project.tick_tempo(s.tempo().max(1.0)) / 60.0 * ppq,
     };
     let ticks = base * sound.stretch_multiplier();
     if !sound.channel_pitch_applies() || os_model::stretch_mode::realtime(sound.stretch_mode()) {
@@ -1434,7 +1473,7 @@ fn sample_secs(s: &State, ch: &os_model::Channel) -> f64 {
 
 /// Seconds per tick at the project tempo (the ticks run at `Project::tick_tempo`).
 fn secs_per_tick(s: &State) -> f64 {
-    60.0 / s.project.tick_tempo(s.tempo.max(1.0)) / f64::from(ppq(s))
+    60.0 / s.project.tick_tempo(s.tempo().max(1.0)) / f64::from(ppq(s))
 }
 
 /// Natural length of a source in ticks: a pattern's length (its bars, the engine's rule: `Project::pattern_length`,
@@ -2211,7 +2250,7 @@ pub fn make_unique(s: &mut State, i: usize) -> Option<u16> {
         cl.source = ClipSource::Pattern(next);
     }
     s.playlist.source = Some(ClipSource::Pattern(next));
-    s.pattern = next;
+    s.set_pattern(next);
     s.piano.dirty = true;
     Some(next)
 }
@@ -2270,6 +2309,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         sample_path: None,
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        lemon_icon: None,
     });
     s.project.get_mut().automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
     let row = s.project.channels.len() - 1;
@@ -2296,7 +2336,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
 /// the caller then takes away). Returns its rack row.
 pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os_model::AutoPoint>) -> usize {
     let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
-    let before = crate::history::Snap::Several(vec![rack, crate::history::Snap::pattern(s, s.pattern)]);
+    let before = crate::history::Snap::Several(vec![rack, crate::history::Snap::pattern(s, s.pattern())]);
     snapshot_with(s, crate::events::TURN_INTO_CLIP, before);
     let name = unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
@@ -2317,6 +2357,7 @@ pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os
         sample_path: None,
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        lemon_icon: None,
     });
     let beats = points.last().map_or(0.0, |p| p.beat);
     let mut a = os_flp::project::new_automation(index, target, points.first().map_or(0.0, |p| p.value), beats);
@@ -2337,7 +2378,7 @@ pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os
 pub fn automation_span(s: &State) -> (u32, u32) {
     let a = if crate::prefs::check(&crate::prefs::AUTOMATION_AT_PLAYBACK_POSITION) { s.playlist.pos } else { 0 };
     let end = clips(s).iter().filter(|c| !c.muted).map(|c| c.end()).max().unwrap_or(0);
-    let b = if end > a { end } else { a + source_len(s, ClipSource::Pattern(s.pattern)).max(1) };
+    let b = if end > a { end } else { a + source_len(s, ClipSource::Pattern(s.pattern())).max(1) };
     (a, b)
 }
 
@@ -2378,6 +2419,7 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
         sample_path: None,
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        lemon_icon: None,
     });
     if !audio {
         // Two points, at 0 and at 4 beats (one 4/4 bar), both 0.5, single curve without tension (§2).
@@ -2419,6 +2461,7 @@ pub fn add_layer_channel(s: &mut State) -> usize {
         sample_path: None,
         layer_children: children,
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        lemon_icon: None,
     });
     let row = s.project.channels.len() - 1;
     s.selected_channel = row;
@@ -2468,6 +2511,7 @@ pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer
         layer_children: Vec::new(),
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
         sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
+        lemon_icon: None,
     });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Audio;
@@ -3531,7 +3575,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 // Clicking a clip makes its source current (§3).
                 s.playlist.source = Some(c.source);
                 if let ClipSource::Pattern(n) = c.source {
-                    s.pattern = n;
+                    s.set_pattern(n);
                 }
                 s.playlist.picker = source_kind(s, c.source);
                 // A resized clip lends its length to the clips placed next; a clip of natural length clears it.
@@ -4131,7 +4175,7 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
         s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
         // Moving the song position switches to SONG mode; a time selection does not (§7). The initial values follow
         // (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
-        s.song_mode = true;
+        s.set_song_mode(true);
         crate::init::apply(s);
         app.drag = Some(Drag::Pl(PlDrag::SongPos));
     }
@@ -4189,7 +4233,7 @@ pub fn press_markers(app: &mut App, grid: Rect, right: bool) {
         let t0 = markers(s)[i].position;
         // As a click on the ruler: SONG mode, the initial values follow (§7).
         s.playlist.pos = t0;
-        s.song_mode = true;
+        s.set_song_mode(true);
         crate::init::apply(s);
         app.drag = Some(Drag::Pl(PlDrag::Marker { i, dt: 0, t0 }));
     }
@@ -4309,11 +4353,7 @@ pub fn commit_edit(s: &mut State) {
             });
         }
         EditTarget::SlotName(t, k) => crate::control::edit(s, "Slot name", crate::control::command::Region::Project, |s| {
-            if text.is_empty() {
-                s.mixer.slot_names.remove(&(t, k));
-            } else {
-                s.mixer.slot_names.insert((t, k), text);
-            }
+            crate::mixer::set_slot_label(s, t, k, (!text.is_empty()).then_some(text));
         }),
         EditTarget::MemberName(t, k, id) => crate::container::rename(s, t, k, id, &text),
         EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
@@ -4918,7 +4958,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ClipEditSource(i) => {
             if let Some(ClipSource::Pattern(n)) = clips(s).get(i).map(|c| c.source) {
-                s.pattern = n;
+                s.set_pattern(n);
                 s.raise(crate::app::Win::PianoRoll);
             }
             None
@@ -5263,11 +5303,11 @@ pub fn export_tracks(app: &mut App) -> String {
     }
     let rate = 44100;
     let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
-    let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.project.ppq, s.project.tick_tempo(s.tempo), rate) as usize;
+    let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.project.ppq, s.project.tick_tempo(s.tempo()), rate) as usize;
     let mut written = 0;
     for &t in &tracks {
         let mut p = s.project.clone();
-        p.tempo = Some(s.tempo);
+        p.tempo = Some(s.tempo());
         if let Some(arr) = p.arrangement_mut() {
             arr.clips = audible.iter().filter(|c| c.track == t).copied().collect();
             for tr in &mut arr.tracks {
@@ -5314,7 +5354,7 @@ pub fn consolidate(app: &mut App) -> String {
     };
     // A project with just those clips, shifted to start at 0 (clips crossing the start are cut there).
     let mut p = s.project.clone();
-    p.tempo = Some(s.tempo);
+    p.tempo = Some(s.tempo());
     let mut parts = Vec::new();
     for &i in &use_idx {
         let Some(mut c) = clips(s).get(i).copied() else { continue };
@@ -5339,7 +5379,7 @@ pub fn consolidate(app: &mut App) -> String {
     let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
     let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
     let mut audio = e.render_all(512);
-    let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo), rate) as usize) * 2;
+    let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo()), rate) as usize) * 2;
     audio.resize(want.max(2), 0.0);
     let dir = s.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -5470,7 +5510,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         }
         Key::Named(NamedKey::Enter) if ctrl => {
             // Play from the song start.
-            app.state.song_mode = true;
+            app.state.set_song_mode(true);
             app.state.playlist.pos = 0;
             app.play_song_from(0);
             return true;
@@ -5888,16 +5928,16 @@ mod tests {
         // Change icon... ▸: the slot's icon, its window's title draws it.
         let star = entry(&m, "Change icon...").children.iter().find(|i| i.label == "Star").unwrap().cmd.clone();
         run(&mut app, star);
-        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, key), Some(crate::icons::Icon::Star));
+        assert_eq!(window_icon(&app.state.project, key), Some(crate::icons::Icon::Star));
         // Change color... ▸ and Random color: the slot's colour, on that slot.
         let change = entry(&m, "Change color...");
         assert!(change.enabled && change.children.len() > 1);
         let red = change.children.iter().find(|i| i.cmd != Cmd::Nothing && i.label != change.children[0].label).unwrap().cmd.clone();
         run(&mut app, red);
-        let c = app.state.mixer.slot_colors.get(&(t, k)).copied();
+        let c = crate::mixer::slot_colors_of(&app.state.project).get(&(t, k)).copied();
         assert!(c.is_some(), "a colour on slot {k} of track {t}");
         run(&mut app, entry(&m, "Random color").cmd.clone());
-        assert!(app.state.mixer.slot_colors.get(&(t, k)).is_some_and(|&r| Some(r) != c));
+        assert!(crate::mixer::slot_colors_of(&app.state.project).get(&(t, k)).is_some_and(|&r| Some(r) != c));
         app.state.selected_mixer = 5;
         // Replace ▸: the effects, into this slot.
         fn leaf(items: &[PItem]) -> Option<&PItem> {
@@ -5931,7 +5971,7 @@ mod tests {
         assert!(m.enabled && m.children[0].label == "None" && m.children[0].mark == Mark::Check(true));
         let keys = m.children.iter().find(|i| i.label == "Keys").unwrap().cmd.clone();
         run(&mut app, keys);
-        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, 0), Some(crate::icons::Icon::PianoRoll));
+        assert_eq!(window_icon(&app.state.project, 0), Some(crate::icons::Icon::PianoRoll));
         assert_eq!(menu(&app).children.iter().find(|i| i.label == "Keys").unwrap().mark, Mark::Check(true));
         // The window menu shows the same choice.
         let mut w = plugin_window_menu(0, false, 0.0, 0.0);
@@ -5939,10 +5979,10 @@ mod tests {
         assert_eq!(entry(&w, "Change icon...").children.iter().find(|i| i.label == "Keys").unwrap().mark, Mark::Check(true));
         // It belongs to the channel, not the row.
         app.state.project.get_mut().channels.swap(0, 1);
-        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, 1), Some(crate::icons::Icon::PianoRoll));
-        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, 0), None);
+        assert_eq!(window_icon(&app.state.project, 1), Some(crate::icons::Icon::PianoRoll));
+        assert_eq!(window_icon(&app.state.project, 0), None);
         run(&mut app, Cmd::SetIcon(1, None));
-        assert!(app.state.playlist.icons.is_empty());
+        assert!(crate::playlist::icons(&app.state.project).is_empty());
     }
 
     /// The window menu's CPU entries (ui/plugin-window.md "CPU"): ticked from the plugin's switches, each flip one undo

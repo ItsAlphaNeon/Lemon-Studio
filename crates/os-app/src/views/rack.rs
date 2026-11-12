@@ -134,7 +134,7 @@ pub fn layout(s: &State) -> Vec<RowPos> {
     rk::shown(s)
         .into_iter()
         .map(|row| {
-            let zipped = s.rack.zipped.contains(&row);
+            let zipped = s.project.channels.get(row).is_some_and(|c| c.rack.zipped);
             let p = RowPos { row, top: y, zipped };
             y += p.pitch();
             p
@@ -296,7 +296,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let first_step = (sx / STEP_W).floor() as u32;
     let per_step = rk::per_step(s);
     let (group, bars) = (rk::beat_steps(s), rk::pattern_bars(s, len * per_step));
-    let pat = s.project.pattern(s.pattern);
+    let pat = s.project.pattern(s.pattern());
     let notes: &[os_model::Note] = pat.map_or(&[], |p| &p.notes);
     // Playback position (pattern mode): the current step (§16).
     let cur_step = (f.playing && !f.song).then(|| (f.tick / f64::from(per_step)).floor() as u32);
@@ -328,7 +328,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         // Mute LED, or the padlock of a locked channel (§10).
         let lr = Rect::new(x + 11.5, ry + 6.5, 12.0, 12.0);
         ui.hit(lr, Action::ChannelEnable(i), "Mute / solo  (shift/ctrl+)0..9");
-        if s.rack.locked.contains(&i) {
+        if ch.rack.locked {
             padlock(ui, x + 17.5, ry + 12.5, ch.enabled);
         } else {
             rack_led(ui, x + 17.5, ry + 12.5, ch.enabled);
@@ -382,7 +382,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         // A channel locked to a note source shows a padlock at the button's right end (§18 Receive notes from ▸).
         let locked = s.rack.note_lock.contains(&Some(i));
         // Change icon... (§18, Lemon Studio's design): the icon at the button's left end, the name moved right of it.
-        let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, i);
+        let icon = crate::playlist::window_icon(&s.project, i);
         let icon_lead = if icon.is_some() { 16.0 } else { 0.0 };
         // A channel with an instrument track (playlist §6c): the "I" disc before the name, as on the track header.
         let inst = crate::track_links::instrument_track_of(s, ch.index).is_some();
@@ -554,9 +554,9 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         ui.c.fill_rect(Rect::new(cf.x, cf.y + 1.0, cf.w, cf.h / 2.0), ui.t.s(0x202122));
         ui.c.fill_rect(Rect::span(cf.x, cf.right(), cf.y + 1.0 + cf.h / 2.0, cf.bottom()), ui.t.s(0x1b1c1d));
     }
-    let label = match s.rack.filter {
+    let label = match rk::filter(&s.project) {
         rk::Filter::All => "All".to_string(),
-        rk::Filter::Group(g) => s.rack.groups.get(g).map_or("All".to_string(), |g| g.name.clone()),
+        rk::Filter::Group(g) => rk::groups(&s.project).get(g).map_or("All".to_string(), |g| g.name.clone()),
         rk::Filter::Unsorted => "Unsorted".to_string(),
     };
     let lf = Font::new(17);
@@ -619,17 +619,17 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let green = ui.t.a(0x8fd14a);
     if lemon {
         // Lemon: toggles are lit rounded squares with dark glyphs.
-        if s.rack.loop_mode {
+        if rk::loop_mode(s) {
             lk::lit_in(ui.c, ui.t, lr, lk::r_btn(t), lhov);
         } else if lhov {
             ui.c.fill_rrect(lr, lk::r_btn(t), t.button_hi);
         }
-        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { lk::ink_on_lit(ui.t) } else { t.glyph });
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(s) { lk::ink_on_lit(ui.t) } else { t.glyph });
     } else {
-        if s.rack.loop_mode || lhov {
-            ui.c.stroke_rrect(lr, 3.0, 1.0, if s.rack.loop_mode { green } else { t.glyph.shade(-0.3) });
+        if rk::loop_mode(s) || lhov {
+            ui.c.stroke_rrect(lr, 3.0, 1.0, if rk::loop_mode(s) { green } else { t.glyph.shade(-0.3) });
         }
-        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(s) { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
     }
     // Graph editor (§7, §14): blue outline when on.
     let gx = r - 58.0;

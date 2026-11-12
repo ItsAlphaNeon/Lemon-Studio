@@ -26,22 +26,22 @@ const REPEAT: Duration = Duration::from_millis(60);
 /// The range in ticks: the song's length (the end of the last clip) in SONG mode, `None` while the playlist is empty
 /// (the slider is disabled); the current pattern's length in PAT mode (§2).
 pub fn range(s: &State) -> Option<u32> {
-    if s.song_mode {
+    if s.song_mode() {
         crate::playlist::clips(s).iter().map(|c| c.end()).max().filter(|&e| e > 0)
     } else {
-        Some(crate::piano::pattern_length(s, s.pattern).max(1))
+        Some(crate::piano::pattern_length(s, s.pattern()).max(1))
     }
 }
 
 /// The position the slider moves: the song position, or the piano roll's play-start marker in PAT mode.
 pub fn stored(s: &State) -> u32 {
-    if s.song_mode { s.playlist.pos } else { s.piano.marker }
+    if s.song_mode() { s.playlist.pos } else { s.piano.marker }
 }
 
 /// Where the handle is: the playhead while this mode plays (and the handle is not being dragged), else the stored
 /// position.
 pub fn shown(s: &State, playing: bool, song: bool, tick: f64, dragging: bool) -> u32 {
-    if playing && song == s.song_mode && !dragging { tick.max(0.0) as u32 } else { stored(s) }
+    if playing && song == s.song_mode() && !dragging { tick.max(0.0) as u32 } else { stored(s) }
 }
 
 pub fn handle_x(pos: u32, range: u32) -> f32 {
@@ -84,7 +84,7 @@ impl App {
         let Some(range) = range(&self.state) else { return };
         let t = t.min(range - 1);
         let s = &mut self.state;
-        if s.song_mode {
+        if s.song_mode() {
             s.playlist.pos = t;
             // The initial values follow a song position move (spec: ui/settings-choices.md "Advanced: Initialize
             // controls automatically").
@@ -108,7 +108,7 @@ impl App {
         if !tp.playing() {
             return;
         }
-        if self.state.song_mode {
+        if self.state.song_mode() {
             let p = self.state.playlist.pos;
             // With Quantize song jumps the playing song goes on to the next unit, then jumps there (ui/playlist.md §7a).
             if let Some(unit) = crate::playlist::jump_unit(&self.state).filter(|_| tp.song() && !tp.paused()) {
