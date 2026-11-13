@@ -4498,6 +4498,7 @@ mod tests {
         app.state.session.project.get_mut().ppq = 96;
         app.state.set_tempo(130.0);
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         let enabled = |app: &App| options_menu(&app.state, 0.0, 0.0).items.iter().find(|i| i.label == "Restretch all").map(|i| (i.enabled, i.key));
         assert_eq!(enabled(&app), Some((true, "Ctrl+Alt+R")));
         assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("No stretched channels to restretch"));

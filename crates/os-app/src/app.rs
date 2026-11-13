@@ -577,7 +577,7 @@ const MONITOR_RECT: Rect = Rect::new(880.0, 4.0, 168.0, 33.0);
 /// The toolbar's CPU panel.
 pub(crate) const CPU_RECT: Rect = Rect::new(1053.0, 4.0, 149.0, 32.0);
 /// What a tempo change repaints in the toolbar (the tempo box and the transport around it).
-const TEMPO_RECT: Rect = Rect::new(380.0, 0.0, 200.0, 83.0);
+pub(crate) const TEMPO_RECT: Rect = Rect::new(380.0, 0.0, 200.0, 83.0);
 
 /// Actions whose hover state has no visual feedback (large background regions).
 fn hover_is_visible(a: &Action) -> bool {
@@ -1486,6 +1486,38 @@ pub struct App {
 }
 
 /// Window-level requests the shell must carry out after an event.
+/// Playback starts from the song position (SONG) or the play-start marker (PAT), after a recording count-in of
+/// `bars` bars (spec: ui/recording.md §3); `sel` is the time selection that loops it. An empty arranger plays nothing
+/// as a song (unless one-click recording is starting).
+pub(crate) fn play_in(ses: &mut crate::session::Session, sel: Option<(u32, u32)>, bars: u32) {
+    let song = ses.song_mode();
+    let audio_starting = ses.audio_rec.as_ref().is_some_and(|r| !r.ending());
+    if song && !audio_starting && ses.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
+        ses.touched.views.push(crate::session::View::Message("The arranger is empty: nothing to play as a song".into()));
+        ses.touched.repaint = true;
+        return;
+    }
+    // The song starts with the project's initial values (spec: ui/settings-choices.md "Advanced: Initialize
+    // controls automatically").
+    if crate::init::apply(ses) {
+        ses.touched.repaint = true;
+    }
+    if song {
+        crate::perform::starting(ses);
+    }
+    let p = crate::rack::play_project_in(ses);
+    let start = if song { f64::from(ses.song_pos) } else { f64::from(ses.pat_pos) };
+    // A looping time selection starts at its start unless the position is inside it (spec: ui/recording.md §5).
+    let start = match sel {
+        Some((a, b)) if start < f64::from(a) || start >= f64::from(b) => f64::from(a),
+        _ => start,
+    };
+    // The engine gets the loop range before its first tick.
+    ses.transport.set_loop(sel);
+    let mode = if song { PlayMode::Song } else { PlayMode::Pattern(ses.pattern()) };
+    ses.transport.play_counted(&p, mode, start, bars);
+}
+
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
         // Each test's app looks for missing samples only in its own project's folders, never another test's.
@@ -1759,7 +1791,9 @@ impl App {
                 crate::templates::remember(&path);
                 crate::recent::add(&path);
                 s.piano.reset();
+                s.session.pat_pos = 0;
                 s.playlist.reset();
+                s.session.song_pos = 0;
                 crate::playlist::load_view(s);
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 // A .lemon file's own state (icons, slot names and colours, Performance settings); its channel icons
@@ -2291,7 +2325,9 @@ impl App {
         // FL's default template is saved in pattern mode.
         s.set_song_mode(false);
         s.piano.reset();
+        s.session.pat_pos = 0;
         s.playlist.reset();
+        s.session.song_pos = 0;
         s.session.history.reset();
         s.session.control.reset();
         s.session.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
@@ -3813,7 +3849,7 @@ impl App {
             || self.state.motion.borrow().moving()
             || self.hold.is_some()
             || self.smooth.running()
-            || self.midi_play.busy()
+            || !self.state.session.ext_pending.is_empty()
             || self.remote.busy()
             || self.state.browser_marquee.borrow().is_some()
             || self.state.cpu.fps_view
@@ -4004,7 +4040,7 @@ impl App {
         // Resumed from a Marker pause: playback counts as started on the marker, so Stop returns there (spec:
         // audio/transport.md "Time markers in SONG mode").
         if let Some(t) = self.state.session.transport.take_marker_resumed() {
-            self.state.playlist.pos = t;
+            self.state.session.song_pos = t;
             self.damage_win(Win::Playlist);
         }
         let _ = crate::rack::sync_playback(&mut self.state.session);
@@ -4619,7 +4655,7 @@ impl App {
             os_hostlink::AudioTo::Playlist => {}
         }
         let s = &mut self.state;
-        let start = s.playlist.pos;
+        let start = s.session.song_pos;
         let secs = s.session.samples.wave(&path).map_or(0.0, |w| w.secs());
         let p = &s.session.project;
         let tempo = p.tick_tempo(s.tempo().max(1.0));
@@ -5601,7 +5637,7 @@ impl App {
                 }
                 Drag::Marker => {
                     if let Some(g) = self.piano_geom() {
-                        self.state.piano.marker = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
+                        self.state.session.pat_pos = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
                         self.state.piano.marker_placed = true;
                     }
                     self.damage_piano();
@@ -7764,7 +7800,7 @@ impl App {
     /// that tick anywhere in the song.
     fn piano_song_seek(&mut self, t: u32, press: bool) -> bool {
         let tp = &self.state.session.transport;
-        let near = if tp.playing() && tp.song() { tp.tick() as u32 } else { self.state.playlist.pos };
+        let near = if tp.playing() && tp.song() { tp.tick() as u32 } else { self.state.session.song_pos };
         let Some(at) = piano::song_tick_of(&self.state.session, t, near) else { return false };
         if press && tp.playing() && tp.song() && tp.paused() {
             tp.stop();
@@ -7781,30 +7817,8 @@ impl App {
 
     /// `start_playback` after a recording count-in of `bars` bars (spec: ui/recording.md §3).
     pub(crate) fn start_playback_counted(&mut self, bars: u32) {
-        let song = self.state.song_mode();
-        if song && !self.one_click_starting() && self.state.session.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
-            self.state.message = Some("The arranger is empty: nothing to play as a song".into());
-            self.invalidate();
-            return;
-        }
-        // The song starts with the project's initial values (spec: ui/settings-choices.md "Advanced: Initialize
-        // controls automatically").
-        if crate::init::apply(&mut self.state.session) {
-            self.invalidate();
-        }
-        if song {
-            crate::perform::starting(&mut self.state);
-        }
-        let p = crate::rack::play_project(&self.state);
-        let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
-        // A looping time selection starts at its start unless the position is inside it (spec: ui/recording.md §5).
-        let start = match self.selection_loop() {
-            Some((a, b)) if start < f64::from(a) || start >= f64::from(b) => f64::from(a),
-            _ => start,
-        };
-        // The engine gets the loop range before its first tick.
-        self.sync_loop_range();
-        self.state.session.transport.play_counted(&p, self.play_mode(), start, bars);
+        let sel = self.selection_loop();
+        self.host(|ses| play_in(ses, sel, bars));
     }
 
     /// TOOLS > Stop sound (Ctrl+H): stops playback and every voice, and the effects' tails.
@@ -7824,10 +7838,6 @@ impl App {
             Some(code) => code == ROW[d],
             None => matches!(key, Key::Character(c) if c == US[d] || c.as_str() == d.to_string()),
         }
-    }
-
-    fn play_mode(&self) -> PlayMode {
-        if self.state.song_mode() { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern()) }
     }
 
     /// Play one note of channel `channel` (Note::channel) once (also while playing or paused).
@@ -8360,7 +8370,7 @@ impl App {
                 if self.state.song_mode() && self.piano_song_seek(t, true) {
                     self.drag = Some(Drag::SongRuler);
                 } else {
-                    self.state.piano.marker = t;
+                    self.state.session.pat_pos = t;
                     self.state.piano.marker_placed = true;
                     self.drag = Some(Drag::Marker);
                 }
@@ -8436,14 +8446,14 @@ impl App {
                 let s = &mut self.state;
                 if s.song_mode() {
                     if let Some((a, _)) = s.playlist.range {
-                        s.playlist.pos = a;
+                        s.session.song_pos = a;
                     }
                     // A song position move: the initial values (spec: ui/settings-choices.md "Advanced: Initialize
                     // controls automatically").
                     crate::init::apply(&mut s.session);
                 } else if let Some((a, _)) = s.piano.range.filter(|_| s.shown(Win::PianoRoll)) {
                     // spec: ui/recording.md §5: the piano roll's time selection, as in SONG mode.
-                    s.piano.marker = a;
+                    s.session.pat_pos = a;
                 }
                 self.invalidate();
             }
@@ -10384,7 +10394,7 @@ mod tests {
         let p = path.to_string_lossy().into_owned();
         let mut a = App::new(None);
         a.state.session.project = crate::locked::Locked::new(test_project());
-        a.state.playlist.pos = 384;
+        a.state.session.song_pos = 384;
         let before = a.state.session.project.channels.len();
         a.sample_from_plugin(p.clone(), os_hostlink::AudioTo::Playlist);
         assert_eq!(a.state.session.project.channels.len(), before + 1);
@@ -11162,11 +11172,11 @@ mod tests {
             ..Default::default()
         }];
         // Editor state in ticks: the piano roll's marker, clipboard and an undo step; the song position and selection.
-        app.state.piano.marker = 48;
+        app.state.session.pat_pos = 48;
         app.state.piano.clipboard = vec![note];
         crate::piano::snapshot(&mut app.state.session);
         app.state.session.project.get_mut().patterns[0].notes[0].position = 72;
-        app.state.playlist.pos = 96;
+        app.state.session.song_pos = 96;
         app.state.playlist.range = Some((96, 192));
         app.mark_saved();
         let before = app.state.session.project.clone();
@@ -11188,15 +11198,15 @@ mod tests {
         assert_eq!((a.clips[0].position, a.clips[0].length, a.markers[0].position), (384, 768, 192));
         assert_eq!(app.state.message.as_deref(), Some("Timebase: 192 PPQ"));
         assert!(app.unsaved());
-        assert_eq!((app.state.piano.marker, app.state.piano.clipboard[0].position), (96, 48));
-        assert_eq!((app.state.playlist.pos, app.state.playlist.range), (192, Some((192, 384))));
+        assert_eq!((app.state.session.pat_pos, app.state.piano.clipboard[0].position), (96, 48));
+        assert_eq!((app.state.session.song_pos, app.state.playlist.range), (192, Some((192, 384))));
         // The pattern is still one 4/4 bar long, in the new ticks.
         assert_eq!(crate::piano::pattern_length(&app.state.session, app.state.pattern()), 768);
         // The change is one step, "Project settings": undone, the old timebase and its ticks, and the undo step made
         // before it then works in those; redone, both come back in the new ticks.
         assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::history::PROJECT_SETTINGS));
         assert_eq!((app.state.session.project.ppq, app.state.session.project.patterns[0].notes[0].position), (96, 72));
-        assert_eq!((app.state.piano.marker, app.state.playlist.pos), (48, 96));
+        assert_eq!((app.state.session.pat_pos, app.state.session.song_pos), (48, 96));
         assert!(crate::piano::undo(&mut app.state));
         assert_eq!(app.state.session.project.patterns[0].notes[0].position, 24);
         crate::history::redo(&mut app.state);
@@ -11419,19 +11429,19 @@ mod tests {
         }
         let bar = s.session.project.bar_ticks();
         let last = |s: &State| pl::clips(&s.session).last().map(|c| (c.position / bar, c.end() / bar, c.track)).unwrap();
-        s.playlist.pos = 4 * bar;
+        s.session.song_pos = 4 * bar;
         pl::create_automation(s, 0, "Auto", 0.5);
         assert_eq!(last(s), (4, 5, 0), "on, at bar 5");
         prefs::set_check(&AT_POS, false);
         pl::create_automation(s, 0, "Auto", 0.5);
         assert_eq!(last(s), (0, 5, 1), "off: from bar 1 to the song's end");
         prefs::set_check(&AT_POS, true);
-        s.playlist.pos = bar;
+        s.session.song_pos = bar;
         pl::create_automation(s, 0, "Auto", 0.5);
         assert_eq!(last(s), (1, 5, 2), "on, at bar 2");
         // A muted clip ending at bar 11 does not count; from bar 7 the song has ended: one pattern length.
         pl::arr_mut(&mut s.session).clips.push(os_model::Clip { muted: true, ..os_model::Clip::new(0, 10 * bar, 6, os_model::ClipSource::Pattern(1)) });
-        s.playlist.pos = 6 * bar;
+        s.session.song_pos = 6 * bar;
         pl::create_automation(s, 0, "Auto", 0.5);
         assert_eq!(last(s), (6, 7, 7));
         // A time selection sets the clip, whatever the check.
@@ -12757,6 +12767,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
@@ -13047,6 +13058,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Playlist];
         app.mouse_move(5.0, 700.0);
         crate::anim::set_clock(true);
@@ -13162,6 +13174,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Mixer];
         frame(&mut app, &mut c, None);
         let pan = KnobId::MixPan(1);
@@ -13256,6 +13269,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
@@ -13341,6 +13355,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Mixer];
         frame(&mut app, &mut c, None);
         let button = hit_rect(&app, &Action::Metronome);
@@ -13640,6 +13655,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
@@ -13679,6 +13695,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
@@ -15229,6 +15246,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         // The all tab lists the roots with content, the preset store, the channel states and the user's projects, all
@@ -16975,16 +16993,16 @@ mod tests {
     fn stop_keeps_the_start_position() {
         let mut app = App::new(None);
         app.state.set_song_mode(true);
-        app.state.playlist.pos = 768;
+        app.state.session.song_pos = 768;
         app.act(Action::Stop);
-        assert_eq!(app.state.playlist.pos, 768);
+        assert_eq!(app.state.session.song_pos, 768);
         app.state.playlist.range = Some((384, 1152));
         app.act(Action::Stop);
-        assert_eq!(app.state.playlist.pos, 384, "the time selection's start");
+        assert_eq!(app.state.session.song_pos, 384, "the time selection's start");
         app.state.set_song_mode(false);
-        app.state.piano.marker = 48;
+        app.state.session.pat_pos = 48;
         app.act(Action::Stop);
-        assert_eq!(app.state.piano.marker, 48);
+        assert_eq!(app.state.session.pat_pos, 48);
     }
 
     /// L flips the PAT / SONG switch (FL's key); with the typing keyboard on, L is a note instead.
@@ -17066,11 +17084,11 @@ mod tests {
         assert_eq!(piano::pattern_tick_in_song(&app.state.session, 1000.0), None, "between the clips");
         // Stopped: the press moves the song position.
         assert!(app.piano_song_seek(96, true));
-        assert_eq!(app.state.playlist.pos, 480);
+        assert_eq!(app.state.session.song_pos, 480);
         // A tick no clip shows: nothing moves.
         pl::arr_mut(&mut app.state.session).clips.truncate(1);
         assert!(!app.piano_song_seek(500, true));
-        assert_eq!(app.state.playlist.pos, 480);
+        assert_eq!(app.state.session.song_pos, 480);
     }
 
     /// Shortening a pattern clip that plays its whole pattern cuts it: it gets a window and plays only that.
@@ -17486,7 +17504,7 @@ mod tests {
         let ruler = app.hits.iter().find(|h| h.action == Action::PianoRuler).map(|h| h.rect).unwrap();
         let ry = ruler.cy();
         swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, ry), (g.x_of(190.0), ry), false);
-        assert_eq!(app.state.piano.marker, 192);
+        assert_eq!(app.state.session.pat_pos, 192);
         assert!(app.state.piano.marker_placed);
         assert_eq!(piano::paste_tick(&app.state, &[Note::step(0, 500)]), 192, "placed: paste at the marker");
         swipe(&mut app, &mut c, (g.x_of(0.0) + 1.0, ry), (g.x_of(100.0), ry), true);
@@ -17703,7 +17721,7 @@ mod tests {
             assert_eq!(app.state.piano.range, None);
             select(&mut app, 800, 60);
             named(&mut app, NamedKey::Enter, CTRL, 1);
-            assert_eq!((app.state.piano.range, app.state.piano.marker), (Some((800, 848)), 800));
+            assert_eq!((app.state.piano.range, app.state.session.pat_pos), (Some((800, 848)), 800));
             assert_eq!(selected(&app), [(800, 60)]);
         }
 
@@ -17743,7 +17761,7 @@ mod tests {
             assert_eq!(selected(&app), [(56, 60)]);
             assert_eq!(spans(&app).iter().filter(|n| n.0 == 56).count(), 2);
             // A placed marker: there.
-            app.state.piano.marker = 480;
+            app.state.session.pat_pos = 480;
             app.state.piano.marker_placed = true;
             letter(&mut app, 'v', CTRL, 1);
             assert_eq!(selected(&app), [(480, 60)]);
@@ -18304,6 +18322,7 @@ mod tests {
 
         // The setting outlives a project change (§8).
         app.state.piano.reset();
+        app.state.session.pat_pos = 0;
         assert_eq!(app.state.piano.snap, EditorSnap::Grid(Snap::None));
     }
 
@@ -18456,7 +18475,9 @@ mod tests {
         // Program settings: opening another project keeps all three (§6).
         app.state.playlist.snap = EditorSnap::Grid(Snap::Cell);
         app.state.piano.reset();
+        app.state.session.pat_pos = 0;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         assert_eq!((now(&app), app.state.piano.snap, app.state.playlist.snap), (Snap::Beat, EditorSnap::Main, EditorSnap::Grid(Snap::Cell)));
     }
 
@@ -19050,7 +19071,7 @@ mod tests {
         assert!(app.state.piano.ghosts);
 
         // Alt+T adds a time marker at the play-start marker (stopped), snapped to a step.
-        app.state.piano.marker = 200;
+        app.state.session.pat_pos = 200;
         key(&mut app, "t", false, true, false);
         assert_eq!(piano::pattern_mut(&mut app.state.session).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
         // It is saved with the pattern and comes back on open.
@@ -19222,6 +19243,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, c, None);
         let g = crate::playlist::PGeom::new(&app.state, app.pl_grid().expect("playlist grid"));
@@ -19282,7 +19304,7 @@ mod tests {
         app.state.set_tempo(90.0);
         ruler_press(&mut app, &mut c, g.x_of(4.0 * bar as f32) + 1.0, g.x_of(4.0 * bar as f32) + 1.0, ruler.cy(), false);
         assert!(app.state.song_mode(), "a click on the ruler switches to SONG");
-        assert_eq!(app.state.playlist.pos, 4 * bar);
+        assert_eq!(app.state.session.song_pos, 4 * bar);
         assert!(!app.state.session.transport.playing(), "and does not start playback");
         assert_eq!(app.state.tempo(), 140.0, "the initial tempo");
     }
@@ -19410,6 +19432,7 @@ mod tests {
         app.state.session.project.get_mut().ppq = 96;
         app.state.set_tempo(130.0);
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         let wav = std::env::temp_dir().join(format!("os-app-fit-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 282240]).unwrap();
         pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
@@ -19473,6 +19496,7 @@ mod tests {
         app.state.session.project.get_mut().ppq = 96;
         app.state.set_tempo(140.0);
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         let wav = std::env::temp_dir().join(format!("os-app-fit-bar-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 176400]).unwrap();
         app.state.session.project.get_mut().bar = Some((3, 2));
@@ -20522,6 +20546,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
         let grid = app.pl_grid().expect("playlist grid");
@@ -20641,6 +20666,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         // The piano roll behind: a letter the playlist leaves goes on to the piano roll's tools.
         app.state.z = vec![Win::PianoRoll, Win::Playlist];
         assert!(app.pl_focus());
@@ -20695,6 +20721,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.playlist.row_h = pl::ROW_H;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
@@ -20837,11 +20864,11 @@ mod tests {
         app.state.session.project.get_mut().arrangements =
             vec![os_model::Arrangement { number: 1, clips: vec![os_model::Clip::new(0, 3168, 0, os_model::ClipSource::Pattern(1))], ..Default::default() }];
         app.state.set_song_mode(true);
-        app.state.playlist.pos = 0;
+        app.state.session.song_pos = 0;
         frame(&mut app, &mut c, None);
         assert_eq!(hit_rect(&app, &Action::SongPos), PANEL);
         let y = 62.0;
-        let pos = |app: &App| app.state.playlist.pos;
+        let pos = |app: &App| app.state.session.song_pos;
 
         // A click beside the handle: one step (36 ticks); the release ends it.
         app.mouse_move(480.0, y);
@@ -20884,7 +20911,7 @@ mod tests {
         frame(&mut app, &mut c, None);
         app.mouse_move(480.0, y);
         app.mouse_down_right();
-        assert_eq!(app.state.piano.marker, 192);
+        assert_eq!(app.state.session.pat_pos, 192);
         assert_eq!(app.hint, "Song position: 1:09:00");
 
         // SONG mode with an empty playlist: disabled.
@@ -20911,6 +20938,7 @@ mod tests {
         app.state.session.file = None;
         app.state.session.path = None;
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.playlist.row_h = pl::ROW_H;
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
@@ -21086,7 +21114,7 @@ mod tests {
 
         // Ctrl+Insert without a time selection inserts one bar at the song position.
         app.state.playlist.range = None;
-        app.state.playlist.pos = bar;
+        app.state.session.song_pos = bar;
         let before: Vec<u32> = on_track(&app, 4).iter().map(|c| c.position).collect();
         app.key(&Key::Named(NamedKey::Insert), true, false);
         let after: Vec<u32> = on_track(&app, 4).iter().map(|c| c.position).collect();
@@ -21138,6 +21166,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         app.state.z = vec![Win::Playlist];
         app.state.session.project.get_mut().patterns[0].notes = (0..16).map(|i| Note { length: 24, key: 60 + (i % 5) as u16 * 2, ..Note::step(0, i * 48) }).collect();
         let bar = 4 * u32::from(app.state.session.project.ppq);
@@ -22950,9 +22979,9 @@ mod tests {
 
         // Add auto and Add jump to next bar, at the song position, kept in position order; each one undo step.
         let steps = app.state.session.history.len();
-        app.state.playlist.pos = 768;
+        app.state.session.song_pos = 768;
         pl::run(&mut app, Cmd::AddAutoMarker);
-        app.state.playlist.pos = 384;
+        app.state.session.song_pos = 384;
         pl::run(&mut app, Cmd::AddJumpMarker);
         assert_eq!(marks(&app), [mk(384, M::SKIP, " "), mk(768, M::PLAIN, "Auto"), mk(768, M::PLAIN, " ")]);
         assert_eq!(app.state.session.history.len(), steps + 2);
@@ -23031,13 +23060,13 @@ mod tests {
 
         // A click on a marker moves the song position to it, and leaves no undo step.
         set(&mut app, &[(384, M::PLAIN, "A"), (768, M::START, "B")]);
-        app.state.playlist.pos = 0;
+        app.state.session.song_pos = 0;
         let grid = Rect::new(300.0, 200.0, 1200.0, 600.0);
         let g = pl::PGeom::new(&app.state, grid);
         app.mouse = (g.x_of(768.0) + 4.0, 190.0);
         let steps = app.state.session.history.len();
         pl::press_markers(&mut app, grid, false);
-        assert_eq!(app.state.playlist.pos, 768);
+        assert_eq!(app.state.session.song_pos, 768);
         let Some(Drag::Pl(d @ PlDrag::Marker { .. })) = app.drag.take() else { panic!("a marker drag") };
         pl::drag_end(&mut app, d, grid);
         assert_eq!(app.state.session.history.len(), steps);
@@ -23047,9 +23076,9 @@ mod tests {
         assert!(app.state.playlist.popup.take().is_some_and(|p| p.items.len() == 3));
 
         // An opened project's song position is at its Start marker.
-        app.state.playlist.pos = 0;
+        app.state.session.song_pos = 0;
         pl::load_view(&mut app.state);
-        assert_eq!(app.state.playlist.pos, 768);
+        assert_eq!(app.state.session.song_pos, 768);
 
         // Add two...: the base-name box, then FL's "<base> -  start" / "<base> -  end" (two spaces) at the time
         // selection's ends (measured: bars 7 to 9 gave 2304 and 3072); one undo step.
@@ -23112,7 +23141,7 @@ mod tests {
         let again = app.state.playlist.popup.clone().expect("still open");
         assert_eq!((Some((again.x, again.y)), again.items[3].mark), (was, Mark::Radio(true)));
         // A scale adds the marker at the song position and closes the list; one undo step.
-        app.state.playlist.pos = 1536;
+        app.state.session.song_pos = 1536;
         let steps = app.state.session.history.len();
         pl::run(&mut app, Cmd::AddKeyMarker(0));
         assert!(app.state.playlist.popup.is_none());
@@ -23335,6 +23364,7 @@ mod tests {
         let ppq = u32::from(a.state.session.project.ppq);
         a.state.session.project.get_mut().patterns[0].notes = (0..8).map(|i| os_model::Note { length: ppq, key: 60, ..os_model::Note::step(ch, i * ppq) }).collect();
         a.state.playlist.reset();
+        a.state.session.song_pos = 0;
         pl::arr_mut(&mut a.state.session).clips.push(os_model::Clip::new(0, 8 * ppq, 0, os_model::ClipSource::Pattern(1)));
         // The EQ's master gain automated from its lowest to its highest over the eight beats.
         a.params_tick();

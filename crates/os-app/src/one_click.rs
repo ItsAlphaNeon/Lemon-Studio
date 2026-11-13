@@ -33,6 +33,13 @@ pub struct AudioRec {
     editor: bool,
 }
 
+impl AudioRec {
+    /// Taking in has stopped; the file is being made.
+    pub fn ending(&self) -> bool {
+        self.ending
+    }
+}
+
 /// The menu (the button's, and TOOLS > One-click audio recording's submenu): the audio editor (which asks for the
 /// input), then the inputs for the playlist.
 pub fn items(_: &State) -> Vec<PItem> {
@@ -157,7 +164,8 @@ impl App {
 
     /// Starts taking in `input` into a new file (no playback: `one_click_start` plays).
     pub(crate) fn one_click_begin(&mut self, input: Input, stream: Option<InputStream>, editor: bool) -> Result<(), String> {
-        begin_in(&mut self.state.session, input, stream, editor, self.state.playlist.pos)
+        let pos = self.state.session.song_pos;
+        begin_in(&mut self.state.session, input, stream, editor, pos)
     }
 
     /// Every tick: the session's `tick_in`; a take for the audio editor goes there.
@@ -187,11 +195,6 @@ impl App {
             let why = self.state.message.take().unwrap_or_default();
             format!("{why}: {name} is in the Recorded folder")
         }
-    }
-
-    /// Whether the empty-playlist check is waived: a recording plays an empty song all the same.
-    pub(crate) fn one_click_starting(&self) -> bool {
-        self.state.session.audio_rec.as_ref().is_some_and(|r| !r.ending)
     }
 }
 

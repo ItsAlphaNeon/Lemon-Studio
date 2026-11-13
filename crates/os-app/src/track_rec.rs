@@ -79,7 +79,7 @@ pub(crate) fn folder(s: &Session) -> std::path::PathBuf {
 impl App {
     /// Every tick: the session's `tick_in` with the song position and the playlist's last clip length.
     pub(crate) fn track_rec_tick(&mut self) {
-        let (pos, lock) = (self.state.playlist.pos, self.state.playlist.lock_len);
+        let (pos, lock) = (self.state.session.song_pos, self.state.playlist.lock_len);
         self.host(|ses| tick_in(ses, pos, lock));
     }
 

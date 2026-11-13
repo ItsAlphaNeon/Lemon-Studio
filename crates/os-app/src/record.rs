@@ -1268,7 +1268,7 @@ mod tests {
         app.record_tick();
         assert!(!app.state.session.transport.playing(), "punched out");
         assert_eq!(notes(&app), [(120, 72, 0)], "the held note ends at the selection's end");
-        assert_eq!(app.state.piano.marker, 96);
+        assert_eq!(app.state.session.pat_pos, 96);
         app.state.piano.range = None;
         assert_eq!(app.selection_loop(), None);
     }

@@ -278,7 +278,7 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     let p = ppq(s);
     let unit = sync_unit(s, set.trigger_sync, first.length);
     let at = match now {
-        None => s.playlist.pos.max(z),
+        None => s.session.song_pos.max(z),
         Some(t) if instant => t,
         Some(t) => {
             let playing = s.session.perform.live.get(&track).and_then(|l| l.pass_at(t)).map(Clip::end);
@@ -620,8 +620,8 @@ pub fn record(s: &mut crate::session::Session, stop: u32) -> usize {
 }
 
 /// Playback starts (§3): clips triggered while stopped start with it; what played before is over.
-pub fn starting(s: &mut State) {
-    let p = &mut s.session.perform;
+pub fn starting(s: &mut crate::session::Session) {
+    let p = &mut s.perform;
     p.live.retain(|_, l| l.armed);
     for l in p.live.values_mut() {
         l.armed = false;
@@ -677,7 +677,7 @@ pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
     a.markers.sort_by_key(|m| m.position);
     s.session.project.get_mut().performance = Some(true);
     s.set_song_mode(true);
-    s.playlist.pos = start;
+    s.session.song_pos = start;
     s.session.dirty = true;
     format!("Prepared for performance mode: {count} columns, Start marker at bar {}", start / bar + 1)
 }
@@ -1159,12 +1159,12 @@ mod tests {
     fn stopped_triggers_start_with_playback() {
         let mut app = app();
         let s = &mut app.state;
-        s.playlist.pos = 3072;
+        s.session.song_pos = 3072;
         trigger(s, 0, None, false, false);
         assert!(s.session.perform.live[&0].armed);
-        starting(s);
+        starting(&mut s.session);
         assert_eq!(s.session.perform.live[&0].start(), 3072);
-        starting(s);
+        starting(&mut s.session);
         assert!(s.session.perform.live.is_empty(), "a second start: what played is over");
     }
 
@@ -1178,7 +1178,7 @@ mod tests {
         let m = markers(&s.session);
         assert_eq!(m.len(), 17);
         assert_eq!((m[1].position, m[15].position, m[16].kind, m[16].position), (1536, 23040, TimeMarker::START, 24960));
-        assert_eq!((s.session.project.performance, s.song_mode(), s.playlist.pos), (Some(true), true, 24960));
+        assert_eq!((s.session.project.performance, s.song_mode(), s.session.song_pos), (Some(true), true, 24960));
         assert_eq!(columns(s).len(), 16);
         assert_eq!(toggle(s), "Performance mode: off");
         assert_eq!(zone(s), None);

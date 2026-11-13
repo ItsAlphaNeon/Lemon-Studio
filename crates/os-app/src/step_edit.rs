@@ -162,11 +162,11 @@ impl App {
         s.session.dirty = true;
         let to = pos + len;
         if s.song_mode() {
-            s.playlist.pos = to;
+            s.session.song_pos = to;
             // The initial values follow a song position move, as with the slider (`App::set_song_pos`).
             crate::init::apply(&mut s.session);
         } else {
-            s.piano.marker = to;
+            s.session.pat_pos = to;
         }
         self.hint = Cow::Owned(crate::song_pos::hint(&self.state, to));
         self.damage_band(HINT_RECT);
@@ -258,11 +258,11 @@ mod tests {
         typed(&mut app, KeyCode::KeyZ, false);
         assert_eq!(notes(&app), [(0, st, 48, 100)]);
         assert_eq!(piano::notes(&app.state.session)[0].channel, ch);
-        assert_eq!((app.state.piano.marker, selected(&app)), (st, vec![0]));
+        assert_eq!((app.state.session.pat_pos, selected(&app)), (st, vec![0]));
         assert_eq!(app.hint, "Song position: 1:02:00");
         tap(&mut app, KeyCode::KeyX);
         assert_eq!(notes(&app), [(0, st, 48, 100), (st, st, 50, 100)]);
-        assert_eq!((app.state.piano.marker, selected(&app)), (2 * st, vec![1]), "the earlier note is deselected");
+        assert_eq!((app.state.session.pat_pos, selected(&app)), (2 * st, vec![1]), "the earlier note is deselected");
         assert_eq!(app.hint, "Song position: 1:03:00");
         // In SONG mode the song position is the playlist's, and the notes go where the pattern plays there, as the
         // piano roll shows it: a clip of it at bar 3, the position a beat into it.
@@ -270,14 +270,14 @@ mod tests {
         let bar = app.state.session.project.bar_ticks();
         let clip = os_model::Clip::new(2 * bar, bar, 0, os_model::ClipSource::Pattern(app.state.pattern()));
         crate::playlist::arr_mut(&mut app.state.session).clips = vec![clip];
-        app.state.playlist.pos = 2 * bar + 4 * st;
+        app.state.session.song_pos = 2 * bar + 4 * st;
         tap(&mut app, KeyCode::KeyC);
         assert_eq!(notes(&app)[2], (4 * st, st, 52, 100));
-        assert_eq!((app.state.playlist.pos, app.state.piano.marker), (2 * bar + 5 * st, 2 * st));
+        assert_eq!((app.state.session.song_pos, app.state.session.pat_pos), (2 * bar + 5 * st, 2 * st));
         // Where no clip of the pattern plays, nothing is written and the position stays.
-        app.state.playlist.pos = bar / 2;
+        app.state.session.song_pos = bar / 2;
         tap(&mut app, KeyCode::KeyV);
-        assert_eq!((notes(&app).len(), app.state.playlist.pos), (3, bar / 2));
+        assert_eq!((notes(&app).len(), app.state.session.song_pos), (3, bar / 2));
         let m = "Step edit: Pattern 1 does not play at the song position";
         assert_eq!(app.state.message.as_deref(), Some(m));
         // The hint bar shows it over the hint of what the pointer rests on, until the pointer moves.
@@ -305,7 +305,7 @@ mod tests {
         assert!(notes(&app).is_empty(), "the MIDI key is still held");
         app.midi_notes(vec![Msg::Off { ch: 0, key: 67, vel: 64 }]);
         assert_eq!(notes(&app), [(0, st, 48, 100), (0, st, 52, 100), (0, st, 67, 90), (0, st, 53, 100)]);
-        assert_eq!((app.state.piano.marker, selected(&app)), (st, vec![0, 1, 2, 3]));
+        assert_eq!((app.state.session.pat_pos, selected(&app)), (st, vec![0, 1, 2, 3]));
         let h = &app.state.session.history;
         assert_eq!(h.at(), at + 1, "one undo step");
         assert_eq!(h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1), Some("Step edit"));
@@ -322,12 +322,12 @@ mod tests {
         let (ppq, st) = (u32::from(app.state.session.project.ppq), one_step(&app));
         tap(&mut app, KeyCode::KeyZ);
         tap(&mut app, KeyCode::KeyX);
-        assert_eq!(app.state.piano.marker, 2 * st, "1:03");
+        assert_eq!(app.state.session.pat_pos, 2 * st, "1:03");
         crate::snap::set(&mut app.state, Snap::Beat);
         assert_eq!(step(&app.state), ppq);
         tap(&mut app, KeyCode::KeyC);
         assert_eq!(notes(&app)[2], (2 * st, ppq, 52, 100), "from 1:03, a beat long");
-        assert_eq!((app.state.piano.marker, selected(&app)), (2 * st + ppq, vec![2]));
+        assert_eq!((app.state.session.pat_pos, selected(&app)), (2 * st + ppq, vec![2]));
         assert_eq!(app.hint, "Song position: 1:07:00");
     }
 
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn nothing_while_off_or_playing() {
         let mut app = app();
-        let nothing = |app: &App| notes(app).is_empty() && app.state.piano.marker == 0;
+        let nothing = |app: &App| notes(app).is_empty() && app.state.session.pat_pos == 0;
         ctrl_e(&mut app);
         assert!(!on());
         tap(&mut app, KeyCode::KeyZ);
