@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(controls(&a), INIT);
         moved(&mut a);
         a.act(Action::Stop);
-        assert_eq!((controls(&a), a.state.playlist.pos), (INIT, 192));
+        assert_eq!((controls(&a), a.state.session.song_pos), (INIT, 192));
         // The song looping back to its start.
         moved(&mut a);
         a.show_playback(Shown { playing: true, song: true, tick: 900.0, ..Shown::default() });

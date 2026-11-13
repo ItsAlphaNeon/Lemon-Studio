@@ -1181,12 +1181,12 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         {
             let tg = targets(s, n);
             let it = PItem::new("Assign to new Audio track(s)", mx(MCmd::AssignAudio(n)));
-            if crate::track_links::can_assign_audio(s, &tg) { it } else { it.off() }
+            if crate::track_links::can_assign_audio(&s.session, &tg) { it } else { it.off() }
         },
         {
             let tg = targets(s, n);
             let it = PItem::new("Unassign from Audio track(s)", mx(MCmd::UnassignAudio(n)));
-            if crate::track_links::can_unassign_audio(s, &tg) { it } else { it.off() }
+            if crate::track_links::can_unassign_audio(&s.session, &tg) { it } else { it.off() }
         },
         PItem::sep(),
         PItem::sub(
@@ -1691,7 +1691,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 s.session.project.channels.iter().enumerate().filter(|(_, c)| tg.contains(&c.mixer_track)).map(|(i, _)| i).collect();
             let k = rows.len();
             s.rack.sel = rows;
-            let tracks = crate::track_links::tracks_routed_to(s, &tg);
+            let tracks = crate::track_links::tracks_routed_to(&s.session, &tg);
             if let Some(&t) = tracks.first() {
                 s.playlist.track = t;
             }
@@ -1703,7 +1703,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::UnassignAudio(n) => {
             let tg = targets(s, n);
-            crate::track_links::unassign_audio(s, &tg)
+            crate::track_links::unassign_audio(&mut s.session, &tg)
         }
         MCmd::SelectDest(n) => select_linked(s, n, true),
         MCmd::SelectSources(n) => select_linked(s, n, false),
@@ -1988,76 +1988,22 @@ impl App {
     }
 
     fn mixer_requests(&mut self) {
-        let reqs = std::mem::take(&mut self.state.session.fx_requests);
-        if reqs.is_empty() {
+        if self.state.session.fx_requests.is_empty() {
             return;
         }
-        let mut relink = false;
-        // Creates waiting for a native plugin's first check (`Plugins::effect_ready`); a newer request for the same
-        // slot replaces a waiting one.
-        let mut waiting: Vec<FxReq> = Vec::new();
-        let mut done = false;
-        for r in reqs {
-            if let FxReq::Create { track, slot, .. } | FxReq::Delete { track, slot } = r {
-                waiting.retain(|w| !matches!(*w, FxReq::Create { track: t, slot: s, .. } if (t, s) == (track, slot)));
-            }
-            if let FxReq::Create { index, .. } = r {
-                if !self.state.session.plugins.effect_ready(index) {
-                    let name = self.state.session.plugins.effects.get(index).map(|a| a.desc.name.clone()).unwrap_or_default();
-                    let msg = format!("Trying {name} before its first load...");
-                    if self.state.message.as_deref() != Some(msg.as_str()) {
-                        self.state.message = Some(msg);
-                        done = true;
-                    }
-                    waiting.push(r);
-                    continue;
-                }
-            }
-            done = true;
-            match r {
-                FxReq::Create { track, slot, index, state } => match self.state.session.plugins.create_effect(track, slot, index, state.as_deref()) {
-                    Ok(_) => {
-                        self.state.session.plugins.added(crate::plugins::fx_key(track, slot));
-                        relink = true;
-                        self.open_fx(track, slot);
-                    }
-                    Err(e) => {
-                        if let Some(m) = track_mut(&mut self.state.session, track) {
-                            m.slots[usize::from(slot)] = None;
-                        }
-                        self.state.message = Some(format!("Effect: {e}"));
-                    }
-                },
-                FxReq::Toggle { track, slot } => {
-                    let key = crate::plugins::fx_key(track, slot);
-                    if !self.state.session.plugins.close_if_open(key) {
-                        self.open_fx(track, slot);
-                    }
-                }
-                FxReq::Show { track, slot } => self.open_fx(track, slot),
-                FxReq::Delete { track, slot } => {
-                    let key = crate::plugins::fx_key(track, slot);
-                    if self.state.session.plugins.hosted.contains_key(&key) {
-                        // Kept for an undo that brings the slot back (`control::host`).
-                        self.state.session.plugins.keep(key);
-                        self.state.session.plugins.drop_key(key);
-                        relink = true;
-                    }
-                }
-                FxReq::Remap(map) => {
-                    self.state.session.plugins.remap_fx(&|t, k| Some(map.iter().find(|(a, _)| *a == (t, k)).map_or((t, k), |&(_, b)| b)));
-                    relink = true;
-                }
+        let done = self.host(fx_requests_in);
+        if let Some(index) = done.trying {
+            let name = self.state.session.plugins.effects.get(index).map(|a| a.desc.name.clone()).unwrap_or_default();
+            let msg = format!("Trying {name} before its first load...");
+            if self.state.message.as_deref() != Some(msg.as_str()) {
+                self.state.message = Some(msg);
+                self.invalidate();
             }
         }
-        waiting.append(&mut self.state.session.fx_requests);
-        self.state.session.fx_requests = waiting;
-        if relink {
-            self.transport.set_effects(self.state.session.plugins.effects());
-            self.state.session.dirty = true;
-        }
-        if done {
-            self.invalidate();
+        for (track, slot, toggle) in done.windows {
+            if !(toggle && self.state.session.plugins.close_if_open(crate::plugins::fx_key(track, slot))) {
+                self.open_fx(track, slot);
+            }
         }
     }
 
@@ -2238,6 +2184,73 @@ impl App {
         }
         self.invalidate();
     }
+}
+
+/// What the mixer's effect requests leave to the interface (`fx_requests_in`): the windows to open (or with `toggle`,
+/// to close when open), in order, and the effect whose first check a create waits for.
+pub(crate) struct FxDone {
+    pub windows: Vec<(u16, u8, bool)>,
+    pub trying: Option<usize>,
+}
+
+/// The mixer's effect requests (`Session::fx_requests`) on the session: effects created, deleted and moved with their
+/// slots. A create waits for a native plugin's first check (`Plugins::effect_ready`); a newer request for the same slot
+/// replaces a waiting one.
+pub(crate) fn fx_requests_in(ses: &mut crate::session::Session) -> FxDone {
+    let reqs = std::mem::take(&mut ses.fx_requests);
+    let mut out = FxDone { windows: Vec::new(), trying: None };
+    let mut relink = false;
+    let mut waiting: Vec<FxReq> = Vec::new();
+    for r in reqs {
+        if let FxReq::Create { track, slot, .. } | FxReq::Delete { track, slot } = r {
+            waiting.retain(|w| !matches!(*w, FxReq::Create { track: t, slot: s, .. } if (t, s) == (track, slot)));
+        }
+        if let FxReq::Create { index, .. } = r {
+            if !ses.plugins.effect_ready(index) {
+                out.trying = Some(index);
+                waiting.push(r);
+                continue;
+            }
+        }
+        ses.touched.repaint = true;
+        match r {
+            FxReq::Create { track, slot, index, state } => match ses.plugins.create_effect(track, slot, index, state.as_deref()) {
+                Ok(_) => {
+                    ses.plugins.added(crate::plugins::fx_key(track, slot));
+                    relink = true;
+                    out.windows.push((track, slot, false));
+                }
+                Err(e) => {
+                    if let Some(m) = track_mut(ses, track) {
+                        m.slots[usize::from(slot)] = None;
+                    }
+                    ses.touched.views.push(crate::session::View::Message(format!("Effect: {e}")));
+                }
+            },
+            FxReq::Toggle { track, slot } => out.windows.push((track, slot, true)),
+            FxReq::Show { track, slot } => out.windows.push((track, slot, false)),
+            FxReq::Delete { track, slot } => {
+                let key = crate::plugins::fx_key(track, slot);
+                if ses.plugins.hosted.contains_key(&key) {
+                    // Kept for an undo that brings the slot back (`control::host`).
+                    ses.plugins.keep(key);
+                    ses.plugins.drop_key(key);
+                    relink = true;
+                }
+            }
+            FxReq::Remap(map) => {
+                ses.plugins.remap_fx(&|t, k| Some(map.iter().find(|(a, _)| *a == (t, k)).map_or((t, k), |&(_, b)| b)));
+                relink = true;
+            }
+        }
+    }
+    waiting.append(&mut ses.fx_requests);
+    ses.fx_requests = waiting;
+    if relink {
+        ses.transport.set_effects(ses.plugins.effects());
+        ses.dirty = true;
+    }
+    out
 }
 
 /// The plugin frame's title for a mixer slot: "Name (Insert N)" / "(Master)" (§7).

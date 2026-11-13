@@ -125,6 +125,7 @@ mod prefs;
 mod settings_window;
 pub mod locked;
 pub mod session;
+mod project_io;
 pub mod edit;
 mod follow;
 mod preview_track;
@@ -1997,8 +1998,8 @@ pub fn run() {
     app.update_startup();
     // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
     splash::step(&splash, splash::MIDI, "Opening MIDI devices");
-    app.midi = midi_in::MidiIn::open(wake_ui);
-    app.midi_out = midi_out::MidiOut::start(app.transport.watch());
+    app.state.session.midi = midi_in::MidiIn::open(wake_ui);
+    app.state.session.midi_out = midi_out::MidiOut::start(app.state.session.transport.watch());
     let message = app.state.message.clone();
     app.midi_refresh(false);
     if message.is_some() {

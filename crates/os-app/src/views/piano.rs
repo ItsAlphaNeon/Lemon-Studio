@@ -152,7 +152,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // A time-signature marker shows its signature (spec: ui/pattern-time-signature.md §2).
     let markers: Vec<(u32, String)> =
         s.session.project.pattern(s.pattern()).map_or(&[][..], |p| &p.markers).iter().map(|m| (m.position, super::playlist::marker_label(m))).collect();
-    ruler(ui, &l, &g, range, s.piano.marker, &markers);
+    ruler(ui, &l, &g, range, s.session.pat_pos, &markers);
     // Lit keys: the one held with the mouse and this channel's notes playing now (§4).
     let mut lit: Vec<i32> = s.piano.held.into_iter().collect();
     lit.extend(s.piano.typed.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| k));
@@ -279,14 +279,14 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     if let Some(tick) = head {
         let x = g.x_of(tick as f32);
         ui.c.fill_rect(Rect::new(x, l.grid.y, 1.5, l.grid.h), t.playhead);
-    } else if let Some(tick) = (!f.playing && s.song_mode()).then(|| piano::pattern_tick_in_song(&s.session, f64::from(s.playlist.pos))).flatten() {
+    } else if let Some(tick) = (!f.playing && s.song_mode()).then(|| piano::pattern_tick_in_song(&s.session, f64::from(s.session.song_pos))).flatten() {
         // Stopped in song mode on a place where this pattern plays: a grey line there.
         let x = g.x_of(tick as f32).round();
         ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 3.0, l.grid.h), ui.t.s(0x38373b));
         ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), ui.t.s(0x53585c));
     } else if !f.playing {
         // Stopped: a grey line at the play-start marker (§10).
-        let x = g.x_of(s.piano.marker as f32).round();
+        let x = g.x_of(s.session.pat_pos as f32).round();
         ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 3.0, l.grid.h), ui.t.s(0x38373b));
         ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), ui.t.s(0x53585c));
     }

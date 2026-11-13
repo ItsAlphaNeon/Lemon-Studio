@@ -163,7 +163,7 @@ impl Fp {
             ("history", history),
             // Whether the engine holds the project as it is: 0 nothing sent yet, 1 in step, 2 behind. Not the copy
             // itself: what it was last handed while playing starts or pauses follows the audio thread's timing.
-            ("engine", match app.transport.sent_for_tests() {
+            ("engine", match app.state.session.transport.sent_for_tests() {
                 None => 0,
                 Some(p) if p == crate::rack::play_project(s) => 1,
                 Some(_) => 2,
@@ -387,7 +387,7 @@ impl Rig {
         }
         // The engine is handed the project as opened, as playing it would: from here an edit that doesn't reach the
         // engine leaves it behind, where with nothing sent yet it would look the same as one that does.
-        rig.app.transport.update(&crate::rack::play_project(&rig.app.state));
+        rig.app.state.session.transport.update(&crate::rack::play_project(&rig.app.state));
         rig.paint();
         rig
     }
@@ -419,16 +419,16 @@ impl Rig {
         for _ in 0..4 {
             self.tick();
         }
-        if self.app.transport.playing() {
+        if self.app.state.session.transport.playing() {
             self.app.act(Action::Stop);
             self.tick();
         }
         // A step that started or stopped playback: with no device the audio thread may stop it on its own before the
         // Stop above, which leaves the engine's copy otherwise. Either way it is stopped and handed the project as it
         // is now, so the fingerprint doesn't follow that race.
-        if self.app.transport.generation_for_tests() != generation {
-            self.app.transport.stop();
-            self.app.transport.update(&crate::rack::play_project(&self.app.state));
+        if self.app.state.session.transport.generation_for_tests() != generation {
+            self.app.state.session.transport.stop();
+            self.app.state.session.transport.update(&crate::rack::play_project(&self.app.state));
         }
         self.app.want_close = false;
         self.settle();
@@ -437,7 +437,7 @@ impl Rig {
     }
 
     fn run(&mut self, inputs: &[Input]) -> Fp {
-        let generation = self.app.transport.generation_for_tests();
+        let generation = self.app.state.session.transport.generation_for_tests();
         for i in inputs {
             i.apply(&mut self.app);
         }
@@ -571,14 +571,14 @@ impl Rig {
         }
         // And stopped: a take still recording (a Touch controller note with Start on input on) would keep changing the
         // project, by the clock of a device that is not there, while the checks undo, redo and save.
-        if self.app.transport.playing() || self.app.state.rec.recording() {
+        if self.app.state.session.transport.playing() || self.app.state.session.rec.recording() {
             self.app.act(crate::app::Action::Stop);
             self.run(&[]);
         }
         // The engine holds what the project says (an edit that never reached it shows here): one finding per top-level
         // field that differs, named by its first difference, so what is accepted is decided per field and the names
         // don't depend on the accepted list.
-        if let Some(sent) = self.app.transport.sent_for_tests() {
+        if let Some(sent) = self.app.state.session.transport.sent_for_tests() {
             let play = crate::rack::play_project(&self.app.state);
             if sent != play {
                 let diff = differences(&sent, &play, false);
@@ -599,7 +599,7 @@ impl Rig {
             undone += 1;
             self.tick();
         }
-        self.after_step(self.app.transport.generation_for_tests());
+        self.after_step(self.app.state.session.transport.generation_for_tests());
         // The project's part only: what `side` holds is compared there (the end only: what undo leaves, as FL does).
         if let Some(d) = difference(&canonical(&project_part(opened)), &canonical(&project_part(&self.app.state.session.project)), false) {
             bad.push(format!("undo-to-start({undone}:{d})"));
@@ -611,7 +611,7 @@ impl Rig {
             }
             self.tick();
         }
-        self.after_step(self.app.transport.generation_for_tests());
+        self.after_step(self.app.state.session.transport.generation_for_tests());
         if let Some(d) = difference(&canonical(&project_part(&last)), &canonical(&project_part(&self.app.state.session.project)), false) {
             bad.push(format!("redo-to-end({d})"));
         }
@@ -1253,7 +1253,7 @@ fn equiv_show() {
         let line: Vec<String> = inputs.iter().map(ToString::to_string).collect();
         eprintln!("step {i}: {}", line.join("; "));
         let before = rig.app.state.session.project.clone();
-        let sent = rig.app.transport.sent_for_tests();
+        let sent = rig.app.state.session.transport.sent_for_tests();
         rig.run(inputs);
         rig.undo_start(&mut start);
         let s = &rig.app.state;
@@ -1262,7 +1262,7 @@ fn equiv_show() {
             eprintln!("  changed: {d}");
         }
         // What playback was handed (the engine's part of the fingerprint).
-        let now = rig.app.transport.sent_for_tests();
+        let now = rig.app.state.session.transport.sent_for_tests();
         if now != sent {
             match (&sent, &now) {
                 (Some(a), Some(b)) => eprintln!("  playback: {}", difference(a, b, false).unwrap_or_else(|| "the same project again".into())),

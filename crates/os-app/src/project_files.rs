@@ -150,7 +150,7 @@ impl App {
     pub(crate) fn revert_to_backup(&mut self) {
         let Some(path) = self.state.session.path.clone() else { return };
         let name = crate::backup::project_name(Some(&path));
-        let mut dirs: Vec<PathBuf> = crate::data_folder::backup_folder(&self.state, Some(&path)).into_iter().collect();
+        let mut dirs: Vec<PathBuf> = crate::data_folder::backup_folder(&self.state.session, Some(&path)).into_iter().collect();
         dirs.extend(crate::backup::folder().filter(|d| !dirs.contains(d)));
         match newest_backup(&dirs, &name) {
             Some(b) => self.ask_discard("reverting to the last backup", Next::Revert(b)),
@@ -175,7 +175,7 @@ impl App {
         }
         self.state.session.path = Some(own);
         // The project file still holds the last save: unsaved until saved again.
-        self.saved.1 = f64::NAN;
+        self.state.session.saved.1 = f64::NAN;
         let n = b.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         self.state.message = Some(format!("Reverted to {n}"));
     }

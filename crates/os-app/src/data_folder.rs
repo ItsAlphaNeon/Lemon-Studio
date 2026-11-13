@@ -119,17 +119,15 @@ pub fn can_rename(s: &State) -> bool {
     s.session.path.is_some() && choice(&s.session.project) != DataFolder::NONE && folder(s).is_some()
 }
 
-/// Before the project is written as `proj`: event 202 gets the data folder in use, which for "relative" is the project
-/// file's folder, whatever 202 said (spec: ui/data-folder.md §2: "the next save wrote that folder into 202"). The
-/// folder is the one of the file the project was opened from or last saved as, so Save as writes the folder it leaves
-/// (flp/events/project-info.md, event 202). Other choices keep 202 as it is.
-pub fn stamp(s: &State, proj: &mut Project) {
+/// What a save writes into event 202 (`App::write_project`): the data folder in use, which for "relative" is the
+/// project file's folder, whatever 202 said (spec: ui/data-folder.md §2: "the next save wrote that folder into 202").
+/// The folder is the one of the file the project was opened from or last saved as, so Save as writes the folder it
+/// leaves (flp/events/project-info.md, event 202). Other choices keep 202 as it is (`None`).
+pub(crate) fn saved_folder(s: &State) -> Option<String> {
     if choice(&s.session.project) != DataFolder::RELATIVE {
-        return;
+        return None;
     }
-    if let (Some(dir), Some(df)) = (folder(s), proj.data_folder.as_mut()) {
-        df.folder = folder_text(&dir);
-    }
+    folder(s).map(|dir| folder_text(&dir))
 }
 
 /// Where a backup of the open project, saved as `path`, goes: with File ▸ Backup ▸ Location's "Save to the project data
@@ -137,8 +135,8 @@ pub fn stamp(s: &State, proj: &mut Project) {
 /// ui/data-folder.md §3. The data folder is the one of `path` (the file a save replaces), and only one that exists
 /// counts: a project from another computer, whose specified folder is not on this one, backs up to the global folder
 /// (Lemon Studio rule). Tests: only data folders in the system's temporary folder.
-pub fn backup_folder(s: &State, path: Option<&Path>) -> Option<PathBuf> {
-    let dir = resolve(&s.session.project, path).filter(|d| d.is_dir());
+pub fn backup_folder(s: &crate::session::Session, path: Option<&Path>) -> Option<PathBuf> {
+    let dir = resolve(&s.project, path).filter(|d| d.is_dir());
     #[cfg(test)]
     let dir = dir.filter(|d| d.starts_with(std::env::temp_dir()));
     match dir {
@@ -536,13 +534,13 @@ mod tests {
         app.save_to(work.join("t.flp"));
         assert_eq!((count(&global), count(&work.join(BACKUP_DIR))), (1, 1), "into <data folder>/Backup");
         let path = app.state.session.path.clone();
-        assert_eq!(backup_folder(&app.state, path.as_deref()), Some(work.join(BACKUP_DIR)));
+        assert_eq!(backup_folder(&app.state.session, path.as_deref()), Some(work.join(BACKUP_DIR)));
         crate::prefs::set_choice(&crate::prefs::BACKUP_LOCATION, 0);
-        assert_eq!(backup_folder(&app.state, path.as_deref()), Some(global.clone()), "Always save to the global folder");
+        assert_eq!(backup_folder(&app.state.session, path.as_deref()), Some(global.clone()), "Always save to the global folder");
         crate::prefs::set_choice(&crate::prefs::BACKUP_LOCATION, 1);
         // A specified folder that does not exist (a project from another computer): the global folder.
         app.state.session.project.get_mut().data_folder = Some(DataFolder { choice: DataFolder::SPECIFIED, folder: folder_text(&dir.join("gone")) });
-        assert_eq!(backup_folder(&app.state, path.as_deref()), Some(global.clone()));
+        assert_eq!(backup_folder(&app.state.session, path.as_deref()), Some(global.clone()));
         crate::backup::TEST_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
     }

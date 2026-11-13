@@ -62,16 +62,16 @@ pub fn search_folders(s: &State, picked: &[PathBuf]) -> Vec<PathBuf> {
 /// A project was opened: its samples are looked for in its own folders, and what the last project picked or missed is
 /// forgotten.
 pub fn opened(app: &mut App) {
-    app.missing.picked.clear();
+    app.state.session.missing.picked.clear();
     app.state.session.plugins.not_found.clear();
-    app.missing.search = None;
-    app.missing.pending = true;
+    app.state.session.missing.search = None;
+    app.state.session.missing.pending = true;
     apply(app);
 }
 
 /// The search folders take the open project's folders and the picked ones.
 pub fn apply(app: &App) {
-    os_engine::sample::set_search_folders(search_folders(&app.state, &app.missing.picked));
+    os_engine::sample::set_search_folders(search_folders(&app.state, &app.state.session.missing.picked));
 }
 
 /// The channels whose sample is not found (sampler and audio clip channels, and a 3x Osc's custom shape): row and the
@@ -105,7 +105,7 @@ fn listed(mut names: Vec<String>) -> String {
 
 /// The project has loaded: the box lists its missing samples and plugins, once per opened project (none: no box).
 pub fn loaded(app: &mut App) {
-    if !std::mem::take(&mut app.missing.pending) {
+    if !std::mem::take(&mut app.state.session.missing.pending) {
         return;
     }
     let samples: Vec<String> = missing_samples(&app.state).iter().map(|(_, p)| file_name(p).to_string()).collect();
@@ -159,7 +159,7 @@ pub fn search(app: &mut App, folder: PathBuf) {
     std::thread::spawn(move || {
         let _ = tx.send(find_in(&root, wanted, Instant::now() + SEARCH_TIME));
     });
-    app.missing.search = Some(Search { rx, folder, started: Instant::now() });
+    app.state.session.missing.search = Some(Search { rx, folder, started: Instant::now() });
     app.invalidate();
 }
 
@@ -199,7 +199,7 @@ pub fn find_in(root: &Path, mut wanted: HashSet<String>, deadline: Instant) -> V
 /// Follows a running search: when it is over, the folders it found samples in are searched from now on, and the
 /// channels whose sample is found there take it.
 pub fn tick(app: &mut App) {
-    let Some(s) = &app.missing.search else { return };
+    let Some(s) = &app.state.session.missing.search else { return };
     let dirs = match s.rx.try_recv() {
         Ok(d) => d,
         Err(TryRecvError::Empty) => {
@@ -208,11 +208,11 @@ pub fn tick(app: &mut App) {
         }
         Err(TryRecvError::Disconnected) => Vec::new(),
     };
-    let folder = app.missing.search.take().map(|s| s.folder).unwrap_or_default();
+    let folder = app.state.session.missing.search.take().map(|s| s.folder).unwrap_or_default();
     let before = missing_samples(&app.state);
     for d in dirs {
-        if !app.missing.picked.contains(&d) {
-            app.missing.picked.push(d);
+        if !app.state.session.missing.picked.contains(&d) {
+            app.state.session.missing.picked.push(d);
         }
     }
     apply(app);
@@ -344,7 +344,7 @@ pub(crate) mod tests {
         std::fs::write(dir.join("elsewhere/deep/Gone.wav"), &wav).unwrap();
         search(&mut app, dir.join("elsewhere"));
         let t0 = Instant::now();
-        while app.missing.search.is_some() && t0.elapsed() < Duration::from_secs(20) {
+        while app.state.session.missing.search.is_some() && t0.elapsed() < Duration::from_secs(20) {
             tick(&mut app);
             std::thread::sleep(Duration::from_millis(5));
         }

@@ -74,7 +74,7 @@ impl crate::app::App {
 /// Hosts Lemon Drum Sampler on every FPC channel without an instance, started from the channel's saved state (a new
 /// instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose instance
 /// failed is not tried again.
-pub(crate) fn sync_drums(s: &mut crate::session::Session, transport: &crate::transport::Transport) {
+pub(crate) fn sync_drums(s: &mut crate::session::Session) {
     if crate::project_plugins::native_first() {
         return;
     }
@@ -105,7 +105,7 @@ pub(crate) fn sync_drums(s: &mut crate::session::Session, transport: &crate::tra
         }
     }
     if added {
-        transport.set_instruments(s.plugins.instruments());
+        s.transport.set_instruments(s.plugins.instruments());
         s.dirty = true;
     }
     s.touched.repaint = true;

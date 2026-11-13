@@ -258,7 +258,7 @@ mod tests {
             let text = app.state.fl_text.take().expect("theme");
             app.state.fl_text = Some(os_theme::fl::set_key(&text, "OverrideClips", if on { "1" } else { "0" }));
             app.tick();
-            assert_eq!(app.state.clip_colors.note_colors, on, "followed");
+            assert_eq!(app.state.session.clip_colors.note_colors, on, "followed");
             assert_eq!(app.state.session.project.channels.iter().map(|c| c.color).collect::<Vec<_>>(), before, "channels, setting {on}");
             let now: Vec<Option<Rgb>> =
                 app.state.session.project.channels.iter().map(|c| crate::playlist::clip_tint(&app.state.session, ClipSource::Channel(c.index))).collect();

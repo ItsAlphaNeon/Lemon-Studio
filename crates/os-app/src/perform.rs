@@ -79,7 +79,12 @@ pub fn on(s: &State) -> bool {
 
 /// The performance zone's end (the Start marker), while performance mode is on (§2).
 pub fn zone(s: &State) -> Option<u32> {
-    on(s).then(|| start_marker(&s.session)).flatten().filter(|&z| z > 0)
+    zone_in(&s.session)
+}
+
+/// `zone` on the session.
+pub fn zone_in(s: &crate::session::Session) -> Option<u32> {
+    (s.project.performance == Some(true)).then(|| start_marker(s)).flatten().filter(|&z| z > 0)
 }
 
 fn ppq(s: &State) -> u32 {
@@ -239,8 +244,8 @@ fn next_in_slot(s: &mut State, cols: &[u32], track: u16, col: usize) -> Option<C
         return None;
     }
     let n = list.len();
-    let by_vel = s.playlist.perform.vel.filter(|_| s.playlist.perf_velocity_subclips).map(|v| (usize::from(v.clamp(1, 127)) - 1) * n / 127);
-    let turn = s.playlist.perform.turn.entry((track, col)).or_insert(0);
+    let by_vel = s.session.perform.vel.filter(|_| s.playlist.perf_velocity_subclips).map(|v| (usize::from(v.clamp(1, 127)) - 1) * n / 127);
+    let turn = s.session.perform.turn.entry((track, col)).or_insert(0);
     let i = by_vel.unwrap_or(*turn % n);
     *turn = (i + 1) % n;
     Some(list[i])
@@ -265,7 +270,7 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     let set = settings(s, track);
     let cols = columns(s);
     // Latch: the playing slot's press stops it.
-    if set.press == 3 && s.playlist.perform.live.get(&track).is_some_and(|l| l.column == col && now.is_none_or(|t| t < l.until())) {
+    if set.press == 3 && s.session.perform.live.get(&track).is_some_and(|l| l.column == col && now.is_none_or(|t| t < l.until())) {
         stop(s, track, now, instant);
         return Some(format!("{}: stopped", crate::playlist::track_name(&s.session, track)));
     }
@@ -273,10 +278,10 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     let p = ppq(s);
     let unit = sync_unit(s, set.trigger_sync, first.length);
     let at = match now {
-        None => s.playlist.pos.max(z),
+        None => s.session.song_pos.max(z),
         Some(t) if instant => t,
         Some(t) => {
-            let playing = s.playlist.perform.live.get(&track).and_then(|l| l.pass_at(t)).map(Clip::end);
+            let playing = s.session.perform.live.get(&track).and_then(|l| l.pass_at(t)).map(Clip::end);
             match playing.filter(|_| queue || set.queue) {
                 Some(end) => end,
                 None => match unit {
@@ -291,11 +296,11 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     let motion = if set.press == 2 { 0 } else { set.motion };
     let mut list = passes(s, track, col, first, at, skip, motion);
     // A queued or synced start keeps what plays until then.
-    let mut kept: Vec<Clip> = s.playlist.perform.live.get(&track).filter(|_| now.is_some()).map_or(Vec::new(), |l| cut_at(s, l, at));
+    let mut kept: Vec<Clip> = s.session.perform.live.get(&track).filter(|_| now.is_some()).map_or(Vec::new(), |l| cut_at(&s.session, l, at));
     kept.append(&mut list);
-    s.playlist.perform.live.insert(track, Live { passes: kept, column: col, end: None, armed: now.is_none() });
+    s.session.perform.live.insert(track, Live { passes: kept, column: col, end: None, armed: now.is_none() });
     if matches!(set.press, 1 | 2) {
-        s.playlist.perform.held = Some(track);
+        s.session.perform.held = Some(track);
     }
     s.session.dirty = true;
     let (bar, step, _) = crate::views::toolbar::bst_ticks(f64::from(at) * 96.0 / f64::from(p));
@@ -306,7 +311,7 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
 /// global snap (Lemon Studio's reading of the manual's "Global Snap": Line and Cell count as a beat, (none) as no sync).
 fn sync_unit(s: &State, sync: u8, len: u32) -> Option<u32> {
     use crate::playlist::Snap;
-    if !s.playlist.perform.snap {
+    if !s.session.perform.snap {
         return PerfSettings::sync_ticks(sync, ppq(s), len, true);
     }
     match s.global_snap.now {
@@ -369,17 +374,17 @@ fn play_scene(s: &mut State, slots: Vec<(u16, usize)>, name: &str, now: Option<u
         return None;
     }
     if !plus {
-        let others: Vec<u16> = s.playlist.perform.live.keys().copied().filter(|t| !slots.iter().any(|x| x.0 == *t)).collect();
+        let others: Vec<u16> = s.session.perform.live.keys().copied().filter(|t| !slots.iter().any(|x| x.0 == *t)).collect();
         for t in others {
             stop(s, t, now, instant);
         }
     }
     // A scene holds no track (its Press acts on the slot alone).
-    let held = s.playlist.perform.held;
+    let held = s.session.perform.held;
     for &(t, col) in &slots {
         trigger_slot(s, t, col, now, instant, false);
     }
-    s.playlist.perform.held = held;
+    s.session.perform.held = held;
     let n = slots.len();
     Some(format!("{} {name}: {n} track{}", if plus { "+Scene" } else { "Scene" }, if n == 1 { "" } else { "s" }))
 }
@@ -396,7 +401,7 @@ pub fn progress(s: &State, tick: u32) -> Vec<(usize, f32)> {
     let Some(z) = zone(s) else { return Vec::new() };
     let (all, cols) = (clips(&s.session), columns(s));
     let mut out = Vec::new();
-    for (&track, l) in &s.playlist.perform.live {
+    for (&track, l) in &s.session.perform.live {
         let Some(p) = l.pass_at(tick) else { continue };
         // The zone clip the pass is a copy of: same track and source, the launched column's first.
         let found = all.iter().enumerate().filter(|(_, c)| c.track == track && c.position < z && c.source == p.source);
@@ -409,13 +414,13 @@ pub fn progress(s: &State, tick: u32) -> Vec<(usize, f32)> {
 }
 
 /// `l`'s passes before `at` (or before it falls silent), the one sounding there cut short.
-fn cut_at(s: &State, l: &Live, at: u32) -> Vec<Clip> {
+fn cut_at(s: &crate::session::Session, l: &Live, at: u32) -> Vec<Clip> {
     let at = at.min(l.until());
     let mut v: Vec<Clip> = l.passes.iter().filter(|c| c.position < at).copied().collect();
     if let Some(c) = v.last_mut().filter(|c| c.end() > at) {
         let keep = at - c.position;
-        let (w0, _) = window(&s.session, c);
-        c.window = Some((w0, w0 + to_src(&s.session, c.source, f64::from(keep))));
+        let (w0, _) = window(s, c);
+        c.window = Some((w0, w0 + to_src(s, c.source, f64::from(keep))));
         c.length = keep;
     }
     v
@@ -423,9 +428,9 @@ fn cut_at(s: &State, l: &Live, at: u32) -> Vec<Clip> {
 
 /// Stop `track`'s clip (§3): at the next Trigger sync point after `now`, or at once with `instant` (or while stopped).
 pub fn stop(s: &mut State, track: u16, now: Option<u32>, instant: bool) -> bool {
-    let Some(l) = s.playlist.perform.live.get(&track) else { return false };
+    let Some(l) = s.session.perform.live.get(&track) else { return false };
     let Some(t) = now else {
-        s.playlist.perform.live.remove(&track);
+        s.session.perform.live.remove(&track);
         s.session.dirty = true;
         return true;
     };
@@ -436,10 +441,10 @@ pub fn stop(s: &mut State, track: u16, now: Option<u32>, instant: bool) -> bool 
         Some(unit) => sync_point(t, z, unit, false),
         None => t,
     };
-    let passes = cut_at(s, l, at);
+    let passes = cut_at(&s.session, l, at);
     if passes.is_empty() || at <= t {
-        s.playlist.perform.live.remove(&track);
-    } else if let Some(l) = s.playlist.perform.live.get_mut(&track) {
+        s.session.perform.live.remove(&track);
+    } else if let Some(l) = s.session.perform.live.get_mut(&track) {
         (l.passes, l.end) = (passes, Some(at));
     }
     s.session.dirty = true;
@@ -449,7 +454,7 @@ pub fn stop(s: &mut State, track: u16, now: Option<u32>, instant: bool) -> bool 
 /// The mouse button is up after a press on a slot (§4 Press): Hold & stop stops at once, Hold & motion moves on as
 /// Motion says when the pass playing ends.
 pub fn release(s: &mut State, now: Option<u32>) {
-    if let Some(track) = s.playlist.perform.held.take() {
+    if let Some(track) = s.session.perform.held.take() {
         release_track(s, track, now);
     }
 }
@@ -461,40 +466,40 @@ pub fn midi_note(s: &mut State, key: u8, vel: u8, down: bool, now: Option<u32>) 
     if key >= 120 {
         return match key {
             125 | 126 => {
-                s.playlist.perform.scene = if down { Some(key == 126) } else { None };
+                s.session.perform.scene = if down { Some(key == 126) } else { None };
                 None
             }
             127 => {
-                s.playlist.perform.snap = down;
+                s.session.perform.snap = down;
                 None
             }
             _ if down => scroll(s, key),
             _ => None,
         };
     }
-    let o = s.playlist.perform.origin;
+    let o = s.session.perform.origin;
     let (track, col) = (o.0 + u16::from(key / 12), o.1 + usize::from(key % 12));
-    if let Some(plus) = s.playlist.perform.scene {
+    if let Some(plus) = s.session.perform.scene {
         if !down {
             return None;
         }
-        s.playlist.perform.vel = Some(vel);
+        s.session.perform.vel = Some(vel);
         let hint = trigger_scene(s, col, now, false, plus);
-        s.playlist.perform.vel = None;
+        s.session.perform.vel = None;
         return hint;
     }
     if !down {
-        if s.playlist.perform.live.get(&track).is_some_and(|l| l.column == col) {
+        if s.session.perform.live.get(&track).is_some_and(|l| l.column == col) {
             release_track(s, track, now);
         }
         return None;
     }
     // The mouse's held slot is not this key's.
-    let held = s.playlist.perform.held;
-    s.playlist.perform.vel = Some(vel);
+    let held = s.session.perform.held;
+    s.session.perform.vel = Some(vel);
     let hint = trigger_slot(s, track, col, now, false, false);
-    s.playlist.perform.vel = None;
-    s.playlist.perform.held = held;
+    s.session.perform.vel = None;
+    s.session.perform.held = held;
     hint
 }
 
@@ -520,7 +525,7 @@ pub fn typing_note(code: winit::keyboard::KeyCode) -> Option<u8> {
 /// on, which 124 toggles.
 fn scroll(s: &mut State, key: u8) -> Option<String> {
     let cols = columns(s).len();
-    let p = &mut s.playlist.perform;
+    let p = &mut s.session.perform;
     let (dt, dc) = if p.paging { GRID } else { (1, 1) };
     match key {
         120 => p.origin.0 = p.origin.0.saturating_sub(dt),
@@ -541,7 +546,7 @@ fn scroll(s: &mut State, key: u8) -> Option<String> {
 pub fn grid_area(s: &State) -> Option<(u16, u16, u32, u32)> {
     let z = zone(s)?;
     (crate::prefs::number(&crate::prefs::PERFORMANCE_CHANNEL) != 0).then_some(())?;
-    let (cols, o) = (columns(s), s.playlist.perform.origin);
+    let (cols, o) = (columns(s), s.session.perform.origin);
     let from = *cols.get(o.1)?;
     let to = cols.get(o.1 + GRID.1).copied().unwrap_or(z);
     Some((o.0, GRID.0, from, to))
@@ -554,11 +559,11 @@ fn release_track(s: &mut State, track: u16, now: Option<u32>) {
             stop(s, track, now, true);
         }
         2 => {
-            let (Some(l), Some(t)) = (s.playlist.perform.live.get(&track).cloned(), now) else { return };
+            let (Some(l), Some(t)) = (s.session.perform.live.get(&track).cloned(), now) else { return };
             let Some(cur) = l.pass_at(t).copied() else { return };
             // The pass playing finishes; Motion picks what follows it.
             let cols = columns(s);
-            let mut kept = cut_at(s, &l, cur.end());
+            let mut kept = cut_at(&s.session, &l, cur.end());
             let mut column = l.column;
             if let Some(col) = step(set.motion, l.column, &used(s, &cols, track), &mut rng(t, track)) {
                 if let Some(c) = first_in_slot(s, &cols, track, col) {
@@ -566,7 +571,7 @@ fn release_track(s: &mut State, track: u16, now: Option<u32>) {
                     column = col;
                 }
             }
-            s.playlist.perform.live.insert(track, Live { passes: kept, column, end: None, ..l });
+            s.session.perform.live.insert(track, Live { passes: kept, column, end: None, ..l });
             s.session.dirty = true;
         }
         _ => {}
@@ -577,10 +582,9 @@ fn release_track(s: &mut State, track: u16, now: Option<u32>) {
 /// played after the Start marker up to `stop` becomes ordinary clips on its track, a clip a pass, the last cut where
 /// it fell silent. On such a track the clips starting in the recorded stretch go and one running into it ends where it
 /// starts. One undo step ("Recorded items"); what was launched is over. Returns the clips made.
-pub fn record(s: &mut State, stop: u32) -> usize {
-    let Some(z) = zone(s).filter(|_| on(s)) else { return 0 };
+pub fn record(s: &mut crate::session::Session, stop: u32) -> usize {
+    let Some(z) = zone_in(s) else { return 0 };
     let takes: Vec<(u16, Vec<Clip>)> = s
-        .playlist
         .perform
         .live
         .iter()
@@ -591,15 +595,15 @@ pub fn record(s: &mut State, stop: u32) -> usize {
     if takes.is_empty() {
         return 0;
     }
-    let mut all = clips(&s.session).to_vec();
+    let mut all = clips(s).to_vec();
     let mut made = 0;
     for (t, v) in takes {
         let (from, to) = (v[0].position, v.last().map_or(0, Clip::end));
         all.retain(|c| c.track != t || c.position < from || c.position >= to);
         for c in all.iter_mut().filter(|c| c.track == t && c.position >= z && c.position < from && c.end() > from) {
             let keep = from - c.position;
-            let (w0, _) = window(&s.session, c);
-            c.window = Some((w0, w0 + to_src(&s.session, c.source, f64::from(keep))));
+            let (w0, _) = window(s, c);
+            c.window = Some((w0, w0 + to_src(s, c.source, f64::from(keep))));
             c.length = keep;
         }
         made += v.len();
@@ -608,16 +612,16 @@ pub fn record(s: &mut State, stop: u32) -> usize {
             c
         }));
     }
-    crate::playlist::snapshot_as(&mut s.session, crate::record::RECORDED);
-    arr_mut(&mut s.session).clips = all;
-    s.playlist.perform.live.retain(|_, l| l.armed);
-    s.session.dirty = true;
+    crate::playlist::snapshot_as(s, crate::record::RECORDED);
+    arr_mut(s).clips = all;
+    s.perform.live.retain(|_, l| l.armed);
+    s.dirty = true;
     made
 }
 
 /// Playback starts (§3): clips triggered while stopped start with it; what played before is over.
-pub fn starting(s: &mut State) {
-    let p = &mut s.playlist.perform;
+pub fn starting(s: &mut crate::session::Session) {
+    let p = &mut s.perform;
     p.live.retain(|_, l| l.armed);
     for l in p.live.values_mut() {
         l.armed = false;
@@ -632,7 +636,7 @@ pub fn toggle(s: &mut State) -> String {
     if on {
         s.set_song_mode(true);
     } else {
-        s.playlist.perform = Perform::default();
+        s.session.perform = Perform::default();
     }
     s.session.dirty = true;
     format!("Performance mode: {}", if on { "on" } else { "off" })
@@ -673,7 +677,7 @@ pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
     a.markers.sort_by_key(|m| m.position);
     s.session.project.get_mut().performance = Some(true);
     s.set_song_mode(true);
-    s.playlist.pos = start;
+    s.session.song_pos = start;
     s.session.dirty = true;
     format!("Prepared for performance mode: {count} columns, Start marker at bar {}", start / bar + 1)
 }
@@ -728,22 +732,22 @@ impl App {
 
 /// The project as played (§3): the zone silent, each launched clip's passes on its track, and that track's own clips
 /// silent while they play (Lemon Studio's design).
-pub fn apply(s: &State, p: &mut Project) {
-    let Some(z) = zone(s) else { return };
+pub fn apply(s: &crate::session::Session, p: &mut Project) {
+    let Some(z) = zone_in(s) else { return };
     let Some(a) = p.arrangement_mut() else { return };
     for c in a.clips.iter_mut().filter(|c| c.position < z) {
         c.muted = true;
     }
     let mut add = Vec::new();
-    for (&t, l) in &s.playlist.perform.live {
+    for (&t, l) in &s.perform.live {
         let (from, to) = (l.start(), l.until());
         if from >= to {
             continue;
         }
         for c in a.clips.iter_mut().filter(|c| c.track == t && c.position >= z && c.position < to && c.end() > from) {
             if c.position < from {
-                let (w0, _) = window(&s.session, c);
-                c.window = Some((w0, w0 + to_src(&s.session, c.source, f64::from(from - c.position))));
+                let (w0, _) = window(s, c);
+                c.window = Some((w0, w0 + to_src(s, c.source, f64::from(from - c.position))));
                 c.length = from - c.position;
             } else {
                 c.muted = true;
@@ -807,17 +811,17 @@ mod tests {
         prefs::set_number(&prefs::PERFORMANCE_CHANNEL, 6);
         let note = |key, down| if down { Msg::On { ch: 5, key, vel: 100 } } else { Msg::Off { ch: 5, key, vel: 64 } };
         app.midi_notes(vec![note(1, true), note(1, false)]);
-        let l = &app.state.playlist.perform.live[&0];
+        let l = &app.state.session.perform.live[&0];
         assert_eq!((l.column, l.armed), (1, true), "note 1: track 1, column 2, armed while stopped");
         app.midi_notes(vec![note(12, true), note(120, true)]);
-        assert!(!app.state.playlist.perform.live.contains_key(&1), "track 2 has no clips in the zone");
+        assert!(!app.state.session.perform.live.contains_key(&1), "track 2 has no clips in the zone");
         arr_mut(&mut app.state.session).tracks[0].perf.press = 1;
         app.midi_notes(vec![note(0, true)]);
-        assert_eq!(app.state.playlist.perform.live[&0].column, 0);
+        assert_eq!(app.state.session.perform.live[&0].column, 0);
         app.midi_notes(vec![note(1, false)]);
-        assert!(app.state.playlist.perform.live.contains_key(&0), "another key's release");
+        assert!(app.state.session.perform.live.contains_key(&0), "another key's release");
         app.midi_notes(vec![note(0, false)]);
-        assert!(!app.state.playlist.perform.live.contains_key(&0), "Hold & stop: the release stops it");
+        assert!(!app.state.session.perform.live.contains_key(&0), "Hold & stop: the release stops it");
 
         // Scrolling: one column right, then note 0 is column 2.
         assert_eq!(grid_area(&app.state), Some((0, 10, 0, 3072)));
@@ -825,30 +829,30 @@ mod tests {
         assert_eq!(app.state.message.as_deref(), Some("Performance MIDI grid: tracks 1–10, columns 2–13"));
         assert_eq!(grid_area(&app.state), Some((0, 10, 1536, 3072)));
         app.midi_notes(vec![note(123, true), note(0, true)]);
-        assert_eq!(app.state.playlist.perform.origin, (0, 1), "the last column is the furthest");
-        assert_eq!(app.state.playlist.perform.live[&0].column, 1);
+        assert_eq!(app.state.session.perform.origin, (0, 1), "the last column is the furthest");
+        assert_eq!(app.state.session.perform.live[&0].column, 1);
         app.midi_notes(vec![note(124, true), note(121, true), note(120, true), note(120, true), note(122, true)]);
-        assert_eq!(app.state.playlist.perform, Perform { origin: (0, 0), paging: true, ..app.state.playlist.perform.clone() });
+        assert_eq!(app.state.session.perform, Perform { origin: (0, 0), paging: true, ..app.state.session.perform.clone() });
         app.midi_notes(vec![note(121, true)]);
-        assert_eq!(app.state.playlist.perform.origin, (10, 0), "a page down");
-        app.state.playlist.perform = Perform::default();
+        assert_eq!(app.state.session.perform.origin, (10, 0), "a page down");
+        app.state.session.perform = Perform::default();
 
         // Notes 125 / 126 held: a note triggers its column's scene.
         arr_mut(&mut app.state.session).tracks[0].perf.press = 0;
         arr_mut(&mut app.state.session).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
         app.midi_notes(vec![note(125, true), note(12, true)]);
         assert_eq!(app.state.message.as_deref(), Some("Scene 1: 2 tracks"));
-        assert!(app.state.playlist.perform.live.contains_key(&2));
+        assert!(app.state.session.perform.live.contains_key(&2));
         app.midi_notes(vec![note(125, false), note(1, true)]);
-        assert_eq!(app.state.playlist.perform.live[&0].column, 1, "released: a note is its slot again");
-        assert!(app.state.playlist.perform.live.contains_key(&2));
+        assert_eq!(app.state.session.perform.live[&0].column, 1, "released: a note is its slot again");
+        assert!(app.state.session.perform.live.contains_key(&2));
         app.midi_notes(vec![note(126, true), note(1, true), note(126, false)]);
-        assert!(app.state.playlist.perform.live.contains_key(&2), "+Scene keeps the other tracks");
-        assert_eq!(app.state.playlist.perform.scene, None);
-        app.state.playlist.perform = Perform::default();
+        assert!(app.state.session.perform.live.contains_key(&2), "+Scene keeps the other tracks");
+        assert_eq!(app.state.session.perform.scene, None);
+        app.state.session.perform = Perform::default();
         app.state.session.project.get_mut().performance = Some(false);
         app.midi_notes(vec![note(0, true)]);
-        assert!(app.state.playlist.perform.live.is_empty(), "off: nothing is triggered");
+        assert!(app.state.session.perform.live.is_empty(), "off: nothing is triggered");
         prefs::set_number(&prefs::PERFORMANCE_CHANNEL, 0);
     }
 
@@ -874,7 +878,7 @@ mod tests {
         arr_mut(&mut s.session).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
         trigger(s, 1, None, false, false);
         assert_eq!(trigger_scene(s, 0, None, false, false).as_deref(), Some("Scene 1: 2 tracks"));
-        let cols = |s: &State| s.playlist.perform.live.iter().map(|(&t, l)| (t, l.column)).collect::<Vec<_>>();
+        let cols = |s: &State| s.session.perform.live.iter().map(|(&t, l)| (t, l.column)).collect::<Vec<_>>();
         assert_eq!(cols(s), vec![(0, 0), (2, 0)]);
         assert_eq!(trigger_scene(s, 1, None, false, true).as_deref(), Some("+Scene 2: 1 track"));
         assert_eq!(cols(s), vec![(0, 1), (2, 0)], "+Scene: track 3 plays on");
@@ -900,7 +904,7 @@ mod tests {
         assert_eq!(scene_of(s, 5).map(|x| x.0), Some(vec![(2, 0), (3, 0)]), "track 4 is grouped under track 3");
         assert_eq!(scene_of(s, 4).map(|x| x.0), Some(vec![(2, 0), (3, 0)]), "track 3 leads the group");
         assert_eq!(trigger_clip_scene(s, 4, None, false, false).as_deref(), Some("Scene 1 (Track 3): 2 tracks"));
-        let cols = |s: &State| s.playlist.perform.live.iter().map(|(&t, l)| (t, l.column)).collect::<Vec<_>>();
+        let cols = |s: &State| s.session.perform.live.iter().map(|(&t, l)| (t, l.column)).collect::<Vec<_>>();
         assert_eq!(cols(s), vec![(2, 0), (3, 0)]);
         // A clip group: each grouped clip's slot.
         arr_mut(&mut s.session).clips[1].set_group(5);
@@ -919,17 +923,17 @@ mod tests {
         let z = 3072;
         s.global_snap.now = crate::playlist::Snap::Beat;
         midi_note(s, 0, 100, true, Some(z + 30));
-        assert_eq!(s.playlist.perform.live[&0].passes.iter().find(|c| c.position > z + 30).map(|c| c.position), Some(z + 384), "the track's 4 beats");
+        assert_eq!(s.session.perform.live[&0].passes.iter().find(|c| c.position > z + 30).map(|c| c.position), Some(z + 384), "the track's 4 beats");
         midi_note(s, 127, 100, true, None);
-        assert!(s.playlist.perform.snap);
+        assert!(s.session.perform.snap);
         midi_note(s, 1, 100, true, Some(z + 30));
-        let l = &s.playlist.perform.live[&0];
+        let l = &s.session.perform.live[&0];
         assert_eq!((l.column, l.passes.iter().find(|c| c.position > z + 30).map(|c| c.position)), (1, Some(z + 96)), "a beat");
         s.global_snap.now = crate::playlist::Snap::None;
         midi_note(s, 0, 100, true, Some(z + 30));
-        assert_eq!(s.playlist.perform.live[&0].passes.iter().find(|c| c.position >= z + 30).map(|c| c.position), Some(z + 30), "(none): at once");
+        assert_eq!(s.session.perform.live[&0].passes.iter().find(|c| c.position >= z + 30).map(|c| c.position), Some(z + 30), "(none): at once");
         midi_note(s, 127, 100, false, None);
-        assert!(!s.playlist.perform.snap);
+        assert!(!s.session.perform.snap);
     }
 
     /// §3b: with Record armed, a stop writes what the launched tracks played as clips after the Start marker.
@@ -939,16 +943,16 @@ mod tests {
         let s = &mut app.state;
         let z = 3072;
         trigger(s, 0, Some(z + 128), true, false);
-        assert_eq!(record(s, z + 128 + 900), 3);
+        assert_eq!(record(&mut s.session, z + 128 + 900), 3);
         let on0: Vec<(u32, u32)> = clips(&s.session).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
         assert_eq!(on0, vec![(z, 128), (z + 128, 384), (z + 512, 384), (z + 896, 132)], "the clip there ends where the recording starts");
         assert_eq!(clips(&s.session).iter().filter(|c| c.track == 1).count(), 1, "track 2 is left alone");
-        assert!(s.playlist.perform.live.is_empty());
+        assert!(s.session.perform.live.is_empty());
         assert_eq!(s.session.history.newest_done(), Some(crate::record::RECORDED));
-        assert_eq!(record(s, z + 2000), 0, "nothing launched");
+        assert_eq!(record(&mut s.session, z + 2000), 0, "nothing launched");
         // A stretch over a clip that starts in it: the clip goes.
         trigger(s, 0, Some(z), true, false);
-        assert_eq!(record(s, z + 384), 1);
+        assert_eq!(record(&mut s.session, z + 384), 1);
         let on0: Vec<(u32, u32)> = clips(&s.session).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
         assert_eq!(on0, vec![(z + 512, 384), (z + 896, 132), (z, 384)]);
     }
@@ -962,7 +966,7 @@ mod tests {
         // Column 0 of track 1 holds three clips: patterns 1, 4 and 5.
         arr_mut(&mut s.session).clips.push(Clip::new(384, 384, 0, ClipSource::Pattern(4)));
         arr_mut(&mut s.session).clips.push(Clip::new(768, 384, 0, ClipSource::Pattern(5)));
-        let src = |s: &State| s.playlist.perform.live[&0].passes[0].source;
+        let src = |s: &State| s.session.perform.live[&0].passes[0].source;
         for (vel, pat) in [(1, 1), (43, 1), (44, 4), (85, 4), (86, 5), (127, 5)] {
             midi_note(s, 0, vel, true, Some(z));
             assert_eq!(src(s), ClipSource::Pattern(pat), "velocity {vel}");
@@ -977,7 +981,7 @@ mod tests {
         // March & wrap: each column's first clip, never a sub-clip.
         arr_mut(&mut s.session).tracks[0].perf.motion = 2;
         midi_note(s, 0, 127, true, Some(z));
-        let pats: Vec<ClipSource> = s.playlist.perform.live[&0].passes.iter().take(4).map(|c| c.source).collect();
+        let pats: Vec<ClipSource> = s.session.perform.live[&0].passes.iter().take(4).map(|c| c.source).collect();
         assert_eq!(pats, vec![ClipSource::Pattern(1), ClipSource::Pattern(2), ClipSource::Pattern(1), ClipSource::Pattern(2)]);
     }
 
@@ -1013,22 +1017,22 @@ mod tests {
         let mut app = app();
         assert!(app.typing_on());
         assert!(app.typing_key(Digit2, true, false, false));
-        let l = &app.state.playlist.perform.live[&0];
+        let l = &app.state.session.perform.live[&0];
         assert_eq!((l.column, l.armed), (1, true), "2: track 1, column 2, armed while stopped");
         assert!(app.typing_held.is_empty(), "no note played");
         assert!(app.typing_key(Digit2, true, false, false), "auto-repeat");
         assert!(app.typing_key(Digit2, false, false, false));
         assert!(app.typing_key(KeyQ, true, false, false) && app.typing_key(KeyQ, false, false, false));
-        assert!(!app.state.playlist.perform.live.contains_key(&1), "Q: track 2, which has no clips in the zone");
+        assert!(!app.state.session.perform.live.contains_key(&1), "Q: track 2, which has no clips in the zone");
         assert!(app.typing_key(BracketLeft, true, false, false), "a note key outside the layout does nothing");
         assert!(app.typing_held.is_empty());
         // Hold & stop: the key's release stops it; the grid scrolled one column right, 1 is column 2.
         arr_mut(&mut app.state.session).tracks[0].perf.press = 1;
-        app.state.playlist.perform = Perform { origin: (0, 1), ..Perform::default() };
+        app.state.session.perform = Perform { origin: (0, 1), ..Perform::default() };
         assert!(app.typing_key(Digit1, true, false, false));
-        assert_eq!(app.state.playlist.perform.live[&0].column, 1);
+        assert_eq!(app.state.session.perform.live[&0].column, 1);
         app.typing_release_all();
-        assert!(!app.state.playlist.perform.live.contains_key(&0), "focus lost: the key is released");
+        assert!(!app.state.session.perform.live.contains_key(&0), "focus lost: the key is released");
         // Out of Performance mode the keys are the piano layout's again.
         app.state.session.project.get_mut().performance = Some(false);
         assert!(!app.typing_key(Digit1, true, false, false), "1 is no note key there");
@@ -1057,10 +1061,10 @@ mod tests {
         // Trigger sync 4 beats: a click at 3072 + 30 starts at the next bar (past Tolerant's 24 ticks).
         let hint = trigger(s, 0, Some(3102), false, false).unwrap();
         assert!(hint.contains("Retrigger"), "{hint}");
-        let l = &s.playlist.perform.live[&0];
+        let l = &s.session.perform.live[&0];
         assert_eq!((l.start(), l.passes[1].position, l.passes.len() as u32), (3456, 3840, AHEAD_BARS));
         let mut p = s.session.project.clone();
-        apply(&s, &mut p);
+        apply(&s.session, &mut p);
         let a = p.arrangement().unwrap();
         assert!(a.clips.iter().filter(|c| c.position < 3072).all(|c| c.muted), "the zone is silent");
         // Track 0's own clip plays until the launched one starts; track 1's is untouched.
@@ -1072,15 +1076,15 @@ mod tests {
         // Alt: at once; Position sync 1 beat starts 10 ticks in.
         arr_mut(&mut s.session).tracks[0].perf.position_sync = 3;
         trigger(s, 1, Some(3082), true, false);
-        let l = &s.playlist.perform.live[&0];
+        let l = &s.session.perform.live[&0];
         assert_eq!((l.passes[0].position, l.passes[0].length, l.passes[0].window), (3082, 758, Some((10.0, 768.0))));
         assert_eq!((l.passes[1].position, l.passes[1].length), (3840, 768));
 
         // A right click stops it at the next sync point (4 beats); Alt at once.
         assert!(stop(s, 0, Some(3100), false));
-        assert_eq!(s.playlist.perform.live[&0].until(), 3456);
+        assert_eq!(s.session.perform.live[&0].until(), 3456);
         assert!(stop(s, 0, Some(3100), true));
-        assert!(!s.playlist.perform.live.contains_key(&0));
+        assert!(!s.session.perform.live.contains_key(&0));
     }
 
     #[test]
@@ -1090,34 +1094,34 @@ mod tests {
         // March & wrap: column 0, column 1, column 0, ...
         arr_mut(&mut s.session).tracks[0].perf = PerfSettings { motion: 2, trigger_sync: 0, ..PerfSettings::default() };
         trigger(s, 0, Some(3072), false, false);
-        let l = &s.playlist.perform.live[&0];
+        let l = &s.session.perform.live[&0];
         let srcs: Vec<ClipSource> = l.passes.iter().take(4).map(|c| c.source).collect();
         assert_eq!(srcs, [1, 2, 1, 2].map(ClipSource::Pattern));
         assert_eq!(l.passes[1].position, 3072 + 384);
         // One shot: one pass.
         arr_mut(&mut s.session).tracks[0].perf.motion = 1;
         trigger(s, 1, Some(3072), false, false);
-        assert_eq!(s.playlist.perform.live[&0].passes.len(), 1);
+        assert_eq!(s.session.perform.live[&0].passes.len(), 1);
         // March & stop from the last column: one pass.
         arr_mut(&mut s.session).tracks[0].perf.motion = 4;
         trigger(s, 1, Some(3072), false, false);
-        assert_eq!(s.playlist.perform.live[&0].passes.len(), 1);
+        assert_eq!(s.session.perform.live[&0].passes.len(), 1);
         // Latch: pressing the playing slot again stops it.
         arr_mut(&mut s.session).tracks[0].perf = PerfSettings { press: 3, trigger_sync: 0, ..PerfSettings::default() };
         trigger(s, 0, Some(3072), false, false);
         trigger(s, 0, Some(3100), false, false);
-        assert!(!s.playlist.perform.live.contains_key(&0));
+        assert!(!s.session.perform.live.contains_key(&0));
         // Hold & stop: the release stops it.
         arr_mut(&mut s.session).tracks[0].perf.press = 1;
         trigger(s, 0, Some(3072), false, false);
-        assert_eq!(s.playlist.perform.held, Some(0));
+        assert_eq!(s.session.perform.held, Some(0));
         release(s, Some(3200));
-        assert!(!s.playlist.perform.live.contains_key(&0));
+        assert!(!s.session.perform.live.contains_key(&0));
         // Queue: waits for the pass playing to end.
         arr_mut(&mut s.session).tracks[0].perf = PerfSettings { trigger_sync: 0, ..PerfSettings::default() };
         trigger(s, 0, Some(3072), false, false);
         trigger(s, 1, Some(3100), false, true);
-        let l = &s.playlist.perform.live[&0];
+        let l = &s.session.perform.live[&0];
         assert_eq!((l.passes[0].source, l.passes[0].length, l.passes[1].source, l.passes[1].position), (ClipSource::Pattern(1), 384, ClipSource::Pattern(2), 3456));
     }
 
@@ -1155,13 +1159,13 @@ mod tests {
     fn stopped_triggers_start_with_playback() {
         let mut app = app();
         let s = &mut app.state;
-        s.playlist.pos = 3072;
+        s.session.song_pos = 3072;
         trigger(s, 0, None, false, false);
-        assert!(s.playlist.perform.live[&0].armed);
-        starting(s);
-        assert_eq!(s.playlist.perform.live[&0].start(), 3072);
-        starting(s);
-        assert!(s.playlist.perform.live.is_empty(), "a second start: what played is over");
+        assert!(s.session.perform.live[&0].armed);
+        starting(&mut s.session);
+        assert_eq!(s.session.perform.live[&0].start(), 3072);
+        starting(&mut s.session);
+        assert!(s.session.perform.live.is_empty(), "a second start: what played is over");
     }
 
     #[test]
@@ -1174,7 +1178,7 @@ mod tests {
         let m = markers(&s.session);
         assert_eq!(m.len(), 17);
         assert_eq!((m[1].position, m[15].position, m[16].kind, m[16].position), (1536, 23040, TimeMarker::START, 24960));
-        assert_eq!((s.session.project.performance, s.song_mode(), s.playlist.pos), (Some(true), true, 24960));
+        assert_eq!((s.session.project.performance, s.song_mode(), s.session.song_pos), (Some(true), true, 24960));
         assert_eq!(columns(s).len(), 16);
         assert_eq!(toggle(s), "Performance mode: off");
         assert_eq!(zone(s), None);

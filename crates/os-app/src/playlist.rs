@@ -632,8 +632,6 @@ pub struct PlaylistState {
     pub sel: Vec<usize>,
     /// Selected track (Ctrl+Up / Down, header click).
     pub track: u16,
-    /// Song position (ticks): song playback starts here.
-    pub pos: u32,
     /// The ▸ menu's Quantize song jumps (§7a): a move of the song position while the song plays waits for the next
     /// beat (1), bar (2), 2, 4 or 8 bars (3 to 5); 0 = Off. Kept for the session only (Lemon Studio's choice).
     pub jump_quantize: u8,
@@ -674,8 +672,6 @@ pub struct PlaylistState {
     pub last_clip: Option<(usize, std::time::Instant)>,
     /// Last left click in the ruler: a second one soon after clears the time selection.
     pub last_ruler: Option<std::time::Instant>,
-    /// Performance mode's launched clips (spec: ui/performance-mode.md).
-    pub perform: crate::perform::Perform,
     /// Performance mode's progress displays on the zone's clips and in the track headers, and whether Ctrl+click
     /// triggers a +Scene instead of a Scene (spec: ui/performance-mode.md §3, §3a).
     pub perf_clip_progress: bool,
@@ -801,7 +797,6 @@ impl Default for PlaylistState {
             pick_rows: [PICK_ROW; 3],
             sel: Vec::new(),
             track: 0,
-            pos: 0,
             jump_quantize: 0,
             key_root: 0,
             key_scale: -2,
@@ -823,7 +818,6 @@ impl Default for PlaylistState {
             last_header: None,
             last_clip: None,
             last_ruler: None,
-            perform: crate::perform::Perform::default(),
             perf_clip_progress: true,
             perf_track_progress: false,
             perf_plus_scene: false,
@@ -1125,13 +1119,28 @@ pub type Fits = HashMap<u16, Option<(f64, f64)>>;
 /// undo and redo, a project opened, the switch turned on), before the next undo step is taken, so they undo and redo
 /// with the edit that made them. As with the fits, the saved copy gets them too: an opened project's crossfades are
 /// not an unsaved change.
-pub fn follow_crossfades(app: &mut App) {
-    let tempo = app.state.tempo();
-    if !(app.state.session.dirty || app.state.session.project.written_at().is_some()) || !app.state.session.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
-        return;
+pub fn follow_crossfades(s: &mut crate::session::Session) -> bool {
+    let tempo = s.tempo();
+    if !(s.dirty || s.project.written_at().is_some()) || !s.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
+        return false;
     }
-    os_model::crossfade::derive(&mut app.saved.0, app.saved.1);
-    app.damage_win(crate::app::Win::Playlist);
+    os_model::crossfade::derive(&mut s.saved.0, s.saved.1);
+    true
+}
+
+/// Audio clips follow their channel's stretch, pitch and the tempo (ui/playlist.md §9c), then the automatic crossfades
+/// follow the clips (`follow_crossfades`). The lengths are worked out, not edited: the saved copy gets them too, so a
+/// fit alone (an opened FL project) is not an unsaved change. Returns whether a clip changed.
+pub fn follow_audio(s: &mut crate::session::Session) -> bool {
+    let mut changed = false;
+    if let Some(fits) = audio_fits(s) {
+        if s.project.write_if(|p| fit_clips(&mut p.arrangements, &fits)) {
+            fit_clips(&mut s.saved.0.arrangements, &fits);
+            s.dirty = true;
+            changed = true;
+        }
+    }
+    follow_crossfades(s) || changed
 }
 
 /// Gives the audio clips of `arrangements` their lengths from `fits` (`fit_audio`). Returns whether one changed.
@@ -1224,20 +1233,25 @@ pub fn snap_delta(s: &State, g: &PGeom, dt: f32, alt: bool) -> i64 {
 /// Place a clip of the current source on `track` at `tick`; returns its index.
 pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
     let src = source_for(s, track);
-    let len = match s.playlist.lock_len {
+    place_in(&mut s.session, src, track, tick, s.playlist.lock_len)
+}
+
+/// `place` of source `src`; `lock_len` is the length the last clip of a source was given (`PlaylistUi::lock_len`).
+pub fn place_in(s: &mut crate::session::Session, src: ClipSource, track: u16, tick: u32, lock_len: Option<(ClipSource, u32)>) -> usize {
+    let len = match lock_len {
         Some((l, n)) if l == src => n,
-        _ => source_len(&s.session, src),
+        _ => source_len(s, src),
     };
-    let audio = source_kind(&s.session, src) == PickKind::Audio && matches!(src, ClipSource::Channel(_));
-    let a = arr_mut(&mut s.session);
+    let audio = source_kind(s, src) == PickKind::Audio && matches!(src, ClipSource::Channel(_));
+    let a = arr_mut(s);
     let mut c = Clip::new(tick, len, track, src);
     if audio {
         // FL writes gain 1.0 into a new audio clip (spec: flp/events/playlist.md, byte 52).
         c.set_gain(1.0);
     }
     a.clips.push(c);
-    s.session.dirty = true;
-    clips(&s.session).len() - 1
+    s.dirty = true;
+    clips(s).len() - 1
 }
 
 /// Delete clips by index (selection indices are remapped). They ripple away (spec: ui/animations.md §4.10).
@@ -1354,7 +1368,7 @@ pub fn set_pick_row(s: &mut State, view: f32, row: f32) {
 /// flp/events/playlist.md "Arranger view"). A project without one gets the default height. The song position starts
 /// at the Start marker (§7a).
 pub fn load_view(s: &mut State) {
-    s.playlist.pos = start_marker(&s.session).unwrap_or(0);
+    s.session.song_pos = start_marker(&s.session).unwrap_or(0);
     s.playlist.row_h = ROW_H;
     let Some(v) = s.session.project.playlist_view else { return };
     s.playlist.row_h = (v.row_px() as f32).clamp(ROW_MIN, ROW_MAX);
@@ -1458,7 +1472,7 @@ pub fn copy(s: &mut State) {
 pub fn paste(s: &mut State) {
     let cb = s.playlist.clipboard.clone();
     let Some(first) = cb.iter().map(|c| c.position).min() else { return };
-    let at = s.playlist.pos;
+    let at = s.session.song_pos;
     let arr = arr_mut(&mut s.session);
     let start = arr.clips.len();
     for c in cb {
@@ -1476,7 +1490,7 @@ pub fn paste(s: &mut State) {
 /// Ctrl+Insert: insert the time selection's length of empty space at its start (all tracks); without a time
 /// selection, one bar at the song position (§5, OS).
 pub fn insert_space(s: &mut State) -> (u32, u32) {
-    let (r0, r1) = s.playlist.range.filter(|r| r.1 > r.0).unwrap_or_else(|| (s.playlist.pos, s.playlist.pos + bar(&s.session)));
+    let (r0, r1) = s.playlist.range.filter(|r| r.1 > r.0).unwrap_or_else(|| (s.session.song_pos, s.session.song_pos + bar(&s.session)));
     let len = r1 - r0;
     let ids: Vec<usize> = clips(&s.session).iter().enumerate().filter(|(_, c)| c.position < r0 && c.end() > r0).map(|(i, _)| i).collect();
     for i in ids {
@@ -1682,7 +1696,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         plugin: None,
         plugin_state: None,
         // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
-        color: Some(s.clip_colors.new_channel(index)),
+        color: Some(s.session.clip_colors.new_channel(index)),
         enabled: true,
         // The clip's range 0..1: stored pan 0 (minimum), volume 12800 (maximum), as FL stores a new clip's
         // (spec: audio/automation.md "Range").
@@ -1732,7 +1746,7 @@ pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os
         name: Some(name),
         plugin: None,
         plugin_state: None,
-        color: Some(s.clip_colors.new_channel(index)),
+        color: Some(s.session.clip_colors.new_channel(index)),
         enabled: true,
         // The clip's range 0..1, as `create_automation` makes it.
         volume: 1.0,
@@ -1761,7 +1775,7 @@ pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os
 /// song position with the check on, from bar 1 with it off; to the song's end (the largest end of a clip that is not
 /// muted, audio/song-structure.md) when that lies after the start, else for the current pattern's length.
 pub fn automation_span(s: &State) -> (u32, u32) {
-    let a = if crate::prefs::check(&crate::prefs::AUTOMATION_AT_PLAYBACK_POSITION) { s.playlist.pos } else { 0 };
+    let a = if crate::prefs::check(&crate::prefs::AUTOMATION_AT_PLAYBACK_POSITION) { s.session.song_pos } else { 0 };
     let end = clips(&s.session).iter().filter(|c| !c.muted).map(|c| c.end()).max().unwrap_or(0);
     let b = if end > a { end } else { a + source_len(&s.session, ClipSource::Pattern(s.pattern())).max(1) };
     (a, b)
@@ -1864,14 +1878,21 @@ pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name:
 /// `add_audio_clip_as` with no undo step of its own (the caller took one), its channel on mixer track `mixer` (`None`:
 /// the track after the highest any channel uses).
 pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer: Option<u16>) -> Option<usize> {
-    s.session.samples.wave(path)?;
+    let lock = s.playlist.lock_len;
+    crate::follow::around(s, |s| add_audio_clip_on(&mut s.session, path, track, tick, mixer, lock))
+}
+
+/// `add_audio_clip_in` on the session (`lock_len` as `place_in` takes it): the playlist's clip source becomes the new
+/// channel and the clip is selected (`View::AudioClipAdded`).
+pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16, tick: u32, mixer: Option<u16>, lock_len: Option<(ClipSource, u32)>) -> Option<usize> {
+    s.samples.wave(path)?;
     // Not on an instrument track: the next free track below it (§6c); on an audio track, through its mixer track.
     let track = crate::track_links::audio_drop_track(s, track, tick, tick + 1);
     let mixer = mixer.or_else(|| crate::track_links::audio_mixer(s, track));
-    let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
-    let mixer_track = mixer.unwrap_or_else(|| (s.session.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.session.project)));
-    s.session.project.get_mut().channels.push(Channel {
+    let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project)));
+    s.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,
         kind: ChannelKind::AudioClip,
@@ -1891,10 +1912,9 @@ pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer
         sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
         lemon_icon: None,
     });
-    s.playlist.source = Some(ClipSource::Channel(index));
-    s.playlist.picker = PickKind::Audio;
-    let i = place(s, track, tick);
-    s.playlist.sel = vec![i];
+    let src = track_info(s, track).and_then(|t| t.clip_lock).unwrap_or(ClipSource::Channel(index));
+    let i = place_in(s, src, track, tick, lock_len);
+    s.touched.views.push(crate::session::View::AudioClipAdded { channel: index, clip: i });
     Some(i)
 }
 
@@ -2476,7 +2496,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     // Performance mode: a click on a clip in the zone launches it, a right click stops its track (spec:
     // ui/performance-mode.md §3).
     if let Some((ci, (t, _))) = hit.and_then(|ci| crate::perform::slot_of(s, ci).map(|slot| (ci, slot))) {
-        let now = app.transport.playing().then(|| app.transport.tick().max(0.0) as u32);
+        let now = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
         let s = &mut app.state;
         if right {
             crate::perform::stop(s, t, now, alt);
@@ -2487,7 +2507,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             s.message = crate::perform::trigger_clip_scene(s, ci, now, alt, plus);
         } else {
             s.message = crate::perform::trigger(s, ci, now, alt, app.shift);
-            if s.playlist.perform.held.is_some() {
+            if s.session.perform.held.is_some() {
                 app.drag = Some(Drag::Pl(PlDrag::Perform));
             }
         }
@@ -2668,7 +2688,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
         PlTool::Zoom => app.drag = Some(Drag::Pl(PlDrag::ZoomBox { x0: x, y0: y })),
         PlTool::Playback => {
             let t = snap_down(s, &g, tick, true);
-            s.playlist.pos = t;
+            s.session.song_pos = t;
             app.drag = Some(Drag::Pl(PlDrag::Playback));
             app.play_song_from(t);
         }
@@ -2684,7 +2704,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 s.playlist.overlay = Some(Overlay::Slice { tick: t, t0: track, t1: track });
             }
             // An instrument track takes no audio clips (§6c).
-            None if !crate::track_links::fits(s, source_for(s, track), track) => {
+            None if !crate::track_links::fits(&s.session, source_for(s, track), track) => {
                 s.message = Some(crate::track_links::NOT_FOR_AUDIO.into());
             }
             None => {
@@ -2863,7 +2883,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
                 .iter()
                 .map(|(_, o)| {
                     let t = (i32::from(o.track) + dk) as u16;
-                    if crate::track_links::fits(s, o.source, t) { t } else { o.track }
+                    if crate::track_links::fits(&s.session, o.source, t) { t } else { o.track }
                 })
                 .collect();
             let arr = arr_mut(&mut s.session);
@@ -2951,7 +2971,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         }
         PlDrag::Playback | PlDrag::Perform => {}
         PlDrag::SongPos => {
-            s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
+            s.session.song_pos = snap_down(s, &g, g.tick_at(x), alt);
             crate::init::apply(&mut s.session);
         }
         PlDrag::TimeSel { t0 } => {
@@ -3113,11 +3133,11 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
     // Audio clips that land on an audio track play through its mixer track (§6c).
     if let PlDrag::Move { orig, .. } = &d {
         let idx: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
-        crate::track_links::route_clips(s, &idx);
+        crate::track_links::route_clips(&mut s.session, &idx);
     }
     match d {
         PlDrag::Perform => {
-            let now = app.transport.playing().then(|| app.transport.tick().max(0.0) as u32);
+            let now = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
             crate::perform::release(&mut app.state, now);
         }
         PlDrag::Slice { .. } => {
@@ -3129,16 +3149,16 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
         PlDrag::ZoomBox { x0, y0 } => zoom_to(app, grid, x0, y0),
-        PlDrag::Playback => app.transport.stop(),
+        PlDrag::Playback => app.state.session.transport.stop(),
         PlDrag::SongPos => {
             // The song jumps to the new position; a running pattern goes on as the song from there, a paused one
             // stops, as with the PAT / SONG switch (§7, audio/transport.md).
-            if app.transport.playing() {
-                if app.transport.song() || !app.transport.paused() {
-                    let p = app.state.playlist.pos;
+            if app.state.session.transport.playing() {
+                if app.state.session.transport.song() || !app.state.session.transport.paused() {
+                    let p = app.state.session.song_pos;
                     app.play_song_from(p);
                 } else {
-                    app.transport.stop();
+                    app.state.session.transport.stop();
                 }
             }
         }
@@ -3158,8 +3178,8 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
                 s.session.dirty = true;
             }
             // The song position went to the marker: playback follows, as from the ruler (§7a).
-            if app.transport.playing() && (app.transport.song() || !app.transport.paused()) {
-                let p = app.state.playlist.pos;
+            if app.state.session.transport.playing() && (app.state.session.transport.song() || !app.state.session.transport.paused()) {
+                let p = app.state.session.song_pos;
                 app.play_song_from(p);
             }
         }
@@ -3289,7 +3309,7 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
         if double {
             s.playlist.range = None;
         }
-        s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
+        s.session.song_pos = snap_down(s, &g, g.tick_at(x), alt);
         // Moving the song position switches to SONG mode; a time selection does not (§7). The initial values follow
         // (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
         s.set_song_mode(true);
@@ -3349,7 +3369,7 @@ pub fn press_markers(app: &mut App, grid: Rect, right: bool) {
         snapshot(&mut s.session);
         let t0 = markers(&s.session)[i].position;
         // As a click on the ruler: SONG mode, the initial values follow (§7).
-        s.playlist.pos = t0;
+        s.session.song_pos = t0;
         s.set_song_mode(true);
         crate::init::apply(&mut s.session);
         app.drag = Some(Drag::Pl(PlDrag::Marker { i, dt: 0, t0 }));
@@ -3367,8 +3387,8 @@ pub fn press_header(app: &mut App, t: u16, right: bool, at: (f32, f32)) {
     }
     // Performance mode: a click on a playing track's header stops it at the next sync point, with Alt at once (spec:
     // ui/performance-mode.md §3).
-    if crate::perform::zone(s).is_some() && s.playlist.perform.live.contains_key(&t) {
-        let playing = app.transport.playing().then(|| app.transport.tick().max(0.0) as u32);
+    if crate::perform::zone(s).is_some() && s.session.perform.live.contains_key(&t) {
+        let playing = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
         crate::perform::stop(&mut app.state, t, playing, app.alt);
     }
     let s = &mut app.state;
@@ -3577,7 +3597,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         // Time signature markers ask for their signature (§7a).
         Cmd::AddSignature | Cmd::MarkerSigAt(_) => {
-            let pos = if let Cmd::MarkerSigAt(t) = cmd { t } else { app.state.playlist.pos };
+            let pos = if let Cmd::MarkerSigAt(t) = cmd { t } else { app.state.session.song_pos };
             app.open_song_signature(crate::timesig::SongSig::At(pos));
             return None;
         }
@@ -3965,21 +3985,21 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::AddMarker | Cmd::MarkerAddAt(_) => {
-            let pos = if let Cmd::MarkerAddAt(t) = cmd { t } else { s.playlist.pos };
+            let pos = if let Cmd::MarkerAddAt(t) = cmd { t } else { s.session.song_pos };
             let at = grid.map_or((600.0, 200.0), |g| (PGeom::new(s, g).x_of(pos as f32), g.y));
             start_edit(s, EditTarget::NewMarker(pos), at);
             None
         }
         Cmd::AddAutoMarker => {
             snapshot(&mut s.session);
-            let pos = s.playlist.pos;
+            let pos = s.session.song_pos;
             add_marker(&mut s.session, TimeMarker::new(pos, "Auto"));
             None
         }
         Cmd::AddJumpMarker => {
             // A Marker skip at the song position and its goal one bar later, both named with one space (§7a).
             snapshot(&mut s.session);
-            let (pos, bar) = (s.playlist.pos, bar(&s.session));
+            let (pos, bar) = (s.session.song_pos, bar(&s.session));
             add_marker(&mut s.session, TimeMarker { kind: TimeMarker::SKIP, ..TimeMarker::new(pos, " ") });
             add_marker(&mut s.session, TimeMarker::new(pos + bar, " "));
             None
@@ -4000,7 +4020,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             // position follows), named after the root and scale; one undo step.
             snapshot(&mut s.session);
             s.playlist.key_scale = k;
-            let pos = s.playlist.pos;
+            let pos = s.session.song_pos;
             add_marker(&mut s.session, TimeMarker::key(pos, s.playlist.key_root, k));
             None
         }
@@ -4628,7 +4648,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Named(NamedKey::Enter) if ctrl => {
             // Play from the song start.
             app.state.set_song_mode(true);
-            app.state.playlist.pos = 0;
+            app.state.session.song_pos = 0;
             app.play_song_from(0);
             return true;
         }
@@ -4650,8 +4670,8 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
 /// back (automation data stays, as in the project).
 pub fn rescale(s: &mut State, from: u16, to: u16) {
     use os_model::{rescale_length, rescale_tick};
+    s.session.song_pos = rescale_tick(s.session.song_pos, from, to);
     let pl = &mut s.playlist;
-    pl.pos = rescale_tick(pl.pos, from, to);
     pl.range = pl.range.map(|(a, b)| (rescale_tick(a, from, to), rescale_tick(b, from, to)));
     pl.clipboard.iter_mut().for_each(|c| c.rescale(from, to));
     if let Some((_, len)) = &mut pl.lock_len {

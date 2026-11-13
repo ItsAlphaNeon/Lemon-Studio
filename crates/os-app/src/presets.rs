@@ -868,7 +868,7 @@ pub fn dropped(app: &mut App, path: &Path) -> Option<String> {
 /// Presets dropped where a new instance was made load once it is hosted (or are given up after [`WAIT`]).
 pub fn pending_tick(app: &mut App) {
     if !app.state.session.plugins.preset_waits.is_empty() {
-        app.host(|ses, _| pending_in(ses));
+        app.host(|ses| pending_in(ses));
     }
 }
 

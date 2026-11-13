@@ -1641,7 +1641,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::sep(),
         {
             let it = it("Assign to new instrument track", RCmd::AssignInstrument(r));
-            if crate::track_links::can_assign_instrument(s, &menu_rows(s, r)) { it } else { it.off() }
+            if crate::track_links::can_assign_instrument(&s.session, &menu_rows(s, r)) { it } else { it.off() }
         },
         PItem::col(),
         it("Cut", RCmd::Cut(r)),
@@ -2384,7 +2384,7 @@ fn restretch_all(app: &mut App) -> Option<String> {
     let rows: Vec<usize> = (0..app.state.session.project.channels.len()).filter(|&r| tempo_fitted(&app.state.session.project.channels[r])).collect();
     if let Some(fits) = crate::playlist::audio_fits(&app.state.session) {
         if crate::playlist::fit_clips(&mut app.state.session.project.get_mut().arrangements, &fits) {
-            crate::playlist::fit_clips(&mut app.saved.0.arrangements, &fits);
+            crate::playlist::fit_clips(&mut app.state.session.saved.0.arrangements, &fits);
             app.damage_win(Win::Playlist);
         }
     }
@@ -2414,7 +2414,34 @@ fn tempo_fitted(c: &os_model::Channel) -> bool {
 /// The project as the transport plays it: in loop mode, channels with their own loop length repeat their first
 /// steps across the pattern (polyrhythms).
 pub fn play_project(s: &State) -> Project {
-    let mut p = s.session.project.clone();
+    play_project_in(&s.session)
+}
+
+/// Edits reach playback right away, also during a drag (at most once per tick): every write to the project
+/// (`locked::Locked`), and the flag for what playback reads outside it (`Session::dirty`). Returns whether playback was
+/// given the project again.
+pub fn sync_playback(ses: &mut crate::session::Session) -> bool {
+    let written = ses.project.take_written();
+    // A write alone that changes nothing playback reads (the project's info, a plugin state stored for a save) builds no
+    // new engine.
+    let play = (written.is_some() && !ses.dirty).then(|| play_project_in(ses));
+    if ses.dirty || play.as_ref().is_some_and(|p| !ses.transport.holds(p)) {
+        ses.dirty = false;
+        // An edit in the interface (a command's change is its event already; an undo or redo is one too).
+        let tempo = ses.tempo();
+        if ses.control.changed_since_seen(&ses.project, tempo) {
+            ses.control.event(&crate::control::By::User, "edit", "", Vec::new());
+        }
+        // Also while Play is still starting (not `playing` yet); ignored when stopped.
+        ses.transport.update(&play.unwrap_or_else(|| play_project_in(ses)));
+        return true;
+    }
+    false
+}
+
+/// `play_project` on the session.
+pub fn play_project_in(s: &crate::session::Session) -> Project {
+    let mut p = s.project.clone();
     // Playback reads nothing of the rack's locks and zips: without them, locking or zipping builds no new engine.
     for c in &mut p.channels {
         (c.rack.locked, c.rack.zipped) = (false, false);
@@ -2431,8 +2458,8 @@ pub fn play_project(s: &State) -> Project {
 /// In each pattern in loop mode, a looping row repeats its first loop length's steps up to the end of the pattern (its
 /// length as played, §23); notes past the loop length go. The pattern's own loops (FL 24.1.1's form): a length, and
 /// under Advanced looping a loop point too, which is the row's notes there rounded up to the unit. `rows`: only those.
-fn expand_loops(p: &mut Project, s: &State, rows: Option<&[usize]>) {
-    let ps = per_step(&s.session);
+fn expand_loops(p: &mut Project, s: &crate::session::Session, rows: Option<&[usize]>) {
+    let ps = per_step(s);
     let ends: Vec<u32> = p.patterns.iter().map(|pat| p.pattern_length(pat.number)).collect();
     let chans: Vec<u16> = p.channels.iter().enumerate().filter(|(r, _)| rows.is_none_or(|rs| rs.contains(r))).map(|(_, c)| c.index).collect();
     for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
@@ -2440,7 +2467,7 @@ fn expand_loops(p: &mut Project, s: &State, rows: Option<&[usize]>) {
         let advanced = loop_type_of(code) == 2;
         for &ch in &chans {
             let Some(v) = pat.loops.iter().find(|l| l.0 == ch).map(|l| l.1) else { continue };
-            let len = if advanced { unit_steps(&s.session, &pat.notes, ch, unit_of(v)).or(length_of(v)) } else { length_of(v) };
+            let len = if advanced { unit_steps(s, &pat.notes, ch, unit_of(v)).or(length_of(v)) } else { length_of(v) };
             let Some(len) = len else { continue };
             let span = len.max(1) * ps;
             let src: Vec<Note> = pat.notes.iter().filter(|n| n.channel == ch && n.position < span).copied().collect();
@@ -2463,7 +2490,7 @@ fn burn(s: &mut State, all: bool) {
     let looping = loop_rows(&s.session);
     let rows: Vec<usize> = if all { looping } else { s.rack.sel.iter().copied().filter(|r| looping.contains(r)).collect() };
     let mut p = s.session.project.clone();
-    expand_loops(&mut p, s, Some(&rows));
+    expand_loops(&mut p, &s.session, Some(&rows));
     let n = s.pattern();
     if let (Some(src), Some(dst)) = (p.pattern(n).cloned(), s.session.project.get_mut().patterns.iter_mut().find(|x| x.number == n)) {
         dst.notes = src.notes;
@@ -2806,7 +2833,7 @@ mod tests {
         assert!(a.unsaved());
         toggle_lock(&mut a.state.session, 1);
         assert!(crate::history::undo(&mut a.state).is_some(), "the project step undone");
-        assert_eq!(a.state.session.project.main_volume, a.saved.0.main_volume);
+        assert_eq!(a.state.session.project.main_volume, a.state.session.saved.0.main_volume);
         assert_eq!(locked_rows(&a.state.session.project), [0, 1].into(), "the locks stay");
     }
 
@@ -4471,6 +4498,7 @@ mod tests {
         app.state.session.project.get_mut().ppq = 96;
         app.state.set_tempo(130.0);
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         let enabled = |app: &App| options_menu(&app.state, 0.0, 0.0).items.iter().find(|i| i.label == "Restretch all").map(|i| (i.enabled, i.key));
         assert_eq!(enabled(&app), Some((true, "Ctrl+Alt+R")));
         assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("No stretched channels to restretch"));

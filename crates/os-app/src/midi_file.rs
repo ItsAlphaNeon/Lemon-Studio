@@ -664,7 +664,7 @@ impl App {
         }
         let parts = imp.parts.len();
         if o.new_project {
-            self.transport.silence();
+            self.state.session.transport.silence();
             self.reset_hosted();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;
@@ -678,7 +678,9 @@ impl App {
             s.set_pattern(1);
             s.set_song_mode(false);
             s.piano.reset();
+            s.session.pat_pos = 0;
             s.playlist.reset();
+            s.session.song_pos = 0;
             s.session.history.reset();
             s.session.control.reset();
             s.session.control.event(&crate::control::By::User, "opened", "New project", Vec::new());

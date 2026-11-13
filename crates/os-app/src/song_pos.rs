@@ -35,7 +35,7 @@ pub fn range(s: &State) -> Option<u32> {
 
 /// The position the slider moves: the song position, or the piano roll's play-start marker in PAT mode.
 pub fn stored(s: &State) -> u32 {
-    if s.song_mode() { s.playlist.pos } else { s.piano.marker }
+    if s.song_mode() { s.session.song_pos } else { s.session.pat_pos }
 }
 
 /// Where the handle is: the playhead while this mode plays (and the handle is not being dragged), else the stored
@@ -74,7 +74,7 @@ pub fn hint(s: &State, pos: u32) -> String {
 impl App {
     /// The position the slider's input starts from (the playhead while this mode plays).
     fn song_pos_now(&self) -> u32 {
-        let t = &self.transport;
+        let t = &self.state.session.transport;
         let dragging = matches!(self.drag, Some(Drag::SongPos { .. }));
         shown(&self.state, t.playing(), t.song(), t.tick(), dragging)
     }
@@ -85,12 +85,12 @@ impl App {
         let t = t.min(range - 1);
         let s = &mut self.state;
         if s.song_mode() {
-            s.playlist.pos = t;
+            s.session.song_pos = t;
             // The initial values follow a song position move (spec: ui/settings-choices.md "Advanced: Initialize
             // controls automatically").
             crate::init::apply(&mut s.session);
         } else {
-            s.piano.marker = t;
+            s.session.pat_pos = t;
             s.piano.marker_placed = true;
         }
         self.hint = Cow::Owned(hint(&self.state, t));
@@ -104,12 +104,12 @@ impl App {
     /// Playback follows a moved position, as after a click in the playlist ruler (spec: ui/playlist.md §7): the song
     /// plays on from there (a paused pattern stops); a playing pattern starts again from its new position.
     fn song_pos_restart(&mut self) {
-        let tp = &self.transport;
+        let tp = &self.state.session.transport;
         if !tp.playing() {
             return;
         }
         if self.state.song_mode() {
-            let p = self.state.playlist.pos;
+            let p = self.state.session.song_pos;
             // With Quantize song jumps the playing song goes on to the next unit, then jumps there (ui/playlist.md §7a).
             if let Some(unit) = crate::playlist::jump_unit(&self.state).filter(|_| tp.song() && !tp.paused()) {
                 tp.jump_on(unit, p);
@@ -119,7 +119,7 @@ impl App {
                 tp.stop();
             }
         } else if !tp.song() && !tp.paused() {
-            self.transport.stop();
+            self.state.session.transport.stop();
             self.start_playback();
         }
     }

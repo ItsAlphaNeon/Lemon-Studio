@@ -92,10 +92,10 @@ fn run(app: &mut App, d: Duration) {
 
 /// Space, as the user presses it; with `OS_CHECK_PAUSE=1` a playing transport is paused instead of stopped.
 fn space(app: &mut App, presses: &mut Vec<Press>, phase: &'static str) {
-    let playing = app.transport.state() == crate::transport::State::Playing;
+    let playing = app.state.session.transport.state() == crate::transport::State::Playing;
     presses.push(Press { at: Instant::now(), phase, play: !playing });
     if playing && std::env::var_os("OS_CHECK_PAUSE").is_some() {
-        app.transport.pause();
+        app.state.session.transport.pause();
     } else {
         app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), false, false);
     }
@@ -134,7 +134,7 @@ fn save_audio(rec: &Recording, presses: &[Press]) {
 /// Starts recording blocks with the transport's counters and every hosted plugin's processing time. The probes'
 /// names: the transport's (`Transport::probes`), then one per plugin, "<name> (<place>)".
 fn record(app: &App) -> usize {
-    let mut probes = app.transport.probes();
+    let mut probes = app.state.session.transport.probes();
     let fixed = probes.len();
     for s in app.perf_sources() {
         if let Some(m) = s.meter {
@@ -345,7 +345,7 @@ fn space_play_stop() {
     let mut app = open(std::path::Path::new(&path));
     let mut presses = Vec::new();
     let fixed = record(&app);
-    let d0 = app.transport.drops();
+    let d0 = app.state.session.transport.drops();
     let c0 = Counters::now();
     for _ in 0..rounds {
         space(&mut app, &mut presses, "space");
@@ -368,7 +368,7 @@ fn space_play_stop() {
     run(&mut app, Duration::from_millis(4500));
     let rec = sim::take();
     save_audio(&rec, &presses);
-    let d = app.transport.drops();
+    let d = app.state.session.transport.drops();
     eprintln!("\n{}", report(&rec, &presses, fixed));
     eprintln!(
         "the transport counted: {} feeder late, {} plugin late, {} device; {} heard (since the app started: {} dropouts)",
@@ -376,7 +376,7 @@ fn space_play_stop() {
         d.plugin - d0.plugin,
         d.device - d0.device,
         d.heard - d0.heard,
-        app.transport.underruns()
+        app.state.session.transport.underruns()
     );
     eprintln!("{}", c0.since());
     sim::set(None);
@@ -393,11 +393,11 @@ fn space_with_an_instrument_open() {
     };
     let rounds: usize = var("OS_CHECK_ROUNDS", 30);
     let mut app = open(std::path::Path::new(&path));
-    app.transport.listen(true);
+    app.state.session.transport.listen(true);
     run(&mut app, Duration::from_millis(500));
     let mut presses = Vec::new();
     let fixed = record(&app);
-    let d0 = app.transport.drops();
+    let d0 = app.state.session.transport.drops();
     let c0 = Counters::now();
     for _ in 0..rounds {
         space(&mut app, &mut presses, "quick");
@@ -407,10 +407,10 @@ fn space_with_an_instrument_open() {
     }
     run(&mut app, Duration::from_millis(1000));
     let rec = sim::take();
-    let d = app.transport.drops();
+    let d = app.state.session.transport.drops();
     eprintln!("\n{}", report(&rec, &presses, fixed));
     eprintln!("the transport counted: {} feeder late, {} plugin late, {} device; {} heard", d.feeder - d0.feeder, d.plugin - d0.plugin, d.device - d0.device, d.heard - d0.heard);
     eprintln!("{}", c0.since());
-    app.transport.listen(false);
+    app.state.session.transport.listen(false);
     sim::set(None);
 }

@@ -173,7 +173,7 @@ pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
 
 /// Rack row `row`'s Lemon Sampler takes the Misc values it plays again (after an undo put them back).
 pub fn follow(app: &mut crate::app::App, row: usize) {
-    app.host(|s, _| follow_in(s, row));
+    app.host(|s| follow_in(s, row));
 }
 
 /// `follow` in the session.

@@ -55,11 +55,56 @@ pub struct Session {
     pub pending_open: Option<usize>,
     /// The hosted plugins' parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
+    /// MIDI controller input, and its held notes: (key, rack row they started on).
+    pub(crate) midi: crate::midi_in::MidiIn,
+    pub(crate) midi_out: crate::midi_out::MidiOut,
+    /// The control plane's socket (`--control`), when it listens.
+    pub(crate) rpc_server: Option<crate::control::server::Server>,
+    /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
+    pub(crate) loading: Option<crate::loading::Loading>,
+    /// The opened project's missing samples and plugins (`crate::missing`).
+    pub(crate) missing: crate::missing::Missing,
+    /// A zipped project being unzipped or written (`crate::zipped`): its panel shows, input waits.
+    pub(crate) zipping: Option<crate::zipped::Zipping>,
+    /// An export is rendering (FILE > Export): its first file's name and progress (0..1); the same panel shows, input
+    /// waits.
+    pub(crate) export: Option<(String, f32)>,
+    /// The running export is PATTERNS > Quick render as audio clip / Render and replace's (spec: ui/pattern-render.md):
+    /// what to do with its file.
+    pub(crate) pattern_render: Option<crate::pattern_render::Pending>,
+    /// The project, tempo and Lemon Studio's own saved state (`lemon_state::saved_form`) as last opened, saved or
+    /// created: anything else has unsaved changes.
+    pub(crate) saved: (os_model::Project, f64, Vec<u8>),
+    /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
+    pub(crate) backup: crate::backup::Backup,
+    /// Performance mode's launched clips (spec: ui/performance-mode.md): what plays besides the arrangement.
+    pub perform: crate::perform::Perform,
+    /// The live engine has had the project once (`sync_live`); each tick's `rack::sync_playback` keeps it current.
+    pub(crate) live_synced: bool,
+    /// The rule for the colours of new audio and automation clips' channels: the interface's theme's (`App::clip_colors`,
+    /// kept up to date by `App::follow_settings`).
+    pub clip_colors: crate::clip_colors::ClipColors,
+    /// The song position (ticks): song playback starts here (the playlist's, spec ui/playlist.md).
+    pub song_pos: u32,
+    /// The piano roll's play-start marker (ticks): pattern playback starts here (spec ui/piano-roll.md §10).
+    pub pat_pos: u32,
+    /// External sync messages waiting out a positive offset (`midi_play::ext_message_in`).
+    pub ext_pending: std::collections::VecDeque<(std::time::Instant, crate::midi_in::Msg)>,
+    /// When the external clock's tempo was last applied.
+    pub ext_tempo_at: Option<std::time::Instant>,
+    /// Recording: armed, the take, count-in, the score logger (`crate::record`).
+    pub rec: crate::record::Rec,
+    /// One-click audio recording under way (spec: ui/one-click-recording.md §2).
+    pub(crate) audio_rec: Option<crate::one_click::AudioRec>,
+    /// Disk recording into the armed mixer tracks under way (spec: audio/track-io.md §2.5).
+    pub(crate) track_rec: Option<crate::track_rec::TrackRec>,
+    /// Playback: the audio thread and what it plays (`crate::transport`). Last, so it goes after the plugins it plays.
+    pub transport: crate::transport::Transport,
 }
 
 /// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
 /// did; the interface knows what that means for its selections and windows.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Touched {
     /// The project was put back whole: the channels' ids by row before, the rows the views pointed at.
     pub rows: Option<Vec<u32>>,
@@ -101,6 +146,12 @@ pub enum View {
     Retimed(u16, u16),
     /// A message for the hint bar.
     Message(String),
+    /// Recording wrote notes of `channel` into `pattern`: the piano roll shows them, nothing selected (its time
+    /// selection stays: it may be looping).
+    Recorded { pattern: u16, channel: u16 },
+    /// An audio clip channel numbered `channel` was made and its clip `clip` placed: it becomes the playlist's clip
+    /// source, the clip the selection.
+    AudioClipAdded { channel: u16, clip: usize },
 }
 
 impl View {
@@ -115,7 +166,7 @@ impl View {
 }
 
 impl Session {
-    pub fn new(project: os_model::Project) -> Self {
+    pub fn new(project: os_model::Project, transport: crate::transport::Transport) -> Self {
         Session {
             project: crate::locked::Locked::new(project),
             history: Default::default(),
@@ -138,6 +189,27 @@ impl Session {
             pending_plugin: None,
             pending_open: None,
             params: Default::default(),
+            midi: crate::midi_in::MidiIn::none(),
+            midi_out: crate::midi_out::MidiOut::none(),
+            loading: None,
+            missing: Default::default(),
+            zipping: None,
+            export: None,
+            pattern_render: None,
+            saved: (os_model::Project::default(), 0.0, Vec::new()),
+            backup: Default::default(),
+            rpc_server: None,
+            perform: Default::default(),
+            live_synced: false,
+            clip_colors: Default::default(),
+            song_pos: 0,
+            ext_pending: Default::default(),
+            ext_tempo_at: None,
+            pat_pos: 0,
+            rec: Default::default(),
+            audio_rec: None,
+            track_rec: None,
+            transport,
         }
     }
 
@@ -168,5 +240,36 @@ impl Session {
 
     pub fn set_tempo(&mut self, bpm: f64) {
         self.project.write_if(|p| p.tempo.replace(bpm) != Some(bpm));
+    }
+}
+
+/// What a keyboard, a MIDI device or a client plays now on rack row `row` (`Session::live`), besides the project.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Live {
+    /// A note starts: `key` sounds at `velocity`, on MIDI channel `midi` (0..15) for a hosted instrument (MIDI channel
+    /// through, spec: ui/channel-rack.md §18).
+    NoteOn { row: usize, key: u16, velocity: u8, midi: u8 },
+    NoteOff { row: usize, key: u16 },
+    /// A controller message (not a note) where a live note would go: a hosted instrument gets it as it is, another
+    /// channel bends by pitch bend over ±`bend_cents` (spec: ui/midi-settings.md §4).
+    Midi { row: usize, bytes: [u8; 3], bend_cents: f64 },
+}
+
+impl Session {
+    /// Before the first live note: the live engine gets the project (once; each tick keeps it current after).
+    pub(crate) fn sync_live(&mut self) {
+        if !self.live_synced {
+            self.live_synced = true;
+            self.transport.update(&crate::rack::play_project_in(self));
+        }
+    }
+
+    /// Plays `l` now: into the playback while playing, else into the live engine.
+    pub fn live(&mut self, l: Live) {
+        match l {
+            Live::NoteOn { row, key, velocity, midi } => self.transport.note_on_midi(row, key, velocity, midi),
+            Live::NoteOff { row, key } => self.transport.note_off(row, key),
+            Live::Midi { row, bytes, bend_cents } => self.transport.midi(row, bytes, bend_cents),
+        }
     }
 }
