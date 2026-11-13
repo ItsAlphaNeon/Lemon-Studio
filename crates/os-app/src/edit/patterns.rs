@@ -106,3 +106,28 @@ pub fn used(p: &Pattern) -> bool {
     !p.notes.is_empty() || !p.controls.is_empty() || p.name.is_some()
 }
 
+pub(crate) fn random_color(seed: u64) -> Rgb {
+    // A random hue at a muted saturation / lightness like the default pattern colours.
+    let mut x = seed ^ 0x9e37_79b9_7f4a_7c15;
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 33;
+    let h = (x % 360) as f32;
+    let (sat, l) = (0.35f32, 0.45f32);
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * sat;
+    let hp = h / 60.0;
+    let xx = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, xx, 0.0),
+        1 => (xx, c, 0.0),
+        2 => (0.0, c, xx),
+        3 => (0.0, xx, c),
+        4 => (xx, 0.0, c),
+        _ => (c, 0.0, xx),
+    };
+    let m = l - c / 2.0;
+    let u = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Rgb::new(u(r), u(g), u(b))
+}
+
+

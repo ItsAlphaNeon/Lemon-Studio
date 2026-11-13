@@ -1038,8 +1038,8 @@ impl Command {
                     }
                     _ => return Err("a clip has a pattern or a channel".into()),
                 };
-                if track == 0 || track > crate::playlist::TRACKS {
-                    return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
+                if track == 0 || track > crate::edit::playlist::TRACKS {
+                    return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
                 }
                 // Else the source's own length, as a clip placed in the playlist gets.
                 let length = length.filter(|&l| l > 0).unwrap_or_else(|| crate::edit::playlist::source_len(s, source));
@@ -1061,8 +1061,8 @@ impl Command {
                 position.map(|v| ticks("position", v)).transpose()?;
                 length.map(|v| ticks("length", v)).transpose()?;
                 let i = clip_place(&s.project, clip)?;
-                if track.is_some_and(|t| t == 0 || t > crate::playlist::TRACKS) {
-                    return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
+                if track.is_some_and(|t| t == 0 || t > crate::edit::playlist::TRACKS) {
+                    return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
                 }
                 if length == Some(0) {
                     return Err("a clip's length can't be 0".into());
@@ -1080,8 +1080,8 @@ impl Command {
             }
             Command::SetPlaylistTrack { track, name, color, enabled } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;
-                if track == 0 || track > crate::playlist::TRACKS {
-                    return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
+                if track == 0 || track > crate::edit::playlist::TRACKS {
+                    return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
                 }
                 let t = &mut crate::edit::playlist::arr_mut(s).tracks[usize::from(track - 1)];
                 if let Some(n) = name {

@@ -139,7 +139,7 @@ pub(crate) fn tick(ses: &mut crate::session::Session, scanning: bool) -> Option<
 fn host_plugins(ses: &mut crate::session::Session, deadline: std::time::Instant, scanning: bool) -> bool {
     ses.plugins.host_deadline = Some(deadline);
     ses.plugins.host_more = false;
-    crate::app::sync_effects(ses);
+    crate::project_plugins::sync_effects(ses);
     crate::project_plugins::sync_wrapped(ses);
     crate::osc3::sync_osc3(ses);
     crate::citrus::sync_citrus(ses);

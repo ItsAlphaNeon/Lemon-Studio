@@ -60,7 +60,7 @@ pub enum Snap {
     /// Pattern `number`'s notes, control points and length (the piano roll, the step sequencer).
     Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32>, loops: (Vec<(u16, u32)>, Option<u32>) },
     /// The playlist (`playlist::capture`).
-    Playlist(Box<crate::playlist::Snapshot>),
+    Playlist(Box<crate::edit::playlist::Snapshot>),
     /// A knob's value: the model's own for the channel knobs, else the knob's 0..1; `None` for a send with no level
     /// record (at unity), so undo leaves none behind.
     Knob(KnobId, Option<f64>),

@@ -410,13 +410,6 @@ pub fn add_group(s: &mut State, name: &str, rows: &BTreeSet<usize>) {
     autosize(s);
 }
 
-/// The project as a save writes it: a file without groups shows All (its filter would name no group).
-pub fn as_saved(p: &mut os_model::Project) {
-    if p.groups.is_empty() {
-        p.current_group = None;
-    }
-}
-
 /// Delete filter group: the rack's group `g` goes, its channels to "Unsorted"; the filter shows All.
 pub fn delete_group(s: &mut State, g: usize) {
     s.session.project.write_if(|p| {
@@ -1701,43 +1694,6 @@ fn box_at_row(s: &State, r: usize, mouse: (f32, f32)) -> (f32, f32) {
     crate::views::rack::name_rect(s, r).map_or(crate::patterns::box_at_mouse(mouse), |nb| (nb.x, nb.y))
 }
 
-/// A sample or channel preset at `path` went into the existing channel `ch`: while "Name channels after their sample or plugin" is on, the
-/// channel takes the file's name without its extension; off, it keeps its name (spec: ui/settings-choices.md
-/// "Miscellaneous: naming, detached plugins and startup"). A channel made new for a file is named after it either way.
-pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
-    if crate::prefs::check(&crate::prefs::AUTO_NAME_CHANNELS) {
-        ch.name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
-    }
-}
-
-/// Sample `path` went into sampler channel `ch` from the file dialog, the browser or a drop: what its WAV chunks say
-/// is read into the channel (spec: ui/settings-choices.md "Advanced: Read sample root note and Read sample tempo
-/// information (2026-10-16)"; `os_engine::sample::wav_tags`).
-/// - "Read sample root note" on: the root note becomes the `smpl` chunk's unity note, C5 (60) without one (any file
-///   that isn't a WAV too). Off: it stays.
-/// - "Read sample tempo information" on: an `acid` chunk's beat count (above 0) sets the stretch method to Auto and
-///   TIME to the beats, in 1/192 of a beat; PITCH and the multiplier stay. Without one, or off, the stretch stays.
-/// - "Auto keep long audio on disk" on: a file of 30 s or more turns Keep on disk on (`keep_on_disk::keep_long`).
-///
-/// Part of the load: it has no undo step of its own. Project loading and previews don't come here; audio clip channels
-/// keep their root note and stretch (not measured).
-pub fn read_tags(ch: &mut os_model::Channel, path: &std::path::Path) {
-    crate::keep_on_disk::keep_long(ch, path);
-    use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
-    let (root, tempo) = (check(&READ_ROOT_NOTE), check(&READ_TEMPO));
-    if ch.kind != os_model::ChannelKind::Sampler || !(root || tempo) {
-        return;
-    }
-    let tags = os_engine::sample::wav_tags(path);
-    if root {
-        ch.misc.root = tags.unity_note.unwrap_or(60);
-    }
-    if let Some(beats) = tags.beats.filter(|_| tempo) {
-        ch.sound.stretch[0] = ((f64::from(beats) * 192.0) as f32).to_bits();
-        ch.sound.stretch[3] = os_model::stretch_mode::AUTO as u32;
-    }
-}
-
 /// The sample chosen in Load sample...: row `r`'s channel takes it (and its name, `auto_name`, and what the file says,
 /// `read_tags`), one history step (`history::load_sample`).
 pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
@@ -2224,28 +2180,6 @@ fn tempo_fitted(c: &os_model::Channel) -> bool {
 /// steps across the pattern (polyrhythms).
 pub fn play_project(s: &State) -> Project {
     play_project_in(&s.session)
-}
-
-/// Edits reach playback right away, also during a drag (at most once per tick): every write to the project
-/// (`locked::Locked`), and the flag for what playback reads outside it (`Session::dirty`). Returns whether playback was
-/// given the project again.
-pub fn sync_playback(ses: &mut crate::session::Session) -> bool {
-    let written = ses.project.take_written();
-    // A write alone that changes nothing playback reads (the project's info, a plugin state stored for a save) builds no
-    // new engine.
-    let play = (written.is_some() && !ses.dirty).then(|| play_project_in(ses));
-    if ses.dirty || play.as_ref().is_some_and(|p| !ses.transport.holds(p)) {
-        ses.dirty = false;
-        // An edit in the interface (a command's change is its event already; an undo or redo is one too).
-        let tempo = ses.tempo();
-        if ses.control.changed_since_seen(&ses.project, tempo) {
-            ses.control.event(&crate::control::By::User, "edit", "", Vec::new());
-        }
-        // Also while Play is still starting (not `playing` yet); ignored when stopped.
-        ses.transport.update(&play.unwrap_or_else(|| play_project_in(ses)));
-        return true;
-    }
-    false
 }
 
 /// Loop button > Burn: write the loops into the current pattern's notes and drop the loop lengths.

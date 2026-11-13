@@ -36,9 +36,9 @@ pub struct Session {
     /// What a command or an undo changed that the interface's views follow, taken by them after it (`crate::follow`).
     pub touched: Touched,
     /// The project's samples as decoded (`playlist::Samples`).
-    pub samples: crate::playlist::Samples,
+    pub samples: crate::edit::playlist::Samples,
     /// Requests for the mixer's slot plugins, handled on the next tick (`mixer::FxReq`).
-    pub fx_requests: Vec<crate::mixer::FxReq>,
+    pub fx_requests: Vec<crate::edit::mixer::FxReq>,
     /// The remote control links the edit under way moved with what they drive (`remote::follow`), as (target before
     /// the edit, target now): its undo step puts them back (`control::edit`).
     pub link_moves: Vec<(crate::typein::Target, crate::typein::Target)>,
@@ -260,7 +260,7 @@ impl Session {
     pub(crate) fn sync_live(&mut self) {
         if !self.live_synced {
             self.live_synced = true;
-            self.transport.update(&crate::rack::play_project_in(self));
+            self.transport.update(&crate::edit::rack::play_project_in(self));
         }
     }
 

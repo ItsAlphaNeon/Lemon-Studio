@@ -269,15 +269,6 @@ impl Default for MixerUi {
     }
 }
 
-/// Highest insert a channel can target (at least 1).
-pub fn max_insert(p: &os_model::Project) -> u16 {
-    max_insert_of(&p.mixer)
-}
-
-pub fn max_insert_of(mixer: &[MixerTrack]) -> u16 {
-    (mixer.len().saturating_sub(2) as u16).max(1)
-}
-
 /// The current track first, then the other selected ones.
 pub fn selected(s: &State) -> Vec<u16> {
     let mut v = vec![s.selected_mixer];
@@ -2100,73 +2091,6 @@ impl App {
         }
         self.invalidate();
     }
-}
-
-/// What the mixer's effect requests leave to the interface (`fx_requests_in`): the windows to open (or with `toggle`,
-/// to close when open), in order, and the effect whose first check a create waits for.
-pub(crate) struct FxDone {
-    pub windows: Vec<(u16, u8, bool)>,
-    pub trying: Option<usize>,
-}
-
-/// The mixer's effect requests (`Session::fx_requests`) on the session: effects created, deleted and moved with their
-/// slots. A create waits for a native plugin's first check (`Plugins::effect_ready`); a newer request for the same slot
-/// replaces a waiting one.
-pub(crate) fn fx_requests_in(ses: &mut crate::session::Session) -> FxDone {
-    let reqs = std::mem::take(&mut ses.fx_requests);
-    let mut out = FxDone { windows: Vec::new(), trying: None };
-    let mut relink = false;
-    let mut waiting: Vec<FxReq> = Vec::new();
-    for r in reqs {
-        if let FxReq::Create { track, slot, .. } | FxReq::Delete { track, slot } = r {
-            waiting.retain(|w| !matches!(*w, FxReq::Create { track: t, slot: s, .. } if (t, s) == (track, slot)));
-        }
-        if let FxReq::Create { index, .. } = r {
-            if !ses.plugins.effect_ready(index) {
-                out.trying = Some(index);
-                waiting.push(r);
-                continue;
-            }
-        }
-        ses.touched.repaint = true;
-        match r {
-            FxReq::Create { track, slot, index, state } => match ses.plugins.create_effect(track, slot, index, state.as_deref()) {
-                Ok(_) => {
-                    ses.plugins.added(crate::plugins::fx_key(track, slot));
-                    relink = true;
-                    out.windows.push((track, slot, false));
-                }
-                Err(e) => {
-                    if let Some(m) = track_mut(ses, track) {
-                        m.slots[usize::from(slot)] = None;
-                    }
-                    ses.touched.views.push(crate::session::View::Message(format!("Effect: {e}")));
-                }
-            },
-            FxReq::Toggle { track, slot } => out.windows.push((track, slot, true)),
-            FxReq::Show { track, slot } => out.windows.push((track, slot, false)),
-            FxReq::Delete { track, slot } => {
-                let key = crate::plugins::fx_key(track, slot);
-                if ses.plugins.hosted.contains_key(&key) {
-                    // Kept for an undo that brings the slot back (`control::host`).
-                    ses.plugins.keep(key);
-                    ses.plugins.drop_key(key);
-                    relink = true;
-                }
-            }
-            FxReq::Remap(map) => {
-                ses.plugins.remap_fx(&|t, k| Some(map.iter().find(|(a, _)| *a == (t, k)).map_or((t, k), |&(_, b)| b)));
-                relink = true;
-            }
-        }
-    }
-    waiting.append(&mut ses.fx_requests);
-    ses.fx_requests = waiting;
-    if relink {
-        ses.transport.set_effects(ses.plugins.effects());
-        ses.dirty = true;
-    }
-    out
 }
 
 /// The plugin frame's title for a mixer slot: "Name (Insert N)" / "(Master)" (§7).

@@ -650,21 +650,6 @@ pub struct PlaylistState {
     pub perf_velocity_subclips: bool,
 }
 
-/// The icon numbers of a project file (a channel's event 155, a mixer track's event 95) whose pictures [`ICONS`] has,
-/// and the icon each opens as (Lemon Studio's design, spec: ui/plugin-window.md "Change icon", the pictures in
-/// flp/events/mixer.md "Icon numbers"): a snare drum or a drum kit the drum, the piano keys the keys, the microphone,
-/// the waveform the wave, the note, a speaker (with a plug or without) the speaker, the jack cable the plug. Other
-/// numbers open with no icon.
-pub const FLP_ICONS: &[(u32, crate::icons::Icon)] = {
-    use crate::icons::Icon::*;
-    &[(4, Kick), (80, Kick), (71, PianoRoll), (30, Mic), (75, Wave), (70, Note), (27, Speaker), (29, Speaker), (31, Plug)]
-};
-
-/// The icon a project file's icon number opens as ([`FLP_ICONS`]), if it has one.
-pub fn flp_icon(n: u32) -> Option<crate::icons::Icon> {
-    FLP_ICONS.iter().find(|&&(k, _)| k == n).map(|&(_, i)| i)
-}
-
 /// Icon keys from here up to `plugins::FX_KEY` are mixer tracks: `TRACK_ICON_KEY + track` (no rack has that many rows).
 pub const TRACK_ICON_KEY: usize = 1 << 23;
 
@@ -970,35 +955,6 @@ pub fn source_key(src: ClipSource) -> u64 {
     })
 }
 
-/// Automatic crossfades follow the clips and the tempo (spec: audio/audio-clips.md "Automatic crossfades"): set again
-/// from the overlaps on the tick an edit reaches playback (clips moved, resized, added, deleted or split, the tempo,
-/// undo and redo, a project opened, the switch turned on), before the next undo step is taken, so they undo and redo
-/// with the edit that made them. As with the fits, the saved copy gets them too: an opened project's crossfades are
-/// not an unsaved change.
-pub fn follow_crossfades(s: &mut crate::session::Session) -> bool {
-    let tempo = s.tempo();
-    if !(s.dirty || s.project.written_at().is_some()) || !s.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
-        return false;
-    }
-    os_model::crossfade::derive(&mut s.saved.0, s.saved.1);
-    true
-}
-
-/// Audio clips follow their channel's stretch, pitch and the tempo (ui/playlist.md §9c), then the automatic crossfades
-/// follow the clips (`follow_crossfades`). The lengths are worked out, not edited: the saved copy gets them too, so a
-/// fit alone (an opened FL project) is not an unsaved change. Returns whether a clip changed.
-pub fn follow_audio(s: &mut crate::session::Session) -> bool {
-    let mut changed = false;
-    if let Some(fits) = audio_fits(s) {
-        if s.project.write_if(|p| fit_clips(&mut p.arrangements, &fits)) {
-            fit_clips(&mut s.saved.0.arrangements, &fits);
-            s.dirty = true;
-            changed = true;
-        }
-    }
-    follow_crossfades(s) || changed
-}
-
 /// The playlist's snap setting with Main read as the global snap (§4); Events and Markers have no unit, as (none).
 pub fn grid_snap(s: &State) -> Snap {
     s.playlist.snap.grid(s.global_snap.now).unwrap_or(Snap::None)
@@ -1070,24 +1026,6 @@ pub fn snap_delta(s: &State, g: &PGeom, dt: f32, alt: bool) -> i64 {
 pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
     let src = source_for(s, track);
     place_in(&mut s.session, src, track, tick, s.playlist.lock_len)
-}
-
-/// `place` of source `src`; `lock_len` is the length the last clip of a source was given (`PlaylistUi::lock_len`).
-pub fn place_in(s: &mut crate::session::Session, src: ClipSource, track: u16, tick: u32, lock_len: Option<(ClipSource, u32)>) -> usize {
-    let len = match lock_len {
-        Some((l, n)) if l == src => n,
-        _ => source_len(s, src),
-    };
-    let audio = source_kind(s, src) == PickKind::Audio && matches!(src, ClipSource::Channel(_));
-    let a = arr_mut(s);
-    let mut c = Clip::new(tick, len, track, src);
-    if audio {
-        // FL writes gain 1.0 into a new audio clip (spec: flp/events/playlist.md, byte 52).
-        c.set_gain(1.0);
-    }
-    a.clips.push(c);
-    s.dirty = true;
-    clips(s).len() - 1
 }
 
 /// Delete clips by index (selection indices are remapped). They ripple away (spec: ui/animations.md §4.10).
@@ -1711,42 +1649,6 @@ pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name:
 pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer: Option<u16>) -> Option<usize> {
     let lock = s.playlist.lock_len;
     crate::follow::around(s, |s| add_audio_clip_on(&mut s.session, path, track, tick, mixer, lock))
-}
-
-/// `add_audio_clip_in` on the session (`lock_len` as `place_in` takes it): the playlist's clip source becomes the new
-/// channel and the clip is selected (`View::AudioClipAdded`).
-pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16, tick: u32, mixer: Option<u16>, lock_len: Option<(ClipSource, u32)>) -> Option<usize> {
-    s.samples.wave(path)?;
-    // Not on an instrument track: the next free track below it (§6c); on an audio track, through its mixer track.
-    let track = crate::track_links::audio_drop_track(s, track, tick, tick + 1);
-    let mixer = mixer.or_else(|| crate::track_links::audio_mixer(s, track));
-    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
-    let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project)));
-    s.project.get_mut().channels.push(Channel {
-        id: os_model::Id::NONE,
-        index,
-        kind: ChannelKind::AudioClip,
-        name: Some(name),
-        plugin: None,
-        plugin_state: None,
-        // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
-        color: Some(s.clip_colors.new_channel(index)),
-        enabled: true,
-        volume: 0.78125,
-        pan: 0.0,
-        pitch_cents: 0,
-        mixer_track,
-        sample_path: Some(path.to_string()),
-        layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
-        sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
-        lemon_icon: None,
-    });
-    let src = track_info(s, track).and_then(|t| t.clip_lock).unwrap_or(ClipSource::Channel(index));
-    let i = place_in(s, src, track, tick, lock_len);
-    s.touched.views.push(crate::session::View::AudioClipAdded { channel: index, clip: i });
-    Some(i)
 }
 
 // ---------------------------------------------------------------------------------------------------------

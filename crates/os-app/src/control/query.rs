@@ -103,7 +103,7 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
     let patterns: Vec<Value> = p
         .patterns
         .iter()
-        .filter(|q| crate::patterns::used(q) || q.name.is_some())
+        .filter(|q| crate::edit::patterns::used(q) || q.name.is_some())
         .map(|q| {
             json!({
                 "id": q.id.0,

@@ -338,16 +338,16 @@ mod tests {
         // The clip's channel: the only selected one, in the "Automation" group with the filter on it, as the original's
         // rack shows after every Create automation clip.
         let row = a.state.session.project.channels.len() - 1;
-        let g = crate::rack::groups(&a.state.session.project).iter().position(|g| g.name == "Automation").expect("the group");
-        assert_eq!((a.state.selected_channel, crate::rack::filter(&a.state.session.project)), (row, crate::rack::Filter::Group(g)));
-        assert!(crate::rack::groups(&a.state.session.project)[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
+        let g = crate::edit::rack::groups(&a.state.session.project).iter().position(|g| g.name == "Automation").expect("the group");
+        assert_eq!((a.state.selected_channel, crate::edit::rack::filter(&a.state.session.project)), (row, crate::edit::rack::Filter::Group(g)));
+        assert!(crate::edit::rack::groups(&a.state.session.project)[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
         let channels = a.state.session.project.channels.len();
         assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert!(a.state.session.project.init_controls.is_empty() && pl::clips(&a.state.session).is_empty());
         assert_eq!(a.state.session.project.channels.len(), channels - 1, "the clip's channel goes with the undo");
-        assert!(crate::rack::groups(&a.state.session.project).iter().all(|g| g.name != "Automation") && crate::rack::filter(&a.state.session.project) == crate::rack::Filter::All);
+        assert!(crate::edit::rack::groups(&a.state.session.project).iter().all(|g| g.name != "Automation") && crate::edit::rack::filter(&a.state.session.project) == crate::edit::rack::Filter::All);
         assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
-        assert_eq!((a.state.session.project.channels.len(), crate::rack::filter(&a.state.session.project)), (channels, crate::rack::Filter::Group(g)));
+        assert_eq!((a.state.session.project.channels.len(), crate::edit::rack::filter(&a.state.session.project)), (channels, crate::edit::rack::Filter::Group(g)));
         assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 10000)], 1));
         // A second clip on the moved knob: its new value replaces the old one; undo brings that back.
         a.state.session.project.get_mut().channels[0].volume = 0.5;

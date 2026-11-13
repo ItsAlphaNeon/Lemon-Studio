@@ -83,7 +83,7 @@ pub(crate) fn follow_apply(ses: &mut crate::session::Session, plan: FollowPlan) 
     let FollowPlan { rows, slots, row_map, fx_map, rows_too, fx_too } = plan;
     if !row_map.is_empty() {
         let m = |r: usize| row_map.get(&r).copied().unwrap_or(Some(r));
-        crate::app::remap_rows_in(ses, &m);
+        crate::project_plugins::remap_rows_in(ses, &m);
     }
     if rows_too {
         // The rows hosted are the instances' rows: an edit may have moved or dropped rows of the list without
@@ -142,7 +142,7 @@ pub(crate) fn follow_apply(ses: &mut crate::session::Session, plan: FollowPlan) 
             Some((t, k)) if fx => ses.plugins.effect_index_of_uid(&uid).is_some_and(|i| ses.plugins.create_effect(t, k, i, Some(&state)).is_ok()),
             None if !fx => match ses.plugins.index_of_uid(&uid) {
                 Some(i) => {
-                    crate::app::plugin_paste_in(ses, key, i, &state);
+                    crate::project_plugins::plugin_paste_in(ses, key, i, &state);
                     ses.plugins.hosted.contains_key(&key)
                 }
                 None => false,
