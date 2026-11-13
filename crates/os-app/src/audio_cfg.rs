@@ -293,6 +293,15 @@ pub fn find(devices: impl Iterator<Item = cpal::Device>, want: &str) -> Option<c
     devices.into_iter().nth(i)
 }
 
+/// The input device named `want` on `host`: among its inputs (`find`), else its default input when `want` is the
+/// name that one is listed under. The default is listed by its own name ("Default Audio Device"), which ALSA's list of
+/// inputs gives none of its entries: there the `default` PCM has its own description ("Default ALSA Output (currently
+/// PipeWire Media Server)").
+pub fn find_input(host: &cpal::Host, want: &str) -> Option<cpal::Device> {
+    use cpal::traits::HostTrait;
+    host.input_devices().ok().and_then(|ds| find(ds, want)).or_else(|| host.default_input_device().filter(|d| device_name(d) == want))
+}
+
 /// The output devices' names for `cfg` (on Linux the sound server's or ALSA's, by mode), and the default's.
 pub fn devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
     let host = host(cfg);
@@ -396,6 +405,18 @@ pub fn rate() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One-click recording's menu lists the default input first, by the name `system_inputs` gives it; that name opens
+    /// it (it is not among ALSA's inputs under that name).
+    #[test]
+    fn the_default_input_is_found_by_the_name_it_is_listed_under() {
+        use cpal::traits::HostTrait;
+        let host = host(&AudioCfg::current());
+        let Some(d) = host.default_input_device() else { return };
+        let name = device_name(&d);
+        let found = find_input(&host, &name).expect("the listed name finds a device");
+        assert_eq!(device_name(&found), name);
+    }
 
     /// A stream through the sound server never asks for no length (the server would buffer about two seconds); elsewhere
     /// "Smallest" and the device's own ask for none, and a chosen length is asked for.
