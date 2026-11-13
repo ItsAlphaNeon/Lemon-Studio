@@ -1764,8 +1764,7 @@ impl App {
         }
         match result {
             Ok((file, project)) => {
-                self.state.session.transport.silence();
-                self.reset_hosted();
+                crate::project_io::open_in(&mut self.state.session, file, project, path.clone());
                 let s = &mut self.state;
                 s.selected_channel = 0;
                 s.selected_mixer = 1;
@@ -1776,33 +1775,16 @@ impl App {
                 s.rack.reset();
                 s.hide(Win::Plugin);
                 s.mixer_scroll = 0.0;
-                // As saved (event 9); a file without it opens in song mode, as in FL 26 (spec: flp/engine-events.md
-                // "Project").
-                let mut project = project;
-                project.song_mode = Some(project.song_mode.unwrap_or(true));
-                project.current_pattern = Some(project.current_pattern.unwrap_or(1).max(1));
-                project.tempo = Some(project.tempo.unwrap_or(130.0));
-                s.session.project = crate::locked::Locked::new(project);
-                // Opening in song mode sets the initial values, as FL 26 does (spec: flp/engine-events.md "Event
-                // 216"); the project is opened with them, not changed.
-                crate::init::apply(&mut s.session);
                 crate::project_info::opened(s);
-                s.session.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
                 crate::templates::remember(&path);
                 crate::recent::add(&path);
-                s.session.path = Some(path);
                 s.piano.reset();
                 s.playlist.reset();
-                s.session.history.reset();
-                s.session.control.reset();
-                s.session.control.event(&crate::control::By::User, "opened", s.session.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
                 crate::playlist::load_view(s);
-                s.session.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 // A .lemon file's own state (icons, slot names and colours, Performance settings); its channel icons
-                // name channels by position, which the ids given here then follow.
-                self.state.session.control.settle(self.state.session.project.get_mut());
+                // name channels by position, which the ids given on opening follow.
                 if let Some(f) = self.state.session.file.take() {
                     crate::lemon_state::apply(&mut self.state, &f);
                     // Saved by a version that has features this one does not: those parts do not play.
@@ -1814,13 +1796,12 @@ impl App {
                 }
                 // The original's Patcher slots that are a plain serial chain open as containers (README.md slice 5).
                 let effects = self.state.session.plugins.effects.clone();
-                if let Some(m) = crate::container::open_patchers(&mut self.state, &effects) {
+                if let Some(m) = crate::container::open_patchers(&mut self.state.session, &effects) {
                     self.state.message = Some(format!("{}. {m}", self.state.message.take().unwrap_or_default()));
                 }
                 self.mark_saved();
                 crate::missing::opened(self);
-                self.state.session.loading = Some(crate::loading::Loading::start(&self.state.session.project));
-                self.state.session.samples.wait = true;
+                crate::project_io::start_loading(&mut self.state.session);
                 self.invalidate();
             }
             Err(e) => self.state.message = Some(format!("Could not open {}: {e}", path.display())),
@@ -1933,7 +1914,7 @@ impl App {
     fn write_project(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<u64> {
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
-        crate::save::store_samplers(&mut self.state.session);
+        crate::project_io::store_samplers(&mut self.state.session);
         // What the save writes into the project from the interface (below) reaches playback like any edit: the engine
         // holds the project as it is.
         let before = self.state.session.project.clone();
@@ -1952,7 +1933,7 @@ impl App {
             }
             edit(p);
         };
-        let (result, message) = crate::save::write_in(&mut s.session, &target, before, extra, &mut stamp);
+        let (result, message) = crate::project_io::write_in(&mut s.session, &target, before, extra, &mut stamp);
         s.message = Some(message);
         if result.is_ok() {
             crate::templates::remember(&target);
@@ -2376,21 +2357,12 @@ impl App {
     /// EQ, Tesla (as Edison), Pulp Filter (as Love Philter) and Press (as Maximus) into their slots, Lemon Trio into its
     /// channels.
     pub(crate) fn store_builtin_states(&mut self) {
-        crate::save::store_builtin_states(&mut self.state.session);
+        crate::project_io::store_builtin_states(&mut self.state.session);
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
     pub(crate) fn reset_hosted(&mut self) {
-        self.state.session.plugins.clear();
-        self.state.session.loading = None;
-        self.state.session.samples.wait = false;
-        self.state.session.hosted_rows.clear();
-        self.state.session.plugins.sampler_failed.clear();
-        self.state.session.plugins.fx_failed.clear();
-        self.state.session.plugins.wrap_failed.clear();
-        self.state.session.plugins.native_failed.clear();
-        self.state.session.transport.set_instruments(Vec::new());
-        self.state.session.transport.set_effects(Vec::new());
+        crate::project_io::reset_hosted(&mut self.state.session);
     }
 
     /// `loading::sync_samplers` with the views following it (tests).

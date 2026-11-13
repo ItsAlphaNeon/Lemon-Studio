@@ -90,7 +90,7 @@ pub fn spent_days(s: &State, now: Instant) -> f64 {
 
 /// The date and time now, as a project's start (days since 1899-12-30): fixed in a test that runs the motions' clock
 /// (`anim::set_clock_at`, the equivalence harness), so a project made new starts the same on every run.
-fn work_time_now() -> WorkTime {
+pub(crate) fn work_time_now() -> WorkTime {
     #[cfg(test)]
     if !crate::anim::still() {
         return WorkTime { started: 46_000.5, spent: 0.0 };
@@ -105,11 +105,9 @@ pub(crate) fn saved_work_time(s: &State) -> WorkTime {
     WorkTime { started, spent: spent_days(s, crate::anim::now()) }
 }
 
-/// A project was opened (`App::open`): one whose file has no start is started now, as a writer creating a project does
-/// (spec: flp/events/project-info.md "Writer notes"); the clock starts again; the Song info box shows when the project
-/// asks for it (event 10).
+/// A project was opened (`App::open`; its start, `project_io::open_in`): the clock starts again; the Song info box shows
+/// when the project asks for it (event 10).
 pub(crate) fn opened(s: &mut State) {
-    s.session.project.get_mut().work_time.get_or_insert_with(work_time_now);
     s.credits.clock.restart(crate::anim::now());
     s.credits.song_box = s.session.project.show_info == Some(true);
     (s.credits.song_since, s.credits.song_alpha) = (None, 1.0);

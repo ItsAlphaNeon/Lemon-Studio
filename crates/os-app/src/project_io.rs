@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Saving, the session's half: the project as playback and the hosted plugins have it, written to a file. The
-//! interface adds what is its own (the playlist's view, Lemon Studio's state, the time spent, `App::write_project`).
+//! Opening and saving, the session's half: a project file read into the session, and the project as playback and the
+//! hosted plugins have it written to a file. The interface adds what is its own (the views, Lemon Studio's state, the
+//! time spent: `App::open`, `App::write_project`).
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 
@@ -126,4 +127,52 @@ pub(crate) fn write_in(ses: &mut Session, target: &Path, before: os_model::Proje
         ses.path = Some(target.to_path_buf());
     }
     (result, message)
+}
+
+/// Every hosted instance goes and nothing is loading (a project opens, the program ends).
+pub(crate) fn reset_hosted(ses: &mut Session) {
+    ses.plugins.clear();
+    ses.loading = None;
+    ses.samples.wait = false;
+    ses.hosted_rows.clear();
+    ses.plugins.sampler_failed.clear();
+    ses.plugins.fx_failed.clear();
+    ses.plugins.wrap_failed.clear();
+    ses.plugins.native_failed.clear();
+    ses.transport.set_instruments(Vec::new());
+    ses.transport.set_effects(Vec::new());
+}
+
+/// `project`, read from `file` at `path`, becomes the session's: playback stops, the plugins go, the history and the
+/// control plane start again. The interface then sets its views (`App::open`) and starts the loading
+/// (`start_loading`).
+pub(crate) fn open_in(ses: &mut Session, file: os_flp::FlpFile, mut project: os_model::Project, path: std::path::PathBuf) {
+    ses.transport.silence();
+    reset_hosted(ses);
+    // As saved (event 9); a file without it opens in song mode, as in FL 26 (spec: flp/engine-events.md "Project").
+    project.song_mode = Some(project.song_mode.unwrap_or(true));
+    project.current_pattern = Some(project.current_pattern.unwrap_or(1).max(1));
+    project.tempo = Some(project.tempo.unwrap_or(130.0));
+    ses.project = crate::locked::Locked::new(project);
+    // Opening in song mode sets the initial values, as FL 26 does (spec: flp/engine-events.md "Event 216"); the project
+    // is opened with them, not changed.
+    crate::init::apply(ses);
+    // One whose file has no start is started now, as a writer creating a project does (spec:
+    // flp/events/project-info.md "Writer notes").
+    ses.project.get_mut().work_time.get_or_insert_with(crate::project_info::work_time_now);
+    ses.file = Some(file);
+    ses.path = Some(path);
+    ses.history.reset();
+    ses.control.reset();
+    ses.control.event(&crate::control::By::User, "opened", ses.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
+    // Live notes use the new project.
+    ses.dirty = true;
+    // Ids for what the file holds, before Lemon Studio's own state (which names channels by position) is applied.
+    ses.control.settle(ses.project.get_mut());
+}
+
+/// The opened project's samples start decoding and its plugins starting (`loading::tick`).
+pub(crate) fn start_loading(ses: &mut Session) {
+    ses.loading = Some(crate::loading::Loading::start(&ses.project));
+    ses.samples.wait = true;
 }

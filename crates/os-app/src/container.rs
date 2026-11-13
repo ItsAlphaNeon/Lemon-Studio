@@ -704,19 +704,19 @@ fn member_of(n: &os_flp::patcher::Node, effects: &[crate::plugins::Available]) -
 /// channel (an instrument patch, slice 3), stays as the project had it. What was opened and what was not, and why, is
 /// returned for the hint bar. The project is opened that way, not changed: a save writes the containers (decision #7).
 // spec: plugins/patcher/state.md §1 to §7; plugins/patcher/README.md §3.1, §4 slice 5
-pub fn open_patchers(s: &mut State, effects: &[crate::plugins::Available]) -> Option<String> {
+pub fn open_patchers(s: &mut crate::session::Session, effects: &[crate::plugins::Available]) -> Option<String> {
     use os_flp::patcher::{self, NotChain, PATCHER};
     let mut opened = Vec::new();
     let mut left = Vec::new();
     let places: Vec<(u16, u8)> = s
-        .session.project
+        .project
         .mixer
         .iter()
         .flat_map(|m| m.slots.iter().enumerate().filter(|(_, p)| p.as_ref().is_some_and(|p| p.name == PATCHER)).map(move |(k, _)| (m.index, k as u8)))
         .collect();
     for (t, k) in places {
-        let place = format!("{}, slot {}", crate::mixer::name(&s.session, t), k + 1);
-        let Some(slot) = crate::mixer::track_mut(&mut s.session, t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
+        let place = format!("{}, slot {}", crate::mixer::name(s, t), k + 1);
+        let Some(slot) = crate::mixer::track_mut(s, t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
         let Some(patch) = patcher::parse(&slot.state) else {
             left.push(format!("{place} (a state Lemon Studio does not read)"));
             continue;
@@ -737,7 +737,7 @@ pub fn open_patchers(s: &mut State, effects: &[crate::plugins::Available]) -> Op
         slot.state = encode(&list);
         opened.push(place);
     }
-    for (r, ch) in s.session.project.channels.iter().enumerate() {
+    for (r, ch) in s.project.channels.iter().enumerate() {
         if ch.plugin.as_deref() == Some(PATCHER) {
             let name = ch.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| format!("channel {}", r + 1));
             left.push(format!("{name} ({})", NotChain::Instrument.text()));
@@ -2273,7 +2273,7 @@ mod tests {
         a.state.session.project.get_mut().channels[0].plugin = Some(os_flp::patcher::PATCHER.into());
         a.state.session.project.get_mut().channels[0].name = Some("Keys".into());
         let effects = a.state.session.plugins.effects.clone();
-        let msg = open_patchers(&mut a.state, &effects).expect("a hint");
+        let msg = open_patchers(&mut a.state.session, &effects).expect("a hint");
         let bus = crate::mixer::name(&a.state.session, 2);
         assert_eq!(msg, format!("Patcher: {bus}, slot 1 opened as a container; left as they were: {bus}, slot 2 (link levels other than 1.0), Keys (an instrument patch)"));
         let list = members(&a.state.session, 2, 0).expect("a container");
@@ -2306,7 +2306,7 @@ mod tests {
         let many = patcher_state(&many, &chain_links(MAX_MEMBERS as u32 + 1, 1.0));
         let t = crate::mixer::track_mut(&mut a.state.session, 2).unwrap();
         (t.slots[0], t.slots[1]) = (patcher(&empty), patcher(&many));
-        let msg = open_patchers(&mut a.state, &[]).unwrap();
+        let msg = open_patchers(&mut a.state.session, &[]).unwrap();
         assert!(msg.ends_with(&format!("slot 2 (more than {MAX_MEMBERS} effects)")), "{msg}");
         assert_eq!(members(&a.state.session, 2, 0), Some(vec![]));
         crate::project_plugins::NATIVE_FIRST.with(|n| n.set(None));
