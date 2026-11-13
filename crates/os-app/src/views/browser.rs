@@ -873,7 +873,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         let rect = Rect::new(13.0, y, bw - 13.0, ROW_H);
         // A parameter row's hint carries its value (spec: plugins/plugin-parameters.md §6); read for the hovered row only.
         let hint = match row.item {
-            Item::Param(key, index) if ui.hovering(rect) => crate::params::row_hint(s, key, index),
+            Item::Param(key, index) if ui.hovering(rect) => crate::params_ui::row_hint(s, key, index),
             _ => row.label.clone(),
         };
         let hov = ui.hit(rect, Action::BrowserRow(i), hint);

@@ -1758,7 +1758,7 @@ impl App {
         }
         // A zipped project is unzipped beside itself, then its project file opens (`crate::zipped`).
         if ext == "zip" {
-            return crate::zipped::import(self, path);
+            return crate::zipped_ui::import(self, path);
         }
         // A project in the layout used before version 24.2 is converted to the current one as it opens, and is saved in
         // that layout (spec: flp/layouts.md "Converting to the newer layout"). One the conversion cannot handle gets a
@@ -1816,7 +1816,7 @@ impl App {
                     self.state.message = Some(format!("{}. {m}", self.state.message.take().unwrap_or_default()));
                 }
                 self.mark_saved();
-                crate::missing::opened(self);
+                crate::missing_ui::opened(self);
                 crate::project_io::start_loading(&mut self.state.session);
                 self.invalidate();
             }
@@ -2148,17 +2148,17 @@ impl App {
             }
             Then::MissingFiles => {
                 if reply == Reply::Button(Answer::Yes) {
-                    crate::missing::pick_folder(self);
+                    crate::missing_ui::pick_folder(self);
                 }
             }
             Then::SampleFolder => {
                 if let Some(p) = file {
-                    crate::missing::search(self, p);
+                    crate::missing_ui::search(self, p);
                 }
             }
             Then::ExportZip => {
                 if let Some(p) = file {
-                    crate::zipped::export(self, p);
+                    crate::zipped_ui::export(self, p);
                 }
             }
             Then::FactoryFolder => {
@@ -2274,7 +2274,7 @@ impl App {
             }
             Then::Proposal(n) => {
                 let s = &mut self.state;
-                let r = if reply == Reply::Button(Answer::Yes) { crate::control::accept(s, n).map(|_| ()) } else { crate::control::discard(&mut s.session, n) };
+                let r = if reply == Reply::Button(Answer::Yes) { crate::control_ui::accept(s, n).map(|_| ()) } else { crate::control::discard(&mut s.session, n) };
                 if let Err(e) = r {
                     s.message = Some(e);
                 }
@@ -2380,7 +2380,7 @@ impl App {
     /// `loading::sync_samplers` with the views following it (tests).
     #[cfg(test)]
     fn sync_samplers(&mut self, deadline: Option<std::time::Instant>) -> bool {
-        self.host(|s| crate::loading::sync_samplers(s, deadline))
+        self.host(|s| crate::loading_ui::sync_samplers(s, deadline))
     }
 
     /// Project loading (spec: ui/project-loading.md): samples decode on worker threads first, then the sampler
@@ -2388,11 +2388,11 @@ impl App {
     /// project, new sampler rows are hosted at once.
     fn loading_tick(&mut self) {
         let scanning = self.sweep.is_some();
-        match self.host(|s| crate::loading::tick(s, scanning)) {
+        match self.host(|s| crate::loading_ui::tick(s, scanning)) {
             None => {}
             // What was not found is listed now (spec: ui/project-loading.md §6).
             Some(true) => {
-                crate::missing::loaded(self);
+                crate::missing_ui::loaded(self);
                 self.invalidate();
             }
             Some(false) => self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0)),
@@ -2447,8 +2447,8 @@ impl App {
         self.scan_tick();
         self.loading_tick();
         self.export_tick();
-        crate::missing::tick(self);
-        crate::zipped::tick(self);
+        crate::missing_ui::tick(self);
+        crate::zipped_ui::tick(self);
         self.midi_tick();
         self.sync_midi_outs();
         self.mixer_tick();
@@ -2657,7 +2657,7 @@ impl App {
                     // notches of one knob one step (`control::run_edit`).
                     Request::ToggleOn(row) => {
                         let _ = chans;
-                        crate::control::knob_edit(&mut self.state, crate::rack::MUTE_SOLO, Region::Mutes, |s| {
+                        crate::control_ui::knob_edit(&mut self.state, crate::rack::MUTE_SOLO, Region::Mutes, |s| {
                             s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled)
                         })
                     }
@@ -2666,7 +2666,7 @@ impl App {
                     Request::PitchCents(row, v) => self.channel_control(row, ChannelControl::Pitch, |c| c.pitch_cents = v),
                     Request::PitchRange(row, r) => {
                         let _ = chans;
-                        crate::control::edit(&mut self.state, "Channel pitch range", Region::Channel(row), |s| {
+                        crate::control_ui::edit(&mut self.state, "Channel pitch range", Region::Channel(row), |s| {
                             s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| {
                                 // A narrower range takes the pitch knob with it.
                                 c.misc.pitch_range = r.clamp(1, 48) as u8;
@@ -2739,7 +2739,7 @@ impl App {
             ChannelControl::Track => ("Channel mixer track", false),
         };
         let run = crate::history::Run::Channel(row, which);
-        crate::control::run_edit(&mut self.state, name, Region::Channel(row), run, knob, |s| {
+        crate::control_ui::run_edit(&mut self.state, name, Region::Channel(row), run, knob, |s| {
             if let Some(c) = s.session.project.get_mut().channels.get_mut(row) {
                 f(c);
             }
@@ -3608,7 +3608,7 @@ impl App {
             TapAct::Apply => {
                 if crate::tapper::toggle_apply() {
                     if let Some(bpm) = self.state.tapper.count.tempo() {
-                        crate::control::edit_app(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, |app| app.set_tempo(bpm));
+                        crate::control_ui::edit_app(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, |app| app.set_tempo(bpm));
                     }
                 }
             }
@@ -3640,7 +3640,7 @@ impl App {
             self.state.session.history.end_run();
         }
         if let Some(bpm) = bpm.filter(|_| crate::tapper::get().apply) {
-            crate::control::edit_run(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, crate::history::Run::Tap, |app| app.set_tempo(bpm));
+            crate::control_ui::edit_run(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, crate::history::Run::Tap, |app| app.set_tempo(bpm));
         }
         self.damage_win(Win::Tapper);
     }
@@ -4403,17 +4403,17 @@ impl App {
             _ => None,
         };
         if let Some(l) = &self.state.session.loading {
-            crate::loading::paint(canvas, &self.theme.colors, l);
+            crate::loading_ui::paint(canvas, &self.theme.colors, l);
         }
         if let Some(s) = &self.state.session.missing.search {
-            crate::missing::paint(canvas, &self.theme.colors, s);
+            crate::missing_ui::paint(canvas, &self.theme.colors, s);
         }
         if let Some(z) = &self.state.session.zipping {
-            crate::zipped::paint(canvas, &self.theme.colors, z);
+            crate::zipped_ui::paint(canvas, &self.theme.colors, z);
         }
         if let Some((name, p)) = &self.state.session.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
-            crate::loading::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
+            crate::loading_ui::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
         }
     }
 
@@ -4626,7 +4626,7 @@ impl App {
             }
         };
         let n = st.slices.len();
-        crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
+        crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
             let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
             let ch = &mut s.session.project.get_mut().channels[row];
@@ -5154,7 +5154,7 @@ impl App {
     /// metronome's accents, what hosted plugins are told), as do the pattern lengths the editors draw; the project
     /// counts as changed.
     pub fn set_bar(&mut self, beats: u16, steps: u16) -> Option<String> {
-        crate::control::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_bar_now(beats, steps))
+        crate::control_ui::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_bar_now(beats, steps))
     }
 
     fn set_bar_now(&mut self, beats: u16, steps: u16) -> Option<String> {
@@ -5171,7 +5171,7 @@ impl App {
     /// division"). Each mode keeps its own last bar while the program runs (4/4 at first): switching keeps the bar of
     /// the mode left and writes the other mode's into the project. A bar is never converted between the modes.
     pub fn set_time_mode(&mut self, signature: bool) -> Option<String> {
-        crate::control::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_time_mode_now(signature))
+        crate::control_ui::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_time_mode_now(signature))
     }
 
     fn set_time_mode_now(&mut self, signature: bool) -> Option<String> {
@@ -5216,7 +5216,7 @@ impl App {
         let v = (i32::from(now) + delta).clamp(i32::from(lo.min(now)), i32::from(hi.max(now))) as u16;
         // Wheel notches in a row make one undo step.
         let bar = if beat_box { (v, steps) } else { (beats, v) };
-        crate::control::edit_run(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, crate::history::Run::Bar, |app| app.set_bar_now(bar.0, bar.1))
+        crate::control_ui::edit_run(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, crate::history::Run::Bar, |app| app.set_bar_now(bar.0, bar.1))
     }
 
     /// Settings > Project ▸ Timebase (PPQ): the project's ticks per quarter (the file header's PPQ). Every tick count
@@ -5241,7 +5241,7 @@ impl App {
     /// "Panning law: Triangular"): the law of the channel and mixer track pans. Playback follows from its next tick, as
     /// for any pan edit; the project counts as changed. A file without the event is Circular.
     pub fn set_panning_law(&mut self, law: u8) -> Option<String> {
-        crate::control::edit(&mut self.state, "Panning law", crate::control::command::Region::Settings, |s| {
+        crate::control_ui::edit(&mut self.state, "Panning law", crate::control::command::Region::Settings, |s| {
             if s.session.project.panning_law.unwrap_or(0) != law {
                 s.session.project.get_mut().panning_law = Some(law);
                 s.session.dirty = true;
@@ -5255,7 +5255,7 @@ impl App {
     /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
     fn toggle_play_truncated(&mut self) {
         let on = !self.state.session.project.play_truncated;
-        crate::control::edit(&mut self.state, "Play truncated notes in clips", crate::control::command::Region::Settings, |s| s.session.project.get_mut().play_truncated = on);
+        crate::control_ui::edit(&mut self.state, "Play truncated notes in clips", crate::control::command::Region::Settings, |s| s.session.project.get_mut().play_truncated = on);
         self.state.session.dirty = true;
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
     }
@@ -5267,7 +5267,7 @@ impl App {
     fn toggle_auto_crossfades(&mut self) {
         let on = !self.state.session.project.auto_crossfades.unwrap_or(false);
         // The whole project: switching sets the clips' crossfades.
-        crate::control::edit(&mut self.state, "Automatic crossfades", crate::control::command::Region::Project, |s| {
+        crate::control_ui::edit(&mut self.state, "Automatic crossfades", crate::control::command::Region::Project, |s| {
             s.session.project.get_mut().auto_crossfades = Some(on);
             crate::playlist::crossfades_switched(&mut s.session);
         });
@@ -6182,7 +6182,7 @@ impl App {
             return;
         }
         // The value box is modal: only its own parts take clicks (spec: ui/type-in-value.md §1).
-        if crate::typein::is_open(&self.state) {
+        if crate::typein_ui::is_open(&self.state) {
             if let Some(a @ Action::TypeIn(_)) = action {
                 if self.acts_on_release(&a) {
                     self.armed = Some(a);
@@ -6479,7 +6479,7 @@ impl App {
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
         self.close_song_info();
-        if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
+        if crate::typein_ui::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.smooth.stop();
@@ -6521,7 +6521,7 @@ impl App {
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
         self.close_song_info();
-        if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
+        if crate::typein_ui::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.smooth.stop();
@@ -7641,7 +7641,7 @@ impl App {
             && c.eq_ignore_ascii_case("z")
         {
             if self.shift {
-                let m = crate::history::ctrl_shift_z(&mut self.state);
+                let m = crate::history_ui::ctrl_shift_z(&mut self.state);
                 self.say(m);
                 return self.invalidate();
             }
@@ -8388,7 +8388,7 @@ impl App {
                 s.piano.overlay = None;
             }
             // EDIT > Undo, also the toolbar's Undo button (spec: ui/toolbar-buttons.md §2).
-            Action::PianoUndo | Action::Util(Util::Undo) => s.message = crate::history::ctrl_z(s),
+            Action::PianoUndo | Action::Util(Util::Undo) => s.message = crate::history_ui::ctrl_z(s),
             Action::Typing => self.toggle_typing(),
             Action::Metronome => self.toggle_metronome(),
             Action::Record => self.toggle_record(),
@@ -8792,7 +8792,7 @@ impl App {
             }
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter => {}
-            Action::TypeIn(t) => crate::typein::click(s, t),
+            Action::TypeIn(t) => crate::typein_ui::click(s, t),
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
             | Action::PlSnap
@@ -8871,7 +8871,7 @@ impl App {
     /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
     pub(crate) fn undo_key(&mut self, alt: bool) {
         let s = &mut self.state;
-        if let Some(m) = if alt { crate::history::ctrl_alt_z(s) } else { crate::history::ctrl_z(s) } {
+        if let Some(m) = if alt { crate::history_ui::ctrl_alt_z(s) } else { crate::history_ui::ctrl_z(s) } {
             self.say(m);
         }
         self.invalidate();
@@ -9172,7 +9172,7 @@ impl App {
         match entry.cmd {
             // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
             MenuCmd::Settings(tab) => self.open_settings(tab),
-            MenuCmd::ExportZip => crate::zipped::export_dialog(self),
+            MenuCmd::ExportZip => crate::zipped_ui::export_dialog(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             MenuCmd::Sampler => {
                 if let Some(index) = self.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
@@ -11207,13 +11207,13 @@ mod tests {
         assert_eq!(crate::piano::pattern_length(&app.state.session, app.state.pattern()), 768);
         // The change is one step, "Project settings": undone, the old timebase and its ticks, and the undo step made
         // before it then works in those; redone, both come back in the new ticks.
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::history::PROJECT_SETTINGS));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(crate::history::PROJECT_SETTINGS));
         assert_eq!((app.state.session.project.ppq, app.state.session.project.patterns[0].notes[0].position), (96, 72));
         assert_eq!((app.state.session.pat_pos, app.state.session.song_pos), (48, 96));
         assert!(crate::piano::undo(&mut app.state));
         assert_eq!(app.state.session.project.patterns[0].notes[0].position, 24);
-        crate::history::redo(&mut app.state);
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         assert_eq!((app.state.session.project.ppq, app.state.session.project.patterns[0].notes[0].position), (192, 144));
         assert!(std::mem::take(&mut app.state.session.retimed), "playback stops");
         // Back to 96: the same project as before (every tick was doubled, none rounded).
@@ -11649,16 +11649,16 @@ mod tests {
         app.mouse_move(x, r.cy() - 20.0);
         app.mouse_up();
         assert_eq!((app.state.tempo(), app.state.session.history.at()), (t0 + 20.0, steps + 1));
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TEMPO));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(TEMPO));
         assert_eq!(app.state.tempo(), t0);
-        assert_eq!(crate::history::redo(&mut app.state).as_deref(), Some(TEMPO));
+        assert_eq!(crate::history_ui::redo(&mut app.state).as_deref(), Some(TEMPO));
         assert_eq!(app.state.tempo(), t0 + 20.0);
 
         let bar = app.state.session.project.bar();
         app.set_bar(3, 4);
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
         assert_eq!(app.state.session.project.bar(), bar);
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         assert_eq!(app.state.session.project.bar(), (3, 4));
         let at = app.state.session.history.at();
         app.set_bar(3, 4);
@@ -11667,11 +11667,11 @@ mod tests {
             app.settings_number(views::settings::BEATS_PER_BAR, 1);
         }
         assert_eq!((app.state.session.project.bar(), app.state.session.history.at()), ((6, 4), at + 1), "wheel notches in a row: one step");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.bar(), (3, 4));
         let signature = app.state.session.project.bar_is_signature();
         app.set_time_mode(!signature);
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
         assert_eq!((app.state.session.project.bar_is_signature(), app.state.session.project.bar()), (signature, (3, 4)));
         // The Project page's switches.
         let before = app.state.session.project.clone();
@@ -11681,7 +11681,7 @@ mod tests {
         let p = &app.state.session.project;
         assert!(p.panning_law == Some(2) && p.play_truncated != before.play_truncated && p.auto_crossfades != before.auto_crossfades);
         for name in ["Automatic crossfades", "Play truncated notes in clips", "Panning law"] {
-            assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(name));
+            assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(name));
         }
         assert!(app.state.session.project == before);
     }
@@ -11909,7 +11909,7 @@ mod tests {
         }
         assert_eq!(app.hint, "Volume: 103%  0.8dB  1.09");
         assert_eq!(app.state.mixer_scroll, scroll, "the mixer does not scroll");
-        assert!(crate::history::undo(&mut app.state).is_some());
+        assert!(crate::history_ui::undo(&mut app.state).is_some());
         assert_eq!(vol(&app), 0.8, "one undo step for the three notches");
         for _ in 0..200 {
             app.wheel(0.0, -1.0, false, false);
@@ -13030,7 +13030,7 @@ mod tests {
         app.mouse_up();
         assert_ne!(vel(&app), before);
         assert_eq!((app.state.session.history.done(), app.state.session.history.newest_done()), (steps + 1, Some("Graph editor change velocity")));
-        assert!(crate::history::undo(&mut app.state).is_some());
+        assert!(crate::history_ui::undo(&mut app.state).is_some());
         assert_eq!(vel(&app), before, "one step takes the whole drag back");
         app.state.set_pattern(n + 1);
         frame(&mut app, &mut c, None);
@@ -14502,7 +14502,7 @@ mod tests {
         pl::run(&mut app, Cmd::PointPaste(ch, 0));
         let p0 = app.state.session.project.automation(ch).unwrap().points[0];
         assert!((p0.value - 0.8).abs() < 1e-3 && p0.beat == 0.0, "{p0:?}");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.automation(ch).unwrap().points[0].value, 0.25);
     }
 
@@ -14927,11 +14927,11 @@ mod tests {
         // Steps: the first count, turning Apply tempo on, the new count; each undoes to the tempo before it.
         assert_eq!(app.state.session.history.at(), steps + 3);
         for want in [133.0, 129.0, 130.0] {
-            assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::control::command::TEMPO));
+            assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(crate::control::command::TEMPO));
             assert_eq!(app.state.tempo(), want);
         }
         for want in [129.0, 133.0, 522.0] {
-            crate::history::redo(&mut app.state);
+            crate::history_ui::redo(&mut app.state);
             assert_eq!(app.state.tempo(), want);
         }
         // MIDI keys tap while the window is open; a chord's keys are one tap.
@@ -16635,7 +16635,7 @@ mod tests {
         assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([1]));
         // Each move is a "Move channel" step, as the menu's: undo puts them back.
         assert_eq!(app.state.session.history.newest_done(), Some("Move channel"));
-        while crate::history::undo(&mut app.state).is_some() {}
+        while crate::history_ui::undo(&mut app.state).is_some() {}
         assert_eq!(order(&app), b, "undone back to the start");
         frame(&mut app, &mut c, None);
         let moved = order(&app);
@@ -17892,12 +17892,12 @@ mod tests {
         let e = app.state.playlist.edit.clone().expect("value box");
         assert_eq!(e.target, EditTarget::TypeIn(Target::Knob(vol), false));
         assert!(e.sel, "the field opens selected");
-        assert_eq!(e.text, crate::typein::text(&app.state, Target::Knob(vol), false));
+        assert_eq!(e.text, crate::typein_ui::text(&app.state, Target::Knob(vol), false));
         assert!(e.text.ends_with("dB"), "{}", e.text);
         // Bottom-right corner 10 px right of / below the mouse (§1).
         let (mx, my) = app.mouse;
         assert_eq!((e.at.0 + crate::typein::W, e.at.1 + crate::typein::H), (mx + 10.0, my + 10.0));
-        assert_eq!(crate::typein::caption(&app.state, Target::Knob(vol)), "Value for Channel volume");
+        assert_eq!(crate::typein_ui::caption(&app.state, Target::Knob(vol)), "Value for Channel volume");
         // Typing replaces the selected text; Enter sets -6 dB.
         typ(&mut app, "-6 dB");
         assert_eq!(app.state.playlist.edit.as_ref().unwrap().text, "-6 dB");
@@ -18001,7 +18001,7 @@ mod tests {
         assert_eq!(e.target, EditTarget::TypeIn(pitch, false));
         assert_eq!(e.text, "440");
         assert_eq!(crate::typein::width(pitch), crate::typein::W_PLAIN);
-        assert_eq!(crate::typein::caption(&app.state, pitch), "Master pitch (Hz)");
+        assert_eq!(crate::typein_ui::caption(&app.state, pitch), "Master pitch (Hz)");
         typ(&mut app, "466.16");
         assert_eq!(app.state.knob_text(KnobId::MasterPitch), "Master pitch: +100 cents");
         frame(&mut app, &mut c, None);
@@ -18013,7 +18013,7 @@ mod tests {
         let e = open(&mut app, &mut c, Action::Fader(1), true);
         assert_eq!(e.target, EditTarget::TypeIn(Target::Fader(1), false));
         assert_eq!(e.text, "0.0dB");
-        assert_eq!(crate::typein::caption(&app.state, Target::Fader(1)), "Value for Bus 1 - Volume");
+        assert_eq!(crate::typein_ui::caption(&app.state, Target::Fader(1)), "Value for Bus 1 - Volume");
         typ(&mut app, "-6");
         let vol = |app: &App| crate::mixer::track(&app.state.session, 1).unwrap().volume.unwrap();
         assert!(crate::mixer::level_text("Volume", vol(&app)).contains("-6.0dB"));
@@ -19821,11 +19821,11 @@ mod tests {
         app.tick();
         assert_eq!(get(&app, sb).position, 288);
         assert_eq!(xf(&app), (Some(ms(128, 130.0, 96)), Some(ms(128, 130.0, 96))));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!((get(&app, sb).position, xf(&app)), (192, (Some(ms(224, 130.0, 96)), Some(ms(224, 130.0, 96)))), "undone with the move");
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         assert_eq!((get(&app, sb).position, xf(&app)), (288, (Some(ms(128, 130.0, 96)), Some(ms(128, 130.0, 96)))));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         app.tick();
 
         // The tempo halved: the clips keep their sample's 2 s, now 208 ticks (§9c), so 16 ticks overlap, in
@@ -19870,9 +19870,9 @@ mod tests {
         assert!(app.hint.contains("Crossfade tension: +2.45"), "{}", app.hint);
         app.tick();
         assert_eq!((get(&app, sb).fade_in_tension(), get(&app, sa).fade_out_tension()), (t, -t), "as the overlaps make them");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!((get(&app, sb).fade_in_tension(), get(&app, sa).fade_out_tension()), (0.0, 0.0), "one step");
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
 
         // Switched off: the lengths go to 0, the tensions stay, and no edit sets them; switched on: set again.
         app.settings_act(SAct::Check(CROSSFADES_CHECK));
@@ -20165,7 +20165,7 @@ mod tests {
         b.app.invalidate();
         b.step("the ripple");
         assert!(b.app.animating());
-        assert!(crate::history::undo(&mut b.app.state).is_some());
+        assert!(crate::history_ui::undo(&mut b.app.state).is_some());
         assert_eq!(pl::clips(&b.app.state.session).len(), 1, "the clip is back");
         b.app.invalidate();
         b.step("the undo");
@@ -22358,12 +22358,12 @@ mod tests {
         assert_eq!(os_model::clip_lfo::range(-0.5, 1.0), (0.25, 0.75));
         // Each change is an undo step; undo puts them back.
         assert_eq!(app.state.session.history.done(), steps + 3);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(lfo(&app).amount, 64);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(lfo(&app).mode, 1);
-        crate::history::redo(&mut app.state);
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         // Middle click: the minimum goes back to 0, not to the centre.
         app.state.reset_knob(KnobId::ChanPan(row));
         assert_eq!(app.state.session.project.channels[row].pan, -1.0);

@@ -144,7 +144,7 @@ pub fn claw(notes: Vec<Note>, set: &Settings, ppq: u32) -> Vec<Note> {
 mod tests {
     use super::*;
 
-    fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub(crate) fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, velocity: 100, ..Note::step(0, pos) }
     }
 

@@ -1167,7 +1167,7 @@ mod tests {
         assert!(a.points.len() >= 2 && a.points[0].value < 0.02);
         assert!(points(&app.state).is_empty(), "the events leave the pattern");
         assert!(!app.state.shown(Win::Events));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.channels.len(), rows);
         assert_eq!(points(&app.state), pts, "undo brings the events back");
     }

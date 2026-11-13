@@ -341,7 +341,7 @@ pub fn show_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
 pub fn knob_menu(s: &State, id: KnobId, x: f32, y: f32) -> Option<Popup> {
     let KnobId::Member(t, k, m, wet) = id else { return None };
     let mut items = vec![PItem::new("Reset", Cmd::Reset(crate::knobs::Control::Knob(id)))];
-    items.extend(crate::params::level_items(s, level_automation(&s.session, t, k, m, wet), crate::typein::Target::Member(t, k, m, wet)));
+    items.extend(crate::params_ui::level_items(s, level_automation(&s.session, t, k, m, wet), crate::typein::Target::Member(t, k, m, wet)));
     Some(Popup { x, y, items, sub: None, scroll: [0; 2] })
 }
 
@@ -387,7 +387,7 @@ fn pct(v: f32) -> i32 {
 /// step. The chain takes the level on the next tick, keeping its instances (`App::sync_containers`).
 pub fn set_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
     let Some(list) = leveled(&s.session, t, k, id, wet, v) else { return };
-    crate::control::edit(s, LEVEL, region(t, k), |s| set_members(&mut s.session, t, k, &list));
+    crate::control_ui::edit(s, LEVEL, region(t, k), |s| set_members(&mut s.session, t, k, &list));
     s.session.dirty = true;
 }
 
@@ -396,7 +396,7 @@ pub fn set_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
 pub fn set_level_run(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
     let Some(list) = leveled(&s.session, t, k, id, wet, v) else { return };
     let run = crate::history::Run::Member(t, k, id, wet);
-    crate::control::run_edit(s, LEVEL, region(t, k), run, true, |s| set_members(&mut s.session, t, k, &list));
+    crate::control_ui::run_edit(s, LEVEL, region(t, k), run, true, |s| set_members(&mut s.session, t, k, &list));
     s.session.dirty = true;
 }
 
@@ -407,7 +407,7 @@ pub fn edit_own(s: &mut State, t: u16, k: u8, id: u32, name: &'static str, f: im
     let Some(mut list) = members(&s.session, t, k) else { return };
     let Some(m) = list.iter_mut().find(|m| m.id == id) else { return };
     f(m);
-    crate::control::edit(s, name, region(t, k), |s| set_members(&mut s.session, t, k, &list));
+    crate::control_ui::edit(s, name, region(t, k), |s| set_members(&mut s.session, t, k, &list));
     s.session.dirty = true;
 }
 
@@ -476,7 +476,7 @@ fn member_ops(s: &State, t: u16, slot: u8, m: &[Member], i: usize) -> Vec<PItem>
     let level = |id: u32, wet: bool, v: f32| {
         let label = format!("{}: {}%", if wet { "Wet" } else { "Dry" }, pct(v));
         let create = level_automation(&s.session, t, slot, id, wet);
-        PItem::sub(label, crate::params::level_items(s, create, crate::typein::Target::Member(t, slot, id, wet)))
+        PItem::sub(label, crate::params_ui::level_items(s, create, crate::typein::Target::Member(t, slot, id, wet)))
     };
     let mem = &m[i];
     vec![
@@ -759,7 +759,7 @@ impl App {
     pub(crate) fn wrap_slot(&mut self, slot: u8, all: bool) -> Option<String> {
         let name = if all { WRAP_ALL } else { WRAP };
         let mut moved = None;
-        let msg = crate::control::edit_app(self, name, crate::control::command::Region::Project, |app| {
+        let msg = crate::control_ui::edit_app(self, name, crate::control::command::Region::Project, |app| {
             let (msg, m) = app.wrap_in_container(slot, all);
             moved = m;
             msg
@@ -933,7 +933,7 @@ impl App {
     /// on the instrument's parameters follow it onto its member (spec §4.5); those on the channel's own settings stay.
     pub(crate) fn wrap_channel(&mut self, row: usize) -> Option<String> {
         let mut moved = None;
-        let msg = crate::control::edit_app(self, WRAP, crate::control::command::Region::Project, |app| {
+        let msg = crate::control_ui::edit_app(self, WRAP, crate::control::command::Region::Project, |app| {
             let (msg, m) = app.wrap_channel_now(row);
             moved = m;
             msg
@@ -1003,7 +1003,7 @@ impl App {
         if let Some(r) = row.filter(|_| shift) {
             return self.wrap_channel(r);
         }
-        crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
+        crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
             let row = crate::app::add_plugin_channel(s.session.project.get_mut(), CONTAINER);
             s.session.project.get_mut().channels[row].plugin_state = Some(encode(&[]));
@@ -1411,7 +1411,7 @@ mod tests {
         assert_eq!(list.children[1].label, format!("2. {second} (wet 50%, dry 50%)"));
 
         // Undo: both slots and their instances come back; the members go.
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         tick(&mut a);
         let t = crate::mixer::track(&a.state.session, 2).unwrap();
         assert!(t.slots[0].is_some() && t.slots[1].as_ref().is_some_and(|p| p.name != CONTAINER));
@@ -1454,8 +1454,8 @@ mod tests {
         tick(&mut a);
         assert_eq!(names(&a, 0), [second.clone(), first.clone()]);
         assert_eq!(keys(&a), vec![before[1], before[0]], "the instances are kept");
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(MOVE));
-        assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(MOVE));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(MOVE));
+        assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(MOVE));
         tick(&mut a);
         assert_eq!(keys(&a), vec![before[1], before[0]], "and kept through an undo and a redo");
         // A member's state, as its window would leave it, then Remove.
@@ -1466,7 +1466,7 @@ mod tests {
         assert_eq!(names(&a, 0), [first.clone()]);
         assert!(!a.state.session.plugins.hosted.contains_key(&k), "its instance goes");
         assert_eq!(a.state.session.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members.len(), 1);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         tick(&mut a);
         assert_eq!(names(&a, 0), [second.clone(), first.clone()]);
         assert_eq!(members(&a.state.session, 2, 0).unwrap()[0].state, state);
@@ -1484,8 +1484,8 @@ mod tests {
         assert_eq!(free_id(&with(&[1, 2, 4])), Some(3));
         assert_eq!(free_id(&with(&(1..=MEMBER_IDS).collect::<Vec<_>>())), None, "at most 15");
         assert_eq!(a.state.session.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members.len(), 3);
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(ADD));
-        assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(ADD));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(ADD));
+        assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(ADD));
         tick(&mut a);
         // A save stores the members' states.
         let mut proj = a.state.session.project.clone();
@@ -1513,7 +1513,9 @@ mod tests {
     /// typed value is one undo step; the chain takes the levels and keeps its instances.
     #[test]
     fn a_members_wet_and_dry() {
-        use crate::typein::{accept, text, Target};
+        use crate::typein::Target;
+        use crate::typein_ui::accept;
+        use crate::typein_ui::text;
         let (mut a, _, second) = two_effects();
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(0, true)));
         tick(&mut a);
@@ -1523,7 +1525,7 @@ mod tests {
         assert_eq!((ops[1].label.as_ref(), cmd_of(&ops[1].children, "Enter value...")), ("Wet: 100%", Cmd::TypeIn(wet)));
         assert_eq!((ops[2].label.as_ref(), cmd_of(&ops[2].children, "Enter value...")), ("Dry: 0%", Cmd::TypeIn(dry)));
         assert_eq!(text(&a.state, wet, false), "100%");
-        assert_eq!(crate::typein::caption(&a.state, dry), format!("Value for {} - {second} dry", crate::mixer::name(&a.state.session, 2)));
+        assert_eq!(crate::typein_ui::caption(&a.state, dry), format!("Value for {} - {second} dry", crate::mixer::name(&a.state.session, 2)));
         accept(&mut a.state, wet, false, "60");
         accept(&mut a.state, dry, false, "40%");
         tick(&mut a);
@@ -1534,7 +1536,7 @@ mod tests {
         let c = live.fx.lock().unwrap();
         assert!((c.members[1].wet - 0.6).abs() < 1e-6 && (c.members[1].dry - 0.4).abs() < 1e-6, "the chain plays the levels");
         drop(c);
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(LEVEL));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(LEVEL));
         tick(&mut a);
         assert_eq!(members(&a.state.session, 2, 0).unwrap()[1].dry, 0.0);
         assert_eq!(a.state.session.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members[1].dry, 0.0);
@@ -1561,7 +1563,7 @@ mod tests {
         assert_eq!(crate::params::target_of(&a.state.session, key, 0), Some(tgt));
         assert_eq!(crate::params::key_of(&a.state.session, target::decode(tgt)), Some((key, 0)));
         assert_eq!(crate::params::target_of(&a.state.session, key, usize::from(MEMBER_WET)), None, "past the parameters' room");
-        let pname = crate::params::param_name(&a.state, key, 0).unwrap();
+        let pname = crate::params_ui::param_name(&a.state, key, 0).unwrap();
 
         // Show all parameters: the member's node under Effects, after its container.
         assert_eq!(a.browse_params(key), None);
@@ -1576,7 +1578,7 @@ mod tests {
         let link = T::MemberParam(2, 0, 2, 0);
         assert_eq!(cmd_of(&menu.items, "MIDI learn..."), Cmd::Remote(RCmd::Link(link)));
         assert_eq!(cmd_of(&menu.items, "Enter value..."), Cmd::TypeIn(link));
-        assert_eq!(crate::typein::get(&a.state, link), crate::params::param_value(&a.state, key, 0));
+        assert_eq!(crate::typein_ui::get(&a.state, link), crate::params_ui::param_value(&a.state, key, 0));
         crate::playlist::run(&mut a, Cmd::CreateAutomation(t, name.clone(), 0.5));
         assert_eq!(crate::params::driving_clip(&a.state.session, tgt), Some(a.state.session.project.channels.last().unwrap().index));
         assert_eq!(crate::init::name(&a.state, tgt), name, "the clip's name, from its target");
@@ -1593,7 +1595,7 @@ mod tests {
         assert_eq!(crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>(), [link]);
         assert!(a.remote_cc("Test", 0, 20, 127));
         a.state.session.plugins.hosted[&key].plugin.lock().unwrap().idle();
-        assert!((crate::params::param_value(&a.state, key, 0).unwrap() - 1.0).abs() < 1e-6);
+        assert!((crate::params_ui::param_value(&a.state, key, 0).unwrap() - 1.0).abs() < 1e-6);
         assert!(crate::remote::label(&a.state, &crate::remote::links()[0]).starts_with(&format!("{second} in ")));
 
         // The levels: the parameter menu, a clip named as the value box names them, a controller.
@@ -1651,7 +1653,7 @@ mod tests {
         assert_eq!(a.state.session.history.len(), 1, "one step for the drag");
         assert!((a.state.session.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members[1].wet - want).abs() < 1e-5);
         assert!((a.state.knob(wet) - want).abs() < 1e-5);
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(LEVEL));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(LEVEL));
         tick(&mut a);
         assert_eq!(members(&a.state.session, 2, 0).unwrap()[1].wet, 1.0);
         assert_eq!(a.state.session.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members[1].wet, 1.0);
@@ -1718,7 +1720,7 @@ mod tests {
         let m2 = members(&a.state.session, 2, 0).unwrap()[1].clone();
         assert_eq!((m2.id, m2.wet, m2.dry), (2, 1.0, 0.25), "its id and levels stay");
         assert_ne!(a.state.session.plugins.containers[&fx_key(2, 0)].keys[1], Some(key), "a new instance");
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(REPLACE));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(REPLACE));
         tick(&mut a);
         assert_eq!(names(&a, 0), [first.clone(), second]);
         // Delete...: out of the container.
@@ -1759,12 +1761,12 @@ mod tests {
         let to = if before > 0.5 { 0.1 } else { 0.9 };
         assert!(a.state.session.plugins.hosted[&key].plugin.lock().unwrap().set_param(id, to));
         a.state.session.history.reset();
-        crate::control::param_set(&mut a.state, key, 0, Some(before), to);
+        crate::control_ui::param_set(&mut a.state, key, 0, Some(before), to);
         assert_eq!(a.state.session.history.newest_done(), Some(PLUGIN_PARAMETER));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         a.host_commands();
         assert!((a.state.session.plugins.param_value(key, id).unwrap() - before).abs() < 1e-6, "undone on the member");
-        crate::history::redo(&mut a.state);
+        crate::history_ui::redo(&mut a.state);
         a.host_commands();
         assert!((a.state.session.plugins.param_value(key, id).unwrap() - to).abs() < 1e-6);
 
@@ -1776,10 +1778,10 @@ mod tests {
         crate::control::state_edit(&mut a.state.session, key, PLUGIN_PRESET, side);
         assert_eq!(a.state.session.history.newest_done(), Some(PLUGIN_PRESET));
         assert_eq!(a.state.session.plugins.presets.get(&key), None);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         a.host_commands();
         assert_eq!(a.state.session.plugins.presets.get(&key), Some(&shown), "the state went back into the member");
-        crate::history::redo(&mut a.state);
+        crate::history_ui::redo(&mut a.state);
         a.host_commands();
         assert_eq!(a.state.session.plugins.presets.get(&key), None, "and the redo takes the preset away again");
         assert_eq!(crate::mixer::slot_names_of(&a.state.session.project), names);
@@ -1864,13 +1866,13 @@ mod tests {
 
         // Undone: the channel and its instrument come back; redone, the container.
         let wrapped = a.state.session.project.channels[0].clone();
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(WRAP));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(WRAP));
         ticks(&mut a);
         assert_eq!(a.state.session.project.channels[0], before);
         assert!(a.state.session.plugins.containers.is_empty() && a.state.session.hosted_rows.contains(&0));
         assert_eq!(a.state.session.plugins.descriptor(0).map(|d| d.name), Some(crate::osc3::LEMON_TRIO.to_string()));
         assert!(!a.state.shown(Win::Container), "the window goes with its container");
-        assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(WRAP));
+        assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(WRAP));
         ticks(&mut a);
         assert_eq!(a.state.session.project.channels[0], wrapped);
         assert!(a.state.session.plugins.containers.contains_key(&0) && !a.state.session.plugins.hosted.contains_key(&0));
@@ -1908,9 +1910,9 @@ mod tests {
         let level = level_target(&a.state.session, 0, CHANNEL, 2, false).unwrap();
         assert_eq!(level, target::channel_param(index, target::member_item(2, target::MEMBER_DRY).unwrap()));
         assert_eq!(level_of(&a.state.session, target::decode(level)), Some((0, CHANNEL, 2, false)));
-        assert_eq!(crate::typein::text(&a.state, T::Member(0, CHANNEL, 2, false), false), "100%");
+        assert_eq!(crate::typein_ui::text(&a.state, T::Member(0, CHANNEL, 2, false), false), "100%");
         assert!(crate::init::name(&a.state, level).starts_with(&place_name(&a.state.session, 0, CHANNEL)));
-        crate::typein::accept(&mut a.state, T::Member(0, CHANNEL, 2, false), false, "25");
+        crate::typein_ui::accept(&mut a.state, T::Member(0, CHANNEL, 2, false), false, "25");
         assert_eq!(a.state.session.history.newest_done(), Some(LEVEL));
         ticks(&mut a);
         assert_eq!(a.state.session.plugins.containers[&0].fx.lock().unwrap().members[1].dry, 0.25, "the chain plays the level");
@@ -2006,17 +2008,17 @@ mod tests {
         // And the remote link drives it.
         assert!(a.remote_cc("Test", 0, 20, 127));
         a.state.session.plugins.hosted[&key].plugin.lock().unwrap().idle();
-        assert!((crate::params::param_value(&a.state, key, 0).unwrap() - 1.0).abs() < 1e-6);
+        assert!((crate::params_ui::param_value(&a.state, key, 0).unwrap() - 1.0).abs() < 1e-6);
 
         // Undone: everything back on the slots; redone: on the members again.
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(WRAP_ALL));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(WRAP_ALL));
         tick(&mut a);
         assert_eq!(targets(&a), was);
         assert_eq!((&a.state.session.project.automations, &a.state.session.project.patterns), (&before.automations, &before.patterns));
-        assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(WRAP_ALL));
+        assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(WRAP_ALL));
         tick(&mut a);
         assert_eq!(targets(&a), moved);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         tick(&mut a);
 
         // The delay wrapped alone (member 1 of slot 2's container), then Wrap all on slot 1: its clip and link follow
@@ -2077,7 +2079,7 @@ mod tests {
         assert_eq!(links(), vec![T::MemberParam(0, CHANNEL, 1, 3), T::Knob(KnobId::ChanVol(0))]);
         let key = a.state.session.plugins.containers[&0].keys[0].unwrap();
         assert_eq!(crate::params::key_of(&a.state.session, target::decode(moved)), Some((key, 3)));
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(WRAP));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(WRAP));
         ticks(&mut a);
         assert_eq!(clips(&a), vec![param, volume]);
         assert_eq!(links(), vec![T::Param(0, 3), T::Knob(KnobId::ChanVol(0))]);
@@ -2132,9 +2134,9 @@ mod tests {
         assert!(crate::params::owner_name(&a.state.session, key).starts_with("Echo in "));
         #[cfg(plugin_windows)]
         assert!(a.member_infos()[&key].name.starts_with("Echo ("));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(members(&a.state.session, 2, 1).unwrap()[1].label, None);
-        crate::history::redo(&mut a.state);
+        crate::history_ui::redo(&mut a.state);
 
         // Change color... ▸ and Random color, Change icon... ▸: one step each.
         let colors = entry(&menu(&a), "Change color...");
@@ -2149,9 +2151,9 @@ mod tests {
         crate::playlist::run(&mut a, pick);
         assert_eq!((members(&a.state.session, 2, 1).unwrap()[1].icon, a.state.session.history.newest_done()), (Some(icon), Some(ICON)));
         assert_eq!(entry(&menu(&a), "Change icon...").children.iter().find(|i| i.label == name).unwrap().mark, crate::playlist::Mark::Check(true));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(members(&a.state.session, 2, 1).unwrap()[1].icon, None);
-        crate::history::redo(&mut a.state);
+        crate::history_ui::redo(&mut a.state);
 
         // The CPU switches: one step each; Auto-bypass reaches the chain, keeping its instances.
         let keys = a.state.session.plugins.containers[&fx_key(2, 1)].keys.clone();
@@ -2164,18 +2166,18 @@ mod tests {
         assert!(a.state.session.plugins.containers[&fx_key(2, 1)].fx.lock().unwrap().members[1].smart);
         assert_eq!(a.state.session.plugins.containers[&fx_key(2, 1)].keys, keys);
         assert_eq!(entry(&menu(&a), "Allow threaded processing").mark, crate::playlist::Mark::Check(false));
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Threaded processing"));
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Auto-bypass when silent"));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some("Threaded processing"));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some("Auto-bypass when silent"));
         tick(&mut a);
         assert!(!a.state.session.plugins.containers[&fx_key(2, 1)].fx.lock().unwrap().members[1].smart);
-        crate::history::redo(&mut a.state);
-        crate::history::redo(&mut a.state);
+        crate::history_ui::redo(&mut a.state);
+        crate::history_ui::redo(&mut a.state);
         tick(&mut a);
         // Switch auto-bypass for all plugins switches the members' too (all on, then all off), one step.
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::AutoBypassAll));
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::AutoBypassAll));
         assert!(members(&a.state.session, 2, 1).unwrap().iter().all(|m| !m.cpu.smart_disable));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(members(&a.state.session, 2, 1).unwrap().iter().all(|m| m.cpu.smart_disable));
         tick(&mut a);
 
@@ -2185,7 +2187,7 @@ mod tests {
         crate::playlist::run(&mut a, Cmd::SlotWin(2, Box::new(Cmd::Mixer(MCmd::MemberReplace(1, 0, lim)))));
         let m = &members(&a.state.session, 2, 1).unwrap()[0];
         assert_eq!((m.label.as_ref(), m.color, m.icon, m.cpu), (None, None, None, os_model::PluginCpu::default()));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         tick(&mut a);
         assert_eq!(members(&a.state.session, 2, 1).unwrap(), saved);
 
@@ -2332,7 +2334,7 @@ mod tests {
         assert_eq!(a.state.session.history.newest_done(), Some(WRAP));
         assert_eq!(names(&a, 0), [first.clone()]);
         assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some(second.as_str()), "the next slot stays as it is");
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(WRAP));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(WRAP));
         tick(&mut a);
         assert!(members(&a.state.session, 2, 0).is_none());
         assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 0).as_deref(), Some(first.as_str()));
@@ -2343,7 +2345,7 @@ mod tests {
         assert_eq!(a.state.session.history.newest_done(), Some("Add effect"));
         assert_eq!(members(&a.state.session, 2, 1), Some(vec![]));
         assert!(a.state.session.plugins.containers.contains_key(&fx_key(2, 1)) && !a.state.session.plugins.hosted.contains_key(&fx_key(2, 1)));
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Add effect"));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some("Add effect"));
         tick(&mut a);
         assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some(second.as_str()));
         // Beside the slots, and with Shift on an empty slot: the first free slot, the slot itself.
@@ -2371,7 +2373,7 @@ mod tests {
         assert_eq!(a.state.session.project.channels.len(), rows + 1);
         assert!(is_container_channel(&a.state.session.project.channels[rows]) && members(&a.state.session, rows as u16, CHANNEL) == Some(vec![]));
         assert_eq!(a.state.selected_channel, rows);
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
         assert_eq!(a.state.session.project.channels.len(), rows);
     }
 }

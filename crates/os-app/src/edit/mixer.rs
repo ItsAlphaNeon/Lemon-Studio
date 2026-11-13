@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 use os_model::{MixerTrack, Rgb};
 use crate::app::{App, State};
-use crate::control::{command::Region, edit};
+use crate::control::command::Region;
+use crate::control_ui::edit;
 use crate::knobs::KnobId;
 use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
 use crate::mixer::*;

@@ -24,7 +24,7 @@ impl crate::app::App {
     /// ADD ▸ MIDI Out (spec §6.2): a MIDI Out channel on the master track, its window open. One undo step, "Add
     /// channel".
     pub(crate) fn add_midi_out(&mut self) -> Option<String> {
-        crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
+        crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
             let row = crate::app::add_plugin_channel(s.session.project.get_mut(), LEMON_MIDI_OUT);
             make_midi_out(&mut s.session.project.get_mut().channels[row], &Settings::default());
@@ -52,7 +52,7 @@ impl crate::app::App {
         if rows.is_empty() {
             return "No channels to set up for MIDI export".into();
         }
-        crate::control::edit_app(self, PREP_LABEL, crate::control::command::Region::Project, |app| {
+        crate::control_ui::edit_app(self, PREP_LABEL, crate::control::command::Region::Project, |app| {
             for &row in &rows {
                 app.state.session.plugins.keep(row);
                 app.state.session.plugins.drop_key(row);

@@ -402,7 +402,7 @@ impl App {
             return self.dialog_done(Then::SaveProject(f.next), Reply::File(None));
         }
         // One undo step when the text changed (`control::edit`).
-        crate::control::edit(&mut self.state, crate::control::command::SONG_INFO, crate::control::command::Region::Settings, |s| {
+        crate::control_ui::edit(&mut self.state, crate::control::command::SONG_INFO, crate::control::command::Region::Settings, |s| {
             let info = &mut s.session.project.get_mut().info;
             for (value, field) in [&mut info.title, &mut info.author, &mut info.url, &mut info.genre].into_iter().zip(&f.info) {
                 let text = field.text.trim();

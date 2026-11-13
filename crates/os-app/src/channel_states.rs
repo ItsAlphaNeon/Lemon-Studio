@@ -209,7 +209,7 @@ pub(crate) mod tests {
         let added = &app.state.session.project.channels[n];
         assert_eq!((added.index as usize, added.name.as_deref(), added.volume), (n, Some("Snare top"), 0.25));
         assert_eq!(app.state.selected_channel, n);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.channels.len(), n, "one undo step");
 
         assert!(read(&dir.join("missing.oschannel")).is_err());

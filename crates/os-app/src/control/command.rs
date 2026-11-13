@@ -349,7 +349,7 @@ impl Settings {
         }
     }
 
-    fn put(self, s: &mut crate::session::Session) {
+    pub(crate) fn put(self, s: &mut crate::session::Session) {
         s.set_tempo(self.tempo);
         let p = s.project.get_mut();
         (p.swing, p.main_volume, p.main_pitch, p.bar, p.bar_as_signature, p.info) =

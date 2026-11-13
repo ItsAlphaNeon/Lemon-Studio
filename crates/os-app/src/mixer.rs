@@ -18,7 +18,8 @@ pub use crate::edit::mixer::*;
 use os_model::{MixerTrack, Rgb};
 
 use crate::app::{App, State};
-use crate::control::{command::Region, edit};
+use crate::control::command::Region;
+use crate::control_ui::edit;
 
 /// Undo step names of the mixer's edits.
 const ROUTING: &str = "Mixer routing";
@@ -876,7 +877,7 @@ pub fn create_group(s: &mut State, n: u16, text: &str) {
     let last = inserts(&s.session);
     let def = format!("Bus {n}");
     let name = text.trim().to_string();
-    crate::control::edit(s, "Create group", Region::Project, |s| {
+    crate::control_ui::edit(s, "Create group", Region::Project, |s| {
         if let Some(m) = track_mut(&mut s.session, n).filter(|_| !name.is_empty()) {
             m.name = (name != def).then_some(name);
         }
@@ -1465,12 +1466,12 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         if matches!(c, MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberAddInst(..) | MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..)) {
             crate::container::store_members(app.state.session.project.get_mut(), &app.state.session.plugins);
         }
-        return crate::control::edit_app(app, name, Region::Project, |app| run_now(app, c));
+        return crate::control_ui::edit_app(app, name, Region::Project, |app| run_now(app, c));
     }
     // A slot's sidechain input is the track's own (its slot's saved state).
     if let MCmd::SlotSidechain(..) = c {
         let t = app.state.selected_mixer;
-        return crate::control::edit_app(app, "Sidechain input", Region::Track(t), |app| run_now(app, c));
+        return crate::control_ui::edit_app(app, "Sidechain input", Region::Track(t), |app| run_now(app, c));
     }
     run_now(app, c)
 }
@@ -1592,7 +1593,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             None
         }
         MCmd::Latency(t, input, Some(u)) => {
-            crate::typein::open(s, crate::typein::Target::Latency(t, input, u), at);
+            crate::typein_ui::open(s, crate::typein::Target::Latency(t, input, u), at);
             None
         }
         MCmd::Separator(n) => {
@@ -2018,14 +2019,14 @@ impl App {
                 return self.invalidate();
             }
         }
-        crate::control::edit_app(self, "Add effect", Region::Project, |app| app.add_tesla(t, None));
+        crate::control_ui::edit_app(self, "Add effect", Region::Project, |app| app.add_tesla(t, None));
     }
 
     /// Open audio editor and record: a Tesla on track `t` set up as an audio logger, as FL's quick load sets Edison
     /// (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"): records on the host's play, for 5
     /// minutes, appended, slaved to the transport, armed.
     pub(crate) fn audio_logger(&mut self, t: u16) {
-        crate::control::edit_app(self, "Add effect", Region::Project, |app| app.tesla_for_recording(t, |s| {
+        crate::control_ui::edit_app(self, "Add effect", Region::Project, |app| app.tesla_for_recording(t, |s| {
             s.rec.when = tesla::state::WHEN_ON_PLAY;
             s.rec.max = AUDIO_LOG_5_MINUTES;
             s.rec.append = true;
@@ -2303,7 +2304,7 @@ mod tests {
         assert_eq!(a.state.session.history.at(), steps + 1);
         assert_eq!(track_entry(&a, 3, "Separator").2, Mark::Check(true));
         assert_eq!((group(&a.state.session, 2), group(&a.state.session, 3), group(&a.state.session, 16)), (None, Some(3..=16), Some(3..=16)));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(!track(&a.state.session, 3).unwrap().separator);
 
         // Create group... on 5 with 5 to 7 selected: the name box, then Enter.
@@ -2444,7 +2445,9 @@ mod tests {
     /// spec: audio/track-io.md §2.6: the latency menus; values typed in ms, samples or beats; one undo step each.
     #[test]
     fn latency_settings_are_typed_in_and_undo() {
-        use crate::typein::{accept, parse, LatUnit, Target};
+        use crate::typein::{LatUnit, Target};
+        use crate::typein_ui::parse;
+        use crate::typein_ui::accept;
         let mut a = app();
         a.state.set_tempo(120.0);
         // The app's tick gives the tracks their ids, which the undo steps name them by.
@@ -2464,7 +2467,7 @@ mod tests {
         assert_eq!(parse(t, false, "12.5%"), None);
         accept(&mut a.state, t, false, "12.5");
         assert_eq!(track(&a.state.session, 2).unwrap().latency_out, 12.5);
-        assert_eq!(crate::typein::text(&a.state, Target::Latency(2, false, LatUnit::Beats), false), "0.025");
+        assert_eq!(crate::typein_ui::text(&a.state, Target::Latency(2, false, LatUnit::Beats), false), "0.025");
         accept(&mut a.state, Target::Latency(2, true, LatUnit::Beats), false, "0.5 beats");
         assert_eq!(track(&a.state.session, 2).unwrap().latency_in, 250.0);
         accept(&mut a.state, Target::Latency(2, true, LatUnit::Beats), false, "x");
@@ -2476,10 +2479,10 @@ mod tests {
         assert_eq!(latency_text(250.0), "250 ms");
         assert_eq!(latency_text(-1.25), "-1.25 ms");
         // Each change is one step, undone in turn.
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(track(&a.state.session, 2).unwrap().latency_out, 1000.0);
-        crate::history::undo(&mut a.state);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(track(&a.state.session, 2).unwrap().latency_in, 0.0);
         assert_eq!(track(&a.state.session, 2).unwrap().latency_out, 12.5);
     }
@@ -2514,12 +2517,12 @@ mod tests {
         hit(&mut a, MHit::Arm(3));
         run(&mut a, MCmd::Monitor(3, os_model::MONITOR_ON));
         run(&mut a, MCmd::Output(3, 1));
-        crate::history::undo(&mut a.state);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         let m = track(&a.state.session, 3).unwrap();
         assert_eq!((m.audio_out, m.monitor, m.armed), (-1, os_model::MONITOR_ARMED, true));
         assert!(m.monitored(), "armed with an input");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(!track(&a.state.session, 3).unwrap().monitored(), "no input");
     }
 
@@ -2630,7 +2633,7 @@ mod tests {
         crate::playlist::put_icon(&mut a.state.session, IconOwner::Track(3), Some(crate::icons::Icon::Star));
         run(&mut a, MCmd::Delete(2));
         assert_eq!(crate::mixer::slot_colors_of(&a.state.session.project).get(&(2, 0)), Some(&red), "the colour follows its track left");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(crate::mixer::slot_colors_of(&a.state.session.project).get(&(3, 0)), Some(&red));
         assert_eq!(crate::mixer::slot_colors_of(&a.state.session.project).get(&(2, 0)), None);
         assert_eq!(crate::playlist::icons(&a.state.session.project).get(&IconOwner::Track(3)), Some(&crate::icons::Icon::Star));
@@ -2730,28 +2733,28 @@ mod tests {
         run(&mut a, MCmd::SlotMove(0, 1));
         assert_eq!(slot_name(&a.state.session, 3, 1).as_deref(), Some("Test FX"));
         assert_eq!(places(&a), at(3, 4, 5, 1, 0));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(places(&a), start, "undo puts them back");
-        crate::history::redo(&mut a.state);
+        crate::history_ui::redo(&mut a.state);
         assert_eq!(places(&a), at(3, 4, 5, 1, 0), "redo moves them again");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
 
         // Move right: tracks 3 and 4 swap.
         run(&mut a, MCmd::MoveRight(3));
         assert_eq!(places(&a), at(4, 3, 5, 0, 1));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(places(&a), start);
 
         // Insert multiple... before track 2: three tracks, one step.
         insert_many(&mut a.state, 2, "3");
         assert_eq!(places(&a), at(6, 7, 8, 0, 1));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(places(&a), start, "one step puts back three moves");
 
         // Delete track 2: the later ones move one left.
         run(&mut a, MCmd::Delete(2));
         assert_eq!(places(&a), at(2, 3, 4, 0, 1));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(places(&a), start);
 
         // Delete track 4: its targets go; the clip stays with track 3's.
@@ -2760,7 +2763,7 @@ mod tests {
         assert_eq!(clip, [target::slot_param(3, 0, 5)]);
         assert_eq!((events, init, ctl), (vec![], vec![target::slot(3, 0, SLOT_MIX)], vec![]));
         assert_eq!(links, [T::Param(crate::plugins::fx_key(3, 0), 5), T::Knob(KnobId::SlotMix(3, 1))]);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         let (clip, events, init, ctl, _) = places(&a);
         assert_eq!((clip, events, init, ctl), (start.0, start.1, start.2, start.3), "the project's come back");
         crate::remote::set_links(&[]);
@@ -3038,8 +3041,8 @@ mod tests {
         assert_eq!(a.state.session.history.at(), steps + 1, "shown again: no step");
         run(&mut a, MCmd::AudioEditorRecord(3));
         assert_eq!(a.state.session.history.at(), steps + 2);
-        crate::history::undo(&mut a.state);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(teslas(&a.state.session).is_empty());
     }
 
@@ -3093,7 +3096,7 @@ mod tests {
         assert_eq!((name(&a.state.session, 3), a.state.selected_mixer), ("Bus 3".to_string(), 3));
         assert_eq!(a.state.message.as_deref(), Some("Inserted 3 mixer tracks"));
         assert_eq!((a.state.session.history.at(), a.state.session.history.newest_done()), (steps + 1, Some(INSERT)));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!((a.state.session.project.mixer.len(), name(&a.state.session, 3)), (len, "Three".to_string()));
         assert_eq!(insert_many(&mut a.state, 3, "lots").as_deref(), Some("Insert multiple: \"lots\" is not a number"));
         assert_eq!(a.state.session.project.mixer.len(), len);
@@ -3122,7 +3125,7 @@ mod tests {
         assert_eq!((col(&a, 2), col(&a, 4), col(&a, 6)), (Some(red), Some(Rgb::new(100, 0, 50)), Some(blue)));
         assert_eq!(col(&a, 3), None, "unselected tracks keep theirs");
         assert_eq!(a.state.session.history.at(), steps + 1);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(col(&a, 4), None);
     }
 
@@ -3163,7 +3166,7 @@ mod tests {
         assert_eq!((name(&a.state.session, 5), name(&a.state.session, 6)), ("Lead".to_string(), "Old five".to_string()));
         assert_eq!(track(&a.state.session, 5).unwrap().color, Some(Rgb::new(10, 20, 30)));
         assert_eq!(a.state.session.history.at(), steps + 2);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(name(&a.state.session, 5), "Old five");
         let _ = std::fs::remove_dir_all(crate::mixer_state::dir().unwrap());
     }
@@ -3307,7 +3310,7 @@ mod tests {
         assert_eq!(entry(&a, "Auto-bypass when silent").1, Mark::Check(true));
         let smart = |a: &App, k: usize| track(&a.state.session, 2).unwrap().slot_cpu[k].smart_disable;
         assert!(smart(&a, 0) && !smart(&a, 1), "only that slot");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(!smart(&a, 0), "one undo step");
         crate::playlist::run(&mut a, Cmd::PluginCpu(key, false));
         assert_eq!(entry(&a, "Allow threaded processing").1, Mark::Check(false));
@@ -3321,7 +3324,7 @@ mod tests {
         assert!(!track(&a.state.session, 2).unwrap().slot_cpu[2].smart_disable, "an empty slot stays as it is");
         run(&mut a, MCmd::AutoBypassAll);
         assert!(!smart(&a, 0) && !smart(&a, 1) && !a.state.session.project.channels[0].misc.cpu.smart_disable, "all on: all off");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(smart(&a, 0) && smart(&a, 1), "one undo step");
         // The instrument rack's options menu runs the same command.
         assert_eq!(find(crate::rack::options_menu(&a.state, 0.0, 0.0)), (true, Cmd::Mixer(MCmd::AutoBypassAll)));
@@ -3348,7 +3351,7 @@ mod tests {
         assert_eq!(run(&mut a, MCmd::PdcAuto).as_deref(), Some("Automatic plugin delay compensation off"));
         assert!(a.state.session.project.pdc_off);
         assert_eq!(auto(&a).1, Mark::Check(false));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(!a.state.session.project.pdc_off, "one undo step");
     }
 

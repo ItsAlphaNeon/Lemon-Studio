@@ -219,7 +219,7 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
         _ => None,
     };
     match step {
-        Some(name) => crate::control::edit(s, name, crate::control::command::Region::Project, |s| run_now(s, cmd, at)),
+        Some(name) => crate::control_ui::edit(s, name, crate::control::command::Region::Project, |s| run_now(s, cmd, at)),
         None => run_now(s, cmd, at),
     }
 }
@@ -386,7 +386,7 @@ pub fn delete_current(s: &mut State) {
         s.rack.delete_now = Some(rows);
         return;
     }
-    crate::control::edit(s, DELETE, crate::control::command::Region::Project, delete_pattern);
+    crate::control_ui::edit(s, DELETE, crate::control::command::Region::Project, delete_pattern);
 }
 
 /// Cancel in the delete confirmation: nothing is deleted and Remember my choice is not kept.
@@ -413,7 +413,7 @@ pub fn accept(s: &mut State) {
         BoxTarget::Rack(crate::rack::RBox::ColorSel) => "Channel color",
         BoxTarget::Rack(_) => "Channel group",
     };
-    crate::control::edit(s, name, crate::control::command::Region::Project, accept_now);
+    crate::control_ui::edit(s, name, crate::control::command::Region::Project, accept_now);
 }
 
 fn accept_now(s: &mut State) {
@@ -461,7 +461,7 @@ pub fn set_color(s: &mut State, i: usize) {
         Some(BoxTarget::Rack(_)) => "Channel color",
         _ => "Pattern color",
     };
-    crate::control::edit(s, name, crate::control::command::Region::Project, |s| set_color_now(s, i));
+    crate::control_ui::edit(s, name, crate::control::command::Region::Project, |s| set_color_now(s, i));
 }
 
 fn set_color_now(s: &mut State, i: usize) {

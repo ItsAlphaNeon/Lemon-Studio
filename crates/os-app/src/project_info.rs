@@ -328,7 +328,7 @@ impl App {
     pub(crate) fn set_genre(&mut self, genre: Option<&'static str>) -> Option<String> {
         let s = &mut self.state;
         accept_info(s);
-        crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
+        crate::control_ui::edit(s, SONG_INFO, Region::Settings, |s| {
             let value = &mut s.session.project.get_mut().info.genre;
             if value.as_deref().unwrap_or("") != genre.unwrap_or("") {
                 *value = genre.map(str::to_string);
@@ -477,7 +477,7 @@ pub const GENRES: [&str; 56] = [
 pub(crate) fn accept_info(s: &mut State) {
     let Some(e) = s.settings.info_edit.take() else { return };
     let text = if e.field.multiline() { e.text.text } else { e.text.text.trim().to_string() };
-    crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
+    crate::control_ui::edit(s, SONG_INFO, Region::Settings, |s| {
         let value = e.field.get_mut(&mut s.session.project.get_mut().info);
         if value.as_deref().unwrap_or("") != text {
             *value = (!text.is_empty()).then_some(text);
@@ -560,9 +560,9 @@ mod tests {
         assert!(app.unsaved());
         assert_eq!(app.title(), "[Song]");
         // The accepted box is one undo step.
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
         assert!(app.state.session.project.info.title.is_none());
-        assert_eq!(crate::history::redo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
+        assert_eq!(crate::history_ui::redo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
         assert_eq!(app.state.session.project.info.title.as_deref(), Some("Song"));
     }
 

@@ -66,7 +66,7 @@ impl App {
                         s.selected_channel = c;
                         s.rack.select_only(c);
                     }
-                    Item::History(e) => s.message = crate::history::go_to(s, e),
+                    Item::History(e) => s.message = crate::history_ui::go_to(s, e),
                     _ => {}
                 }
                 if let Item::Sample(path) = &row.item {
@@ -741,7 +741,7 @@ impl App {
                     s.selected_channel = c;
                     s.rack.select_only(c);
                 }
-                Item::History(e) => return crate::history::go_to(s, e),
+                Item::History(e) => return crate::history_ui::go_to(s, e),
                 _ => {}
             },
             RowCmd::Pattern(pc) => {

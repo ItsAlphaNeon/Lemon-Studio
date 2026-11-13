@@ -1956,7 +1956,7 @@ pub fn value_text(s: &State, ch: u16, v: f64) -> String {
         Some(target::Target::ChannelMixerTrack(_)) => crate::views::rack::insert_name(target::mixer_track_of(v, crate::mixer::max_insert(&s.session.project))),
         Some(target::Target::ChannelOn(_)) => (if target::channel_on(v) { "On" } else { "Off" }).into(),
         Some(t @ (target::Target::ChannelParam(..) | target::Target::SlotParam(..))) => {
-            crate::params::value_text(s, t, v).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
+            crate::params_ui::value_text(s, t, v).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
         }
         _ => format!("{:.0}%", v * 100.0),
     }
@@ -3433,7 +3433,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::MixerInsert(_) => "2".into(),
         EditTarget::MixerGroup(_) => String::new(),
         EditTarget::Chords => crate::chord_tool::last(),
-        EditTarget::TypeIn(t, norm) => crate::typein::text(s, t, norm),
+        EditTarget::TypeIn(t, norm) => crate::typein_ui::text(s, t, norm),
     };
     s.playlist.edit = Some(TextEdit { target, text, at, sel: false });
 }
@@ -3447,7 +3447,7 @@ pub fn commit_edit(s: &mut State) {
         // Names aren't in the playlist's step (`capture`): their own steps, which drop the empty one above.
         EditTarget::ArrangementName => {
             if !text.trim().is_empty() {
-                crate::control::edit(s, "Arrangement name", crate::control::command::Region::Arrangement, |s| arr_mut(&mut s.session).name = Some(text.trim().to_string()));
+                crate::control_ui::edit(s, "Arrangement name", crate::control::command::Region::Arrangement, |s| arr_mut(&mut s.session).name = Some(text.trim().to_string()));
             }
         }
         EditTarget::TrackName(t) => {
@@ -3483,17 +3483,17 @@ pub fn commit_edit(s: &mut State) {
         }
         EditTarget::MixerName(n) => {
             let def = if n == 0 { "Master".to_string() } else { format!("Bus {n}") };
-            crate::control::edit(s, "Mixer track name", crate::control::command::Region::Track(n), |s| {
+            crate::control_ui::edit(s, "Mixer track name", crate::control::command::Region::Track(n), |s| {
                 if let Some(m) = s.session.project.get_mut().mixer.iter_mut().find(|m| m.index == n) {
                     m.name = (!text.is_empty() && text != def).then_some(text);
                 }
             });
         }
-        EditTarget::SlotName(t, k) => crate::control::edit(s, "Slot name", crate::control::command::Region::Project, |s| {
+        EditTarget::SlotName(t, k) => crate::control_ui::edit(s, "Slot name", crate::control::command::Region::Project, |s| {
             crate::mixer::set_slot_label(&mut s.session, t, k, (!text.is_empty()).then_some(text));
         }),
         EditTarget::MemberName(t, k, id) => crate::container::rename(s, t, k, id, &text),
-        EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
+        EditTarget::TypeIn(t, norm) => crate::typein_ui::accept(s, t, norm, &text),
         // Their own steps too. Settled first: they renumber mixer tracks, which moves channels' mixer tracks, part of
         // the playlist's step since audio tracks (`capture`), so the step above would no longer be empty.
         EditTarget::MixerInsert(n) => {
@@ -3505,7 +3505,7 @@ pub fn commit_edit(s: &mut State) {
             crate::mixer::create_group(s, n, &text);
         }
         EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
-        EditTarget::PatternName(n) => crate::control::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
+        EditTarget::PatternName(n) => crate::control_ui::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
             if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
                 p.name = (!text.is_empty()).then_some(text);
             } else if !text.is_empty() {
@@ -3635,7 +3635,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::TypeIn(t) => {
             let at = app.mouse;
-            crate::typein::open(&mut app.state, t, at);
+            crate::typein_ui::open(&mut app.state, t, at);
             app.invalidate();
             return None;
         }
@@ -3832,7 +3832,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             Some(format!("Snap: {}", p.label()))
         }
         Cmd::GlobalSnap(sn) => Some(crate::snap::set(s, sn)),
-        Cmd::Undo => crate::history::ctrl_z(s),
+        Cmd::Undo => crate::history_ui::ctrl_z(s),
         Cmd::Copy => {
             copy(s);
             None
@@ -4126,7 +4126,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ClipRandomColor(i) => {
             let Some(src) = clips(&s.session).get(i).map(|c| c.source) else { return None };
-            crate::control::edit(s, "Clip color", crate::control::command::Region::Project, |s| {
+            crate::control_ui::edit(s, "Clip color", crate::control::command::Region::Project, |s| {
                 let seed = (clips(&s.session).len() as u32).wrapping_mul(2654435761).wrapping_add(i as u32 * 40503);
                 let rgb = hsl_rgb((seed % 360) as f32, 0.45, 0.45);
                 match src {
@@ -4193,7 +4193,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::TrackGroup(_) => None,
-        Cmd::TrackMode(t, m) => crate::control::edit(s, crate::track_links::TRACK_MODE, crate::control::command::Region::Project, |s| {
+        Cmd::TrackMode(t, m) => crate::control_ui::edit(s, crate::track_links::TRACK_MODE, crate::control::command::Region::Project, |s| {
             crate::track_links::set_mode(s, t, m)
         }),
         Cmd::GroupCollapse(t) => {
@@ -4204,7 +4204,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             show_arrangement(s, n);
             None
         }
-        Cmd::ArrAdd | Cmd::ArrClone => crate::control::edit(s, "Add arrangement", crate::control::command::Region::Project, |s| {
+        Cmd::ArrAdd | Cmd::ArrClone => crate::control_ui::edit(s, "Add arrangement", crate::control::command::Region::Project, |s| {
             let n = s.session.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
             let mut a = if cmd_is_clone(&cmd) { arr_mut(&mut s.session).clone() } else { os_flp::project::default_arrangement() };
             a.number = n;
@@ -4223,7 +4223,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
             None
         }
-        Cmd::ArrDelete if s.session.project.arrangements.len() > 1 => crate::control::edit(s, "Delete arrangement", crate::control::command::Region::Project, |s| {
+        Cmd::ArrDelete if s.session.project.arrangements.len() > 1 => crate::control_ui::edit(s, "Delete arrangement", crate::control::command::Region::Project, |s| {
             let i = s.session.project.arrangement_index();
             s.session.project.get_mut().arrangements.remove(i);
             let n = s.session.project.arrangements[i.saturating_sub(1)].number;
@@ -4745,12 +4745,12 @@ pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
         return;
     }
     match crate::plugins::fx_of(key) {
-        Some((t, k)) => crate::control::edit(s, name, Region::Track(t), |s| {
+        Some((t, k)) => crate::control_ui::edit(s, name, Region::Track(t), |s| {
             if let Some(m) = s.session.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
                 flip(&mut m.slot_cpu[usize::from(k)]);
             }
         }),
-        None => crate::control::edit(s, name, Region::Channel(key), |s| flip(&mut s.session.project.get_mut().channels[key].misc.cpu)),
+        None => crate::control_ui::edit(s, name, Region::Channel(key), |s| flip(&mut s.session.project.get_mut().channels[key].misc.cpu)),
     }
     s.session.dirty = true;
 }
@@ -4919,7 +4919,7 @@ mod tests {
         let steps = app.state.session.history.len();
         assert_eq!(run(&mut app, Cmd::LockClips(false)).as_deref(), Some("No track is locked to a clip"));
         assert_eq!(app.state.session.history.len(), steps, "nothing to unlock: no step");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(track_info(&app.state.session, 0).unwrap().clip_lock, Some(p1), "undo brings the lock back");
     }
 
@@ -4946,7 +4946,7 @@ mod tests {
         run(&mut app, cmd);
         let m = &app.state.session.project.channels[0].misc;
         assert_eq!((m.cut, m.cut_by), (0, 0));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(it(&app).mark, Mark::Check(true), "one undo step");
     }
 
@@ -5058,7 +5058,7 @@ mod tests {
         run(&mut app, entry(&m, "Delete...").cmd.clone());
         assert!(crate::mixer::track(&app.state.session, t).unwrap().slots[usize::from(k)].is_none(), "the slot is cleared");
         assert_eq!(app.state.selected_mixer, 5, "the selection stays");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(crate::mixer::track(&app.state.session, t).unwrap().slots[usize::from(k)].is_some(), "one undo step");
     }
 
@@ -5114,7 +5114,7 @@ mod tests {
         assert_eq!((cpu.threaded, cpu.smart_disable), (true, true));
         assert_eq!(entry(&menu(&app, 1), "Auto-bypass when silent").mark, Mark::Check(true));
         assert!(crate::history::edit_label(&app.state.session, false).to_lowercase().contains("auto-bypass when silent"), "the step's name");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(!app.state.session.project.channels[1].misc.cpu.smart_disable, "one undo step");
 
         let (t, k) = (3u16, 2u8);
@@ -5128,8 +5128,8 @@ mod tests {
         run(&mut app, Cmd::Mixer(crate::mixer::MCmd::SlotMove(k, 1)));
         let m = crate::mixer::track(&app.state.session, t).unwrap();
         assert_eq!((m.slot_cpu[2].threaded, m.slot_cpu[3].threaded), (true, false), "the switches follow the plugin");
-        crate::history::undo(&mut app.state);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(crate::mixer::track(&app.state.session, t).unwrap().slot_cpu.iter().all(|c| c.threaded));
     }
 }

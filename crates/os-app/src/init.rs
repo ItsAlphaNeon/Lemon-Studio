@@ -217,7 +217,7 @@ pub fn name(s: &State, t: u32) -> String {
         Target::SlotMix(m, k) => format!("{} - Slot {} mix level", mix(m), k + 1),
         // A plugin that isn't hosted: its parameter by number.
         p @ (Target::ChannelParam(..) | Target::SlotParam(..)) => match (crate::params::key_of(&s.session, p), p) {
-            (Some((key, index)), _) => crate::params::clip_name(s, key, index),
+            (Some((key, index)), _) => crate::params_ui::clip_name(s, key, index),
             (None, Target::SlotParam(m, k, i)) => format!("{} - Slot {} - Parameter {}", mix(m), k + 1, i + 1),
             (None, _) => format!("{} - Parameter {}", channel((t >> 16) as u16), (t & 0x7FFF) + 1),
         },
@@ -310,17 +310,17 @@ mod tests {
         pl::run(&mut a, Cmd::InitControl(vol, 0.25));
         assert_eq!(a.state.session.history.len(), 2);
         assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 3200)], "a new value replaces the old one");
-        assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(INITIALIZED));
         assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 6400)]);
-        assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(INITIALIZED));
         assert!(a.state.session.project.init_controls.is_empty());
-        assert_eq!(history::redo(&mut a.state).as_deref(), Some(INITIALIZED));
-        assert_eq!(history::redo(&mut a.state).as_deref(), Some(INITIALIZED));
+        assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(INITIALIZED));
+        assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(INITIALIZED));
         assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 3200)]);
         pl::run(&mut a, Cmd::DeleteInit(vol));
         assert!(a.state.session.project.init_controls.is_empty());
         assert_eq!(a.state.session.history.len(), 2, "no step");
-        assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED), "undo goes back past the delete");
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(INITIALIZED), "undo goes back past the delete");
         assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 6400)]);
     }
 
@@ -342,27 +342,27 @@ mod tests {
         assert_eq!((a.state.selected_channel, crate::rack::filter(&a.state.session.project)), (row, crate::rack::Filter::Group(g)));
         assert!(crate::rack::groups(&a.state.session.project)[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
         let channels = a.state.session.project.channels.len();
-        assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert!(a.state.session.project.init_controls.is_empty() && pl::clips(&a.state.session).is_empty());
         assert_eq!(a.state.session.project.channels.len(), channels - 1, "the clip's channel goes with the undo");
         assert!(crate::rack::groups(&a.state.session.project).iter().all(|g| g.name != "Automation") && crate::rack::filter(&a.state.session.project) == crate::rack::Filter::All);
-        assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
+        assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert_eq!((a.state.session.project.channels.len(), crate::rack::filter(&a.state.session.project)), (channels, crate::rack::Filter::Group(g)));
         assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 10000)], 1));
         // A second clip on the moved knob: its new value replaces the old one; undo brings that back.
         a.state.session.project.get_mut().channels[0].volume = 0.5;
         pl::run(&mut a, Cmd::CreateAutomation(vol, "Kick - Channel volume".into(), 0.5));
         assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 6400)]);
-        assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert_eq!(a.state.session.project.init_controls, vec![rec(vol, 10000)]);
-        assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
+        assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
 
         // Off: the clip only.
         prefs::set_check(&prefs::INIT_CONTROLS, false);
         let (t, name, v) = a.automation_target(&Action::Tempo).unwrap();
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
         assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 6400)], 3));
-        assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert_eq!((a.state.session.project.init_controls.clone(), pl::clips(&a.state.session).len()), (vec![rec(vol, 6400)], 2));
         prefs::set_check(&prefs::INIT_CONTROLS, true);
     }

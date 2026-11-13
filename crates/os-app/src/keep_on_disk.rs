@@ -36,7 +36,9 @@ pub fn keep_long(ch: &mut os_model::Channel, path: &Path) {
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::history::{ctrl_alt_z, ctrl_z, LOAD_SAMPLE};
+    use crate::history::LOAD_SAMPLE;
+    use crate::history_ui::ctrl_alt_z;
+    use crate::history_ui::ctrl_z;
     use crate::prefs::{check, set_check, AUTO_KEEP_ON_DISK};
     use crate::rack::sample_chosen;
     use std::path::PathBuf;

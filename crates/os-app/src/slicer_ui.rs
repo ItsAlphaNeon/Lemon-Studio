@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(a.state.selected_channel, row);
         assert!(a.state.session.hosted_rows.contains(&row));
         assert!(a.state.message.as_deref().is_some_and(|m| m.contains("3 slices")));
-        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
+        assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
         assert_eq!(a.state.session.project.channels.len(), before);
         let _ = std::fs::remove_file(&path);
     }

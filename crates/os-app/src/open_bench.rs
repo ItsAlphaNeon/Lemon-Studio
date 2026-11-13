@@ -66,7 +66,7 @@ fn open_load() {
     let Some(out) = std::env::var_os("OS_OPEN_BENCH_ZIP") else { return };
     app.state.dialogs.clear();
     let t0 = Instant::now();
-    crate::zipped::export(&mut app, out.into());
+    crate::zipped_ui::export(&mut app, out.into());
     let mut worst = t0.elapsed();
     while app.loading() && t0.elapsed() < Duration::from_secs(300) {
         let t = Instant::now();

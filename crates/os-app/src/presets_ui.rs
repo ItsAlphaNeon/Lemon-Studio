@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(app.state.session.history.at(), steps + 1);
         run(&mut app, PCmd::FlipSpare(0));
         assert_eq!(app.state.session.plugins.sampler_path(0).as_deref(), Some("C:/x/b.wav"), "and back");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         app.host_commands();
         assert_eq!(app.state.session.plugins.sampler_path(0).as_deref(), Some("C:/x/a.wav"), "undo puts the state in use back");
         // The mixer's slot menu fills the same entries for the slot's plugin.
