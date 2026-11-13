@@ -21,8 +21,6 @@ use std::time::{Duration, Instant};
 use os_host::{Descriptor, Library, SharedPlugin};
 use os_engine::{SharedEffect, SharedInstrument};
 
-#[cfg(plugin_windows)]
-use crate::plugin_window::{ChannelInfo, FrameEvent, FrameWindow};
 
 /// A plugin the host knows (offered in the plugin menus unless hidden or combined away).
 #[derive(Clone)]
@@ -61,72 +59,6 @@ pub struct Hosted {
     pub spare: Option<Vec<u8>>,
     /// "Display preset name in preset selector" unticked: its window's Presets box shows no preset name.
     pub hide_preset: bool,
-}
-
-/// An instance's editor window, and what is kept of it while it is closed (`Plugins::editors`, by the instance's key).
-/// Apart from the instance: the plugin keeps playing whether its editor is open or not.
-#[derive(Default)]
-pub struct Editor {
-    #[cfg(plugin_windows)]
-    pub window: Option<FrameWindow>,
-    /// Set while the open editor belongs to a Lemon plugin that joined the strip (host link).
-    #[cfg(plugin_windows)]
-    pub link: Option<os_hostlink::Link>,
-    /// The instance whose editor is open in `window` (closed through it when the editor goes, `Drop`).
-    #[cfg(plugin_windows)]
-    plugin: Option<SharedPlugin>,
-    /// Its window opens detached: set when the user adds it while "Open new plugin windows floating" is on (`Plugins::added`),
-    /// or chosen for it (window menu > Detached, Switch all plugin editors to ▸), then the mode its window had when it
-    /// last closed (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
-    #[cfg_attr(not(plugin_windows), allow(dead_code))]
-    pub detached: bool,
-    /// Where its detached window was when it last closed (screen px): reopened, it goes back there (spec: as above).
-    #[cfg(plugin_windows)]
-    pub placed: Option<(i32, i32)>,
-    /// Linux: where its window drawn in the app's was when it last closed (canvas px): it reopens there.
-    #[cfg(target_os = "linux")]
-    pub embed_at: Option<(f32, f32)>,
-    /// When its open window opened (`Plugins::opens`): the limit on open editors closes the earliest first.
-    #[cfg(plugin_windows)]
-    opened: u64,
-}
-
-impl Editor {
-    /// Its window is open.
-    pub fn open(&self) -> bool {
-        #[cfg(plugin_windows)]
-        return self.window.is_some();
-        #[cfg(not(plugin_windows))]
-        false
-    }
-
-    /// The open editor is a Lemon plugin's that joined the strip through the host link.
-    #[cfg(plugin_windows)]
-    fn linked(&self) -> bool {
-        self.link.is_some()
-    }
-
-    /// Closes its window, the editor first (a frame destroyed under an open editor took the editor's window with it,
-    /// and the plugin's own close then crashed at exit).
-    fn close(&mut self) {
-        #[cfg(plugin_windows)]
-        {
-            if let (Some(plugin), true) = (self.plugin.take(), self.window.is_some()) {
-                if let Ok(mut p) = plugin.lock() {
-                    p.close_editor();
-                }
-            }
-            self.window = None;
-            self.link = None;
-        }
-    }
-}
-
-impl Drop for Editor {
-    /// An editor going (its instance gone, the program ending) closes first, before its frame window goes.
-    fn drop(&mut self) {
-        self.close();
-    }
 }
 
 /// When the UI last locked an instance for one of its per-tick jobs: the attention count it acted on, and when.
@@ -252,55 +184,22 @@ impl Hosted {
 
 }
 
-/// What a plugin window asks of the app.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Request {
-    Close(usize),
-    ToggleOn(usize),
-    Volume(usize, f64),
-    Pan(usize, f64),
-    PitchCents(usize, i32),
-    /// The strip's RANGE box (semitones) and TRACK box (mixer track); a double click on TRACK shows the mixer there.
-    PitchRange(usize, i32),
-    Track(usize, u16),
-    ShowTrack(usize),
-    /// A preview note from a Lemon plugin's own keyboard (host link): row, key, velocity, on.
-    Note(usize, u8, u8, bool),
-    /// "Create automation clip" from a Lemon plugin's own parameter menu (host link): row, parameter index.
-    #[cfg_attr(not(plugin_windows), allow(dead_code))]
-    Automate(usize, usize),
-    /// A sample file a Lemon plugin sent (host link `Audio`, Tesla's Send): to the selected channel (true) or the
-    /// playlist.
-    #[cfg_attr(not(plugin_windows), allow(dead_code))]
-    Audio(String, os_hostlink::AudioTo),
-    /// Notes a Lemon plugin sent for its channel's current pattern (host link `Notes`, Lemon Slicer's dump): row,
-    /// notes.
-    #[cfg_attr(not(plugin_windows), allow(dead_code))]
-    Notes(usize, Vec<os_hostlink::NoteOut>),
-    /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
-    Raise(usize),
-    /// The menu arrow was clicked: open the window menu at this screen point.
-    Menu(usize, i32, i32),
-    /// The title-bar Presets box was clicked: open the preset list at this screen point (spec: plugins/presets.md).
-    Presets(usize, i32, i32),
-    /// The Presets box arrows: next (+1) / previous (-1) preset.
-    PresetStep(usize, i32),
-    /// A file dropped on the window's frame.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    DropFile(usize, PathBuf),
-    /// A Misc tab value changed (spec: ui/plugin-window.md "Misc tab").
-    Misc(usize, crate::misc_page::M, f32),
-    /// A Misc tab list asks for its menu at this screen point.
-    MiscMenu(usize, crate::misc_page::M, i32, i32),
-    /// A strip knob of channel row `.0` asks for its menu at this screen point.
-    KnobMenu(usize, crate::knobs::Control, i32, i32),
-    /// A greyed-out control of the window was clicked: the app says it is not available yet.
-    NotAvailable(&'static str),
-    /// The plugin asked for a menu over its editor (VST 3 context menu): shown at this screen point (spec:
-    /// plugins/vst3-hosting.md §9).
-    PluginMenu(usize, os_host::Menu, (i32, i32)),
-    /// The instance stopped after a crash (its window is closed): what to tell the user.
-    Stopped(usize, String),
+/// What happened to an instance that its editor window follows: recorded by the host, replayed in order by the
+/// interface's `EditorHost` (step 7.3b: the windows are the interface's).
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditorEvent {
+    /// The user added the instance under `.0`: its window opens detached (`.1`) or docked.
+    Detached(usize, bool),
+    /// The instance under `.0` went: its window closes.
+    Drop(usize),
+    /// Show the preset name of the instance under `.0` in its open window.
+    PresetShown(usize),
+    /// Slot instances moved: (old key, new key), in the order they moved.
+    FxMoves(Vec<(usize, usize)>),
+    /// The rack rows' instances moved: each hosted row's new row, `None` for one that went.
+    Remap(Vec<(usize, Option<usize>)>),
+    /// Every instance went (the hosted keys there were).
+    Clear(Vec<usize>),
 }
 
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
@@ -314,14 +213,6 @@ pub const MEMBER_KEY: usize = 1 << 26;
 /// Plugin editor windows open at once under "Limit the number of open plugin editors" (spec:
 /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
 pub const MAX_EDITORS: usize = 25;
-
-/// Of the open windows (`hosted` key, when it opened), the one to close before another opens, so that no more than
-/// `max` are open: the one opened earliest, while `max` or more are open.
-#[cfg_attr(not(plugin_windows), allow(dead_code))]
-fn earliest_over(open: impl Iterator<Item = (usize, u64)>, max: usize) -> Option<usize> {
-    let open: Vec<(usize, u64)> = open.collect();
-    open.iter().min_by_key(|o| o.1).filter(|_| open.len() >= max).map(|o| o.0)
-}
 
 /// The `hosted` key of mixer track `track`'s slot `slot`.
 pub fn fx_key(track: u16, slot: u8) -> usize {
@@ -340,14 +231,14 @@ pub struct Plugins {
     pub effects: Vec<Available>,
     /// By rack row, or by `fx_key` for mixer slots.
     pub hosted: BTreeMap<usize, Hosted>,
-    /// The instances' editor windows, by `hosted` key; they move and go with their instances.
-    pub editors: BTreeMap<usize, Editor>,
+    /// What happened to the instances that their editor windows follow (`crate::editor_host`), oldest first.
+    pub editor_events: Vec<EditorEvent>,
+    /// The keys whose editor window is open, as the interface last said (`EditorHost::open_keys`): an instance with an
+    /// open editor is looked at every tick.
+    pub editors_open: std::collections::BTreeSet<usize>,
     /// Main window handle (owner of plugin windows).
     pub owner: isize,
     pub scale: f32,
-    /// Plugin windows opened so far (stamps `Hosted::opened`).
-    #[cfg(plugin_windows)]
-    opens: u64,
     /// The preset file each instance last loaded or saved (spec: plugins/presets.md), by `hosted` key.
     pub presets: BTreeMap<usize, PathBuf>,
     /// Presets dropped where a new instance is being made: they load once it is hosted (`presets::pending_tick`).
@@ -396,6 +287,55 @@ pub struct Plugins {
 }
 
 impl Plugins {
+    /// One instance's tick on the UI thread (`EditorHost::idle`, and without windows `idle_headless`): its plugin's
+    /// idle, a crash told once, and what its editor shows. `menu_at` places a menu the plugin asks for (`None`: no
+    /// window to show it over, closed at once); `size` takes the editor size the plugin asks for. Returns what to tell
+    /// the user of a crash and the menu to show.
+    pub(crate) fn tick_row(h: &mut Hosted, row: usize, open: bool, menu_at: impl FnOnce(&os_host::Menu) -> Option<(i32, i32)>, size: impl FnOnce((u32, u32))) -> (Option<String>, Option<(os_host::Menu, (i32, i32))>) {
+        let look = h.due(h.seen, open);
+        let mut stopped = None;
+        let mut menu = None;
+        if let Some(mut p) = look.and_then(|_| lock_for_tick(&h.plugin, h.meter.as_deref())) {
+            let t0 = Instant::now();
+            h.seen = look.unwrap_or(h.seen);
+            // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
+            if let (Some(code), false) = (p.stopped(), h.stop_told) {
+                h.stop_told = true;
+                stopped = Some(stopped_message(&p.desc().name, code, row >= FX_KEY));
+            }
+            p.idle();
+            // A menu the plugin asked to pop up over its editor: at its point on the screen, or closed at once
+            // without a window to show it over (spec: plugins/vst3-hosting.md §9).
+            if let Some(m) = p.take_menu() {
+                match menu_at(&m) {
+                    Some(at) => menu = Some((m, at)),
+                    None => p.menu_done(m.id, None),
+                }
+            }
+            if let Some(s) = p.editor_size() {
+                size(s);
+            }
+            if let Some(m) = &h.meter {
+                m.note_hold(t0.elapsed());
+            }
+            #[cfg(target_os = "linux")]
+            crate::dropout_log::held(&p.desc().name, "the UI's tick", t0.elapsed());
+        }
+        (stopped, menu)
+    }
+
+    /// The UI tick's plugin housekeeping without windows (`--render`, `--serve`).
+    pub fn idle_headless(&mut self) {
+        sweep_retired();
+        os_host::guard::watch_windows(false);
+        #[cfg(target_os = "linux")]
+        os_host::runloop::dispatch();
+        for (&row, h) in &mut self.hosted {
+            let _ = Self::tick_row(h, row, false, |_| None, |_| {});
+        }
+        self.editor_events.clear();
+    }
+
     /// Adds plugin names to `not_found` (each once; "Serum (error text)" counts as its own entry).
     pub fn add_not_found(&mut self, names: &[String]) {
         for n in names {
@@ -479,7 +419,7 @@ pub fn builtin_effects() -> Vec<Available> {
 /// Whether `plugin` is one compiled into Lemon Studio, whose editor is drawn in the app's own window (Linux;
 /// `plugin_window::EmbedFrame`). `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives them windows of their own again.
 #[cfg(target_os = "linux")]
-fn embeds(plugin: &SharedPlugin) -> bool {
+pub(crate) fn embeds(plugin: &SharedPlugin) -> bool {
     static IDS: OnceLock<HashSet<String>> = OnceLock::new();
     if std::env::var_os("LEMONSTUDIO_PLUGIN_WINDOWS").is_some_and(|v| v == "1") {
         return false;
@@ -750,15 +690,13 @@ impl Plugins {
     pub fn added(&mut self, key: usize) {
         let on = crate::prefs::check(&crate::prefs::DETACH_NEW);
         if self.hosted.contains_key(&key) {
-            self.editors.entry(key).or_default().detached = on;
+            self.editor_events.push(EditorEvent::Detached(key, on));
         }
     }
 
     /// Removes the instance under `key` (closing its window first).
     pub fn drop_key(&mut self, key: usize) {
-        #[cfg(plugin_windows)]
-        self.close_window(key);
-        self.editors.remove(&key);
+        self.editor_events.push(EditorEvent::Drop(key));
         self.hosted.remove(&key);
         self.presets.remove(&key);
     }
@@ -791,10 +729,7 @@ impl Plugins {
             Some(p) => self.presets.insert(key, p),
             None => self.presets.remove(&key),
         };
-        #[cfg(plugin_windows)]
-        if let Some(w) = self.editors.get(&key).and_then(|e| e.window.as_ref()) {
-            w.set_preset(self.shown_preset(key));
-        }
+        self.editor_events.push(EditorEvent::PresetShown(key));
     }
 
     /// The name of the preset the instance under `key` holds.
@@ -813,10 +748,7 @@ impl Plugins {
     pub fn show_preset_name(&mut self, key: usize, show: bool) {
         let Some(h) = self.hosted.get_mut(&key) else { return };
         h.hide_preset = !show;
-        #[cfg(plugin_windows)]
-        if let Some(w) = self.editors.get(&key).and_then(|e| e.window.as_ref()) {
-            w.set_preset(self.shown_preset(key));
-        }
+        self.editor_events.push(EditorEvent::PresetShown(key));
     }
 
     /// Moves mixer slot instances: `m(track, slot)` gives the new place, `None` drops the instance.
@@ -831,7 +763,7 @@ impl Plugins {
                     if let Some(p) = self.presets.remove(&k) {
                         self.presets.insert(fx_key(nt, ns), p);
                     }
-                    moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap(), self.editors.remove(&k)))
+                    moved.push((fx_key(nt, ns), self.hosted.remove(&k).unwrap(), k))
                 }
                 None => {
                     self.keep(k);
@@ -839,15 +771,9 @@ impl Plugins {
                 }
             }
         }
-        for (k, h, e) in moved {
-            let old_editor = self.editors.remove(&k);
-            if let Some(e) = e {
-                self.editors.insert(k, e);
-            }
+        self.editor_events.push(EditorEvent::FxMoves(moved.iter().map(|&(k, _, from)| (from, k)).collect()));
+        for (k, h, _) in moved {
             if let Some(old) = self.hosted.insert(k, h) {
-                if let Some(mut e) = old_editor {
-                    e.close();
-                }
                 self.keep_hosted(&old, true);
             }
         }
@@ -1057,55 +983,9 @@ impl Plugins {
         p.load_state(&new)
     }
 
-    /// The hosted row whose plugin window is at screen point (x, y).
-    #[cfg(windows)]
-    pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
-        use windows_sys::Win32::Foundation::POINT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_PARENT};
-        // Walk up from the window under the point: a docked frame is a child of the main window, a detached one is a
-        // top-level window.
-        let mut w = unsafe { WindowFromPoint(POINT { x, y }) };
-        while !w.is_null() {
-            if let Some((&r, _)) = self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|f| f.hwnd() == w as isize)) {
-                return Some(r);
-            }
-            w = unsafe { GetAncestor(w, GA_PARENT) };
-        }
-        None
-    }
-
-    /// Drops file `path` on row `row`'s plugin window at screen point (x, y), as Explorer would: the window under the
-    /// point that accepts files gets `WM_DROPFILES`. Lemon Sampler rows without one (the strip, the frame) load the sample
-    /// through their state. Returns whether the plugin got the file.
-    #[cfg(windows)]
-    pub fn drop_file(&mut self, row: usize, x: i32, y: i32, path: &str, sampler: bool) -> bool {
-        if self.editors.get(&row).and_then(|e| e.window.as_ref()).is_some_and(|f| post_drop(x, y, path, f.hwnd())) {
-            return true;
-        }
-        sampler && self.load_sample(row, path)
-    }
-
-    /// The hosted row whose plugin window is at screen point (x, y).
-    #[cfg(target_os = "macos")]
-    pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
-        let frame = crate::plugin_window::row_window_at(x, y)?;
-        self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|f| f.hwnd() == frame)).map(|(&r, _)| r)
-    }
-
-    /// Drops file `path` on row `row`'s plugin window: macOS plugins take files only from a drag session of their own,
-    /// so only Lemon Sampler rows load it (through their state). Returns whether the plugin got the file.
-    #[cfg(target_os = "macos")]
-    pub fn drop_file(&mut self, row: usize, _x: i32, _y: i32, path: &str, sampler: bool) -> bool {
-        sampler && self.load_sample(row, path)
-    }
-
     /// Closes every window and drops every instance (a new or opened project).
     pub fn clear(&mut self) {
-        #[cfg(plugin_windows)]
-        for row in self.hosted.keys().copied().collect::<Vec<_>>() {
-            self.close_window(row);
-        }
-        self.editors.clear();
+        self.editor_events.push(EditorEvent::Clear(self.hosted.keys().copied().collect()));
         self.hosted.clear();
         self.containers.clear();
         self.presets.clear();
@@ -1171,247 +1051,9 @@ impl Plugins {
         }
     }
 
-    /// Whether a plugin's editor is open, so the transport keeps the plugins processed while nothing plays
-    /// (`Transport::listen`): an instrument's own keyboard plays it without the host, and an effect may make sound of
-    /// its own (Tesla plays its sample) or show what it hears.
-    pub fn editor_open(&self) -> bool {
-        #[cfg(plugin_windows)]
-        return self.editors.values().any(|e| e.window.is_some());
-        #[cfg(not(plugin_windows))]
-        false
-    }
-
-    /// Opens (or raises) row `row`'s plugin window.
-    #[cfg(plugin_windows)]
-    pub fn open_window(&mut self, row: usize, info: ChannelInfo) -> Result<(), String> {
-        let (owner, scale) = (self.owner, self.scale_for(row, self.scale));
-        if !self.hosted.contains_key(&row) {
-            return Err("not a plugin channel".into());
-        }
-        if let Some(w) = self.editors.get(&row).and_then(|e| e.window.as_ref()) {
-            w.raise();
-            return Ok(());
-        }
-        // At most `MAX_EDITORS` open: the one opened earliest closes (its plugin keeps running). Spec:
-        // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
-        if crate::prefs::check(&crate::prefs::LIMIT_EDITORS) {
-            while let Some(k) = earliest_over(self.editors.iter().filter(|(_, e)| e.window.is_some()).map(|(&k, e)| (k, e.opened)), MAX_EDITORS) {
-                self.close_window(k);
-            }
-        }
-        let Some(h) = self.hosted.get(&row) else { return Err("not a plugin channel".into()) };
-        let e = self.editors.entry(row).or_default();
-        // A detached window reopens where it was; the first time, on a monitor as the settings say (spec: as above).
-        let pos = match (e.detached, e.placed) {
-            (true, Some(at)) => at,
-            (true, None) => crate::plugin_window::first_position(owner, scale, crate::prefs::check(&crate::prefs::DETACHED_WITH_MAIN)),
-            (false, _) => crate::plugin_window::default_position(owner, scale),
-        };
-        // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size. On
-        // Linux a plugin compiled into Lemon Studio draws its editor in the app's own window (`EmbedFrame`).
-        #[cfg(target_os = "linux")]
-        let w = if embeds(&h.plugin) {
-            FrameWindow::embedded(info, (560.0, 437.0), scale, e.embed_at)?
-        } else {
-            FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, e.detached)?
-        };
-        #[cfg(not(target_os = "linux"))]
-        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, e.detached)?;
-        // Mixer effects have no channel strip (spec: ui/mixer.md §7).
-        if row >= FX_KEY {
-            w.set_strip(false);
-        }
-        // The editor takes the frame's scale (on Linux the X server's, not the main window's).
-        let k = w.scale();
-        // The instance is locked only while its editor opens: the audio thread skips an instance it cannot lock, so
-        // everything done under the lock is silence for that channel. Held through the frame's creation, layout,
-        // painting and raise as well, opening a plugin window made a playing song drop out on that channel.
-        let size = {
-            let mut p = h.plugin.lock().map_err(|_| "plugin busy")?;
-            p.open_editor(w.area(), k)?
-        };
-        e.link = fit_editor(&w, size, k);
-        #[cfg(target_os = "linux")]
-        if e.link.is_none() {
-            fit_resizable(&w, &h.plugin, size, k);
-        }
-        // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
-        // the open ones.
-        w.raise();
-        e.window = Some(w);
-        e.plugin = Some(h.plugin.clone());
-        self.opens += 1;
-        e.opened = self.opens;
-        let name = self.shown_preset(row);
-        if let Some(w) = self.editors.get(&row).and_then(|e| e.window.as_ref()) {
-            w.set_preset(name);
-        }
-        Ok(())
-    }
-
     /// The scale row `row`'s window is drawn at where the program would use `scale`: its Scaling ▸ choice, if any.
     pub fn scale_for(&self, row: usize, scale: f32) -> f32 {
         self.editor_scales.get(&row).copied().unwrap_or(scale)
-    }
-
-    /// Scaling ▸ for row `row` (`None`: Main, the program's scale): an open window is drawn again at once.
-    pub fn set_editor_scale(&mut self, row: usize, scale: Option<f32>) {
-        match scale {
-            Some(k) => self.editor_scales.insert(row, k),
-            None => self.editor_scales.remove(&row),
-        };
-        #[cfg(any(windows, target_os = "macos"))]
-        if self.editors.get(&row).is_some_and(|e| e.window.is_some()) {
-            let k = self.scale_for(row, self.scale);
-            self.rescale_window(row, k);
-        }
-    }
-
-    /// The main window's DPI scale changed: docked windows follow it (detached ones follow their own monitor,
-    /// `FrameEvent::Dpi`). Spec: ui/ui-scaling.md §3.
-    pub fn set_scale(&mut self, scale: f32) {
-        if scale <= 0.0 || scale == self.scale {
-            return;
-        }
-        self.scale = scale;
-        #[cfg(any(windows, target_os = "macos"))]
-        for row in self.docked() {
-            self.rescale_window(row, self.scale_for(row, scale));
-        }
-    }
-
-    /// Redraws row `row`'s window at `scale`: the frame resizes and the editor is reopened, since plugins take their
-    /// scale when the editor opens (on macOS its sizes are measured at it). The plugin's page is kept.
-    #[cfg(any(windows, target_os = "macos"))]
-    fn rescale_window(&mut self, row: usize, scale: f32) {
-        let (Some(Hosted { plugin, .. }), Some(Editor { window: Some(w), link, .. })) = (self.hosted.get(&row), self.editors.get_mut(&row)) else { return };
-        if w.scale() == scale {
-            return;
-        }
-        let Ok(mut p) = plugin.lock() else { return };
-        let page = link.as_ref().map(|l| l.page_now());
-        p.close_editor();
-        w.set_scale(scale);
-        *link = match p.open_editor(w.area(), scale) {
-            Ok(size) => fit_editor(w, size, scale),
-            Err(e) => {
-                eprintln!("lemonstudio: plugin editor at the new scale: {e}");
-                None
-            }
-        };
-        if let (Some(l), Some(page)) = (link.as_mut(), page) {
-            l.set_page(page);
-            w.set_page(l.page_now());
-        }
-    }
-
-    #[cfg(plugin_windows)]
-    pub(crate) fn close_window(&mut self, row: usize) {
-        if let Some(e) = self.editors.get_mut(&row) {
-            // The mode and place it reopens in (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins
-            // and startup").
-            if let Some(w) = &e.window {
-                e.detached = w.detached();
-                #[cfg(target_os = "linux")]
-                if let Some(em) = w.embed() {
-                    let r = em.rect();
-                    e.embed_at = Some((r.x, r.y));
-                }
-                #[cfg(windows)]
-                if e.detached {
-                    e.placed = w.position().or(e.placed);
-                }
-            }
-            e.close();
-        }
-    }
-
-    /// Row `row`'s open window (native frame handle) and whether it is detached.
-    #[cfg(plugin_windows)]
-    pub fn window_of(&self, row: usize) -> Option<(isize, bool)> {
-        self.editors.get(&row).and_then(|e| e.window.as_ref()).map(|w| (w.hwnd(), w.detached()))
-    }
-
-    /// Docks or detaches row `row`'s window (window menu > Detached); closed, it opens that way next time.
-    #[cfg(plugin_windows)]
-    pub fn set_detached(&mut self, row: usize, on: bool) {
-        let owner = self.owner;
-        if self.hosted.contains_key(&row) {
-            let e = self.editors.entry(row).or_default();
-            e.detached = on;
-            if let Some(w) = &e.window {
-                w.set_detached(owner, on);
-            }
-        }
-    }
-
-    /// Switch all plugin editors to ▸ (spec: ui/channel-rack.md §17): every instance's window, rack rows' and mixer
-    /// slots', docked or detached; an open one at once, a closed one when it opens next.
-    #[cfg(plugin_windows)]
-    pub fn set_all_detached(&mut self, on: bool) {
-        let keys: Vec<usize> = self.hosted.keys().copied().collect();
-        for key in keys {
-            self.set_detached(key, on);
-        }
-    }
-
-    /// Linux: the open plugin windows of their own, by key (`crate::float_layer`).
-    #[cfg(target_os = "linux")]
-    pub fn native_rows(&self) -> Vec<usize> {
-        self.editors.iter().filter(|(_, e)| e.window.as_ref().is_some_and(|w| w.embed().is_none())).map(|(&r, _)| r).collect()
-    }
-
-    /// Linux: the plugin windows of their own at `at` of their slide (`crate::float_layer`).
-    #[cfg(target_os = "linux")]
-    pub fn slide_native(&self, at: f32) {
-        for w in self.editors.values().filter_map(|e| e.window.as_ref()) {
-            w.slide(at);
-        }
-    }
-
-    /// Rows whose plugin window is open and docked in the main window.
-    #[cfg(plugin_windows)]
-    /// Linux: the open plugin windows drawn in the app's, by key.
-    #[cfg(target_os = "linux")]
-    pub fn embeds(&self) -> BTreeMap<usize, crate::plugin_window::EmbedFrame> {
-        self.editors.iter().filter_map(|(&r, e)| Some((r, e.window.as_ref()?.embed()?.clone()))).collect()
-    }
-
-    pub fn docked(&self) -> Vec<usize> {
-        self.editors.iter().filter(|(_, e)| e.window.as_ref().is_some_and(|w| !w.detached())).map(|(&r, _)| r).collect()
-    }
-
-    /// Stacks the docked windows of `rows` (bottom to top, as in `State::z`) in that order: docked windows clip each
-    /// other by their native order, so it must match the app's.
-    #[cfg(plugin_windows)]
-    pub fn stack(&self, rows: &[usize]) {
-        let hwnds: Vec<isize> = rows.iter().filter_map(|r| self.window_of(*r)).filter(|w| !w.1).map(|w| w.0).collect();
-        crate::plugin_window::stack(self.owner, &hwnds);
-    }
-
-    /// VIEW > Into workspace for the docked windows: one partly outside the workspace moves fully back in
-    /// (`FrameWindow::move_into_workspace`).
-    #[cfg(all(plugin_windows, windows))]
-    pub fn move_into_workspace(&self) {
-        for w in self.editors.values().filter_map(|e| e.window.as_ref()) {
-            w.move_into_workspace();
-        }
-    }
-
-    /// Moves row `row`'s docked window to `(x, y)` (main-window client px; VIEW > Align all channel editors).
-    #[cfg(all(plugin_windows, windows))]
-    pub fn move_docked(&self, row: usize, x: i32, y: i32) {
-        if let Some(w) = self.editors.get(&row).and_then(|e| e.window.as_ref()) {
-            w.move_to(x, y);
-        }
-    }
-
-    /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
-    #[cfg(plugin_windows)]
-    pub fn clip(&self, row: usize, work: [i32; 4], covers: &[[i32; 4]]) {
-        if let Some(w) = self.editors.get(&row).and_then(|e| e.window.as_ref()) {
-            w.clip_to(work, covers);
-        }
     }
 
     /// Rack rows were renumbered (`m(old) = new`; `None` drops the instance and its window). The presets the instances
@@ -1421,258 +1063,31 @@ impl Plugins {
         let rows: Vec<usize> = self.presets.range(..FX_KEY).map(|(&r, _)| r).collect();
         let presets: Vec<(usize, PathBuf)> = rows.into_iter().filter_map(|r| Some((r, self.presets.remove(&r)?))).filter_map(|(r, p)| Some((m(r)?, p))).collect();
         self.presets.extend(presets);
-        // The editors go with their instances; one whose instance goes closes first.
-        let mut editors: BTreeMap<usize, Editor> = self.editors.split_off(&FX_KEY);
-        let mut rows = std::mem::replace(&mut self.editors, BTreeMap::new());
+        // The editors go with their instances (`EditorEvent::Remap`); one whose instance goes closes first.
+        let mut map = Vec::new();
         for (row, h) in std::mem::take(&mut self.hosted) {
             if row >= FX_KEY {
                 self.hosted.insert(row, h);
             } else if let Some(n) = m(row) {
-                let old_editor = editors.remove(&n);
-                if let Some(e) = rows.remove(&row) {
-                    editors.insert(n, e);
-                }
+                map.push((row, Some(n)));
                 // Two instances mapped onto one row: the one there goes, kept.
                 if let Some(old) = self.hosted.insert(n, h) {
-                    if let Some(mut e) = old_editor {
-                        e.close();
-                    }
                     self.keep_hosted(&old, false);
                 }
             } else {
-                if let Some(mut e) = rows.remove(&row) {
-                    e.close();
-                }
+                map.push((row, None));
                 self.keep_hosted(&h, false);
             }
         }
-        self.editors = editors;
+        self.editor_events.push(EditorEvent::Remap(map));
     }
 
-    /// Closes row `row`'s plugin window when it is open; returns whether it was.
-    pub fn close_if_open(&mut self, row: usize) -> bool {
-        #[cfg(plugin_windows)]
-        if self.editors.get(&row).is_some_and(|e| e.window.is_some()) {
-            self.close_window(row);
-            return true;
-        }
-        let _ = row;
-        false
-    }
-
-    /// UI tick: plugin housekeeping, then the windows' requests (a closed window is closed here).
-    #[cfg_attr(not(plugin_windows), allow(unused_variables, unused_mut))]
-    pub fn idle(&mut self, info: impl Fn(usize) -> Option<ChannelInfoT>) -> Vec<Request> {
-        sweep_retired();
-        os_host::guard::watch_windows(false);
-        // Linux: the frames' X11 events, then the editors' descriptors and timers (`os_host::runloop`).
-        #[cfg(target_os = "linux")]
-        {
-            crate::plugin_window::pump();
-            os_host::runloop::dispatch();
-        }
-        let mut out = Vec::new();
-        let mut close: Vec<usize> = Vec::new();
-        #[cfg(any(windows, target_os = "macos"))]
-        let mut rescale: Vec<(usize, f32)> = Vec::new();
-        // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
-        #[cfg(plugin_windows)]
-        for (area, m) in crate::plugin_window::take_link() {
-            let row = self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
-            match (row, m) {
-                (Some(row), crate::plugin_window::LinkMsg::Note(k, v, on)) => out.push(Request::Note(row, k, v, on)),
-                (Some(row), crate::plugin_window::LinkMsg::Automate(i)) => out.push(Request::Automate(row, i)),
-                (_, crate::plugin_window::LinkMsg::Audio(_)) => out.extend(os_hostlink::take_audio().into_iter().map(|(p, ch)| Request::Audio(p, ch))),
-                (Some(row), crate::plugin_window::LinkMsg::Notes(token)) => out.push(Request::Notes(row, os_hostlink::take_notes(token))),
-                (None, crate::plugin_window::LinkMsg::Notes(token)) => drop(os_hostlink::take_notes(token)),
-                _ => {}
-            }
-        }
-        for (&row, h) in &mut self.hosted {
-            #[cfg_attr(not(plugin_windows), allow(unused_mut, unused_variables))]
-            let mut ed = self.editors.get_mut(&row);
-            let look = h.due(h.seen, ed.as_ref().is_some_and(|e| e.open()));
-            let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
-            if let Some(mut p) = look.and_then(|_| lock_for_tick(&h.plugin, h.meter.as_deref())) {
-                let t0 = Instant::now();
-                h.seen = look.unwrap_or(h.seen);
-                // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
-                if let (Some(code), false) = (p.stopped(), h.stop_told) {
-                    h.stop_told = true;
-                    out.push(Request::Stopped(row, stopped_message(&p.desc().name, code, row >= FX_KEY)));
-                    close.push(row);
-                }
-                p.idle();
-                // A menu the plugin asked to pop up over its editor: at its point on the screen, or closed at once
-                // without a window to show it over (spec: plugins/vst3-hosting.md §9).
-                if let Some(m) = p.take_menu() {
-                    #[cfg(plugin_windows)]
-                    let at = ed.as_ref().and_then(|e| e.window.as_ref()).map(|w| {
-                        let k = w.scale();
-                        w.editor_to_screen(m.at.0 as f32 / k, m.at.1 as f32 / k)
-                    });
-                    #[cfg(not(plugin_windows))]
-                    let at: Option<(i32, i32)> = None;
-                    match at {
-                        Some(at) => menu = Some((m, at)),
-                        None => p.menu_done(m.id, None),
-                    }
-                }
-                #[cfg(plugin_windows)]
-                if let (Some(w), false, Some((ew, eh))) = (ed.as_ref().and_then(|e| e.window.as_ref()), ed.as_ref().is_some_and(|e| e.linked()), p.editor_size()) {
-                    let k = w.scale();
-                    w.set_editor_size((ew as f32 / k, eh as f32 / k));
-                }
-                if let Some(m) = &h.meter {
-                    m.note_hold(t0.elapsed());
-                }
-                #[cfg(target_os = "linux")]
-                crate::dropout_log::held(&p.desc().name, "the UI's tick", t0.elapsed());
-            }
-            #[cfg(plugin_windows)]
-            if let Some(Editor { window: Some(w), link, .. }) = ed.as_deref_mut() {
-                if let Some(i) = info(row) {
-                    w.set_info(i);
-                }
-                if let Some(l) = link.as_mut() {
-                    w.set_page(l.page());
-                    w.set_hint(l.hint());
-                    if let Some((lw, lh)) = l.size() {
-                        w.set_editor_size((lw as f32, lh as f32));
-                    }
-                    // A resizable Lemon plugin (Tesla): the frame's edges resize it.
-                    w.set_resizable(l.resizable().map(|(mw, mh)| (mw as f32, mh as f32)));
-                }
-                for e in w.take_events() {
-                    match (&e, &mut *link) {
-                        (FrameEvent::Page(n), Some(l)) => {
-                            l.set_page(*n);
-                            continue;
-                        }
-                        (FrameEvent::Resize(ew, eh), Some(l)) => {
-                            l.set_size(*ew, *eh);
-                            continue;
-                        }
-                        // Another resizable plugin (CLAP, VST3; `fit_resizable`): its editor is asked.
-                        #[cfg(target_os = "linux")]
-                        (FrameEvent::Resize(ew, eh), None) => {
-                            follow_resize(w, &h.plugin, (*ew, *eh));
-                            continue;
-                        }
-                        _ => {}
-                    }
-                    out.push(match e {
-                        FrameEvent::Page(_) | FrameEvent::Resize(..) => continue,
-                        FrameEvent::Close => {
-                            close.push(row);
-                            Request::Close(row)
-                        }
-                        FrameEvent::ToggleOn => Request::ToggleOn(row),
-                        FrameEvent::Volume(v) => Request::Volume(row, v),
-                        FrameEvent::Pan(v) => Request::Pan(row, v),
-                        FrameEvent::PitchCents(c) => Request::PitchCents(row, c),
-                        FrameEvent::PitchRange(r) => Request::PitchRange(row, r),
-                        FrameEvent::Track(t) => Request::Track(row, t),
-                        FrameEvent::ShowTrack => Request::ShowTrack(row),
-                        FrameEvent::Raise => Request::Raise(row),
-                        FrameEvent::Menu(x, y) => Request::Menu(row, x, y),
-                        FrameEvent::Presets(x, y) => Request::Presets(row, x, y),
-                        FrameEvent::PresetStep(d) => Request::PresetStep(row, d),
-                        FrameEvent::DropFile(p) => Request::DropFile(row, p),
-                        FrameEvent::Misc(m, v) => Request::Misc(row, m, v),
-                        FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
-                        FrameEvent::KnobMenu(k, x, y) => {
-                            use crate::knobs::{Control, KnobId};
-                            use crate::plugin_window::Knob;
-                            let c = match k {
-                                Knob::Pan => Control::Knob(KnobId::ChanPan(row)),
-                                Knob::Vol => Control::Knob(KnobId::ChanVol(row)),
-                                Knob::Pitch => Control::ChanPitch(row),
-                                Knob::Range | Knob::Track => continue,
-                            };
-                            Request::KnobMenu(row, c, x, y)
-                        }
-                        FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
-                        FrameEvent::NotAvailable(name) => Request::NotAvailable(name),
-                        FrameEvent::Dpi(k) => {
-                            // A Main GUI scaling percentage replaces the monitor's scale (spec: ui/ui-scaling.md §1).
-                            #[cfg(any(windows, target_os = "macos"))]
-                            rescale.push((row, crate::gui_scale(f64::from(k)) as f32));
-                            #[cfg(not(any(windows, target_os = "macos")))]
-                            let _ = k;
-                            continue;
-                        }
-                    });
-                }
-            }
-            // After the window's events: the click in the editor that opened the menu raised the window, which closes
-            // open popups.
-            if let Some((m, at)) = menu {
-                out.push(Request::PluginMenu(row, m, at));
-            }
-        }
-        #[cfg(plugin_windows)]
-        for row in close {
-            self.close_window(row);
-        }
-        #[cfg(any(windows, target_os = "macos"))]
-        for (row, k) in rescale {
-            self.rescale_window(row, self.scale_for(row, k));
-        }
-        #[cfg(target_os = "linux")]
-        crate::plugin_window::paint_dirty();
-        out
-    }
 }
 
 /// What the user is told when instance `name` stopped after exception `code`.
-fn stopped_message(name: &str, code: u32, effect: bool) -> String {
+pub(crate) fn stopped_message(name: &str, code: u32, effect: bool) -> String {
     let now = if effect { "its slot passes the sound through" } else { "its channel is silent" };
     format!("{}: {now}. Save your project and restart Lemon Studio to use it again", os_host::guard::stopped_text(name, code))
-}
-
-/// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`). A Lemon plugin answers the host
-/// link's hello: its page tabs go into the strip row and its editor shrinks to what is below them.
-#[cfg(plugin_windows)]
-fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_hostlink::Link> {
-    let link = os_hostlink::Link::connect(w.area() as isize);
-    match &link {
-        Some(l) => {
-            w.set_pages(l.pages.clone(), l.page_now());
-            let (lw, lh) = l.size().unwrap_or(((ew as f32 / scale) as u32, (eh as f32 / scale) as u32));
-            w.set_editor_size((lw as f32, lh as f32));
-        }
-        None => w.set_editor_size((ew as f32 / scale, eh as f32 / scale)),
-    }
-    link
-}
-
-/// Lets the user resize window `w` by its edges when its freshly opened editor (`size` in device px at `scale`) can be
-/// resized by the host, and shrinks an editor whose window would not fit the monitor's work area to fit it. An editor
-/// that cannot be resized is left as it is.
-#[cfg(target_os = "linux")]
-fn fit_resizable(w: &FrameWindow, plugin: &std::sync::Mutex<dyn os_host::Plugin>, size: (u32, u32), scale: f32) {
-    let Ok(can) = plugin.lock().map(|p| p.can_resize_editor()) else { return };
-    w.set_resizable(can.then_some(crate::plugin_window::MIN_EDITOR));
-    let editor = (size.0 as f32 / scale, size.1 as f32 / scale);
-    let Some((ew, eh)) = w.work_size().and_then(|room| crate::plugin_window::fit_in(editor, w.chrome(), room)).filter(|_| can) else { return };
-    let px = |v: f32| (v * scale).round().max(1.0) as u32;
-    let taken = plugin.lock().ok().and_then(|mut p| p.resize_editor(px(ew), px(eh)));
-    if let Some((tw, th)) = taken {
-        w.set_editor_size((tw as f32 / scale, th as f32 / scale));
-    }
-}
-
-/// The frame's edges asked for an editor of `size` (logical px): the plugin's editor is asked for it, and the frame
-/// takes the size it took (an editor that keeps its own size keeps the frame's).
-#[cfg(target_os = "linux")]
-fn follow_resize(w: &FrameWindow, plugin: &std::sync::Mutex<dyn os_host::Plugin>, size: (u32, u32)) {
-    let k = w.scale();
-    let px = |v: u32| (v as f32 * k).round().max(1.0) as u32;
-    let taken = plugin.lock().ok().and_then(|mut p| if p.can_resize_editor() { p.resize_editor(px(size.0), px(size.1)) } else { None });
-    if let Some((tw, th)) = taken {
-        w.set_editor_size((tw as f32 / k, th as f32 / k));
-    }
 }
 
 impl Drop for Hosted {
@@ -1752,7 +1167,7 @@ pub const LEMON_FORMULA_CONTROLLER: &str = "Lemon Formula Controller";
 pub const LEMON_VOCODER: &str = "Lemon Vocoder";
 /// The plugin name a project file stores for Vocodex (file-format identifier, kept for interop): slots with it are
 /// played and edited by Lemon Vocoder (spec: plugins/lemon-vocoder.md §6).
-pub const VOCODEX_FILE_NAME: &str = "Vocodex";
+pub use crate::effect_ports::VOCODEX_FILE_NAME;
 /// Name of Lemon Drop, Lemon Studio's audio visualizer (spec: plugins/lemon-drop.md).
 pub const LEMON_DROP: &str = lemon_drop::NAME;
 /// The plugin name a project file stores for Wave Candy (file-format identifier, kept for interop): slots with it are
@@ -2350,58 +1765,6 @@ pub(crate) fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
     Some(b)
 }
 
-/// Posts `WM_DROPFILES` for `path` to the window at screen point (x, y), or its nearest ancestor that accepts files
-/// (`DragAcceptFiles`). The drop handle is ours: the receiver's `DragFinish` frees it. Same process only.
-#[cfg(windows)]
-/// `frame` bounds the search: a docked frame's parent is the main window, which takes files itself.
-fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::Foundation::GlobalFree;
-    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
-    use windows_sys::Win32::UI::Shell::DROPFILES;
-    use windows_sys::Win32::UI::WindowsAndMessaging::*;
-    unsafe {
-        let mut w = WindowFromPoint(POINT { x, y });
-        while !w.is_null() {
-            // The frame takes files itself (presets); it is not where a sample for the plugin goes.
-            if w as isize == frame {
-                return false;
-            }
-            if GetWindowLongW(w, GWL_EXSTYLE) as u32 & WS_EX_ACCEPTFILES != 0 {
-                break;
-            }
-            w = GetAncestor(w, GA_PARENT);
-            if w == GetDesktopWindow() {
-                return false;
-            }
-        }
-        if w.is_null() {
-            return false;
-        }
-        let mut pt = POINT { x, y };
-        windows_sys::Win32::Graphics::Gdi::ScreenToClient(w, &mut pt);
-        let wide: Vec<u16> = path.encode_utf16().chain([0, 0]).collect();
-        let head = std::mem::size_of::<DROPFILES>();
-        let mem = GlobalAlloc(GHND, head + wide.len() * 2);
-        if mem.is_null() {
-            return false;
-        }
-        let p = GlobalLock(mem) as *mut u8;
-        if p.is_null() {
-            GlobalFree(mem);
-            return false;
-        }
-        *(p as *mut DROPFILES) = DROPFILES { pFiles: head as u32, pt, fNC: 0, fWide: 1 };
-        std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, p.add(head), wide.len() * 2);
-        GlobalUnlock(mem);
-        if PostMessageW(w, WM_DROPFILES, mem as usize, 0) == 0 {
-            GlobalFree(mem);
-            return false;
-        }
-        true
-    }
-}
-
 /// The `sample-path` field of a Lemon Sampler (or Lemon Trio) state blob.
 pub(crate) use os_hostlink::state::json as state_json;
 
@@ -2410,11 +1773,6 @@ pub(crate) fn sample_path_of(blob: &[u8]) -> Option<String> {
     let field = v.get("fields")?.get("sample-path")?.as_str()?;
     serde_json::from_str::<String>(field).ok()
 }
-
-#[cfg(plugin_windows)]
-pub type ChannelInfoT = ChannelInfo;
-#[cfg(not(plugin_windows))]
-pub type ChannelInfoT = ();
 
 /// Opens the bundled Lemon Sampler in a real plugin window, clicks through the strip and captures the window
 /// (`OS_SHOT_DIR=<dir> OS_CLAP=<Lemon Sampler.clap> cargo test -p os-app plugin_window_shots -- --ignored`).
@@ -2429,7 +1787,7 @@ mod tests {
     use windows_sys::Win32::Storage::Xps::PrintWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    fn pump(plugins: &mut Plugins, ms: u64) {
+    fn pump(host: &mut crate::editor_host::EditorHost, plugins: &mut Plugins, ms: u64) {
         let end = Instant::now() + Duration::from_millis(ms);
         while Instant::now() < end {
             unsafe {
@@ -2439,7 +1797,7 @@ mod tests {
                     DispatchMessageW(&m);
                 }
             }
-            plugins.idle(|_| None);
+            host.idle(plugins, |_| None);
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -2495,28 +1853,29 @@ mod tests {
             (r.right - r.left, r.bottom - r.top)
         };
         let mut pl = Plugins { available: builtin(), scale: 1.5, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         pl.create_with(0, index, None).unwrap();
         let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 200);
-        let w = pl.editors[&0].window.as_ref().unwrap();
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 200);
+        let w = host.editors[&0].window.as_ref().unwrap();
         let (frame, area) = (w.hwnd(), w.area() as isize);
         let editor = || unsafe { GetWindow(area as HWND, GW_CHILD) } as isize;
         // Joined the strip: 560 x 390 logical (spec: plugins/host-link.md), drawn at 150 %.
         assert_eq!(size(editor()), (840, 585), "the editor draws at the window's scale");
         assert_eq!(size(area), (840, 585), "the frame's editor area matches it");
         let page = 1;
-        pl.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(page);
+        host.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(page);
         for (k, want) in [(1.0, (560, 390)), (2.0, (1120, 780))] {
-            pl.rescale_window(0, k);
-            pump(&mut pl, 100);
+            host.rescale_window(&mut pl, 0, k);
+            pump(&mut host, &mut pl, 100);
             assert_eq!(size(editor()), want, "editor at scale {k}");
             assert_eq!(size(area), want, "editor area at scale {k}");
             let (fw, _) = size(frame);
             assert_eq!(fw, want.0 + (2.0 * 7.0 * k) as i32, "frame width at scale {k}");
-            assert!(pl.editors[&0].link.is_some(), "the reopened editor joins the strip again");
-            assert_eq!(pl.editors[&0].link.as_ref().unwrap().page_now(), page, "the plugin's page is kept");
+            assert!(host.editors[&0].link.is_some(), "the reopened editor joins the strip again");
+            assert_eq!(host.editors[&0].link.as_ref().unwrap().page_now(), page, "the plugin's page is kept");
         }
     }
 
@@ -2528,21 +1887,22 @@ mod tests {
         let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.create(0, 0).unwrap();
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 400);
-        let hwnd = pl.editors[&0].window.as_ref().unwrap().hwnd();
-        assert!(pl.editors[&0].link.is_some(), "Lemon Sampler should join the strip");
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 400);
+        let hwnd = host.editors[&0].window.as_ref().unwrap().hwnd();
+        assert!(host.editors[&0].link.is_some(), "Lemon Sampler should join the strip");
         capture(hwnd, &dir.join("win_sample.bmp"));
         click(hwnd, 68, 47); // second page tab
-        pump(&mut pl, 300);
+        pump(&mut host, &mut pl, 300);
         capture(hwnd, &dir.join("win_envelope.bmp"));
         click(hwnd, 111, 47); // Misc wrench
-        pump(&mut pl, 300);
+        pump(&mut host, &mut pl, 300);
         capture(hwnd, &dir.join("win_misc.bmp"));
         click(hwnd, 24, 12); // gear: hide the strip
-        pump(&mut pl, 300);
+        pump(&mut host, &mut pl, 300);
         capture(hwnd, &dir.join("win_nostrip.bmp"));
     }
 
@@ -2555,13 +1915,14 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         pl.create_effect(1, 0, index, None).unwrap();
         let key = fx_key(1, 0);
         let info = ChannelInfo { name: LEMON_EQ.into(), target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(key, info).unwrap();
-        pump(&mut pl, 400);
-        let frame = pl.editors[&key].window.as_ref().unwrap().hwnd();
+        host.open_window(&mut pl, key, info).unwrap();
+        pump(&mut host, &mut pl, 400);
+        let frame = host.editors[&key].window.as_ref().unwrap().hwnd();
         capture(frame, &dir.join("eq_window.bmp"));
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0, "the editor is a child of the frame");
@@ -2569,7 +1930,7 @@ mod tests {
         assert_eq!(mask(&pl), Some(0x7f));
         // Band 3's switch (editor coordinates, spec: plugins/lemon-parametric-eq-2.md §3): mutes band 3.
         click(editor, 549 + 21 * 2 + 6, 296);
-        pump(&mut pl, 200);
+        pump(&mut host, &mut pl, 200);
         capture(frame, &dir.join("eq_window_muted.bmp"));
         assert_eq!(mask(&pl), Some(0x7f & !4));
     }
@@ -2582,12 +1943,13 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(crate::osc3::LEMON_TRIO).expect("built-in Lemon Trio");
         pl.create_with(0, index, None).unwrap();
         let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 400);
-        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 400);
+        let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0, "the editor is a child of the frame");
         // Where osc 2's coarse knob is drawn (painted-frame coordinates -> editor client, hosted crop).
@@ -2617,9 +1979,9 @@ mod tests {
         for _ in 0..6 {
             let (sx, sy) = (er.left + cx, er.top + cy);
             unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
-            pump(&mut pl, 60);
+            pump(&mut host, &mut pl, 60);
         }
-        pump(&mut pl, 300);
+        pump(&mut host, &mut pl, 300);
         capture(frame, &b);
         assert_ne!(state(&pl), before, "the knob moved the plugin value");
         assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
@@ -2634,12 +1996,13 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         pl.create_with(0, index, None).unwrap();
         let info = ChannelInfo { name: crate::citrus::CITRUS.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 400);
-        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 400);
+        let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0, "the editor is a child of the frame");
         let mut er: RECT = unsafe { std::mem::zeroed() };
@@ -2652,12 +2015,12 @@ mod tests {
         for _ in 0..3 {
             let (sx, sy) = (er.left + 524, er.top + 261);
             unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
-            pump(&mut pl, 60);
+            pump(&mut host, &mut pl, 60);
         }
         let (cx, cy) = citrus::view::cell_centre(0, citrus::state::COL_OUT);
         unsafe { SendMessageW(editor as HWND, WM_RBUTTONDOWN, 0, ((cx as isize) | ((cy as isize) << 16)) as isize) };
         unsafe { SendMessageW(editor as HWND, WM_RBUTTONUP, 0, ((cx as isize) | ((cy as isize) << 16)) as isize) };
-        pump(&mut pl, 300);
+        pump(&mut host, &mut pl, 300);
         capture(frame, &b);
         let st = citrus::state::State::from_bytes(&pl.sytrus_file_state(0).expect("a Sytrus state")).expect("an edited state");
         assert_eq!(st.soften, 12, "three wheel notches of 4");
@@ -2674,12 +2037,13 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(crate::smith::SMITH).expect("built-in Smith");
         pl.create_with(0, index, None).unwrap();
         let info = ChannelInfo { name: crate::smith::SMITH.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 400);
-        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 400);
+        let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0, "the editor is a child of the frame");
         let mut er: RECT = unsafe { std::mem::zeroed() };
@@ -2692,12 +2056,12 @@ mod tests {
         for _ in 0..3 {
             let (sx, sy) = (er.left + 21, er.top + 38);
             unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
-            pump(&mut pl, 60);
+            pump(&mut host, &mut pl, 60);
         }
         let (cx, cy) = (541isize, 109isize);
         unsafe { SendMessageW(editor as HWND, WM_LBUTTONDOWN, 0, cx | (cy << 16)) };
         unsafe { SendMessageW(editor as HWND, WM_LBUTTONUP, 0, cx | (cy << 16)) };
-        pump(&mut pl, 300);
+        pump(&mut host, &mut pl, 300);
         capture(frame, &b);
         let st = smith::state::State::from_bytes(&pl.ogun_file_state(0).expect("an Ogun state")).expect("an edited state");
         assert_eq!(st.ints[smith::state::LEVEL], 160 + 3 * 8, "three wheel notches of 8");
@@ -2716,11 +2080,12 @@ mod tests {
         let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.create(0, 0).unwrap();
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 300);
-        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 300);
+        let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
         assert!(editor != 0);
         let mut seed = 0x2545F4914F6CDD1Du64;
@@ -2734,7 +2099,7 @@ mod tests {
         let send = |msg: u32, wp: usize, x: i32, y: i32| unsafe { SendMessageW(editor as HWND, msg, wp, (x | (y << 16)) as isize) };
         // Probe on the sample page: the "Normalize" radio must change the plugin state, twice (on, off).
         let probe = |pl: &mut Plugins| -> bool {
-            pl.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(0);
+            host.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(0);
             pump(pl, 40);
             let before = state(pl);
             send(WM_LBUTTONDOWN, 1, 298, 149);
@@ -2777,7 +2142,7 @@ mod tests {
                 }
                 6 => {
                     // Switch page through the host link.
-                    if let Some(l) = &mut pl.editors.get_mut(&0).unwrap().link {
+                    if let Some(l) = &mut host.editors.get_mut(&0).unwrap().link {
                         l.set_page(rnd(2) as usize);
                     }
                 }
@@ -2786,7 +2151,7 @@ mod tests {
                 }
             }
             if i % 20 == 0 {
-                pump(&mut pl, 15);
+                pump(&mut host, &mut pl, 15);
             }
             if i % 100 == 99 && !probe(&mut pl) && failed.is_none() {
                 failed = Some(i);
@@ -2807,14 +2172,15 @@ mod tests {
         let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.create(0, 0).unwrap();
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 300);
-        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 300);
+        let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
-        pump(&mut pl, 200);
+        pump(&mut host, &mut pl, 200);
         let state = |pl: &Plugins| String::from_utf8_lossy(&pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap()).to_string();
         let offset = |s: &str| -> f32 {
             let i = s.find("\"start_offset\"").expect("start_offset in state");
@@ -2845,14 +2211,14 @@ mod tests {
             ci.flags & CURSOR_SHOWING != 0
         };
         unsafe { SetCursorPos(p.x, p.y) };
-        pump(&mut pl, 50);
+        pump(&mut host, &mut pl, 50);
         input(MOUSEEVENTF_LEFTDOWN, 0, 0);
-        pump(&mut pl, 50);
+        pump(&mut host, &mut pl, 50);
         let mut worst = 0;
         let t0 = Instant::now();
         for _ in 0..40 {
             input(MOUSEEVENTF_MOVE, 0, -3);
-            pump(&mut pl, 12);
+            pump(&mut host, &mut pl, 12);
             let (x, y) = cursor();
             worst = worst.max((x - p.x).abs() + (y - p.y).abs());
         }
@@ -2860,7 +2226,7 @@ mod tests {
         let hidden = !shown();
         let during = offset(&state(&pl));
         input(MOUSEEVENTF_LEFTUP, 0, 0);
-        pump(&mut pl, 80);
+        pump(&mut host, &mut pl, 80);
         let after = cursor();
         println!("offset {before} -> {during}, worst cursor drift {worst} px, cursor hidden while dragging: {hidden}, 40 moves in {took:?}");
         assert!(during > before + 0.01, "the knob did not follow the drag ({before} -> {during})");
@@ -2882,10 +2248,11 @@ mod tests {
         let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.create(0, 0).unwrap();
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 300);
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
         let wav = std::env::temp_dir().join(format!("os-app-knob-sound-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..88200).flat_map(|i| { let v = ((i as f32 / 44100.0 * 220.0).fract() * 2.0 - 1.0) * 0.4; [v, v] }).collect();
@@ -2896,7 +2263,7 @@ mod tests {
         let mut blob = (st.len() as u64).to_le_bytes().to_vec();
         blob.extend_from_slice(st.as_bytes());
         assert!(pl.hosted[&0].plugin.lock().unwrap().load_state(&blob));
-        pump(&mut pl, 300);
+        pump(&mut host, &mut pl, 300);
         let rate = pl.rate;
         let render = |pl: &mut Plugins| -> Vec<f32> {
             let plugin = pl.hosted[&0].plugin.clone();
@@ -2920,12 +2287,12 @@ mod tests {
         render(&mut pl);
         let before = render(&mut pl);
         assert!(before.iter().any(|v| v.abs() > 0.05), "the sample plays");
-        pl.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
-        pump(&mut pl, 100);
-        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        host.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
+        pump(&mut host, &mut pl, 100);
+        let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
-        pump(&mut pl, 200);
+        pump(&mut host, &mut pl, 200);
         // Filter MOD X: the reference's plugin window (492.5, 168.5) -> editor client (488, 96) with the host's strip
         // row.
         let mut p = POINT { x: 488, y: 96 };
@@ -2935,15 +2302,15 @@ mod tests {
             SendInput(1, &i, std::mem::size_of::<INPUT>() as i32);
         };
         unsafe { SetCursorPos(p.x, p.y) };
-        pump(&mut pl, 50);
+        pump(&mut host, &mut pl, 50);
         input(MOUSEEVENTF_LEFTDOWN, 0, 0);
-        pump(&mut pl, 50);
+        pump(&mut host, &mut pl, 50);
         for _ in 0..60 {
             input(MOUSEEVENTF_MOVE, 0, 4);
-            pump(&mut pl, 10);
+            pump(&mut host, &mut pl, 10);
         }
         input(MOUSEEVENTF_LEFTUP, 0, 0);
-        pump(&mut pl, 200);
+        pump(&mut host, &mut pl, 200);
         let state = String::from_utf8_lossy(&pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap()).to_string();
         let i = state.find("\"f_cut\"").unwrap_or(0);
         println!("state: {}", &state[i..(i + 40).min(state.len())]);
@@ -2966,10 +2333,11 @@ mod tests {
         let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.create(0, 0).unwrap();
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 300);
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
         let wav = std::env::temp_dir().join(format!("os-app-app-knob-sound-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..88200).flat_map(|i| { let v = ((i as f32 / 44100.0 * 220.0).fract() * 2.0 - 1.0) * 0.4; [v, v] }).collect();
@@ -2980,7 +2348,7 @@ mod tests {
         let mut blob = (st.len() as u64).to_le_bytes().to_vec();
         blob.extend_from_slice(st.as_bytes());
         assert!(pl.hosted[&0].plugin.lock().unwrap().load_state(&blob));
-        pump(&mut pl, 300);
+        pump(&mut host, &mut pl, 300);
         let mut project = crate::app::test_project();
         project.channels.clear();
         let row = crate::app::add_plugin_channel(&mut project, "Lemon Sampler");
@@ -3007,12 +2375,12 @@ mod tests {
         let before = level(&mut pl);
         println!("level before {before}");
         assert!(before > 0.05, "the note is heard");
-        pl.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
-        pump(&mut pl, 100);
-        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        host.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
+        pump(&mut host, &mut pl, 100);
+        let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
-        pump(&mut pl, 200);
+        pump(&mut host, &mut pl, 200);
         // Filter MOD X: the reference's plugin window (492.5, 168.5) -> editor client (488, 96) with the host's strip
         // row.
         let mut p = POINT { x: 488, y: 96 };
@@ -3022,15 +2390,15 @@ mod tests {
             SendInput(1, &i, std::mem::size_of::<INPUT>() as i32);
         };
         unsafe { SetCursorPos(p.x, p.y) };
-        pump(&mut pl, 50);
+        pump(&mut host, &mut pl, 50);
         input(MOUSEEVENTF_LEFTDOWN, 0, 0);
-        pump(&mut pl, 50);
+        pump(&mut host, &mut pl, 50);
         for _ in 0..120 {
             input(MOUSEEVENTF_MOVE, 0, 4);
-            pump(&mut pl, 10);
+            pump(&mut host, &mut pl, 10);
         }
         input(MOUSEEVENTF_LEFTUP, 0, 0);
-        pump(&mut pl, 200);
+        pump(&mut host, &mut pl, 200);
         let state = String::from_utf8_lossy(&pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap()).to_string();
         let i = state.find("\"f_cut\"").unwrap_or(0);
         println!("state: {}", &state[i..(i + 40).min(state.len())]);
@@ -3053,11 +2421,12 @@ mod tests {
         let desc = lib.plugins()[0].clone();
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.create(0, 0).unwrap();
         let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 300);
-        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 300);
+        let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe {
             SetForegroundWindow(frame as HWND);
@@ -3076,7 +2445,7 @@ mod tests {
             keybd_event(0x51, q as u8, 0, 0);
             keybd_event(0x51, q as u8, KEYEVENTF_KEYUP, 0);
         }
-        pump(&mut pl, 100);
+        pump(&mut host, &mut pl, 100);
         let keys = crate::plugin_window::take_keys();
         assert_eq!(keys.len(), 2, "{keys:?}");
         assert!(keys[0].pressed && !keys[1].pressed && keys[0].scancode == 0x10);
@@ -3109,17 +2478,18 @@ mod tests {
         let desc = lib.plugins()[0].clone();
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: monitor, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.create(0, 0).unwrap();
         let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 500);
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 500);
         let size = |h: HWND| unsafe {
             let mut r: RECT = std::mem::zeroed();
             GetWindowRect(h, &mut r);
             (r.right - r.left, r.bottom - r.top)
         };
         let handles = |pl: &Plugins| {
-            let w = pl.editors[&0].window.as_ref().unwrap();
+            let w = host.editors[&0].window.as_ref().unwrap();
             let area = w.area() as HWND;
             (w.hwnd() as HWND, area, unsafe { GetWindow(area, GW_CHILD) })
         };
@@ -3139,22 +2509,22 @@ mod tests {
             ClientToScreen(editor, &mut p);
             SetForegroundWindow(frame);
         }
-        pump(&mut pl, 200);
+        pump(&mut host, &mut pl, 200);
         let input = |flags: u32, dx: i32, dy: i32| unsafe {
             let i = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } };
             SendInput(1, &i, std::mem::size_of::<INPUT>() as i32);
         };
         let _ = pl.hosted[&0].plugin.lock().unwrap().take_param_events();
         unsafe { SetCursorPos(p.x, p.y) };
-        pump(&mut pl, 50);
+        pump(&mut host, &mut pl, 50);
         input(MOUSEEVENTF_LEFTDOWN, 0, 0);
-        pump(&mut pl, 50);
+        pump(&mut host, &mut pl, 50);
         for _ in 0..40 {
             input(MOUSEEVENTF_MOVE, 0, -3);
-            pump(&mut pl, 12);
+            pump(&mut host, &mut pl, 12);
         }
         input(MOUSEEVENTF_LEFTUP, 0, 0);
-        pump(&mut pl, 200);
+        pump(&mut host, &mut pl, 200);
         let edits = pl.hosted[&0].plugin.lock().unwrap().take_param_events();
         println!("{name}: opened at the monitor's {monitor} as {ew} x {eh}; a drag at ({x}, {y}) gave {} edits, starting {:?}", edits.len(), &edits[..edits.len().min(3)]);
         shot(&pl, "monitor");
@@ -3163,8 +2533,8 @@ mod tests {
         }
         let mut base = None;
         for k in [1.0f32, 1.5, 2.0] {
-            pl.rescale_window(0, k);
-            pump(&mut pl, 600);
+            host.rescale_window(&mut pl, 0, k);
+            pump(&mut host, &mut pl, 600);
             let (_, area, editor) = handles(&pl);
             let (e, a) = (size(editor), size(area));
             let reported = pl.hosted[&0].plugin.lock().unwrap().editor_size();
@@ -3188,6 +2558,7 @@ mod tests {
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &click).unwrap();
         let onsets = |swing: u8| -> Vec<usize> {
             let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+            let mut host = crate::editor_host::EditorHost::default();
             let index = pl.index_of(LEMON_SAMPLER).unwrap();
             let mut p = crate::app::test_project();
             p.channels.truncate(1);
@@ -3235,6 +2606,7 @@ mod tests {
     #[test]
     fn builtin_lemon_sampler_takes_a_sample() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         let mut ch = crate::app::test_project().channels.remove(0);
         ch.envelopes[1].enabled = true;
@@ -3267,6 +2639,7 @@ mod tests {
     fn builtin_synths_follow_the_hosts_tuning() {
         for name in [crate::osc3::LEMON_TRIO, crate::citrus::CITRUS] {
             let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+            let mut host = crate::editor_host::EditorHost::default();
             let index = pl.index_of(name).unwrap();
             pl.create_with(0, index, None).unwrap();
             let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
@@ -3302,6 +2675,7 @@ mod tests {
     #[test]
     fn lemon_trio_glides_on_a_mono_portamento_channel() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.create_with(0, pl.index_of(crate::osc3::LEMON_TRIO).unwrap(), None).unwrap();
         let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
         let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 1.0, ..Default::default() };
@@ -3341,6 +2715,7 @@ mod tests {
     #[test]
     fn hosted_instrument_voices_follow_the_plugins() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let sampler = pl.index_of(LEMON_SAMPLER).unwrap();
         pl.create_with(0, sampler, None).unwrap();
         // A tenth of a second of sound.
@@ -3393,6 +2768,7 @@ mod tests {
     #[test]
     fn builtin_lemon_sampler_takes_the_stretch_settings() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         let wav = std::env::temp_dir().join(format!("os-app-sampler-stretch-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..48000)
@@ -3452,6 +2828,7 @@ mod tests {
         use lemon_sampler::params::fx_from_text;
         use os_model::SampleFx;
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         let saved = |pl: &Plugins, row| {
             let st = pl.hosted[&row].plugin.lock().unwrap().save_state().unwrap();
@@ -3530,6 +2907,7 @@ mod tests {
     #[test]
     fn lemon_sampler_state_without_a_sample_plays_nothing() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         let wav = std::env::temp_dir().join(format!("os-app-sampler-cleared-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..9600).flat_map(|i| [((i as f32) * 0.0576).sin() * 0.5; 2]).collect();
@@ -3561,6 +2939,7 @@ mod tests {
     #[test]
     fn lemon_sampler_stretch_parameters_give_the_channel_settings() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         let mut ch = crate::app::test_project().channels.remove(0);
         let read = |pl: &Plugins| {
@@ -3590,6 +2969,7 @@ mod tests {
     fn builtin_parametric_eq_takes_and_gives_the_file_state() {
         use lemon_parametric_eq_2::params::{default_state, field, plugin_state_from_fl, set_field};
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         // Band 4 (default frequency: the middle of the scale) at +12 dB.
         let mut fl = default_state();
@@ -3626,6 +3006,7 @@ mod tests {
     #[test]
     fn lemon_sampler_starts_late_and_chokes() {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(LEMON_SAMPLER).unwrap();
         pl.create_with(0, index, None).unwrap();
         // One second: silent first half, 0.5 in the second.
@@ -3664,29 +3045,30 @@ mod tests {
     fn drop_on_plugin_window_loads_the_sample() {
         use windows_sys::Win32::Foundation::RECT;
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.create(0, pl.index_of(LEMON_SAMPLER).unwrap()).unwrap();
         let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        pl.open_window(0, info).unwrap();
-        pump(&mut pl, 300);
-        let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+        host.open_window(&mut pl, 0, info).unwrap();
+        pump(&mut host, &mut pl, 300);
+        let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
         let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         unsafe {
             SetForegroundWindow(frame as HWND);
             GetWindowRect(frame as HWND, &mut r);
         }
-        pump(&mut pl, 100);
+        pump(&mut host, &mut pl, 100);
         let (x, y) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-        assert_eq!(pl.row_at_screen(x, y), Some(0), "the window is found under the point");
+        assert_eq!(host.row_at_screen(x, y), Some(0), "the window is found under the point");
         let mp3 = fixture_mp3();
-        assert!(post_drop(x, y, &mp3, frame), "the editor accepts files");
-        pump(&mut pl, 300);
+        assert!(crate::editor_host::post_drop(x, y, &mp3, frame), "the editor accepts files");
+        pump(&mut host, &mut pl, 300);
         assert_eq!(pl.sampler_path(0).as_deref(), Some(mp3.as_str()));
         // The strip (no editor under the point): loaded through the state instead.
         let wav = std::env::temp_dir().join(format!("os-app-drop-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &[0.5; 2000]).unwrap();
         let wav = wav.to_string_lossy().into_owned();
-        assert!(pl.drop_file(0, r.left + 12, r.top + 40, &wav, true));
-        pump(&mut pl, 200);
+        assert!(host.drop_file(&mut pl, 0, r.left + 12, r.top + 40, &wav, true));
+        pump(&mut host, &mut pl, 200);
         assert_eq!(pl.sampler_path(0).as_deref(), Some(wav.as_str()));
     }
 
@@ -3817,6 +3199,7 @@ mod tests {
             let a = Available { desc: lib.plugins()[0].clone(), lib };
             let name = a.desc.name.clone();
             let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+            let mut host = crate::editor_host::EditorHost::default();
             let key = if effect {
                 pl.effects = vec![a];
                 pl.create_effect(1, 0, 0, None).unwrap();
@@ -3827,16 +3210,16 @@ mod tests {
                 0
             };
             let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-            pl.open_window(key, info).unwrap();
-            let frame = pl.editors[&key].window.as_ref().unwrap().hwnd();
+            host.open_window(&mut pl, key, info).unwrap();
+            let frame = host.editors[&key].window.as_ref().unwrap().hwnd();
             unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
-            pump(&mut pl, 400);
+            pump(&mut host, &mut pl, 400);
             let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
             assert!(!editor.is_null(), "{name}: the editor is a child of the frame");
             let out = dir.join(format!("vst3_{}.bmp", name.replace(' ', "_")));
             // The first capture of a window that never reached the screen makes it paint.
             capture(frame, &out);
-            pump(&mut pl, 200);
+            pump(&mut host, &mut pl, 200);
             capture(frame, &out);
         }
     }
@@ -3855,15 +3238,16 @@ mod tests {
             let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
             let a = Available { desc: lib.plugins()[0].clone(), lib };
             let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
+            let mut host = crate::editor_host::EditorHost::default();
             pl.create_effect(1, 0, 0, None).unwrap();
             let key = fx_key(1, 0);
             let info = ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
             for round in 0..2 {
-                pl.open_window(key, info.clone()).unwrap();
-                let frame = pl.editors[&key].window.as_ref().unwrap().hwnd();
+                host.open_window(&mut pl, key, info.clone()).unwrap();
+                let frame = host.editors[&key].window.as_ref().unwrap().hwnd();
                 unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
-                pump(&mut pl, 300);
-                let area = pl.editors[&key].window.as_ref().unwrap().area() as HWND;
+                pump(&mut host, &mut pl, 300);
+                let area = host.editors[&key].window.as_ref().unwrap().area() as HWND;
                 let editor = unsafe { GetWindow(area, GW_CHILD) };
                 assert!(!editor.is_null(), "{name}: the editor is a child of the frame's editor area");
                 let (mut ra, mut re): (RECT, RECT) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
@@ -3874,11 +3258,11 @@ mod tests {
                 if let Some(dir) = &dir {
                     let out = dir.join(format!("native_{}_{round}.bmp", name.replace(' ', "_")));
                     capture(frame, &out);
-                    pump(&mut pl, 200);
+                    pump(&mut host, &mut pl, 200);
                     capture(frame, &out);
                 }
-                assert!(pl.close_if_open(key));
-                pump(&mut pl, 100);
+                assert!(host.close_if_open(&mut pl, key));
+                pump(&mut host, &mut pl, 100);
             }
         }
     }
@@ -3897,6 +3281,7 @@ mod tests {
         let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
         let a = Available { desc: lib.plugins()[0].clone(), lib };
         let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let key = fx_key(1, 0);
         eprintln!("STEP create");
         if let Err(e) = pl.create_effect(1, 0, 0, None) {
@@ -3924,11 +3309,11 @@ mod tests {
         };
         eprintln!("STEP window");
         let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        match pl.open_window(key, info) {
+        match host.open_window(&mut pl, key, info) {
             Ok(()) => {
-                let frame = pl.editors[&key].window.as_ref().unwrap().hwnd();
+                let frame = host.editors[&key].window.as_ref().unwrap().hwnd();
                 unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
-                pump(&mut pl, 700);
+                pump(&mut host, &mut pl, 700);
             }
             Err(e) => eprintln!("STEP no window: {e}"),
         }
@@ -3936,8 +3321,8 @@ mod tests {
         let st = pl.state(key).unwrap_or_default();
         pl.set_state(key, &st);
         eprintln!("STEP close");
-        pl.close_if_open(key);
-        pump(&mut pl, 100);
+        host.close_if_open(&mut pl, key);
+        pump(&mut host, &mut pl, 100);
         stop.store(true, Ordering::Relaxed);
         let finite = audio.join().unwrap();
         eprintln!("STEP drop");
@@ -4085,6 +3470,7 @@ mod tests {
         let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
         let a = Available { desc: lib.plugins()[0].clone(), lib };
         let mut pl = Plugins { scale: 1.0, rate: 48000, available: vec![a], ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         eprintln!("STEP create");
         if let Err(e) = pl.create(0, 0) {
             eprintln!("RESULT refused: {e}");
@@ -4119,11 +3505,11 @@ mod tests {
         });
         eprintln!("STEP window");
         let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        match pl.open_window(0, info) {
+        match host.open_window(&mut pl, 0, info) {
             Ok(()) => {
-                let frame = pl.editors[&0].window.as_ref().unwrap().hwnd();
+                let frame = host.editors[&0].window.as_ref().unwrap().hwnd();
                 unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
-                pump(&mut pl, 700);
+                pump(&mut host, &mut pl, 700);
             }
             Err(e) => eprintln!("STEP no window: {e}"),
         }
@@ -4132,8 +3518,8 @@ mod tests {
         let st = pl.state(0).unwrap_or_default();
         pl.set_state(0, &st);
         eprintln!("STEP close");
-        pl.close_if_open(0);
-        pump(&mut pl, 100);
+        host.close_if_open(&mut pl, 0);
+        pump(&mut host, &mut pl, 100);
         eprintln!("STEP drop");
         pl.drop_key(0);
         eprintln!("RESULT ok (peak {held:.3}, after its end {tail:.4}, state {} bytes, finite output {finite})", st.len());
@@ -4241,6 +3627,7 @@ mod tests {
         let desc = builtin()[0].desc.clone();
         let plugin: SharedPlugin = Arc::new(Mutex::new(Tracked(desc, gone.clone())));
         let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         pl.hosted.insert(3, Hosted::new(plugin));
         let engine = pl.instruments();
         pl.drop_key(3);
@@ -4249,7 +3636,7 @@ mod tests {
         assert_eq!(retired_count(), 1, "kept while the engine holds it");
         std::thread::spawn(move || drop(engine)).join().unwrap();
         assert_eq!(*gone.lock().unwrap(), None, "not destroyed by the engine's release");
-        pl.idle(|_| None);
+        host.idle(&mut pl, |_| None);
         assert_eq!(*gone.lock().unwrap(), Some(std::thread::current().id()));
         assert_eq!(retired_count(), 0);
     }
@@ -4310,6 +3697,7 @@ mod tests {
         desc.name = "Faulty".into();
         let plugin = os_host::share(Faulty(desc, fault.clone()), Arc::new(os_host::guard::Module::default()));
         let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let key = fx_key(1, 0);
         pl.hosted.insert(key, Hosted::new(plugin));
         assert_eq!(pl.state(key), Some(vec![4, 5, 6]));
@@ -4318,9 +3706,9 @@ mod tests {
         // The engine's thread runs into the crash.
         let engine = fx.clone();
         std::thread::spawn(move || engine.lock().unwrap().process_fx(48000, &mut [0.5; 8], &mut [0.5; 8])).join().unwrap();
-        let told: Vec<String> = pl.idle(|_| None).into_iter().filter_map(|r| if let Request::Stopped(k, t) = r { Some(format!("{k}: {t}")) } else { None }).collect();
+        let told: Vec<String> = host.idle(&mut pl, |_| None).into_iter().filter_map(|r| if let Request::Stopped(k, t) = r { Some(format!("{k}: {t}")) } else { None }).collect();
         assert_eq!(told, [format!("{key}: Faulty stopped after a memory error: its slot passes the sound through. Save your project and restart Lemon Studio to use it again")]);
-        assert!(!pl.idle(|_| None).iter().any(|r| matches!(r, Request::Stopped(..))), "told once");
+        assert!(!host.idle(&mut pl, |_| None).iter().any(|r| matches!(r, Request::Stopped(..))), "told once");
         let (mut l, mut r) = ([0.5f32; 8], [0.5f32; 8]);
         fx.lock().unwrap().process_fx(48000, &mut l, &mut r);
         assert_eq!((l, r), ([0.5; 8], [0.5; 8]), "passed through");
@@ -4344,6 +3732,7 @@ mod tests {
             })
             .collect();
         let mut pl = Plugins { effects, scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let project = crate::app::test_project();
         let transport = crate::transport::Transport::new(None);
         transport.update(&project);
@@ -4353,16 +3742,16 @@ mod tests {
                 pl.create_effect(1, i as u8, i, None).unwrap();
                 let name = pl.effects[i].desc.name.clone();
                 let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-                pl.open_window(fx_key(1, i as u8), info).unwrap();
+                host.open_window(&mut pl, fx_key(1, i as u8), info).unwrap();
                 transport.set_effects(pl.effects());
-                pump(&mut pl, 400);
+                pump(&mut host, &mut pl, 400);
             }
             for i in 0..pl.effects.len() {
                 pl.drop_key(fx_key(1, i as u8));
                 transport.set_effects(pl.effects());
-                pump(&mut pl, 150);
+                pump(&mut host, &mut pl, 150);
             }
-            pump(&mut pl, 300);
+            pump(&mut host, &mut pl, 300);
             assert_eq!(retired_count(), 0, "round {round}: the engine let go and the UI destroyed them");
             println!("round {round} ok");
         }
@@ -4377,16 +3766,17 @@ mod tests {
         use crate::prefs::{check, DETACHED_WITH_MAIN, DETACH_NEW, LIMIT_EDITORS, TYPING_PRIORITY_OFF};
         assert_eq!((check(&DETACH_NEW), check(&DETACHED_WITH_MAIN), check(&TYPING_PRIORITY_OFF), check(&LIMIT_EDITORS)), (false, false, false, true));
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         pl.create_effect(1, 0, index, None).unwrap();
-        assert!(!pl.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "a project's instance opens docked");
+        assert!(!host.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "a project's instance opens docked");
         pl.added(fx_key(1, 0));
-        assert!(!pl.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "check off: docked");
+        assert!(!host.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "check off: docked");
         crate::prefs::set_check(&DETACH_NEW, true);
         pl.create_effect(1, 1, index, None).unwrap();
         pl.added(fx_key(1, 1));
-        assert!(pl.editors.get(&fx_key(1, 1)).is_some_and(|e| e.detached), "check on: detached");
-        assert!(!pl.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "an existing plugin keeps its mode");
+        assert!(host.editors.get(&fx_key(1, 1)).is_some_and(|e| e.detached), "check on: detached");
+        assert!(!host.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "an existing plugin keeps its mode");
     }
 
     /// "Limit the number of open plugin editors": with 25 open, the one opened earliest closes before another opens
@@ -4396,9 +3786,9 @@ mod tests {
         assert_eq!(MAX_EDITORS, 25);
         // Key 24 opened earliest.
         let open: Vec<(usize, u64)> = (0..25).map(|i| (i, 50 - i as u64)).collect();
-        assert_eq!(earliest_over(open[..24].iter().copied(), MAX_EDITORS), None, "24 open: the 25th opens beside them");
-        assert_eq!(earliest_over(open.iter().copied(), MAX_EDITORS), Some(24));
-        assert_eq!(earliest_over(std::iter::empty(), MAX_EDITORS), None);
+        assert_eq!(crate::editor_host::earliest_over(open[..24].iter().copied(), MAX_EDITORS), None, "24 open: the 25th opens beside them");
+        assert_eq!(crate::editor_host::earliest_over(open.iter().copied(), MAX_EDITORS), Some(24));
+        assert_eq!(crate::editor_host::earliest_over(std::iter::empty(), MAX_EDITORS), None);
     }
 
     /// The limit and the reopening place with real windows (spec: as above): a detached window moved, closed and
@@ -4409,6 +3799,7 @@ mod tests {
     #[ignore]
     fn editor_limit_and_reopen_place() {
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Bus {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, max_track: 125, misc: None, icon: None };
         let keys: Vec<usize> = (0..26u16).map(|i| fx_key(1 + i / 8, (i % 8) as u8)).collect();
@@ -4416,31 +3807,31 @@ mod tests {
             let (t, s) = fx_of(k).unwrap();
             pl.create_effect(t, s, index, None).unwrap();
         }
-        let open = |pl: &Plugins| pl.editors.values().filter(|e| e.window.is_some()).count();
+        let open = |pl: &Plugins| host.editors.values().filter(|e| e.window.is_some()).count();
         // Without a main window every frame is detached.
-        pl.open_window(keys[0], info(1)).unwrap();
-        let hwnd = pl.window_of(keys[0]).unwrap().0;
+        host.open_window(&mut pl, keys[0], info(1)).unwrap();
+        let hwnd = host.window_of(keys[0]).unwrap().0;
         unsafe { SetWindowPos(hwnd as HWND, std::ptr::null_mut(), 300, 200, 0, 0, SWP_NOSIZE | SWP_NOZORDER) };
-        pump(&mut pl, 50);
-        assert!(pl.close_if_open(keys[0]));
-        assert_eq!((pl.editors[&keys[0]].detached, pl.editors[&keys[0]].placed), (true, Some((300, 200))));
-        pl.open_window(keys[0], info(1)).unwrap();
-        assert_eq!(pl.editors[&keys[0]].window.as_ref().unwrap().position(), Some((300, 200)), "reopened where it was");
+        pump(&mut host, &mut pl, 50);
+        assert!(host.close_if_open(&mut pl, keys[0]));
+        assert_eq!((host.editors[&keys[0]].detached, host.editors[&keys[0]].placed), (true, Some((300, 200))));
+        host.open_window(&mut pl, keys[0], info(1)).unwrap();
+        assert_eq!(host.editors[&keys[0]].window.as_ref().unwrap().position(), Some((300, 200)), "reopened where it was");
         for &k in &keys[1..25] {
-            pl.open_window(k, info(fx_of(k).unwrap().0)).unwrap();
-            pump(&mut pl, 10);
+            host.open_window(&mut pl, k, info(fx_of(k).unwrap().0)).unwrap();
+            pump(&mut host, &mut pl, 10);
         }
         assert_eq!(open(&pl), 25);
-        pl.open_window(keys[25], info(4)).unwrap();
+        host.open_window(&mut pl, keys[25], info(4)).unwrap();
         assert_eq!(open(&pl), 25, "the 26th closed the earliest first");
-        assert!(pl.editors[&keys[0]].window.is_none() && pl.hosted.contains_key(&keys[0]), "closed, its plugin kept");
+        assert!(host.editors[&keys[0]].window.is_none() && pl.hosted.contains_key(&keys[0]), "closed, its plugin kept");
         crate::prefs::set_check(&crate::prefs::LIMIT_EDITORS, false);
-        pl.open_window(keys[0], info(1)).unwrap();
+        host.open_window(&mut pl, keys[0], info(1)).unwrap();
         assert_eq!(open(&pl), 26, "no limit");
         for &k in &keys {
             pl.drop_key(k);
         }
-        pump(&mut pl, 100);
+        pump(&mut host, &mut pl, 100);
     }
 }
 
@@ -4451,6 +3842,8 @@ mod tests {
 #[cfg(all(test, target_os = "linux"))]
 mod resize_tests {
     use super::*;
+    use crate::editor_host::EditorHost;
+    use crate::plugin_window::{ChannelInfo, FrameEvent};
     use std::ffi::c_void;
     use std::sync::Mutex;
     use x11rb::connection::Connection as _;
@@ -4512,20 +3905,22 @@ mod resize_tests {
         }
     }
 
-    fn open(size: (u32, u32), resizable: bool) -> (Plugins, Arc<Mutex<Vec<(u32, u32)>>>) {
+    fn open(size: (u32, u32), resizable: bool) -> (Plugins, EditorHost, Arc<Mutex<Vec<(u32, u32)>>>) {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let desc = os_host::Descriptor { format: os_host::Format::Clap, id: "stretchy".into(), name: "Stretchy".into(), vendor: String::new(), version: String::new(), features: Vec::new(), kind: os_host::Kind::Instrument, path: PathBuf::new() };
         let p: SharedPlugin = Arc::new(Mutex::new(Stretchy { desc, size, resizable, asked: asked.clone() }));
         let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = EditorHost::default();
         pl.hosted.insert(0, Hosted::new(p));
         let info = ChannelInfo { icon: None, name: "Stretchy".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-        pl.open_window(0, info).unwrap();
-        (pl, asked)
+        let mut host = EditorHost::default();
+        host.open_window(&mut pl, 0, info).unwrap();
+        (pl, host, asked)
     }
 
-    fn tick(pl: &mut Plugins, n: usize) {
+    fn tick(pl: &mut Plugins, host: &mut EditorHost, n: usize) {
         for _ in 0..n {
-            pl.idle(|_| None);
+            host.idle(pl, |_| None);
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -4547,11 +3942,12 @@ mod resize_tests {
         let desc = lib.plugins()[0].clone();
         let (c, _) = x11rb::connect(None).expect("an X server (DISPLAY)");
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut host = EditorHost::default();
         pl.create(0, 0).unwrap();
         let info = ChannelInfo { icon: None, name: "Resize".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-        pl.open_window(0, info).unwrap();
-        tick(&mut pl, 30);
-        let w = pl.editors[&0].window.as_ref().unwrap();
+        host.open_window(&mut pl, 0, info).unwrap();
+        tick(&mut pl, &mut host, 30);
+        let w = host.editors[&0].window.as_ref().unwrap();
         let (win, area, k) = (w.hwnd() as u32, w.area() as usize as u32, w.scale());
         let chrome = w.chrome();
         let chrome = ((chrome.0 * k).round() as u32, (chrome.1 * k).round() as u32);
@@ -4561,8 +3957,8 @@ mod resize_tests {
         println!("{}: can resize {can}; editor {before:?}, frame {:?}, editor window {:?}", path.display(), geometry(&c, win), editor_window());
         for target in [(before.0 + 200, before.1 + 150), (before.0 * 3 / 4, before.1 * 3 / 4)] {
             let logical = |v: u32| (v as f32 / k).round() as u32;
-            pl.editors[&0].window.as_ref().unwrap().push_event(FrameEvent::Resize(logical(target.0), logical(target.1)));
-            tick(&mut pl, 40);
+            host.editors[&0].window.as_ref().unwrap().push_event(FrameEvent::Resize(logical(target.0), logical(target.1)));
+            tick(&mut pl, &mut host, 40);
             let now = pl.hosted[&0].plugin.lock().unwrap().editor_size().unwrap();
             let frame = geometry(&c, win);
             println!("asked {target:?}: editor {now:?}, frame {frame:?}, area {:?}, editor window {:?}", geometry(&c, area), editor_window());
@@ -4581,9 +3977,9 @@ mod resize_tests {
     fn editors_follow_frame_resizes() {
         let (c, screen) = x11rb::connect(None).expect("an X server (DISPLAY)");
         let root = c.setup().roots[screen].clone();
-        let (mut pl, asked) = open((600, 400), true);
-        tick(&mut pl, 5);
-        let w = pl.editors[&0].window.as_ref().unwrap();
+        let (mut pl, mut host, asked) = open((600, 400), true);
+        tick(&mut pl, &mut host, 5);
+        let w = host.editors[&0].window.as_ref().unwrap();
         let (win, area, k) = (w.hwnd() as u32, w.area() as usize as u32, w.scale());
         let chrome = w.chrome();
         let chrome = ((chrome.0 * k).round() as u32, (chrome.1 * k).round() as u32);
@@ -4592,7 +3988,7 @@ mod resize_tests {
 
         // A drag of the frame's edges: the editor is asked, and the frame takes the size it took.
         w.push_event(FrameEvent::Resize(1005, 703));
-        tick(&mut pl, 5);
+        tick(&mut pl, &mut host, 5);
         let asked_now = asked.lock().unwrap().clone();
         println!("asked {asked_now:?}; frame {:?}, area {:?}", geometry(&c, win), geometry(&c, area));
         let px = |v: f32| (v * k).round() as u32;
@@ -4603,26 +3999,26 @@ mod resize_tests {
         drop(pl);
 
         // An editor that cannot be resized: nothing is asked of it.
-        let (mut pl, asked) = open((600, 400), false);
-        tick(&mut pl, 5);
-        pl.editors[&0].window.as_ref().unwrap().push_event(FrameEvent::Resize(900, 900));
-        tick(&mut pl, 5);
+        let (mut pl, mut host, asked) = open((600, 400), false);
+        tick(&mut pl, &mut host, 5);
+        host.editors[&0].window.as_ref().unwrap().push_event(FrameEvent::Resize(900, 900));
+        tick(&mut pl, &mut host, 5);
         assert!(asked.lock().unwrap().is_empty(), "nothing asked of an editor that cannot be resized");
         drop(pl);
 
         // Larger than the screen: a resizable editor opens fitted to it, another one as it is.
         let (sw, sh) = (u32::from(root.width_in_pixels), u32::from(root.height_in_pixels));
-        let (mut pl, asked) = open((sw + 500, sh + 300), true);
-        tick(&mut pl, 5);
-        let win = pl.editors[&0].window.as_ref().unwrap().hwnd() as u32;
+        let (mut pl, mut host, asked) = open((sw + 500, sh + 300), true);
+        tick(&mut pl, &mut host, 5);
+        let win = host.editors[&0].window.as_ref().unwrap().hwnd() as u32;
         let (fw, fh) = geometry(&c, win);
         println!("screen {sw} x {sh}: a {} x {} editor opens in a {fw} x {fh} window; asked {:?}", sw + 500, sh + 300, asked.lock().unwrap());
         assert!(fw <= sw && fh <= sh, "the window fits the screen");
         assert!(fw + 10 > sw && fh + 10 > sh, "and uses it");
         drop(pl);
-        let (mut pl, _) = open((sw + 500, sh + 300), false);
-        tick(&mut pl, 5);
-        let win = pl.editors[&0].window.as_ref().unwrap().hwnd() as u32;
+        let (mut pl, mut host, _) = open((sw + 500, sh + 300), false);
+        tick(&mut pl, &mut host, 5);
+        let win = host.editors[&0].window.as_ref().unwrap().hwnd() as u32;
         assert!(geometry(&c, win).0 > sw, "an editor that cannot be resized is left as it is");
     }
 }

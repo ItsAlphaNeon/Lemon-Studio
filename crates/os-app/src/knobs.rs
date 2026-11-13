@@ -402,7 +402,7 @@ impl crate::app::App {
             }
             Control::Fader(t) => {
                 let v = os_model::MixerTrack::new(t).volume.unwrap_or(0.8);
-                crate::control::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t), |s| {
+                crate::control_ui::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t), |s| {
                     if let Some(m) = crate::mixer::track_mut(&mut s.session, t) {
                         m.volume = Some(v);
                         s.session.dirty = true;
@@ -411,7 +411,7 @@ impl crate::app::App {
                 self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
             }
             Control::ChanPitch(row) => {
-                crate::control::edit(s, "Channel pitch", crate::control::command::Region::Channel(row), |s| {
+                crate::control_ui::edit(s, "Channel pitch", crate::control::command::Region::Channel(row), |s| {
                     if let Some(ch) = s.session.project.get_mut().channels.get_mut(row) {
                         ch.pitch_cents = 0;
                         s.session.dirty = true;
@@ -507,7 +507,7 @@ mod tests {
             assert_eq!(app.state.knob(id), id.default_value(), "{id:?}");
             assert_eq!(app.hint, app.state.knob_text(id));
         }
-        assert!(crate::history::undo(&mut app.state).is_some(), "an undo step");
+        assert!(crate::history_ui::undo(&mut app.state).is_some(), "an undo step");
         assert_ne!(app.state.knob(KnobId::SlotMix(1, 0)), 1.0, "undone");
         crate::mixer::track_mut(&mut app.state.session, 1).unwrap().volume = Some(0.2);
         app.reset_control(Control::Fader(1));

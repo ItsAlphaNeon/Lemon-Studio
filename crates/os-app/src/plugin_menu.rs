@@ -201,7 +201,7 @@ pub fn run(app: &mut App, c: PlugCmd) -> Option<String> {
 /// channel hosting it. Its plugin window opens once it is hosted. One undo step, "Add channel" (`control::edit_app`):
 /// undone, the channel goes and its instance is kept; redone, it comes back with it (`control::host`).
 pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
-    crate::control::edit_app(app, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| add_generator_now(app, index, after))
+    crate::control_ui::edit_app(app, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| add_generator_now(app, index, after))
 }
 
 pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
@@ -240,7 +240,7 @@ pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize
 /// (`control::edit_app`): the channel takes a new id, so its old instrument, kept by the old one's (`Plugins::keep`),
 /// comes back with an undo and the new one with a redo (`control::host`).
 pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<String> {
-    crate::control::edit_app(app, crate::history::REPLACE_CHANNEL, crate::control::command::Region::Project, |app| replace_generator_now(app, index, row))
+    crate::control_ui::edit_app(app, crate::history::REPLACE_CHANNEL, crate::control::command::Region::Project, |app| replace_generator_now(app, index, row))
 }
 
 fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<String> {

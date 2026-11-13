@@ -1523,7 +1523,7 @@ fn engine(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayM
     // The engine hands its instruments one tick per call: Lemon Sampler's voices step on those calls.
     lemon_sampler::set_host_ticks(project.ppq);
     let mut e = Engine::with_instruments(project, library, rate, mode, &list);
-    crate::project_plugins::attach_effects(&mut e, project, fx);
+    crate::effect_ports::attach_effects(&mut e, project, fx);
     e
 }
 

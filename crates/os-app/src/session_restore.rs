@@ -70,12 +70,12 @@ pub fn tokens(app: &App) -> Vec<Token> {
     z.iter()
         .filter_map(|&w| match w {
             Win::Plugin => Some(Token::Channel(s.plugin_channel)),
-            Win::Hosted(k) => app.state.session.plugins.editors.get(&k).filter(|e| e.window.is_some()).map(|_| Token::Plugin(k)),
+            Win::Hosted(k) => app.state.editor_host.editors.get(&k).filter(|e| e.window.is_some()).map(|_| Token::Plugin(k)),
             w => NAMES.iter().any(|(x, _)| *x == w).then_some(Token::Win(w)),
         })
         .chain(
             // Plugin windows of their own (not in the window stack): after the rest.
-            app.state.session.plugins.editors.iter().filter(|(k, e)| e.window.is_some() && !z.contains(&Win::Hosted(**k))).map(|(k, _)| Token::Plugin(*k)),
+            app.state.editor_host.editors.iter().filter(|(k, e)| e.window.is_some() && !z.contains(&Win::Hosted(**k))).map(|(k, _)| Token::Plugin(*k)),
         )
         .collect()
 }

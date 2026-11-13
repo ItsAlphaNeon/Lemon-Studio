@@ -61,7 +61,7 @@ pub fn start_marker(s: &State, n: u16) -> Option<usize> {
 /// after the signature as FL names it ("3/8", §4-5). The pattern's bars follow it, and so do its clips that kept their
 /// natural length. One undo step.
 pub fn set_start(s: &mut State, n: u16, num: u8, den: u8) {
-    crate::control::edit(s, STEP, crate::control::command::Region::Project, |s| set_start_now(s, n, num, den));
+    crate::control_ui::edit(s, STEP, crate::control::command::Region::Project, |s| set_start_now(s, n, num, den));
 }
 
 /// The pattern time signature's undo step.
@@ -78,7 +78,7 @@ fn set_start_now(s: &mut State, n: u16, num: u8, den: u8) {
 /// Yes to the conflict question took the start marker away: the pattern's bars are the project's again (§3).
 pub fn remove_start(s: &mut State, n: u16) {
     let Some(i) = start_marker(s, n) else { return };
-    crate::control::edit(s, STEP, crate::control::command::Region::Project, |s| {
+    crate::control_ui::edit(s, STEP, crate::control::command::Region::Project, |s| {
         let old = s.session.project.pattern_length(n);
         crate::patterns::pat_mut(&mut s.session, n).markers.remove(i);
         crate::playlist::refit_pattern_clips(&mut s.session, n, old);

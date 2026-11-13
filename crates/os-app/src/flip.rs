@@ -45,7 +45,7 @@ pub fn flip(mut notes: Vec<Note>, set: &Settings) -> Vec<Note> {
 mod tests {
     use super::*;
 
-    fn note(pos: u32, len: u32, key: u16, vel: u8) -> Note {
+    pub(crate) fn note(pos: u32, len: u32, key: u16, vel: u8) -> Note {
         Note { length: len, key, velocity: vel, ..Note::step(0, pos) }
     }
 

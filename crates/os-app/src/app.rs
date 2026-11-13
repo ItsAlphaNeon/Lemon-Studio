@@ -1097,6 +1097,8 @@ impl State {
 pub struct State {
     /// The open project and what goes with it (`crate::session`).
     pub session: crate::session::Session,
+    /// The plugin editor windows (`crate::editor_host`): the interface's, apart from the instances.
+    pub editor_host: crate::editor_host::EditorHost,
     /// The rack's view an undo step puts back, by step (`crate::follow`).
     pub rack_views: std::collections::HashMap<u64, crate::follow::RackView>,
     /// The toolbar's scope / analyzer and peak bars (fed from the audio tap in `App::tick`).
@@ -1743,6 +1745,7 @@ impl App {
             journal: crate::journal::Journal::start(),
             state: State {
                 session: crate::session::Session::new(project, transport),
+                editor_host: Default::default(),
                 rack_views: Default::default(),
                 plugdb: Default::default(),
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -2009,7 +2012,7 @@ impl App {
         }
         // A zipped project is unzipped beside itself, then its project file opens (`crate::zipped`).
         if ext == "zip" {
-            crate::zipped::import(self, path);
+            crate::zipped_ui::import(self, path);
             return false;
         }
         // A project in the layout used before version 24.2 is converted to the current one as it opens, and is saved in
@@ -2079,7 +2082,7 @@ impl App {
                 }
                 self.mark_saved();
                 self.journal_opened(Some(&opened));
-                crate::missing::opened(self);
+                crate::missing_ui::opened(self);
                 crate::project_io::start_loading(&mut self.state.session);
                 self.invalidate();
                 true
@@ -2340,7 +2343,7 @@ impl App {
                 #[cfg(not(target_os = "linux"))]
                 let rows = vec![row];
                 for r in rows {
-                    self.state.session.plugins.close_window(r);
+                    self.state.editor_host.close_window(&mut self.state.session.plugins, r);
                 }
             }
             w => self.act(Action::CloseWin(w)),
@@ -2469,17 +2472,17 @@ impl App {
             }
             Then::MissingFiles => {
                 if reply == Reply::Button(Answer::Yes) {
-                    crate::missing::pick_folder(self);
+                    crate::missing_ui::pick_folder(self);
                 }
             }
             Then::SampleFolder => {
                 if let Some(p) = file {
-                    crate::missing::search(self, p);
+                    crate::missing_ui::search(self, p);
                 }
             }
             Then::ExportZip => {
                 if let Some(p) = file {
-                    crate::zipped::export(self, p);
+                    crate::zipped_ui::export(self, p);
                 }
             }
             Then::FactoryFolder => {
@@ -2505,7 +2508,7 @@ impl App {
             }
             Then::SavePreset(key) => {
                 if let Some(p) = file {
-                    self.state.message = crate::presets::save_chosen(self, key, p);
+                    self.state.message = crate::presets_ui::save_chosen(self, key, p);
                 }
             }
             Then::SaveChannelState(row) => {
@@ -2515,17 +2518,17 @@ impl App {
             }
             Then::ImportPreset(key) => {
                 if let Some(p) = file {
-                    self.state.message = crate::presets::import_chosen(self, key, p);
+                    self.state.message = crate::presets_ui::import_chosen(self, key, p);
                 }
             }
             Then::RenamePreset(key, old) => {
                 if let Some(p) = file {
-                    self.state.message = crate::presets::rename_chosen(self, key, old, p);
+                    self.state.message = crate::presets_ui::rename_chosen(self, key, old, p);
                 }
             }
             Then::DeletePreset(key, path) => {
                 if reply == Reply::Button(Answer::Yes) {
-                    self.state.message = crate::presets::delete_chosen(self, key, path);
+                    self.state.message = crate::presets_ui::delete_chosen(self, key, path);
                 }
             }
             Then::SaveToolbarPreset => {
@@ -2600,7 +2603,7 @@ impl App {
             }
             Then::Proposal(n) => {
                 let s = &mut self.state;
-                let r = if reply == Reply::Button(Answer::Yes) { crate::control::accept(s, n).map(|_| ()) } else { crate::control::discard(&mut s.session, n) };
+                let r = if reply == Reply::Button(Answer::Yes) { crate::control_ui::accept(s, n).map(|_| ()) } else { crate::control::discard(&mut s.session, n) };
                 if let Err(e) = r {
                     s.message = Some(e);
                 }
@@ -2708,7 +2711,7 @@ impl App {
     /// `loading::sync_samplers` with the views following it (tests).
     #[cfg(test)]
     fn sync_samplers(&mut self, deadline: Option<std::time::Instant>) -> bool {
-        self.host(|s| crate::loading::sync_samplers(s, deadline))
+        self.host(|s| crate::loading_ui::sync_samplers(s, deadline))
     }
 
     /// Project loading (spec: ui/project-loading.md): samples decode on worker threads first, then the sampler
@@ -2716,11 +2719,11 @@ impl App {
     /// project, new sampler rows are hosted at once.
     fn loading_tick(&mut self) {
         let scanning = self.sweep.is_some();
-        match self.host(|s| crate::loading::tick(s, scanning)) {
+        match self.host(|s| crate::loading_ui::tick(s, scanning)) {
             None => {}
             // What was not found is listed now (spec: ui/project-loading.md §6).
             Some(true) => {
-                crate::missing::loaded(self);
+                crate::missing_ui::loaded(self);
                 self.invalidate();
             }
             Some(false) => self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0)),
@@ -2776,14 +2779,14 @@ impl App {
         self.scan_tick();
         self.loading_tick();
         self.export_tick();
-        crate::missing::tick(self);
-        crate::zipped::tick(self);
+        crate::missing_ui::tick(self);
+        crate::zipped_ui::tick(self);
         self.midi_tick();
         self.sync_midi_outs();
         self.mixer_tick();
         self.follow_ids(false, true);
         self.host_commands();
-        crate::presets::pending_tick(self);
+        crate::presets_ui::pending_tick(self);
         self.params_tick();
         // While a project loads, `loading_tick` starts these a few per tick.
         if self.state.session.loading.is_none() {
@@ -2816,7 +2819,7 @@ impl App {
         #[cfg(plugin_windows)]
         if let Some(row) = self.state.session.pending_open.take().filter(|r| self.state.session.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.session.project, row) {
-                match self.state.session.plugins.open_window(row, info) {
+                match self.state.editor_host.open_window(&mut self.state.session.plugins, row, info) {
                     Ok(()) => {
                         self.state.raise(Win::Hosted(row));
                         self.select_window_track(row);
@@ -2834,7 +2837,7 @@ impl App {
         let requests = {
             let members = self.member_infos();
             let project = &self.state.session.project;
-            self.state.session.plugins.idle(|row| {
+            self.state.editor_host.idle(&mut self.state.session.plugins, |row| {
                 // A container's member (`crate::container`): its name over its slot's title.
                 if row >= crate::plugins::MEMBER_KEY {
                     return members.get(&row).cloned();
@@ -2845,7 +2848,7 @@ impl App {
         };
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
-        self.state.session.plugins.idle(|_| None);
+        self.state.editor_host.idle(&mut self.state.session.plugins, |_| None);
         // What was hosted on this tick takes the id of its channel or slot now, before anything moves rows.
         self.follow_ids(false, false);
         // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
@@ -2855,7 +2858,7 @@ impl App {
         // armed, so the microphone is not held (and shown in use) the rest of the time.
         crate::device::want_inputs(self.state.session.project.mixer.iter().any(|m| m.audio_in >= 0 && (m.monitored() || m.armed)));
         let monitoring = self.state.session.project.mixer.iter().any(|m| m.monitored()) && crate::device::input_source().is_some();
-        let listen = self.state.session.plugins.editor_open() || monitoring;
+        let listen = self.state.editor_host.editor_open() || monitoring;
         if listen {
             self.sync_live();
         }
@@ -2883,7 +2886,7 @@ impl App {
         #[cfg(plugin_windows)]
         {
             for r in requests {
-                use crate::plugins::Request;
+                use crate::editor_host::Request;
                 let chans = &mut self.state.session.project.get_mut().channels;
                 match r {
                     // The window's own close: all its tabs (a tab's little x closes only that one).
@@ -2891,7 +2894,7 @@ impl App {
                     Request::Close(row) => {
                         let others: Vec<usize> = self.state.plugin_tabs.group_of(row).map_or(Vec::new(), |g| g.rows.iter().copied().filter(|&o| o != row).collect());
                         for o in others {
-                            self.state.session.plugins.close_window(o);
+                            self.state.editor_host.close_window(&mut self.state.session.plugins, o);
                         }
                         continue;
                     }
@@ -2925,7 +2928,7 @@ impl App {
                     Request::PluginMenu(row, m, (x, y)) => {
                         // The plugin's own menu (VST 3 context menu) as the app's popup, over its window docked or
                         // detached (spec: plugins/vst3-hosting.md §9).
-                        let detached = self.state.session.plugins.window_of(row).is_some_and(|(_, d)| d);
+                        let detached = self.state.editor_host.window_of(row).is_some_and(|(_, d)| d);
                         let at = self.screen_to_canvas(x, y);
                         if self.show_plugin_menu(row, &m, at) {
                             self.popup_lift = detached.then_some(row);
@@ -2934,7 +2937,7 @@ impl App {
                         continue;
                     }
                     Request::Menu(row, x, y) => {
-                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
                         // A plugin window drawn in the app's own (Linux, a plugin compiled into Lemon Studio) stays in it.
@@ -2945,7 +2948,7 @@ impl App {
                             }
                         }
                         // A container's member has its presets too (plugins/patcher/README.md §4.2).
-                        crate::presets::fill_window_menu(self, row, &mut menu);
+                        crate::presets_ui::fill_window_menu(self, row, &mut menu);
                         crate::playlist::fill_plugin_window_menu(&self.state, row, &mut menu);
                         // A channel's window: Replace ▸ lists the generators (an effect slot's stays greyed here; the
                         // mixer's slot menu has its own Replace ▸).
@@ -2960,15 +2963,15 @@ impl App {
                         continue;
                     }
                     Request::Presets(row, x, y) => {
-                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
-                        self.state.playlist.popup = Some(crate::presets::popup(self, row, lx, ly));
+                        self.state.playlist.popup = Some(crate::presets_ui::popup(self, row, lx, ly));
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
                         continue;
                     }
                     Request::PresetStep(row, d) => {
-                        self.state.message = crate::presets::run(self, crate::presets::PCmd::Step(row, d));
+                        self.state.message = crate::presets_ui::run(self, crate::presets::PCmd::Step(row, d));
                         continue;
                     }
                     Request::DropFile(row, path) => {
@@ -2980,7 +2983,7 @@ impl App {
                         continue;
                     }
                     Request::MiscMenu(row, m, x, y) => {
-                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::misc::menu(self, row, m, lx, ly));
                         self.popup_lift = detached.then_some(row);
@@ -2988,7 +2991,7 @@ impl App {
                         continue;
                     }
                     Request::KnobMenu(row, c, x, y) => {
-                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(match c {
                             // The channel's volume and pan: the rack's knob menu (spec: ui/channel-rack.md §19).
@@ -3003,7 +3006,7 @@ impl App {
                     // notches of one knob one step (`control::run_edit`).
                     Request::ToggleOn(row) => {
                         let _ = chans;
-                        crate::control::knob_edit(&mut self.state, crate::rack::MUTE_SOLO, Region::Mutes, |s| {
+                        crate::control_ui::knob_edit(&mut self.state, crate::rack::MUTE_SOLO, Region::Mutes, |s| {
                             s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled)
                         })
                     }
@@ -3012,7 +3015,7 @@ impl App {
                     Request::PitchCents(row, v) => self.channel_control(row, ChannelControl::Pitch, |c| c.pitch_cents = v),
                     Request::PitchRange(row, r) => {
                         let _ = chans;
-                        crate::control::edit(&mut self.state, "Channel pitch range", Region::Channel(row), |s| {
+                        crate::control_ui::edit(&mut self.state, "Channel pitch range", Region::Channel(row), |s| {
                             s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| {
                                 // A narrower range takes the pitch knob with it.
                                 c.misc.pitch_range = r.clamp(1, 48) as u8;
@@ -3106,7 +3109,7 @@ impl App {
         let k = self.state.ui_scale.max(0.1);
         let canvas = ((self.state.screen.0 * k).round() as u32, (self.state.screen.1 * k).round() as u32);
         let work = self.state.work_rect();
-        let frames = self.state.session.plugins.embeds();
+        let frames = self.state.editor_host.embeds();
         self.sync_plugin_tabs(&frames);
         let mut seen = std::mem::take(&mut self.embed_seen);
         for (row, (_, r, o)) in &seen {
@@ -3154,7 +3157,7 @@ impl App {
             ChannelControl::Misc(_) => ("Channel settings", true),
         };
         let run = crate::history::Run::Channel(row, which);
-        crate::control::run_edit(&mut self.state, name, Region::Channel(row), run, knob, |s| {
+        crate::control_ui::run_edit(&mut self.state, name, Region::Channel(row), run, knob, |s| {
             if let Some(c) = s.session.project.get_mut().channels.get_mut(row) {
                 f(c);
             }
@@ -3203,7 +3206,7 @@ impl App {
     /// main window, which the detached window covers).
     #[cfg(plugin_windows)]
     pub fn sync_lift(&mut self, canvas: &Canvas) {
-        let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.state.session.plugins.window_of(r));
+        let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.state.editor_host.window_of(r));
         let bounds = self.overlays.iter().copied().reduce(|a, b| a.union(&b));
         match (lifted, bounds) {
             (Some((frame, true)), Some(b)) => {
@@ -3230,7 +3233,7 @@ impl App {
     /// windows above them and the overlays (spec: ui/plugin-window.md "Docking"). Detached windows leave `State::z`.
     #[cfg(plugin_windows)]
     fn clip_docked(&mut self) {
-        let mut docked = self.state.session.plugins.docked();
+        let mut docked = self.state.editor_host.docked();
         // A hidden tab brought forward (from the rack, say) shows; the others stay out of the stack. Then the groups
         // take in the windows opened and closed since the last look: a window closed (its button in the rack clicked
         // again) would otherwise still be the tab showing, and the one left would leave the stack until the next tick.
@@ -3239,7 +3242,7 @@ impl App {
             if let Some(&Win::Hosted(r)) = self.state.z.last() {
                 self.state.plugin_tabs.activate(r);
             }
-            let frames = self.state.session.plugins.embeds();
+            let frames = self.state.editor_host.embeds();
             self.sync_plugin_tabs(&frames);
             let tabs = &self.state.plugin_tabs;
             docked.retain(|&r| !tabs.hidden(r));
@@ -3257,7 +3260,7 @@ impl App {
         let over: Vec<[i32; 4]> = self.overlays.iter().map(|&r| px(r.outset(2.0))).collect();
         let z = self.state.paint_order();
         let stacked: Vec<usize> = z.iter().filter_map(|w| if let Win::Hosted(r) = w { Some(*r) } else { None }).collect();
-        self.state.session.plugins.stack(&stacked);
+        self.state.editor_host.stack(&self.state.session.plugins, &stacked);
         let docked_at = z.iter().rposition(|&w| self.state.is_max(w));
         for (i, &w) in z.iter().enumerate() {
             let Win::Hosted(row) = w else { continue };
@@ -3271,7 +3274,7 @@ impl App {
             if docked_at.is_some_and(|d| i < d) {
                 covers.push(work);
             }
-            self.state.session.plugins.clip(row, work, &covers);
+            self.state.editor_host.clip(row, work, &covers);
         }
     }
 
@@ -3732,7 +3735,7 @@ impl App {
         // Hosted plugin windows (rack rows and mixer slots; detached ones are not in the stack).
         let rows: Vec<usize> = self.state.session.plugins.hosted.keys().copied().collect();
         for row in rows.into_iter().filter(|&r| keep != Some(Win::Hosted(r))) {
-            self.state.session.plugins.close_if_open(row);
+            self.state.editor_host.close_if_open(&mut self.state.session.plugins, row);
         }
         self.invalidate();
     }
@@ -4048,7 +4051,7 @@ impl App {
             TapAct::Apply => {
                 if crate::tapper::toggle_apply() {
                     if let Some(bpm) = self.state.tapper.count.tempo() {
-                        crate::control::edit_app(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, |app| app.set_tempo(bpm));
+                        crate::control_ui::edit_app(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, |app| app.set_tempo(bpm));
                     }
                 }
             }
@@ -4080,7 +4083,7 @@ impl App {
             self.state.session.history.end_run();
         }
         if let Some(bpm) = bpm.filter(|_| crate::tapper::get().apply) {
-            crate::control::edit_run(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, crate::history::Run::Tap, |app| app.set_tempo(bpm));
+            crate::control_ui::edit_run(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, crate::history::Run::Tap, |app| app.set_tempo(bpm));
         }
         self.damage_win(Win::Tapper);
     }
@@ -4365,7 +4368,7 @@ impl App {
     fn float_layer_tick(&mut self, now: std::time::Instant) {
         use crate::float_layer as layer;
         #[cfg(target_os = "linux")]
-        let native = self.state.session.plugins.native_rows();
+        let native = self.state.editor_host.native_rows();
         #[cfg(not(target_os = "linux"))]
         let native: Vec<usize> = Vec::new();
         let motion = !cfg!(test) && crate::anim::level() >= crate::anim::Level::Polished;
@@ -4382,7 +4385,7 @@ impl App {
         };
         if layer::step(&mut self.state, now) || moved {
             #[cfg(target_os = "linux")]
-            self.state.session.plugins.slide_native(self.state.float_layer.at());
+            self.state.editor_host.slide_native(self.state.float_layer.at());
             self.invalidate();
         }
     }
@@ -5049,17 +5052,17 @@ impl App {
             _ => None,
         };
         if let Some(l) = &self.state.session.loading {
-            crate::loading::paint(canvas, &self.theme.colors, l);
+            crate::loading_ui::paint(canvas, &self.theme.colors, l);
         }
         if let Some(s) = &self.state.session.missing.search {
-            crate::missing::paint(canvas, &self.theme.colors, s);
+            crate::missing_ui::paint(canvas, &self.theme.colors, s);
         }
         if let Some(z) = &self.state.session.zipping {
-            crate::zipped::paint(canvas, &self.theme.colors, z);
+            crate::zipped_ui::paint(canvas, &self.theme.colors, z);
         }
         if let Some((name, p)) = &self.state.session.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
-            crate::loading::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
+            crate::loading_ui::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
         }
     }
 
@@ -5174,7 +5177,7 @@ impl App {
         }
         // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
         if crate::presets::is_preset_file(&path) {
-            self.state.message = crate::presets::dropped(self, &path);
+            self.state.message = crate::presets_ui::dropped(self, &path);
             return self.invalidate();
         }
         if path.is_dir() {
@@ -5272,7 +5275,7 @@ impl App {
             }
         };
         let n = st.slices.len();
-        crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
+        crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
             let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
             let ch = &mut s.session.project.get_mut().channels[row];
@@ -5336,7 +5339,7 @@ impl App {
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn plugin_window_under_cursor(&self) -> Option<usize> {
         let (x, y) = Self::pointer_on_screen()?;
-        self.state.session.plugins.row_at_screen(x, y)
+        self.state.editor_host.row_at_screen(x, y)
     }
 
     /// A browser sample released over a hosted plugin window (it sits above the main window, which keeps the mouse
@@ -5345,12 +5348,12 @@ impl App {
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn sample_to_plugin_window(&mut self, path: &str) -> bool {
         let Some((x, y)) = Self::pointer_on_screen() else { return false };
-        let Some(row) = self.state.session.plugins.row_at_screen(x, y) else { return false };
+        let Some(row) = self.state.editor_host.row_at_screen(x, y) else { return false };
         if self.loop_to_slicer(row, path) {
             return true;
         }
         let sampler = self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
-        let taken = self.state.session.plugins.drop_file(row, x, y, path, sampler);
+        let taken = self.state.editor_host.drop_file(&mut self.state.session.plugins, row, x, y, path, sampler);
         self.sample_taken(row, path, sampler, taken);
         true
     }
@@ -5382,7 +5385,7 @@ impl App {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn file_on_plugin_window(&mut self, row: usize, path: PathBuf) {
         if crate::presets::is_preset_file(&path) {
-            self.state.message = crate::presets::load_into(self, row, &path);
+            self.state.message = crate::presets_ui::load_into(self, row, &path);
             return self.invalidate();
         }
         let p = path.to_string_lossy().into_owned();
@@ -5893,7 +5896,7 @@ impl App {
     /// metronome's accents, what hosted plugins are told), as do the pattern lengths the editors draw; the project
     /// counts as changed.
     pub fn set_bar(&mut self, beats: u16, steps: u16) -> Option<String> {
-        crate::control::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_bar_now(beats, steps))
+        crate::control_ui::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_bar_now(beats, steps))
     }
 
     fn set_bar_now(&mut self, beats: u16, steps: u16) -> Option<String> {
@@ -5910,7 +5913,7 @@ impl App {
     /// division"). Each mode keeps its own last bar while the program runs (4/4 at first): switching keeps the bar of
     /// the mode left and writes the other mode's into the project. A bar is never converted between the modes.
     pub fn set_time_mode(&mut self, signature: bool) -> Option<String> {
-        crate::control::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_time_mode_now(signature))
+        crate::control_ui::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_time_mode_now(signature))
     }
 
     fn set_time_mode_now(&mut self, signature: bool) -> Option<String> {
@@ -5955,7 +5958,7 @@ impl App {
         let v = (i32::from(now) + delta).clamp(i32::from(lo.min(now)), i32::from(hi.max(now))) as u16;
         // Wheel notches in a row make one undo step.
         let bar = if beat_box { (v, steps) } else { (beats, v) };
-        crate::control::edit_run(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, crate::history::Run::Bar, |app| app.set_bar_now(bar.0, bar.1))
+        crate::control_ui::edit_run(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, crate::history::Run::Bar, |app| app.set_bar_now(bar.0, bar.1))
     }
 
     /// Settings > Project ▸ Timebase (PPQ): the project's ticks per quarter (the file header's PPQ). Every tick count
@@ -5980,7 +5983,7 @@ impl App {
     /// "Panning law: Triangular"): the law of the channel and mixer track pans. Playback follows from its next tick, as
     /// for any pan edit; the project counts as changed. A file without the event is Circular.
     pub fn set_panning_law(&mut self, law: u8) -> Option<String> {
-        crate::control::edit(&mut self.state, "Panning law", crate::control::command::Region::Settings, |s| {
+        crate::control_ui::edit(&mut self.state, "Panning law", crate::control::command::Region::Settings, |s| {
             if s.session.project.panning_law.unwrap_or(0) != law {
                 s.session.project.get_mut().panning_law = Some(law);
                 s.session.dirty = true;
@@ -5994,7 +5997,7 @@ impl App {
     /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
     fn toggle_play_truncated(&mut self) {
         let on = !self.state.session.project.play_truncated;
-        crate::control::edit(&mut self.state, "Play truncated notes in clips", crate::control::command::Region::Settings, |s| s.session.project.get_mut().play_truncated = on);
+        crate::control_ui::edit(&mut self.state, "Play truncated notes in clips", crate::control::command::Region::Settings, |s| s.session.project.get_mut().play_truncated = on);
         self.state.session.dirty = true;
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
     }
@@ -6006,7 +6009,7 @@ impl App {
     fn toggle_auto_crossfades(&mut self) {
         let on = !self.state.session.project.auto_crossfades.unwrap_or(false);
         // The whole project: switching sets the clips' crossfades.
-        crate::control::edit(&mut self.state, "Automatic crossfades", crate::control::command::Region::Project, |s| {
+        crate::control_ui::edit(&mut self.state, "Automatic crossfades", crate::control::command::Region::Project, |s| {
             s.session.project.get_mut().auto_crossfades = Some(on);
             crate::playlist::crossfades_switched(&mut s.session);
         });
@@ -6951,7 +6954,7 @@ impl App {
             return;
         }
         // The value box is modal: only its own parts take clicks (spec: ui/type-in-value.md §1).
-        if crate::typein::is_open(&self.state) {
+        if crate::typein_ui::is_open(&self.state) {
             if let Some(a @ Action::TypeIn(_)) = action {
                 if self.acts_on_release(&a) {
                     self.armed = Some(a);
@@ -7250,7 +7253,7 @@ impl App {
         if let Some(r) = self.tab_close_press.take() {
             if self.top_hit(x, y).is_some_and(|h| h.action == Action::PluginTabClose(r)) {
                 self.state.plugin_tabs.closing(r);
-                self.state.session.plugins.close_window(r);
+                self.state.editor_host.close_window(&mut self.state.session.plugins, r);
                 self.invalidate();
             }
             return true;
@@ -7617,7 +7620,7 @@ impl App {
             return;
         }
         self.close_song_info();
-        if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
+        if crate::typein_ui::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.smooth.stop();
@@ -7664,7 +7667,7 @@ impl App {
             return;
         }
         self.close_song_info();
-        if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
+        if crate::typein_ui::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.smooth.stop();
@@ -8802,7 +8805,7 @@ impl App {
             && c.eq_ignore_ascii_case("z")
         {
             if self.shift {
-                let m = crate::history::ctrl_shift_z(&mut self.state);
+                let m = crate::history_ui::ctrl_shift_z(&mut self.state);
                 self.say(m);
                 return self.invalidate();
             }
@@ -9574,7 +9577,7 @@ impl App {
                 s.piano.overlay = None;
             }
             // EDIT > Undo, also the toolbar's Undo button (spec: ui/toolbar-buttons.md §2).
-            Action::PianoUndo | Action::Util(Util::Undo) => s.message = crate::history::ctrl_z(s),
+            Action::PianoUndo | Action::Util(Util::Undo) => s.message = crate::history_ui::ctrl_z(s),
             Action::Typing => self.toggle_typing(),
             Action::Metronome => self.toggle_metronome(),
             Action::Record => self.toggle_record(),
@@ -10016,7 +10019,7 @@ impl App {
             }
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter | Action::BrowserMove => {}
-            Action::TypeIn(t) => crate::typein::click(s, t),
+            Action::TypeIn(t) => crate::typein_ui::click(s, t),
             Action::PluginTab(_) | Action::PluginTabClose(_) | Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow | Action::Embed(_) => {}
             Action::PlTool(_)
             | Action::PlSnap
@@ -10059,7 +10062,7 @@ impl App {
             return;
         }
         if self.state.session.hosted_rows.contains(&i) {
-            if !self.state.session.plugins.close_if_open(i) {
+            if !self.state.editor_host.close_if_open(&mut self.state.session.plugins, i) {
                 self.state.session.pending_open = Some(i);
             }
             return;
@@ -10095,7 +10098,7 @@ impl App {
     /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
     pub(crate) fn undo_key(&mut self, alt: bool) {
         let s = &mut self.state;
-        if let Some(m) = if alt { crate::history::ctrl_alt_z(s) } else { crate::history::ctrl_z(s) } {
+        if let Some(m) = if alt { crate::history_ui::ctrl_alt_z(s) } else { crate::history_ui::ctrl_z(s) } {
             self.say(m);
         }
         self.invalidate();
@@ -10396,7 +10399,7 @@ impl App {
         match entry.cmd {
             // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
             MenuCmd::Settings(tab) => self.open_settings(tab),
-            MenuCmd::ExportZip => crate::zipped::export_dialog(self),
+            MenuCmd::ExportZip => crate::zipped_ui::export_dialog(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             MenuCmd::Sampler => {
                 if let Some(index) = self.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
@@ -11707,7 +11710,7 @@ mod tests {
         a.reset_hosted();
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
         a.state.session.project.get_mut().mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: VOCODEX_FILE_NAME.into(), state: fl.clone() });
-        assert_eq!(crate::project_plugins::slot_ports(&a.state.session.project, 1, 0), (0, 2), "the sidechain bus takes the carrier's input");
+        assert_eq!(crate::effect_ports::slot_ports(&a.state.session.project, 1, 0), (0, 2), "the sidechain bus takes the carrier's input");
         a.sync_effects();
         let key = fx_key(1, 0);
         assert_eq!(a.state.session.plugins.descriptor(key).map(|d| d.name), Some(LEMON_VOCODER.to_string()));
@@ -12608,13 +12611,13 @@ mod tests {
         assert_eq!(crate::piano::pattern_length(&app.state.session, app.state.pattern()), 768);
         // The change is one step, "Project settings": undone, the old timebase and its ticks, and the undo step made
         // before it then works in those; redone, both come back in the new ticks.
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::history::PROJECT_SETTINGS));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(crate::history::PROJECT_SETTINGS));
         assert_eq!((app.state.session.project.ppq, app.state.session.project.patterns[0].notes[0].position), (96, 72));
         assert_eq!((app.state.session.pat_pos, app.state.session.song_pos), (48, 96));
         assert!(crate::piano::undo(&mut app.state));
         assert_eq!(app.state.session.project.patterns[0].notes[0].position, 24);
-        crate::history::redo(&mut app.state);
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         assert_eq!((app.state.session.project.ppq, app.state.session.project.patterns[0].notes[0].position), (192, 144));
         assert!(std::mem::take(&mut app.state.session.retimed), "playback stops");
         // Back to 96: the same project as before (every tick was doubled, none rounded).
@@ -12754,11 +12757,11 @@ mod tests {
             app.plugin_tick();
         };
         app.state.session.plugins.create_with(0, index, None).unwrap();
-        app.state.session.plugins.open_window(0, info("One")).unwrap();
+        app.state.editor_host.open_window(&mut app.state.session.plugins, 0, info("One")).unwrap();
         settle(&mut app, &[0]);
         let alone = app.state.embeds[&0].rect();
         app.state.session.plugins.create_with(1, index, None).unwrap();
-        app.state.session.plugins.open_window(1, info("Two")).unwrap();
+        app.state.editor_host.open_window(&mut app.state.session.plugins, 1, info("Two")).unwrap();
         settle(&mut app, &[0, 1]);
         app.plugin_tick();
         assert!(app.state.plugin_tabs.hidden(0) && !app.state.plugin_tabs.hidden(1), "the new one shows");
@@ -12797,8 +12800,8 @@ mod tests {
         assert_eq!(a.h, alone.h, "no row of tabs");
         tabs_go_back_together(&mut app, &mut c);
         tabs_rejoin_as_the_shell_drives_it(&mut app, &mut c);
-        app.state.session.plugins.close_window(0);
-        app.state.session.plugins.close_window(1);
+        app.state.editor_host.close_window(&mut app.state.session.plugins, 0);
+        app.state.editor_host.close_window(&mut app.state.session.plugins, 1);
     }
 
     /// The tab showing closed from the instrument rack (its window button clicked again), over and over: the window
@@ -12825,22 +12828,22 @@ mod tests {
             app.plugin_tick();
         };
         app.state.session.plugins.create_with(0, index, None).unwrap();
-        app.state.session.plugins.open_window(0, info("Vangelis")).unwrap();
+        app.state.editor_host.open_window(&mut app.state.session.plugins, 0, info("Vangelis")).unwrap();
         settle(&mut app, &[0]);
         app.state.session.plugins.create_with(1, index, None).unwrap();
         for round in 0..3 {
-            app.state.session.plugins.open_window(1, info("Hydronium")).unwrap();
+            app.state.editor_host.open_window(&mut app.state.session.plugins, 1, info("Hydronium")).unwrap();
             settle(&mut app, &[0, 1]);
             app.plugin_tick();
             assert!(app.state.plugin_tabs.hidden(0) && app.state.z.contains(&Win::Hosted(1)), "round {round}: the new tab shows");
             frame(&mut app, &mut c, None);
-            assert!(app.state.session.plugins.close_if_open(1));
+            assert!(app.state.editor_host.close_if_open(&mut app.state.session.plugins, 1));
             app.plugin_tick();
             assert!(app.state.z.contains(&Win::Hosted(0)), "round {round}: the one left is in the stack at once");
             assert!(!app.state.plugin_tabs.hidden(0) && app.state.plugin_tabs.group_of(0).is_none());
             frame(&mut app, &mut c, None);
         }
-        app.state.session.plugins.close_window(0);
+        app.state.editor_host.close_window(&mut app.state.session.plugins, 0);
     }
 
     /// A tab's little x closes that tab; the window's close closes them all, in either layout.
@@ -12860,7 +12863,7 @@ mod tests {
         let rows = [0, 1, 2];
         for r in rows {
             app.state.session.plugins.create_with(r, index, None).unwrap();
-            app.state.session.plugins.open_window(r, info("Tab")).unwrap();
+            app.state.editor_host.open_window(&mut app.state.session.plugins, r, info("Tab")).unwrap();
         }
         let t0 = Instant::now();
         while !rows.iter().all(|r| app.state.embeds.get(r).is_some_and(|e| e.claimed())) && t0.elapsed() < Duration::from_secs(3) {
@@ -13226,16 +13229,16 @@ mod tests {
         app.mouse_move(x, r.cy() - 20.0);
         app.mouse_up();
         assert_eq!((app.state.tempo(), app.state.session.history.at()), (t0 + 20.0, steps + 1));
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TEMPO));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(TEMPO));
         assert_eq!(app.state.tempo(), t0);
-        assert_eq!(crate::history::redo(&mut app.state).as_deref(), Some(TEMPO));
+        assert_eq!(crate::history_ui::redo(&mut app.state).as_deref(), Some(TEMPO));
         assert_eq!(app.state.tempo(), t0 + 20.0);
 
         let bar = app.state.session.project.bar();
         app.set_bar(3, 4);
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
         assert_eq!(app.state.session.project.bar(), bar);
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         assert_eq!(app.state.session.project.bar(), (3, 4));
         let at = app.state.session.history.at();
         app.set_bar(3, 4);
@@ -13244,11 +13247,11 @@ mod tests {
             app.settings_number(views::settings::BEATS_PER_BAR, 1);
         }
         assert_eq!((app.state.session.project.bar(), app.state.session.history.at()), ((6, 4), at + 1), "wheel notches in a row: one step");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.bar(), (3, 4));
         let signature = app.state.session.project.bar_is_signature();
         app.set_time_mode(!signature);
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(TIME_SIGNATURE));
         assert_eq!((app.state.session.project.bar_is_signature(), app.state.session.project.bar()), (signature, (3, 4)));
         // The Project page's switches.
         let before = app.state.session.project.clone();
@@ -13258,7 +13261,7 @@ mod tests {
         let p = &app.state.session.project;
         assert!(p.panning_law == Some(2) && p.play_truncated != before.play_truncated && p.auto_crossfades != before.auto_crossfades);
         for name in ["Automatic crossfades", "Play truncated notes in clips", "Panning law"] {
-            assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(name));
+            assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(name));
         }
         assert!(app.state.session.project == before);
     }
@@ -13459,7 +13462,7 @@ mod tests {
             let index = app.state.session.plugins.index_of(name).unwrap_or_else(|| panic!("built-in {name}"));
             app.state.session.plugins.create_with(0, index, None).unwrap();
             let info = ChannelInfo { icon: None, name: name.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-            app.state.session.plugins.open_window(0, info).unwrap();
+            app.state.editor_host.open_window(&mut app.state.session.plugins, 0, info).unwrap();
             let t0 = Instant::now();
             while !app.state.embeds.get(&0).is_some_and(|e| e.view().frame.is_some()) && t0.elapsed() < Duration::from_secs(5) {
                 app.plugin_tick();
@@ -13482,7 +13485,7 @@ mod tests {
             app.mouse_move(ed.cx(), ed.cy());
             app.mouse_down();
             app.mouse_up();
-            app.state.session.plugins.close_window(0);
+            app.state.editor_host.close_window(&mut app.state.session.plugins, 0);
             app.plugin_tick();
         }
     }
@@ -13561,7 +13564,7 @@ mod tests {
         }
         assert_eq!(app.hint, "Volume: 103%  0.8dB  1.09");
         assert_eq!(app.state.mixer_scroll, scroll, "the mixer does not scroll");
-        assert!(crate::history::undo(&mut app.state).is_some());
+        assert!(crate::history_ui::undo(&mut app.state).is_some());
         assert_eq!(vol(&app), 0.8, "one undo step for the three notches");
         for _ in 0..200 {
             app.wheel(0.0, -1.0, false, false);
@@ -14023,7 +14026,7 @@ mod tests {
         let index = app.state.session.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         app.state.session.plugins.create_with(0, index, None).unwrap();
         let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-        app.state.session.plugins.open_window(0, info).unwrap();
+        app.state.editor_host.open_window(&mut app.state.session.plugins, 0, info).unwrap();
         let t0 = Instant::now();
         while !app.state.embeds.get(&0).is_some_and(|e| e.view().frame.is_some()) && t0.elapsed() < Duration::from_secs(3) {
             app.plugin_tick();
@@ -14731,7 +14734,7 @@ mod tests {
         app.mouse_up();
         assert_ne!(vel(&app), before);
         assert_eq!((app.state.session.history.done(), app.state.session.history.newest_done()), (steps + 1, Some("Graph editor change velocity")));
-        assert!(crate::history::undo(&mut app.state).is_some());
+        assert!(crate::history_ui::undo(&mut app.state).is_some());
         assert_eq!(vel(&app), before, "one step takes the whole drag back");
         app.state.set_pattern(n + 1);
         frame(&mut app, &mut c, None);
@@ -15658,7 +15661,7 @@ mod tests {
         let index = app.state.session.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         app.state.session.plugins.create_with(0, index, None).unwrap();
         let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-        app.state.session.plugins.open_window(0, info).unwrap();
+        app.state.editor_host.open_window(&mut app.state.session.plugins, 0, info).unwrap();
         let settle = |app: &mut App, f: &dyn Fn(&App) -> bool| {
             let t0 = Instant::now();
             while !f(app) && t0.elapsed() < Duration::from_secs(3) {
@@ -15704,15 +15707,15 @@ mod tests {
         app.mouse_down();
         app.mouse_up();
         settle(&mut app, &|a| a.state.embeds.is_empty());
-        assert!(app.state.embeds.is_empty() && app.state.session.plugins.editors.get(&0).is_none_or(|e| e.window.is_none()), "closed by its button");
+        assert!(app.state.embeds.is_empty() && app.state.editor_host.editors.get(&0).is_none_or(|e| e.window.is_none()), "closed by its button");
         // the window manager's close shortcut closes it in front, not the app
         let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-        app.state.session.plugins.open_window(0, info).unwrap();
+        app.state.editor_host.open_window(&mut app.state.session.plugins, 0, info).unwrap();
         settle(&mut app, &|a| a.state.embeds.contains_key(&0));
         app.state.raise(Win::Hosted(0));
         app.close_requested();
         settle(&mut app, &|a| a.state.embeds.is_empty());
-        assert!(app.state.session.plugins.editors.get(&0).is_none_or(|e| e.window.is_none()) && !app.want_exit, "the shortcut closed the plugin window only");
+        assert!(app.state.editor_host.editors.get(&0).is_none_or(|e| e.window.is_none()) && !app.want_exit, "the shortcut closed the plugin window only");
     }
 
     /// The Lemon design draws a built-in editor's window as a card (owner, 2026-10-27): rounded like the channel rack,
@@ -15763,7 +15766,7 @@ mod tests {
         let index = app.state.session.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         app.state.session.plugins.create_with(0, index, None).unwrap();
         let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: Some(Default::default()) };
-        app.state.session.plugins.open_window(0, info).unwrap();
+        app.state.editor_host.open_window(&mut app.state.session.plugins, 0, info).unwrap();
         let t0 = Instant::now();
         while !app.state.embeds.get(&0).is_some_and(|e| e.claimed() && e.view().frame.is_some()) && t0.elapsed() < Duration::from_secs(3) {
             app.plugin_tick();
@@ -15830,7 +15833,7 @@ mod tests {
         };
         let open = |app: &mut App| {
             let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-            app.state.session.plugins.open_window(0, info).unwrap();
+            app.state.editor_host.open_window(&mut app.state.session.plugins, 0, info).unwrap();
             settle(app, &|a| a.state.embeds.contains_key(&0));
             app.state.raise(Win::Hosted(0));
         };
@@ -15847,7 +15850,7 @@ mod tests {
         app.mouse_down();
         assert_eq!(app.state.z.last(), Some(&Win::Hosted(0)), "held, the button changes nothing yet");
         app.mouse_up();
-        assert!(app.state.session.plugins.editors.get(&0).is_none_or(|e| e.window.is_none()), "the release hides the plugin window");
+        assert!(app.state.editor_host.editors.get(&0).is_none_or(|e| e.window.is_none()), "the release hides the plugin window");
         assert_eq!(app.state.z.last(), Some(&Win::ChannelRack), "and brings the rack forward with it");
         // the rack in front: the plugin window's close button closes it without bringing it forward
         open(&mut app);
@@ -15865,7 +15868,7 @@ mod tests {
         assert_eq!(app.state.z.last(), Some(&Win::ChannelRack), "the close button's press leaves the rack in front");
         app.mouse_up();
         settle(&mut app, &|a| a.state.embeds.is_empty());
-        assert!(app.state.session.plugins.editors.get(&0).is_none_or(|e| e.window.is_none()), "closed");
+        assert!(app.state.editor_host.editors.get(&0).is_none_or(|e| e.window.is_none()), "closed");
         assert_eq!(app.state.z.last(), Some(&Win::ChannelRack));
     }
 
@@ -15885,7 +15888,7 @@ mod tests {
         app.state.session.plugins.create_with(0, index, None).unwrap();
         let open = |app: &mut App| {
             let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-            app.state.session.plugins.open_window(0, info).unwrap();
+            app.state.editor_host.open_window(&mut app.state.session.plugins, 0, info).unwrap();
             let t0 = Instant::now();
             while !app.state.embeds.contains_key(&0) && t0.elapsed() < Duration::from_secs(3) {
                 app.plugin_tick();
@@ -15897,7 +15900,7 @@ mod tests {
         let e = open(&mut app);
         e.set_pos((300.0, 220.0));
         app.plugin_tick();
-        app.state.session.plugins.close_window(0);
+        app.state.editor_host.close_window(&mut app.state.session.plugins, 0);
         app.plugin_tick();
         let e = open(&mut app);
         assert_eq!((e.rect().x, e.rect().y), (300.0, 220.0), "the plugin window reopens where it was");
@@ -16558,7 +16561,7 @@ mod tests {
         pl::run(&mut app, Cmd::PointPaste(ch, 0));
         let p0 = app.state.session.project.automation(ch).unwrap().points[0];
         assert!((p0.value - 0.8).abs() < 1e-3 && p0.beat == 0.0, "{p0:?}");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.automation(ch).unwrap().points[0].value, 0.25);
     }
 
@@ -16983,11 +16986,11 @@ mod tests {
         // Steps: the first count, turning Apply tempo on, the new count; each undoes to the tempo before it.
         assert_eq!(app.state.session.history.at(), steps + 3);
         for want in [133.0, 129.0, 130.0] {
-            assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::control::command::TEMPO));
+            assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(crate::control::command::TEMPO));
             assert_eq!(app.state.tempo(), want);
         }
         for want in [129.0, 133.0, 522.0] {
-            crate::history::redo(&mut app.state);
+            crate::history_ui::redo(&mut app.state);
             assert_eq!(app.state.tempo(), want);
         }
         // MIDI keys tap while the window is open; a chord's keys are one tap.
@@ -17646,7 +17649,8 @@ mod tests {
         crate::plugin_menu::add_generator(&mut a, sampler, None);
         let on = a.state.session.pending_open.unwrap();
         a.sync_samplers(None);
-        let detached = |r: usize| a.state.session.plugins.editors.get(&r).is_some_and(|e| e.detached);
+        a.state.editor_host.sync(&mut a.state.session.plugins);
+        let detached = |r: usize| a.state.editor_host.editors.get(&r).is_some_and(|e| e.detached);
         assert!(detached(on));
         assert!(!detached(off), "added before: keeps its mode");
         assert!(!detached(0), "the project's channel");
@@ -18796,7 +18800,7 @@ mod tests {
         assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([1]));
         // Each move is a "Move channel" step, as the menu's: undo puts them back.
         assert_eq!(app.state.session.history.newest_done(), Some("Move channel"));
-        while crate::history::undo(&mut app.state).is_some() {}
+        while crate::history_ui::undo(&mut app.state).is_some() {}
         assert_eq!(order(&app), b, "undone back to the start");
         frame(&mut app, &mut c, None);
         let moved = order(&app);
@@ -20053,12 +20057,12 @@ mod tests {
         let e = app.state.playlist.edit.clone().expect("value box");
         assert_eq!(e.target, EditTarget::TypeIn(Target::Knob(vol), false));
         assert!(e.sel, "the field opens selected");
-        assert_eq!(e.text, crate::typein::text(&app.state, Target::Knob(vol), false));
+        assert_eq!(e.text, crate::typein_ui::text(&app.state, Target::Knob(vol), false));
         assert!(e.text.ends_with("dB"), "{}", e.text);
         // Bottom-right corner 10 px right of / below the mouse (§1).
         let (mx, my) = app.mouse;
         assert_eq!((e.at.0 + crate::typein::W, e.at.1 + crate::typein::H), (mx + 10.0, my + 10.0));
-        assert_eq!(crate::typein::caption(&app.state, Target::Knob(vol)), "Value for Channel volume");
+        assert_eq!(crate::typein_ui::caption(&app.state, Target::Knob(vol)), "Value for Channel volume");
         // Typing replaces the selected text; Enter sets -6 dB.
         typ(&mut app, "-6 dB");
         assert_eq!(app.state.playlist.edit.as_ref().unwrap().text, "-6 dB");
@@ -20162,7 +20166,7 @@ mod tests {
         assert_eq!(e.target, EditTarget::TypeIn(pitch, false));
         assert_eq!(e.text, "440");
         assert_eq!(crate::typein::width(pitch), crate::typein::W_PLAIN);
-        assert_eq!(crate::typein::caption(&app.state, pitch), "Master pitch (Hz)");
+        assert_eq!(crate::typein_ui::caption(&app.state, pitch), "Master pitch (Hz)");
         typ(&mut app, "466.16");
         assert_eq!(app.state.knob_text(KnobId::MasterPitch), "Master pitch: +100 cents");
         frame(&mut app, &mut c, None);
@@ -20174,7 +20178,7 @@ mod tests {
         let e = open(&mut app, &mut c, Action::Fader(1), true);
         assert_eq!(e.target, EditTarget::TypeIn(Target::Fader(1), false));
         assert_eq!(e.text, "0.0dB");
-        assert_eq!(crate::typein::caption(&app.state, Target::Fader(1)), "Value for Bus 1 - Volume");
+        assert_eq!(crate::typein_ui::caption(&app.state, Target::Fader(1)), "Value for Bus 1 - Volume");
         typ(&mut app, "-6");
         let vol = |app: &App| crate::mixer::track(&app.state.session, 1).unwrap().volume.unwrap();
         assert!(crate::mixer::level_text("Volume", vol(&app)).contains("-6.0dB"));
@@ -21982,11 +21986,11 @@ mod tests {
         app.tick();
         assert_eq!(get(&app, sb).position, 288);
         assert_eq!(xf(&app), (Some(ms(128, 130.0, 96)), Some(ms(128, 130.0, 96))));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!((get(&app, sb).position, xf(&app)), (192, (Some(ms(224, 130.0, 96)), Some(ms(224, 130.0, 96)))), "undone with the move");
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         assert_eq!((get(&app, sb).position, xf(&app)), (288, (Some(ms(128, 130.0, 96)), Some(ms(128, 130.0, 96)))));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         app.tick();
 
         // The tempo halved: the clips keep their sample's 2 s, now 208 ticks (§9c), so 16 ticks overlap, in
@@ -22031,9 +22035,9 @@ mod tests {
         assert!(app.hint.contains("Crossfade tension: +2.45"), "{}", app.hint);
         app.tick();
         assert_eq!((get(&app, sb).fade_in_tension(), get(&app, sa).fade_out_tension()), (t, -t), "as the overlaps make them");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!((get(&app, sb).fade_in_tension(), get(&app, sa).fade_out_tension()), (0.0, 0.0), "one step");
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
 
         // Switched off: the lengths go to 0, the tensions stay, and no edit sets them; switched on: set again.
         app.settings_act(SAct::Check(CROSSFADES_CHECK));
@@ -22326,7 +22330,7 @@ mod tests {
         b.app.invalidate();
         b.step("the ripple");
         assert!(b.app.animating());
-        assert!(crate::history::undo(&mut b.app.state).is_some());
+        assert!(crate::history_ui::undo(&mut b.app.state).is_some());
         assert_eq!(pl::clips(&b.app.state.session).len(), 1, "the clip is back");
         b.app.invalidate();
         b.step("the undo");
@@ -23642,14 +23646,14 @@ mod tests {
         app.state.session.plugins.effects = crate::plugins::builtin_effects();
         app.sync_samplers(None);
         app.state.session.plugins.create_effect(1, 0, 0, None).expect("an effect in a mixer slot");
-        assert!(app.state.session.plugins.hosted.len() >= 2 && app.state.session.plugins.editors.values().all(|e| !e.detached));
+        assert!(app.state.session.plugins.hosted.len() >= 2 && app.state.editor_host.editors.values().all(|e| !e.detached));
         let items = submenu(TOOLS_MENU, EDITORS_LABEL).unwrap()(&app.state);
         let rack = crate::rack::options_menu(&app.state, 0.0, 0.0);
         assert_eq!(rack.items.iter().find(|i| i.label == EDITORS_LABEL).map(|i| &i.children), Some(&items), "the rack's is the same");
         crate::playlist::run(&mut app, items[1].cmd.clone());
-        assert!(app.state.session.plugins.hosted.keys().all(|k| app.state.session.plugins.editors.get(k).is_some_and(|e| e.detached)), "Detached");
+        assert!(app.state.session.plugins.hosted.keys().all(|k| app.state.editor_host.editors.get(k).is_some_and(|e| e.detached)), "Detached");
         crate::playlist::run(&mut app, items[0].cmd.clone());
-        assert!(app.state.session.plugins.editors.values().all(|e| !e.detached), "Attached");
+        assert!(app.state.editor_host.editors.values().all(|e| !e.detached), "Attached");
     }
 
     /// ADD > Effect ▸: the effect plugin menu as a submenu; a pick goes into the selected mixer track's first empty
@@ -24577,12 +24581,12 @@ mod tests {
         assert_eq!(os_model::clip_lfo::range(-0.5, 1.0), (0.25, 0.75));
         // Each change is an undo step; undo puts them back.
         assert_eq!(app.state.session.history.done(), steps + 3);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(lfo(&app).amount, 64);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(lfo(&app).mode, 1);
-        crate::history::redo(&mut app.state);
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         // Middle click: the minimum goes back to 0, not to the centre.
         app.state.reset_knob(KnobId::ChanPan(row));
         assert_eq!(app.state.session.project.channels[row].pan, -1.0);

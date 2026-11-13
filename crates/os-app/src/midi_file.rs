@@ -695,7 +695,7 @@ impl App {
             crate::playlist::arr_mut(&mut s.session);
             // One undo step through the control plane, as the rack's other channel adds (`control::edit`).
             let n = s.pattern();
-            crate::control::edit(s, IMPORT_STEP, crate::control::command::Region::Project, |s| place(s, imp, o, &name, n));
+            crate::control_ui::edit(s, IMPORT_STEP, crate::control::command::Region::Project, |s| place(s, imp, o, &name, n));
         }
         let s = &mut self.state;
         crate::piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
@@ -1152,9 +1152,9 @@ mod tests {
         let notes = app.state.session.project.pattern(1).unwrap().notes.len();
         assert_eq!(notes, before.pattern(1).map_or(0, |p| p.notes.len()) + 4);
         let after = app.state.session.project.clone();
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(IMPORT_STEP));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(IMPORT_STEP));
         assert_eq!(app.state.session.project, before);
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         assert_eq!(app.state.session.project.channels.len(), after.channels.len());
         assert_eq!(app.state.session.project.pattern(1), after.pattern(1));
         let _ = std::fs::remove_file(path);

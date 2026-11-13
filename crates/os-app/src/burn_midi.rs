@@ -92,7 +92,7 @@ impl Play {
     }
 
     /// The note written for it; the velocity, pan and mods of a note whose levels did not change stay its bytes.
-    fn note(&self) -> Note {
+    pub(crate) fn note(&self) -> Note {
         let n = &self.src;
         let key = (self.pitch / 100.0).round();
         let rest = self.pitch - key * 100.0;
@@ -710,7 +710,7 @@ impl App {
         };
         let index = ch.index;
         let count = notes.iter().filter(|n| !n.muted() && !n.slide()).count();
-        let msg = crate::control::edit_app(self, STEP, crate::control::command::Region::Project, |app| {
+        let msg = crate::control_ui::edit_app(self, STEP, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
             let to = if new { crate::patterns::next_empty(&s.session, cur) } else { cur };
             let p = crate::patterns::pat_mut(&mut s.session, to);
@@ -740,7 +740,7 @@ mod tests {
     use os_model::Arpeggio;
 
     /// A note of channel 0 at `pos`, `len` ticks long, on `key`.
-    fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub(crate) fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, ..Note::step(0, pos) }
     }
 
@@ -869,7 +869,7 @@ mod tests {
         assert_eq!(notes_of(&app, cur, 1).len(), 1, "another channel's notes stay");
         assert_eq!(app.state.session.project.channels[0].misc.arp.direction, 0, "the arpeggiator is off: not generated twice");
         assert_eq!(app.state.pattern(), cur);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 96, 60)], "one undo step");
         assert_eq!(app.state.session.project.channels[0].misc.arp.direction, 1);
     }
@@ -890,7 +890,7 @@ mod tests {
         assert!(notes_of(&app, to, 1).is_empty(), "only the burnt channel's notes");
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 12, 60)], "the pattern burnt from keeps its notes");
         assert_eq!(app.state.session.project.channels[0].misc.echo.feed, 0.0, "the echo delay is off");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(notes_of(&app, to, 0).is_empty(), "one undo step");
         assert_eq!(app.state.session.project.channels[0].misc.echo.feed, 0.25);
     }
@@ -1009,7 +1009,7 @@ mod tests {
             let f = fifths.lock().unwrap();
             assert_eq!((f.capture, f.resets), (false, 2), "reset before and after, not capturing");
         }
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         // With the channel's arpeggiator on, the plugin is played the arpeggio.
         (app.state.session.project.get_mut().channels[0].misc.arp.direction, app.state.session.project.get_mut().channels[0].misc.arp.chord) = (1, 1);
         let ch = app.state.session.project.channels[0].index;

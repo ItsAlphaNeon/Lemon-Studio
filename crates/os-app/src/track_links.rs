@@ -215,7 +215,7 @@ pub fn set_mode(s: &mut State, t: u16, mode: Mode) -> Option<String> {
 /// as ADD makes one (`plugin_menu::add_generator_now`), and track `t` becomes its instrument track, named and coloured
 /// after it, its insert named after it. One undo step, "Playlist track mode".
 pub fn new_instrument(app: &mut crate::app::App, t: u16, index: usize) -> Option<String> {
-    crate::control::edit_app(app, TRACK_MODE, crate::control::command::Region::Project, |app| {
+    crate::control_ui::edit_app(app, TRACK_MODE, crate::control::command::Region::Project, |app| {
         let rows = app.state.session.project.channels.len();
         let msg = crate::plugin_menu::add_generator_now(app, index, None);
         if app.state.session.project.channels.len() == rows {
@@ -400,11 +400,11 @@ mod tests {
         assert_eq!(crate::playlist::track_name(&app.state.session, 2), crate::mixer::name(&app.state.session, 3), "the name stays");
         assert_eq!(link(&app.state.session, 3), TrackLink::audio(5), "only that insert's");
         // One undo step each.
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(link(&app.state.session, 2), TrackLink::audio(3));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(link(&app.state.session, 3).is_none());
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(link(&app.state.session, 2).is_none());
     }
 
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(insert, Some(os_model::Rgb::new(0xaa, 0x33, 0x55)), "and its colour");
         assert_eq!(app.state.session.project.channels[1].mixer_track, 2, "its routing stays");
         assert!(!entry(&menu(&app), "Assign to new instrument track").enabled);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(link(&app.state.session, 0).is_none());
         assert_eq!(crate::mixer::name(&app.state.session, 2), insert2);
     }
@@ -452,7 +452,7 @@ mod tests {
         crate::playlist::run(&mut app, Cmd::TrackMode(4, Mode::Unassigned));
         assert!(link(&app.state.session, 4).is_none());
         assert_eq!(crate::playlist::track_name(&app.state.session, 4), "Snare");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(link(&app.state.session, 4), TrackLink::instrument(3));
     }
 
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(crate::playlist::track_name(&app.state.session, 6), name);
         assert_eq!(msg, Some(format!("Added {name} on {name}")));
         assert_eq!((app.state.session.history.at(), app.state.session.history.newest_done()), (steps + 1, Some(TRACK_MODE)));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.channels.len(), rows);
         assert!(link(&app.state.session, 6).is_none());
     }

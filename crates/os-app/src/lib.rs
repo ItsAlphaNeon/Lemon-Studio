@@ -16,6 +16,7 @@ mod anim;
 mod app;
 mod arrange;
 mod audio_clipboard;
+mod audio_log_ui;
 mod help_links;
 mod diagnostics;
 mod audio_cfg;
@@ -23,10 +24,13 @@ mod auto_close;
 mod autoscroll;
 mod backup;
 mod crash;
+mod backup_ui;
 #[cfg(test)]
 mod audio_bench;
 #[cfg(target_os = "linux")]
 mod dropout_log;
+mod editor_host;
+mod effect_ports;
 #[cfg(test)]
 mod checks;
 #[cfg(test)]
@@ -47,12 +51,16 @@ mod rt;
 mod omarchy;
 mod one_click;
 mod session_restore;
+mod one_click_ui;
 mod track_rec;
+mod track_rec_ui;
 mod audio_log;
 mod score_log;
 mod clip_colors;
+mod clip_colors_ui;
 mod clock;
 mod control;
+mod control_ui;
 mod cpu;
 mod data_folder;
 mod desktop;
@@ -66,8 +74,10 @@ mod enable_groups;
 mod export;
 mod export_form;
 mod factory_folder;
+mod factory_folder_ui;
 mod high_visibility;
 mod history;
+mod history_ui;
 mod hold;
 mod keep_on_disk;
 mod icons;
@@ -76,9 +86,12 @@ mod knobs;
 mod layout;
 mod lemon_state;
 mod loading;
+mod loading_ui;
 mod missing;
+mod missing_ui;
 mod mix_threads;
 mod zipped;
+mod zipped_ui;
 mod logo;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -92,20 +105,27 @@ mod midi_file;
 mod midi_in;
 mod midi_out;
 mod lemon_midi_out;
+mod lemon_midi_out_ui;
 mod track_links;
 mod midi_play;
 mod container;
 mod mixer;
 mod mixer_state;
 mod osc3;
+mod osc3_ui;
 mod citrus;
+mod citrus_ui;
 mod smith;
+mod smith_ui;
 mod chord_tool;
 mod slicer;
+mod slicer_ui;
 mod drums;
+mod drums_ui;
 mod monitor;
 mod motion;
 mod params;
+mod params_ui;
 mod piano;
 mod piano_snap;
 mod piano_split;
@@ -114,6 +134,7 @@ mod rack;
 mod remote;
 mod render;
 mod pattern_render;
+mod pattern_render_ui;
 mod patterns;
 mod perf;
 mod perform;
@@ -125,6 +146,7 @@ mod plugin_palette;
 mod plugin_popup;
 mod plugin_rebuild;
 mod plugin_scan;
+mod plugin_scan_ui;
 #[cfg(plugin_windows)]
 #[cfg(target_os = "linux")]
 mod plugin_tabs;
@@ -144,7 +166,9 @@ mod project_forms;
 mod project_info;
 mod project_picker;
 mod project_plugins;
+mod project_plugins_ui;
 mod presets;
+mod presets_ui;
 mod misc;
 mod misc_page;
 mod note_names;
@@ -189,6 +213,7 @@ mod templates;
 mod timesig;
 mod transport;
 mod typein;
+mod typein_ui;
 mod views;
 mod detached_win;
 mod wallpaper;
@@ -1214,7 +1239,7 @@ impl ApplicationHandler for Shell {
             // Windows display scale changed, or the window moved to a monitor with another DPI: the canvas follows at
             // the next paint; docked plugin windows are redrawn at the new scale (spec: ui/ui-scaling.md §3).
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.app.state.session.plugins.set_scale(gui_scale(scale_factor) as f32);
+                self.app.state.editor_host.set_scale(&mut self.app.state.session.plugins, gui_scale(scale_factor) as f32);
                 self.inset = insets(&window);
                 self.app.invalidate();
                 window.request_redraw();
@@ -1255,7 +1280,7 @@ impl ApplicationHandler for Shell {
                     canvas.resize(cw, ch, scale);
                     self.app.invalidate();
                     // Main GUI scaling changed: docked plugin windows follow (spec: ui/ui-scaling.md §3).
-                    self.app.state.session.plugins.set_scale(scale);
+                    self.app.state.editor_host.set_scale(&mut self.app.state.session.plugins, scale);
                 }
                 // The window may have reached a monitor with another refresh rate.
                 let monitor = window.current_monitor();

@@ -625,7 +625,7 @@ impl App {
     /// The plugin window the encoders opened closes.
     fn close_opened(&mut self) {
         if let Some(row) = self.drive().opened.take() {
-            self.state.session.plugins.close_if_open(row);
+            self.state.editor_host.close_if_open(&mut self.state.session.plugins, row);
             self.invalidate();
         }
     }
@@ -685,7 +685,7 @@ impl App {
                 }
             }
             button::UNDO => {
-                let step = if shift { crate::history::redo(&mut self.state) } else { crate::history::undo(&mut self.state) };
+                let step = if shift { crate::history_ui::redo(&mut self.state) } else { crate::history_ui::undo(&mut self.state) };
                 if let Some(step) = step {
                     self.say(format!("{}: {step}", if shift { "Redo" } else { "Undo" }));
                 }
@@ -920,7 +920,7 @@ impl App {
         match t {
             Target::Knob(k) => f64::from(s.knob(k)),
             Target::Fader(m) => crate::mixer::track(&s.session, m).and_then(|m| m.volume).unwrap_or(0.8),
-            Target::Param(key, i) => crate::params::param_value(s, key, i).unwrap_or(0.0),
+            Target::Param(key, i) => crate::params_ui::param_value(s, key, i).unwrap_or(0.0),
             Target::Tempo => self.state.session.transport.tempo().unwrap_or(s.tempo()),
         }
     }
@@ -941,7 +941,7 @@ impl App {
                 if first {
                     crate::history::settle(&mut s.session);
                 }
-                crate::control::run_edit(s, crate::history::MIXER_VOLUME, Region::Track(m), run, true, |s| {
+                crate::control_ui::run_edit(s, crate::history::MIXER_VOLUME, Region::Track(m), run, true, |s| {
                     if let Some(tr) = crate::mixer::track_mut(&mut s.session, m) {
                         tr.volume = Some(v);
                         s.session.dirty = true;
@@ -949,9 +949,9 @@ impl App {
                 });
             }
             Target::Param(key, i) => {
-                let before = crate::params::param_value(s, key, i);
-                if crate::params::set_param_value(s, key, i, v) {
-                    crate::control::param_set(s, key, i, if first { before } else { None }, v);
+                let before = crate::params_ui::param_value(s, key, i);
+                if crate::params_ui::set_param_value(s, key, i, v) {
+                    crate::control_ui::param_set(s, key, i, if first { before } else { None }, v);
                 }
             }
             Target::Tempo => {}
@@ -1030,11 +1030,11 @@ impl App {
             self.state.raise(Win::Hosted(key));
         }
         let id = self.state.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id);
-        if let (Some(id), Some(l)) = (id, self.state.session.plugins.editors.get(&key).and_then(|e| e.link.as_ref())) {
+        if let (Some(id), Some(l)) = (id, self.state.editor_host.editors.get(&key).and_then(|e| e.link.as_ref())) {
             l.reveal(id);
         }
         // Any plugin: the app's own hint says what changes.
-        self.hint = std::borrow::Cow::Owned(crate::params::row_hint(&self.state, key, index));
+        self.hint = std::borrow::Cow::Owned(crate::params_ui::row_hint(&self.state, key, index));
         self.damage_band(crate::app::HINT_RECT);
     }
 
@@ -1042,7 +1042,7 @@ impl App {
     fn open_target_window(&mut self, key: usize) {
         if crate::plugins::fx_of(key).is_none() {
             let row = key;
-            let open = self.state.session.plugins.window_of(row).is_some();
+            let open = self.state.editor_host.window_of(row).is_some();
             if !open {
                 if self.state.session.hosted_rows.contains(&row) {
                     self.state.session.pending_open = Some(row);

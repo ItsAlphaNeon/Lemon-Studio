@@ -282,14 +282,14 @@ pub fn remove(t: Target) {
 /// ctrl 7"), and "omni" for one that drives the selected channel's knob.
 pub fn label(s: &State, l: &Link) -> String {
     let channel = |r: usize| crate::views::browser::channel_label(s, r).unwrap_or_else(|| format!("Channel {}", r + 1));
-    let name = crate::typein::target_name(s, l.target);
+    let name = crate::typein_ui::target_name(s, l.target);
     let what = match l.target {
         Target::Knob(KnobId::ChanVol(r) | KnobId::ChanPan(r)) if !l.omni => format!("{} - {name}", channel(r)),
         Target::RackTrack(r) | Target::RackLed(r) => format!("{} - {name}", channel(r)),
         Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::mixer::name(&s.session, a)),
-        Target::Param(key, index) => crate::params::clip_name(s, key, index),
+        Target::Param(key, index) => crate::params_ui::clip_name(s, key, index),
         Target::MemberParam(m, k, id, index) => match crate::container::member_key(&s.session, crate::container::place_key(m, k), id) {
-            Some(key) => crate::params::clip_name(s, key, index),
+            Some(key) => crate::params_ui::clip_name(s, key, index),
             None => format!("{} - {name}", crate::container::place_name(&s.session, m, k)),
         },
         _ => name,
@@ -554,7 +554,7 @@ impl App {
                 l.port = port;
                 add(l, true);
                 self.remote.sync();
-                let name = crate::typein::caption(&self.state, t);
+                let name = crate::typein_ui::caption(&self.state, t);
                 self.state.message = Some(format!("Linked channel {}, controller {cc} to {}", ch + 1, name.trim_start_matches("Value for ")));
                 if self.state.multilink.queue.is_empty() {
                     self.state.multilink.on = false;
@@ -574,7 +574,7 @@ impl App {
         let l = self.remote.links[i];
         let t = self.remote_target(&l);
         // A rack box's position over its travel (its track over the last insert, the LED 0 / 1), a knob's value.
-        let now = crate::typein::position(&self.state, t).or_else(|| crate::typein::get(&self.state, t));
+        let now = crate::typein_ui::position(&self.state, t).or_else(|| crate::typein_ui::get(&self.state, t));
         let Some(now) = now.map(|x| x as f32) else { return };
         let x = l.formula.map(f32::from(v) / 127.0);
         let pressed = v > 0;
@@ -655,13 +655,13 @@ impl App {
                 self.record_control(&crate::app::Action::Fader(m));
             }
             Target::Param(key, index) => {
-                crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
+                crate::params_ui::set_param_value(&mut self.state, key, index, f64::from(v));
                 self.record_plugin_param(key, index, f64::from(v));
             }
             // An effect inside a container: its instance while it is loaded.
             Target::MemberParam(m, k, id, index) => {
                 if let Some(key) = crate::container::member_key(&self.state.session, crate::container::place_key(m, k), id) {
-                    crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
+                    crate::params_ui::set_param_value(&mut self.state, key, index, f64::from(v));
                     self.record_plugin_param(key, index, f64::from(v));
                 }
             }
@@ -674,8 +674,8 @@ impl App {
             }
             // One undo step for each track the box moves to, and each switch of the LED (`typein::set_value`).
             Target::RackTrack(_) | Target::RackLed(_) => {
-                let to = crate::typein::at_position(&self.state, t, f64::from(v));
-                crate::typein::set_value(&mut self.state, t, to);
+                let to = crate::typein_ui::at_position(&self.state, t, f64::from(v));
+                crate::typein_ui::set_value(&mut self.state, t, to);
             }
             // Never linked (no remote control).
             Target::Latency(..) => {}
@@ -751,7 +751,7 @@ impl App {
         match b.link() {
             Some(l) => {
                 add(l, b.conflicts);
-                let name = crate::typein::caption(&self.state, b.target);
+                let name = crate::typein_ui::caption(&self.state, b.target);
                 self.state.message = Some(format!("Linked channel {}, controller {} to {}", l.ch + 1, l.cc, name.trim_start_matches("Value for ")));
             }
             None => self.state.message = Some("No controller: nothing linked".into()),
@@ -819,7 +819,7 @@ impl App {
         let m = &mut self.state.multilink;
         if m.on && !m.queue.contains(&t) {
             m.queue.push_back(t);
-            let name = crate::typein::caption(&self.state, t);
+            let name = crate::typein_ui::caption(&self.state, t);
             let n = self.state.multilink.queue.len();
             self.state.message = Some(format!("MIDI learn {n}: {}", name.trim_start_matches("Value for ")));
         }
@@ -835,7 +835,7 @@ pub fn group_name(s: &State, b: &LinkBox) -> String {
             None => crate::container::place_name(&s.session, m, k),
         },
         Target::Fader(t) => crate::mixer::name(&s.session, t),
-        t => crate::typein::caption(s, t).trim_start_matches("Value for ").to_string(),
+        t => crate::typein_ui::caption(s, t).trim_start_matches("Value for ").to_string(),
     }
 }
 

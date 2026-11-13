@@ -54,6 +54,6 @@ pub fn paint(ui: &mut Ui, s: &State, e: &TextEdit, t: Target, norm: bool) {
     let (cx, cy, c) = (close.cx(), close.cy(), if close_hov { th.text } else { dim });
     ui.c.line(cx - 4.0, cy - 4.0, cx + 4.0, cy + 4.0, 1.5, c);
     ui.c.line(cx - 4.0, cy + 4.0, cx + 4.0, cy - 4.0, 1.5, c);
-    let cap = typein::caption(s, t);
+    let cap = crate::typein_ui::caption(s, t);
     ui.c.text_clip(Font::new(13), r.x + 44.0, r.y + 31.0, r.w - 50.0, dim, &cap);
 }

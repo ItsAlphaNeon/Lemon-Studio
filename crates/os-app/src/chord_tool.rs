@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(last(), "C/E G");
         assert_eq!(write(s, "C X"), "Chord progression: \"X\" is not a chord");
         assert_eq!(s.session.history.at(), steps + 1, "nothing written");
-        crate::history::undo(s);
+        crate::history_ui::undo(s);
         assert_eq!(crate::piano::notes(&s.session).len(), 1);
     }
 }

@@ -531,7 +531,7 @@ pub fn set_len(s: &mut State, steps: Option<u32>) {
     let max = max_steps(&s.session);
     // An undo step; a drag or a run of wheel notches of the box one step.
     let run = crate::history::Run::PatternLength(n);
-    crate::control::run_edit(s, "Pattern length", crate::control::command::Region::Pattern(n), run, false, |s| {
+    crate::control_ui::run_edit(s, "Pattern length", crate::control::command::Region::Pattern(n), run, false, |s| {
         crate::patterns::pat_mut(&mut s.session, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
         s.session.dirty = true;
     });
@@ -776,7 +776,7 @@ pub fn gradient_colors(a: Option<Rgb>, b: Option<Rgb>, k: usize) -> Vec<Rgb> {
 /// with "Restore previous state after solo" on, puts back the states from before the first solo (a solo moved to
 /// another channel keeps them; spec: ui/settings-choices.md "Miscellaneous"). Locked channels keep their state.
 pub fn solo(s: &mut State, r: usize) {
-    crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| solo_now(s, r));
+    crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| solo_now(s, r));
 }
 
 /// The undo step of a channel muted, soloed or switched on or off: a knob tweak's (none with "Undo knob tweaks" off).
@@ -856,7 +856,7 @@ pub fn zipped_rows(p: &os_model::Project) -> BTreeSet<usize> {
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
-    crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
+    crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
         if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
             c.enabled = !c.enabled;
             s.session.dirty = true;
@@ -1137,7 +1137,7 @@ pub fn ask_purge(s: &mut State) -> Option<String> {
 
 /// `delete_rows` as one undo step (their hosted instruments come back with an undo, `control::host`).
 pub fn delete_step(app: &mut App, rows: &[usize]) {
-    crate::control::edit_app(app, crate::history::DELETE_CHANNEL, crate::control::command::Region::Project, |app| delete_rows(app, rows));
+    crate::control_ui::edit_app(app, crate::history::DELETE_CHANNEL, crate::control::command::Region::Project, |app| delete_rows(app, rows));
 }
 
 /// Delete rows now: the channels, their notes and clips go.
@@ -1187,7 +1187,7 @@ pub fn wheel_move(app: &mut App, r: usize, notches: i32) {
     };
     app.state.rack.select_only(r);
     // A "Move channel" step, as the menu's and Alt+Up / Down's moves are.
-    crate::control::edit_app(app, "Move channel", crate::control::command::Region::Project, |app| {
+    crate::control_ui::edit_app(app, "Move channel", crate::control::command::Region::Project, |app| {
         for _ in 0..notches.unsigned_abs() {
             move_selected(app, -notches.signum());
         }
@@ -1812,7 +1812,9 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
 /// (the insert Reset gives; on), then the mixer box's master, 25 %, 50 %, 75 % and last insert, or the LED's Off and
 /// On, each with the box's text at that value. The current value has the radio mark.
 fn box_set_items(s: &State, t: crate::typein::Target) -> Vec<PItem> {
-    use crate::typein::{at_position, get, Target};
+    use crate::typein::Target;
+    use crate::typein_ui::at_position;
+    use crate::typein_ui::get;
     let now = get(s, t);
     let item = |name: &str, v: f64| {
         let text = crate::views::rack::insert_name(v as u16);
@@ -1975,7 +1977,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         _ => None,
     };
     if let Some(name) = step {
-        return crate::control::edit_app(app, name, crate::control::command::Region::Project, |app| run_now(app, c));
+        return crate::control_ui::edit_app(app, name, crate::control::command::Region::Project, |app| run_now(app, c));
     }
     run_now(app, c)
 }
@@ -2043,7 +2045,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         // spec: ui/plugin-window.md "Docking and the window menu"
         #[cfg(plugin_windows)]
-        RCmd::DetachAll(on) => app.state.session.plugins.set_all_detached(on),
+        RCmd::DetachAll(on) => app.state.editor_host.set_all_detached(&mut app.state.session.plugins, on),
         // spec: ui/channel-switches.md §6
         #[cfg(any(windows, target_os = "macos"))]
         RCmd::EditorKeys(on) => crate::plugin_window::set_editor_keys(on),
@@ -2149,18 +2151,18 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::CopyBox(t) => {
-            s.value_clip = crate::typein::position(s, t);
+            s.value_clip = crate::typein_ui::position(s, t);
             None
         }
         RCmd::PasteBox(t) => {
             if let Some(p) = s.value_clip {
-                let v = crate::typein::at_position(s, t, p);
-                crate::typein::set_value(s, t, v);
+                let v = crate::typein_ui::at_position(s, t, p);
+                crate::typein_ui::set_value(s, t, v);
             }
             None
         }
         RCmd::SetBox(t, v) => {
-            crate::typein::set_value(s, t, v);
+            crate::typein_ui::set_value(s, t, v);
             None
         }
         RCmd::MixerReset(r) => {
@@ -2237,7 +2239,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::MuteSel(mute) => {
-            crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
+            crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
                 for &r in &sel {
                     if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
                         c.enabled = !mute;
@@ -2789,7 +2791,7 @@ mod tests {
         crate::history::settle(&mut a.state.session);
         assert_eq!(a.state.session.history.newest_done(), Some(LOOP_MODE_STEP));
         assert!(loop_mode(&a.state.session) && !a.unsaved());
-        assert!(crate::history::undo(&mut a.state).is_some());
+        assert!(crate::history_ui::undo(&mut a.state).is_some());
         assert!(!loop_mode(&a.state.session));
     }
 
@@ -2805,9 +2807,9 @@ mod tests {
         assert_eq!(a.state.session.project.current_pattern, Some(2));
         assert!(a.unsaved());
         assert_eq!(a.state.session.history.done(), steps, "no step");
-        crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
+        crate::control_ui::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
         a.state.set_pattern(3);
-        assert!(crate::history::undo(&mut a.state).is_some());
+        assert!(crate::history_ui::undo(&mut a.state).is_some());
         assert_eq!(a.state.pattern(), 3, "the undo left it");
     }
 
@@ -2824,9 +2826,9 @@ mod tests {
         assert_eq!(a.state.session.project.song_mode, Some(!song));
         assert!(!a.unsaved());
         assert_eq!(a.state.session.history.done(), steps, "no step");
-        crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
+        crate::control_ui::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
         a.state.set_song_mode(song);
-        assert!(crate::history::undo(&mut a.state).is_some());
+        assert!(crate::history_ui::undo(&mut a.state).is_some());
         assert_eq!(a.state.song_mode(), song, "the undo left it");
     }
 
@@ -2841,10 +2843,10 @@ mod tests {
         toggle_lock(&mut a.state.session, 0);
         assert!(is_locked(&a.state.session, 0) && !a.unsaved());
         assert_eq!(a.state.session.history.done(), steps, "no step");
-        crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
+        crate::control_ui::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
         assert!(a.unsaved());
         toggle_lock(&mut a.state.session, 1);
-        assert!(crate::history::undo(&mut a.state).is_some(), "the project step undone");
+        assert!(crate::history_ui::undo(&mut a.state).is_some(), "the project step undone");
         assert_eq!(a.state.session.project.main_volume, a.state.session.saved.0.main_volume);
         assert_eq!(locked_rows(&a.state.session.project), [0, 1].into(), "the locks stay");
     }
@@ -2910,9 +2912,9 @@ mod tests {
         let p2 = crate::patterns::pat_mut(&mut a.state.session, 2);
         p2.notes.push(os_model::Note::step(ch, 0));
         (p2.loops, p2.loop_mode) = (vec![(ch, 4)], None);
-        crate::control::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
+        crate::control_ui::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
         a.state.set_pattern(2);
-        assert!(crate::history::undo(&mut a.state).is_some());
+        assert!(crate::history_ui::undo(&mut a.state).is_some());
         assert_eq!(a.state.pattern(), 2, "the pattern shown stays");
         assert_eq!((loop_lens(&a.state.session), loop_mode(&a.state.session)), ([(0, 4)].into(), false), "pattern 2's own loops (mode off)");
         a.state.set_pattern(3);
@@ -3011,7 +3013,7 @@ mod tests {
         run(&mut app, c);
         assert_eq!(app.state.knob(knob), 1.0);
         assert_eq!(set(&app).iter().position(|i| i.mark == Mark::Radio(true)), Some(6));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.knob(knob), 0.5, "one undo step");
     }
 
@@ -3019,7 +3021,10 @@ mod tests {
     /// or "Master", "On" or "Off", each one undo step; text it cannot read leaves the value.
     #[test]
     fn mixer_box_and_led_type_in_value() {
-        use crate::typein::{accept, caption, text, Target};
+        use crate::typein::Target;
+        use crate::typein_ui::text;
+        use crate::typein_ui::accept;
+        use crate::typein_ui::caption;
         let mut app = App::new(None);
         let type_in = |m: Popup| m.items.iter().find(|i| i.label == "Enter value...").map(|i| (i.enabled, i.cmd.clone())).unwrap();
         assert_eq!(type_in(mixer_menu(&app.state, 0, None, 0.0, 0.0)), (true, Cmd::TypeIn(Target::RackTrack(0))));
@@ -3039,10 +3044,10 @@ mod tests {
         assert_eq!(track(&app), 7, "unreadable text leaves it");
         accept(&mut app.state, box_, false, "100000");
         assert_eq!(track(&app), crate::mixer::max_insert(&app.state.session.project), "clamped to the last insert");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(track(&app), 7, "one undo step each");
         for _ in 0..3 {
-            crate::history::undo(&mut app.state);
+            crate::history_ui::undo(&mut app.state);
         }
         assert_eq!(track(&app), before);
 
@@ -3054,7 +3059,7 @@ mod tests {
         assert!(on(&app));
         accept(&mut app.state, led, false, "muted");
         assert_eq!((on(&app), text(&app.state, led, false).as_str()), (false, "Off"));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(on(&app));
     }
 
@@ -3088,7 +3093,7 @@ mod tests {
         assert_eq!(app.state.session.project.channels[2].mixer_track, 0);
         let set = find(&mixer_menu(&app.state, 2, None, 0.0, 0.0), "Set...").children;
         assert_eq!(set.iter().position(|i| i.mark == Mark::Radio(true)), Some(2));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.channels[2].mixer_track, 4, "one undo step");
 
         // The LED: Set... ▸ Off mutes; a copied off pastes as off.
@@ -3351,7 +3356,7 @@ mod tests {
 
         assert_eq!(run(&mut app, RCmd::SwingSel(Some(50))).as_deref(), Some("Swing mix 50% for 2 channel(s)"));
         assert_eq!(swing(&app), [0.5, 1.0, 0.5, 1.0]);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(swing(&app), [1.0; 4], "one undo step");
         run(&mut app, RCmd::SwingSel(None));
         assert_eq!(app.state.pat_ui.name_box.as_ref().map(|b| (b.target, b.text.clone())), Some((crate::patterns::BoxTarget::Rack(RBox::SwingMix), "100".into())));
@@ -3388,7 +3393,7 @@ mod tests {
         assert_eq!(ticked(&app, 0), Some((true, Mark::Check(false))));
         run(&mut app, RCmd::CutItself(2));
         assert_eq!(cut(&app, 2), (2, 2), "the freed group is taken again");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(cut(&app, 2), (0, 0), "one undo step");
 
         let n = app.state.session.project.channels.len();
@@ -4172,7 +4177,9 @@ mod tests {
     #[test]
     fn a_sample_load_is_one_history_step() {
         use crate::browser::BCmd;
-        use crate::history::{ctrl_alt_z, ctrl_z, LOAD_SAMPLE};
+        use crate::history::LOAD_SAMPLE;
+        use crate::history_ui::ctrl_alt_z;
+        use crate::history_ui::ctrl_z;
         let mut app = App::new(None);
         let r = sampler_row(&app);
         let y = crate::views::rack::name_rect(&app.state, r).unwrap().cy();
@@ -4222,7 +4229,9 @@ mod tests {
     /// it comes back as it was.
     #[test]
     fn undoing_a_drop_below_the_rows_removes_its_channel() {
-        use crate::history::{ctrl_alt_z, ctrl_z, LOAD_SAMPLE};
+        use crate::history::LOAD_SAMPLE;
+        use crate::history_ui::ctrl_z;
+        use crate::history_ui::ctrl_alt_z;
         let mut app = App::new(None);
         let n = app.state.session.project.channels.len();
         let file = tagged_wav(None, "new-row", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
@@ -4244,7 +4253,8 @@ mod tests {
     /// match the channel again, back to no sample at all; a channel a drop made loses its instrument and gets it back.
     #[test]
     fn the_hosted_sampler_follows_undo_and_redo() {
-        use crate::history::{ctrl_alt_z, ctrl_z};
+        use crate::history_ui::ctrl_z;
+        use crate::history_ui::ctrl_alt_z;
         let mut app = App::new(None);
         app.state.session.plugins = crate::plugins::Plugins::default();
         app.state.session.plugins.available = crate::plugins::builtin();
@@ -4630,7 +4640,7 @@ mod tests {
         app.state.rack.select_only(1);
         run(&mut app, RCmd::MoveSel(1));
         assert_eq!(places(&app), at(2, 1));
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(places(&app), at(1, 2), "undo puts them back");
 
         // Deleting the channel the clip drives: its targets and links go (the clip stays).

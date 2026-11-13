@@ -8,10 +8,7 @@
 //! moves it into the log (`Log::tick`).
 // spec: ui/audio-logger.md
 
-use crate::app::{App, State};
 use crate::capture::Ring;
-use crate::playlist::{Cmd, Mark, PItem};
-use crate::record::RecCmd;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -19,8 +16,8 @@ use std::sync::OnceLock;
 /// Settings ▸'s choices: how many minutes the log keeps.
 pub const MINUTES: [u32; 4] = [1, 2, 5, 10];
 /// Kept in `settings.txt`: the switch (on by default) and the length.
-const ON: &str = "audio_logger";
-const LENGTH: &str = "audio_logger_minutes";
+pub(crate) const ON: &str = "audio_logger";
+pub(crate) const LENGTH: &str = "audio_logger_minutes";
 const DEFAULT_MINUTES: u32 = 5;
 /// A sample at or below this is silence: a dump leaves it out at both ends.
 const SILENT: f32 = 1e-5;
@@ -68,21 +65,11 @@ pub fn minutes() -> u32 {
     crate::settings_file::get(LENGTH).and_then(|v| v.parse().ok()).filter(|m| MINUTES.contains(m)).unwrap_or(DEFAULT_MINUTES)
 }
 
-/// TOOLS > Retro audio capture > Settings ▸.
-pub fn items(_: &State) -> Vec<PItem> {
-    let now = minutes();
-    let mut items = vec![PItem::head("Keep the last")];
-    items.extend(MINUTES.iter().map(|&m| {
-        PItem::new(format!("{m} minute{}", if m == 1 { "" } else { "s" }), Cmd::Rec(RecCmd::AudioLog(m))).mark(Mark::Radio(m == now))
-    }));
-    items
-}
-
 /// The log: interleaved stereo at `rate`, oldest first.
 #[derive(Debug, Default)]
 pub struct Log {
     kept: VecDeque<f32>,
-    rate: u32,
+    pub(crate) rate: u32,
     incoming: Vec<f32>,
 }
 
@@ -112,7 +99,7 @@ impl Log {
     }
 
     /// Adds `samples` played at `rate` and drops what is older than `minutes`; a new rate starts the log over.
-    fn keep(&mut self, samples: &[f32], rate: u32, minutes: u32) {
+    pub(crate) fn keep(&mut self, samples: &[f32], rate: u32, minutes: u32) {
         if rate != self.rate {
             self.kept.clear();
             self.rate = rate;
@@ -132,42 +119,6 @@ impl Log {
         let Some(first) = (0..frames).find(|&i| loud(i)) else { return (Vec::new(), Vec::new()) };
         let last = (0..frames).rev().find(|&i| loud(i)).unwrap_or(first);
         (first..=last).map(|i| (self.kept[2 * i], self.kept[2 * i + 1])).unzip()
-    }
-}
-
-impl App {
-    /// TOOLS > Retro audio capture > Enabled.
-    pub(crate) fn toggle_audio_log(&mut self) {
-        let on = !enabled();
-        crate::settings_file::set_flag(ON, on);
-        self.audio_log.tick();
-        self.state.message = Some(if on { format!("Retro audio capture on: the last {} minute(s)", minutes()) } else { "Retro audio capture off".into() });
-    }
-
-    pub(crate) fn set_audio_log_minutes(&mut self, m: u32) -> String {
-        crate::settings_file::write(LENGTH, &m.to_string());
-        format!("Retro audio capture: keeps the last {m} minute(s)")
-    }
-
-    /// TOOLS > Retro audio capture > Open capture in audio editor: the log (silence at either end left out) into a WAV in the
-    /// `Recorded` folder, and into Tesla on the master track as One-click recording's takes go.
-    pub(crate) fn dump_audio_log(&mut self) -> String {
-        if !enabled() {
-            return "Retro audio capture is off: TOOLS > Retro audio capture > Enabled".into();
-        }
-        let (l, r) = self.audio_log.audio();
-        if l.is_empty() {
-            return "The audio logger has heard nothing yet".into();
-        }
-        let sample = tesla::sample::Sample::from_channels(self.audio_log.rate.max(1), vec![l, r], tesla::sample::Format::Float32);
-        let dir = crate::track_rec::folder(&self.state.session);
-        let name = format!("Audio log_{}.wav", chrono::Local::now().format("%Y-%m-%d %H-%M-%S"));
-        let path = dir.join(name);
-        let wrote = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, tesla::wav::write(&sample, tesla::wav::Depth::Own)));
-        match wrote {
-            Ok(()) => self.take_to_editor(&path),
-            Err(e) => format!("{} could not be written: {e}", path.display()),
-        }
     }
 }
 
@@ -195,31 +146,6 @@ mod tests {
         log.keep(&second(0.5), 2000, 1);
         assert_eq!(log.kept.len(), 2000);
         assert_eq!(Log::default().audio().0.len(), 0);
-    }
-
-    /// Open capture in audio editor: off, a message; on, the log into a WAV in `Recorded` and into Tesla on the master track.
-    #[test]
-    fn a_dump_goes_into_the_audio_editor() {
-        use crate::mixer::FxReq;
-        let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
-        app.state.session.plugins.effects = crate::plugins::builtin_effects();
-        crate::settings_file::set_flag(ON, false);
-        assert!(app.dump_audio_log().contains("off"));
-        crate::settings_file::set_flag(ON, true);
-        assert!(app.dump_audio_log().contains("nothing"));
-        let tone: Vec<f32> = (0..9600).map(|i| if i % 2 == 0 { (i / 2) as f32 / 4800.0 } else { 0.5 }).collect();
-        app.audio_log.keep(&tone, 48000, 5);
-        let msg = app.dump_audio_log();
-        assert!(msg.starts_with("Recorded Audio log_") && msg.ends_with(" into the audio editor"), "{msg}");
-        let Some(FxReq::Create { track: 0, state: Some(st), .. }) = app.state.session.fx_requests.last().cloned() else {
-            panic!("{:?}", app.state.session.fx_requests)
-        };
-        let saved = tesla::state::from_plugin_state(&st).unwrap();
-        assert_eq!((saved.sample.frames(), saved.sample.rate), (4800, 48000));
-        let path = std::path::PathBuf::from(&saved.path);
-        assert!(path.exists() && path.parent().unwrap().ends_with("Recorded"), "{path:?}");
-        let _ = std::fs::remove_file(path);
     }
 
     /// The device's block gives its first output pair, only while the logger is on.

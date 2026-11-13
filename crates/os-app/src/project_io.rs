@@ -193,7 +193,7 @@ pub(crate) fn read(path: &Path) -> Result<(os_flp::FlpFile, os_model::Project, b
 /// stock plugins kept in step with the project, the mixer's effects and containers, the commands' plugins, samples into
 /// the samplers, and the instances' housekeeping. What it would show is dropped.
 pub(crate) fn host_tick(ses: &mut Session) {
-    crate::loading::tick(ses, false);
+    crate::loading_ui::tick(ses, false);
     crate::lemon_midi_out::sync_midi_outs(ses);
     let _ = crate::mixer::fx_requests_in(ses);
     let _ = crate::container::sync_containers_in(ses);
@@ -211,7 +211,7 @@ pub(crate) fn host_tick(ses: &mut Session) {
     }
     crate::control::host::host_commands(ses);
     crate::control::host::sample_loads(ses);
-    let _ = ses.plugins.idle(|_| None);
+    let _ = ses.plugins.idle_headless();
     ses.touched = Default::default();
 }
 

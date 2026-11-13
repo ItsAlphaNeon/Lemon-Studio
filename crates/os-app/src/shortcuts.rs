@@ -5,7 +5,7 @@
 //! General ▸ Input ▸ Manage shortcuts: which F8 key runs the browser and the pickers, which modifier held while a
 //! MIDI file is imported shows its import window, and which modifier held while double-clicking an audio clip opens
 //! its properties or its channel's settings. Program settings (`crate::prefs`, `settings.txt`, not on a settings
-//! page: `prefs::OFF_PAGE_COMBOS`). The window (`views::dialog`) edits a copy of them (`Form`) that Apply keeps; the
+//! page: `OFF_PAGE_COMBOS`). The window (`views::dialog`) edits a copy of them (`Form`) that Apply keeps; the
 //! settings window closes while it is open.
 // spec: ui/settings-choices.md "Input: Manage shortcuts (2026-10-16)"
 
@@ -61,6 +61,11 @@ pub const ROWS: [&Combo; 9] = [
     &CLIP_PROPERTIES,
     &CLIP_CHANNEL,
 ];
+
+/// The declared combos no settings page shows (a window of their own does): General ▸ Input ▸ Manage shortcuts' rows.
+/// Read by the declaration tests.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const OFF_PAGE_COMBOS: &[&Combo] = &ROWS;
 
 /// The window's groups: title and how many of `ROWS` it takes, in order.
 pub const GROUPS: [(&str, usize); 3] = [("Browser and pickers", 4), ("MIDI import window", 3), ("Double-click on audio clips", 2)];
@@ -260,7 +265,7 @@ mod tests {
         assert_eq!(CLIP_MODS, ["(disabled)", "(none)", "Alt"]);
         // They are program settings, not on a settings page.
         for c in ROWS {
-            assert!(prefs::OFF_PAGE_COMBOS.iter().any(|o| o.key == c.key), "{} is declared", c.label);
+            assert!(OFF_PAGE_COMBOS.iter().any(|o| o.key == c.key), "{} is declared", c.label);
         }
     }
 

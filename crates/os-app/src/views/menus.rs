@@ -617,10 +617,10 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         // spec: ui/channel-switches.md §3, §6
         Sub::KeyFocus => |_| crate::rack::key_focus_items(),
         // spec: ui/one-click-recording.md §2
-        Sub::OneClick => crate::one_click::items,
+        Sub::OneClick => crate::one_click_ui::items,
         // spec: ui/recording.md §6
         Sub::DumpLog => crate::score_log::items,
-        Sub::AudioLog => crate::audio_log::items,
+        Sub::AudioLog => crate::audio_log_ui::items,
         Sub::Declick => crate::rack::declick_items,
         Sub::ClipsAll => |_| crate::rack::stretch_items(true),
         Sub::ClipsSel => |_| crate::rack::stretch_items(false),

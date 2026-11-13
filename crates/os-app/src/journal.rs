@@ -254,7 +254,7 @@ impl App {
     /// The hosted instances whose windows are open (the plugins a user edits).
     fn editing_plugins(&self) -> Vec<usize> {
         #[cfg(plugin_windows)]
-        return self.state.session.plugins.editors.iter().filter(|(_, e)| e.window.is_some()).map(|(&k, _)| k).collect();
+        return self.state.editor_host.editors.iter().filter(|(_, e)| e.window.is_some()).map(|(&k, _)| k).collect();
         #[cfg(not(plugin_windows))]
         Vec::new()
     }
@@ -505,7 +505,7 @@ mod tests {
         let kinds = |a: &App, from: u64| a.journal.since(from).0.iter().map(|e| e["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let start = a.journal.since(0).1;
         // A tempo change in the interface: a step and its change.
-        crate::control::edit(&mut a.state, crate::control::command::TEMPO, crate::control::command::Region::Settings, |s| s.set_tempo(140.0));
+        crate::control_ui::edit(&mut a.state, crate::control::command::TEMPO, crate::control::command::Region::Settings, |s| s.set_tempo(140.0));
         a.journal.touch();
         a.journal.read_at = None;
         a.journal_tick();
@@ -515,7 +515,7 @@ mod tests {
         assert!(es[1]["changes"].as_array().unwrap().iter().any(|c| c["path"] == "tempo" && c["after"] == 140.0), "{}", es[1]);
         // Undone: an undo and the change back.
         let mark = a.journal.since(0).1;
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         a.journal.read_at = None;
         a.journal_tick();
         assert_eq!(kinds(&a, mark), ["undo", "changes"]);

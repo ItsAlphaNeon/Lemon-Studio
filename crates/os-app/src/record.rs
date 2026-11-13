@@ -586,7 +586,7 @@ impl App {
         self.act(crate::app::Action::Stop);
         let mut undone = 0;
         while since.is_some_and(|k| self.state.session.history.done() > k) && self.state.session.history.newest_done() == Some(RECORDED) {
-            crate::history::undo(&mut self.state);
+            crate::history_ui::undo(&mut self.state);
             undone += 1;
         }
         self.state.session.rec.since = None;
@@ -1086,7 +1086,7 @@ mod tests {
         stop(&mut app);
         assert_eq!(notes(&app), [(24, 72, 0), (168, 96, 0)]);
         assert_eq!(app.state.session.history.len(), steps + 1);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(notes(&app), [(24, 72, 0), (192, 24, 0)]);
 
         // A note held when playback stops ends where playback last was; Line leaves times as played.
@@ -1142,7 +1142,7 @@ mod tests {
         assert_eq!((clips[0].position, clips[0].track, clips[0].source), (bar as u32, 0, ClipSource::Pattern(1)));
         assert_eq!(notes(&app), [(48, 48, 0)]);
         // Undo takes the clip away with the notes.
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(crate::playlist::clips(&app.state.session).is_empty() && notes(&app).is_empty());
     }
 
@@ -1380,7 +1380,7 @@ mod tests {
         app.record_knob(KnobId::ChanPan(1));
         assert!(controls(&app).contains(&(96, ch, ControlPoint::PAN, 3200)));
         stop(&mut app);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(vol(&app), [(70, 1000), (200, 2000)]);
 
         // Automation off: knob moves write nothing.
@@ -1442,7 +1442,7 @@ mod tests {
             ]
         );
         stop(&mut app);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(points(&app), []);
     }
 
@@ -1584,7 +1584,7 @@ mod tests {
         let l = len as u32;
         assert_eq!(notes(&app), [(48, 24, 0), (l - 24, 24, 0)], "the second pass replaced the first's note at 48");
         assert_eq!(app.state.session.history.len(), steps + 2, "one undo step per pass");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(notes(&app), [(48, 48, 0), (l - 24, 24, 0)]);
     }
 

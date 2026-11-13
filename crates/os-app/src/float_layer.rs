@@ -297,7 +297,7 @@ mod tests {
             let index = a.state.session.plugins.index_of(name).unwrap();
             a.state.session.plugins.create_with(row, index, None).unwrap();
             let info = ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-            a.state.session.plugins.open_window(row, info).unwrap();
+            a.state.editor_host.open_window(&mut a.state.session.plugins, row, info).unwrap();
         }
         let t0 = Instant::now();
         while !(0..2).all(|r| a.state.embeds.get(&r).is_some_and(|e| e.view().frame.is_some())) && t0.elapsed() < Duration::from_secs(5) {

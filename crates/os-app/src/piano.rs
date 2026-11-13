@@ -457,7 +457,7 @@ pub fn channel(s: &State) -> Option<u16> {
 /// Undo the newest step of the project's history; returns false when there is nothing to undo.
 #[cfg(test)]
 pub fn undo(s: &mut State) -> bool {
-    crate::history::undo(s).is_some()
+    crate::history_ui::undo(s).is_some()
 }
 
 /// The timebase changed from `from` to `to` ticks per quarter (`Project::set_ppq` rescaled the project): the scroll,

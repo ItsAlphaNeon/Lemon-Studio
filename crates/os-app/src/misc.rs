@@ -168,7 +168,7 @@ pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
         return;
     }
     let run = crate::history::Run::Channel(row, crate::history::ChannelControl::Misc(m));
-    crate::control::run_edit(&mut app.state, "Channel settings", crate::control::command::Region::Channel(row), run, mp::draggable(m), |s| {
+    crate::control_ui::run_edit(&mut app.state, "Channel settings", crate::control::command::Region::Channel(row), run, mp::draggable(m), |s| {
         if let Some(ch) = s.session.project.get_mut().channels.get_mut(row) {
             put(&mut ch.misc, m, v);
         }

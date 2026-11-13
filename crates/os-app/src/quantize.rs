@@ -314,7 +314,7 @@ pub fn quantize(notes: Vec<Note>, tpl: &Pattern, set: &Settings, ppq: u32) -> Ve
 mod tests {
     use super::*;
 
-    fn note(pos: u32, len: u32) -> Note {
+    pub(crate) fn note(pos: u32, len: u32) -> Note {
         Note { length: len, ..Note::step(0, pos) }
     }
 
