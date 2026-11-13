@@ -14,6 +14,8 @@
 //! a `.lemon` file only; an FLP's icons come from its icon numbers instead.
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
+use std::collections::BTreeSet;
+
 use crate::app::State;
 use crate::playlist::ICONS;
 #[cfg(test)]
@@ -54,7 +56,7 @@ const CLIP_CHANNEL: u8 = 1;
 pub const FEATURES: &[&str] = &[];
 
 /// The features of [`FEATURES`] that `s` uses.
-fn used(_s: &State) -> Vec<&'static str> {
+fn used(_s: &crate::session::Session) -> Vec<&'static str> {
     Vec::new()
 }
 
@@ -76,9 +78,9 @@ pub fn unknown_features(file: &os_flp::FlpFile) -> Vec<String> {
 
 /// [`lemon::FEATURES`]: a u32 count, then each name (u16 length, UTF-8). The features `s` uses, and those its file
 /// names that this version does not know: their parts are kept through a save, so the names stay too.
-fn features(s: &State) -> Event {
+fn features(s: &crate::session::Session) -> Event {
     let mut names: Vec<String> = used(s).into_iter().map(String::from).collect();
-    if let Some(f) = &s.session.file {
+    if let Some(f) = &s.file {
         names.extend(unknown_features(f));
     }
     let mut b = start(names.len());
@@ -93,11 +95,54 @@ fn features(s: &State) -> Event {
 /// The `LMex` events holding the Lemon Studio state of `s` and `plugins`, in ID order. Set keyboard focus of all
 /// plugins to ▸ is written only where it works (Windows and macOS); elsewhere the file's own event is kept.
 pub fn events(s: &State, plugins: &Plugins) -> Vec<Event> {
-    let mut v = vec![icons(s), slot_names(s), slot_colors(s), performance(s), mixer(s), scaling(s, plugins), channel_checks(s)];
+    events_in(&s.session, plugins, &looks(s))
+}
+
+/// What of a `.lemon` file's own state is the interface's (`events_in`): its views' choices.
+pub struct Looks<'a> {
+    /// The mixer's View ▸ Waveforms and Extra properties.
+    pub waveforms: bool,
+    pub extra: bool,
+    /// The channels (by id) that show a waveform preview, and those with MIDI channel through off.
+    pub wave_preview: &'a BTreeSet<u32>,
+    pub through_off: &'a BTreeSet<u32>,
+    /// The playlist's Performance flags ([`lemon::PERFORMANCE`]).
+    pub performance: u8,
+    /// The rack's note locks (`rack::NoteSrc` order).
+    pub note_lock: [Option<usize>; 2],
+}
+
+static NO_CHANNELS: BTreeSet<u32> = BTreeSet::new();
+
+impl Looks<'static> {
+    /// Without an interface (`--serve`): the choices an interface starts with.
+    pub fn none() -> Looks<'static> {
+        Looks { waveforms: false, extra: true, wave_preview: &NO_CHANNELS, through_off: &NO_CHANNELS, performance: CLIP_PROGRESS | VELOCITY_SUBCLIPS, note_lock: [None; 2] }
+    }
+}
+
+/// The interface's choices as `s` has them.
+fn looks(s: &State) -> Looks<'_> {
+    let pl = &s.playlist;
+    let performance = [
+        (pl.perf_clip_progress, CLIP_PROGRESS),
+        (pl.perf_track_progress, TRACK_PROGRESS),
+        (pl.perf_plus_scene, PLUS_SCENE),
+        (pl.perf_velocity_subclips, VELOCITY_SUBCLIPS),
+    ]
+    .iter()
+    .filter(|(on, _)| *on)
+    .fold(0, |f, (_, bit)| f | bit);
+    Looks { waveforms: s.mixer.waveforms, extra: s.mixer.extra, wave_preview: &s.rack.wave_preview, through_off: &s.rack.through_off, performance, note_lock: s.rack.note_lock }
+}
+
+/// `events` on the session, with the interface's choices `looks`.
+pub fn events_in(s: &crate::session::Session, plugins: &Plugins, looks: &Looks) -> Vec<Event> {
+    let mut v = vec![icons(s), slot_names(s), slot_colors(s), performance(looks), mixer(s, looks), scaling(s, plugins), channel_checks(s, looks)];
     #[cfg(any(windows, target_os = "macos"))]
     v.push(Event::new(lemon::KEY_FOCUS, Value::var([LAYOUT, u8::from(editor_keys())])));
     v.push(track_locks(s));
-    v.push(note_locks(s));
+    v.push(note_locks(looks));
     v.push(features(s));
     v
 }
@@ -106,8 +151,13 @@ pub fn events(s: &State, plugins: &Plugins) -> Vec<Event> {
 /// focus of all plugins to ▸ is left out: it is a switch for the whole program, with no undo step, so it marks no
 /// project changed.
 pub fn saved_form(s: &State, plugins: &Plugins) -> Vec<u8> {
+    saved_form_in(&s.session, plugins, &looks(s))
+}
+
+/// `saved_form` on the session, with the interface's choices `looks`.
+pub fn saved_form_in(s: &crate::session::Session, plugins: &Plugins, looks: &Looks) -> Vec<u8> {
     let mut b = Vec::new();
-    for e in events(s, plugins).into_iter().filter(|e| e.id != lemon::KEY_FOCUS) {
+    for e in events_in(s, plugins, looks).into_iter().filter(|e| e.id != lemon::KEY_FOCUS) {
         b.push(e.id);
         b.extend_from_slice(e.data().unwrap_or_default());
     }
@@ -253,8 +303,8 @@ fn from_flp(s: &mut crate::session::Session) {
 /// number (u16: the channel's position in the rack, or the mixer track) and slot (u8, 0 unless an effect slot), and the
 /// icon's name (u8 length, UTF-8; the names of the Change icon... menu). A channel is kept by its position, since the
 /// file holds the channels in rack order and ids are not saved.
-fn icons(s: &State) -> Event {
-    let p = &s.session.project;
+fn icons(s: &crate::session::Session) -> Event {
+    let p = &s.project;
     // Only names this version knows (as the menu offers them).
     fn known(n: &Option<String>) -> Option<&str> {
         n.as_deref().filter(|n| ICONS.iter().any(|(x, _)| x == n))
@@ -302,9 +352,9 @@ fn read_icons(s: &mut crate::session::Session, d: &[u8]) {
 }
 
 /// [`lemon::SLOT_NAMES`]: a u32 count, then per slot its mixer track (u16), slot (u8) and name (u16 length, UTF-8).
-fn slot_names(s: &State) -> Event {
+fn slot_names(s: &crate::session::Session) -> Event {
     let mut v: Vec<((u16, u8), &String)> = Vec::new();
-    for m in &s.session.project.mixer {
+    for m in &s.project.mixer {
         v.extend(m.slot_names.iter().enumerate().filter_map(|(k, n)| Some(((m.index, k as u8), n.as_ref()?))));
     }
     v.sort();
@@ -320,9 +370,9 @@ fn slot_names(s: &State) -> Event {
 }
 
 /// [`lemon::SLOT_COLORS`]: a u32 count, then per slot its mixer track (u16), slot (u8) and colour (u8 red, green, blue).
-fn slot_colors(s: &State) -> Event {
+fn slot_colors(s: &crate::session::Session) -> Event {
     let mut v: Vec<((u16, u8), &os_model::Rgb)> = Vec::new();
-    for m in &s.session.project.mixer {
+    for m in &s.project.mixer {
         v.extend(m.slot_colors.iter().enumerate().filter_map(|(k, c)| Some(((m.index, k as u8), c.as_ref()?))));
     }
     v.sort_by_key(|(k, _)| *k);
@@ -336,18 +386,8 @@ fn slot_colors(s: &State) -> Event {
 
 /// [`lemon::PERFORMANCE`]: one u8 of flags: 1 Performance clip progress, 2 Performance track progress, 4 Ctrl+click
 /// triggers +Scene, 8 Velocity picks sub-clips.
-fn performance(s: &State) -> Event {
-    let pl = &s.playlist;
-    let flags = [
-        (pl.perf_clip_progress, CLIP_PROGRESS),
-        (pl.perf_track_progress, TRACK_PROGRESS),
-        (pl.perf_plus_scene, PLUS_SCENE),
-        (pl.perf_velocity_subclips, VELOCITY_SUBCLIPS),
-    ]
-    .iter()
-    .filter(|(on, _)| *on)
-    .fold(0, |f, (_, bit)| f | bit);
-    Event::new(lemon::PERFORMANCE, Value::var([LAYOUT, flags]))
+fn performance(looks: &Looks) -> Event {
+    Event::new(lemon::PERFORMANCE, Value::var([LAYOUT, looks.performance]))
 }
 
 /// [`lemon::KEY_FOCUS`]: Set keyboard focus of all plugins to ▸ (`plugin_window::editor_keys`). The switch is one for
@@ -370,21 +410,21 @@ fn set_editor_keys(on: bool) {
 
 /// [`lemon::MIXER`]: one u8 of flags: 1 Plugin delay compensation ▸ Automatic, 2 View ▸ Waveforms, 4 View ▸ Extra
 /// properties.
-fn mixer(s: &State) -> Event {
-    let flags = [(!s.session.project.pdc_off, PDC_AUTO), (s.mixer.waveforms, WAVEFORMS), (s.mixer.extra, EXTRA_PROPS)];
+fn mixer(s: &crate::session::Session, looks: &Looks) -> Event {
+    let flags = [(!s.project.pdc_off, PDC_AUTO), (looks.waveforms, WAVEFORMS), (looks.extra, EXTRA_PROPS)];
     Event::new(lemon::MIXER, Value::var([LAYOUT, flags.iter().filter(|(on, _)| *on).fold(0, |f, (_, bit)| f | bit)]))
 }
 
 /// [`lemon::SCALING`]: a u32 count, then per plugin window its owner's kind (u8: 0 a channel, 2 an effect slot, as in
 /// [`lemon::ICONS`]), number (u16: the channel's rack position, or the mixer track), slot (u8, 0 for a channel) and
 /// scale (u16 percent). Windows at Main are not listed; a container's members are not kept.
-fn scaling(s: &State, plugins: &Plugins) -> Event {
+fn scaling(s: &crate::session::Session, plugins: &Plugins) -> Event {
     let mut v = Vec::new();
     for (&key, &k) in &plugins.editor_scales {
         let pct = (k * 100.0).round() as u16;
         match crate::plugins::fx_of(key) {
             Some((t, slot)) => v.push((SLOT, t, slot, pct)),
-            None if key < s.session.project.channels.len() => v.push((CHANNEL, key as u16, 0, pct)),
+            None if key < s.project.channels.len() => v.push((CHANNEL, key as u16, 0, pct)),
             None => {}
         }
     }
@@ -401,14 +441,14 @@ fn scaling(s: &State, plugins: &Plugins) -> Event {
 
 /// [`lemon::CHANNEL_CHECKS`]: a u32 count, then per channel in rack order its position (u16) and flags (u8: 1 Show
 /// waveform preview, 2 MIDI channel through).
-fn channel_checks(s: &State) -> Event {
-    let mut b = start(s.session.project.channels.len());
-    for (i, c) in s.session.project.channels.iter().enumerate() {
+fn channel_checks(s: &crate::session::Session, looks: &Looks) -> Event {
+    let mut b = start(s.project.channels.len());
+    for (i, c) in s.project.channels.iter().enumerate() {
         let mut flags = 0;
-        if s.rack.wave_preview.contains(&c.id.0) {
+        if looks.wave_preview.contains(&c.id.0) {
             flags |= WAVE_PREVIEW;
         }
-        if !s.rack.through_off.contains(&c.id.0) {
+        if !looks.through_off.contains(&c.id.0) {
             flags |= MIDI_THROUGH;
         }
         b.extend_from_slice(&(i as u16).to_le_bytes());
@@ -420,9 +460,9 @@ fn channel_checks(s: &State) -> Event {
 /// [`lemon::TRACK_LOCKS`]: a u32 count, then per locked playlist track its arrangement (u16, 0-based), track (u16,
 /// 0-based) and source (u8: 0 a pattern, 1 an audio or automation channel; u16: the 1-based pattern number or the
 /// channel's rack position).
-fn track_locks(s: &State) -> Event {
+fn track_locks(s: &crate::session::Session) -> Event {
     let mut v = Vec::new();
-    for (a, arr) in s.session.project.arrangements.iter().enumerate() {
+    for (a, arr) in s.project.arrangements.iter().enumerate() {
         for (t, tr) in arr.tracks.iter().enumerate() {
             match tr.clip_lock {
                 Some(os_model::ClipSource::Pattern(p)) => v.push((a as u16, t as u16, PATTERN, p)),
@@ -443,8 +483,8 @@ fn track_locks(s: &State) -> Event {
 
 /// [`lemon::NOTE_LOCKS`]: a u32 count, then per locked note source its kind (u8: 0 the computer keyboard, 1 the Touch
 /// controller, as `rack::NoteSrc` orders them) and the channel's rack position (u16).
-fn note_locks(s: &State) -> Event {
-    let locks: Vec<(u8, u16)> = s.rack.note_lock.iter().enumerate().filter_map(|(src, row)| Some((src as u8, (*row)? as u16))).collect();
+fn note_locks(looks: &Looks) -> Event {
+    let locks: Vec<(u8, u16)> = looks.note_lock.iter().enumerate().filter_map(|(src, row)| Some((src as u8, (*row)? as u16))).collect();
     let mut b = start(locks.len());
     for (src, row) in locks {
         b.push(src);
@@ -486,6 +526,15 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without an interface, a save writes the choices a new interface starts with.
+    #[test]
+    fn no_interface_looks_as_a_new_one() {
+        let a = crate::app::App::new(None);
+        let (l, n) = (looks(&a.state), Looks::none());
+        assert_eq!((l.waveforms, l.extra, l.performance, l.note_lock), (n.waveforms, n.extra, n.performance, n.note_lock));
+        assert_eq!((l.wave_preview, l.through_off), (n.wave_preview, n.through_off));
+    }
     use crate::app::App;
     use crate::icons::Icon;
 
@@ -794,7 +843,7 @@ mod tests {
         // Two colours, the second cut short: the first is read.
         let mut s = with_state();
         crate::mixer::set_slot_color(&mut s.state.session, 3, 4, Some(os_model::Rgb::new(1, 2, 3)));
-        let mut b = slot_colors(&s.state).data().unwrap().to_vec();
+        let mut b = slot_colors(&s.state.session).data().unwrap().to_vec();
         b.truncate(b.len() - 1);
         for (t, k) in crate::mixer::slot_colors_of(&s.state.session.project).into_keys() {
             crate::mixer::set_slot_color(&mut s.state.session, t, k, None);
