@@ -667,7 +667,7 @@ impl App {
             }
             // A container member's level: one undo step while it keeps moving; recorded as its automation target.
             Target::Member(m, k, id, wet) => {
-                crate::container::set_level_run(&mut self.state, m, k, id, wet, v);
+                crate::container_ui::set_level_run(&mut self.state, m, k, id, wet, v);
                 if let Some(target) = crate::container::level_target(&self.state.session, m, k, id, wet) {
                     self.record_param(target, (0.0, 1.0), f64::from(v));
                 }

@@ -1634,7 +1634,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         // README.md §2.8, §3.3, §4.4).
         {
             let wrap = it(crate::container::WRAP, RCmd::Wrap(r));
-            if crate::container::can_wrap_channel(s, r) { wrap } else { wrap.off() }
+            if crate::container_ui::can_wrap_channel(s, r) { wrap } else { wrap.off() }
         },
         it("Clone", RCmd::Clone(r)),
         it("Delete...", RCmd::Delete(r)),

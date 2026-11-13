@@ -572,7 +572,7 @@ pub enum EditTarget {
     MixerName(u16),
     SlotName(u16, u8),
     /// The name of member `.2` (its id) of the container at place (`.0`, `.1`): a track and slot, or a rack row and
-    /// `container::CHANNEL` (Lemon Studio's design, `crate::container::rename`).
+    /// `container::CHANNEL` (Lemon Studio's design, `crate::container_ui::rename`).
     MemberName(u16, u8, u32),
     /// The mixer track menu's Insert multiple...: how many tracks to insert in front of this one.
     MixerInsert(u16),
@@ -779,7 +779,7 @@ pub fn icons(p: &os_model::Project) -> HashMap<IconOwner, crate::icons::Icon> {
 fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
     if let Some((t, k, id)) = crate::container::of_key(&s.session, key) {
         let icon = icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i);
-        crate::container::edit_own(s, t, k, id, crate::container::ICON, |m| m.icon = icon);
+        crate::container_ui::edit_own(s, t, k, id, crate::container::ICON, |m| m.icon = icon);
         return;
     }
     let Some(owner) = icon_owner(&s.session.project, key) else { return };
@@ -2033,7 +2033,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::new("Reset empty tracks", Cmd::ResetEmptyTracks),
         PItem::sep(),
         PItem::new("Prepare for performance mode", Cmd::PerfPrepare),
-        PItem::new("Performance mode", Cmd::PerfToggle).key("Ctrl+P").mark(Mark::Check(crate::perform::on(s))),
+        PItem::new("Performance mode", Cmd::PerfToggle).key("Ctrl+P").mark(Mark::Check(crate::perform_ui::on(s))),
         PItem::new("Performance clip progress", Cmd::PerfClipProgress).mark(Mark::Check(s.playlist.perf_clip_progress)),
         PItem::new("Performance track progress", Cmd::PerfTrackProgress).mark(Mark::Check(s.playlist.perf_track_progress)),
         PItem::new("Ctrl+click triggers +Scene", Cmd::PerfPlusScene).mark(Mark::Check(s.playlist.perf_plus_scene)),
@@ -2495,18 +2495,18 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
 
     // Performance mode: a click on a clip in the zone launches it, a right click stops its track (spec:
     // ui/performance-mode.md §3).
-    if let Some((ci, (t, _))) = hit.and_then(|ci| crate::perform::slot_of(s, ci).map(|slot| (ci, slot))) {
+    if let Some((ci, (t, _))) = hit.and_then(|ci| crate::perform_ui::slot_of(s, ci).map(|slot| (ci, slot))) {
         let now = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
         let s = &mut app.state;
         if right {
-            crate::perform::stop(s, t, now, alt);
+            crate::perform_ui::stop(s, t, now, alt);
             s.message = Some(format!("{}: stopping", track_name(&s.session, t)));
         } else if app.ctrl {
             // Ctrl+click: the clip's clip group, track group or column as a scene (§3a).
             let plus = s.playlist.perf_plus_scene;
-            s.message = crate::perform::trigger_clip_scene(s, ci, now, alt, plus);
+            s.message = crate::perform_ui::trigger_clip_scene(s, ci, now, alt, plus);
         } else {
-            s.message = crate::perform::trigger(s, ci, now, alt, app.shift);
+            s.message = crate::perform_ui::trigger(s, ci, now, alt, app.shift);
             if s.session.perform.held.is_some() {
                 app.drag = Some(Drag::Pl(PlDrag::Perform));
             }
@@ -3138,7 +3138,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
     match d {
         PlDrag::Perform => {
             let now = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
-            crate::perform::release(&mut app.state, now);
+            crate::perform_ui::release(&mut app.state, now);
         }
         PlDrag::Slice { .. } => {
             if let Some(Overlay::Slice { tick, t0, t1 }) = overlay {
@@ -3329,7 +3329,7 @@ pub fn marker_at(s: &State, g: &PGeom, x: f32) -> Option<usize> {
 
 /// Width of a marker tab: its action's icon and its label.
 pub fn marker_w(s: &State, m: &TimeMarker) -> f32 {
-    let n = crate::perform::pad_name(s, m).map_or_else(|| m.name.chars().count(), |p| p.chars().count());
+    let n = crate::perform_ui::pad_name(s, m).map_or_else(|| m.name.chars().count(), |p| p.chars().count());
     (n as f32 * 7.0 + 18.0 + marker_icon(m.kind).0).max(24.0)
 }
 
@@ -3387,9 +3387,9 @@ pub fn press_header(app: &mut App, t: u16, right: bool, at: (f32, f32)) {
     }
     // Performance mode: a click on a playing track's header stops it at the next sync point, with Alt at once (spec:
     // ui/performance-mode.md §3).
-    if crate::perform::zone(s).is_some() && s.session.perform.live.contains_key(&t) {
+    if crate::perform_ui::zone(s).is_some() && s.session.perform.live.contains_key(&t) {
         let playing = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
-        crate::perform::stop(&mut app.state, t, playing, app.alt);
+        crate::perform_ui::stop(&mut app.state, t, playing, app.alt);
     }
     let s = &mut app.state;
     let now = crate::anim::now();
@@ -3492,7 +3492,7 @@ pub fn commit_edit(s: &mut State) {
         EditTarget::SlotName(t, k) => crate::control_ui::edit(s, "Slot name", crate::control::command::Region::Project, |s| {
             crate::mixer::set_slot_label(&mut s.session, t, k, (!text.is_empty()).then_some(text));
         }),
-        EditTarget::MemberName(t, k, id) => crate::container::rename(s, t, k, id, &text),
+        EditTarget::MemberName(t, k, id) => crate::container_ui::rename(s, t, k, id, &text),
         EditTarget::TypeIn(t, norm) => crate::typein_ui::accept(s, t, norm, &text),
         // Their own steps too. Settled first: they renumber mixer tracks, which moves channels' mixer tracks, part of
         // the playlist's step since audio tracks (`capture`), so the step above would no longer be empty.
@@ -4312,7 +4312,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::PerfToggle => {
             snapshot_as(&mut s.session, "Performance mode");
-            Some(crate::perform::toggle(s))
+            Some(crate::perform_ui::toggle(s))
         }
         Cmd::PerfSet(t, which, v) => {
             snapshot_as(&mut s.session, "Performance settings");
@@ -4741,7 +4741,7 @@ pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
     };
     let name = if smart { "Auto-bypass when silent" } else { "Threaded processing" };
     if let Some((t, k, id)) = crate::container::of_key(&s.session, key) {
-        crate::container::edit_own(s, t, k, id, name, |m| flip(&mut m.cpu));
+        crate::container_ui::edit_own(s, t, k, id, name, |m| flip(&mut m.cpu));
         return;
     }
     match crate::plugins::fx_of(key) {

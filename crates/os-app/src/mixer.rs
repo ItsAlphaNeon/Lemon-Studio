@@ -185,7 +185,7 @@ pub enum MCmd {
     ContainerList(u8),
     /// A member window's Rename, color and icon..., Change color... ▸ and Random color on member `.1` (its place) of the
     /// container in the current track's slot `.0`, as `Member` addresses it: the member's own name and colour, one undo
-    /// step each (`crate::container::edit_own`).
+    /// step each (`crate::container_ui::edit_own`).
     MemberRename(u8, usize),
     MemberColor(u8, usize, Option<Rgb>),
     MemberRandomColor(u8, usize),
@@ -1341,8 +1341,8 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
         PItem::new("Delete...", mx(MCmd::SlotDelete(slot))),
         PItem::sep(),
         // Lemon Studio's Patcher, slice 1 (`crate::container`).
-        PItem { enabled: crate::container::can_wrap(app, slot, false), ..PItem::new(crate::container::WRAP, mx(MCmd::Wrap(slot, false))) },
-        PItem { enabled: crate::container::can_wrap(app, slot, true), ..PItem::new(crate::container::WRAP_ALL, mx(MCmd::Wrap(slot, true))) },
+        PItem { enabled: crate::container_ui::can_wrap(app, slot, false), ..PItem::new(crate::container::WRAP, mx(MCmd::Wrap(slot, false))) },
+        PItem { enabled: crate::container_ui::can_wrap(app, slot, true), ..PItem::new(crate::container::WRAP_ALL, mx(MCmd::Wrap(slot, true))) },
         PItem::head("Presets"),
         PItem::sub("Presets", vec![PItem::not_yet("(none)")]),
         PItem::not_yet("Browse presets"),
@@ -1377,7 +1377,7 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
     ];
     let mut items = items;
     // A container's members, listed (slice 1 gives them no windows of their own).
-    if let Some(list) = crate::container::list_items(s, slot) {
+    if let Some(list) = crate::container_ui::list_items(s, slot) {
         items.insert(3, PItem::sub("Container", list));
     }
     let mut menu = Popup { x, y, items, sub: None, scroll: [0; 2] };
@@ -1809,7 +1809,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::MemberColor(slot, i, c) => {
             let t = s.selected_mixer;
             if let Some(m) = crate::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
-                crate::container::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = c);
+                crate::container_ui::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = c);
             }
             None
         }
@@ -1818,12 +1818,12 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             if let Some(m) = crate::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
                 let seed = (u64::from(t) << 16 | u64::from(slot) << 8 | u64::from(m.id)).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed());
                 let c = crate::patterns::random_color(seed);
-                crate::container::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = Some(c));
+                crate::container_ui::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = Some(c));
             }
             None
         }
         MCmd::ContainerList(slot) => {
-            crate::container::show(s, s.selected_mixer, slot);
+            crate::container_ui::show(s, s.selected_mixer, slot);
             None
         }
         MCmd::SlotMove(slot, d) => {
@@ -2132,7 +2132,7 @@ impl App {
         let key = crate::plugins::fx_key(track, slot);
         // A container: its list's window.
         if crate::container::members(&self.state.session, track, slot).is_some() {
-            crate::container::show(&mut self.state, track, slot);
+            crate::container_ui::show(&mut self.state, track, slot);
             return;
         }
         if !self.state.session.plugins.hosted.contains_key(&key) {

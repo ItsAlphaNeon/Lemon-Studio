@@ -268,7 +268,7 @@ impl State {
             KnobId::Arp(k) => self.arp.set.get(k),
             KnobId::PianoDlg(k) => self.piano_dlg.get(k),
             // What the chain plays while its list is open (`container::shown_level`).
-            KnobId::Member(t, k, id, wet) => crate::container::shown_level(self, t, k, id, wet),
+            KnobId::Member(t, k, id, wet) => crate::container_ui::shown_level(self, t, k, id, wet),
             _ => self.session.knob(id).unwrap_or(0.0),
         }
     }
@@ -316,7 +316,7 @@ impl State {
                 }
             }
             // No undo step here: a drag's is taken at the press (`history::knob`).
-            KnobId::Member(t, k, member, wet) => crate::container::put_level(self, t, k, member, wet, v),
+            KnobId::Member(t, k, member, wet) => crate::container_ui::put_level(self, t, k, member, wet, v),
             _ => self.session.set_knob(id, v),
         }
     }

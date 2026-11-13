@@ -2269,7 +2269,7 @@ impl App {
             }
             Then::PerfMarkers(count, spacing) => {
                 if reply == Reply::Button(Answer::Ok) {
-                    let m = crate::perform::prepare_with(&mut self.state, crate::perform::MarkerForm { count, spacing });
+                    let m = crate::perform_ui::prepare_with(&mut self.state, crate::perform::MarkerForm { count, spacing });
                     self.state.message = Some(m);
                 }
             }
@@ -7913,8 +7913,8 @@ impl App {
         }
         // Performance mode (spec: ui/performance-mode.md §3): its layout's keys launch the zone's slots as the
         // Performance mode MIDI channel's notes do, and play no note; the other note keys do nothing.
-        if crate::perform::zone(&self.state).is_some() {
-            if let Some(note) = crate::perform::typing_note(code) {
+        if crate::perform_ui::zone(&self.state).is_some() {
+            if let Some(note) = crate::perform_ui::typing_note(code) {
                 if !self.perf_typed.iter().any(|h| h.0 == code) {
                     self.perf_typed.push((code, note));
                     self.perform_note(note, TYPING_VELOCITY, true);
@@ -8837,7 +8837,7 @@ impl App {
             if self.state.shown(Win::Container) && self.state.container.at == place {
                 self.state.hide(Win::Container);
             } else {
-                crate::container::show(&mut self.state, place.0, place.1);
+                crate::container_ui::show(&mut self.state, place.0, place.1);
             }
             return;
         }
@@ -8860,7 +8860,7 @@ impl App {
     pub(crate) fn open_channel_window(&mut self, i: usize) {
         let s = &mut self.state;
         if s.session.project.channels.get(i).is_some_and(crate::container::is_container_channel) {
-            crate::container::show(s, i as u16, crate::container::CHANNEL);
+            crate::container_ui::show(s, i as u16, crate::container::CHANNEL);
         } else if s.session.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
             // Not hosted yet (just added): Lemon Sampler starts on the next tick and its window opens then.
             s.session.pending_open = Some(i);

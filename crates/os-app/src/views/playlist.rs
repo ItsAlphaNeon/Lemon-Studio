@@ -244,14 +244,14 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     ripples(ui, s, &g);
     // Performance mode: the part of the zone the MIDI channel's notes reach (spec: ui/performance-mode.md §3).
-    if let Some((tr, n, a, b)) = crate::perform::grid_area(s) {
+    if let Some((tr, n, a, b)) = crate::perform_ui::grid_area(s) {
         let (y0, y1) = (g.y_of(tr), g.y_of(tr + n));
         ui.c.stroke_rrect(Rect::span(g.x_of(a as f32), g.x_of(b as f32), y0, y1), 0.0, 1.0, t.playhead.with_alpha(140));
     }
     // Performance mode: a launched clip's zone clip is outlined and filled as far as its pass has played (spec:
     // ui/performance-mode.md §3).
     if f.playing && f.song && s.playlist.perf_clip_progress {
-        for (i, k) in crate::perform::progress(s, f.tick.max(0.0) as u32) {
+        for (i, k) in crate::perform_ui::progress(s, f.tick.max(0.0) as u32) {
             let r = g.clip_rect(&pl::clips(&s.session)[i]);
             ui.c.fill_rect(Rect::new(r.x, r.y, r.w * k, r.h), t.playhead.with_alpha(60));
             ui.c.stroke_rrect(r, 0.0, 1.0, t.playhead);
@@ -293,7 +293,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     // Performance track progress (spec: ui/performance-mode.md §3): a bar along the bottom of a launched track's header.
     if f.playing && f.song && s.playlist.perf_track_progress {
-        for (row, k) in crate::perform::track_progress(s, f.tick.max(0.0) as u32) {
+        for (row, k) in crate::perform_ui::track_progress(s, f.tick.max(0.0) as u32) {
             if visible.contains(&row) {
                 let y = g.y_of(row) + g.rows.height(row) - 6.0;
                 ui.c.fill_rect(Rect::new(head_x + 2.0, y, (head_w - 4.0) * k, 3.0), ui.t.playhead);
@@ -732,7 +732,7 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
         ui.c.fill_polygon(&tab, t.ruler.mix(t.track_header, 0.55));
         marker_glyph(ui, m.kind, x, top + 8.0);
         let tx = x + 3.0 + pl::marker_icon(m.kind).0;
-        let label = crate::perform::pad_name(s, m).unwrap_or_else(|| marker_label(m));
+        let label = crate::perform_ui::pad_name(s, m).unwrap_or_else(|| marker_label(m));
         ui.c.text_clip(Font::new(12), tx, lane.y + 1.0, right - tx, t.text, &label);
     }
     ui.c.pop_clip();

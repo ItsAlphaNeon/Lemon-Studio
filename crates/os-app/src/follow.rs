@@ -112,7 +112,7 @@ fn view(s: &mut State, v: crate::session::View) {
             s.piano.select(pattern, channel, Vec::new());
             s.piano.range = range;
         }
-        View::MemberLevel { t, k, id, wet, v } => crate::container::show_level(s, t, k, id, wet, v),
+        View::MemberLevel { t, k, id, wet, v } => crate::container_ui::show_level(s, t, k, id, wet, v),
         View::PatternsRenumbered => {
             s.playlist.sel.clear();
             s.playlist.hover_clip = None;
