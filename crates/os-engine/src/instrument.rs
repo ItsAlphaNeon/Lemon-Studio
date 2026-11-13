@@ -103,6 +103,18 @@ pub trait Instrument: Send {
     }
     /// Renders `left.len()` frames at `rate`, overwriting both buffers.
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
+    /// The extra outputs the instrument has besides its main one (a plugin's output buses after the first, each heard
+    /// as a stereo pair; spec: audio/multi-output.md). Valid once the instrument is active. Default: none.
+    fn extra_outputs(&self) -> usize {
+        0
+    }
+    /// `process`, also filling the extra outputs: with `n = left.len()`, extra output `k`'s left side goes to
+    /// `extra[2kn..(2k+1)n]` and its right side to `extra[(2k+1)n..(2k+2)n]`, for as many outputs as `extra` holds.
+    /// An output the instrument doesn't have, or doesn't fill, is silence. Default: `process` and silent extras.
+    fn process_extra(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
+        extra.fill(0.0);
+        self.process(rate, left, right);
+    }
     /// True while the instrument still has sound to deliver (ringing voices, a long sample): the engine keeps
     /// processing it instead of stopping after its idle tail. Valid after `process`.
     fn active(&self) -> bool {

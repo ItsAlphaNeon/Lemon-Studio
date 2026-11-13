@@ -346,6 +346,9 @@ struct ChannelState {
     /// never moved, `InstTuning::moves`).
     own_tuning: bool,
     instrument: Slot,
+    /// Where each extra output of the instrument goes: the port of output k + 1, the number of mixer tracks after the
+    /// channel's own it plays into, 0 for none (`Engine::set_channel_outputs`; spec: audio/multi-output.md).
+    outputs: Vec<usize>,
     /// Polyphony, mono, portamento and cut group rules for the instrument's notes (spec: audio/channel-voices.md).
     rules: notes::Rules,
     /// Trim positions (source frames) times this are positions in what the channel plays: the stretch factor when
@@ -474,6 +477,13 @@ fn stretched_frames(frames: usize, factor: f64) -> usize {
 }
 
 impl ChannelState {
+    /// The mixer track extra output `k` plays into, of `tracks`: `outputs[k]` tracks after the channel's own; `None` for
+    /// none or one past the last track (spec: audio/multi-output.md).
+    fn output_track(&self, k: usize, tracks: usize) -> Option<usize> {
+        let port = *self.outputs.get(k)?;
+        (port > 0).then_some(self.insert + port).filter(|&t| t < tracks)
+    }
+
     /// The buffer a voice plays (`Trigger::buf`).
     fn buffer(&self, buf: u16) -> Option<&Arc<Sample>> {
         match buf {
@@ -1216,6 +1226,8 @@ pub struct Engine {
     inst_tail: u64,
     /// A hosted instrument reported sound still to come during the last tick.
     inst_active: bool,
+    /// The channels whose instruments put out extra outputs this tick (`instruments_out`), kept for its capacity.
+    extra_out: Vec<usize>,
     /// Per channel, this tick: a note of it is held or due to end (its instrument is not auto-bypassed).
     inst_held: Vec<bool>,
     /// Automation clips of the playlist and their curves (song mode).
@@ -1421,6 +1433,7 @@ impl Engine {
                     smart: ch.misc.cpu.smart_disable,
                     own_tuning: ch.kind.is_sampler(),
                     instrument: Slot::default(),
+                    outputs: Vec::new(),
                     rules: notes::Rules::new(&ch.misc, ppq),
                     from_scale,
                     realtime,
@@ -1763,6 +1776,7 @@ impl Engine {
             key_out: Vec::new(),
             inst_tail: 0,
             inst_active: false,
+            extra_out: Vec::new(),
             inst_held: Vec::new(),
             metronome: None,
             // Accent on every numerator-th beat (spec: ui/metronome.md §4): event 17, beats per bar.
@@ -1881,6 +1895,24 @@ impl Engine {
                 fx.ports = [main, aux];
                 self.pdc.due = true;
             }
+        }
+    }
+
+    /// Where generator channel `channel`'s instrument's extra outputs go (spec: audio/multi-output.md): `ports[k]` for
+    /// extra output `k` (the plugin's output bus `k + 2`), the number of mixer tracks after the channel's own track it
+    /// plays into, 0 for none. An output past the last track goes nowhere.
+    pub fn set_channel_outputs(&mut self, channel: usize, ports: Vec<usize>) {
+        let Some(ch) = self.channels.get_mut(channel) else { return };
+        let ports = {
+            let mut p = ports;
+            while p.last() == Some(&0) {
+                p.pop();
+            }
+            p
+        };
+        if ch.outputs != ports {
+            ch.outputs = ports;
+            self.pdc.due = true;
         }
     }
 
@@ -3757,6 +3789,8 @@ impl Engine {
     /// the tick owes its notes and frames, a delay that changed works the pads out again with the next tick.
     fn instruments_out(&mut self, n: usize) {
         let mut active = false;
+        let mut extra_out = std::mem::take(&mut self.extra_out);
+        extra_out.clear();
         for (c, o) in self.multicore.instruments() {
             if !o.ran {
                 // Still busy: it misses the tick. Its notes wait and its frames are owed, so it stays in time.
@@ -3776,7 +3810,30 @@ impl Engine {
             for (x, s) in self.bus[self.channels[c].insert].iter_mut().zip(&o.buf) {
                 *x += *s;
             }
+            if !self.channels[c].outputs.is_empty() {
+                extra_out.push(c);
+            }
         }
+        // Extra outputs join the tracks after the channel's own, each padded to be as late as that track's latest
+        // path (spec: audio/multi-output.md).
+        for &c in &extra_out {
+            let tracks = self.bus.len();
+            let pads = &mut self.pdc.out_pads;
+            if pads.len() <= c {
+                pads.resize_with(c + 1, Vec::new);
+            }
+            let Some(o) = self.multicore.instrument_out_mut(c) else { continue };
+            for (k, buf) in o.extra.iter_mut().enumerate() {
+                let Some(t) = self.channels[c].output_track(k, tracks) else { continue };
+                if let Some(p) = pads[c].get_mut(k) {
+                    p.run(buf);
+                }
+                for (x, s) in self.bus[t].iter_mut().zip(buf.iter()) {
+                    *x += *s;
+                }
+            }
+        }
+        self.extra_out = extra_out;
         // The missed notes and controller messages of the instruments that ran have been sent.
         let ran = |c: usize| self.multicore.instrument_ran(c);
         self.inst_missed.retain(|m| !ran(m.0));
@@ -4386,6 +4443,9 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     let ch = &cx.channels[c];
     (out.ran, out.active) = (false, false);
     out.buf.clear();
+    for e in &mut out.extra {
+        e.clear();
+    }
     let Some(inst) = ch.instrument.0.as_ref() else { return };
     let Some(mut inst) = lock_busy(inst, until, cx.wait, cx.export) else {
         *owed += n;
@@ -4509,7 +4569,14 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
         }
     }
     let (l, r) = (&mut sc.l[..n], &mut sc.r[..n]);
-    inst.process(cx.rate, l, r);
+    // Extra outputs only for a channel that sends one somewhere (spec: audio/multi-output.md).
+    let extras = ch.outputs.len();
+    if extras > 0 {
+        out.planar.resize(2 * extras * n, 0.0);
+        inst.process_extra(cx.rate, l, r, &mut out.planar[..2 * extras * n]);
+    } else {
+        inst.process(cx.rate, l, r);
+    }
     out.delay = inst.reported_delay();
     // An instrument without voice gains: the clips' shapes on its whole output. A clip that has ended keeps the channel
     // silent through its choke's tail only while no other clip of the channel plays; then the playing clips' gains
@@ -4531,16 +4598,31 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     // A level that changed smooths over the tick, as a voice's does: it has arrived when the curve says so (spec:
     // audio/automation.md).
     let (sl, sr) = out.gain.replace((gl, gr)).unwrap_or((gl, gr));
-    if (sl, sr) == (gl, gr) {
-        out.buf.extend(l.iter().zip(r.iter()).flat_map(|(&a, &b)| [a * gl, b * gr]));
-    } else {
-        let (dl, dr) = ((gl - sl) / n as f32, (gr - sr) / n as f32);
-        out.buf.extend(l.iter().zip(r.iter()).enumerate().flat_map(|(f, (&a, &b))| {
-            let x = (f + 1) as f32;
-            [a * (sl + dl * x), b * (sr + dr * x)]
-        }));
+    let levels = |l: &[f32], r: &[f32], into: &mut Vec<f32>| {
+        if (sl, sr) == (gl, gr) {
+            into.extend(l.iter().zip(r.iter()).flat_map(|(&a, &b)| [a * gl, b * gr]));
+        } else {
+            let (dl, dr) = ((gl - sl) / n as f32, (gr - sr) / n as f32);
+            into.extend(l.iter().zip(r.iter()).enumerate().flat_map(|(f, (&a, &b))| {
+                let x = (f + 1) as f32;
+                [a * (sl + dl * x), b * (sr + dr * x)]
+            }));
+        }
+    };
+    levels(l, r, &mut out.buf);
+    // The extra outputs that go somewhere, with the channel's levels as its main output has them (a Lemon Studio
+    // choice: spec audio/multi-output.md §3).
+    out.extra.resize_with(out.extra.len().max(extras), Vec::new);
+    let mut loud_extra = false;
+    for (k, &port) in ch.outputs.iter().enumerate() {
+        if port == 0 {
+            continue;
+        }
+        let side = |s: usize| &out.planar[(2 * k + s) * n..(2 * k + s + 1) * n];
+        levels(side(0), side(1), &mut out.extra[k]);
+        loud_extra |= !auto_bypass::silent(&out.extra[k]);
     }
-    out.quiet.note(quiet_in && !out.active && auto_bypass::silent(&out.buf), n);
+    out.quiet.note(quiet_in && !out.active && !loud_extra && auto_bypass::silent(&out.buf), n);
     // Delay compensation: the channel waits for the latest path into its track.
     if let Some(pad) = pad.filter(|p| p.len() > 0) {
         pad.run(&mut out.buf);
@@ -9898,5 +9980,95 @@ mod tests {
     fn input_numbers_are_pairs_then_single_inputs() {
         assert_eq!((0..7).map(|n| input_channels(n, 4)).collect::<Vec<_>>(), [Some((0, 1)), Some((2, 3)), Some((0, 0)), Some((1, 1)), Some((2, 2)), Some((3, 3)), None]);
         assert_eq!([input_channels(-1, 4), input_channels(0, 0), input_channels(0, 1)], [None, None, Some((0, 0))]);
+    }
+
+    /// A multi-output instrument: a constant on its main output and another on each extra one, with a delay it reports.
+    struct Outs {
+        levels: Vec<f32>,
+        delay: u32,
+    }
+
+    impl crate::Instrument for Outs {
+        fn note_on(&mut self, _offset: u32, _key: u8, _velocity: f32) {}
+        fn note_off(&mut self, _offset: u32, _key: u8) {}
+        fn process(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+            l.fill(self.levels[0]);
+            r.fill(self.levels[0]);
+        }
+        fn extra_outputs(&self) -> usize {
+            self.levels.len() - 1
+        }
+        fn process_extra(&mut self, rate: u32, l: &mut [f32], r: &mut [f32], extra: &mut [f32]) {
+            self.process(rate, l, r);
+            for (k, side) in extra.chunks_mut(l.len()).enumerate() {
+                side.fill(self.levels.get(k / 2 + 1).copied().unwrap_or(0.0));
+            }
+        }
+        fn active(&self) -> bool {
+            true
+        }
+        fn reported_delay(&self) -> u32 {
+            self.delay
+        }
+    }
+
+    fn outs_engine(channels: usize, delay: u32) -> (Engine, Vec<Arc<std::sync::Mutex<Outs>>>) {
+        let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+        p.channels = (0..channels).map(|i| Channel { index: i as u16, kind: ChannelKind::Plugin, mixer_track: 1 + i as u16, ..channel() }).collect();
+        p.mixer = (0..6).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_looping(true);
+        let insts: Vec<_> = (0..channels).map(|i| Arc::new(std::sync::Mutex::new(Outs { levels: vec![0.25, 0.5, 0.125], delay: if i == 0 { delay } else { 0 } }))).collect();
+        for (i, inst) in insts.iter().enumerate() {
+            e.set_instrument(i, inst.clone());
+        }
+        (e, insts)
+    }
+
+    fn track_peaks(e: &mut Engine) -> Vec<f32> {
+        let mut out = vec![0.0f32; 512 * 2];
+        for _ in 0..20 {
+            e.process(&mut out);
+        }
+        let mut peaks = Vec::new();
+        e.take_track_peaks(&mut peaks);
+        peaks.iter().map(|p| p[0]).collect()
+    }
+
+    /// spec: audio/multi-output.md: an instrument's extra output with port N plays into the mixer track N after the
+    /// channel's own, with the channel's levels; one with port 0 goes nowhere, nor does one past the last track.
+    #[test]
+    fn extra_outputs_play_into_the_tracks_after_the_channels() {
+        let (mut e, _insts) = outs_engine(1, 0);
+        let alone = track_peaks(&mut e);
+        assert!(alone[1] > 0.01, "the main output on track 1: {alone:?}");
+        assert!(alone[2..].iter().all(|&p| p == 0.0), "no extra output is heard before it has a port: {alone:?}");
+
+        // Extra output 1 (bus 2) two tracks on, output 2 (bus 3) not at all.
+        e.set_channel_outputs(0, vec![2, 0]);
+        let routed = track_peaks(&mut e);
+        assert!((routed[3] / routed[1] - 2.0).abs() < 1e-3, "track 3 hears the extra output at the main output's gain: {routed:?}");
+        assert_eq!((routed[2], routed[4]), (0.0, 0.0), "{routed:?}");
+
+        // Both, one of them past the last track.
+        e.set_channel_outputs(0, vec![1, 9]);
+        let both = track_peaks(&mut e);
+        assert!((both[2] / both[1] - 2.0).abs() < 1e-3 && both[3] == 0.0, "{both:?}");
+    }
+
+    /// spec: audio/multi-output.md "Delay compensation": what the extra output plays into waits for the instrument's
+    /// delay as its own track does: another channel on that track is padded by it.
+    #[test]
+    fn extra_outputs_count_for_delay_compensation() {
+        let (mut e, _insts) = outs_engine(2, 64);
+        track_peaks(&mut e);
+        assert_eq!((e.pdc.chan_pad[0].len(), e.pdc.chan_pad[1].len()), (0, 0), "channel 1 has a track of its own");
+
+        // Channel 0's extra output plays into channel 1's track 2.
+        e.set_channel_outputs(0, vec![1]);
+        track_peaks(&mut e);
+        assert_eq!(e.pdc.chan_pad[1].len(), 64, "channel 1 waits for channel 0's delay on track 2");
+        assert_eq!(e.pdc.out_pads[0][0].len(), 0, "the extra output is the latest path into track 2");
     }
 }

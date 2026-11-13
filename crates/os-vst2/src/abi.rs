@@ -179,6 +179,8 @@ pub mod op {
     pub const SUPPORTS: i32 = 0x33;
     /// Returns 0 when unknown, 1 for no tail, else the tail in frames.
     pub const TAIL_SAMPLES: i32 = 0x34;
+    /// Output channel `index`'s properties into `ptr` (a [`PinProperties`]); returns 1 when it has them.
+    pub const OUTPUT_PROPERTIES: i32 = 0x22;
     /// Parameter `index`'s properties into `ptr` (a [`ParameterProperties`]); returns 1 when it has them.
     pub const PARAM_PROPERTIES: i32 = 0x38;
     pub const VST_VERSION: i32 = 0x3A;
@@ -334,6 +336,18 @@ pub mod time {
     pub const BARS_VALID: i32 = 1 << 11;
     pub const CYCLE_POS_VALID: i32 = 1 << 12;
     pub const TIME_SIG_VALID: i32 = 1 << 13;
+}
+
+/// An input or output channel's properties (vst2sdk `vst_stream_properties_t`): its label, flags (bit 0 active, bit 1
+/// the first of a stereo pair), its speaker arrangement and a short label.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PinProperties {
+    pub label: [u8; 64],
+    pub flags: i32,
+    pub arrangement: i32,
+    pub short_label: [u8; 8],
+    pub _reserved: [u8; 48],
 }
 
 /// A parameter's properties (vst2sdk `vst_parameter_properties_t`); few plugins give them.
