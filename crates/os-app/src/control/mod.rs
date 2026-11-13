@@ -258,29 +258,32 @@ fn op(c: &Command) -> &'static str {
 
 /// Applies `commands` in order, all or none; returns each one's result and the commands that undo them all (in the
 /// order to apply them). Records nothing.
+#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
 pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
-    crate::follow::around(s, |s| run_commands(s, commands))
+    crate::follow::around(s, |s| run_in(&mut s.session, commands))
 }
 
-fn run_commands(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
-    s.session.control.settle(s.session.project.get_mut());
+/// `run` on the session: what the views are to follow is reported (`Session::touched`); a list that fails reports
+/// nothing.
+pub(crate) fn run_in(s: &mut crate::session::Session, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
+    s.control.settle(s.project.get_mut());
     let queues = Queues::of(s);
-    let known = s.session.control.known.clone();
+    let known = s.control.known.clone();
     let mut undo = Vec::with_capacity(commands.len());
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
-        match c.apply(&mut s.session) {
+        match c.apply(s) {
             Ok(done) => {
                 undo.push(done.undo);
                 results.push(done.result);
-                s.session.control.settle(s.session.project.get_mut());
+                s.control.settle(s.project.get_mut());
             }
             Err(e) => {
                 // Back to where the list started.
                 undo.reverse();
-                take_back(s, undo);
+                take_back_in(s, undo);
                 queues.put(s);
-                s.session.control.known = known;
+                s.control.known = known;
                 return Err(format!("command {i}: {e}"));
             }
         }
@@ -289,13 +292,9 @@ fn run_commands(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json
     Ok((results, undo))
 }
 
+
 /// Applies undo commands (from `run`, in their order), returning the commands that redo them (in theirs). An undo
 /// that fails (the project was changed under it in a way it can't follow) stops there.
-pub fn take_back(s: &mut State, undo: Vec<Command>) -> Vec<Command> {
-    crate::follow::around(s, |s| take_back_in(&mut s.session, undo))
-}
-
-/// `take_back` in the session; the views follow.
 pub(crate) fn take_back_in(s: &mut crate::session::Session, undo: Vec<Command>) -> Vec<Command> {
     let mut redo = Vec::with_capacity(undo.len());
     for c in undo {
@@ -314,21 +313,28 @@ pub(crate) fn take_back_in(s: &mut crate::session::Session, undo: Vec<Command>) 
 
 /// The one entry point: applies `commands` as one transaction (see `run`) and records it as one step of the undo
 /// history, named `name` (else the single command's name), after the client for a client's changes.
+#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
 pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    crate::follow::around(s, |s| apply_in(&mut s.session, by, name, commands))
+}
+
+/// `apply` on the session.
+pub(crate) fn apply_in(s: &mut crate::session::Session, by: &By, name: Option<&str>, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
     if commands.is_empty() {
         return Ok(Vec::new());
     }
     let ops: Vec<&'static str> = commands.iter().map(op).collect();
     let step = name.map(str::to_string).unwrap_or_else(|| if commands.len() == 1 { commands[0].name().to_string() } else { "Edit".into() });
-    let (results, undo) = run(s, commands)?;
+    let (results, undo) = run_in(s, commands)?;
     let label: Cow<'static, str> = match by {
         By::User => step.clone().into(),
         By::Client(n) => format!("{n}: {}", lower(&step)).into(),
     };
-    crate::history::record_named(&mut s.session, label, crate::history::Snap::Commands(undo));
-    crate::history::done_with(&mut s.session);
-    s.session.control.saw(&s.session.project, s.tempo());
-    s.session.control.event(by, "apply", step, ops);
+    crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
+    crate::history::done_with(s);
+    let tempo = s.tempo();
+    s.control.saw(&s.project, tempo);
+    s.control.event(by, "apply", step, ops);
     Ok(results)
 }
 
@@ -522,96 +528,98 @@ struct Queues {
     sample_loads: usize,
     fx: usize,
     dirty: bool,
-    message: Option<String>,
     hosted_rows: Vec<usize>,
-    selected_channel: usize,
-    rack_sel: std::collections::BTreeSet<usize>,
-    selected_mixer: u16,
-    mixer_sel: Vec<u16>,
-    windows: Vec<crate::app::Win>,
-    plugin_channel: usize,
-    clips: Vec<usize>,
-    piano: crate::piano::PianoState,
     written: Option<&'static std::panic::Location<'static>>,
+    /// What the views were told before: what a failed list (or a dry run) told them goes.
+    touched: crate::session::Touched,
 }
 
 impl Queues {
-    fn of(s: &State) -> Queues {
+    fn of(s: &crate::session::Session) -> Queues {
         Queues {
-            host: s.session.control.host.len(),
-            params: s.session.control.params.len(),
-            states: s.session.control.states.len(),
-            sample_loads: s.session.sample_loads.len(),
-            fx: s.session.fx_requests.len(),
-            dirty: s.session.dirty,
-            written: s.session.project.written_at(),
-            message: s.message.clone(),
-            hosted_rows: s.session.hosted_rows.clone(),
-            selected_channel: s.selected_channel,
-            rack_sel: s.rack.sel.clone(),
-            selected_mixer: s.selected_mixer,
-            mixer_sel: s.mixer.sel.clone(),
-            windows: s.z.clone(),
-            plugin_channel: s.plugin_channel,
-            clips: s.playlist.sel.clone(),
-            piano: s.piano.clone(),
+            host: s.control.host.len(),
+            params: s.control.params.len(),
+            states: s.control.states.len(),
+            sample_loads: s.sample_loads.len(),
+            fx: s.fx_requests.len(),
+            dirty: s.dirty,
+            written: s.project.written_at(),
+            hosted_rows: s.hosted_rows.clone(),
+            touched: s.touched.clone(),
         }
     }
 
-    fn put(self, s: &mut State) {
-        s.session.control.host.truncate(self.host);
-        s.session.control.params.truncate(self.params);
-        s.session.control.states.truncate(self.states);
-        s.session.sample_loads.truncate(self.sample_loads);
-        s.session.fx_requests.truncate(self.fx);
-        s.message = self.message;
-        s.session.hosted_rows = self.hosted_rows;
-        (s.selected_channel, s.rack.sel, s.selected_mixer, s.mixer.sel) = (self.selected_channel, self.rack_sel, self.selected_mixer, self.mixer_sel);
-        (s.z, s.plugin_channel, s.playlist.sel) = (self.windows, self.plugin_channel, self.clips);
-        s.piano = self.piano;
-        s.session.dirty = self.dirty;
-        s.session.project.rewind_written(self.written);
+    fn put(self, s: &mut crate::session::Session) {
+        s.control.host.truncate(self.host);
+        s.control.params.truncate(self.params);
+        s.control.states.truncate(self.states);
+        s.sample_loads.truncate(self.sample_loads);
+        s.fx_requests.truncate(self.fx);
+        s.hosted_rows = self.hosted_rows;
+        s.dirty = self.dirty;
+        s.project.rewind_written(self.written);
+        s.touched = self.touched;
     }
 }
 
 /// Applies `commands` to see what they change and takes them back at once: the project is as it was. Returns the
 /// changes; an error when the list can't be applied.
+#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
 pub fn dry_run(s: &mut State, commands: Vec<Command>) -> Result<Vec<query::Change>, String> {
+    let selected = s.selected_channel;
+    dry_run_in(&mut s.session, commands, selected)
+}
+
+/// `dry_run` on the session; `selected` is the channel the interface has selected (`query::project_in`). The views are
+/// told nothing.
+pub(crate) fn dry_run_in(s: &mut crate::session::Session, commands: Vec<Command>, selected: usize) -> Result<Vec<query::Change>, String> {
     let queues = Queues::of(s);
-    let known = s.session.control.known.clone();
-    let before = query::project(s);
-    let (_, undo) = run(s, commands)?;
-    let after = query::project(s);
-    take_back(s, undo);
+    let known = s.control.known.clone();
+    let before = query::project_in(s, selected);
+    let (_, undo) = run_in(s, commands)?;
+    let after = query::project_in(s, selected);
+    take_back_in(s, undo);
     queues.put(s);
-    s.session.control.known = known;
+    s.control.known = known;
     Ok(query::changes(&before, &after))
 }
 
 /// A proposal: `commands` checked by a dry run and kept for `accept` or `discard`. Returns its number and changes.
+#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
 pub fn propose(s: &mut State, by: &By, name: &str, commands: Vec<Command>) -> Result<(u64, Vec<query::Change>), String> {
-    let changes = dry_run(s, commands.clone())?;
-    let c = &mut s.session.control;
+    let selected = s.selected_channel;
+    crate::follow::around(s, |s| propose_in(&mut s.session, by, name, commands, selected))
+}
+
+/// `propose` on the session.
+pub(crate) fn propose_in(s: &mut crate::session::Session, by: &By, name: &str, commands: Vec<Command>, selected: usize) -> Result<(u64, Vec<query::Change>), String> {
+    let changes = dry_run_in(s, commands.clone(), selected)?;
+    let c = &mut s.control;
     c.proposal_seq += 1;
     let n = c.proposal_seq;
     c.proposals.push(Proposal { n, by: by.clone(), name: name.to_string(), commands, changes: changes.clone() });
     c.event(by, "proposal", name, Vec::new());
-    s.message = Some(format!("{} proposes: {name}", by.label()));
+    s.touched.views.push(crate::session::View::Message(format!("{} proposes: {name}", by.label())));
     Ok((n, changes))
 }
 
 /// Accepts proposal `n`: applied as one step named after it and its client.
 pub fn accept(s: &mut State, n: u64) -> Result<Vec<serde_json::Value>, String> {
-    let i = s.session.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
-    let p = s.session.control.proposals.remove(i);
-    match apply(s, &p.by, Some(&p.name), p.commands.clone()) {
+    crate::follow::around(s, |s| accept_in(&mut s.session, n))
+}
+
+/// `accept` on the session.
+pub(crate) fn accept_in(s: &mut crate::session::Session, n: u64) -> Result<Vec<serde_json::Value>, String> {
+    let i = s.control.proposals.iter().position(|p| p.n == n).ok_or_else(|| format!("no proposal {n}"))?;
+    let p = s.control.proposals.remove(i);
+    match apply_in(s, &p.by, Some(&p.name), p.commands.clone()) {
         Ok(r) => {
-            s.session.control.event(&p.by, "accepted", p.name, Vec::new());
+            s.control.event(&p.by, "accepted", p.name, Vec::new());
             Ok(r)
         }
         // The project changed since it was proposed: it waits on, for the client to discard or the user to see why.
         Err(e) => {
-            s.session.control.proposals.insert(i, p);
+            s.control.proposals.insert(i, p);
             Err(e)
         }
     }

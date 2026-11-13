@@ -87,7 +87,7 @@ pub struct Session {
 
 /// What the interface's views have to follow after a command or an undo (`Session::touched`). The session says what it
 /// did; the interface knows what that means for its selections and windows.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Touched {
     /// The project was put back whole: the channels' ids by row before, the rows the views pointed at.
     pub rows: Option<Vec<u32>>,

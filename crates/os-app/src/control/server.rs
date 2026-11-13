@@ -203,9 +203,18 @@ impl Server {
 
 /// `--serve`: the app without a window, `project` opened, answering clients until the process is ended.
 pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Option<std::path::PathBuf>) -> ! {
-    let mut app = crate::app::App::new(project);
+    // A session of its own: no window, no `App` (control-plane step 8).
+    let mut ses = crate::session::Session::new(crate::app::default_project(), crate::transport::Transport::new(crate::factory_folder::dir()));
     // The plugins of the last scan, as the window's app has them before its own scan.
-    app.load_plugins();
+    ses.plugins = crate::project_io::last_scan();
+    ses.project.get_mut().work_time = Some(crate::project_info::work_time_now());
+    crate::project_io::mark_saved(&mut ses, &crate::lemon_state::Looks::none());
+    if let Some(p) = project {
+        match crate::project_io::open_headless(&mut ses, &p) {
+            Ok(m) => eprintln!("Lemon Studio: {m}"),
+            Err(e) => eprintln!("Lemon Studio: {e}"),
+        }
+    }
     let mut server = match start(at, level, || {}) {
         Ok(s) => s,
         Err(e) => {
@@ -218,9 +227,30 @@ pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Op
         server.token = token;
     }
     eprintln!("Lemon Studio: control plane {} ({level:?})", server.describe());
-    app.listen(server);
+    ses.rpc_server = Some(server);
     loop {
-        app.tick();
+        serve_tick(&mut ses);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+}
+
+/// One tick of a session served without a window: the clients' requests, then the plugin host's work, then the project
+/// to playback. What a window would show is dropped; what the user would decide waits for the clients
+/// (proposals) or is theirs (saves).
+pub(crate) fn serve_tick(ses: &mut crate::session::Session) {
+    let edited = ses.dirty || ses.project.written_at().is_some();
+    ses.control.settle_tick(&mut ses.project, edited);
+    if let Some(mut server) = ses.rpc_server.take() {
+        while let Ok(req) = server.rx.try_recv() {
+            let mut client = server.clients.remove(&req.conn).unwrap_or_else(|| Client { name: format!("Client {}", req.conn), level: server.level, saves: server.headless, token: server.token.clone() });
+            if let Some(a) = super::rpc::rpc_line_in(ses, &mut client, &req.line, 0, &mut super::rpc::Asks::default()) {
+                let _ = req.reply.send(a);
+            }
+            server.clients.insert(req.conn, client);
+        }
+        ses.rpc_server = Some(server);
+    }
+    crate::project_io::host_tick(ses);
+    let _ = crate::rack::sync_playback(ses);
+    ses.touched = Default::default();
 }
