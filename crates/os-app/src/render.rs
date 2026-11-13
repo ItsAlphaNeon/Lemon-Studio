@@ -105,34 +105,19 @@ pub fn render(o: &Opts) -> Result<(), String> {
     let mut ses = crate::session::Session::new(os_model::Project::default(), crate::transport::Transport::new(crate::factory_folder::dir()));
     ses.plugins = match o.hosted {
         Hosted::Builtin => crate::plugins::Plugins::builtins(),
-        Hosted::LastScan => {
-            let mut p = crate::plugins::Plugins::builtins();
-            if let Some(cache) = crate::plugin_db::Cache::load() {
-                p.merge(&cache);
-            }
-            p
-        }
+        Hosted::LastScan => crate::project_io::last_scan(),
         #[cfg(test)]
         Hosted::ScanNow => crate::plugins::Plugins::scan(),
     };
     // Instances start at the render rate (`Plugins::create_with` activates at the current rate).
     ses.plugins.set_rate(o.rate);
-    let (file, project, _) = match crate::project_io::read(&o.project) {
-        Ok(r) => r,
-        Err((e, _)) => {
-            eprintln!("OPEN Could not open {}: {e}", o.project.display());
+    match crate::project_io::open_headless(&mut ses, &o.project) {
+        Ok(m) => eprintln!("OPEN {m}"),
+        Err(e) => {
+            eprintln!("OPEN {e}");
             return Err(format!("could not open {}", o.project.display()));
         }
-    };
-    crate::project_io::open_in(&mut ses, file, project, o.project.clone());
-    if let Some(f) = ses.file.take() {
-        crate::lemon_state::apply_session(&mut ses, &f);
-        ses.file = Some(f);
     }
-    let effects = ses.plugins.effects.clone();
-    let patchers = crate::container::open_patchers(&mut ses, &effects);
-    crate::project_io::start_loading(&mut ses);
-    eprintln!("OPEN Opened {}{}", o.project.display(), patchers.map_or(String::new(), |m| format!(". {m}")));
     let t0 = Instant::now();
     while ses.loading.is_some() && t0.elapsed() < Duration::from_secs(300) {
         crate::project_io::host_tick(&mut ses);

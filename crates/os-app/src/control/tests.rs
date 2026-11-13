@@ -1081,3 +1081,38 @@ fn a_proposal_hands_playback_nothing() {
     a.tick();
     assert_eq!(a.state.session.transport.updates_for_tests(), n, "the dry run took its change back");
 }
+
+/// A session served without a window (`--serve`), no `App` at all: a client's command applies and its undo takes it
+/// back, a proposal changes nothing until accepted, and the client saves the project itself, which then counts as saved
+/// and opens again with the change.
+#[test]
+fn a_session_without_a_window_serves_clients() {
+    let mut ses = crate::session::Session::new(crate::app::test_project(), crate::transport::Transport::new(None));
+    let mut c = rpc::Client { name: "Headless".into(), level: Level::Edit, saves: true, token: None };
+    let mut call = |ses: &mut crate::session::Session, m: &str, params: Value| -> Value {
+        let mut asks = rpc::Asks::default();
+        let line = json!({"jsonrpc": "2.0", "id": 1, "method": m, "params": params}).to_string();
+        let out: Value = serde_json::from_str(&rpc::rpc_line_in(ses, &mut c, &line, 0, &mut asks).unwrap()).unwrap();
+        assert!(asks.save.is_none(), "{m}: a client that saves is not asked about");
+        out
+    };
+    let before = ses.project.channels.len();
+    let r = call(&mut ses, "apply", json!({"command": {"op": "add_channel", "name": "Bass"}}));
+    assert!(r.get("result").is_some(), "{r}");
+    assert_eq!(ses.project.channels.len(), before + 1);
+    call(&mut ses, "undo", json!({}));
+    assert_eq!(ses.project.channels.len(), before);
+    call(&mut ses, "redo", json!({}));
+    let r = call(&mut ses, "propose", json!({"name": "Faster", "command": {"op": "set_tempo", "bpm": 150}}));
+    assert!(r["result"]["proposal"].as_u64().is_some(), "{r}");
+    assert_ne!(ses.tempo(), 150.0, "a proposal changes nothing yet");
+    let path = std::env::temp_dir().join(format!("os-headless-{}.flp", std::process::id()));
+    let r = call(&mut ses, "save", json!({"path": path.display().to_string()}));
+    assert_eq!(r["result"]["saved"].as_str(), Some(path.display().to_string().as_str()), "{r}");
+    assert_eq!(ses.saved.0, ses.project.clone(), "saved");
+    let (_, p, _) = crate::project_io::read(&path).unwrap_or_else(|(e, _)| panic!("{e}"));
+    assert!(p.channels.iter().any(|c| c.name.as_deref() == Some("Bass")));
+    let _ = std::fs::remove_file(&path);
+    crate::control::server::serve_tick(&mut ses);
+    assert_eq!(ses.touched, Default::default());
+}

@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 
 use super::{By, Command, Level};
 use crate::app::App;
+use crate::session::Session;
 
 /// The protocol's version (a client checks it in `hello`'s result).
 pub const PROTOCOL: u32 = 1;
@@ -81,183 +82,219 @@ fn commands(params: &Value) -> Result<Vec<Command>, Fail> {
     serde_json::from_value(list).map_err(bad)
 }
 
-impl App {
-    /// Answers one request line from client `c` (`None`: a notification, no answer).
-    pub fn rpc_line(&mut self, c: &mut Client, line: &str) -> Option<String> {
-        let (id, out) = match serde_json::from_str::<Value>(line) {
-            Err(e) => (Value::Null, Err(Fail(PARSE, e.to_string()))),
-            Ok(req) => {
-                let id = req.get("id").cloned();
-                let method = req.get("method").and_then(Value::as_str);
-                let params = req.get("params").cloned().unwrap_or(Value::Null);
-                let out = match method {
-                    Some(m) if req.get("jsonrpc").and_then(Value::as_str) == Some("2.0") => self.rpc(c, m, &params),
-                    _ => Err(Fail(INVALID, "not a JSON-RPC 2.0 request".into())),
-                };
-                match id {
-                    None => return None,
-                    Some(id) => (id, out),
-                }
-            }
-        };
-        let reply = match out {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(Fail(code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
-        };
-        Some(reply.to_string())
-    }
+/// What a request leaves to an interface (`rpc_in`): a proposal to show, a save to ask the user about.
+#[derive(Debug, Default)]
+pub struct Asks {
+    pub proposal: Option<u64>,
+    pub save: Option<(String, std::path::PathBuf)>,
+}
 
-    /// Method `m` with `params` for client `c`.
-    pub fn rpc(&mut self, c: &mut Client, m: &str, params: &Value) -> Result<Value, Fail> {
-        if let Some(t) = &c.token {
-            if m != "hello" || params.get("token").and_then(Value::as_str) != Some(t.as_str()) {
-                return Err(Fail(NOT_ALLOWED, "give the token in `hello` first".into()));
-            }
-            c.token = None;
-        }
-        let by = By::Client(c.name.clone());
-        let out = match m {
-            "hello" => {
-                if let Some(n) = params.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) {
-                    c.name = n.chars().take(40).collect();
-                }
-                Ok(json!({ "app": "Lemon Studio", "version": crate::version::VERSION, "protocol": PROTOCOL, "name": c.name, "level": c.level }))
-            }
-            "state" => Ok(super::query::project(&self.state)),
-            "notes" => super::query::notes(&self.state, uint(params, "pattern")? as u32).map_err(bad),
-            "plugins" => {
-                let names = |v: &[crate::plugins::Available]| v.iter().map(|a| a.desc.name.clone()).collect::<Vec<_>>();
-                Ok(json!({ "instruments": names(&self.state.session.plugins.available), "effects": names(&self.state.session.plugins.effects) }))
-            }
-            "params" => self.params_of(uint(params, "owner")? as u32),
-            "history" => {
-                let h = &self.state.session.history;
-                let steps: Vec<Value> = h.entries().into_iter().map(|(k, name)| json!({ "step": k, "name": name, "undone": h.undone(k) })).collect();
-                Ok(json!({ "at": h.at(), "steps": steps }))
-            }
-            "events" => {
-                let since = params.get("since").and_then(Value::as_u64).unwrap_or(0);
-                let (events, last) = self.state.session.control.events_since(since);
-                Ok(json!({ "events": events, "last": last }))
-            }
-            "proposals" => {
-                let list: Vec<Value> = self.state.session.control.proposals.iter().map(|p| json!({ "proposal": p.n, "name": p.name, "changes": p.changes })).collect();
-                Ok(Value::Array(list))
-            }
-            "apply" => {
-                need(c, Level::Edit)?;
-                let mut cmds = commands(params)?;
-                self.fill_params(&mut cmds).map_err(failed)?;
-                let name = params.get("name").and_then(Value::as_str);
-                let results = super::apply(&mut self.state, &by, name, cmds).map_err(failed)?;
-                Ok(json!({ "results": results }))
-            }
-            "propose" => {
-                need(c, Level::Propose)?;
-                let mut cmds = commands(params)?;
-                self.fill_params(&mut cmds).map_err(failed)?;
-                let name = params.get("name").and_then(Value::as_str).unwrap_or("Proposal");
-                let (n, changes) = super::propose(&mut self.state, &by, name, cmds).map_err(failed)?;
-                self.ask_proposal(n);
-                Ok(json!({ "proposal": n, "changes": changes }))
-            }
-            "accept" => {
-                need(c, Level::Edit)?;
-                let results = super::accept(&mut self.state, uint(params, "proposal")?).map_err(failed)?;
-                Ok(json!({ "results": results }))
-            }
-            "discard" => {
-                need(c, Level::Edit)?;
-                super::discard(&mut self.state.session, uint(params, "proposal")?).map_err(failed)?;
-                Ok(Value::Null)
-            }
-            "undo" | "redo" => {
-                need(c, Level::Edit)?;
-                let s = &mut self.state;
-                let name = if m == "undo" { crate::history::undo(s) } else { crate::history::redo(s) };
-                if let Some(n) = &name {
-                    s.session.control.saw(&s.session.project, s.tempo());
-                    s.session.control.event(&by, if m == "undo" { "undo" } else { "redo" }, n.clone(), Vec::new());
-                }
-                Ok(json!({ "step": name }))
-            }
-            // Writing a file is an effect outside the project: with a window, the user decides (spec:
-            // roadmap/control-plane.md "Safety model").
-            "save" => {
-                need(c, Level::Edit)?;
-                let path = params.get("path").and_then(Value::as_str).map(std::path::PathBuf::from).or_else(|| self.state.session.path.clone());
-                let path = path.ok_or_else(|| bad("the project has no file yet: give `path`"))?;
-                if c.saves {
-                    self.save_to(path.clone());
-                    let msg = self.state.message.clone().unwrap_or_default();
-                    if !msg.starts_with("Saved") {
-                        return Err(failed(msg));
-                    }
-                    Ok(json!({ "saved": path.display().to_string() }))
-                } else {
-                    self.ask_save(&c.name, path.clone());
-                    Ok(json!({ "asked": path.display().to_string() }))
-                }
-            }
-            _ => Err(Fail(NO_METHOD, format!("no method `{m}`"))),
-        };
-        if matches!(m, "apply" | "accept" | "undo" | "redo") && out.is_ok() {
-            self.invalidate();
-        }
+impl App {
+    /// Answers one request line from client `c` (`None`: a notification, no answer): on the session, with the views
+    /// following and what the user is to decide asked.
+    pub fn rpc_line(&mut self, c: &mut Client, line: &str) -> Option<String> {
+        let selected = self.state.selected_channel;
+        let mut asks = Asks::default();
+        let out = self.host(|s| rpc_line_in(s, c, line, selected, &mut asks));
+        self.asked(asks);
         out
     }
 
-    /// The parameters of the plugin playing channel or slot `owner`.
-    fn params_of(&mut self, owner: u32) -> Result<Value, Fail> {
-        let key = super::command::owner_key(&self.state.session, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
-        let h = self.state.session.plugins.hosted.get(&key).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
-        let p = h.plugin.lock().map_err(|_| failed("the plugin is busy"))?;
-        let mut list = Vec::new();
-        for i in 0..p.param_count() {
-            let Some(info) = p.param_info(i) else { continue };
-            if info.hidden {
-                continue;
-            }
-            let v = p.param_value(info.id);
-            if let Some(v) = v {
-                self.state.session.control.saw_param(owner, info.id, v);
-            }
-            list.push(json!({
-                "id": info.id,
-                "name": info.name,
-                "group": info.group,
-                "unit": info.unit,
-                "value": v,
-                "text": v.and_then(|v| p.param_text(info.id, v)),
-                "min": info.min,
-                "max": info.max,
-                "default": info.default,
-                "steps": info.steps,
-                "list": info.enumerated,
-                "automatable": info.automatable,
-                "read_only": info.read_only,
-            }));
-        }
-        Ok(json!({ "owner": owner, "plugin": h.name, "params": list }))
+    /// Method `m` with `params` for client `c`, as `rpc_line` answers it.
+    pub fn rpc(&mut self, c: &mut Client, m: &str, params: &Value) -> Result<Value, Fail> {
+        let selected = self.state.selected_channel;
+        let mut asks = Asks::default();
+        let out = self.host(|s| rpc_in(s, c, m, params, selected, &mut asks));
+        self.asked(asks);
+        out
     }
 
-    /// Gives each `SetParam` its value before (`from`), read from the plugin.
-    pub(crate) fn fill_params(&mut self, cmds: &mut [Command]) -> Result<(), String> {
-        for c in cmds.iter_mut() {
-            if let Command::SetParam { owner, param, from: from @ None, .. } = c {
-                let key = super::command::owner_key(&self.state.session, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
-                let v = self
-                    .state.session.plugins
-                    .hosted
-                    .get(&key)
-                    .and_then(|h| h.plugin.lock().ok()?.param_value(*param))
-                    .ok_or_else(|| format!("{owner} has no parameter {param}"))?;
-                *from = Some(v);
-                self.state.session.control.saw_param(*owner, *param, v);
+    /// What a request left to the user is asked.
+    fn asked(&mut self, asks: Asks) {
+        if let Some(n) = asks.proposal {
+            self.ask_proposal(n);
+        }
+        if let Some((who, path)) = asks.save {
+            self.ask_save(&who, path);
+        }
+    }
+}
+
+/// Answers one request line from client `c` (`None`: a notification, no answer).
+pub fn rpc_line_in(ses: &mut Session, c: &mut Client, line: &str, selected: usize, asks: &mut Asks) -> Option<String> {
+    let (id, out) = match serde_json::from_str::<Value>(line) {
+        Err(e) => (Value::Null, Err(Fail(PARSE, e.to_string()))),
+        Ok(req) => {
+            let id = req.get("id").cloned();
+            let method = req.get("method").and_then(Value::as_str);
+            let params = req.get("params").cloned().unwrap_or(Value::Null);
+            let out = match method {
+                Some(m) if req.get("jsonrpc").and_then(Value::as_str) == Some("2.0") => rpc_in(ses, c, m, &params, selected, asks),
+                _ => Err(Fail(INVALID, "not a JSON-RPC 2.0 request".into())),
+            };
+            match id {
+                None => return None,
+                Some(id) => (id, out),
             }
         }
-        Ok(())
+    };
+    let reply = match out {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(Fail(code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+    };
+    Some(reply.to_string())
+}
+
+/// Method `m` with `params` for client `c`.
+pub fn rpc_in(ses: &mut Session, c: &mut Client, m: &str, params: &Value, selected: usize, asks: &mut Asks) -> Result<Value, Fail> {
+    if let Some(t) = &c.token {
+        if m != "hello" || params.get("token").and_then(Value::as_str) != Some(t.as_str()) {
+            return Err(Fail(NOT_ALLOWED, "give the token in `hello` first".into()));
+        }
+        c.token = None;
     }
+    let by = By::Client(c.name.clone());
+    let out = match m {
+        "hello" => {
+            if let Some(n) = params.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) {
+                c.name = n.chars().take(40).collect();
+            }
+            Ok(json!({ "app": "Lemon Studio", "version": crate::version::VERSION, "protocol": PROTOCOL, "name": c.name, "level": c.level }))
+        }
+        "state" => Ok(super::query::project_in(ses, selected)),
+        "notes" => super::query::notes(ses, uint(params, "pattern")? as u32).map_err(bad),
+        "plugins" => {
+            let names = |v: &[crate::plugins::Available]| v.iter().map(|a| a.desc.name.clone()).collect::<Vec<_>>();
+            Ok(json!({ "instruments": names(&ses.plugins.available), "effects": names(&ses.plugins.effects) }))
+        }
+        "params" => params_of(ses, uint(params, "owner")? as u32),
+        "history" => {
+            let h = &ses.history;
+            let steps: Vec<Value> = h.entries().into_iter().map(|(k, name)| json!({ "step": k, "name": name, "undone": h.undone(k) })).collect();
+            Ok(json!({ "at": h.at(), "steps": steps }))
+        }
+        "events" => {
+            let since = params.get("since").and_then(Value::as_u64).unwrap_or(0);
+            let (events, last) = ses.control.events_since(since);
+            Ok(json!({ "events": events, "last": last }))
+        }
+        "proposals" => {
+            let list: Vec<Value> = ses.control.proposals.iter().map(|p| json!({ "proposal": p.n, "name": p.name, "changes": p.changes })).collect();
+            Ok(Value::Array(list))
+        }
+        "apply" => {
+            need(c, Level::Edit)?;
+            let mut cmds = commands(params)?;
+            fill_params(ses, &mut cmds).map_err(failed)?;
+            let name = params.get("name").and_then(Value::as_str);
+            let results = super::apply_in(ses, &by, name, cmds).map_err(failed)?;
+            Ok(json!({ "results": results }))
+        }
+        "propose" => {
+            need(c, Level::Propose)?;
+            let mut cmds = commands(params)?;
+            fill_params(ses, &mut cmds).map_err(failed)?;
+            let name = params.get("name").and_then(Value::as_str).unwrap_or("Proposal");
+            let (n, changes) = super::propose_in(ses, &by, name, cmds, selected).map_err(failed)?;
+            asks.proposal = Some(n);
+            Ok(json!({ "proposal": n, "changes": changes }))
+        }
+        "accept" => {
+            need(c, Level::Edit)?;
+            let results = super::accept_in(ses, uint(params, "proposal")?).map_err(failed)?;
+            Ok(json!({ "results": results }))
+        }
+        "discard" => {
+            need(c, Level::Edit)?;
+            super::discard(ses, uint(params, "proposal")?).map_err(failed)?;
+            Ok(Value::Null)
+        }
+        "undo" | "redo" => {
+            need(c, Level::Edit)?;
+            let name = if m == "undo" { crate::history::undo_in(ses) } else { crate::history::redo_in(ses) };
+            if let Some(n) = &name {
+                let tempo = ses.tempo();
+                ses.control.saw(&ses.project, tempo);
+                ses.control.event(&by, if m == "undo" { "undo" } else { "redo" }, n.clone(), Vec::new());
+            }
+            Ok(json!({ "step": name }))
+        }
+        // Writing a file is an effect outside the project: with a window, the user decides (spec:
+        // roadmap/control-plane.md "Safety model").
+        "save" => {
+            need(c, Level::Edit)?;
+            let path = params.get("path").and_then(Value::as_str).map(std::path::PathBuf::from).or_else(|| ses.path.clone());
+            let path = path.ok_or_else(|| bad("the project has no file yet: give `path`"))?;
+            if c.saves {
+                let (result, msg) = crate::project_io::save(ses, &path);
+                ses.touched.views.push(crate::session::View::Message(msg.clone()));
+                if result.is_err() {
+                    return Err(failed(msg));
+                }
+                Ok(json!({ "saved": path.display().to_string() }))
+            } else {
+                asks.save = Some((c.name.clone(), path.clone()));
+                Ok(json!({ "asked": path.display().to_string() }))
+            }
+        }
+        _ => Err(Fail(NO_METHOD, format!("no method `{m}`"))),
+    };
+    if matches!(m, "apply" | "accept" | "undo" | "redo") && out.is_ok() {
+        ses.touched.repaint = true;
+    }
+    out
+}
+
+/// The parameters of the plugin playing channel or slot `owner`.
+fn params_of(ses: &mut Session, owner: u32) -> Result<Value, Fail> {
+    let key = super::command::owner_key(&*ses, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
+    let h = ses.plugins.hosted.get(&key).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
+    let p = h.plugin.lock().map_err(|_| failed("the plugin is busy"))?;
+    let mut list = Vec::new();
+    for i in 0..p.param_count() {
+        let Some(info) = p.param_info(i) else { continue };
+        if info.hidden {
+            continue;
+        }
+        let v = p.param_value(info.id);
+        if let Some(v) = v {
+            ses.control.saw_param(owner, info.id, v);
+        }
+        list.push(json!({
+            "id": info.id,
+            "name": info.name,
+            "group": info.group,
+            "unit": info.unit,
+            "value": v,
+            "text": v.and_then(|v| p.param_text(info.id, v)),
+            "min": info.min,
+            "max": info.max,
+            "default": info.default,
+            "steps": info.steps,
+            "list": info.enumerated,
+            "automatable": info.automatable,
+            "read_only": info.read_only,
+        }));
+    }
+    Ok(json!({ "owner": owner, "plugin": h.name, "params": list }))
+}
+
+/// Gives each `SetParam` its value before (`from`), read from the plugin.
+pub(crate) fn fill_params(ses: &mut Session, cmds: &mut [Command]) -> Result<(), String> {
+    for c in cmds.iter_mut() {
+        if let Command::SetParam { owner, param, from: from @ None, .. } = c {
+            let key = super::command::owner_key(&*ses, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
+            let v = ses
+                .plugins
+                .hosted
+                .get(&key)
+                .and_then(|h| h.plugin.lock().ok()?.param_value(*param))
+                .ok_or_else(|| format!("{owner} has no parameter {param}"))?;
+            *from = Some(v);
+            ses.control.saw_param(*owner, *param, v);
+        }
+    }
+    Ok(())
 }
 
 impl App {

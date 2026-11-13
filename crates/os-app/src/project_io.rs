@@ -189,9 +189,9 @@ pub(crate) fn read(path: &Path) -> Result<(os_flp::FlpFile, os_model::Project, b
     }
 }
 
-/// The plugin host's work on one tick without an interface (`--render`): the opened project's loading, the stock
-/// plugins kept in step with the project, the mixer's effects and containers, samples into the samplers, and the
-/// instances' housekeeping. What it would show is dropped.
+/// The plugin host's work on one tick without an interface (`--render`, `--serve`): the opened project's loading, the
+/// stock plugins kept in step with the project, the mixer's effects and containers, the commands' plugins, samples into
+/// the samplers, and the instances' housekeeping. What it would show is dropped.
 pub(crate) fn host_tick(ses: &mut Session) {
     crate::loading::tick(ses, false);
     crate::lemon_midi_out::sync_midi_outs(ses);
@@ -209,7 +209,59 @@ pub(crate) fn host_tick(ses: &mut Session) {
             crate::project_plugins::host_native(ses, false);
         }
     }
+    crate::control::host::host_commands(ses);
     crate::control::host::sample_loads(ses);
     let _ = ses.plugins.idle(|_| None);
     ses.touched = Default::default();
+}
+
+/// Saves the project to `target` without an interface (a client of `--serve`): what a `.lemon` file keeps of the
+/// interface's choices is what a new interface starts with (`lemon_state::Looks::none`), and the time spent is the
+/// project's. On success the project counts as saved. Returns the size written, or why not, and what was said.
+pub(crate) fn save(ses: &mut Session, target: &Path) -> (Result<u64, String>, String) {
+    store_samplers(ses);
+    let before = ses.project.clone();
+    let looks = crate::lemon_state::Looks::none();
+    let extra = crate::lemon_state::events_in(ses, &ses.plugins, &looks);
+    let (result, message) = write_in(ses, target, before, extra, &mut |_| {});
+    if result.is_ok() {
+        mark_saved(ses, &looks);
+    }
+    (result, message)
+}
+
+/// The project as it is now counts as saved (or opened, or made), with the interface's choices `looks`: what unsaved
+/// changes are measured against (`App::unsaved`).
+pub(crate) fn mark_saved(ses: &mut Session, looks: &crate::lemon_state::Looks) {
+    // New things get their ids before the copy, so ids alone are no unsaved change.
+    let control = &mut ses.control;
+    ses.project.write_if(|p| control.settle(p));
+    ses.saved = (ses.project.clone(), ses.tempo(), crate::lemon_state::saved_form_in(ses, &ses.plugins, looks));
+    ses.plugin_edited = false;
+}
+
+/// Opens the project file at `path` without an interface (`--render`, `--serve`): read, made the session's with what a
+/// `.lemon` file keeps of the project, Patcher slots as containers, counted as saved, and loading. Returns what an
+/// interface would say, or why it could not open.
+pub(crate) fn open_headless(ses: &mut Session, path: &Path) -> Result<String, String> {
+    let (file, project, _) = read(path).map_err(|(e, _)| format!("Could not open {}: {e}", path.display()))?;
+    open_in(ses, file, project, path.to_path_buf());
+    if let Some(f) = ses.file.take() {
+        crate::lemon_state::apply_session(ses, &f);
+        ses.file = Some(f);
+    }
+    let effects = ses.plugins.effects.clone();
+    let patchers = crate::container::open_patchers(ses, &effects);
+    mark_saved(ses, &crate::lemon_state::Looks::none());
+    start_loading(ses);
+    Ok(format!("Opened {}{}", path.display(), patchers.map_or(String::new(), |m| format!(". {m}"))))
+}
+
+/// The plugins the program offers without an interface: the built-in ones and those the last scan found.
+pub(crate) fn last_scan() -> crate::plugins::Plugins {
+    let mut p = crate::plugins::Plugins::builtins();
+    if let Some(cache) = crate::plugin_db::Cache::load() {
+        p.merge(&cache);
+    }
+    p
 }
