@@ -2031,7 +2031,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         // spec: ui/plugin-window.md "Docking and the window menu"
         #[cfg(plugin_windows)]
-        RCmd::DetachAll(on) => app.state.session.plugins.set_all_detached(on),
+        RCmd::DetachAll(on) => app.state.editor_host.set_all_detached(&mut app.state.session.plugins, on),
         // spec: ui/channel-switches.md §6
         #[cfg(any(windows, target_os = "macos"))]
         RCmd::EditorKeys(on) => crate::plugin_window::set_editor_keys(on),

@@ -35,11 +35,11 @@ impl ApplicationHandler for Idle {
 }
 
 /// Runs the windows and the plugins' idle calls for `ms`.
-fn pump(el: &mut EventLoop<()>, pl: &mut Plugins, ms: u64) {
+fn pump(el: &mut EventLoop<()>, host: &mut crate::editor_host::EditorHost, pl: &mut Plugins, ms: u64) {
     let end = Instant::now() + Duration::from_millis(ms);
     while Instant::now() < end {
         el.pump_app_events(Some(Duration::from_millis(10)), &mut Idle);
-        pl.idle(|_| None);
+        host.idle(pl, |_| None);
     }
 }
 
@@ -63,8 +63,8 @@ struct Look {
     window: Option<isize>,
 }
 
-fn look(pl: &Plugins) -> Option<Look> {
-    let w = pl.editors.get(&0)?.window.as_ref()?;
+fn look(host: &crate::editor_host::EditorHost) -> Option<Look> {
+    let w = host.editors.get(&0)?.window.as_ref()?;
     // SAFETY: the frame's views live as long as its window, which `pl` holds.
     let (frame, area) = unsafe { (&*(w.hwnd() as *const NSView), &*(w.area() as *const NSView)) };
     let editor = area.subviews().firstObject().map(|v| frame_of(&v));
@@ -109,6 +109,7 @@ pub fn run(args: &[String]) -> i32 {
         let Some(desc) = lib.plugins().first().cloned() else { continue };
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 2.0, ..Plugins::default() };
+        let mut host = crate::editor_host::EditorHost::default();
         if let Err(e) = pl.create(0, 0) {
             println!("{name}: {e}");
             failed = true;
@@ -119,21 +120,21 @@ pub fn run(args: &[String]) -> i32 {
             continue;
         }
         let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
-        if let Err(e) = pl.open_window(0, info) {
+        if let Err(e) = host.open_window(&mut pl, 0, info) {
             println!("{name}: the window did not open: {e}");
             failed = true;
             continue;
         }
-        pump(&mut el, &mut pl, 900);
+        pump(&mut el, &mut host, &mut pl, 900);
         let stem = name.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
-        let display = pl.editors.get(&0).and_then(|e| e.window.as_ref()).map_or(2.0, |w| w.scale());
+        let display = host.editors.get(&0).and_then(|e| e.window.as_ref()).map_or(2.0, |w| w.scale());
         for (k, tag) in [(display, "display"), (1.0, "1x"), (2.0, "2x")] {
             if tag != "display" {
-                pl.rescale_window(0, k);
-                pump(&mut el, &mut pl, 700);
+                host.rescale_window(&mut pl, 0, k);
+                pump(&mut el, &mut host, &mut pl, 700);
             }
             let reported = pl.hosted[&0].plugin.lock().ok().and_then(|p| p.editor_size());
-            let Some(l) = look(&pl) else {
+            let Some(l) = look(&host) else {
                 println!("{name} at {k}: the window is gone");
                 failed = true;
                 break;
@@ -152,7 +153,7 @@ pub fn run(args: &[String]) -> i32 {
             );
         }
         pl.drop_key(0);
-        pump(&mut el, &mut pl, 200);
+        pump(&mut el, &mut host, &mut pl, 200);
     }
     i32::from(failed)
 }

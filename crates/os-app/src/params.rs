@@ -392,6 +392,7 @@ pub enum MenuEntry {
 impl App {
     /// Every plugin tick: keeps the parameter lists of hosted instances and records the parameters their editors moved.
     pub(crate) fn params_tick(&mut self) {
+        self.state.session.plugins.editors_open = self.state.editor_host.open_keys();
         let Tick { moved, recorded, automate } = params_in(&mut self.state.session);
         if moved {
             self.tweak_hint();
@@ -584,7 +585,7 @@ pub(crate) fn params_in(ses: &mut crate::session::Session) -> Tick {
     for (&key, h) in &ses.plugins.hosted {
         // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
         // is read again next tick (its events stay queued).
-        let editor = ses.plugins.editors.get(&key).is_some_and(|e| e.open());
+        let editor = ses.plugins.editors_open.contains(&key);
         let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen), editor) else { continue };
         // A plugin's parameters can take a few ms to read (`lock_for_tick`).
         let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };

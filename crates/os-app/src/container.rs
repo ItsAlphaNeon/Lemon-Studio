@@ -1097,7 +1097,7 @@ impl App {
         #[cfg(plugin_windows)]
         {
             let info = self.member_infos().remove(&key)?;
-            match self.state.session.plugins.open_window(key, info) {
+            match self.state.editor_host.open_window(&mut self.state.session.plugins, key, info) {
                 Ok(()) => {
                     self.state.raise(crate::app::Win::Hosted(key));
                     None

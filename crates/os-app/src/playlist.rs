@@ -3762,7 +3762,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         #[cfg(plugin_windows)]
         Cmd::PluginDetach(row, on) => {
-            app.state.session.plugins.set_detached(row, on);
+            app.state.editor_host.set_detached(&mut app.state.session.plugins, row, on);
             app.state.raise(crate::app::Win::Hosted(row));
             app.invalidate();
             return None;

@@ -1055,6 +1055,8 @@ impl State {
 pub struct State {
     /// The open project and what goes with it (`crate::session`).
     pub session: crate::session::Session,
+    /// The plugin editor windows (`crate::editor_host`): the interface's, apart from the instances.
+    pub editor_host: crate::editor_host::EditorHost,
     /// The rack's view an undo step puts back, by step (`crate::follow`).
     pub rack_views: std::collections::HashMap<u64, crate::follow::RackView>,
     /// The toolbar's scope / analyzer and peak bars (fed from the audio tap in `App::tick`).
@@ -1536,6 +1538,7 @@ impl App {
             audio_playing: false,
             state: State {
                 session: crate::session::Session::new(project, transport),
+                editor_host: Default::default(),
                 rack_views: Default::default(),
                 plugdb: Default::default(),
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -2484,7 +2487,7 @@ impl App {
         #[cfg(plugin_windows)]
         if let Some(row) = self.state.session.pending_open.take().filter(|r| self.state.session.hosted_rows.contains(r)) {
             if let Some(info) = channel_info(&self.state.session.project, row) {
-                match self.state.session.plugins.open_window(row, info) {
+                match self.state.editor_host.open_window(&mut self.state.session.plugins, row, info) {
                     Ok(()) => {
                         self.state.raise(Win::Hosted(row));
                         self.select_window_track(row);
@@ -2502,7 +2505,7 @@ impl App {
         let requests = {
             let members = self.member_infos();
             let project = &self.state.session.project;
-            self.state.session.plugins.idle(|row| {
+            self.state.editor_host.idle(&mut self.state.session.plugins, |row| {
                 // A container's member (`crate::container`): its name over its slot's title.
                 if row >= crate::plugins::MEMBER_KEY {
                     return members.get(&row).cloned();
@@ -2513,7 +2516,7 @@ impl App {
         };
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
-        self.state.session.plugins.idle(|_| None);
+        self.state.editor_host.idle(&mut self.state.session.plugins, |_| None);
         // What was hosted on this tick takes the id of its channel or slot now, before anything moves rows.
         self.follow_ids(false, false);
         // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
@@ -2523,7 +2526,7 @@ impl App {
         // armed, so the microphone is not held (and shown in use) the rest of the time.
         crate::device::want_inputs(self.state.session.project.mixer.iter().any(|m| m.audio_in >= 0 && (m.monitored() || m.armed)));
         let monitoring = self.state.session.project.mixer.iter().any(|m| m.monitored()) && crate::device::input_source().is_some();
-        let listen = self.state.session.plugins.editor_open() || monitoring;
+        let listen = self.state.editor_host.editor_open() || monitoring;
         if listen {
             self.sync_live();
         }
@@ -2551,7 +2554,7 @@ impl App {
         #[cfg(plugin_windows)]
         {
             for r in requests {
-                use crate::plugins::Request;
+                use crate::editor_host::Request;
                 let chans = &mut self.state.session.project.get_mut().channels;
                 match r {
                     Request::Close(_) => continue,
@@ -2583,7 +2586,7 @@ impl App {
                     Request::PluginMenu(row, m, (x, y)) => {
                         // The plugin's own menu (VST 3 context menu) as the app's popup, over its window docked or
                         // detached (spec: plugins/vst3-hosting.md §9).
-                        let detached = self.state.session.plugins.window_of(row).is_some_and(|(_, d)| d);
+                        let detached = self.state.editor_host.window_of(row).is_some_and(|(_, d)| d);
                         let at = self.screen_to_canvas(x, y);
                         if self.show_plugin_menu(row, &m, at) {
                             self.popup_lift = detached.then_some(row);
@@ -2592,7 +2595,7 @@ impl App {
                         continue;
                     }
                     Request::Menu(row, x, y) => {
-                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
                         // A container's member has its presets too (plugins/patcher/README.md §4.2).
@@ -2611,7 +2614,7 @@ impl App {
                         continue;
                     }
                     Request::Presets(row, x, y) => {
-                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::presets::popup(self, row, lx, ly));
                         self.popup_lift = detached.then_some(row);
@@ -2631,7 +2634,7 @@ impl App {
                         continue;
                     }
                     Request::MiscMenu(row, m, x, y) => {
-                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::misc::menu(self, row, m, lx, ly));
                         self.popup_lift = detached.then_some(row);
@@ -2639,7 +2642,7 @@ impl App {
                         continue;
                     }
                     Request::KnobMenu(row, c, x, y) => {
-                        let Some((_, detached)) = self.state.session.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(match c {
                             // The channel's volume and pan: the rack's knob menu (spec: ui/channel-rack.md §19).
@@ -2785,7 +2788,7 @@ impl App {
     /// main window, which the detached window covers).
     #[cfg(plugin_windows)]
     pub fn sync_lift(&mut self, canvas: &Canvas) {
-        let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.state.session.plugins.window_of(r));
+        let lifted = self.popup_lift.filter(|_| self.state.playlist.popup.is_some()).and_then(|r| self.state.editor_host.window_of(r));
         let bounds = self.overlays.iter().copied().reduce(|a, b| a.union(&b));
         match (lifted, bounds) {
             (Some((frame, true)), Some(b)) => {
@@ -2812,7 +2815,7 @@ impl App {
     /// windows above them and the overlays (spec: ui/plugin-window.md "Docking"). Detached windows leave `State::z`.
     #[cfg(plugin_windows)]
     fn clip_docked(&mut self) {
-        let docked = self.state.session.plugins.docked();
+        let docked = self.state.editor_host.docked();
         self.state.z.retain(|w| !matches!(w, Win::Hosted(r) if !docked.contains(r)));
         for &r in &docked {
             if !self.state.z.contains(&Win::Hosted(r)) {
@@ -2826,7 +2829,7 @@ impl App {
         let over: Vec<[i32; 4]> = self.overlays.iter().map(|&r| px(r.outset(2.0))).collect();
         let z = self.state.z.clone();
         let stacked: Vec<usize> = z.iter().filter_map(|w| if let Win::Hosted(r) = w { Some(*r) } else { None }).collect();
-        self.state.session.plugins.stack(&stacked);
+        self.state.editor_host.stack(&self.state.session.plugins, &stacked);
         let docked_at = z.iter().rposition(|&w| self.state.is_max(w));
         for (i, &w) in z.iter().enumerate() {
             let Win::Hosted(row) = w else { continue };
@@ -2840,7 +2843,7 @@ impl App {
             if docked_at.is_some_and(|d| i < d) {
                 covers.push(work);
             }
-            self.state.session.plugins.clip(row, work, &covers);
+            self.state.editor_host.clip(row, work, &covers);
         }
     }
 
@@ -3289,7 +3292,7 @@ impl App {
         // Hosted plugin windows (rack rows and mixer slots; detached ones are not in the stack).
         let rows: Vec<usize> = self.state.session.plugins.hosted.keys().copied().collect();
         for row in rows.into_iter().filter(|&r| keep != Some(Win::Hosted(r))) {
-            self.state.session.plugins.close_if_open(row);
+            self.state.editor_host.close_if_open(&mut self.state.session.plugins, row);
         }
         self.invalidate();
     }
@@ -4687,7 +4690,7 @@ impl App {
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn plugin_window_under_cursor(&self) -> Option<usize> {
         let (x, y) = Self::pointer_on_screen()?;
-        self.state.session.plugins.row_at_screen(x, y)
+        self.state.editor_host.row_at_screen(x, y)
     }
 
     /// A browser sample released over a hosted plugin window (it sits above the main window, which keeps the mouse
@@ -4696,12 +4699,12 @@ impl App {
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn sample_to_plugin_window(&mut self, path: &str) -> bool {
         let Some((x, y)) = Self::pointer_on_screen() else { return false };
-        let Some(row) = self.state.session.plugins.row_at_screen(x, y) else { return false };
+        let Some(row) = self.state.editor_host.row_at_screen(x, y) else { return false };
         if self.loop_to_slicer(row, path) {
             return true;
         }
         let sampler = self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
-        let taken = self.state.session.plugins.drop_file(row, x, y, path, sampler);
+        let taken = self.state.editor_host.drop_file(&mut self.state.session.plugins, row, x, y, path, sampler);
         self.sample_taken(row, path, sampler, taken);
         true
     }
@@ -8832,7 +8835,7 @@ impl App {
             return;
         }
         if self.state.session.hosted_rows.contains(&i) {
-            if !self.state.session.plugins.close_if_open(i) {
+            if !self.state.editor_host.close_if_open(&mut self.state.session.plugins, i) {
                 self.state.session.pending_open = Some(i);
             }
             return;
@@ -15587,7 +15590,8 @@ mod tests {
         crate::plugin_menu::add_generator(&mut a, sampler, None);
         let on = a.state.session.pending_open.unwrap();
         a.sync_samplers(None);
-        let detached = |r: usize| a.state.session.plugins.editors.get(&r).is_some_and(|e| e.detached);
+        a.state.editor_host.sync(&mut a.state.session.plugins);
+        let detached = |r: usize| a.state.editor_host.editors.get(&r).is_some_and(|e| e.detached);
         assert!(detached(on));
         assert!(!detached(off), "added before: keeps its mode");
         assert!(!detached(0), "the project's channel");
@@ -21477,14 +21481,14 @@ mod tests {
         app.state.session.plugins.effects = crate::plugins::builtin_effects();
         app.sync_samplers(None);
         app.state.session.plugins.create_effect(1, 0, 0, None).expect("an effect in a mixer slot");
-        assert!(app.state.session.plugins.hosted.len() >= 2 && app.state.session.plugins.editors.values().all(|e| !e.detached));
+        assert!(app.state.session.plugins.hosted.len() >= 2 && app.state.editor_host.editors.values().all(|e| !e.detached));
         let items = submenu(TOOLS_MENU, EDITORS_LABEL).unwrap()(&app.state);
         let rack = crate::rack::options_menu(&app.state, 0.0, 0.0);
         assert_eq!(rack.items.iter().find(|i| i.label == EDITORS_LABEL).map(|i| &i.children), Some(&items), "the rack's is the same");
         crate::playlist::run(&mut app, items[1].cmd.clone());
-        assert!(app.state.session.plugins.hosted.keys().all(|k| app.state.session.plugins.editors.get(k).is_some_and(|e| e.detached)), "Detached");
+        assert!(app.state.session.plugins.hosted.keys().all(|k| app.state.editor_host.editors.get(k).is_some_and(|e| e.detached)), "Detached");
         crate::playlist::run(&mut app, items[0].cmd.clone());
-        assert!(app.state.session.plugins.editors.values().all(|e| !e.detached), "Attached");
+        assert!(app.state.editor_host.editors.values().all(|e| !e.detached), "Attached");
     }
 
     /// ADD > Effect ▸: the effect plugin menu as a submenu; a pick goes into the selected mixer track's first empty

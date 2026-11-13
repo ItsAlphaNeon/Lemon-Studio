@@ -338,8 +338,8 @@ mod tests {
     fn a_menu_without_a_window_closes_unpicked() {
         let (mut a, fake, done) = app();
         fake.lock().unwrap().asks = Some(menu(4));
-        let requests = a.state.session.plugins.idle(|_| None);
-        assert!(!requests.iter().any(|r| matches!(r, crate::plugins::Request::PluginMenu(..))));
+        let requests = a.state.editor_host.idle(&mut a.state.session.plugins, |_| None);
+        assert!(!requests.iter().any(|r| matches!(r, crate::editor_host::Request::PluginMenu(..))));
         assert_eq!(*done.lock().unwrap(), [(4, None)]);
         assert!(fake.lock().unwrap().asks.is_none());
     }

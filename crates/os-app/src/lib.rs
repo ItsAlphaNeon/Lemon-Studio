@@ -27,6 +27,7 @@ mod backup;
 mod audio_bench;
 #[cfg(target_os = "linux")]
 mod dropout_log;
+mod editor_host;
 mod effect_ports;
 #[cfg(test)]
 mod checks;
@@ -1183,7 +1184,7 @@ impl ApplicationHandler for Shell {
             // Windows display scale changed, or the window moved to a monitor with another DPI: the canvas follows at
             // the next paint; docked plugin windows are redrawn at the new scale (spec: ui/ui-scaling.md §3).
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.app.state.session.plugins.set_scale(gui_scale(scale_factor) as f32);
+                self.app.state.editor_host.set_scale(&mut self.app.state.session.plugins, gui_scale(scale_factor) as f32);
                 self.inset = insets(&window);
                 self.app.invalidate();
                 window.request_redraw();
@@ -1223,7 +1224,7 @@ impl ApplicationHandler for Shell {
                     canvas.resize(cw, ch, scale);
                     self.app.invalidate();
                     // Main GUI scaling changed: docked plugin windows follow (spec: ui/ui-scaling.md §3).
-                    self.app.state.session.plugins.set_scale(scale);
+                    self.app.state.editor_host.set_scale(&mut self.app.state.session.plugins, scale);
                 }
                 // The window may have reached a monitor with another refresh rate.
                 let monitor = window.current_monitor();

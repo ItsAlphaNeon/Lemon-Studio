@@ -1403,7 +1403,7 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     if let MCmd::SlotScale(slot, pct) = c {
         let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
-        app.state.session.plugins.set_editor_scale(key, pct.map(|p| f32::from(p) / 100.0));
+        app.state.editor_host.set_editor_scale(&mut app.state.session.plugins, key, pct.map(|p| f32::from(p) / 100.0));
         return None;
     }
     // A track's state takes its effects' settings from their instances.
@@ -2001,7 +2001,7 @@ impl App {
             }
         }
         for (track, slot, toggle) in done.windows {
-            if !(toggle && self.state.session.plugins.close_if_open(crate::plugins::fx_key(track, slot))) {
+            if !(toggle && self.state.editor_host.close_if_open(&mut self.state.session.plugins, crate::plugins::fx_key(track, slot))) {
                 self.open_fx(track, slot);
             }
         }
@@ -2145,7 +2145,7 @@ impl App {
         #[cfg(plugin_windows)]
         {
             let info = fx_info(&self.state.session.project, key);
-            match info.map(|i| self.state.session.plugins.open_window(key, i)) {
+            match info.map(|i| self.state.editor_host.open_window(&mut self.state.session.plugins, key, i)) {
                 Some(Ok(())) => {
                     self.state.raise(crate::app::Win::Hosted(key));
                     self.select_window_track(key);

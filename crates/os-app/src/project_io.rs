@@ -211,7 +211,7 @@ pub(crate) fn host_tick(ses: &mut Session) {
     }
     crate::control::host::host_commands(ses);
     crate::control::host::sample_loads(ses);
-    let _ = ses.plugins.idle(|_| None);
+    let _ = ses.plugins.idle_headless();
     ses.touched = Default::default();
 }
 
