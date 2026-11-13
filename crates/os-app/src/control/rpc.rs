@@ -121,6 +121,7 @@ impl App {
     }
 
     /// Method `m` with `params` for client `c`, as `rpc_line` answers it.
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests
     pub fn rpc(&mut self, c: &mut Client, m: &str, params: &Value) -> Result<Value, Fail> {
         if JOURNAL.contains(&m) && c.token.is_none() {
             return self.journal_rpc(c, m, params);

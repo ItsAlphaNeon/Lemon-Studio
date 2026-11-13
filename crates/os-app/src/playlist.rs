@@ -1127,13 +1127,28 @@ pub type Fits = HashMap<u16, Option<(f64, f64)>>;
 /// undo and redo, a project opened, the switch turned on), before the next undo step is taken, so they undo and redo
 /// with the edit that made them. As with the fits, the saved copy gets them too: an opened project's crossfades are
 /// not an unsaved change.
-pub fn follow_crossfades(app: &mut App) {
-    let tempo = app.state.tempo();
-    if !(app.state.session.dirty || app.state.session.project.written_at().is_some()) || !app.state.session.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
-        return;
+pub fn follow_crossfades(s: &mut crate::session::Session) -> bool {
+    let tempo = s.tempo();
+    if !(s.dirty || s.project.written_at().is_some()) || !s.project.write_if(|p| os_model::crossfade::derive(p, tempo)) {
+        return false;
     }
-    os_model::crossfade::derive(&mut app.state.session.saved.0, app.state.session.saved.1);
-    app.damage_win(crate::app::Win::Playlist);
+    os_model::crossfade::derive(&mut s.saved.0, s.saved.1);
+    true
+}
+
+/// Audio clips follow their channel's stretch, pitch and the tempo (ui/playlist.md §9c), then the automatic crossfades
+/// follow the clips (`follow_crossfades`). The lengths are worked out, not edited: the saved copy gets them too, so a
+/// fit alone (an opened FL project) is not an unsaved change. Returns whether a clip changed.
+pub fn follow_audio(s: &mut crate::session::Session) -> bool {
+    let mut changed = false;
+    if let Some(fits) = audio_fits(s) {
+        if s.project.write_if(|p| fit_clips(&mut p.arrangements, &fits)) {
+            fit_clips(&mut s.saved.0.arrangements, &fits);
+            s.dirty = true;
+            changed = true;
+        }
+    }
+    follow_crossfades(s) || changed
 }
 
 /// Gives the audio clips of `arrangements` their lengths from `fits` (`fit_audio`). Returns whether one changed.

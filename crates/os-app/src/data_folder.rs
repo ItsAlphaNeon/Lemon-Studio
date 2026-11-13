@@ -135,8 +135,8 @@ pub(crate) fn saved_folder(s: &State) -> Option<String> {
 /// ui/data-folder.md §3. The data folder is the one of `path` (the file a save replaces), and only one that exists
 /// counts: a project from another computer, whose specified folder is not on this one, backs up to the global folder
 /// (Lemon Studio rule). Tests: only data folders in the system's temporary folder.
-pub fn backup_folder(s: &State, path: Option<&Path>) -> Option<PathBuf> {
-    let dir = resolve(&s.session.project, path).filter(|d| d.is_dir());
+pub fn backup_folder(s: &crate::session::Session, path: Option<&Path>) -> Option<PathBuf> {
+    let dir = resolve(&s.project, path).filter(|d| d.is_dir());
     #[cfg(test)]
     let dir = dir.filter(|d| d.starts_with(std::env::temp_dir()));
     match dir {
@@ -534,13 +534,13 @@ mod tests {
         app.save_to(work.join("t.flp"));
         assert_eq!((count(&global), count(&work.join(BACKUP_DIR))), (1, 1), "into <data folder>/Backup");
         let path = app.state.session.path.clone();
-        assert_eq!(backup_folder(&app.state, path.as_deref()), Some(work.join(BACKUP_DIR)));
+        assert_eq!(backup_folder(&app.state.session, path.as_deref()), Some(work.join(BACKUP_DIR)));
         crate::prefs::set_choice(&crate::prefs::BACKUP_LOCATION, 0);
-        assert_eq!(backup_folder(&app.state, path.as_deref()), Some(global.clone()), "Always save to the global folder");
+        assert_eq!(backup_folder(&app.state.session, path.as_deref()), Some(global.clone()), "Always save to the global folder");
         crate::prefs::set_choice(&crate::prefs::BACKUP_LOCATION, 1);
         // A specified folder that does not exist (a project from another computer): the global folder.
         app.state.session.project.get_mut().data_folder = Some(DataFolder { choice: DataFolder::SPECIFIED, folder: folder_text(&dir.join("gone")) });
-        assert_eq!(backup_folder(&app.state, path.as_deref()), Some(global.clone()));
+        assert_eq!(backup_folder(&app.state.session, path.as_deref()), Some(global.clone()));
         crate::backup::TEST_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
     }

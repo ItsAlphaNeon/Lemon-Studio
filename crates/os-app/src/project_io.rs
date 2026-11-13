@@ -265,3 +265,53 @@ pub(crate) fn last_scan() -> crate::plugins::Plugins {
     }
     p
 }
+
+/// What a copy of the project (`App::save_copy`, a backup) leaves as it was: the project, its file and name, its saved
+/// point and its unsaved plugin edits.
+pub(crate) struct Kept {
+    project: os_model::Project,
+    written: Option<&'static std::panic::Location<'static>>,
+    path: Option<std::path::PathBuf>,
+    file: Option<os_flp::FlpFile>,
+    saved: (os_model::Project, f64, Vec<u8>),
+    plugin_edited: bool,
+}
+
+impl Kept {
+    pub(crate) fn of(ses: &Session) -> Kept {
+        Kept {
+            project: ses.project.clone(),
+            written: ses.project.written_at(),
+            path: ses.path.clone(),
+            file: ses.file.clone(),
+            saved: ses.saved.clone(),
+            plugin_edited: ses.plugin_edited,
+        }
+    }
+
+    pub(crate) fn put(self, ses: &mut Session) {
+        (ses.path, ses.file, ses.saved, ses.plugin_edited) = (self.path, self.file, self.saved, self.plugin_edited);
+        ses.project = crate::locked::Locked::restored(self.project, self.written);
+    }
+}
+
+/// Writes a copy of the project to `target` without an interface (a backup of a served session): as `save`, but the
+/// project keeps its file, name and saved point.
+pub(crate) fn copy(ses: &mut Session, target: &Path) -> Result<(), String> {
+    let kept = Kept::of(ses);
+    store_samplers(ses);
+    let before = ses.project.clone();
+    let extra = crate::lemon_state::events_in(ses, &ses.plugins, &crate::lemon_state::Looks::none());
+    let (result, message) = write_in(ses, target, before, extra, &mut |_| {});
+    kept.put(ses);
+    result.map(|_| ()).map_err(|_| message.trim_start_matches("Save failed: ").to_string())
+}
+
+/// Whether the project changed since it was last opened, saved or made, with the interface's choices `looks`: the
+/// session's half of `App::unsaved`.
+pub(crate) fn unsaved(ses: &Session, looks: &crate::lemon_state::Looks) -> bool {
+    !crate::app::same_as_saved(&ses.saved.0, &ses.project)
+        || ses.saved.1 != ses.tempo()
+        || ses.saved.2 != crate::lemon_state::saved_form_in(ses, &ses.plugins, looks)
+        || ses.plugin_edited
+}

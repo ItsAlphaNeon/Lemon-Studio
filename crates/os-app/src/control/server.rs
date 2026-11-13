@@ -234,8 +234,8 @@ pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Op
     }
 }
 
-/// One tick of a session served without a window: the clients' requests, then the plugin host's work, then the project
-/// to playback. What a window would show is dropped; what the user would decide waits for the clients
+/// One tick of a session served without a window: the clients' requests, then the plugin host's work and the Autosave
+/// timer, then the project to playback. What a window would show is dropped; what the user would decide waits for the clients
 /// (proposals) or is theirs (saves).
 pub(crate) fn serve_tick(ses: &mut crate::session::Session) {
     let edited = ses.dirty || ses.project.written_at().is_some();
@@ -251,6 +251,10 @@ pub(crate) fn serve_tick(ses: &mut crate::session::Session) {
         ses.rpc_server = Some(server);
     }
     crate::project_io::host_tick(ses);
+    if let Some(e) = crate::backup::tick_headless(ses, std::time::Instant::now()) {
+        eprintln!("Lemon Studio: {e}");
+    }
+    crate::playlist::follow_audio(ses);
     let _ = crate::rack::sync_playback(ses);
     ses.touched = Default::default();
 }

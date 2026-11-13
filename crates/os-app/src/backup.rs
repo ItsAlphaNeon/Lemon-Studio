@@ -117,16 +117,10 @@ pub fn keep_overwritten(target: &Path, dir: Option<PathBuf>) {
 }
 
 impl App {
-    /// The Autosave timer (`App::tick`): when its interval ends and the project changed since the last backup or save,
-    /// a backup is written. A new Autosave choice starts the timer again.
+    /// The Autosave timer (spec: ui/settings-choices.md "Backup files"): when it runs out, a project changed since it was
+    /// saved and since its last backup is backed up (`write_backup`).
     pub(crate) fn backup_tick(&mut self, now: Instant) {
-        let every = interval(prefs::index(&prefs::AUTOSAVE));
-        if every != self.state.session.backup.every {
-            self.state.session.backup.every = every;
-            self.state.session.backup.due = every.map(|e| now + e);
-        }
-        let (Some(every), Some(due)) = (every, self.state.session.backup.due) else { return };
-        if now < due {
+        if !due(&mut self.state.session.backup, now) {
             return;
         }
         if self.changed_since_backup() {
@@ -140,35 +134,103 @@ impl App {
                 Some(Ok(_)) => {}
             }
         }
-        self.state.session.backup.due = Some(now + every);
+        rearm(&mut self.state.session.backup, now);
     }
 
     /// Whether the project changed since it was last backed up, and since it was last saved (or opened, or created).
     pub(crate) fn changed_since_backup(&self) -> bool {
-        self.unsaved() && self.state.session.backup.last.as_ref().is_none_or(|(p, t)| *p != self.state.session.project || *t != self.state.tempo())
+        changed_since(&self.state.session, self.unsaved())
     }
 
     /// Writes a backup of the project as it is now, named for local time `t`, then deletes its oldest autosaves beyond
     /// Maximum (`prefs::BACKUP_MAXIMUM`). Returns the file (one already written in the same minute is not
     /// overwritten); None while the project cannot be written now.
     pub(crate) fn write_backup(&mut self, t: NaiveDateTime) -> Option<Result<PathBuf, String>> {
-        let Some(dir) = crate::data_folder::backup_folder(&self.state, self.state.session.path.as_deref()) else { return Some(Err("no user folder".into())) };
-        let name = project_name(self.state.session.path.as_deref());
-        let target = dir.join(file_name(&name, "autosaved", t));
-        if target.exists() {
-            return Some(Ok(target));
-        }
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            return Some(Err(format!("{}: {e}", dir.display())));
-        }
-        let snap = (self.state.session.project.clone(), self.state.tempo());
+        let (target, snap) = match place(&self.state.session, t) {
+            Ok(Place::Write(target, snap)) => (target, snap),
+            Ok(Place::Done(target)) => return Some(Ok(target)),
+            Err(e) => return Some(Err(e)),
+        };
         let done = self.save_copy(target.clone())?;
         if done.is_ok() {
-            self.state.session.backup.last = Some(snap);
-            prune(&dir, &name, usize::from(prefs::number(&prefs::BACKUP_MAXIMUM)));
+            wrote(&mut self.state.session, &target, snap);
         }
         Some(done.map(|()| target))
     }
+}
+
+/// Whether the Autosave timer ran out (it follows the interval set: Never stops it).
+pub(crate) fn due(b: &mut Backup, now: Instant) -> bool {
+    let every = interval(prefs::index(&prefs::AUTOSAVE));
+    if every != b.every {
+        b.every = every;
+        b.due = every.map(|e| now + e);
+    }
+    b.due.is_some_and(|due| now >= due)
+}
+
+/// The timer starts again after a backup (or after finding none was needed).
+pub(crate) fn rearm(b: &mut Backup, now: Instant) {
+    if let Some(every) = b.every {
+        b.due = Some(now + every);
+    }
+}
+
+/// Whether the project changed since it was last backed up; `unsaved`: since it was last saved (or opened, or made).
+pub(crate) fn changed_since(ses: &crate::session::Session, unsaved: bool) -> bool {
+    unsaved && ses.backup.last.as_ref().is_none_or(|(p, t)| *p != ses.project || *t != ses.tempo())
+}
+
+/// Where a backup named for local time `t` goes (`place`).
+pub(crate) enum Place {
+    /// Write it there; the project and tempo it backs up.
+    Write(PathBuf, (Project, f64)),
+    /// One was written there in the same minute already: not overwritten.
+    Done(PathBuf),
+}
+
+/// Where the backup named for local time `t` goes, its folder made.
+pub(crate) fn place(ses: &crate::session::Session, t: NaiveDateTime) -> Result<Place, String> {
+    let dir = crate::data_folder::backup_folder(ses, ses.path.as_deref()).ok_or_else(|| "no user folder".to_string())?;
+    let name = project_name(ses.path.as_deref());
+    let target = dir.join(file_name(&name, "autosaved", t));
+    if target.exists() {
+        return Ok(Place::Done(target));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(Place::Write(target, (ses.project.clone(), ses.tempo())))
+}
+
+/// A backup of `snap` was written to `target`: it is the last one, and the oldest autosaves beyond Maximum go.
+pub(crate) fn wrote(ses: &mut crate::session::Session, target: &Path, snap: (Project, f64)) {
+    ses.backup.last = Some(snap);
+    if let Some(dir) = target.parent() {
+        prune(dir, &project_name(ses.path.as_deref()), usize::from(prefs::number(&prefs::BACKUP_MAXIMUM)));
+    }
+}
+
+/// The Autosave timer of a session without an interface (`--serve`): as `App::backup_tick`, the copy written by the
+/// session (`project_io::copy`). Returns what failed.
+pub(crate) fn tick_headless(ses: &mut crate::session::Session, now: Instant) -> Option<String> {
+    if !due(&mut ses.backup, now) {
+        return None;
+    }
+    let mut failed = None;
+    if ses.loading.is_some() || ses.export.is_some() {
+        return None;
+    }
+    if changed_since(ses, crate::project_io::unsaved(ses, &crate::lemon_state::Looks::none())) {
+        match place(ses, chrono::Local::now().naive_local()) {
+            Ok(Place::Write(target, snap)) => match crate::project_io::copy(ses, &target) {
+                Ok(()) => wrote(ses, &target, snap),
+                Err(e) => failed = Some(format!("Backup failed: {e}")),
+            },
+            Ok(Place::Done(_)) => {}
+            Err(e) => failed = Some(format!("Backup failed: {e}")),
+        }
+    }
+    rearm(&mut ses.backup, now);
+    failed
 }
 
 #[cfg(test)]
