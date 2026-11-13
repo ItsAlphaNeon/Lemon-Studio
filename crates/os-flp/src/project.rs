@@ -3565,6 +3565,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 let v = (v * scale).round() as i32;
                 data[off + 8..off + 12].copy_from_slice(&v.to_le_bytes());
             }
+            // The equaliser, band by band: gain, frequency and width (spec: flp/events/mixer.md). A file without a
+            // band's record gets one.
+            let loc = mixer_location(record_track(m.index, project.mixer.len()), 0);
+            for (b, (band, was)) in m.eq.iter().zip(&old.eq).enumerate() {
+                for (k, first) in [MX_EQ_GAIN, MX_EQ_FREQ, MX_EQ_WIDTH].into_iter().enumerate() {
+                    if band[k] != was[k] {
+                        set_param_record(data, loc, first + b as u8, band[k]);
+                    }
+                }
+            }
         }
     }
     if let (Some(v), Some(data)) = (project.main_volume.filter(|&v| Some(v) != current.main_volume), params.as_mut()) {
@@ -4225,6 +4235,9 @@ fn track_records(t: u16, m: Option<&MixerTrack>) -> Vec<u8> {
             MX_VOLUME => m.volume.map_or(v, |x| (x * 16000.0).round() as i32),
             MX_PAN => m.pan.map_or(v, |x| (x * 6400.0).round() as i32),
             MX_STEREO => m.stereo_separation.map_or(v, |x| (x * 64.0).round() as i32),
+            MX_EQ_GAIN..MX_EQ_FREQ => m.eq[usize::from(pid - MX_EQ_GAIN)][0],
+            MX_EQ_FREQ..MX_EQ_WIDTH => m.eq[usize::from(pid - MX_EQ_FREQ)][1],
+            MX_EQ_WIDTH..=0xE2 => m.eq[usize::from(pid - MX_EQ_WIDTH)][2],
             _ => v,
         };
         out.extend(param_rec(pid, MX_KIND_PARAM, mixer_location(t, 0), v));
@@ -4993,6 +5006,26 @@ mod tests {
     /// The track menu's Separator (flag 0x0400), Dock to (0x00C0) and Allow threaded processing (0x0010) are written by
     /// `create` and `apply` and read back; the last ("current") track keeps the master's docking (spec: flp/layouts.md
     /// "A mixer track's record (event 236)", ui/mixer.md §6.1).
+    /// A track's equaliser is written: a new track with its bands, an edit of a file's track band by band.
+    #[test]
+    fn mixer_equaliser_round_trips() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..10).map(MixerTrack::new).collect();
+        p.mixer[9].routes.clear();
+        p.mixer[1].eq[0] = [-600, 2641, 17500];
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer[1].eq, p.mixer[1].eq);
+        let mut edited = back.clone();
+        edited.mixer[1].eq[0][1] = 5777;
+        edited.mixer[2].eq[2] = [1200, 60000, 30000];
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!((again.mixer[1].eq, again.mixer[2].eq), (edited.mixer[1].eq, edited.mixer[2].eq));
+    }
+
     #[test]
     fn mixer_separator_docking_and_threading_round_trip() {
         use os_model::{MixerTrack, DOCK_LEFT, DOCK_MIDDLE, DOCK_RIGHT};

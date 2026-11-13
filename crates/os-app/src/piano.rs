@@ -27,6 +27,9 @@ pub enum Tool {
 }
 
 impl Tool {
+    /// The tools in the title bar's order.
+    pub const ALL: [Tool; 8] = [Tool::Draw, Tool::Paint, Tool::Delete, Tool::Mute, Tool::Slice, Tool::Select, Tool::Zoom, Tool::Playback];
+
     pub fn from_letter(c: &str) -> Option<Tool> {
         Some(match c.to_ascii_lowercase().as_str() {
             "p" => Tool::Draw,
@@ -142,7 +145,7 @@ impl Default for PianoState {
             range: None,
             row_h: ROW,
             ghosts: true,
-            rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
+            rng: crate::clip_colors::clock() | 1,
             split: crate::piano_split::load(),
             split_click: None,
             was_shown: None,

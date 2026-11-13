@@ -170,7 +170,7 @@ impl App {
         };
         let start_tick = self.state.playlist.pos;
         let p = &self.state.project;
-        let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+        let tempo = p.tick_tempo(self.state.tempo.max(1.0));
         let start_secs = os_engine::laws::tick_to_frame(f64::from(start_tick), p.ppq.max(1), tempo, 48000) as f64 / 48000.0;
         self.state.rec.audio = true;
         self.audio_rec = Some(AudioRec { stream, recorder: Some(recorder), rate, start_tick, start_secs, est: (0.0, 0), ending: false, editor });
@@ -239,7 +239,7 @@ impl App {
     fn place_take(&mut self, path: &std::path::Path, frames: u64, rate: u32, start: u32) -> String {
         let s = &mut self.state;
         let p = &s.project;
-        let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+        let tempo = p.tick_tempo(s.tempo.max(1.0));
         let len = (frames as f64 / f64::from(rate) * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
         let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
         let text = path.to_string_lossy();

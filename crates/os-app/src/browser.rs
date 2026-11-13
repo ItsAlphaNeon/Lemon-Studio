@@ -435,7 +435,7 @@ impl App {
 
     /// A press on the browser's splitter: drags it; a double click gives the browser its default width (spec §9).
     fn browser_split_press(&mut self) {
-        let now = std::time::Instant::now();
+        let now = crate::anim::now();
         let s = &mut self.state;
         let double = s.browser_split_click.is_some_and(|t| now.duration_since(t).as_millis() < 400);
         s.browser_split_click = if double { None } else { Some(now) };

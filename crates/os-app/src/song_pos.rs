@@ -135,7 +135,7 @@ impl App {
             self.drag = Some(Drag::SongPos { dx: x - hx });
         } else {
             self.song_pos_step();
-            self.drag = Some(Drag::SongPosHold { next: Instant::now() + FIRST_REPEAT });
+            self.drag = Some(Drag::SongPosHold { next: crate::anim::now() + FIRST_REPEAT });
         }
     }
 

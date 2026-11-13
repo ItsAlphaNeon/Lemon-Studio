@@ -92,7 +92,7 @@ impl NoteType {
 impl App {
     /// A press just started a drag of `kind`'s sort: with the check on, it is held from now.
     pub(crate) fn hold_start(&mut self, kind: Kind) {
-        self.hold = prefs::check(&prefs::CLICK_AND_HOLD).then(|| Hold { at: Instant::now(), from: self.mouse, kind, periods: 0 });
+        self.hold = prefs::check(&prefs::CLICK_AND_HOLD).then(|| Hold { at: crate::anim::now(), from: self.mouse, kind, periods: 0 });
     }
 
     /// The mouse moved to (`x`, `y`): further than [`SLOP`] from the press, the hold ends and the drag goes on as one.
@@ -174,7 +174,7 @@ impl App {
         let g = pl::PGeom::new(&self.state, grid);
         let unit = match pl::grid_snap(&self.state) {
             pl::Snap::None => g.ppq / 4,
-            sn => sn.ticks(g.ppq, g.bar_w),
+            sn => pl::snap_ticks(&self.state, sn, g.bar_w),
         };
         // `fresh`: the copies are a change even where they end up.
         let d = PlDrag::Move { x0: x0 - unit as f32 * g.ppt, y0, orig: copies, fresh: true };
@@ -490,7 +490,7 @@ mod tests {
         let (mut app, (x, y)) = playlist_app(&mut c);
         let orig = pl::clips(&app.state)[0];
         let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
-        let unit = pl::grid_snap(&app.state).ticks(g.ppq, g.bar_w);
+        let unit = pl::snap_unit(&app.state, g.bar_w);
         let steps = app.state.history.len();
         press(&mut app, x, y);
         let now = at(&app, 700);
