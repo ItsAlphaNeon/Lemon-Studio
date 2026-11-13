@@ -1005,7 +1005,7 @@ impl App {
         }
         crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
-            let row = crate::app::add_plugin_channel(s.session.project.get_mut(), CONTAINER);
+            let row = crate::projects::add_plugin_channel(s.session.project.get_mut(), CONTAINER);
             s.session.project.get_mut().channels[row].plugin_state = Some(encode(&[]));
             s.selected_channel = row;
             s.rack.select_only(row);
@@ -1352,7 +1352,7 @@ mod tests {
     /// An app with Lemon Studio's effects, the limiter in slot 1 and the delay in slot 2 of track 2; the two names.
     fn two_effects() -> (App, String, String) {
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.reset_hosted();
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
         a.state.plugdb.rebuild(&a.state.session.plugins);
@@ -2267,7 +2267,7 @@ mod tests {
     fn the_originals_serial_patches_open_as_containers() {
         crate::project_plugins::NATIVE_FIRST.with(|n| n.set(Some(false)));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.reset_hosted();
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let effect = |a: &App, n: &str| a.state.session.plugins.effects.iter().position(|e| e.desc.name == n).unwrap_or_else(|| panic!("{n}"));
@@ -2310,7 +2310,7 @@ mod tests {
         // Audio input straight to Audio output (an unlinked surface beside it) is an empty container; 16 effects are
         // more than a container holds.
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let empty = patcher_state(&[("Control Surface", "Surface", &[])], &[(1001, 1000, 1.0)]);
         let many: Vec<(&str, &str, &[u8])> = vec![("Fruity Limiter", "Fruity Limiter", &[][..]); MAX_MEMBERS + 1];
         let many = patcher_state(&many, &chain_links(MAX_MEMBERS as u32 + 1, 1.0));

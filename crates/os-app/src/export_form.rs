@@ -544,7 +544,7 @@ mod tests {
     /// A pattern with notes, played in PAT mode.
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.session.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
         app.state.set_song_mode(false);
         app
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn opens_with_the_last_choices() {
         let mut empty = App::new(None);
-        empty.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        empty.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         empty.state.session.project.get_mut().patterns[0].notes.clear();
         empty.state.set_song_mode(false);
         empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));

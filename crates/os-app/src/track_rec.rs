@@ -67,7 +67,7 @@ pub fn file_name(project: &str, now: chrono::NaiveDateTime, track: &str) -> Stri
 }
 
 pub(crate) fn folder(s: &Session) -> std::path::PathBuf {
-    crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded")
+    crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::user_dir::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded")
 }
 
 /// Whether the armed tracks record now: Record armed with Audio in the filter, playing, not paused or counting in.

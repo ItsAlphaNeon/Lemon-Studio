@@ -564,7 +564,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let s = &mut app.state;
         s.session.project.get_mut().patterns = vec![
             Pattern { number: 1, name: Some("Kick".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() },

@@ -953,7 +953,7 @@ mod tests {
     fn app() -> App {
         crate::settings_file::set_flag("rec_ask", false);
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.selected_channel = 0;
         app.state.set_pattern(1);
         app.state.session.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
@@ -1636,7 +1636,7 @@ mod tests {
     #[test]
     fn a_session_records_without_the_interface() {
         crate::settings_file::set_flag("rec_ask", false);
-        let mut ses = crate::session::Session::new(crate::app::test_project(), crate::transport::Transport::new(None));
+        let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None));
         ses.set_pattern(1);
         ses.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         ses.rec.armed = true;

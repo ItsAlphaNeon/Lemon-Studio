@@ -2922,7 +2922,7 @@ mod tests {
     use super::*;
 
     fn looping_engine() -> (Engine, Project) {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern {
             number: 1,
@@ -3136,7 +3136,7 @@ mod tests {
     #[test]
     fn playback_publishes_the_automated_tempo() {
         use os_model::{AutoPoint, Automation, Channel, ChannelKind, Clip, ClipSource, target};
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         project.tempo = Some(130.0);
         let index = project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
         project.channels.push(Channel { index, kind: ChannelKind::Automation, pan: -1.0, volume: 1.0, ..project.channels[0].clone() });
@@ -3477,7 +3477,7 @@ mod tests {
     #[test]
     #[ignore]
     fn deleted_notes_stop_playing() {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         let pat = os_model::Pattern {
             number: 1,
@@ -3507,7 +3507,7 @@ mod tests {
     #[test]
     #[ignore]
     fn fader_edit_is_heard_at_once() {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[4].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 384, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
@@ -3526,7 +3526,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_notes_play_and_release() {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         project.patterns = vec![os_model::Pattern { number: 1, ..Default::default() }];
         let t = Transport::new(None);
         t.update(&project);
@@ -3556,7 +3556,7 @@ mod tests {
     #[ignore]
     fn audio_threads_run_realtime() {
         crate::rt::enable_in_tests();
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
@@ -3586,7 +3586,7 @@ mod tests {
     #[test]
     #[ignore]
     fn pause_holds_position() {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
@@ -3666,7 +3666,7 @@ mod tests {
     fn long_blocks_play_smoothly() {
         let _restore = DefaultAudio;
         crate::audio_cfg::AudioCfg { buffer: Some(4096), ..Default::default() }.apply();
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: (0..16).map(|i| os_model::Note { length: 12, key: 60, ..os_model::Note::step(ch, i * 24) }).collect(), ..Default::default() }];
         let t = Transport::new(None);
@@ -3699,7 +3699,7 @@ mod tests {
     #[test]
     #[ignore]
     fn a_failed_device_opens_again_and_playback_goes_on() {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: (0..8).map(|i| os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, i * 48) }).collect(), ..Default::default() }];
         let t = Transport::new(None);
@@ -3743,7 +3743,7 @@ mod tests {
         let Some(name) = pick else { return };
         let _restore = DefaultAudio;
         AudioCfg::default().with(Set::Asio(name.clone())).apply();
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: (0..8).map(|i| os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, i * 48) }).collect(), ..Default::default() }];
         let t = Transport::new(None);
@@ -3819,7 +3819,7 @@ mod tests {
         use crate::audio_cfg::{AudioCfg, Set};
         let _restore = DefaultAudio;
         AudioCfg::default().with(Set::Asio("No Such ASIO Driver".into())).apply();
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
@@ -3844,7 +3844,7 @@ mod tests {
     #[test]
     #[ignore]
     fn playback_starts_at_its_position_and_moves_to_new_settings() {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         let bar = u32::from(project.ppq) * 4;
         let notes = (0..16).map(|b| os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, b * bar) }).collect();
@@ -3892,7 +3892,7 @@ mod tests {
     #[test]
     #[ignore]
     fn closing_the_device_holds_the_playback() {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         project.patterns = vec![os_model::Pattern { number: 1, ..Default::default() }];
         let t = Transport::new(None);
         t.play(&project, PlayMode::Pattern(1), 0.0);
@@ -3930,7 +3930,7 @@ mod tests {
     #[test]
     #[ignore]
     fn tap_follows_playback() {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[4].index;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
         let t = Transport::new(None);
@@ -3986,7 +3986,7 @@ mod tests {
             }
         }
         set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.channels[0].kind = os_model::ChannelKind::Plugin;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96 * 8, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
@@ -4065,7 +4065,7 @@ mod tests {
             }
         }
         set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.channels[0].kind = os_model::ChannelKind::Plugin;
         project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96 * 8, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
@@ -4111,7 +4111,7 @@ mod tests {
     #[test]
     #[ignore]
     fn stop_ends_every_voice() {
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         let (synth, own) = (project.channels[0].index, project.channels[1].index);
         project.channels[0].kind = os_model::ChannelKind::Plugin;
         let note = |ch: u16, key: u16| os_model::Note { length: 384, key, ..os_model::Note::step(ch, 0) };

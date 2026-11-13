@@ -208,7 +208,7 @@ pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize
     let d = app.state.session.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
-    let mut ch = if sampler { crate::app::add_channel(s.session.project.get_mut()) } else { crate::app::add_plugin_channel(s.session.project.get_mut(), &d.name) };
+    let mut ch = if sampler { crate::projects::add_channel(s.session.project.get_mut()) } else { crate::projects::add_plugin_channel(s.session.project.get_mut(), &d.name) };
     if sampler {
         s.session.pending_open = Some(ch);
     } else {

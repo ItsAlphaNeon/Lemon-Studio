@@ -554,7 +554,7 @@ mod tests {
     /// and slot 0's colour on track 2; Performance settings other than the defaults.
     fn with_state() -> App {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.session.control.settle(app.state.session.project.get_mut());
         let ch = app.state.session.project.channels[1].id.0;
         let s = &mut app.state;
@@ -727,7 +727,7 @@ mod tests {
         let d = dir("flp_icons");
         let path = d.join("Icons.flp");
         let mut made = App::new(None);
-        made.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        made.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         made.state.session.control.settle(made.state.session.project.get_mut());
         let m = &mut made.state.session.project.get_mut().mixer;
         m[2].icon = Some(75);

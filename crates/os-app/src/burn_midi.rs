@@ -749,7 +749,7 @@ mod tests {
     }
 
     fn arp_channel(f: impl FnOnce(&mut Arpeggio)) -> Channel {
-        let mut ch = crate::app::sampler_channel(0, "Ch", 0);
+        let mut ch = crate::projects::sampler_channel(0, "Ch", 0);
         f(&mut ch.misc.arp);
         ch
     }
@@ -767,7 +767,7 @@ mod tests {
     /// Off: nothing generated.
     #[test]
     fn nothing_without_the_arpeggiator_or_echoes() {
-        assert_eq!(generate(&crate::app::sampler_channel(0, "Ch", 0), &[note(0, 96, 60)], 96), None);
+        assert_eq!(generate(&crate::projects::sampler_channel(0, "Ch", 0), &[note(0, 96, 60)], 96), None);
     }
 
     /// A major chord upwards, one step a note: a note four steps long plays C E G C (spec: "The note list", "Timing").
@@ -807,7 +807,7 @@ mod tests {
     /// The echo delay: each echo later by the time, quieter by the feed, its pitch stepped (spec: "Echo delay").
     #[test]
     fn echoes() {
-        let mut ch = crate::app::sampler_channel(0, "Ch", 0);
+        let mut ch = crate::projects::sampler_channel(0, "Ch", 0);
         let e = &mut ch.misc.echo;
         (e.feed, e.echoes, e.time, e.pitch) = (0.25, 2, 48.0 / 384.0, 100.0 / 1200.0);
         let got = generate(&ch, &[note(0, 12, 60)], 96).unwrap();

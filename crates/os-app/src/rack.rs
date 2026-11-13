@@ -2771,7 +2771,7 @@ mod tests {
     #[test]
     fn loop_mode_is_an_undo_step_and_no_unsaved_change() {
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.set_pattern(1);
         a.mark_saved();
         loop_step(&mut a.state.session, LOOP_MODE_STEP);
@@ -2788,7 +2788,7 @@ mod tests {
     #[test]
     fn the_pattern_shown_is_no_undo_step_but_an_unsaved_change() {
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.mark_saved();
         let steps = a.state.session.history.done();
         a.state.set_pattern(2);
@@ -2806,7 +2806,7 @@ mod tests {
     #[test]
     fn the_song_mode_is_no_undo_step_and_no_unsaved_change() {
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.mark_saved();
         let steps = a.state.session.history.done();
         let song = a.state.song_mode();
@@ -2825,7 +2825,7 @@ mod tests {
     #[test]
     fn a_lock_is_no_undo_step_and_no_unsaved_change() {
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.mark_saved();
         let steps = a.state.session.history.done();
         toggle_lock(&mut a.state.session, 0);
@@ -2843,7 +2843,7 @@ mod tests {
     #[test]
     fn loop_mode_with_every_channel_following_survives_a_save() {
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.set_pattern(1);
         let ch = a.state.session.project.channels[0].index;
         let follow = os_model::Pattern::LOOP_FOLLOW;
@@ -2866,7 +2866,7 @@ mod tests {
     #[test]
     fn loop_lengths_follow_the_pattern_shown() {
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let ch = a.state.session.project.channels[0].index;
         for (n, len) in [(1, 3), (2, 5)] {
             let pat = crate::patterns::pat_mut(&mut a.state.session, n);
@@ -2890,7 +2890,7 @@ mod tests {
     #[test]
     fn undo_of_a_project_step_keeps_the_pattern_shown_and_its_loops() {
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let ch = a.state.session.project.channels[0].index;
         let pat = crate::patterns::pat_mut(&mut a.state.session, 1);
         pat.notes.push(os_model::Note::step(ch, 0));
@@ -2914,7 +2914,7 @@ mod tests {
     #[test]
     fn the_engine_gets_the_pattern_shown() {
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.set_pattern(1);
         a.state.session.dirty = false;
         let _ = a.state.session.project.take_written();
@@ -2929,7 +2929,7 @@ mod tests {
     fn a_save_hands_what_it_writes_in_to_playback() {
         let file = std::env::temp_dir().join(format!("openstudio-save-dirty-{}.flp", std::process::id()));
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         (a.state.session.file, a.state.session.path) = (None, None);
         a.state.set_pattern(3);
         a.state.session.dirty = false;
@@ -2947,7 +2947,7 @@ mod tests {
     fn the_current_pattern_and_its_loops_reopen() {
         let file = std::env::temp_dir().join(format!("openstudio-current-pattern-{}.flp", std::process::id()));
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         // A pattern with nothing in it is not saved: pattern 2 gets a note.
@@ -3476,7 +3476,7 @@ mod tests {
     /// Deleting a channel keeps the tempo's control points (channel 0x4000), which belong to no channel.
     #[test]
     fn restructuring_keeps_tempo_points() {
-        let mut p = crate::app::test_project();
+        let mut p = crate::projects::test_project();
         let tempo = os_model::ControlPoint::new(96, 0x4000, 5, 140_000);
         p.patterns[0].controls = vec![os_model::ControlPoint::new(0, 1, os_model::ControlPoint::VOLUME, 6400), tempo];
         remap_project(&mut p, &[Some(0), None, Some(1), Some(2), Some(3)]);
@@ -3694,7 +3694,7 @@ mod tests {
                 let (a, b, c) = (0, 1, 2);
                 let want = |i: usize| !(on && i == b);
                 let mut app = App::new(None);
-                app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+                app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
                 let s = &mut app.state;
 
                 // Channel rack (Ctrl+click on the LEDs); channel 5 is locked and muted.
@@ -3742,7 +3742,7 @@ mod tests {
     #[test]
     fn playlist_click_after_solo_unmutes_only_that_track() {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let s = &mut app.state;
         let tracks = |s: &mut State| crate::playlist::arr_mut(&mut s.session).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
         crate::playlist::toggle_solo(s, 0);
@@ -3765,7 +3765,7 @@ mod tests {
         for on in [false, true] {
             set_check(&SELECT_FIRST_CHANNEL, on);
             let mut app = App::new(None);
-            app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+            app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
             // Pattern 2: steps on channels 4 and 2 (indices 3 and 1); pattern 3 has none.
             let notes = vec![Note::step(3, 0), Note::step(1, 96)];
             app.state.session.project.get_mut().patterns.push(os_model::Pattern { number: 2, notes, ..Default::default() });
@@ -3802,7 +3802,7 @@ mod tests {
         for on in [false, true] {
             set_check(&AUTO_ZIP_EMPTY, on);
             let mut app = App::new(None);
-            app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+            app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
             // Rows: 0 Kick, 1 Clap, 2 Hat, 3 Snare, 4 Pluck.
             let pat = |number: u16, notes: Vec<Note>| os_model::Pattern { number, notes, ..Default::default() };
             app.state.session.project.get_mut().patterns = vec![pat(1, vec![Note::step(0, 0), Note::step(2, 48)]), pat(2, vec![Note::step(1, 96)]), pat(3, Vec::new())];
@@ -4332,7 +4332,7 @@ mod tests {
         use crate::app::Action;
         use crate::typein::Target;
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.session.control.settle(app.state.session.project.get_mut());
         let menu = |app: &App, which: u8| match which {
             0 => knob_menu(&app.state, KnobId::ChanVol(1), app.automation_target(&Action::Knob(KnobId::ChanVol(1))), 0.0, 0.0),
@@ -4420,7 +4420,7 @@ mod tests {
         use crate::playlist::{self as pl, Cmd};
         use os_model::target;
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.session.control.settle(app.state.session.project.get_mut());
         let (row, ch) = (1, app.state.session.project.channels[1].index);
         app.state.session.project.get_mut().channels[row].mixer_track = 2;
@@ -4504,7 +4504,7 @@ mod tests {
     fn restretch_all_fits_the_clips_at_once() {
         use crate::playlist as pl;
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.session.project.get_mut().ppq = 96;
         app.state.set_tempo(130.0);
         app.state.playlist.reset();
@@ -4584,7 +4584,7 @@ mod tests {
 
     fn lock_app() -> App {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.toggles.push("typing");
         app.state.selected_channel = 0;
         app

@@ -432,7 +432,7 @@ mod tests {
     fn slot_plugin_parameters_browse_and_automate() {
         use crate::views::browser::{rows, Item};
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.reset_hosted();
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
@@ -501,7 +501,7 @@ mod tests {
     /// The app with the built-in EQ hosted in mixer track 2's slot 2, its parameters listed in the browser.
     fn eq_app() -> (App, usize) {
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.reset_hosted();
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let eq = os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };

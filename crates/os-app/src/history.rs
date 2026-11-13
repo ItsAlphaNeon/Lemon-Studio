@@ -702,7 +702,7 @@ impl Snap {
             Snap::Timebase(t) => {
                 let Timebase { ppq, patterns, arrangements } = *t;
                 let from = s.project.ppq.max(1);
-                crate::app::retime_in(s, from, ppq.max(1));
+                crate::projects::retime_in(s, from, ppq.max(1));
                 (s.project.get_mut().patterns, s.project.get_mut().arrangements) = (patterns, arrangements);
                 // Playback stops on the next tick, as for the change (`App::set_timebase`).
                 s.retimed = true;

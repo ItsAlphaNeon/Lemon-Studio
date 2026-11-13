@@ -729,8 +729,8 @@ impl Command {
                     return Err("a sample goes into a sampler channel (no plugin)".into());
                 }
                 let row = match &plugin {
-                    Some(p) if !sampler => crate::app::add_plugin_channel(s.project.get_mut(), p),
-                    _ => crate::app::add_channel(s.project.get_mut()),
+                    Some(p) if !sampler => crate::projects::add_plugin_channel(s.project.get_mut(), p),
+                    _ => crate::projects::add_channel(s.project.get_mut()),
                 };
                 let ch = &mut s.project.get_mut().channels[row];
                 if let Some(t) = track {

@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn stereo_separation_moves_in_64ths() {
         let mut app = crate::app::App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.set_knob(KnobId::MixSep(1), 0.5 + 0.01 / 2.0);
         let sep = |app: &crate::app::App| crate::mixer::track(&app.state.session, 1).unwrap().stereo_separation;
         assert_eq!(sep(&app), Some(1.0 / 64.0));
@@ -485,7 +485,7 @@ mod tests {
         s.set_knob(KnobId::MixPan(1), 0.75);
         assert_eq!(s.knob_text(KnobId::MixPan(1)), "Panning: 50% right");
         assert_eq!(s.knob_text(KnobId::Swing), "Main swing: 0%");
-        s.session.project.get_mut().channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
+        s.session.project.get_mut().channels = vec![os_model::Channel { volume: 0.78, ..crate::projects::test_project().channels[0].clone() }];
         assert_eq!(s.knob_text(KnobId::ChanVol(0)), "Channel volume: 78%  -5.2dB  0.55");
     }
 
@@ -495,7 +495,7 @@ mod tests {
         use crate::app::Action;
         use crate::views::settings::SAct;
         let mut app = crate::app::App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         assert_eq!(Control::of(&Action::Knob(KnobId::Swing)), Some(Control::Knob(KnobId::Swing)));
         assert_eq!(Control::of(&Action::Fader(2)), Some(Control::Fader(2)));
         assert_eq!(Control::of(&Action::Settings(SAct::ThemeKnob(3))), Some(Control::Theme(3)));

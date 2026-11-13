@@ -216,9 +216,9 @@ pub(crate) mod tests {
         let wav = wav(4410);
         std::fs::write(dir.join("Here.wav"), &wav).unwrap();
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::default_project());
-        let a = crate::app::add_channel(app.state.session.project.get_mut());
-        let b = crate::app::add_channel(app.state.session.project.get_mut());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::default_project());
+        let a = crate::projects::add_channel(app.state.session.project.get_mut());
+        let b = crate::projects::add_channel(app.state.session.project.get_mut());
         app.state.session.project.get_mut().channels[a].sample_path = Some(r"C:\Users\someone\AppData\Local\Temp\Image-Line\x\Here.wav".into());
         app.state.session.project.get_mut().channels[b].sample_path = Some(r"C:\Users\someone\Downloads\Gone.wav".into());
         app.state.session.file = None;

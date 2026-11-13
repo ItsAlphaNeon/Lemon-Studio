@@ -14,7 +14,7 @@ use crate::app::App;
 
 fn app() -> App {
     let mut a = App::new(None);
-    a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+    a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
     a.state.session.project.get_mut().arrangements = vec![os_flp::project::default_arrangement()];
     a.state.session.control.settle(a.state.session.project.get_mut());
     a
@@ -1089,7 +1089,7 @@ fn a_proposal_hands_playback_nothing() {
 /// and opens again with the change.
 #[test]
 fn a_session_without_a_window_serves_clients() {
-    let mut ses = crate::session::Session::new(crate::app::test_project(), crate::transport::Transport::new(None));
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None));
     let mut c = rpc::Client { name: "Headless".into(), level: Level::Edit, saves: true, token: None };
     let mut call = |ses: &mut crate::session::Session, m: &str, params: Value| -> Value {
         let mut asks = rpc::Asks::default();

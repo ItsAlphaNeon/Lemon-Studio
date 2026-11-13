@@ -100,11 +100,11 @@ mod tests {
         let file = std::env::temp_dir().join(format!("openstudio-slicer-{}.flp", std::process::id()));
         let wav = loop_file("reopen");
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.state.session.plugins.available = crate::plugins::builtin();
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_SLICER);
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), LEMON_SLICER);
         let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_SLICER));
@@ -143,7 +143,7 @@ mod tests {
         }
         std::fs::write(&path, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.plugins.available = crate::plugins::builtin();
         let before = a.state.session.project.channels.len();
         a.sample_from_plugin(path.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
@@ -175,7 +175,7 @@ mod tests {
         s.cues.push(Cue { id: 2, name: "Part 2".into(), pos: 22050, len: Some(22050) });
         std::fs::write(&first, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.plugins.available = crate::plugins::builtin();
         a.sample_from_plugin(first.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
         let row = a.state.session.project.channels.len() - 1;
@@ -209,8 +209,8 @@ mod tests {
     #[test]
     fn dumped_notes_replace_the_channels_notes() {
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_SLICER);
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), LEMON_SLICER);
         let ch = a.state.session.project.channels[row].index;
         let other = a.state.session.project.channels[0].index;
         a.state.session.project.get_mut().ppq = 96;

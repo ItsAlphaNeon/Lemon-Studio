@@ -86,7 +86,7 @@ impl App {
 
     /// Clicking a sample plays it once (spec §7): cut off after `PREVIEW_LIMIT` unless "Full sample preview" is ticked.
     pub(crate) fn preview_sample(&self, path: &str) {
-        let mut p = crate::app::preview_project(path);
+        let mut p = crate::projects::preview_project(path);
         p.tempo = Some(self.state.tempo());
         crate::preview_track::route(&mut p, &self.state.session.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
         let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
@@ -1342,7 +1342,7 @@ mod tests {
         assert_eq!(labels(&app), [crate::plugins::LEMON_SAMPLER]);
         assert!(app.state.browser_favs.is_empty());
         // "Add to plugin database (flag as favorite)" of a hosted plugin toggles the same star.
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let row = 0;
         app.state.session.plugins.create(row, 0).expect("Lemon Sampler hosted");
         assert!(app.browser_cmd(BCmd::Star(row)).is_some_and(|m| m.contains("no longer")));

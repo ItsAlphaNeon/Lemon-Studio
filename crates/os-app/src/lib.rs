@@ -30,6 +30,8 @@ mod audio_bench;
 mod dropout_log;
 mod editor_host;
 mod effect_ports;
+mod projects;
+mod user_dir;
 #[cfg(test)]
 mod checks;
 #[cfg(test)]

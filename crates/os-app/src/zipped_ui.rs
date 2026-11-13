@@ -39,7 +39,7 @@ pub fn import(app: &mut App, zip: PathBuf) {
     if app.state.session.zipping.is_some() {
         return;
     }
-    let fallback = crate::app::theme_dir().map(|d| d.join(UNZIP_DIR));
+    let fallback = crate::user_dir::theme_dir().map(|d| d.join(UNZIP_DIR));
     let z = zip.clone();
     run(app, "Unzipping project", &zip, move |done, total| unzip(&z, fallback.as_deref(), done, total).map(Done::Unzipped));
 }
@@ -170,8 +170,8 @@ mod tests {
         std::fs::write(d.join("one/Kick.wav"), &wav).unwrap();
         std::fs::write(d.join("two/Kick.wav"), &wav[..wav.len() - 2]).unwrap();
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::default_project());
-        let rows: Vec<usize> = (0..4).map(|_| crate::app::add_channel(app.state.session.project.get_mut())).collect();
+        app.state.session.project = crate::locked::Locked::new(crate::projects::default_project());
+        let rows: Vec<usize> = (0..4).map(|_| crate::projects::add_channel(app.state.session.project.get_mut())).collect();
         let one = d.join("one/Kick.wav").to_string_lossy().into_owned();
         let two = d.join("two/Kick.wav").to_string_lossy().into_owned();
         app.state.session.project.get_mut().channels[rows[0]].sample_path = Some(one.clone());

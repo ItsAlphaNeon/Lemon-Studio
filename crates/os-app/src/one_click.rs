@@ -102,7 +102,7 @@ fn devices() -> Vec<(String, bool, u16)> {
 /// `begin`'s work for `App::one_click_begin`: `pos` is the song position, where the clip goes.
 pub(crate) fn begin_in(s: &mut Session, input: Input, stream: Option<InputStream>, editor: bool, pos: u32) -> Result<(), String> {
     let rate = stream.as_ref().map(|s| s.rate);
-    let dir = crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded");
+    let dir = crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::user_dir::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded");
     let name = capture::file_name(&crate::backup::project_name(s.path.as_deref()), chrono::Local::now().naive_local());
     capture().start(input.first, input.stereo);
     let recorder = match Recorder::start(dir.join(name), rate.unwrap_or(48000)) {

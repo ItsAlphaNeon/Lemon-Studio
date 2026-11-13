@@ -563,8 +563,8 @@ fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
     let max = crate::mixer::max_insert(&s.session.project);
     for (i, part) in imp.parts.iter().enumerate() {
         let row = match o.instrument {
-            Instrument::Sampler => crate::app::add_channel(s.session.project.get_mut()),
-            k => crate::app::add_plugin_channel(s.session.project.get_mut(), k.label()),
+            Instrument::Sampler => crate::projects::add_channel(s.session.project.get_mut()),
+            k => crate::projects::add_plugin_channel(s.session.project.get_mut(), k.label()),
         };
         let ch = &mut s.session.project.get_mut().channels[row];
         ch.name = Some(part.name.clone());
@@ -668,7 +668,7 @@ impl App {
             self.reset_hosted();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;
-            s.session.project = crate::locked::Locked::new(crate::app::empty_project());
+            s.session.project = crate::locked::Locked::new(crate::projects::empty_project());
             s.session.project.get_mut().ppq = ppq;
             s.session.project.get_mut().tempo = Some(tempo);
             crate::project_info::created(s);
@@ -1085,7 +1085,7 @@ mod tests {
 
     fn test_app() -> App {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.set_song_mode(false);
         app
     }
@@ -1267,9 +1267,9 @@ mod tests {
     #[test]
     fn exports_read_back() {
         let imp = convert(&three(96), &Options::default(), 96);
-        let mut p = crate::app::empty_project();
+        let mut p = crate::projects::empty_project();
         p.channels = (0..3).map(|i| {
-            let mut c = crate::app::test_project().channels[0].clone();
+            let mut c = crate::projects::test_project().channels[0].clone();
             c.index = i;
             c.name = Some(imp.parts[usize::from(i)].name.clone());
             c

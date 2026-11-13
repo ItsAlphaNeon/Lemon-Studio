@@ -310,7 +310,7 @@ pub(crate) fn copy(ses: &mut Session, target: &Path) -> Result<(), String> {
 /// Whether the project changed since it was last opened, saved or made, with the interface's choices `looks`: the
 /// session's half of `App::unsaved`.
 pub(crate) fn unsaved(ses: &Session, looks: &crate::lemon_state::Looks) -> bool {
-    !crate::app::same_as_saved(&ses.saved.0, &ses.project)
+    !crate::projects::same_as_saved(&ses.saved.0, &ses.project)
         || ses.saved.1 != ses.tempo()
         || ses.saved.2 != crate::lemon_state::saved_form_in(ses, &ses.plugins, looks)
         || ses.plugin_edited

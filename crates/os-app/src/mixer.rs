@@ -2400,7 +2400,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app
     }
 

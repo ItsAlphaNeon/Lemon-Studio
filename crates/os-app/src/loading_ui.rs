@@ -50,9 +50,9 @@ mod tests {
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4);
         assert_eq!((workers(0), workers(1), workers(10)), (0, 1, cores));
         // A project of six sampler channels, each with a file of its own (missing: the workers report them failed).
-        let mut p = crate::app::default_project();
+        let mut p = crate::projects::default_project();
         for i in 0..6 {
-            let r = crate::app::add_channel(&mut p);
+            let r = crate::projects::add_channel(&mut p);
             p.channels[r].sample_path = Some(format!("Z:/no such folder/loading-{i}.wav"));
         }
         assert_eq!(Loading::start(&p).workers, cores.min(6), "on");

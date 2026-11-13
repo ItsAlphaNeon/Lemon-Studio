@@ -2317,9 +2317,9 @@ mod tests {
         blob.extend_from_slice(st.as_bytes());
         assert!(pl.hosted[&0].plugin.lock().unwrap().load_state(&blob));
         pump(&mut host, &mut pl, 300);
-        let mut project = crate::app::test_project();
+        let mut project = crate::projects::test_project();
         project.channels.clear();
-        let row = crate::app::add_plugin_channel(&mut project, "Lemon Sampler");
+        let row = crate::projects::add_plugin_channel(&mut project, "Lemon Sampler");
         assert_eq!(row, 0);
         let transport = crate::transport::Transport::new(None);
         transport.update(&project);
@@ -2527,7 +2527,7 @@ mod tests {
             let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
             let mut host = crate::editor_host::EditorHost::default();
             let index = pl.index_of(LEMON_SAMPLER).unwrap();
-            let mut p = crate::app::test_project();
+            let mut p = crate::projects::test_project();
             p.channels.truncate(1);
             p.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note::step(0, 0), os_model::Note::step(0, 24)], ..Default::default() }];
             p.swing = Some(swing);
@@ -2575,7 +2575,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
-        let mut ch = crate::app::test_project().channels.remove(0);
+        let mut ch = crate::projects::test_project().channels.remove(0);
         ch.envelopes[1].enabled = true;
         ch.envelopes[1].attack = 65536 / 2;
         pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
@@ -2646,7 +2646,7 @@ mod tests {
         pl.create_with(0, pl.index_of(crate::osc3::LEMON_TRIO).unwrap(), None).unwrap();
         let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
         let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 1.0, ..Default::default() };
-        let mut ch = crate::app::test_project().channels.remove(0);
+        let mut ch = crate::projects::test_project().channels.remove(0);
         (ch.kind, ch.plugin, ch.misc, ch.sample_path) = (os_model::ChannelKind::Plugin, Some(crate::osc3::FILE_NAME.into()), misc, None);
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut slib = os_engine::SampleLibrary::default();
@@ -2745,7 +2745,7 @@ mod tests {
             })
             .collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
-        let mut ch = crate::app::test_project().channels.remove(0);
+        let mut ch = crate::projects::test_project().channels.remove(0);
         // Stretch (a realtime method), twice as long, 300 cents up.
         ch.sound.stretch = [0, 300, 10000, (-1i32) as u32];
         pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
@@ -2802,7 +2802,7 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&st[8..]).unwrap()
         };
         let f = |v: &serde_json::Value| v["f32"].as_f64().unwrap();
-        let mut ch = crate::app::test_project().channels.remove(0);
+        let mut ch = crate::projects::test_project().channels.remove(0);
         let fx = SampleFx {
             flags: SampleFx::REVERSE | SampleFx::SWAP,
             boost: 128,
@@ -2833,7 +2833,7 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-sampler-fx-{}.wav", std::process::id()));
         let frames: Vec<f32> = (0..1000).flat_map(|i| [i as f32 / 1000.0, -(i as f32) / 2000.0]).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
-        let mut ch = crate::app::test_project().channels.remove(0);
+        let mut ch = crate::projects::test_project().channels.remove(0);
         ch.sound.fx = SampleFx { flags: SampleFx::REVERSE | SampleFx::SWAP, ..SampleFx::default() };
         pl.create_with(1, index, Some(&sampler_state(&ch))).unwrap();
         assert!(pl.load_sample(1, &wav.to_string_lossy()));
@@ -2908,7 +2908,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let mut host = crate::editor_host::EditorHost::default();
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
-        let mut ch = crate::app::test_project().channels.remove(0);
+        let mut ch = crate::projects::test_project().channels.remove(0);
         let read = |pl: &Plugins| {
             let p = pl.hosted[&0].plugin.lock().unwrap();
             let mut st = [0u32; 4];
@@ -3099,12 +3099,12 @@ mod tests {
         let wav = std::env::temp_dir().join(format!("os-app-vst3-save-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 4800]).unwrap();
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.state.session.plugins.available = vec![load(&smp)];
         a.state.session.plugins.effects = vec![load(&eq)];
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), "Lemon Sampler");
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), "Lemon Sampler");
         a.state.session.plugins.create(row, 0).unwrap();
         a.state.session.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
@@ -3368,7 +3368,7 @@ mod tests {
         // SAFETY: test-only, run alone; `OPENSTUDIO_NATIVE` is read only by the scan.
         unsafe { std::env::set_var("OPENSTUDIO_NATIVE", "1") };
         let mut a = crate::app::App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.plugins = Plugins::scan();
         a.state.plugdb.rebuild(&a.state.session.plugins);
         use crate::plugin_menu::PlugCmd;
@@ -3700,7 +3700,7 @@ mod tests {
             .collect();
         let mut pl = Plugins { effects, scale: 1.0, rate: 48000, ..Plugins::default() };
         let mut host = crate::editor_host::EditorHost::default();
-        let project = crate::app::test_project();
+        let project = crate::projects::test_project();
         let transport = crate::transport::Transport::new(None);
         transport.update(&project);
         transport.play(&project, os_engine::PlayMode::Pattern(1), 0.0);

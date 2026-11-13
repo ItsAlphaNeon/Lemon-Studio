@@ -220,7 +220,7 @@ mod tests {
     fn knob_and_slider_menus_reset() {
         use crate::playlist::Cmd;
         let mut app = crate::app::App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         for m in [M::LevelPan, M::TimeGate, M::VolMid, M::Fine] {
             let menu = menu(&app, 0, m, 0.0, 0.0);
             assert_eq!(menu.items.len(), 1, "{m:?}");
