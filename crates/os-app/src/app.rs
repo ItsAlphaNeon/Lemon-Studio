@@ -2961,6 +2961,10 @@ impl App {
                             if let Some(i) = menu.items.iter_mut().find(|i| i.label == "Replace") {
                                 *i = crate::playlist::PItem::sub("Replace", crate::plugin_menu::items(&self.state, crate::plugin_menu::Target::Replace(row), true));
                             }
+                            // Outputs ▸: where a multi-output plugin's extra outputs play (spec: audio/multi-output.md).
+                            if let Some(outs) = crate::rack::outputs_menu(self, row) {
+                                menu.items.push(outs);
+                            }
                         }
                         self.state.playlist.popup = Some(menu);
                         self.popup_lift = detached.then_some(row);

@@ -648,6 +648,18 @@ pub(super) struct InstOut {
     pub quiet: super::auto_bypass::Quiet,
     /// The gains its output ended the last tick on.
     pub gain: Option<(f32, f32)>,
+    /// What each extra output adds to its mixer track, interleaved, with the channel's levels (spec:
+    /// audio/multi-output.md): one buffer per extra output, empty for one that goes nowhere. `planar` is the
+    /// instrument's own layout (`Instrument::process_extra`), kept for its capacity.
+    pub extra: Vec<Vec<f32>>,
+    pub planar: Vec<f32>,
+}
+
+impl Multicore {
+    /// What channel `c`'s instrument put out this tick, to take its extra outputs from (`Engine::instruments_out`).
+    pub fn instrument_out_mut(&mut self, c: usize) -> Option<&mut InstOut> {
+        self.inst_out.get_mut(c)
+    }
 }
 
 /// The audio clips with shapes on instrument channels (`Engine::inst_shapes`), shared by the channels of a tick: each

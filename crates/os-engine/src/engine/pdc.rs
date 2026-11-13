@@ -158,6 +158,9 @@ pub(super) struct Pdc {
     /// Per channel: the delay its instrument last reported, and the pad between it and its mixer track.
     pub chan_delay: Vec<u32>,
     pub chan_pad: Vec<Pad>,
+    /// Per channel, per extra output: the pad between it and the mixer track it plays into (spec:
+    /// audio/multi-output.md).
+    pub out_pads: Vec<Vec<Pad>>,
     /// What the pads were last worked out with, for the automation waits: per track `leaving`, per slot `arriving`
     /// plus the delays of the slots above it that ran; and per track whether a slot was on (the master always counts).
     leaving: Vec<i64>,
@@ -241,6 +244,9 @@ impl Pdc {
         for p in &mut self.chan_pad {
             p.clear();
         }
+        for p in self.out_pads.iter_mut().flatten() {
+            p.clear();
+        }
         self.waiting.clear();
         self.marks.clear();
         (self.first, self.fresh, self.due, self.follows) = (true, true, false, false);
@@ -254,6 +260,7 @@ impl Pdc {
         for (new, o) in self.chan_pad.iter_mut().zip(&mut old.chan_pad) {
             *new = std::mem::take(o);
         }
+        self.out_pads = std::mem::take(&mut old.out_pads);
         for (new, &o) in self.chan_delay.iter_mut().zip(&old.chan_delay) {
             *new = o;
         }
@@ -345,6 +352,11 @@ impl Engine {
             if ch.instrument.0.is_some() && !self.pdc.manual {
                 let d = self.pdc.chan_delay.get(c).copied().unwrap_or(0);
                 ins[ch.insert].chan = ins[ch.insert].chan.max(d);
+                for k in 0..ch.outputs.len() {
+                    if let Some(t) = ch.output_track(k, n) {
+                        ins[t].chan = ins[t].chan.max(d);
+                    }
+                }
             }
         }
         let l = lateness(&ins, &self.order, self.rate);
@@ -406,6 +418,15 @@ impl Engine {
             let delay = if self.pdc.manual { 0 } else { self.pdc.chan_delay.get(c).copied().unwrap_or(0) };
             let len = if ch.instrument.0.is_some() { l.channel_pad(ch.insert, delay) } else { 0 };
             if let Some(p) = self.pdc.chan_pad.get_mut(c) {
+                p.set_len(len);
+            }
+            if self.pdc.out_pads.len() <= c {
+                self.pdc.out_pads.resize_with(c + 1, Vec::new);
+            }
+            let pads = &mut self.pdc.out_pads[c];
+            pads.resize_with(ch.outputs.len(), Pad::default);
+            for (k, p) in pads.iter_mut().enumerate() {
+                let len = match ch.instrument.0.is_some() { true => ch.output_track(k, n).map_or(0, |t| l.channel_pad(t, delay)), false => 0 };
                 p.set_len(len);
             }
         }

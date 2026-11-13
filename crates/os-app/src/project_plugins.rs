@@ -243,6 +243,59 @@ pub fn set_slot_sidechain(proj: &mut Project, plugins: &Plugins, track: u16, slo
     true
 }
 
+/// The output ports a channel's wrapped plugin is saved with, past its main output: for each extra output, the number
+/// of mixer tracks after the channel's own that it plays into, 0 for none (spec: audio/multi-output.md). Empty for a
+/// channel that sets none.
+pub fn channel_outputs(ch: &Channel) -> Vec<usize> {
+    if ch.kind != ChannelKind::Plugin || ch.plugin.as_deref() != Some(WRAPPER) {
+        return Vec::new();
+    }
+    let ports = ch.plugin_state.as_deref().map(wrapper::output_ports).unwrap_or_default();
+    let mut out: Vec<usize> = ports.iter().skip(1).map(|&p| usize::try_from(p).unwrap_or(0)).collect();
+    while out.last() == Some(&0) {
+        out.pop();
+    }
+    out
+}
+
+/// Gives `e` every channel's output ports from `project` (`channel_outputs`).
+pub fn attach_outputs(e: &mut os_engine::Engine, project: &Project) {
+    for (c, ch) in project.channels.iter().enumerate() {
+        let ports = channel_outputs(ch);
+        if !ports.is_empty() {
+            e.set_channel_outputs(c, ports);
+        }
+    }
+}
+
+/// Sets extra output `k` (0: the plugin's second output) of the plugin on channel row `row` to play `port` tracks after
+/// the channel's own, 0 for none. A channel not yet saved as a wrapper becomes one, as a slot does for its sidechain
+/// input. `false`: the channel hosts no such plugin.
+pub fn set_channel_output(proj: &mut Project, plugins: &Plugins, row: usize, k: usize, port: usize) -> bool {
+    set_channel_outputs(proj, plugins, row, &[(k, port)])
+}
+
+/// `set_channel_output` for several outputs at once: each `(k, port)`.
+pub fn set_channel_outputs(proj: &mut Project, plugins: &Plugins, row: usize, ports: &[(usize, usize)]) -> bool {
+    let Some(ch) = proj.channels.get_mut(row).filter(|c| c.kind == ChannelKind::Plugin) else { return false };
+    if ch.plugin.as_deref() != Some(WRAPPER) {
+        let Some(d) = plugins.descriptor(row).filter(is_wrapped) else { return false };
+        ch.plugin_state = Some(wrapper::encode(None, &plugin_ref(&d, plugins.state(row).unwrap_or_default())));
+        ch.plugin = Some(WRAPPER.into());
+    }
+    let Some(state) = ch.plugin_state.as_deref() else { return false };
+    let mut all = wrapper::output_ports(state);
+    for &(k, port) in ports {
+        if all.len() < k + 2 {
+            all.resize(k + 2, 0);
+        }
+        all[k + 1] = i32::try_from(port).unwrap_or(0);
+    }
+    let Some(state) = wrapper::set_output_ports(state, &all) else { return false };
+    ch.plugin_state = Some(state);
+    true
+}
+
 /// Attaches hosted effects to `e`, each with the input ports its slot is saved with in `project`.
 pub fn attach_effects(e: &mut os_engine::Engine, project: &Project, fx: impl IntoIterator<Item = (usize, usize, os_engine::SharedEffect)>) {
     for (t, s, f) in fx {

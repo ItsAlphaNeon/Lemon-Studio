@@ -236,6 +236,47 @@ pub fn set_input_port(data: &[u8], bus: usize, port: i32) -> Option<Vec<u8>> {
     Some(r.to_bytes())
 }
 
+/// The port of each output bus (record 32) in the plugin's bus order, the main bus first: for an instrument, the number
+/// of mixer tracks after the channel's own the bus plays into, 0 for none (spec: audio/multi-output.md). Empty when the
+/// state has no audio ports.
+pub fn output_ports(data: &[u8]) -> Vec<i32> {
+    let Some(r) = Records::parse(data) else { return Vec::new() };
+    r.get(rec::OUTPUTS).unwrap_or(&[]).chunks_exact(12).map(|e| i32::from_le_bytes([e[0], e[1], e[2], e[3]])).collect()
+}
+
+/// `data` with each output bus's port set from `ports` (the main bus first; buses past its end keep theirs); `None` when
+/// `data` is not a wrapper state. A state without audio ports gets them as FL lays them out (the bus counts, then each
+/// bus with its port and active 1), with the input buses it has (none for one that had no ports), unless every port is
+/// 0, which every bus has already.
+pub fn set_output_ports(data: &[u8], ports: &[i32]) -> Option<Vec<u8>> {
+    let mut r = Records::parse(data)?;
+    let entry = |port: i32| [port.to_le_bytes(), 1u32.to_le_bytes(), [0; 4]].concat();
+    let had = r.get(rec::OUTPUTS).map(<[u8]>::to_vec);
+    if had.is_none() && ports.iter().all(|&p| p == 0) {
+        return Some(data.to_vec());
+    }
+    let mut outs = had.unwrap_or_default();
+    while outs.len() / 12 < ports.len() {
+        outs.extend(entry(0));
+    }
+    for (b, &port) in ports.iter().enumerate() {
+        outs[b * 12..b * 12 + 4].copy_from_slice(&port.to_le_bytes());
+    }
+    let n_out = (outs.len() / 12) as u32;
+    let mut io = match r.get(rec::IO).filter(|io| io.len() >= 8) {
+        Some(io) => io.to_vec(),
+        None => {
+            let n_in = (r.get(rec::INPUTS).map_or(0, <[u8]>::len) / 12) as u32;
+            [n_in.to_le_bytes(), [0; 4], [0; 4], [0; 4]].concat()
+        }
+    };
+    let n = u32::from_le_bytes([io[4], io[5], io[6], io[7]]).max(n_out);
+    io[4..8].copy_from_slice(&n.to_le_bytes());
+    r.set(rec::IO, io);
+    r.set(rec::OUTPUTS, outs);
+    Some(r.to_bytes())
+}
+
 /// The name a wrapper state shows for its plugin (record 54), if `data` is one.
 pub fn plugin_name(data: &[u8]) -> Option<String> {
     Records::parse(data).map(|r| text(r.get(rec::NAME))).filter(|n| !n.is_empty())
@@ -380,6 +421,31 @@ mod tests {
         assert_eq!(&r.get(rec::INPUTS).unwrap()[16..20], &0u32.to_le_bytes());
         assert_eq!(r.records.len(), 4);
         assert_eq!(set_input_port(&[1, 2], 1, 1), None);
+    }
+
+    /// Output ports read from record 32 and set the FL way: a state without audio ports gets them only for a port that
+    /// is not 0, with no input buses; a state that has them keeps its inputs and the active flags.
+    #[test]
+    fn output_ports_round_trip() {
+        let b = encode(None, &clap());
+        assert!(output_ports(&b).is_empty());
+        assert_eq!(set_output_ports(&b, &[0, 0, 0]).unwrap(), b);
+        let s = set_output_ports(&b, &[0, 1, 2]).unwrap();
+        assert_eq!(output_ports(&s), [0, 1, 2]);
+        let r = Records::parse(&s).unwrap();
+        assert_eq!(r.records.iter().map(|x| x.0).take(3).collect::<Vec<_>>(), [30, 32, 50]);
+        assert_eq!(r.get(rec::IO).unwrap(), [0u32.to_le_bytes(), 3u32.to_le_bytes(), [0; 4], [0; 4]].concat());
+        assert_eq!(decode(&s), Some(clap()));
+        // Fewer ports than buses: the others keep theirs.
+        let s2 = set_output_ports(&s, &[0, 4]).unwrap();
+        assert_eq!(output_ports(&s2), [0, 4, 2]);
+        // A state with input ports keeps them and their count.
+        let with_in = set_input_port(&b, 1, 2).unwrap();
+        let s = set_output_ports(&with_in, &[0, 1]).unwrap();
+        assert_eq!((input_ports(&s), output_ports(&s)), (vec![0, 2], vec![0, 1]));
+        let r = Records::parse(&s).unwrap();
+        assert_eq!(r.get(rec::IO).unwrap(), [2u32.to_le_bytes(), 2u32.to_le_bytes(), [0; 4], [0; 4]].concat());
+        assert_eq!(set_output_ports(&[1, 2], &[1]), None);
     }
 
     #[test]
