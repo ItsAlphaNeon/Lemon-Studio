@@ -1146,153 +1146,161 @@ impl App {
     /// plugin started from its saved state, or left out of the chain when its plugin is not found (the list keeps it). A
     /// list whose levels or Auto-bypass switches alone changed sets them on the chain.
     pub(crate) fn sync_containers(&mut self) {
-        let mut want: Vec<(usize, Id)> = Vec::new();
-        for m in &self.state.session.project.mixer {
-            for (k, p) in m.slots.iter().enumerate() {
-                if let Some(p) = p.as_ref().filter(|p| p.name == CONTAINER) {
-                    want.push((fx_key(m.index, k as u8), p.id));
-                }
-            }
-        }
-        for (r, ch) in self.state.session.project.channels.iter().enumerate() {
-            if is_container_channel(ch) && u16::try_from(r).is_ok() {
-                want.push((r, ch.id));
-            }
-        }
-        if want.is_empty() && self.state.session.plugins.containers.is_empty() {
-            self.state.session.plugin_members.clear();
-            self.mirror_levels();
-            return;
-        }
-        let mut changed = false;
-        let mut channels = false;
-        // Gone, or moved to another slot or row (found by the slot's or channel's id).
-        let keys: Vec<usize> = self.state.session.plugins.containers.keys().copied().collect();
-        for key in keys {
-            if want.iter().any(|w| w.0 == key) {
-                continue;
-            }
-            let live = self.state.session.plugins.containers.remove(&key).unwrap();
-            channels |= live.channel;
-            let to = want.iter().find(|w| w.1 == live.id && !live.id.is_none() && !self.state.session.plugins.containers.contains_key(&w.0) && (w.0 < FX_KEY) == live.channel).map(|w| w.0);
-            match to {
-                Some(to) => {
-                    self.state.session.plugins.containers.insert(to, live);
-                }
-                None => {
-                    for k in live.keys.into_iter().flatten() {
-                        self.state.session.plugins.drop_key(k);
-                    }
-                }
-            }
-            changed = true;
-        }
-        let mut missing = Vec::new();
-        for (key, id) in want {
-            let Some((t, k)) = key_place(key) else { continue };
-            let Some(p) = state_in(&self.state.session.project, t, k) else { continue };
-            if let Some(live) = self.state.session.plugins.containers.get_mut(&key) {
-                live.id = id;
-                if live.src == p {
-                    continue;
-                }
-            }
-            let list = decode(p).unwrap_or_default();
-            let src = p.to_vec();
-            if let Some(live) = self.state.session.plugins.containers.get_mut(&key).filter(|l| l.shape == shape(&list)) {
-                if let Ok(mut c) = live.fx.lock() {
-                    let playing = list.iter().zip(&live.keys).filter(|(_, k)| k.is_some());
-                    for (at, (m, _)) in playing.enumerate() {
-                        c.set_levels(at, m.wet, m.dry);
-                        c.set_smart(at, m.cpu.smart_disable);
-                    }
-                }
-                live.src = src;
-                continue;
-            }
-            // Built again: the instances of the members still there are kept.
-            let mut pool: Vec<((u32, String), usize)> = match self.state.session.plugins.containers.remove(&key) {
-                Some(old) => old.shape.into_iter().zip(old.keys).filter_map(|(s, k)| Some((s, k?))).collect(),
-                None => Vec::new(),
-            };
-            let mut keys = Vec::new();
-            let channel = k == CHANNEL;
-            for m in &list {
-                if let Some(at) = pool.iter().position(|(s, _)| (s.0, s.1.as_str()) == (m.id, m.uid.as_str())) {
-                    keys.push(Some(pool.remove(at).1));
-                    continue;
-                }
-                let state = (!m.state.is_empty()).then_some(m.state.as_slice());
-                // An instrument plays in a channel's container only.
-                let made = if !m.instrument {
-                    self.state.session.plugins.effect_index_of_uid(&m.uid).and_then(|i| self.state.session.plugins.instantiate_effect(i, state).ok())
-                } else if channel {
-                    self.state.session.plugins.index_of_uid(&m.uid).and_then(|i| self.state.session.plugins.instantiate(i, state).ok())
-                } else {
-                    None
-                };
-                match made {
-                    Some((plugin, _)) => {
-                        let k = MEMBER_KEY + self.state.session.plugins.next_member;
-                        self.state.session.plugins.next_member += 1;
-                        self.state.session.plugins.hosted.insert(k, Hosted::new(plugin));
-                        keys.push(Some(k));
-                    }
-                    None => {
-                        missing.push(m.name.clone());
-                        keys.push(None);
-                    }
-                }
-            }
-            for (_, k) in pool {
-                self.state.session.plugins.drop_key(k);
-            }
-            let hosted = &self.state.session.plugins.hosted;
-            let fx = list
-                .iter()
-                .zip(&keys)
-                .filter_map(|(m, k)| {
-                    let plugin = hosted.get(&(*k)?)?.plugin.clone();
-                    Some(if m.instrument {
-                        chain::Member::instrument(m.id, plugin as os_engine::SharedInstrument, m.wet, m.dry)
-                    } else {
-                        chain::Member::new(m.id, plugin as os_engine::SharedEffect, m.wet, m.dry).with_smart(m.cpu.smart_disable)
-                    })
-                })
-                .collect();
-            let live = Live { id, src, shape: shape(&list), channel, keys, fx: Arc::new(Mutex::new(Chain::new(fx))) };
-            self.state.session.plugins.containers.insert(key, live);
-            channels |= channel;
-            changed = true;
-        }
-        if !missing.is_empty() {
-            let note = format!("Container: not found, left out of the chain: {}", missing.join(", "));
+        if let Some(note) = self.host(sync_containers_in) {
             // After the hint of an opened project's Patcher slots (`open_patchers`), which it completes.
             self.state.message = Some(match self.state.message.take() {
                 Some(m) if m.contains("Patcher: ") => format!("{m}. {note}"),
                 _ => note,
             });
         }
-        if channels {
-            self.state.session.transport.set_instruments(self.state.session.plugins.instruments());
-        }
-        if changed {
-            // Which member each hosted key is, for its parameters' targets and links (`params::target_of`).
-            let members = &mut self.state.session.plugin_members;
-            members.clear();
-            for (&slot_key, live) in &self.state.session.plugins.containers {
-                let Some((t, k)) = key_place(slot_key) else { continue };
-                for ((id, _), key) in live.shape.iter().zip(&live.keys) {
-                    if let Some(key) = key {
-                        members.insert(*key, (t, k, *id));
-                    }
-                }
-            }
-            self.state.session.transport.set_effects(self.state.session.plugins.effects());
-            self.state.session.dirty = true;
-        }
         self.mirror_levels();
     }
+}
+
+/// Every tick: the containers played follow the project's container slots and channels (a wrap, an edit of the
+/// list, an undo, an opened project, a slot or channel moved). A container whose list changed is built again from
+/// it: a member still there (by its id and plugin) keeps its instance and window; a new one is an instance of its
+/// plugin started from its saved state, or left out of the chain when its plugin is not found (the list keeps it). A
+/// list whose levels or Auto-bypass switches alone changed sets them on the chain.
+pub(crate) fn sync_containers_in(ses: &mut crate::session::Session) -> Option<String> {
+    let mut want: Vec<(usize, Id)> = Vec::new();
+    for m in &ses.project.mixer {
+        for (k, p) in m.slots.iter().enumerate() {
+            if let Some(p) = p.as_ref().filter(|p| p.name == CONTAINER) {
+                want.push((fx_key(m.index, k as u8), p.id));
+            }
+        }
+    }
+    for (r, ch) in ses.project.channels.iter().enumerate() {
+        if is_container_channel(ch) && u16::try_from(r).is_ok() {
+            want.push((r, ch.id));
+        }
+    }
+    if want.is_empty() && ses.plugins.containers.is_empty() {
+        ses.plugin_members.clear();
+        return None;
+    }
+    let mut changed = false;
+    let mut channels = false;
+    // Gone, or moved to another slot or row (found by the slot's or channel's id).
+    let keys: Vec<usize> = ses.plugins.containers.keys().copied().collect();
+    for key in keys {
+        if want.iter().any(|w| w.0 == key) {
+            continue;
+        }
+        let live = ses.plugins.containers.remove(&key).unwrap();
+        channels |= live.channel;
+        let to = want.iter().find(|w| w.1 == live.id && !live.id.is_none() && !ses.plugins.containers.contains_key(&w.0) && (w.0 < FX_KEY) == live.channel).map(|w| w.0);
+        match to {
+            Some(to) => {
+                ses.plugins.containers.insert(to, live);
+            }
+            None => {
+                for k in live.keys.into_iter().flatten() {
+                    ses.plugins.drop_key(k);
+                }
+            }
+        }
+        changed = true;
+    }
+    let mut missing = Vec::new();
+    for (key, id) in want {
+        let Some((t, k)) = key_place(key) else { continue };
+        let Some(p) = state_in(&ses.project, t, k) else { continue };
+        if let Some(live) = ses.plugins.containers.get_mut(&key) {
+            live.id = id;
+            if live.src == p {
+                continue;
+            }
+        }
+        let list = decode(p).unwrap_or_default();
+        let src = p.to_vec();
+        if let Some(live) = ses.plugins.containers.get_mut(&key).filter(|l| l.shape == shape(&list)) {
+            if let Ok(mut c) = live.fx.lock() {
+                let playing = list.iter().zip(&live.keys).filter(|(_, k)| k.is_some());
+                for (at, (m, _)) in playing.enumerate() {
+                    c.set_levels(at, m.wet, m.dry);
+                    c.set_smart(at, m.cpu.smart_disable);
+                }
+            }
+            live.src = src;
+            continue;
+        }
+        // Built again: the instances of the members still there are kept.
+        let mut pool: Vec<((u32, String), usize)> = match ses.plugins.containers.remove(&key) {
+            Some(old) => old.shape.into_iter().zip(old.keys).filter_map(|(s, k)| Some((s, k?))).collect(),
+            None => Vec::new(),
+        };
+        let mut keys = Vec::new();
+        let channel = k == CHANNEL;
+        for m in &list {
+            if let Some(at) = pool.iter().position(|(s, _)| (s.0, s.1.as_str()) == (m.id, m.uid.as_str())) {
+                keys.push(Some(pool.remove(at).1));
+                continue;
+            }
+            let state = (!m.state.is_empty()).then_some(m.state.as_slice());
+            // An instrument plays in a channel's container only.
+            let made = if !m.instrument {
+                ses.plugins.effect_index_of_uid(&m.uid).and_then(|i| ses.plugins.instantiate_effect(i, state).ok())
+            } else if channel {
+                ses.plugins.index_of_uid(&m.uid).and_then(|i| ses.plugins.instantiate(i, state).ok())
+            } else {
+                None
+            };
+            match made {
+                Some((plugin, _)) => {
+                    let k = MEMBER_KEY + ses.plugins.next_member;
+                    ses.plugins.next_member += 1;
+                    ses.plugins.hosted.insert(k, Hosted::new(plugin));
+                    keys.push(Some(k));
+                }
+                None => {
+                    missing.push(m.name.clone());
+                    keys.push(None);
+                }
+            }
+        }
+        for (_, k) in pool {
+            ses.plugins.drop_key(k);
+        }
+        let hosted = &ses.plugins.hosted;
+        let fx = list
+            .iter()
+            .zip(&keys)
+            .filter_map(|(m, k)| {
+                let plugin = hosted.get(&(*k)?)?.plugin.clone();
+                Some(if m.instrument {
+                    chain::Member::instrument(m.id, plugin as os_engine::SharedInstrument, m.wet, m.dry)
+                } else {
+                    chain::Member::new(m.id, plugin as os_engine::SharedEffect, m.wet, m.dry).with_smart(m.cpu.smart_disable)
+                })
+            })
+            .collect();
+        let live = Live { id, src, shape: shape(&list), channel, keys, fx: Arc::new(Mutex::new(Chain::new(fx))) };
+        ses.plugins.containers.insert(key, live);
+        channels |= channel;
+        changed = true;
+    }
+    let note = (!missing.is_empty()).then(|| format!("Container: not found, left out of the chain: {}", missing.join(", ")));
+    if channels {
+        ses.transport.set_instruments(ses.plugins.instruments());
+    }
+    if changed {
+        // Which member each hosted key is, for its parameters' targets and links (`params::target_of`).
+        let members = &mut ses.plugin_members;
+        members.clear();
+        for (&slot_key, live) in &ses.plugins.containers {
+            let Some((t, k)) = key_place(slot_key) else { continue };
+            for ((id, _), key) in live.shape.iter().zip(&live.keys) {
+                if let Some(key) = key {
+                    members.insert(*key, (t, k, *id));
+                }
+            }
+        }
+        ses.transport.set_effects(ses.plugins.effects());
+        ses.dirty = true;
+    }
+    note
 }
 
 #[cfg(test)]
