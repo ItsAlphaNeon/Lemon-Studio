@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use os_model::{target, ChannelKind, ClipSource, Note, Project, Rgb};
 use crate::app::{App, State, Win};
-use crate::knobs::KnobId;
+use crate::knob_id::KnobId;
 use crate::playlist::{Cmd, Mark, PItem, Popup};
 use crate::rack::*;
 

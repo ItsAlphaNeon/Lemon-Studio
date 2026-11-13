@@ -10,7 +10,6 @@
 #![allow(unused_imports)]
 
 use os_model::{ClipSource, Pattern, Rgb};
-use crate::app::State;
 use crate::patterns::*;
 
 pub fn name_of(s: &crate::session::Session, n: u16) -> String {

@@ -10,6 +10,7 @@
 //! the topmost hit from the previous frame, so occluded controls never highlight.
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
+use crate::knobs::KnobUi;
 use crate::control::command::Region;
 use crate::history::ChannelControl;
 use std::borrow::Cow;

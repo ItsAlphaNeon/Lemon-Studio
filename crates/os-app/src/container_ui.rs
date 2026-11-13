@@ -6,6 +6,7 @@
 
 #![allow(unused_imports)]
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
+use crate::knobs::KnobUi;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 pub use crate::edit::container::*;

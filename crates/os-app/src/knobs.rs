@@ -7,6 +7,7 @@
 //! Values are normalised 0..1. Every knob reads and writes the project model.
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
+use crate::piano_dlg::DlgKnob;
 use os_ui::Rect;
 
 use crate::app::State;
@@ -18,58 +19,9 @@ pub const PITCH_SNAP: f32 = 0.2;
 /// Normalised value change per mouse-wheel notch (1/64).
 pub const PER_NOTCH: f32 = 1.0 / 64.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum KnobId {
-    /// The toolbar's main volume (stored 0..16000, 12800 = unity at 0.8) and main pitch (-1200..1200 cents) (model
-    /// `Project::main_volume` / `main_pitch`; spec: audio/mixer.md "Main volume", audio/voice-levels.md).
-    MasterVol,
-    MasterPitch,
-    /// Mixer track pan (model).
-    MixPan(u16),
-    MixSep(u16),
-    SlotMix(u16, u8),
-    /// Send level from mixer track `.0` to `.1` (model `send_levels`, fader law; spec: ui/mixer.md §5).
-    Send(u16, u16),
-    /// Channel rack row / plugin window (model).
-    ChanVol(usize),
-    ChanPan(usize),
-    /// Channel rack main swing, 0..100 % (spec: ui/channel-rack.md §7; playback: flp/events/project-info.md).
-    Swing,
-    /// Mixer track `.0`'s equaliser: band `.1` (0 low shelf, 1 peaking, 2 high shelf), setting `.2` (0 gain, the
-    /// band's fader; 1 frequency; 2 width) (model `MixerTrack::eq`; spec: ui/mixer.md §8, audio/mixer.md "Equaliser").
-    Eq(u16, u8, u8),
-    /// A knob of the piano roll's Strum dialog (dialog state, not project data; spec: ui/piano-strum.md §1).
-    Strum(crate::strum::Knob),
-    /// A knob (or the Range box) of the piano roll's Arpeggiate dialog (dialog state; spec: ui/piano-arpeggiate.md §1).
-    Arp(crate::arpeggiate::Knob),
-    /// A knob or fader of the piano roll's Flam or Scale levels dialog (dialog state; spec: ui/piano-flam.md §1,
-    /// ui/piano-level-scaling.md §1).
-    PianoDlg(crate::piano_dlg::Knob),
-    /// A control of the LFO of the automation clip on channel row `.0` (model `Automation::lfo`; spec:
-    /// audio/automation.md "The LFO"). Its switch and mode are two-position controls that a click flips.
-    AutoLfo(usize, LfoKnob),
-    /// A setting of the Lemon MIDI Out on channel row `.0` (its plugin state; spec: plugins/midi-out.md §6). The checks
-    /// are two-position controls that a click flips.
-    MidiOut(usize, crate::lemon_midi_out::MoKnob),
-    /// The wet (`.3`) or dry level of member `.2` of the container in slot `.1` of track `.0`, 0..1 (the container's
-    /// window, `crate::container`; Lemon Studio's design: spec plugins/patcher/README.md §4.3). It shows the level the
-    /// chain plays, an automated one included.
-    Member(u16, u8, u32, bool),
-}
+pub use crate::knob_id::KnobId;
 
-/// The controls of an automation clip's LFO, each over its stored range: switch (off, on), mode (multiply, add),
-/// amount 0..128, speed 0..65536, tension, skew and pulse width -128..128 (Lemon Studio's ranges for the knobs; the
-/// page gives the stored values' meaning).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum LfoKnob {
-    On,
-    Mode,
-    Amount,
-    Speed,
-    Tension,
-    Skew,
-    Pulse,
-}
+pub use crate::knob_id::LfoKnob;
 
 impl LfoKnob {
     pub const ALL: [LfoKnob; 7] = [LfoKnob::On, LfoKnob::Mode, LfoKnob::Amount, LfoKnob::Speed, LfoKnob::Tension, LfoKnob::Skew, LfoKnob::Pulse];
@@ -138,9 +90,16 @@ fn eq_pos(field: u8, v: i32) -> f32 {
     }
 }
 
-impl KnobId {
+/// How a knob behaves under the mouse and what it resets to: the interface's side of `KnobId`.
+pub trait KnobUi {
+    fn notch(self) -> f32;
+    fn drag_rate(self) -> f32;
+    fn default_value(self) -> f32;
+}
+
+impl KnobUi for KnobId {
     /// Value change per wheel notch: master pitch steps a semitone.
-    pub fn notch(self) -> f32 {
+    fn notch(self) -> f32 {
         match self {
             KnobId::MasterPitch => 1.0 / 24.0,
             // spec: ui/channel-rack.md §11 (3 % per notch; pan percent spans half the range), §7 (swing 4-5 %).
@@ -155,16 +114,8 @@ impl KnobId {
         }
     }
 
-    /// What the knob is as a target of the value box and of controller links: a container member's level is its own.
-    pub fn target(self) -> crate::typein::Target {
-        match self {
-            KnobId::Member(t, k, id, wet) => crate::typein::Target::Member(t, k, id, wet),
-            k => crate::typein::Target::Knob(k),
-        }
-    }
-
     /// Value change per pixel of vertical drag.
-    pub fn drag_rate(self) -> f32 {
+    fn drag_rate(self) -> f32 {
         match self {
             // spec: ui/channel-rack.md §11 (0.4 % / px volume, 0.8 % / px pan) and §7 (30 px = 17 % swing).
             KnobId::ChanVol(_) | KnobId::ChanPan(_) => 0.004,
@@ -184,7 +135,7 @@ impl KnobId {
     }
 
     /// Value restored by a middle click.
-    pub fn default_value(self) -> f32 {
+    fn default_value(self) -> f32 {
         match self {
             KnobId::MasterVol | KnobId::Send(..) => 0.8,
             KnobId::ChanVol(_) => 0.78125,

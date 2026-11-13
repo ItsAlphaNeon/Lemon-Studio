@@ -77,6 +77,7 @@ mod keep_on_disk;
 mod icon;
 mod icons;
 mod init;
+mod knob_id;
 mod knobs;
 mod layout;
 mod lemon_state;

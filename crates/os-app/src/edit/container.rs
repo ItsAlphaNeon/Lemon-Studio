@@ -14,7 +14,7 @@ use os_engine::chain::{self, Chain};
 use os_model::target::{self, Target as Auto, MEMBER_DRY, MEMBER_IDS, MEMBER_WET};
 use os_model::{Id, Project, SlotPlugin};
 use crate::app::{App, State, Win};
-use crate::knobs::KnobId;
+use crate::knob_id::KnobId;
 use crate::playlist::{Cmd, PItem, Popup};
 use crate::plugins::{fx_key, fx_of, Hosted, Plugins, FX_KEY, MEMBER_KEY};
 use crate::container::*;

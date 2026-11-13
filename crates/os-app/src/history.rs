@@ -27,7 +27,7 @@ use std::borrow::Cow;
 
 use os_model::{ControlPoint, Note};
 
-use crate::knobs::KnobId;
+use crate::knob_id::KnobId;
 use crate::prefs;
 
 /// The history's first entry: the project as opened or reset.

@@ -16,13 +16,11 @@ use std::rc::Rc;
 use os_model::{
     target, AutoMode, AutoPoint, Arrangement, Automation, Channel, ChannelKind, Clip, ClipSource, PlaylistTrack, Rgb, TimeMarker,
 };
-use os_ui::Rect;
 use crate::app::{App, Drag, State};
-use crate::snap::EditorSnap;
 use crate::playlist::*;
 
 /// Sets (`None`: clears) the icon `owner` shows; the project is written only when it changes.
-pub fn put_icon(s: &mut crate::session::Session, owner: IconOwner, icon: Option<crate::icons::Icon>) {
+pub fn put_icon(s: &mut crate::session::Session, owner: IconOwner, icon: Option<crate::icon::Icon>) {
     let name = icon.and_then(|i| ICONS.iter().find(|(_, x)| *x == i)).map(|&(n, _)| n.to_string());
     s.project.write_if(|p| {
         let slot = match owner {

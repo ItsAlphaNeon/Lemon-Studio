@@ -95,47 +95,19 @@ impl Tool {
     }
 }
 
-/// A knob or fader of the dialogs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Knob {
-    FlamTime,
-    FlamVel,
-    Center,
-    Mult,
-    Offset,
-    Tension,
-    ClawTime,
-    /// LFO's Start and End columns (Value, Range, Speed) and its Phase.
-    LfoValue,
-    LfoRange,
-    LfoSpeed,
-    LfoEndValue,
-    LfoEndRange,
-    LfoEndSpeed,
-    LfoPhase,
-    /// Quantize's Start time, Sensitivity and Duration, and its Levels (an index into `quantize::LEVELS`).
-    QStart,
-    QSens,
-    QDur,
-    QLevel(u8),
-    /// Chop's Time mul and its Levels (an index into `quantize::LEVELS`).
-    ChopTimeMul,
-    ChopLevel(u8),
-    /// Randomize's Octave, Range and Stack boxes (they turn like knobs), its Length, Variation and Population knobs
-    /// and its Levels (an index into `quantize::LEVELS`).
-    RandOctave,
-    RandRange,
-    RandStack,
-    RandLength,
-    RandVariation,
-    RandPopulation,
-    RandLevel(u8),
+pub use crate::knob_id::piano_dlg::Knob;
+
+/// How a dialog knob behaves under the mouse (`crate::knob_id::piano_dlg::Knob` is the session's).
+pub trait DlgKnob {
+    fn notch(self) -> f32;
+    fn travel(self) -> Option<f32>;
+    fn default_pos(self) -> f32;
 }
 
-impl Knob {
+impl DlgKnob for Knob {
     /// Change of the 0..1 position per wheel notch (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §1,
     /// piano-lfo.md §1, piano-quantize.md §1, piano-chop.md §1, piano-randomize.md §1).
-    pub fn notch(self) -> f32 {
+    fn notch(self) -> f32 {
         match self {
             Knob::FlamTime => flam::TIME_NOTCH,
             Knob::FlamVel => flam::VEL_NOTCH,
@@ -161,7 +133,7 @@ impl Knob {
     }
 
     /// Track length in px of the faders (`views/piano_dlg.rs`): a drag moves the handle with the mouse.
-    pub fn travel(self) -> Option<f32> {
+    fn travel(self) -> Option<f32> {
         match self {
             Knob::Center => Some(72.0),
             Knob::Mult | Knob::Offset => Some(144.0),
@@ -170,7 +142,7 @@ impl Knob {
     }
 
     /// Position after Reset; Center's is on the velocity lane.
-    pub fn default_pos(self) -> f32 {
+    fn default_pos(self) -> f32 {
         let (f, l, c) = (flam::Settings::default(), levels::Settings::default(), claw::Settings::default());
         Ui::pos_of(self, &f, &l, &c, &lfo::Settings::default(), &quantize::Settings::default(), &chop::Settings::default(), &randomize::Settings::default())
     }
