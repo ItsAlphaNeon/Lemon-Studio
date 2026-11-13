@@ -117,29 +117,14 @@ pub fn saved_form(s: &State, plugins: &Plugins) -> Vec<u8> {
 /// Puts the state a `.lemon` file holds into `s` and `plugins` (a project just opened, its ids given). An FLP has
 /// none; its channels and mixer tracks show the icons their numbers stand for instead ([`from_flp`]).
 pub fn apply(s: &mut State, file: &FlpFile) {
+    apply_session(&mut s.session, file);
     if !lemon::is_lemon(file) {
-        from_flp(s);
         return;
     }
     let read = |id| lemon::data(file, id).filter(|d| d.first() == Some(&LAYOUT));
     if let Some(&flags) = read(lemon::MIXER).as_deref().and_then(|d| d.get(1)) {
-        s.session.project.get_mut().pdc_off = flags & PDC_AUTO == 0;
         s.mixer.waveforms = flags & WAVEFORMS != 0;
         s.mixer.extra = flags & EXTRA_PROPS != 0;
-    }
-    if let Some(d) = read(lemon::SCALING) {
-        let mut r = Reader(&d[1..]);
-        for _ in 0..r.u32().unwrap_or(0) {
-            let (Some(kind), Some(n), Some(k), Some(pct)) = (r.u8(), r.u16(), r.u8(), r.u16()) else { break };
-            let key = match kind {
-                CHANNEL => usize::from(n),
-                SLOT => crate::plugins::fx_key(n, k),
-                _ => continue,
-            };
-            if pct > 0 {
-                s.session.plugins.editor_scales.insert(key, f32::from(pct) / 100.0);
-            }
-        }
     }
     if let Some(d) = read(lemon::CHANNEL_CHECKS) {
         let mut r = Reader(&d[1..]);
@@ -158,20 +143,6 @@ pub fn apply(s: &mut State, file: &FlpFile) {
     if let Some(&on) = read(lemon::KEY_FOCUS).as_deref().and_then(|d| d.get(1)) {
         set_editor_keys(on != 0);
     }
-    if let Some(d) = read(lemon::TRACK_LOCKS) {
-        let mut r = Reader(&d[1..]);
-        for _ in 0..r.u32().unwrap_or(0) {
-            let (Some(a), Some(t), Some(kind), Some(v)) = (r.u16(), r.u16(), r.u8(), r.u16()) else { break };
-            let src = match kind {
-                PATTERN => os_model::ClipSource::Pattern(v),
-                CLIP_CHANNEL => os_model::ClipSource::Channel(v),
-                _ => continue,
-            };
-            if let Some(tr) = s.session.project.get_mut().arrangements.get_mut(usize::from(a)).and_then(|a| a.tracks.get_mut(usize::from(t))) {
-                tr.clip_lock = Some(src);
-            }
-        }
-    }
     if let Some(d) = read(lemon::NOTE_LOCKS) {
         let mut r = Reader(&d[1..]);
         for _ in 0..r.u32().unwrap_or(0) {
@@ -179,28 +150,6 @@ pub fn apply(s: &mut State, file: &FlpFile) {
             let row = usize::from(row);
             if let Some(lock) = s.rack.note_lock.get_mut(usize::from(src)).filter(|_| row < s.session.project.channels.len()) {
                 *lock = Some(row);
-            }
-        }
-    }
-    if let Some(d) = read(lemon::ICONS) {
-        read_icons(s, &d[1..]);
-    }
-    if let Some(d) = read(lemon::SLOT_NAMES) {
-        let mut r = Reader(&d[1..]);
-        for _ in 0..r.u32().unwrap_or(0) {
-            let (Some(t), Some(k), Some(len)) = (r.u16(), r.u8(), r.u16()) else { break };
-            let Some(text) = r.take(usize::from(len)) else { break };
-            if let Some(v) = s.session.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_names.get_mut(usize::from(k))) {
-                *v = Some(String::from_utf8_lossy(text).into_owned());
-            }
-        }
-    }
-    if let Some(d) = read(lemon::SLOT_COLORS) {
-        let mut r = Reader(&d[1..]);
-        for _ in 0..r.u32().unwrap_or(0) {
-            let (Some(t), Some(k), Some(c)) = (r.u16(), r.u8(), r.take(3)) else { break };
-            if let Some(v) = s.session.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_colors.get_mut(usize::from(k))) {
-                *v = Some(os_model::Rgb::new(c[0], c[1], c[2]));
             }
         }
     }
@@ -213,12 +162,76 @@ pub fn apply(s: &mut State, file: &FlpFile) {
     }
 }
 
+/// `apply`, the session's half: what of a `.lemon` file's own state belongs to the project and its plugins (plugin
+/// delay compensation, the editors' scaling, the playlist tracks' locks, icons, slot names and colours), or for an FLP
+/// the icons its numbers stand for.
+pub fn apply_session(s: &mut crate::session::Session, file: &FlpFile) {
+    if !lemon::is_lemon(file) {
+        from_flp(s);
+        return;
+    }
+    let read = |id| lemon::data(file, id).filter(|d| d.first() == Some(&LAYOUT));
+    if let Some(&flags) = read(lemon::MIXER).as_deref().and_then(|d| d.get(1)) {
+        s.project.get_mut().pdc_off = flags & PDC_AUTO == 0;
+    }
+    if let Some(d) = read(lemon::SCALING) {
+        let mut r = Reader(&d[1..]);
+        for _ in 0..r.u32().unwrap_or(0) {
+            let (Some(kind), Some(n), Some(k), Some(pct)) = (r.u8(), r.u16(), r.u8(), r.u16()) else { break };
+            let key = match kind {
+                CHANNEL => usize::from(n),
+                SLOT => crate::plugins::fx_key(n, k),
+                _ => continue,
+            };
+            if pct > 0 {
+                s.plugins.editor_scales.insert(key, f32::from(pct) / 100.0);
+            }
+        }
+    }
+    if let Some(d) = read(lemon::TRACK_LOCKS) {
+        let mut r = Reader(&d[1..]);
+        for _ in 0..r.u32().unwrap_or(0) {
+            let (Some(a), Some(t), Some(kind), Some(v)) = (r.u16(), r.u16(), r.u8(), r.u16()) else { break };
+            let src = match kind {
+                PATTERN => os_model::ClipSource::Pattern(v),
+                CLIP_CHANNEL => os_model::ClipSource::Channel(v),
+                _ => continue,
+            };
+            if let Some(tr) = s.project.get_mut().arrangements.get_mut(usize::from(a)).and_then(|a| a.tracks.get_mut(usize::from(t))) {
+                tr.clip_lock = Some(src);
+            }
+        }
+    }
+    if let Some(d) = read(lemon::ICONS) {
+        read_icons(s, &d[1..]);
+    }
+    if let Some(d) = read(lemon::SLOT_NAMES) {
+        let mut r = Reader(&d[1..]);
+        for _ in 0..r.u32().unwrap_or(0) {
+            let (Some(t), Some(k), Some(len)) = (r.u16(), r.u8(), r.u16()) else { break };
+            let Some(text) = r.take(usize::from(len)) else { break };
+            if let Some(v) = s.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_names.get_mut(usize::from(k))) {
+                *v = Some(String::from_utf8_lossy(text).into_owned());
+            }
+        }
+    }
+    if let Some(d) = read(lemon::SLOT_COLORS) {
+        let mut r = Reader(&d[1..]);
+        for _ in 0..r.u32().unwrap_or(0) {
+            let (Some(t), Some(k), Some(c)) = (r.u16(), r.u8(), r.take(3)) else { break };
+            if let Some(v) = s.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slot_colors.get_mut(usize::from(k))) {
+                *v = Some(os_model::Rgb::new(c[0], c[1], c[2]));
+            }
+        }
+    }
+}
+
 /// The icons of an opened FLP: each channel's and mixer track's icon number (events 155 and 95) that has a picture in
 /// the Change icon... list ([`crate::playlist::FLP_ICONS`]). A `.lemon` file's icons are its own (event 193), so a
 /// choice made in Lemon Studio, None too, wins over the numbers its FLP events keep.
-fn from_flp(s: &mut State) {
+fn from_flp(s: &mut crate::session::Session) {
     let name = |i: crate::icons::Icon| ICONS.iter().find(|(_, x)| *x == i).map(|&(n, _)| n.to_string());
-    s.session.project.write_if(|p| {
+    s.project.write_if(|p| {
         let mut changed = false;
         for c in &mut p.channels {
             if let Some(n) = crate::playlist::flp_icon(c.rack.icon).and_then(name) {
@@ -268,14 +281,14 @@ fn icons(s: &State) -> Event {
     Event::new(lemon::ICONS, Value::var(b))
 }
 
-fn read_icons(s: &mut State, d: &[u8]) {
+fn read_icons(s: &mut crate::session::Session, d: &[u8]) {
     let mut r = Reader(d);
     for _ in 0..r.u32().unwrap_or(0) {
         let (Some(kind), Some(n), Some(k), Some(len)) = (r.u8(), r.u16(), r.u8(), r.u8()) else { break };
         let Some(name) = r.take(usize::from(len)) else { break };
         // A name this version does not know (one added later) is left out.
         let Some(&(name, _)) = ICONS.iter().find(|(nm, _)| nm.as_bytes() == name) else { continue };
-        let p = s.session.project.get_mut();
+        let p = s.project.get_mut();
         let to = match kind {
             CHANNEL => p.channels.get_mut(usize::from(n)).map(|c| &mut c.lemon_icon),
             TRACK => p.mixer.iter_mut().find(|m| m.index == n).map(|m| &mut m.lemon_icon),

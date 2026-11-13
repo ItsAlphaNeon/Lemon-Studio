@@ -77,6 +77,10 @@ pub struct Session {
     pub(crate) saved: (os_model::Project, f64, Vec<u8>),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
     pub(crate) backup: crate::backup::Backup,
+    /// Performance mode's launched clips (spec: ui/performance-mode.md): what plays besides the arrangement.
+    pub perform: crate::perform::Perform,
+    /// The live engine has had the project once (`sync_live`); each tick's `rack::sync_playback` keeps it current.
+    pub(crate) live_synced: bool,
     /// Playback: the audio thread and what it plays (`crate::transport`). Last, so it goes after the plugins it plays.
     pub transport: crate::transport::Transport,
 }
@@ -172,6 +176,8 @@ impl Session {
             saved: (os_model::Project::default(), 0.0, Vec::new()),
             backup: Default::default(),
             rpc_server: None,
+            perform: Default::default(),
+            live_synced: false,
             transport,
         }
     }
@@ -203,5 +209,36 @@ impl Session {
 
     pub fn set_tempo(&mut self, bpm: f64) {
         self.project.write_if(|p| p.tempo.replace(bpm) != Some(bpm));
+    }
+}
+
+/// What a keyboard, a MIDI device or a client plays now on rack row `row` (`Session::live`), besides the project.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Live {
+    /// A note starts: `key` sounds at `velocity`, on MIDI channel `midi` (0..15) for a hosted instrument (MIDI channel
+    /// through, spec: ui/channel-rack.md §18).
+    NoteOn { row: usize, key: u16, velocity: u8, midi: u8 },
+    NoteOff { row: usize, key: u16 },
+    /// A controller message (not a note) where a live note would go: a hosted instrument gets it as it is, another
+    /// channel bends by pitch bend over ±`bend_cents` (spec: ui/midi-settings.md §4).
+    Midi { row: usize, bytes: [u8; 3], bend_cents: f64 },
+}
+
+impl Session {
+    /// Before the first live note: the live engine gets the project (once; each tick keeps it current after).
+    pub(crate) fn sync_live(&mut self) {
+        if !self.live_synced {
+            self.live_synced = true;
+            self.transport.update(&crate::rack::play_project_in(self));
+        }
+    }
+
+    /// Plays `l` now: into the playback while playing, else into the live engine.
+    pub fn live(&mut self, l: Live) {
+        match l {
+            Live::NoteOn { row, key, velocity, midi } => self.transport.note_on_midi(row, key, velocity, midi),
+            Live::NoteOff { row, key } => self.transport.note_off(row, key),
+            Live::Midi { row, bytes, bend_cents } => self.transport.midi(row, bytes, bend_cents),
+        }
     }
 }

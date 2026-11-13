@@ -860,3 +860,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// What the running export did since the last look (`poll`).
+pub(crate) enum Polled {
+    Idle,
+    Running,
+    /// It ended: the name it was started with, and how long the audio was and the files written, or why it failed.
+    Done(String, Result<(f64, Vec<std::path::PathBuf>), String>),
+}
+
+/// The session's part of an export on each tick: its progress, and once it ends, the plugins back to live playback and
+/// all notes off to the MIDI outputs that want it (spec: ui/midi-settings.md §2).
+pub(crate) fn poll(ses: &mut crate::session::Session) -> Polled {
+    let Some((name, _)) = ses.export.clone() else { return Polled::Idle };
+    match ses.transport.export_status() {
+        crate::transport::Export::Running(p) => {
+            ses.export = Some((name, p));
+            Polled::Running
+        }
+        crate::transport::Export::Done(r) => {
+            ses.export = None;
+            if crate::midi_cfg::Switch::Output.on() {
+                ses.midi_out.notes_off();
+            }
+            ses.plugins.set_offline(false);
+            lemon_sampler::stream::export_finished();
+            Polled::Done(name, r)
+        }
+        crate::transport::Export::Idle => Polled::Idle,
+    }
+}

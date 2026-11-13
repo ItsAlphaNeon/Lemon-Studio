@@ -102,48 +102,62 @@ fn parse(args: &[String]) -> Result<Opts, String> {
 pub fn render(o: &Opts) -> Result<(), String> {
     // The audio thread must not open the user's audio device (an ASIO driver opens at start).
     crate::transport::headless();
-    let mut app = crate::app::App::new(None);
-    match o.hosted {
-        Hosted::Builtin => app.state.session.plugins = crate::plugins::Plugins::builtins(),
+    let mut ses = crate::session::Session::new(os_model::Project::default(), crate::transport::Transport::new(crate::factory_folder::dir()));
+    ses.plugins = match o.hosted {
+        Hosted::Builtin => crate::plugins::Plugins::builtins(),
         Hosted::LastScan => {
-            app.load_plugins();
+            let mut p = crate::plugins::Plugins::builtins();
+            if let Some(cache) = crate::plugin_db::Cache::load() {
+                p.merge(&cache);
+            }
+            p
         }
         #[cfg(test)]
-        Hosted::ScanNow => app.state.session.plugins = crate::plugins::Plugins::scan(),
-    }
+        Hosted::ScanNow => crate::plugins::Plugins::scan(),
+    };
     // Instances start at the render rate (`Plugins::create_with` activates at the current rate).
-    app.state.session.plugins.set_rate(o.rate);
-    let opened = app.open(o.project.clone());
-    eprintln!("OPEN {}", app.state.message.clone().unwrap_or_default());
-    if !opened {
-        app.reset_hosted();
-        return Err(format!("could not open {}", o.project.display()));
+    ses.plugins.set_rate(o.rate);
+    let (file, project, _) = match crate::project_io::read(&o.project) {
+        Ok(r) => r,
+        Err((e, _)) => {
+            eprintln!("OPEN Could not open {}: {e}", o.project.display());
+            return Err(format!("could not open {}", o.project.display()));
+        }
+    };
+    crate::project_io::open_in(&mut ses, file, project, o.project.clone());
+    if let Some(f) = ses.file.take() {
+        crate::lemon_state::apply_session(&mut ses, &f);
+        ses.file = Some(f);
     }
+    let effects = ses.plugins.effects.clone();
+    let patchers = crate::container::open_patchers(&mut ses, &effects);
+    crate::project_io::start_loading(&mut ses);
+    eprintln!("OPEN Opened {}{}", o.project.display(), patchers.map_or(String::new(), |m| format!(". {m}")));
     let t0 = Instant::now();
-    while app.loading() && t0.elapsed() < Duration::from_secs(300) {
-        app.plugin_tick();
+    while ses.loading.is_some() && t0.elapsed() < Duration::from_secs(300) {
+        crate::project_io::host_tick(&mut ses);
         std::thread::sleep(Duration::from_millis(5));
     }
     // Effects, wrapped plugins and 3x Osc are hosted on the ticks after loading.
     let mut last = usize::MAX;
     for _ in 0..400 {
-        app.plugin_tick();
-        let n = app.state.session.plugins.hosted.len();
+        crate::project_io::host_tick(&mut ses);
+        let n = ses.plugins.hosted.len();
         if n == last && t0.elapsed() > Duration::from_secs(2) {
             break;
         }
         last = n;
         std::thread::sleep(Duration::from_millis(10));
     }
-    eprintln!("HOSTED {} in {:.1} s: {}", app.state.session.plugins.hosted.len(), t0.elapsed().as_secs_f64(), app.state.message.clone().unwrap_or_default());
-    report(&app);
+    eprintln!("HOSTED {} in {:.1} s", ses.plugins.hosted.len(), t0.elapsed().as_secs_f64());
+    report(&ses);
 
-    app.state.session.plugins.set_offline(true);
-    let project = crate::rack::play_project(&app.state);
+    ses.plugins.set_offline(true);
+    let project = crate::rack::play_project_in(&ses);
     let mut library = crate::transport::host_library(crate::factory_folder::dir());
     lemon_sampler::set_host_ticks(project.ppq);
-    let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &app.state.session.plugins.instruments());
-    crate::project_plugins::attach_effects(&mut e, &project, app.state.session.plugins.effects());
+    let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &ses.plugins.instruments());
+    crate::project_plugins::attach_effects(&mut e, &project, ses.plugins.effects());
     if o.from > 0 {
         e.seek_tick(o.from);
     } else {
@@ -170,18 +184,18 @@ pub fn render(o: &Opts) -> Result<(), String> {
     });
     let peak = audio.iter().fold(0.0f32, |m, v| m.max(v.abs()));
     eprintln!("RENDERED {:.2} s (song {:.2} s) at {} Hz in {:.1} s, peak {peak:.3}", audio.len() as f64 / 2.0 / rate as f64, len as f64 / rate as f64, o.rate, t1.elapsed().as_secs_f64());
-    app.reset_hosted();
+    crate::project_io::reset_hosted(&mut ses);
     written.map_err(|e| format!("{}: {e}", o.out.display()))
 }
 
 /// What plays each channel and mixer slot: the hosted plugin (name, format) or the engine.
-fn report(app: &crate::app::App) { // This code is a part of L e m o n S t u d i o.
-    let p = &app.state.session.project;
+fn report(ses: &crate::session::Session) { // This code is a part of L e m o n S t u d i o.
+    let p = &ses.project;
     for (row, c) in p.channels.iter().enumerate() {
         if matches!(c.kind, ChannelKind::Automation | ChannelKind::Layer) {
             continue;
         }
-        let who = match app.state.session.plugins.descriptor(row) {
+        let who = match ses.plugins.descriptor(row) {
             Some(d) => format!("{} ({})", d.name, crate::plugins::format_name(d.format)),
             None => "engine".into(),
         };
@@ -191,7 +205,7 @@ fn report(app: &crate::app::App) { // This code is a part of L e m o n S t u d i
     for m in &p.mixer {
         for (k, s) in m.slots.iter().enumerate() {
             let Some(s) = s else { continue };
-            let who = match app.state.session.plugins.descriptor(crate::plugins::fx_key(m.index, k as u8)) {
+            let who = match ses.plugins.descriptor(crate::plugins::fx_key(m.index, k as u8)) {
                 Some(d) => format!("{} ({})", d.name, crate::plugins::format_name(d.format)),
                 None if os_engine::effects::from_slot(&s.name, &s.state, 44100).is_some() => "engine".into(),
                 None => "nothing (sound passes)".into(),

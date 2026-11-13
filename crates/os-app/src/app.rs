@@ -1579,7 +1579,7 @@ pub struct App {
     /// Keys held now that launched Performance mode slots (spec: ui/performance-mode.md §3), as (physical key, note).
     perf_typed: Vec<(KeyCode, u8)>,
     pub typing_octave: i32,
-    typing_synced: bool,
+
     /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key, velocity).
     mouse_note: Option<(usize, u16, u8)>,
     /// The notes the Playback tool's line holds sounding: (rack row, key, velocity).
@@ -1864,7 +1864,6 @@ impl App {
             typing_held: Vec::new(),
             perf_typed: Vec::new(),
             typing_octave: 0,
-            typing_synced: false,
             mouse_note: None,
             scrub_notes: Vec::new(),
             cables_at: None,
@@ -1998,23 +1997,14 @@ impl App {
         // that layout (spec: flp/layouts.md "Converting to the newer layout"). One the conversion cannot handle gets a
         // dialog that says so, not just a line in the hint bar.
         // A converted project opens without its path: Save asks for a new file, so the original stays for its own version.
-        let mut legacy = None;
         let mut converted = false;
-        let result = std::fs::read(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|b| os_flp::FlpFile::parse(&b).map_err(|e| e.to_string()))
-            .and_then(|mut f| match os_flp::project::upgrade(&mut f).and_then(|c| {
+        let (result, legacy) = match crate::project_io::read(&path) {
+            Ok((f, p, c)) => {
                 converted = c;
-                os_flp::project::load(&f)
-            }) {
-                Ok(p) => Ok((f, p)),
-                Err(os_flp::project::ProjectError::LegacyLayout(v)) => {
-                    let e = os_flp::project::ProjectError::LegacyLayout(v.clone()).to_string();
-                    legacy = Some(v);
-                    Err(e)
-                }
-                Err(e) => Err(e.to_string()),
-            });
+                (Ok((f, p)), None)
+            }
+            Err((e, legacy)) => (Err(e), legacy),
+        };
         if let Some(v) = legacy {
             let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             let saved = if v.trim().is_empty() { "an older version".to_string() } else { format!("version {}", v.trim()) };
@@ -2026,8 +2016,7 @@ impl App {
         }
         match result {
             Ok((file, project)) => {
-                self.state.session.transport.silence();
-                self.reset_hosted();
+                crate::project_io::open_in(&mut self.state.session, file, project, path.clone());
                 let s = &mut self.state;
                 s.selected_channel = 0;
                 s.selected_mixer = 1;
@@ -2038,21 +2027,10 @@ impl App {
                 s.rack.reset();
                 s.hide(Win::Plugin);
                 s.mixer_scroll = 0.0;
-                // As saved (event 9); a file without it opens in song mode (spec: flp/engine-events.md "Project").
-                let mut project = project;
-                project.song_mode = Some(project.song_mode.unwrap_or(true));
-                project.current_pattern = Some(project.current_pattern.unwrap_or(1).max(1));
-                project.tempo = Some(project.tempo.unwrap_or(130.0));
-                s.session.project = crate::locked::Locked::new(project);
-                // Opening in song mode sets the initial values (spec: flp/engine-events.md "Event 216"); the project
-                // is opened with them, not changed.
-                crate::init::apply(&mut s.session);
                 crate::project_info::opened(s);
-                s.session.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
                 crate::templates::remember(&path);
                 crate::recent::add(&path);
-                s.session.path = Some(path);
                 // A converted project is not saved over its original, which its own version can still open: Save asks
                 // for a new file. A `.lemon` keeps its path.
                 if converted && s.session.path.as_deref().is_some_and(crate::project_files::is_flp) {
@@ -2060,15 +2038,10 @@ impl App {
                 }
                 s.piano.reset();
                 s.playlist.reset();
-                s.session.history.reset();
-                s.session.control.reset();
-                s.session.control.event(&crate::control::By::User, "opened", s.session.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
                 crate::playlist::load_view(s);
-                s.session.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 // A .lemon file's own state (icons, slot names and colours, Performance settings); its channel icons
-                // name channels by position, which the ids given here then follow.
-                self.state.session.control.settle(self.state.session.project.get_mut());
+                // name channels by position, which the ids given on opening follow.
                 if let Some(f) = self.state.session.file.take() {
                     crate::lemon_state::apply(&mut self.state, &f);
                     // Saved by a version that has features this one does not: those parts do not play.
@@ -2080,14 +2053,13 @@ impl App {
                 }
                 // The original's Patcher slots that are a plain serial chain open as containers (README.md slice 5).
                 let effects = self.state.session.plugins.effects.clone();
-                if let Some(m) = crate::container::open_patchers(&mut self.state, &effects) {
+                if let Some(m) = crate::container::open_patchers(&mut self.state.session, &effects) {
                     self.state.message = Some(format!("{}. {m}", self.state.message.take().unwrap_or_default()));
                 }
                 self.mark_saved();
                 self.journal_opened(Some(&opened));
                 crate::missing::opened(self);
-                self.state.session.loading = Some(crate::loading::Loading::start(&self.state.session.project));
-                self.state.session.samples.wait = true;
+                crate::project_io::start_loading(&mut self.state.session);
                 self.invalidate();
                 true
             }
@@ -2168,17 +2140,10 @@ impl App {
     /// Follows a running export: moves the progress bar, then reports the result (a pattern render's goes to
     /// `pattern_render_done`).
     pub(crate) fn export_tick(&mut self) {
-        let Some((name, _)) = self.state.session.export.clone() else { return };
-        match self.state.session.transport.export_status() {
-            crate::transport::Export::Running(p) => {
-                self.state.session.export = Some((name, p));
-                self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
-            }
-            crate::transport::Export::Done(r) => {
-                self.state.session.export = None;
-                self.midi_after_export();
-                self.state.session.plugins.set_offline(false);
-                lemon_sampler::stream::export_finished();
+        match crate::export::poll(&mut self.state.session) {
+            crate::export::Polled::Idle => {}
+            crate::export::Polled::Running => self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0)),
+            crate::export::Polled::Done(name, r) => {
                 if let Some(p) = self.state.session.pattern_render.take() {
                     return self.pattern_render_done(p, r);
                 }
@@ -2196,7 +2161,6 @@ impl App {
                 });
                 self.invalidate();
             }
-            crate::transport::Export::Idle => {}
         }
     }
 
@@ -2214,104 +2178,30 @@ impl App {
         self.journal_saving();
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
-        // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
-        // them.
-        for row in self.state.session.hosted_rows.clone() {
-            if self.state.session.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
-                let lemon = self.state.session.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
-                if let Some(st) = self.state.session.plugins.state(row).filter(|_| lemon) {
-                    crate::plugins::store_sampler(&mut self.state.session.project.get_mut().channels[row], &st);
-                }
-                if let Some(p) = self.state.session.plugins.sampler_path(row) {
-                    // A placeholder path that still names the same file is kept as the project wrote it.
-                    let ch = &mut self.state.session.project.get_mut().channels[row];
-                    if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
-                        continue;
-                    }
-                    // An empty path: the sample was taken out (spec: flp/events/channels.md "Loop points (event 251)").
-                    if !p.is_empty() {
-                        ch.sample_path = Some(p);
-                    } else if ch.sample_path.is_some() {
-                        ch.clear_sample();
-                    }
-                }
-            }
-        }
+        crate::project_io::store_samplers(&mut self.state.session);
         // What the save writes into the project from the interface (below) reaches playback like any edit: the engine
         // holds the project as it is.
         let before = self.state.session.project.clone();
-        self.store_builtin_states();
         let s = &mut self.state;
-        let tempo = s.tempo();
-        s.session.project.write_if(|p| p.tempo.replace(tempo) != Some(tempo));
-        // Kept as the project says, or pattern mode, as a new project's (an unsaved change of none).
-        s.session.project.write_if(|p| {
-            let unset = p.song_mode.is_none();
-            p.song_mode.get_or_insert(false);
-            unset
-        });
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).
         crate::playlist::store_view(s);
-        if s.session.project != before {
-            s.session.dirty = true;
-        }
-        // A file Lemon Studio made before the project had a playlist has no arrangement block (FL's files always have
-        // one): build it again from the model, which holds everything that file stored.
-        let lacks_playlist = s.session.file.as_ref().and_then(|f| os_flp::project::load(f).ok()).is_some_and(|p| p.arrangements.is_empty())
-            && !s.session.project.arrangements.is_empty();
-        // A project that was not opened from a file gets a new FLP built from the model.
-        let mut file = if s.session.file.is_none() || lacks_playlist {
-            // The new file's blocks are the model's channels and mixer tracks in order.
-            settle_origins(s.session.project.get_mut());
-            // FL's files always have a playlist, and the mixer is stored after it (spec: flp/events/mixer.md).
-            if s.session.project.arrangements.is_empty() {
-                s.session.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
-            }
-            let mut first = s.session.project.clone();
-            crate::rack::as_saved(&mut first);
-            crate::project_plugins::store_hosted(&mut first, &s.session.plugins);
-            match os_flp::project::create(&first) {
-                Ok(f) => f,
-                Err(e) => {
-                    s.message = Some(format!("Save failed: {e}"));
-                    return None;
-                }
-            }
-        } else {
-            s.session.file.clone().expect("checked")
-        };
-        // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a
-        // failed save leaves the loaded file as it was.
-        let lost = os_flp::project::unsaved_parts(&s.session.project, &file);
-        // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
-        // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
-        let mut proj = s.session.project.clone();
-        crate::rack::as_saved(&mut proj);
-        // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`).
+        // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`); the time spent on the
+        // project and its data folder go into the copy written.
         let extra = crate::lemon_state::events(s, &s.session.plugins);
-        crate::project_info::stamp(s, &mut proj);
-        crate::data_folder::stamp(s, &mut proj);
-        crate::project_plugins::store_hosted(&mut proj, &s.session.plugins);
-        edit(&mut proj);
-        // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
-        let result = os_flp::project::apply(&proj, &mut file)
-            .map_err(|e| e.to_string())
-            .and_then(|()| lemon_or_flp(&mut file, &target, extra))
-            .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
-            .and_then(|b| crate::replace_file::replace(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
-        s.message = Some(match &result {
-            Ok(_) if lost.is_empty() => format!("Saved {}", target.display()),
-            Ok(_) => format!("Saved {} without {}", target.display(), lost.join(", ")),
-            Err(e) => format!("Save failed: {e}"),
-        });
-        if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
-            // The saved file now holds the channels and mixer tracks in model order, and the plugins as written.
-            settle_origins(s.session.project.get_mut());
-            crate::project_plugins::adopt_saved(s.session.project.get_mut(), &proj);
-            s.session.file = Some(file);
+        let work = crate::project_info::saved_work_time(s);
+        let folder = crate::data_folder::saved_folder(s);
+        let mut stamp = |p: &mut os_model::Project| {
+            p.work_time = Some(work);
+            if let (Some(dir), Some(df)) = (&folder, p.data_folder.as_mut()) {
+                df.folder = dir.clone();
+            }
+            edit(p);
+        };
+        let (result, message) = crate::project_io::write_in(&mut s.session, &target, before, extra, &mut stamp);
+        s.message = Some(message);
+        if result.is_ok() {
             crate::templates::remember(&target);
             crate::recent::add(&target);
-            s.session.path = Some(target.clone());
             if self.copying {
                 // A copy (a backup, Save new version's...) is not the project's file: its saved point stays.
                 self.journal_copied(&target);
@@ -2792,139 +2682,35 @@ impl App {
     /// EQ, Tesla (as Edison), Pulp Filter (as Love Philter) and Press (as Maximus) into their slots, Lemon Trio into its
     /// channels.
     pub(crate) fn store_builtin_states(&mut self) {
-        use crate::plugins::{EDISON_FILE_NAME, EQ_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME};
-        for key in self.state.session.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
-            let Some((t, k)) = crate::plugins::fx_of(key) else { continue };
-            let Some(slot) = self.state.session.project.get_mut().mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
-            let st = match slot.name.as_str() {
-                EQ_FILE_NAME => self.state.session.plugins.eq_file_state(key),
-                EDISON_FILE_NAME => self.state.session.plugins.edison_file_state(key),
-                LOVE_PHILTER_FILE_NAME => self.state.session.plugins.love_philter_file_state(key),
-                MAXIMUS_FILE_NAME => self.state.session.plugins.maximus_file_state(key),
-                file => self.state.session.plugins.recreation_file_state(key, file),
-            };
-            if let Some(st) = st {
-                slot.state = st;
-            }
-        }
-        crate::osc3::store(self.state.session.project.get_mut(), &self.state.session.plugins);
-        crate::citrus::store(self.state.session.project.get_mut(), &self.state.session.plugins);
-        crate::smith::store(self.state.session.project.get_mut(), &self.state.session.plugins);
-        crate::slicer::store(self.state.session.project.get_mut(), &self.state.session.plugins);
-        crate::drums::store(self.state.session.project.get_mut(), &self.state.session.plugins);
+        crate::project_io::store_builtin_states(&mut self.state.session);
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
     pub(crate) fn reset_hosted(&mut self) {
         self.surface_reload();
-        self.state.session.plugins.clear();
-        self.state.session.loading = None;
-        self.state.session.samples.wait = false;
-        self.state.session.hosted_rows.clear();
-        self.state.session.plugins.sampler_failed.clear();
-        self.state.session.plugins.fx_failed.clear();
-        self.state.session.plugins.wrap_failed.clear();
-        self.state.session.plugins.native_failed.clear();
-        self.state.session.transport.set_instruments(Vec::new());
-        self.state.session.transport.set_effects(Vec::new());
+        crate::project_io::reset_hosted(&mut self.state.session);
     }
 
-    /// Every sampler channel is played and edited by Lemon Sampler (owner, 2026-10-10; spec: plugins/lemon-sampler.md §7):
-    /// a channel without an instance gets one, started from the channel's sample and envelopes. Without Lemon Sampler
-    /// (plugin not found) sampler channels keep the engine's own sample playback.
-    /// With a `deadline` it stops after the instance that passes it; returns whether every sampler row is done.
+    /// `loading::sync_samplers` with the views following it (tests).
+    #[cfg(test)]
     fn sync_samplers(&mut self, deadline: Option<std::time::Instant>) -> bool {
-        let Some(index) = self.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER) else { return true };
-        let mut added = false;
-        let mut done = true;
-        for row in 0..self.state.session.project.channels.len() {
-            let ch = &self.state.session.project.channels[row];
-            if !ch.kind.is_sampler() || self.state.session.hosted_rows.contains(&row) || self.state.session.plugins.sampler_failed.contains(&row) {
-                continue;
-            }
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                done = false;
-                break;
-            }
-            let st = crate::plugins::sampler_state(ch);
-            if let Some(l) = &mut self.state.session.loading {
-                l.hosted += 1;
-                l.label = ch.name.clone().unwrap_or_default();
-            }
-            match self.state.session.plugins.create_with(row, index, Some(&st)) {
-                Ok(_) => {
-                    self.state.session.hosted_rows.push(row);
-                    added = true;
-                    // A channel just added (ADD ▸ Lemon Sampler): its window is about to open (spec:
-                    // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
-                    if self.state.session.pending_open == Some(row) {
-                        self.state.session.plugins.added(row);
-                    }
-                }
-                Err(e) => {
-                    self.state.session.plugins.sampler_failed.push(row);
-                    self.state.message = Some(format!("Lemon Sampler: {e}"));
-                }
-            }
-        }
-        if added {
-            self.state.session.transport.set_instruments(self.state.session.plugins.instruments());
-            self.state.session.dirty = true;
-        }
-        done
+        self.host(|s| crate::loading::sync_samplers(s, deadline))
     }
 
     /// Project loading (spec: ui/project-loading.md): samples decode on worker threads first, then the sampler
     /// instances start a few per tick (`loading::HOST_BUDGET`) so the progress panel keeps moving. Without a loading
     /// project, new sampler rows are hosted at once.
     fn loading_tick(&mut self) {
-        let Some(decoded) = self.state.session.loading.as_mut().map(|l| l.decode_done()) else {
-            self.sync_samplers(None);
-            return;
-        };
-        let deadline = std::time::Instant::now() + crate::loading::HOST_BUDGET;
-        // Then the plugin channels and mixer effects, under the same budget, then the samplers' played samples.
-        if decoded && self.sync_samplers(Some(deadline)) && self.host_plugins(deadline) && self.state.session.loading.as_mut().is_some_and(|l| l.builds_done()) {
-            self.state.session.loading = None;
-            self.state.session.samples.wait = false;
+        let scanning = self.sweep.is_some();
+        match self.host(|s| crate::loading::tick(s, scanning)) {
+            None => {}
             // What was not found is listed now (spec: ui/project-loading.md §6).
-            crate::missing::loaded(self);
-            return self.invalidate();
-        }
-        self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
-    }
-
-    /// Starts the opened project's plugin channels and mixer effects until `deadline` (`project_plugins::sync_wrapped`
-    /// and the other hosts stop after the instance that passes it): true when none is left to start.
-    fn host_plugins(&mut self, deadline: std::time::Instant) -> bool {
-        self.state.session.plugins.host_deadline = Some(deadline);
-        self.state.session.plugins.host_more = false;
-        self.sync_effects();
-        self.sync_wrapped();
-        self.sync_osc3();
-        self.sync_citrus();
-        self.sync_smith();
-        self.sync_slicer();
-        self.sync_drums();
-        self.sync_native();
-        self.state.session.plugins.host_deadline = None;
-        let samplers = self.state.session.hosted_rows.iter().filter(|&&r| self.state.session.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
-        let done = (self.state.session.plugins.hosted.len() + self.state.session.plugins.wrap_failed.len() + self.state.session.plugins.fx_failed.len() + self.state.session.plugins.native_failed.len()).saturating_sub(samplers);
-        let more = self.state.session.plugins.host_more;
-        if let Some(l) = &mut self.state.session.loading {
-            l.label.clear();
-            l.plugins_done = done;
-            // Plugins no host plays (FL's own effects without a recreation) are not waited for.
-            if !more {
-                l.plugins = done;
+            Some(true) => {
+                crate::missing::loaded(self);
+                self.invalidate();
             }
+            Some(false) => self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0)),
         }
-        !more
-    }
-
-    /// Whether the plugin hosts' time this tick is over (`host_plugins`): the host that asks stops and goes on next tick.
-    pub(crate) fn past_deadline(&mut self) -> bool {
-        self.state.session.plugins.past_deadline()
     }
 
     /// `f`, the plugin host's part of a tick on the session, with the views following it and the
@@ -3237,9 +3023,9 @@ impl App {
                         // The plugin's own keyboard plays on the live stream, like the typing keyboard.
                         if on {
                             self.sync_live();
-                            self.state.session.transport.note_on(row, u16::from(key), vel);
+                            self.state.session.live(crate::session::Live::NoteOn { row, key: u16::from(key), velocity: vel, midi: 0 });
                         } else {
-                            self.state.session.transport.note_off(row, u16::from(key));
+                            self.state.session.live(crate::session::Live::NoteOff { row, key: u16::from(key) });
                         }
                         continue;
                     }
@@ -4831,23 +4617,8 @@ impl App {
             self.state.playlist.pos = t;
             self.damage_win(Win::Playlist);
         }
-        // Edits reach playback right away, also during a drag (at most once per tick): every write to the project
-        // (`locked::Locked`), and the flag for what playback reads outside it (the tempo, song mode, the pattern shown;
-        // control-plane step 5 moves those into the project).
-        let written = self.state.session.project.take_written();
-        // A write alone that changes nothing playback reads (the project's info, a plugin state stored for a save) builds
-        // no new engine.
-        let play = (written.is_some() && !self.state.session.dirty).then(|| crate::rack::play_project(&self.state));
-        if self.state.session.dirty || play.as_ref().is_some_and(|p| !self.state.session.transport.holds(p)) {
-            self.state.session.dirty = false;
+        if crate::rack::sync_playback(&mut self.state.session) {
             self.journal.touch();
-            // An edit in the interface (a command's change is its event already; an undo or redo is one too).
-            let s = &mut self.state;
-            if s.session.control.changed_since_seen(&s.session.project, s.tempo()) {
-                s.session.control.event(&crate::control::By::User, "edit", "", Vec::new());
-            }
-            // Also while Play is still starting (not `playing` yet); ignored when stopped.
-            self.state.session.transport.update(&play.unwrap_or_else(|| crate::rack::play_project(&self.state)));
         }
         self.playback_damage();
         self.journal_tick();
@@ -8289,14 +8060,14 @@ impl App {
         }
         self.state.piano.held = key;
         if let Some((row, k, _)) = self.mouse_note.take() {
-            self.state.session.transport.note_off(row, k);
+            self.state.session.live(crate::session::Live::NoteOff { row, key: k });
         }
         let row = piano::channel(&self.state).and_then(|ch| self.state.session.project.channels.iter().position(|c| c.index == ch));
         if let (Some(k), true, Some(row)) = (key, play, row) {
             let k = k.clamp(0, crate::piano::TOP_KEY) as u16;
             self.sync_live();
             let velocity = std::mem::replace(&mut self.key_velocity, TYPING_VELOCITY);
-            self.state.session.transport.note_on(row, k, velocity);
+            self.state.session.live(crate::session::Live::NoteOn { row, key: k, velocity, midi: 0 });
             self.mouse_note = Some((row, k, velocity));
         }
         // The keyboard column.
@@ -8413,7 +8184,7 @@ impl App {
             self.sync_live();
         }
         for (k, velocity) in new {
-            self.state.session.transport.note_on(row, k, velocity);
+            self.state.session.live(crate::session::Live::NoteOn { row, key: k, velocity, midi: 0 });
             self.scrub_notes.push((row, k, velocity));
         }
     }
@@ -8421,7 +8192,7 @@ impl App {
     /// The Playback tool's notes stop with the button.
     fn scrub_release(&mut self) {
         for (row, key, _) in std::mem::take(&mut self.scrub_notes) {
-            self.state.session.transport.note_off(row, key);
+            self.state.session.live(crate::session::Live::NoteOff { row, key });
         }
     }
 
@@ -9322,7 +9093,7 @@ impl App {
             }
             let Some(i) = self.typing_held.iter().position(|h| h.0 == code) else { return false };
             let (_, row, key) = self.typing_held.remove(i);
-            self.state.session.transport.note_off(row, key);
+            self.state.session.live(crate::session::Live::NoteOff { row, key });
             self.typing_lit_changed();
             self.step_edit_up(crate::step_edit::Src::Typing(code));
             return true;
@@ -9365,7 +9136,7 @@ impl App {
         self.locked_hint(crate::rack::NoteSrc::Typing, row);
         self.sync_live();
         let key = key as u16;
-        self.state.session.transport.note_on(row, key, TYPING_VELOCITY);
+        self.state.session.live(crate::session::Live::NoteOn { row, key, velocity: TYPING_VELOCITY, midi: 0 });
         self.typing_held.push((code, row, key));
         self.step_edit_down(crate::step_edit::Src::Typing(code), key, TYPING_VELOCITY);
         self.typing_lit_changed();
@@ -9387,10 +9158,7 @@ impl App {
 
     /// The live stream needs the project before the first live note.
     pub(crate) fn sync_live(&mut self) {
-        if !self.typing_synced {
-            self.typing_synced = true;
-            self.state.session.transport.update(&crate::rack::play_project(&self.state));
-        }
+        self.state.session.sync_live();
     }
 
     /// Release every held typing-keyboard note and the piano-roll key held with the mouse (focus lost, switch off,
@@ -9398,7 +9166,7 @@ impl App {
     pub fn typing_release_all(&mut self) {
         self.step_chord.clear();
         if let Some((row, key, _)) = self.mouse_note.take() {
-            self.state.session.transport.note_off(row, key);
+            self.state.session.live(crate::session::Live::NoteOff { row, key });
         }
         self.scrub_release();
         for (_, note) in std::mem::take(&mut self.perf_typed) {
@@ -9408,7 +9176,7 @@ impl App {
             return;
         }
         for (_, row, key) in std::mem::take(&mut self.typing_held) {
-            self.state.session.transport.note_off(row, key);
+            self.state.session.live(crate::session::Live::NoteOff { row, key });
         }
         self.typing_lit_changed();
     }
@@ -11165,7 +10933,7 @@ fn typing_semitone(code: KeyCode) -> Option<i32> {
 /// Makes the file written to `target` a `.lemon` file (Lemon Studio's chunks around the FLP's, saved by this version,
 /// with `extra`: Lemon Studio's own state, `crate::lemon_state`), or a plain FLP for a target named `.flp`, which has no
 /// place for `extra` (spec: flp/lemon-format.md).
-fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra: Vec<os_flp::Event>) -> Result<(), String> {
+pub(crate) fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra: Vec<os_flp::Event>) -> Result<(), String> {
     if crate::project_files::is_flp(target) {
         os_flp::lemon::to_flp(file);
         return Ok(());
@@ -11174,7 +10942,7 @@ fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra:
     os_flp::lemon::to_lemon(file, &extra).map_err(|e| e.to_string())
 }
 
-fn settle_origins(p: &mut Project) {
+pub(crate) fn settle_origins(p: &mut Project) {
     for (i, c) in p.channels.iter_mut().enumerate() {
         c.rack.origin = Some(i as u16);
     }

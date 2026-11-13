@@ -676,8 +676,6 @@ pub struct PlaylistState {
     pub last_clip: Option<(usize, std::time::Instant)>,
     /// Last left click in the ruler: a second one soon after clears the time selection.
     pub last_ruler: Option<std::time::Instant>,
-    /// Performance mode's launched clips (spec: ui/performance-mode.md).
-    pub perform: crate::perform::Perform,
     /// Performance mode's progress displays on the zone's clips and in the track headers, and whether Ctrl+click
     /// triggers a +Scene instead of a Scene (spec: ui/performance-mode.md §3, §3a).
     pub perf_clip_progress: bool,
@@ -825,7 +823,6 @@ impl Default for PlaylistState {
             last_header: None,
             last_clip: None,
             last_ruler: None,
-            perform: crate::perform::Perform::default(),
             perf_clip_progress: true,
             perf_track_progress: false,
             perf_plus_scene: false,
@@ -2491,7 +2488,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             s.message = crate::perform::trigger_clip_scene(s, ci, now, alt, plus);
         } else {
             s.message = crate::perform::trigger(s, ci, now, alt, app.shift);
-            if s.playlist.perform.held.is_some() {
+            if s.session.perform.held.is_some() {
                 app.drag = Some(Drag::Pl(PlDrag::Perform));
             }
         }
@@ -3372,7 +3369,7 @@ pub fn press_header(app: &mut App, t: u16, right: bool, at: (f32, f32)) {
     }
     // Performance mode: a click on a playing track's header stops it at the next sync point, with Alt at once (spec:
     // ui/performance-mode.md §3).
-    if crate::perform::zone(s).is_some() && s.playlist.perform.live.contains_key(&t) {
+    if crate::perform::zone(s).is_some() && s.session.perform.live.contains_key(&t) {
         let playing = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
         crate::perform::stop(&mut app.state, t, playing, app.alt);
     }

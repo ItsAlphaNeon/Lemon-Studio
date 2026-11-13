@@ -156,7 +156,7 @@ impl App {
         // The bent row returns to the centre when another is selected (spec §4).
         if let Some(row) = self.midi_play.bend_row.filter(|&r| r != self.state.selected_channel) {
             self.midi_play.bend_row = None;
-            self.state.session.transport.midi(row, [0xe0, 0, 64], 200.0);
+            self.state.session.live(crate::session::Live::Midi { row, bytes: [0xe0, 0, 64], bend_cents: 200.0 });
         }
         self.midi_out_tick();
     }
@@ -243,7 +243,7 @@ impl App {
                     if row < self.state.session.project.channels.len() {
                         self.sync_live();
                         if let Some(b) = ev.msg.bytes() {
-                            self.state.session.transport.midi(row, b, 200.0);
+                            self.state.session.live(crate::session::Live::Midi { row, bytes: b, bend_cents: 200.0 });
                         }
                         self.midi_play.bend_row = Some(row);
                     }
@@ -268,7 +268,7 @@ impl App {
         let row = self.state.selected_channel;
         let Some(b) = m.bytes().filter(|_| row < self.state.session.project.channels.len()) else { return };
         self.sync_live();
-        self.state.session.transport.midi(row, b, 200.0);
+        self.state.session.live(crate::session::Live::Midi { row, bytes: b, bend_cents: 200.0 });
     }
 
     fn midi_note_on(&mut self, ch: u8, key: u8, vel: u8) {
@@ -321,7 +321,7 @@ impl App {
             self.midi_end(h, h.up.unwrap_or(64));
         }
         self.sync_live();
-        self.state.session.transport.note_on_midi(row, play, vel, midi);
+        self.state.session.live(crate::session::Live::NoteOn { row, key: play, velocity: vel, midi });
         self.midi_play.held.push(Held { key, src, row, play, up: None });
         self.step_edit_down_with(src, play, vel, extra);
     }
@@ -340,7 +340,7 @@ impl App {
     }
 
     fn midi_end(&mut self, h: Held, release: u8) {
-        self.state.session.transport.note_off(h.row, h.play);
+        self.state.session.live(crate::session::Live::NoteOff { row: h.row, key: h.play });
         self.step_edit_up_with(h.src, Some(release));
     }
 
@@ -548,12 +548,6 @@ impl App {
         self.state.session.midi_out.configure(c);
     }
 
-    /// After an export: all notes off to the outputs that want it (spec §2).
-    pub(crate) fn midi_after_export(&mut self) {
-        if Switch::Output.on() {
-            self.state.session.midi_out.notes_off();
-        }
-    }
 }
 
 /// Settings > MIDI's controls (`views::midi_page`) and the OPTIONS menu's MIDI switches.
