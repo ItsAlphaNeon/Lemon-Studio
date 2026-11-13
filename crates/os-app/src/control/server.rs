@@ -254,6 +254,7 @@ pub(crate) fn serve_tick(ses: &mut crate::session::Session) {
     if let Some(e) = crate::backup::tick_headless(ses, std::time::Instant::now()) {
         eprintln!("Lemon Studio: {e}");
     }
+    crate::playlist::follow_audio(ses);
     let _ = crate::rack::sync_playback(ses);
     ses.touched = Default::default();
 }

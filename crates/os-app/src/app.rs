@@ -4010,16 +4010,9 @@ impl App {
         if crate::mixer::feed_meters(&mut self.state, &peaks) && self.state.shown(Win::Mixer) {
             self.damage_live(Live::Meter);
         }
-        // Audio clips follow their channel's stretch, pitch and the tempo (ui/playlist.md §9c). The lengths are worked
-        // out, not edited: the saved copy gets them too, so a fit alone (an opened FL project) is not an unsaved change.
-        if let Some(fits) = crate::playlist::audio_fits(&self.state.session) {
-            if self.state.session.project.write_if(|p| crate::playlist::fit_clips(&mut p.arrangements, &fits)) {
-                crate::playlist::fit_clips(&mut self.state.session.saved.0.arrangements, &fits);
-                self.state.session.dirty = true;
-                self.damage_win(Win::Playlist);
-            }
+        if crate::playlist::follow_audio(&mut self.state.session) {
+            self.damage_win(Win::Playlist);
         }
-        crate::playlist::follow_crossfades(self);
         // Resumed from a Marker pause: playback counts as started on the marker, so Stop returns there (spec:
         // audio/transport.md "Time markers in SONG mode").
         if let Some(t) = self.state.session.transport.take_marker_resumed() {
