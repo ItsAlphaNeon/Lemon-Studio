@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::app::{App, State};
+use crate::session::{Session, View};
 use crate::capture::{Recorder, Ring};
 use crate::record::Opt;
 
@@ -71,142 +72,15 @@ pub fn armed_file(s: &State, track: u16) -> String {
     file_name(&crate::backup::project_name(s.session.path.as_deref()), chrono::Local::now().naive_local(), &crate::mixer::name(&s.session, track))
 }
 
-pub(crate) fn folder(s: &State) -> std::path::PathBuf {
-    crate::data_folder::folder(s).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded")
+pub(crate) fn folder(s: &Session) -> std::path::PathBuf {
+    crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded")
 }
 
 impl App {
-    /// Whether the armed tracks record now: Record armed with Audio in the filter, playing, not paused or counting in.
-    fn track_rec_live(&self) -> bool {
-        let r = &self.state.rec;
-        r.armed && r.count.is_none() && Opt::Audio.on() && self.state.session.transport.playing() && !self.state.session.transport.paused()
-    }
-
-    /// Every tick: starts a take when the armed tracks start recording, ends it when they stop, and places its files
-    /// once they are made.
+    /// Every tick: the session's `tick_in` with the song position and the playlist's last clip length.
     pub(crate) fn track_rec_tick(&mut self) {
-        let live = self.track_rec_live();
-        match &self.track_rec {
-            None if live => self.track_rec_begin(),
-            Some(r) if !r.ending && !live => self.track_rec_end(),
-            Some(r) if r.ending && r.recs.iter().all(|(_, w)| w.as_ref().is_none_or(Recorder::done)) => self.track_rec_place(),
-            _ => {}
-        }
-    }
-
-    /// A take of the tracks armed now (none armed: nothing starts, and a track armed later starts one).
-    fn track_rec_begin(&mut self) {
-        let s = &self.state;
-        let armed: Vec<u16> = s.session.project.mixer.iter().filter(|m| m.armed).map(|m| m.index).collect();
-        if armed.is_empty() {
-            return;
-        }
-        let rate = self.state.session.transport.opened().map_or(48000, |d| d.rate);
-        let dir = folder(s);
-        let now = chrono::Local::now().naive_local();
-        let project = crate::backup::project_name(s.session.path.as_deref());
-        let tracks = armed.iter().map(|&t| TrackRing { track: usize::from(t), ring: Ring::new(RING), first: AtomicU64::new(u64::MAX), dropped: AtomicU64::new(0) }).collect();
-        let takes = Arc::new(Takes { on: AtomicBool::new(true), tracks });
-        let mut names: Vec<String> = Vec::new();
-        for &t in &armed {
-            // Two tracks of one name get files of their own.
-            let name = crate::mixer::name(&s.session, t);
-            names.push(if names.contains(&name) { format!("{name} ({t})") } else { name });
-        }
-        let mut recs = Vec::new();
-        for (i, (&t, name)) in armed.iter().zip(&names).enumerate() {
-            let takes = takes.clone();
-            match Recorder::start_from(dir.join(file_name(&project, now, name)), rate, move |out| takes.tracks[i].ring.pop_into(out)) {
-                Ok(w) => recs.push((t, Some(w))),
-                Err(e) => {
-                    self.state.message = Some(format!("Disk recording: {e}"));
-                    recs.push((t, None));
-                }
-            }
-        }
-        let song_pos = (!self.state.song_mode()).then_some(self.state.playlist.pos);
-        self.state.session.transport.record_tracks(Some(takes.clone()));
-        self.track_rec = Some(TrackRec { takes, recs, rate, song_pos, ending: false });
-        self.invalidate();
-    }
-
-    /// The take ends: the engine stops handing over, and each writer makes its file, the input's delay left out of a
-    /// track that records an input (spec: audio/track-io.md §2.5 "Where the take goes").
-    fn track_rec_end(&mut self) {
-        self.state.session.transport.record_tracks(None);
-        let p = &self.state.session.project;
-        let tempo = p.tick_tempo(self.state.tempo().max(1.0));
-        let Some(r) = self.track_rec.as_mut() else { return };
-        r.takes.on.store(false, Ordering::Release);
-        let tick = os_engine::laws::tick_to_frame(1.0, p.ppq.max(1), tempo, r.rate).max(1);
-        let delay = self.state.session.transport.input_delay(tick) as i64;
-        for (t, w) in &r.recs {
-            let Some(w) = w else { continue };
-            let m = p.mixer.iter().find(|m| m.index == *t);
-            // The track's input latency setting moves the take on top of that ("Adjust position of recorded audio").
-            let head = m.filter(|m| m.audio_in >= 0).map_or(0, |m| delay + (f64::from(m.latency_in) * f64::from(r.rate) / 1000.0).round() as i64);
-            w.set_head(head);
-            w.finish();
-        }
-        r.ending = true;
-        self.invalidate();
-    }
-
-    /// The take's files as audio clips where it started, each on the first playlist track free there, its channel on
-    /// the mixer track it was recorded on: one undo step (or, with Auto-create audio clips off, only the files).
-    fn track_rec_place(&mut self) {
-        let Some(r) = self.track_rec.take() else { return };
-        let auto = crate::prefs::check(&crate::prefs::AUTO_AUDIO_CLIPS);
-        let mut made: Vec<(u16, std::path::PathBuf, u64, u32)> = Vec::new();
-        let mut errors = Vec::new();
-        let mut lost = 0;
-        for (i, (t, w)) in r.recs.into_iter().enumerate() {
-            let Some(w) = w else { continue };
-            let ring = &r.takes.tracks[i];
-            lost += ring.dropped.load(Ordering::Relaxed);
-            match w.join() {
-                // Under a millisecond is nothing.
-                Ok((path, frames)) if frames * 1000 < u64::from(r.rate) => {
-                    let _ = std::fs::remove_file(path);
-                }
-                Ok((path, frames)) => {
-                    let first = ring.first.load(Ordering::Acquire);
-                    let at = r.song_pos.unwrap_or(u32::try_from(first).unwrap_or(0));
-                    made.push((t, path, frames, at));
-                }
-                Err(e) => errors.push(e),
-            }
-        }
-        let mut msg = match (made.len(), auto) {
-            (0, _) => errors.first().map_or_else(|| "Nothing was recorded".to_string(), |e| format!("Disk recording: {e}")),
-            (_, false) => format!("Recorded {} file(s) into the Recorded folder", made.len()),
-            (_, true) => {
-                let s = &mut self.state;
-                crate::playlist::snapshot_as(&mut s.session, crate::one_click::RECORDED);
-                let p = &s.session.project;
-                let tempo = p.tick_tempo(s.tempo().max(1.0));
-                let ppq = f64::from(p.ppq.max(1));
-                let mut placed = 0;
-                for (t, path, frames, at) in &made {
-                    let len = (*frames as f64 / f64::from(r.rate) * tempo / 60.0 * ppq).ceil() as u32;
-                    // Into the mixer track's audio track when it has one free over the take (spec: ui/playlist.md §6c).
-                    let track = crate::track_links::record_track(s, *t, *at, at + len.max(1));
-                    if crate::playlist::add_audio_clip_in(s, &path.to_string_lossy(), track, *at, Some(*t)).is_some() {
-                        placed += 1;
-                    }
-                }
-                s.session.dirty = true;
-                match (placed, made.first()) {
-                    (1, Some((_, path, ..))) => format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
-                    (n, _) => format!("Recorded {n} mixer tracks"),
-                }
-            }
-        };
-        if lost > 0 {
-            msg = format!("{msg} ({lost} frames were lost: the disk was too slow)");
-        }
-        self.state.message = Some(msg);
-        self.invalidate();
+        let (pos, lock) = (self.state.playlist.pos, self.state.playlist.lock_len);
+        self.host(|ses| tick_in(ses, pos, lock));
     }
 
     /// Arm selected track(s) / Disarm selected track(s) (the track menu), and the disk-record button: arming turns
@@ -226,6 +100,139 @@ impl App {
             "Recording filter: Audio on (armed tracks record while Record is armed)".to_string()
         })
     }
+}
+
+/// Whether the armed tracks record now: Record armed with Audio in the filter, playing, not paused or counting in.
+fn live(s: &Session) -> bool {
+    let r = &s.rec;
+    r.armed && r.count.is_none() && Opt::Audio.on() && s.transport.playing() && !s.transport.paused()
+}
+
+/// Every tick: starts a take when the armed tracks start recording, ends it when they stop, and places its files
+/// once they are made.
+/// `pos` is the song position (a take in PAT mode goes there), `lock_len` the playlist's last clip length
+/// (`playlist::place_in`).
+pub(crate) fn tick_in(s: &mut Session, pos: u32, lock_len: Option<(os_model::ClipSource, u32)>) {
+    let live = live(s);
+    match &s.track_rec {
+        None if live => begin(s, pos),
+        Some(r) if !r.ending && !live => end(s),
+        Some(r) if r.ending && r.recs.iter().all(|(_, w)| w.as_ref().is_none_or(Recorder::done)) => place(s, lock_len),
+        _ => {}
+    }
+}
+
+/// A take of the tracks armed now (none armed: nothing starts, and a track armed later starts one).
+fn begin(s: &mut Session, pos: u32) {
+    let armed: Vec<u16> = s.project.mixer.iter().filter(|m| m.armed).map(|m| m.index).collect();
+    if armed.is_empty() {
+        return;
+    }
+    let rate = s.transport.opened().map_or(48000, |d| d.rate);
+    let dir = folder(s);
+    let now = chrono::Local::now().naive_local();
+    let project = crate::backup::project_name(s.path.as_deref());
+    let tracks = armed.iter().map(|&t| TrackRing { track: usize::from(t), ring: Ring::new(RING), first: AtomicU64::new(u64::MAX), dropped: AtomicU64::new(0) }).collect();
+    let takes = Arc::new(Takes { on: AtomicBool::new(true), tracks });
+    let mut names: Vec<String> = Vec::new();
+    for &t in &armed {
+        // Two tracks of one name get files of their own.
+        let name = crate::mixer::name(s, t);
+        names.push(if names.contains(&name) { format!("{name} ({t})") } else { name });
+    }
+    let mut recs = Vec::new();
+    for (i, (&t, name)) in armed.iter().zip(&names).enumerate() {
+        let takes = takes.clone();
+        match Recorder::start_from(dir.join(file_name(&project, now, name)), rate, move |out| takes.tracks[i].ring.pop_into(out)) {
+            Ok(w) => recs.push((t, Some(w))),
+            Err(e) => {
+                s.touched.views.push(View::Message(format!("Disk recording: {e}")));
+                recs.push((t, None));
+            }
+        }
+    }
+    let song_pos = (!s.song_mode()).then_some(pos);
+    s.transport.record_tracks(Some(takes.clone()));
+    s.track_rec = Some(TrackRec { takes, recs, rate, song_pos, ending: false });
+    s.touched.repaint = true;
+}
+
+/// The take ends: the engine stops handing over, and each writer makes its file, the input's delay left out of a
+/// track that records an input (spec: audio/track-io.md §2.5 "Where the take goes").
+fn end(s: &mut Session) {
+    s.transport.record_tracks(None);
+    let p = &s.project;
+    let tempo = p.tick_tempo(s.tempo().max(1.0));
+    let Some(r) = s.track_rec.as_mut() else { return };
+    r.takes.on.store(false, Ordering::Release);
+    let tick = os_engine::laws::tick_to_frame(1.0, p.ppq.max(1), tempo, r.rate).max(1);
+    let delay = s.transport.input_delay(tick) as i64;
+    for (t, w) in &r.recs {
+        let Some(w) = w else { continue };
+        let m = p.mixer.iter().find(|m| m.index == *t);
+        // The track's input latency setting moves the take on top of that ("Adjust position of recorded audio").
+        let head = m.filter(|m| m.audio_in >= 0).map_or(0, |m| delay + (f64::from(m.latency_in) * f64::from(r.rate) / 1000.0).round() as i64);
+        w.set_head(head);
+        w.finish();
+    }
+    r.ending = true;
+    s.touched.repaint = true;
+}
+
+/// The take's files as audio clips where it started, each on the first playlist track free there, its channel on
+/// the mixer track it was recorded on: one undo step (or, with Auto-create audio clips off, only the files).
+fn place(s: &mut Session, lock_len: Option<(os_model::ClipSource, u32)>) {
+    let Some(r) = s.track_rec.take() else { return };
+    let auto = crate::prefs::check(&crate::prefs::AUTO_AUDIO_CLIPS);
+    let mut made: Vec<(u16, std::path::PathBuf, u64, u32)> = Vec::new();
+    let mut errors = Vec::new();
+    let mut lost = 0;
+    for (i, (t, w)) in r.recs.into_iter().enumerate() {
+        let Some(w) = w else { continue };
+        let ring = &r.takes.tracks[i];
+        lost += ring.dropped.load(Ordering::Relaxed);
+        match w.join() {
+            // Under a millisecond is nothing.
+            Ok((path, frames)) if frames * 1000 < u64::from(r.rate) => {
+                let _ = std::fs::remove_file(path);
+            }
+            Ok((path, frames)) => {
+                let first = ring.first.load(Ordering::Acquire);
+                let at = r.song_pos.unwrap_or(u32::try_from(first).unwrap_or(0));
+                made.push((t, path, frames, at));
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    let mut msg = match (made.len(), auto) {
+        (0, _) => errors.first().map_or_else(|| "Nothing was recorded".to_string(), |e| format!("Disk recording: {e}")),
+        (_, false) => format!("Recorded {} file(s) into the Recorded folder", made.len()),
+        (_, true) => {
+            crate::playlist::snapshot_as(s, crate::one_click::RECORDED);
+            let p = &s.project;
+            let tempo = p.tick_tempo(s.tempo().max(1.0));
+            let ppq = f64::from(p.ppq.max(1));
+            let mut placed = 0;
+            for (t, path, frames, at) in &made {
+                let len = (*frames as f64 / f64::from(r.rate) * tempo / 60.0 * ppq).ceil() as u32;
+                // Into the mixer track's audio track when it has one free over the take (spec: ui/playlist.md §6c).
+                let track = crate::track_links::record_track(s, *t, *at, at + len.max(1));
+                if crate::playlist::add_audio_clip_on(s, &path.to_string_lossy(), track, *at, Some(*t), lock_len).is_some() {
+                    placed += 1;
+                }
+            }
+            s.dirty = true;
+            match (placed, made.first()) {
+                (1, Some((_, path, ..))) => format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
+                (n, _) => format!("Recorded {n} mixer tracks"),
+            }
+        }
+    };
+    if lost > 0 {
+        msg = format!("{msg} ({lost} frames were lost: the disk was too slow)");
+    }
+    s.touched.views.push(View::Message(msg));
+    s.touched.repaint = true;
 }
 
 #[cfg(test)]
@@ -248,10 +255,10 @@ mod tests {
         assert!(app.arm_tracks(&[1], true).is_none(), "already armed: says nothing");
         app.state.session.transport.pretend_at(0.0, true);
         app.track_rec_tick();
-        assert!(app.track_rec.is_none(), "Record is not armed");
-        app.state.rec.armed = true;
+        assert!(app.state.session.track_rec.is_none(), "Record is not armed");
+        app.state.session.rec.armed = true;
         app.track_rec_tick();
-        let takes = app.track_rec.as_ref().expect("a take").takes.clone();
+        let takes = app.state.session.track_rec.as_ref().expect("a take").takes.clone();
         takes.push(2, 90, &[0.5; 96]);
         takes.push(1, 96, &vec![0.25; 9600]);
         takes.push(1, 97, &vec![0.25; 9600]);
@@ -259,12 +266,12 @@ mod tests {
         app.state.session.transport.stop();
         for _ in 0..500 {
             app.track_rec_tick();
-            if app.track_rec.is_none() {
+            if app.state.session.track_rec.is_none() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(app.track_rec.is_none(), "{:?}", app.state.message);
+        assert!(app.state.session.track_rec.is_none(), "{:?}", app.state.message);
         assert_eq!(app.state.session.project.channels.len(), channels + 1, "{:?}", app.state.message);
         let ch = app.state.session.project.channels.last().unwrap();
         assert_eq!(ch.mixer_track, 1);

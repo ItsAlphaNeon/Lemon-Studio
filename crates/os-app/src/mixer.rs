@@ -1181,12 +1181,12 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         {
             let tg = targets(s, n);
             let it = PItem::new("Assign to new Audio track(s)", mx(MCmd::AssignAudio(n)));
-            if crate::track_links::can_assign_audio(s, &tg) { it } else { it.off() }
+            if crate::track_links::can_assign_audio(&s.session, &tg) { it } else { it.off() }
         },
         {
             let tg = targets(s, n);
             let it = PItem::new("Unassign from Audio track(s)", mx(MCmd::UnassignAudio(n)));
-            if crate::track_links::can_unassign_audio(s, &tg) { it } else { it.off() }
+            if crate::track_links::can_unassign_audio(&s.session, &tg) { it } else { it.off() }
         },
         PItem::sep(),
         PItem::sub(
@@ -1691,7 +1691,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 s.session.project.channels.iter().enumerate().filter(|(_, c)| tg.contains(&c.mixer_track)).map(|(i, _)| i).collect();
             let k = rows.len();
             s.rack.sel = rows;
-            let tracks = crate::track_links::tracks_routed_to(s, &tg);
+            let tracks = crate::track_links::tracks_routed_to(&s.session, &tg);
             if let Some(&t) = tracks.first() {
                 s.playlist.track = t;
             }
@@ -1703,7 +1703,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::UnassignAudio(n) => {
             let tg = targets(s, n);
-            crate::track_links::unassign_audio(s, &tg)
+            crate::track_links::unassign_audio(&mut s.session, &tg)
         }
         MCmd::SelectDest(n) => select_linked(s, n, true),
         MCmd::SelectSources(n) => select_linked(s, n, false),

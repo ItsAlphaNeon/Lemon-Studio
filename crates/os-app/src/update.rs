@@ -464,7 +464,7 @@ impl crate::app::App {
                 }
             }
         }
-        let recording = self.audio_rec.is_some() || self.track_rec.is_some();
+        let recording = self.state.session.audio_rec.is_some() || self.state.session.track_rec.is_some();
         if self.updates.offer_due && !self.modal_open() && !recording {
             self.updates.offer_due = false;
             if let Some(f) = self.updates.offer.clone() {

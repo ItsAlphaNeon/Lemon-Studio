@@ -296,7 +296,7 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     let motion = if set.press == 2 { 0 } else { set.motion };
     let mut list = passes(s, track, col, first, at, skip, motion);
     // A queued or synced start keeps what plays until then.
-    let mut kept: Vec<Clip> = s.session.perform.live.get(&track).filter(|_| now.is_some()).map_or(Vec::new(), |l| cut_at(s, l, at));
+    let mut kept: Vec<Clip> = s.session.perform.live.get(&track).filter(|_| now.is_some()).map_or(Vec::new(), |l| cut_at(&s.session, l, at));
     kept.append(&mut list);
     s.session.perform.live.insert(track, Live { passes: kept, column: col, end: None, armed: now.is_none() });
     if matches!(set.press, 1 | 2) {
@@ -414,13 +414,13 @@ pub fn progress(s: &State, tick: u32) -> Vec<(usize, f32)> {
 }
 
 /// `l`'s passes before `at` (or before it falls silent), the one sounding there cut short.
-fn cut_at(s: &State, l: &Live, at: u32) -> Vec<Clip> {
+fn cut_at(s: &crate::session::Session, l: &Live, at: u32) -> Vec<Clip> {
     let at = at.min(l.until());
     let mut v: Vec<Clip> = l.passes.iter().filter(|c| c.position < at).copied().collect();
     if let Some(c) = v.last_mut().filter(|c| c.end() > at) {
         let keep = at - c.position;
-        let (w0, _) = window(&s.session, c);
-        c.window = Some((w0, w0 + to_src(&s.session, c.source, f64::from(keep))));
+        let (w0, _) = window(s, c);
+        c.window = Some((w0, w0 + to_src(s, c.source, f64::from(keep))));
         c.length = keep;
     }
     v
@@ -441,7 +441,7 @@ pub fn stop(s: &mut State, track: u16, now: Option<u32>, instant: bool) -> bool 
         Some(unit) => sync_point(t, z, unit, false),
         None => t,
     };
-    let passes = cut_at(s, l, at);
+    let passes = cut_at(&s.session, l, at);
     if passes.is_empty() || at <= t {
         s.session.perform.live.remove(&track);
     } else if let Some(l) = s.session.perform.live.get_mut(&track) {
@@ -563,7 +563,7 @@ fn release_track(s: &mut State, track: u16, now: Option<u32>) {
             let Some(cur) = l.pass_at(t).copied() else { return };
             // The pass playing finishes; Motion picks what follows it.
             let cols = columns(s);
-            let mut kept = cut_at(s, &l, cur.end());
+            let mut kept = cut_at(&s.session, &l, cur.end());
             let mut column = l.column;
             if let Some(col) = step(set.motion, l.column, &used(s, &cols, track), &mut rng(t, track)) {
                 if let Some(c) = first_in_slot(s, &cols, track, col) {
@@ -582,10 +582,9 @@ fn release_track(s: &mut State, track: u16, now: Option<u32>) {
 /// played after the Start marker up to `stop` becomes ordinary clips on its track, a clip a pass, the last cut where
 /// it fell silent. On such a track the clips starting in the recorded stretch go and one running into it ends where it
 /// starts. One undo step ("Recorded items"); what was launched is over. Returns the clips made.
-pub fn record(s: &mut State, stop: u32) -> usize {
-    let Some(z) = zone(s).filter(|_| on(s)) else { return 0 };
+pub fn record(s: &mut crate::session::Session, stop: u32) -> usize {
+    let Some(z) = zone_in(s) else { return 0 };
     let takes: Vec<(u16, Vec<Clip>)> = s
-        .session
         .perform
         .live
         .iter()
@@ -596,15 +595,15 @@ pub fn record(s: &mut State, stop: u32) -> usize {
     if takes.is_empty() {
         return 0;
     }
-    let mut all = clips(&s.session).to_vec();
+    let mut all = clips(s).to_vec();
     let mut made = 0;
     for (t, v) in takes {
         let (from, to) = (v[0].position, v.last().map_or(0, Clip::end));
         all.retain(|c| c.track != t || c.position < from || c.position >= to);
         for c in all.iter_mut().filter(|c| c.track == t && c.position >= z && c.position < from && c.end() > from) {
             let keep = from - c.position;
-            let (w0, _) = window(&s.session, c);
-            c.window = Some((w0, w0 + to_src(&s.session, c.source, f64::from(keep))));
+            let (w0, _) = window(s, c);
+            c.window = Some((w0, w0 + to_src(s, c.source, f64::from(keep))));
             c.length = keep;
         }
         made += v.len();
@@ -613,10 +612,10 @@ pub fn record(s: &mut State, stop: u32) -> usize {
             c
         }));
     }
-    crate::playlist::snapshot_as(&mut s.session, crate::record::RECORDED);
-    arr_mut(&mut s.session).clips = all;
-    s.session.perform.live.retain(|_, l| l.armed);
-    s.session.dirty = true;
+    crate::playlist::snapshot_as(s, crate::record::RECORDED);
+    arr_mut(s).clips = all;
+    s.perform.live.retain(|_, l| l.armed);
+    s.dirty = true;
     made
 }
 
@@ -944,16 +943,16 @@ mod tests {
         let s = &mut app.state;
         let z = 3072;
         trigger(s, 0, Some(z + 128), true, false);
-        assert_eq!(record(s, z + 128 + 900), 3);
+        assert_eq!(record(&mut s.session, z + 128 + 900), 3);
         let on0: Vec<(u32, u32)> = clips(&s.session).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
         assert_eq!(on0, vec![(z, 128), (z + 128, 384), (z + 512, 384), (z + 896, 132)], "the clip there ends where the recording starts");
         assert_eq!(clips(&s.session).iter().filter(|c| c.track == 1).count(), 1, "track 2 is left alone");
         assert!(s.session.perform.live.is_empty());
         assert_eq!(s.session.history.newest_done(), Some(crate::record::RECORDED));
-        assert_eq!(record(s, z + 2000), 0, "nothing launched");
+        assert_eq!(record(&mut s.session, z + 2000), 0, "nothing launched");
         // A stretch over a clip that starts in it: the clip goes.
         trigger(s, 0, Some(z), true, false);
-        assert_eq!(record(s, z + 384), 1);
+        assert_eq!(record(&mut s.session, z + 384), 1);
         let on0: Vec<(u32, u32)> = clips(&s.session).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
         assert_eq!(on0, vec![(z + 512, 384), (z + 896, 132), (z, 384)]);
     }

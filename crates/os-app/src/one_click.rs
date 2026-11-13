@@ -8,6 +8,7 @@
 //! track (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio").
 
 use crate::app::{Action, App, State};
+use crate::session::{Session, View};
 use crate::capture::{self, capture, Input, InputStream, Recorder};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
 
@@ -103,7 +104,7 @@ fn devices() -> Vec<(String, bool, u16)> {
 impl App {
     /// The microphone: stops a recording, else opens the menu under the button.
     pub(crate) fn one_click_button(&mut self) {
-        if self.audio_rec.as_ref().is_some_and(|r| !r.ending) {
+        if self.state.session.audio_rec.as_ref().is_some_and(|r| !r.ending) {
             return self.act(Action::Stop);
         }
         let (x, y) = self.mouse;
@@ -122,7 +123,7 @@ impl App {
     /// An input picked: records it from the song position, as Play from stopped with Record armed (spec §2); the take
     /// goes into the audio editor (`editor`) or the playlist.
     pub(crate) fn one_click_start(&mut self, input: Input, editor: bool) {
-        if self.audio_rec.is_some() {
+        if self.state.session.audio_rec.is_some() {
             self.state.message = Some("Already recording audio".into());
             return self.invalidate();
         }
@@ -149,108 +150,23 @@ impl App {
             self.act(Action::PatSong(true));
         }
         // Armed directly: the audio was the answer to "what to record".
-        self.state.rec.armed = true;
+        self.state.session.rec.armed = true;
         self.play_counted_if_armed();
         self.invalidate();
     }
 
     /// Starts taking in `input` into a new file (no playback: `one_click_start` plays).
     pub(crate) fn one_click_begin(&mut self, input: Input, stream: Option<InputStream>, editor: bool) -> Result<(), String> {
-        let rate = stream.as_ref().map(|s| s.rate);
-        let dir = crate::data_folder::folder(&self.state).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded");
-        let name = capture::file_name(&crate::backup::project_name(self.state.session.path.as_deref()), chrono::Local::now().naive_local());
-        capture().start(input.first, input.stereo);
-        let recorder = match Recorder::start(dir.join(name), rate.unwrap_or(48000)) {
-            Ok(r) => r,
-            Err(e) => {
-                capture().stop();
-                return Err(e);
-            }
-        };
-        let start_tick = self.state.playlist.pos;
-        let p = &self.state.session.project;
-        let tempo = p.tick_tempo(self.state.tempo().max(1.0));
-        let start_secs = os_engine::laws::tick_to_frame(f64::from(start_tick), p.ppq.max(1), tempo, 48000) as f64 / 48000.0;
-        self.state.rec.audio = true;
-        self.audio_rec = Some(AudioRec { stream, recorder: Some(recorder), rate, start_tick, start_secs, est: (0.0, 0), ending: false, editor });
-        Ok(())
+        begin_in(&mut self.state.session, input, stream, editor, self.state.playlist.pos)
     }
 
-    /// Every tick: follows where the song's start falls in the input; on stop, pause or disarm finishes the file;
-    /// once it is made, places it (spec §2 The take).
+    /// Every tick: the session's `tick_in`; a take for the audio editor goes there.
     pub(crate) fn one_click_tick(&mut self) {
-        let Some(r) = self.audio_rec.as_mut() else { return };
-        if !r.ending {
-            let t = &self.state.session.transport;
-            let live = t.playing() && !t.paused() && self.state.rec.count.is_none();
-            let device = t.opened();
-            let rate = r.rate.or(device.as_ref().map(|d| d.rate)).unwrap_or(48000);
-            if live && t.song() {
-                r.est.0 += capture().frames() as f64 - (t.seconds() - r.start_secs) * f64::from(rate);
-                r.est.1 += 1;
-            }
-            if t.playing() && !t.paused() && self.state.rec.armed {
-                return;
-            }
-            // The input heard with the song's start came in after the output's and the input's latencies (ASIO).
-            let latency = match (&r.rate, device.filter(|d| d.host == crate::device::ASIO)) {
-                (None, Some(d)) => i64::from(d.latency.unwrap_or(0)) + i64::from(d.input_latency.unwrap_or(0)),
-                _ => 0,
-            };
-            let head = if r.est.1 > 0 { (r.est.0 / f64::from(r.est.1)).round() as i64 + latency } else { capture().frames() as i64 };
-            capture().stop();
-            r.stream = None;
-            r.rate = Some(rate);
-            if let Some(w) = &r.recorder {
-                w.set_rate(rate);
-                w.set_head(head);
-                w.finish();
-            }
-            r.ending = true;
-            self.state.rec.audio = false;
-            self.invalidate();
-            return;
-        }
-        if !r.recorder.as_ref().is_none_or(Recorder::done) {
-            return;
-        }
-        let Some(r) = self.audio_rec.take() else { return };
-        let rate = r.rate.unwrap_or(48000).max(1);
-        self.state.message = Some(match r.recorder.map_or(Err("no recorder".into()), Recorder::join) {
-            Ok((path, frames)) if frames * 1000 >= u64::from(rate) => {
-                let placed = if r.editor { self.take_to_editor(&path) } else { self.place_take(&path, frames, rate, r.start_tick) };
-                match capture().dropped() {
-                    0 => placed,
-                    lost => format!("{placed} ({lost} frames were lost: the disk was too slow)"),
-                }
-            }
-            Ok((path, _)) => {
-                let _ = std::fs::remove_file(path);
-                "Nothing was recorded".into()
-            }
-            Err(e) => format!("Audio recording: {e}"),
-        });
+        let lock = self.state.playlist.lock_len;
+        let Some(path) = self.host(|ses| tick_in(ses, lock)) else { return };
+        let placed = self.take_to_editor(&path);
+        self.state.message = Some(with_lost(placed));
         self.invalidate();
-    }
-
-    /// The take's audio clip channel and clip at `start`, on the first track free over it, which becomes an audio track
-    /// on the take's mixer track: one undo step.
-    fn place_take(&mut self, path: &std::path::Path, frames: u64, rate: u32, start: u32) -> String {
-        let s = &mut self.state;
-        let p = &s.session.project;
-        let tempo = p.tick_tempo(s.tempo().max(1.0));
-        let len = (frames as f64 / f64::from(rate) * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
-        let track = crate::playlist::free_track(&s.session, 0, start, start + len.max(1));
-        let text = path.to_string_lossy();
-        match crate::playlist::add_audio_clip_as(s, &text, track, start, RECORDED) {
-            Some(i) => {
-                // The take's track becomes an audio track on the take's mixer track, as the original binds the track
-                // it records into to a mixer track (spec: ui/one-click-recording.md §1, ui/playlist.md §6c).
-                crate::track_links::bind_take(s, i);
-                format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())
-            }
-            None => format!("{text} could not be read"),
-        }
     }
 
     /// The take into Tesla on the master track: its first Tesla if that holds no sample, else a new one (spec:
@@ -275,7 +191,119 @@ impl App {
 
     /// Whether the empty-playlist check is waived: a recording plays an empty song all the same.
     pub(crate) fn one_click_starting(&self) -> bool {
-        self.audio_rec.as_ref().is_some_and(|r| !r.ending)
+        self.state.session.audio_rec.as_ref().is_some_and(|r| !r.ending)
+    }
+}
+
+/// `begin`'s work for `App::one_click_begin`: `pos` is the song position, where the clip goes.
+pub(crate) fn begin_in(s: &mut Session, input: Input, stream: Option<InputStream>, editor: bool, pos: u32) -> Result<(), String> {
+    let rate = stream.as_ref().map(|s| s.rate);
+    let dir = crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded");
+    let name = capture::file_name(&crate::backup::project_name(s.path.as_deref()), chrono::Local::now().naive_local());
+    capture().start(input.first, input.stereo);
+    let recorder = match Recorder::start(dir.join(name), rate.unwrap_or(48000)) {
+        Ok(r) => r,
+        Err(e) => {
+            capture().stop();
+            return Err(e);
+        }
+    };
+    let start_tick = pos;
+    let p = &s.project;
+    let tempo = p.tick_tempo(s.tempo().max(1.0));
+    let start_secs = os_engine::laws::tick_to_frame(f64::from(start_tick), p.ppq.max(1), tempo, 48000) as f64 / 48000.0;
+    s.rec.audio = true;
+    s.audio_rec = Some(AudioRec { stream, recorder: Some(recorder), rate, start_tick, start_secs, est: (0.0, 0), ending: false, editor });
+    Ok(())
+}
+
+/// A take's message, with the frames the disk lost.
+fn with_lost(placed: String) -> String {
+    match capture().dropped() {
+        0 => placed,
+        lost => format!("{placed} ({lost} frames were lost: the disk was too slow)"),
+    }
+}
+
+/// Every tick: follows where the song's start falls in the input; on stop, pause or disarm finishes the file;
+/// once it is made, places it (spec §2 The take).
+/// `lock_len` as `playlist::place_in` takes it. A finished take for the audio editor comes back for the interface.
+pub(crate) fn tick_in(s: &mut Session, lock_len: Option<(os_model::ClipSource, u32)>) -> Option<std::path::PathBuf> {
+    let Some(r) = s.audio_rec.as_mut() else { return None };
+    if !r.ending {
+        let t = &s.transport;
+        let live = t.playing() && !t.paused() && s.rec.count.is_none();
+        let device = t.opened();
+        let rate = r.rate.or(device.as_ref().map(|d| d.rate)).unwrap_or(48000);
+        if live && t.song() {
+            r.est.0 += capture().frames() as f64 - (t.seconds() - r.start_secs) * f64::from(rate);
+            r.est.1 += 1;
+        }
+        if t.playing() && !t.paused() && s.rec.armed {
+            return None;
+        }
+        // The input heard with the song's start came in after the output's and the input's latencies (ASIO).
+        let latency = match (&r.rate, device.filter(|d| d.host == crate::device::ASIO)) {
+            (None, Some(d)) => i64::from(d.latency.unwrap_or(0)) + i64::from(d.input_latency.unwrap_or(0)),
+            _ => 0,
+        };
+        let head = if r.est.1 > 0 { (r.est.0 / f64::from(r.est.1)).round() as i64 + latency } else { capture().frames() as i64 };
+        capture().stop();
+        r.stream = None;
+        r.rate = Some(rate);
+        if let Some(w) = &r.recorder {
+            w.set_rate(rate);
+            w.set_head(head);
+            w.finish();
+        }
+        r.ending = true;
+        s.rec.audio = false;
+        s.touched.repaint = true;
+        return None;
+    }
+    if !r.recorder.as_ref().is_none_or(Recorder::done) {
+        return None;
+    }
+    let Some(r) = s.audio_rec.take() else { return None };
+    let rate = r.rate.unwrap_or(48000).max(1);
+    let message = match r.recorder.map_or(Err("no recorder".into()), Recorder::join) {
+        Ok((path, frames)) if frames * 1000 >= u64::from(rate) => {
+            if r.editor {
+                return Some(path);
+            }
+            with_lost(place_take(s, &path, frames, rate, r.start_tick, lock_len))
+        }
+        Ok((path, _)) => {
+            let _ = std::fs::remove_file(path);
+            "Nothing was recorded".into()
+        }
+        Err(e) => format!("Audio recording: {e}"),
+    };
+    s.touched.views.push(View::Message(message));
+    s.touched.repaint = true;
+    None
+}
+
+/// The take's audio clip channel and clip at `start`, on the first track free over it, which becomes an audio track
+/// on the take's mixer track: one undo step.
+fn place_take(s: &mut Session, path: &std::path::Path, frames: u64, rate: u32, start: u32, lock_len: Option<(os_model::ClipSource, u32)>) -> String {
+    let p = &s.project;
+    let tempo = p.tick_tempo(s.tempo().max(1.0));
+    let len = (frames as f64 / f64::from(rate) * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
+    let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
+    let text = path.to_string_lossy();
+    let added = s.samples.wave(&text).and_then(|_| {
+        crate::playlist::snapshot_as(s, RECORDED);
+        crate::playlist::add_audio_clip_on(s, &text, track, start, None, lock_len)
+    });
+    match added {
+        Some(i) => {
+            // The take's track becomes an audio track on the take's mixer track, as the original binds the track
+            // it records into to a mixer track (spec: ui/one-click-recording.md §1, ui/playlist.md §6c).
+            crate::track_links::bind_take(s, i);
+            format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())
+        }
+        None => format!("{text} could not be read"),
     }
 }
 
@@ -315,20 +343,20 @@ mod tests {
         let mut app = app();
         let channels = app.state.session.project.channels.len();
         app.one_click_begin(Input { device: "Test ASIO".into(), asio: true, first: 0, stereo: true }, None, false).unwrap();
-        assert!(app.state.rec.audio && capture().on());
+        assert!(app.state.session.rec.audio && capture().on());
         app.state.session.transport.pretend_at(0.0, true);
-        app.state.rec.armed = true;
+        app.state.session.rec.armed = true;
         app.one_click_tick();
         capture().push(4800, |ch, f| if ch == 0 { f as f32 / 4800.0 } else { 0.5 });
         app.state.session.transport.stop();
         for _ in 0..500 {
             app.one_click_tick();
-            if app.audio_rec.is_none() {
+            if app.state.session.audio_rec.is_none() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(app.audio_rec.is_none() && !app.state.rec.audio && !capture().on(), "{:?}", app.state.message);
+        assert!(app.state.session.audio_rec.is_none() && !app.state.session.rec.audio && !capture().on(), "{:?}", app.state.message);
         assert_eq!(app.state.session.project.channels.len(), channels + 1);
         let ch = app.state.session.project.channels.last().unwrap();
         let path = std::path::PathBuf::from(ch.sample_path.clone().unwrap());
@@ -357,13 +385,13 @@ mod tests {
         let clips = app.state.session.project.arrangement().map_or(0, |a| a.clips.len());
         app.one_click_begin(Input { device: "Test ASIO".into(), asio: true, first: 0, stereo: true }, None, true).unwrap();
         app.state.session.transport.pretend_at(0.0, true);
-        app.state.rec.armed = true;
+        app.state.session.rec.armed = true;
         app.one_click_tick();
         capture().push(4800, |ch, f| if ch == 0 { f as f32 / 4800.0 } else { 0.5 });
         app.state.session.transport.stop();
         for _ in 0..500 {
             app.one_click_tick();
-            if app.audio_rec.is_none() {
+            if app.state.session.audio_rec.is_none() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));

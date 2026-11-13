@@ -1641,7 +1641,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::sep(),
         {
             let it = it("Assign to new instrument track", RCmd::AssignInstrument(r));
-            if crate::track_links::can_assign_instrument(s, &menu_rows(s, r)) { it } else { it.off() }
+            if crate::track_links::can_assign_instrument(&s.session, &menu_rows(s, r)) { it } else { it.off() }
         },
         PItem::col(),
         it("Cut", RCmd::Cut(r)),

@@ -1083,7 +1083,6 @@ pub struct State {
     pub arp: crate::arpeggiate::ArpUi,
     /// The piano roll's Flam, Flip and Scale levels dialogs: where each was, their settings, the preview session.
     pub piano_dlg: crate::piano_dlg::Ui,
-    pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
     /// Open child windows, bottom to top.
@@ -1202,9 +1201,6 @@ pub struct State {
     pub dialogs: Vec<crate::dialog::Modal>,
     /// The working time's clock and the Song info box (Settings > Info, `project_info`).
     pub credits: crate::project_info::Credits,
-    /// The current theme's rule for the colours of new audio and automation clips' channels (`App::clip_colors`, kept
-    /// up to date by `App::follow_settings`).
-    pub clip_colors: crate::clip_colors::ClipColors,
     /// Windows shown in a native window of their own (Options ▸ Detached; spec: ui/mixer.md §6.2, ui/channel-rack.md
     /// §17; Lemon Studio's design), each with that window's size in logical px. Being in `z` still says whether one is
     /// shown; detached, it is drawn there at (0, 0) and the main window leaves it out (`App::on_surface`).
@@ -1426,10 +1422,6 @@ pub struct App {
     pub(crate) smooth: crate::smooth::Eases,
     /// Where the shell should move the cursor to (a wheel step in a menu, `menu_wheel`).
     pub warp: Option<(f32, f32)>,
-    /// One-click audio recording under way (spec: ui/one-click-recording.md §2).
-    pub(crate) audio_rec: Option<crate::one_click::AudioRec>,
-    /// Disk recording into the armed mixer tracks under way (spec: audio/track-io.md §2.5).
-    pub(crate) track_rec: Option<crate::track_rec::TrackRec>,
     /// TOOLS > Retro audio capture: the last minutes the device played (spec: ui/audio-logger.md).
     pub(crate) audio_log: crate::audio_log::Log,
     /// Checking for, downloading and installing a newer build (`crate::update`).
@@ -1581,7 +1573,6 @@ impl App {
                 strum: Default::default(),
                 arp: Default::default(),
                 piano_dlg: Default::default(),
-                rec: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
                 toolbar: views::toolbar::Opts::load(),
@@ -1600,7 +1591,6 @@ impl App {
                 ui_scale: 1.0,
                 dialogs: Vec::new(),
                 credits: Default::default(),
-                clip_colors: Default::default(),
                 detached: Vec::new(),
                 detached_frames: Vec::new(),
                 surface: None,
@@ -1646,8 +1636,6 @@ impl App {
             hold: None,
             smooth: Default::default(),
             warp: None,
-            audio_rec: None,
-            track_rec: None,
             audio_log: Default::default(),
             updates: Default::default(),
             menu_notch: 0.0,
@@ -3741,7 +3729,7 @@ impl App {
                     }
                     // A note held while recording grows from the old playhead to the new one (spec: ui/recording.md §2).
                     if let [a, b] = xs[..]
-                        && self.state.rec.holding()
+                        && self.state.session.rec.holding()
                     {
                         self.damage_rect(Rect::new(a.min(b) - 2.0, grid.y, (a - b).abs() + 5.0, grid.h));
                     }
@@ -3862,8 +3850,8 @@ impl App {
             self.invalidate();
         }
         let clips = self.clip_colors();
-        if self.state.clip_colors != clips {
-            self.state.clip_colors = clips;
+        if self.state.session.clip_colors != clips {
+            self.state.session.clip_colors = clips;
         }
     }
 
@@ -10698,7 +10686,7 @@ mod tests {
         app.settings_act(SAct::Check(NOTE_COLORS_CHECK));
         assert!(app.state.fl_theme().override_clips && saved().contains("OverrideClips=1"));
         app.tick();
-        assert!(app.clip_colors().note_colors && app.state.clip_colors.note_colors);
+        assert!(app.clip_colors().note_colors && app.state.session.clip_colors.note_colors);
         assert_eq!((checks(&app), &app.theme.colors), (vec![(NOTE_COLORS_CHECK, true)], &Palette::default()));
         app.settings_act(SAct::Check(NOTE_COLORS_CHECK));
         assert!(!app.state.fl_theme().override_clips && saved().contains("OverrideClips=0"));

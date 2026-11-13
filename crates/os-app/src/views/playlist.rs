@@ -1468,7 +1468,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     let led = Rect::new(hr.right() - 19.0, (h - gap - 15.0).max(1.0) + hr.y, 14.0, 14.0);
     ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo)");
     // An audio or instrument track (§6c): a light disc with "A" / "I" before its name, which is drawn bright.
-    let link = crate::track_links::link(s, row);
+    let link = crate::track_links::link(&s.session, row);
     let badge = match link.kind {
         os_model::TrackLink::AUDIO => Some(("A", "Audio track: its audio clips play through its mixer track (Track mode in the menu)")),
         os_model::TrackLink::INSTRUMENT => Some(("I", "Instrument track: linked to a channel (Track mode in the menu)")),

@@ -1236,20 +1236,25 @@ pub fn snap_delta(s: &State, g: &PGeom, dt: f32, alt: bool) -> i64 {
 /// Place a clip of the current source on `track` at `tick`; returns its index.
 pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
     let src = source_for(s, track);
-    let len = match s.playlist.lock_len {
+    place_in(&mut s.session, src, track, tick, s.playlist.lock_len)
+}
+
+/// `place` of source `src`; `lock_len` is the length the last clip of a source was given (`PlaylistUi::lock_len`).
+pub fn place_in(s: &mut crate::session::Session, src: ClipSource, track: u16, tick: u32, lock_len: Option<(ClipSource, u32)>) -> usize {
+    let len = match lock_len {
         Some((l, n)) if l == src => n,
-        _ => source_len(&s.session, src),
+        _ => source_len(s, src),
     };
-    let audio = source_kind(&s.session, src) == PickKind::Audio && matches!(src, ClipSource::Channel(_));
-    let a = arr_mut(&mut s.session);
+    let audio = source_kind(s, src) == PickKind::Audio && matches!(src, ClipSource::Channel(_));
+    let a = arr_mut(s);
     let mut c = Clip::new(tick, len, track, src);
     if audio {
         // FL writes gain 1.0 into a new audio clip (spec: flp/events/playlist.md, byte 52).
         c.set_gain(1.0);
     }
     a.clips.push(c);
-    s.session.dirty = true;
-    clips(&s.session).len() - 1
+    s.dirty = true;
+    clips(s).len() - 1
 }
 
 /// Delete clips by index (selection indices are remapped). They ripple away (spec: ui/animations.md §4.10).
@@ -1694,7 +1699,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         plugin: None,
         plugin_state: None,
         // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
-        color: Some(s.clip_colors.new_channel(index)),
+        color: Some(s.session.clip_colors.new_channel(index)),
         enabled: true,
         // The clip's range 0..1: stored pan 0 (minimum), volume 12800 (maximum), as FL stores a new clip's
         // (spec: audio/automation.md "Range").
@@ -1744,7 +1749,7 @@ pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os
         name: Some(name),
         plugin: None,
         plugin_state: None,
-        color: Some(s.clip_colors.new_channel(index)),
+        color: Some(s.session.clip_colors.new_channel(index)),
         enabled: true,
         // The clip's range 0..1, as `create_automation` makes it.
         volume: 1.0,
@@ -1876,14 +1881,21 @@ pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name:
 /// `add_audio_clip_as` with no undo step of its own (the caller took one), its channel on mixer track `mixer` (`None`:
 /// the track after the highest any channel uses).
 pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer: Option<u16>) -> Option<usize> {
-    s.session.samples.wave(path)?;
+    let lock = s.playlist.lock_len;
+    crate::follow::around(s, |s| add_audio_clip_on(&mut s.session, path, track, tick, mixer, lock))
+}
+
+/// `add_audio_clip_in` on the session (`lock_len` as `place_in` takes it): the playlist's clip source becomes the new
+/// channel and the clip is selected (`View::AudioClipAdded`).
+pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16, tick: u32, mixer: Option<u16>, lock_len: Option<(ClipSource, u32)>) -> Option<usize> {
+    s.samples.wave(path)?;
     // Not on an instrument track: the next free track below it (§6c); on an audio track, through its mixer track.
     let track = crate::track_links::audio_drop_track(s, track, tick, tick + 1);
     let mixer = mixer.or_else(|| crate::track_links::audio_mixer(s, track));
-    let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
-    let mixer_track = mixer.unwrap_or_else(|| (s.session.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.session.project)));
-    s.session.project.get_mut().channels.push(Channel {
+    let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project)));
+    s.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,
         kind: ChannelKind::AudioClip,
@@ -1903,10 +1915,9 @@ pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer
         sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
         lemon_icon: None,
     });
-    s.playlist.source = Some(ClipSource::Channel(index));
-    s.playlist.picker = PickKind::Audio;
-    let i = place(s, track, tick);
-    s.playlist.sel = vec![i];
+    let src = track_info(s, track).and_then(|t| t.clip_lock).unwrap_or(ClipSource::Channel(index));
+    let i = place_in(s, src, track, tick, lock_len);
+    s.touched.views.push(crate::session::View::AudioClipAdded { channel: index, clip: i });
     Some(i)
 }
 
@@ -2696,7 +2707,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 s.playlist.overlay = Some(Overlay::Slice { tick: t, t0: track, t1: track });
             }
             // An instrument track takes no audio clips (§6c).
-            None if !crate::track_links::fits(s, source_for(s, track), track) => {
+            None if !crate::track_links::fits(&s.session, source_for(s, track), track) => {
                 s.message = Some(crate::track_links::NOT_FOR_AUDIO.into());
             }
             None => {
@@ -2875,7 +2886,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
                 .iter()
                 .map(|(_, o)| {
                     let t = (i32::from(o.track) + dk) as u16;
-                    if crate::track_links::fits(s, o.source, t) { t } else { o.track }
+                    if crate::track_links::fits(&s.session, o.source, t) { t } else { o.track }
                 })
                 .collect();
             let arr = arr_mut(&mut s.session);
@@ -3125,7 +3136,7 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
     // Audio clips that land on an audio track play through its mixer track (§6c).
     if let PlDrag::Move { orig, .. } = &d {
         let idx: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
-        crate::track_links::route_clips(s, &idx);
+        crate::track_links::route_clips(&mut s.session, &idx);
     }
     match d {
         PlDrag::Perform => {

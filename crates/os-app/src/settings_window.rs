@@ -29,7 +29,7 @@ impl App {
         }
         // Recording ▸ Start on input off ends a wait for input, as its toolbar button does.
         if c.key == REC_WAIT.key && !on {
-            self.state.rec.waiting = false;
+            self.state.session.rec.waiting = false;
         }
         self.state.message = Some(format!("{}: {}", c.label, if on { "on" } else { "off" }));
         self.invalidate();
@@ -808,12 +808,12 @@ mod tests {
         }
         // Start on input off from the page ends a wait for input, as its button does.
         Opt::Wait.toggle();
-        app.state.rec.waiting = true;
+        app.state.session.rec.waiting = true;
         let r = hit_rect(&app, &Action::Settings(SAct::Check(REC_WAIT.label)));
         click(&mut app, &mut c, r);
-        assert!(!Opt::Wait.on() && !app.state.rec.waiting);
+        assert!(!Opt::Wait.on() && !app.state.session.rec.waiting);
         // Loop record from the page reaches the playback at the next tick: armed with it off, playback runs on.
-        app.state.rec.armed = true;
+        app.state.session.rec.armed = true;
         app.record_tick();
         assert!(crate::transport::run_on_flag().load(std::sync::atomic::Ordering::Relaxed));
         let r = hit_rect(&app, &Action::Settings(SAct::Check(REC_LOOP.label)));
@@ -821,7 +821,7 @@ mod tests {
         app.record_tick();
         assert!(!crate::transport::run_on_flag().load(std::sync::atomic::Ordering::Relaxed));
         set_check(&REC_LOOP, false);
-        app.state.rec.armed = false;
+        app.state.session.rec.armed = false;
         // Count-in length: the page's combo is the count-in button's right-click choice.
         let combo = |app: &App, l: &str| app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(k, ..)) if *k == l)).map(|h| h.rect).expect("the combo works");
         let r = combo(&app, COUNT_IN_LENGTH.label);

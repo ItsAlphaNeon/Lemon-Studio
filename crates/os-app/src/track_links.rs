@@ -27,68 +27,68 @@ pub const TRACK_MODE: &str = "Playlist track mode";
 pub const NOT_FOR_AUDIO: &str = "Instrument tracks are not for audio clips";
 
 /// Playlist track `t`'s link in the current arrangement.
-pub fn link(s: &State, t: u16) -> TrackLink {
-    track_info(&s.session, t).map_or(TrackLink::NONE, |x| x.link)
+pub fn link(s: &crate::session::Session, t: u16) -> TrackLink {
+    track_info(s, t).map_or(TrackLink::NONE, |x| x.link)
 }
 
 /// The mixer track audio track `t` plays through.
-pub fn audio_mixer(s: &State, t: u16) -> Option<u16> {
+pub fn audio_mixer(s: &crate::session::Session, t: u16) -> Option<u16> {
     link(s, t).audio_mixer()
 }
 
-pub fn is_instrument(s: &State, t: u16) -> bool {
+pub fn is_instrument(s: &crate::session::Session, t: u16) -> bool {
     link(s, t).kind == TrackLink::INSTRUMENT
 }
 
-fn set_link(s: &mut State, t: u16, l: TrackLink) {
-    if let Some(tr) = arr_mut(&mut s.session).tracks.get_mut(usize::from(t)) {
+fn set_link(s: &mut crate::session::Session, t: u16, l: TrackLink) {
+    if let Some(tr) = arr_mut(s).tracks.get_mut(usize::from(t)) {
         tr.link = l;
     }
 }
 
 /// The track a new audio or instrument track takes: the first one with no clips, no link and no name (measured: the
 /// original skipped a track it had named, one with clips and linked ones).
-pub fn new_track(s: &State) -> Option<u16> {
+pub fn new_track(s: &crate::session::Session) -> Option<u16> {
     (0..TRACKS).find(|&t| {
-        let info = track_info(&s.session, t);
-        info.is_none_or(|x| x.link.is_none() && x.name.as_deref().is_none_or(str::is_empty)) && !clips(&s.session).iter().any(|c| c.track == t)
+        let info = track_info(s, t);
+        info.is_none_or(|x| x.link.is_none() && x.name.as_deref().is_none_or(str::is_empty)) && !clips(s).iter().any(|c| c.track == t)
     })
 }
 
 /// The audio tracks linked to mixer track `m`, top to bottom.
-pub fn audio_tracks_of(s: &State, m: u16) -> Vec<u16> {
+pub fn audio_tracks_of(s: &crate::session::Session, m: u16) -> Vec<u16> {
     (0..TRACKS).filter(|&t| audio_mixer(s, t) == Some(m)).collect()
 }
 
 /// The instrument track of channel `ch` (its index), the first when there are several.
-pub fn instrument_track_of(s: &State, ch: u16) -> Option<u16> {
+pub fn instrument_track_of(s: &crate::session::Session, ch: u16) -> Option<u16> {
     (0..TRACKS).find(|&t| link(s, t).instrument_channel() == Some(ch))
 }
 
 /// Mixer tracks Assign to new Audio track(s) can take: inserts not yet linked (the master is left out).
-fn assignable(s: &State, mixers: &[u16]) -> Vec<u16> {
-    mixers.iter().copied().filter(|&m| m >= 1 && m <= crate::mixer::inserts(&s.session) && audio_tracks_of(s, m).is_empty()).collect()
+fn assignable(s: &crate::session::Session, mixers: &[u16]) -> Vec<u16> {
+    mixers.iter().copied().filter(|&m| m >= 1 && m <= crate::mixer::inserts(s) && audio_tracks_of(s, m).is_empty()).collect()
 }
 
 /// The mixer track menu's Assign to new Audio track(s) is greyed when none of `mixers` can take one (the original
 /// greys it on a linked track).
-pub fn can_assign_audio(s: &State, mixers: &[u16]) -> bool {
+pub fn can_assign_audio(s: &crate::session::Session, mixers: &[u16]) -> bool {
     !assignable(s, mixers).is_empty()
 }
 
-pub fn can_unassign_audio(s: &State, mixers: &[u16]) -> bool {
+pub fn can_unassign_audio(s: &crate::session::Session, mixers: &[u16]) -> bool {
     mixers.iter().any(|&m| !audio_tracks_of(s, m).is_empty())
 }
 
 /// Assign to new Audio track(s) (spec: ui/mixer-track-commands.md §8): each of `mixers` without an audio track gets
 /// one on a new playlist track (`new_track`), named after the mixer track. The playlist selects the last one.
 pub fn assign_audio(s: &mut State, mixers: &[u16]) -> Option<String> {
-    let todo = assignable(s, mixers);
+    let todo = assignable(&s.session, mixers);
     let mut made = Vec::new();
     for m in todo {
-        let Some(t) = new_track(s) else { break };
+        let Some(t) = new_track(&s.session) else { break };
         let name = crate::mixer::name(&s.session, m);
-        set_link(s, t, TrackLink::audio(m));
+        set_link(&mut s.session, t, TrackLink::audio(m));
         arr_mut(&mut s.session).tracks[usize::from(t)].name = Some(name);
         made.push((m, t));
     }
@@ -102,15 +102,15 @@ pub fn assign_audio(s: &mut State, mixers: &[u16]) -> Option<String> {
 }
 
 /// Unassign from Audio track(s): the audio tracks of `mixers` become plain tracks; names, colours and clips stay.
-pub fn unassign_audio(s: &mut State, mixers: &[u16]) -> Option<String> {
+pub fn unassign_audio(s: &mut crate::session::Session, mixers: &[u16]) -> Option<String> {
     let tracks: Vec<u16> = mixers.iter().flat_map(|&m| audio_tracks_of(s, m)).collect();
     for &t in &tracks {
         set_link(s, t, TrackLink::NONE);
     }
-    s.session.dirty = true;
+    s.dirty = true;
     match tracks.as_slice() {
         [] => Some("No audio track to unassign".into()),
-        [t] => Some(format!("Unassigned {}", crate::playlist::track_name(&s.session, *t))),
+        [t] => Some(format!("Unassigned {}", crate::playlist::track_name(s, *t))),
         v => Some(format!("Unassigned {} audio tracks", v.len())),
     }
 }
@@ -121,14 +121,14 @@ fn instrument_kind(k: ChannelKind) -> bool {
 }
 
 /// Rack rows Assign to new instrument track can take: instrument channels without an instrument track.
-fn instrument_rows(s: &State, rows: &[usize]) -> Vec<usize> {
+fn instrument_rows(s: &crate::session::Session, rows: &[usize]) -> Vec<usize> {
     rows.iter()
         .copied()
-        .filter(|&r| s.session.project.channels.get(r).is_some_and(|c| instrument_kind(c.kind) && instrument_track_of(s, c.index).is_none()))
+        .filter(|&r| s.project.channels.get(r).is_some_and(|c| instrument_kind(c.kind) && instrument_track_of(s, c.index).is_none()))
         .collect()
 }
 
-pub fn can_assign_instrument(s: &State, rows: &[usize]) -> bool {
+pub fn can_assign_instrument(s: &crate::session::Session, rows: &[usize]) -> bool {
     !instrument_rows(s, rows).is_empty()
 }
 
@@ -136,11 +136,11 @@ pub fn can_assign_instrument(s: &State, rows: &[usize]) -> bool {
 /// (`new_track`) linked to it, named and coloured after it; the channel's mixer insert is named after it too (the
 /// master keeps its name), as the original does.
 pub fn assign_instrument(s: &mut State, rows: &[usize]) -> Option<String> {
-    let todo = instrument_rows(s, rows);
+    let todo = instrument_rows(&s.session, rows);
     let mut made = Vec::new();
     for r in todo {
-        let Some(t) = new_track(s) else { break };
-        link_instrument(s, t, r);
+        let Some(t) = new_track(&s.session) else { break };
+        link_instrument(&mut s.session, t, r);
         made.push((r, t));
     }
     let &(r, t) = made.last()?;
@@ -153,12 +153,12 @@ pub fn assign_instrument(s: &mut State, rows: &[usize]) -> Option<String> {
 }
 
 /// Track `t` becomes the instrument track of rack row `r`, named and coloured after the channel.
-fn link_instrument(s: &mut State, t: u16, r: usize) {
-    let Some(ch) = s.session.project.channels.get(r) else { return };
+fn link_instrument(s: &mut crate::session::Session, t: u16, r: usize) {
+    let Some(ch) = s.project.channels.get(r) else { return };
     let (index, color, mixer) = (ch.index, ch.color, ch.mixer_track);
-    let name = crate::rack::channel_name(&s.session, r);
+    let name = crate::rack::channel_name(s, r);
     set_link(s, t, TrackLink::instrument(index));
-    let tr = &mut arr_mut(&mut s.session).tracks[usize::from(t)];
+    let tr = &mut arr_mut(s).tracks[usize::from(t)];
     tr.name = Some(name.clone());
     if color.is_some() {
         tr.color = color;
@@ -166,7 +166,7 @@ fn link_instrument(s: &mut State, t: u16, r: usize) {
     // The channel's insert takes its name and colour (measured: Assign to new instrument track on 808 Clap wrote both to
     // Insert 2, events 204 and 149); the master keeps its own.
     if mixer != 0 {
-        if let Some(m) = crate::mixer::track_mut(&mut s.session, mixer) {
+        if let Some(m) = crate::mixer::track_mut(s, mixer) {
             m.name = Some(name);
             if color.is_some() {
                 m.color = color;
@@ -193,17 +193,17 @@ pub enum Mode {
 /// colour; Unassigned keeps the name.
 pub fn set_mode(s: &mut State, t: u16, mode: Mode) -> Option<String> {
     match mode {
-        Mode::Unassigned => set_link(s, t, TrackLink::NONE),
+        Mode::Unassigned => set_link(&mut s.session, t, TrackLink::NONE),
         Mode::Audio(_) | Mode::NewAudio => {
             let m = match mode {
                 Mode::Audio(m) => m,
                 _ => crate::mixer::add_track(s, None),
             };
             let name = crate::mixer::name(&s.session, m);
-            set_link(s, t, TrackLink::audio(m));
+            set_link(&mut s.session, t, TrackLink::audio(m));
             arr_mut(&mut s.session).tracks[usize::from(t)].name = Some(name);
         }
-        Mode::Instrument(r) => link_instrument(s, t, r),
+        Mode::Instrument(r) => link_instrument(&mut s.session, t, r),
         // Needs the app to host the plugin (`new_instrument`).
         Mode::NewInstrument(_) => return None,
     }
@@ -222,7 +222,7 @@ pub fn new_instrument(app: &mut crate::app::App, t: u16, index: usize) -> Option
             return msg;
         }
         let row = app.state.selected_channel;
-        link_instrument(&mut app.state, t, row);
+        link_instrument(&mut app.state.session, t, row);
         app.state.playlist.track = t;
         app.state.session.dirty = true;
         Some(format!("Added {} on {}", crate::rack::channel_name(&app.state.session, row), crate::playlist::track_name(&app.state.session, t)))
@@ -235,7 +235,7 @@ pub fn new_instrument(app: &mut crate::app::App, t: u16, index: usize) -> Option
 /// armed) and Disarm recording (spec: ui/playlist.md §6c, measured).
 pub fn mode_items(s: &State, t: u16, cmd: impl Fn(Mode) -> crate::playlist::Cmd) -> Vec<crate::playlist::PItem> {
     use crate::playlist::{Mark, PItem};
-    let l = link(s, t);
+    let l = link(&s.session, t);
     let mut audio = vec![PItem::new("New mixer track", cmd(Mode::NewAudio)), PItem::sep()];
     audio.extend(
         (1..=crate::mixer::inserts(&s.session)).map(|m| PItem::new(format!("{m}. {}", crate::mixer::name(&s.session, m)), cmd(Mode::Audio(m))).mark(Mark::Check(l.audio_mixer() == Some(m)))),
@@ -276,43 +276,43 @@ pub fn mode_items(s: &State, t: u16, cmd: impl Fn(Mode) -> crate::playlist::Cmd)
 }
 
 /// Whether a clip of `src` may sit on track `t`: an instrument track takes no audio clips.
-pub fn fits(s: &State, src: ClipSource, t: u16) -> bool {
+pub fn fits(s: &crate::session::Session, src: ClipSource, t: u16) -> bool {
     !(is_instrument(s, t) && is_audio_source(s, src))
 }
 
-fn is_audio_source(s: &State, src: ClipSource) -> bool {
-    matches!(src, ClipSource::Channel(ch) if s.session.project.channel(ch).is_some_and(|c| c.kind == ChannelKind::AudioClip))
+fn is_audio_source(s: &crate::session::Session, src: ClipSource) -> bool {
+    matches!(src, ClipSource::Channel(ch) if s.project.channel(ch).is_some_and(|c| c.kind == ChannelKind::AudioClip))
 }
 
 /// The track an audio clip dropped on `t` over ticks `a..b` goes to: `t`, or for an instrument track the first track
 /// below it that is free over the span and not an instrument track (the original asks first, then does this).
-pub fn audio_drop_track(s: &State, t: u16, a: u32, b: u32) -> u16 {
+pub fn audio_drop_track(s: &crate::session::Session, t: u16, a: u32, b: u32) -> u16 {
     if !is_instrument(s, t) {
         return t;
     }
     (t + 1..TRACKS)
-        .find(|&k| !is_instrument(s, k) && !clips(&s.session).iter().any(|c| c.track == k && c.position < b && c.end() > a))
+        .find(|&k| !is_instrument(s, k) && !clips(s).iter().any(|c| c.track == k && c.position < b && c.end() > a))
         .unwrap_or(t)
 }
 
 /// Audio clips `idx` (of the current arrangement) on audio tracks: their channels go to the track's mixer track, as
 /// the original reroutes a clip's channel when it lands on an audio track (moving it off again leaves the channel
 /// where it is).
-pub fn route_clips(s: &mut State, idx: &[usize]) {
+pub fn route_clips(s: &mut crate::session::Session, idx: &[usize]) {
     let moves: Vec<(u16, u16)> = idx
         .iter()
-        .filter_map(|&i| clips(&s.session).get(i))
+        .filter_map(|&i| clips(s).get(i))
         .filter_map(|c| match c.source {
             ClipSource::Channel(ch) if is_audio_source(s, c.source) => audio_mixer(s, c.track).map(|m| (ch, m)),
             _ => None,
         })
         .collect();
-    let max = crate::mixer::max_insert(&s.session.project);
+    let max = crate::mixer::max_insert(&s.project);
     for (ch, m) in moves {
-        if let Some(c) = s.session.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
+        if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
             if c.mixer_track != m && m <= max {
                 c.mixer_track = m;
-                s.session.dirty = true;
+                s.dirty = true;
             }
         }
     }
@@ -320,19 +320,19 @@ pub fn route_clips(s: &mut State, idx: &[usize]) {
 
 /// The playlist track a take recorded on mixer track `m` over ticks `a..b` goes to: `m`'s first audio track when it
 /// is free over the span (recording into an audio track), else the first track free over it.
-pub fn record_track(s: &State, m: u16, a: u32, b: u32) -> u16 {
+pub fn record_track(s: &crate::session::Session, m: u16, a: u32, b: u32) -> u16 {
     audio_tracks_of(s, m)
         .into_iter()
-        .find(|&t| !clips(&s.session).iter().any(|c| c.track == t && c.position < b && c.end() > a))
-        .unwrap_or_else(|| crate::playlist::free_track(&s.session, 0, a, b))
+        .find(|&t| !clips(s).iter().any(|c| c.track == t && c.position < b && c.end() > a))
+        .unwrap_or_else(|| crate::playlist::free_track(s, 0, a, b))
 }
 
 /// The track of a recorded take (clip `i`) becomes an audio track on the take channel's mixer track, unless it is
 /// linked already.
-pub fn bind_take(s: &mut State, i: usize) {
-    let Some(c) = clips(&s.session).get(i).copied() else { return };
+pub fn bind_take(s: &mut crate::session::Session, i: usize) {
+    let Some(c) = clips(s).get(i).copied() else { return };
     let ClipSource::Channel(ch) = c.source else { return };
-    let Some(m) = s.session.project.channel(ch).map(|x| x.mixer_track) else { return };
+    let Some(m) = s.project.channel(ch).map(|x| x.mixer_track) else { return };
     if link(s, c.track).is_none() && m != 0 {
         set_link(s, c.track, TrackLink::audio(m));
     }
@@ -340,12 +340,12 @@ pub fn bind_take(s: &mut State, i: usize) {
 
 /// Select ▸ Channels and playlist tracks routed to this track: the playlist tracks linked to `mixers` (audio tracks)
 /// or to a channel using them (instrument tracks), top to bottom.
-pub fn tracks_routed_to(s: &State, mixers: &[u16]) -> Vec<u16> {
+pub fn tracks_routed_to(s: &crate::session::Session, mixers: &[u16]) -> Vec<u16> {
     (0..TRACKS)
         .filter(|&t| {
             let l = link(s, t);
             l.audio_mixer().is_some_and(|m| mixers.contains(&m))
-                || l.instrument_channel().and_then(|ch| s.session.project.channel(ch)).is_some_and(|c| mixers.contains(&c.mixer_track))
+                || l.instrument_channel().and_then(|ch| s.project.channel(ch)).is_some_and(|c| mixers.contains(&c.mixer_track))
         })
         .collect()
 }
@@ -386,26 +386,26 @@ mod tests {
         crate::playlist::arr_mut(&mut app.state.session).clips.push(clip(0, 0, ClipSource::Pattern(1)));
         crate::playlist::arr_mut(&mut app.state.session).tracks[1].name = Some("Drums".into());
         assert_eq!(crate::mixer::run(&mut app, MCmd::AssignAudio(3)).as_deref(), Some(format!("Assigned {0} to {0}", crate::mixer::name(&app.state.session, 3)).as_str()));
-        assert_eq!(link(&app.state, 2), TrackLink::audio(3));
+        assert_eq!(link(&app.state.session, 2), TrackLink::audio(3));
         assert_eq!(crate::playlist::track_name(&app.state.session, 2), crate::mixer::name(&app.state.session, 3));
         assert_eq!(app.state.playlist.track, 2);
-        assert_eq!(audio_tracks_of(&app.state, 3), [2]);
+        assert_eq!(audio_tracks_of(&app.state.session, 3), [2]);
         assert!(!entry(&menu(&app, 3), "Assign to new Audio track(s)").enabled);
         assert!(entry(&menu(&app, 3), "Unassign from Audio track(s)").enabled);
         // The next one goes below it.
         crate::mixer::run(&mut app, MCmd::AssignAudio(5));
-        assert_eq!(link(&app.state, 3), TrackLink::audio(5));
+        assert_eq!(link(&app.state.session, 3), TrackLink::audio(5));
         crate::mixer::run(&mut app, MCmd::UnassignAudio(3));
-        assert!(link(&app.state, 2).is_none());
+        assert!(link(&app.state.session, 2).is_none());
         assert_eq!(crate::playlist::track_name(&app.state.session, 2), crate::mixer::name(&app.state.session, 3), "the name stays");
-        assert_eq!(link(&app.state, 3), TrackLink::audio(5), "only that insert's");
+        assert_eq!(link(&app.state.session, 3), TrackLink::audio(5), "only that insert's");
         // One undo step each.
         crate::history::undo(&mut app.state);
-        assert_eq!(link(&app.state, 2), TrackLink::audio(3));
+        assert_eq!(link(&app.state.session, 2), TrackLink::audio(3));
         crate::history::undo(&mut app.state);
-        assert!(link(&app.state, 3).is_none());
+        assert!(link(&app.state.session, 3).is_none());
         crate::history::undo(&mut app.state);
-        assert!(link(&app.state, 2).is_none());
+        assert!(link(&app.state.session, 2).is_none());
     }
 
     /// Assign to new instrument track (ui/channel-rack.md §18): linked to the channel, named and coloured after it,
@@ -418,8 +418,8 @@ mod tests {
         let menu = |app: &App| crate::rack::channel_menu(&app.state, 1, 0.0, 0.0).items;
         assert!(entry(&menu(&app), "Assign to new instrument track").enabled);
         crate::rack::run(&mut app, RCmd::AssignInstrument(1));
-        assert_eq!(link(&app.state, 0), TrackLink::instrument(1));
-        assert_eq!(instrument_track_of(&app.state, 1), Some(0));
+        assert_eq!(link(&app.state.session, 0), TrackLink::instrument(1));
+        assert_eq!(instrument_track_of(&app.state.session, 1), Some(0));
         let tr = track_info(&app.state.session, 0).unwrap();
         assert_eq!((tr.name.as_deref(), tr.color), (Some("Clap"), Some(os_model::Rgb::new(0xaa, 0x33, 0x55))));
         assert_eq!(crate::mixer::name(&app.state.session, 2), "Clap", "the channel's insert takes its name");
@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(app.state.session.project.channels[1].mixer_track, 2, "its routing stays");
         assert!(!entry(&menu(&app), "Assign to new instrument track").enabled);
         crate::history::undo(&mut app.state);
-        assert!(link(&app.state, 0).is_none());
+        assert!(link(&app.state.session, 0).is_none());
         assert_eq!(crate::mixer::name(&app.state.session, 2), insert2);
     }
 
@@ -438,22 +438,22 @@ mod tests {
         let mut app = app();
         let inserts = crate::mixer::inserts(&app.state.session);
         crate::playlist::run(&mut app, Cmd::TrackMode(4, Mode::Audio(2)));
-        assert_eq!(link(&app.state, 4), TrackLink::audio(2));
+        assert_eq!(link(&app.state.session, 4), TrackLink::audio(2));
         let items = mode_items(&app.state, 4, |m| Cmd::TrackMode(4, m));
         assert_eq!(items[1].mark, crate::playlist::Mark::Check(true));
         assert_eq!(entry(&items[1].children, &format!("2. {}", crate::mixer::name(&app.state.session, 2))).mark, crate::playlist::Mark::Check(true));
         crate::playlist::run(&mut app, Cmd::TrackMode(5, Mode::NewAudio));
-        assert_eq!(link(&app.state, 5), TrackLink::audio(inserts + 1), "a mixer track added for it");
+        assert_eq!(link(&app.state.session, 5), TrackLink::audio(inserts + 1), "a mixer track added for it");
         assert_eq!(crate::playlist::track_name(&app.state.session, 5), crate::mixer::name(&app.state.session, inserts + 1));
         // Audio to instrument: the channel's insert takes its name.
         crate::playlist::run(&mut app, Cmd::TrackMode(4, Mode::Instrument(3)));
-        assert_eq!(link(&app.state, 4), TrackLink::instrument(3));
+        assert_eq!(link(&app.state.session, 4), TrackLink::instrument(3));
         assert_eq!(crate::playlist::track_name(&app.state.session, 4), "Snare");
         crate::playlist::run(&mut app, Cmd::TrackMode(4, Mode::Unassigned));
-        assert!(link(&app.state, 4).is_none());
+        assert!(link(&app.state.session, 4).is_none());
         assert_eq!(crate::playlist::track_name(&app.state.session, 4), "Snare");
         crate::history::undo(&mut app.state);
-        assert_eq!(link(&app.state, 4), TrackLink::instrument(3));
+        assert_eq!(link(&app.state.session, 4), TrackLink::instrument(3));
     }
 
     /// Track mode ▸ Instrument track ▸ (ui/playlist.md §6c, measured): Use existing channel ▸ first, then the generators;
@@ -472,14 +472,14 @@ mod tests {
         let msg = crate::playlist::run(&mut app, Cmd::TrackMode(6, Mode::NewInstrument(i)));
         assert_eq!(app.state.session.project.channels.len(), rows + 1);
         let ch = app.state.session.project.channels[rows].index;
-        assert_eq!(link(&app.state, 6), TrackLink::instrument(ch));
+        assert_eq!(link(&app.state.session, 6), TrackLink::instrument(ch));
         let name = crate::rack::channel_name(&app.state.session, rows);
         assert_eq!(crate::playlist::track_name(&app.state.session, 6), name);
         assert_eq!(msg, Some(format!("Added {name} on {name}")));
         assert_eq!((app.state.session.history.at(), app.state.session.history.newest_done()), (steps + 1, Some(TRACK_MODE)));
         crate::history::undo(&mut app.state);
         assert_eq!(app.state.session.project.channels.len(), rows);
-        assert!(link(&app.state, 6).is_none());
+        assert!(link(&app.state.session, 6).is_none());
     }
 
     /// An audio track's options in Track mode ▸ (ui/playlist.md §6c, measured): only on an audio track; Arm recording and
@@ -514,22 +514,22 @@ mod tests {
         let audio = ClipSource::Channel(s.session.project.channels[4].index);
         crate::playlist::arr_mut(&mut s.session).tracks[2].link = TrackLink::audio(7);
         crate::playlist::arr_mut(&mut s.session).tracks[5].link = TrackLink::instrument(0);
-        assert!(!fits(s, audio, 5) && fits(s, audio, 2) && fits(s, ClipSource::Pattern(1), 5));
+        assert!(!fits(&s.session, audio, 5) && fits(&s.session, audio, 2) && fits(&s.session, ClipSource::Pattern(1), 5));
         crate::playlist::arr_mut(&mut s.session).clips.push(clip(6, 0, ClipSource::Pattern(1)));
-        assert_eq!(audio_drop_track(s, 5, 0, 96), 7, "below the instrument track, past the busy track");
-        assert_eq!(audio_drop_track(s, 4, 0, 96), 4);
+        assert_eq!(audio_drop_track(&s.session, 5, 0, 96), 7, "below the instrument track, past the busy track");
+        assert_eq!(audio_drop_track(&s.session, 4, 0, 96), 4);
         crate::playlist::arr_mut(&mut s.session).clips.push(clip(2, 0, audio));
         let i = clips(&s.session).len() - 1;
-        route_clips(s, &[i]);
+        route_clips(&mut s.session, &[i]);
         assert_eq!(s.session.project.channels[4].mixer_track, 7);
         // Off the audio track: the channel stays where it is.
         crate::playlist::arr_mut(&mut s.session).clips[i].track = 3;
-        route_clips(s, &[i]);
+        route_clips(&mut s.session, &[i]);
         assert_eq!(s.session.project.channels[4].mixer_track, 7);
         // A recorded take goes to the mixer track's audio track while it is free there.
-        assert_eq!(record_track(s, 7, 200, 300), 2);
-        assert_eq!(tracks_routed_to(s, &[7]), [2]);
-        assert_eq!(tracks_routed_to(s, &[1]), [5], "the instrument track of a channel on Insert 1");
+        assert_eq!(record_track(&s.session, 7, 200, 300), 2);
+        assert_eq!(tracks_routed_to(&s.session, &[7]), [2]);
+        assert_eq!(tracks_routed_to(&s.session, &[1]), [5], "the instrument track of a channel on Insert 1");
     }
 
     /// Deleting a linked mixer track or channel unlinks its tracks; the others follow the renumbering.
@@ -542,10 +542,10 @@ mod tests {
         crate::playlist::arr_mut(&mut s.session).tracks[2].link = TrackLink::instrument(1);
         crate::playlist::arr_mut(&mut s.session).tracks[3].link = TrackLink::instrument(4);
         crate::mixer::delete_track(s, 3);
-        assert!(link(s, 0).is_none());
-        assert_eq!(link(s, 1), TrackLink::audio(4));
+        assert!(link(&s.session, 0).is_none());
+        assert_eq!(link(&s.session, 1), TrackLink::audio(4));
         crate::rack::remap_project(s.session.project.get_mut(), &[Some(0), None, Some(1), Some(2), Some(3)]);
-        assert!(link(s, 2).is_none());
-        assert_eq!(link(s, 3), TrackLink::instrument(3));
+        assert!(link(&s.session, 2).is_none());
+        assert_eq!(link(&s.session, 3), TrackLink::instrument(3));
     }
 }
