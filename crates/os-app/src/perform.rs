@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use os_model::{Clip, Project};
 
-use crate::playlist::{arr_mut, clips, start_marker, to_src, window};
+use crate::edit::playlist::{arr_mut, clips, start_marker, to_src, window};
 
 /// How far ahead of its start a launched clip's copies are placed, in bars of 4 beats (Lemon Studio's design: the
 /// engine plays what it is given; a trigger, a stop or an edit places them again).
@@ -169,7 +169,7 @@ pub fn record(s: &mut crate::session::Session, stop: u32) -> usize {
             c
         }));
     }
-    crate::playlist::snapshot_as(s, crate::record::RECORDED);
+    crate::edit::playlist::snapshot_as(s, crate::record::RECORDED);
     arr_mut(s).clips = all;
     s.perform.live.retain(|_, l| l.armed);
     s.dirty = true;

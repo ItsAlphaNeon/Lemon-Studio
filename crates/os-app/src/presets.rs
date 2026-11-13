@@ -444,7 +444,7 @@ fn side(ses: &crate::session::Session, key: usize) -> Option<crate::control::com
         // A container's effect: no name of its own to put back.
         None if key >= crate::plugins::MEMBER_KEY => None,
         None => ses.project.channels.get(key)?.name.clone(),
-        Some((t, k)) => crate::mixer::slot_label(ses, t, k),
+        Some((t, k)) => crate::edit::mixer::slot_label(ses, t, k),
     };
     Some(crate::control::command::PluginSide { state: ses.plugins.state(key)?, preset: ses.plugins.presets.get(&key).cloned(), name, fill: 0 })
 }
@@ -515,7 +515,7 @@ fn apply(ses: &mut crate::session::Session, key: usize, body: &Body) -> Option<V
 fn auto_name(ses: &mut crate::session::Session, key: usize, path: &Path) {
     match crate::plugins::fx_of(key) {
         Some(slot) if crate::prefs::check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS) => {
-            crate::mixer::set_slot_label(ses, slot.0, slot.1, Some(shown_name(path)));
+            crate::edit::mixer::set_slot_label(ses, slot.0, slot.1, Some(shown_name(path)));
         }
         Some(_) => {}
         None => {

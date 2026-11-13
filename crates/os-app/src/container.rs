@@ -36,7 +36,6 @@ use os_engine::chain::{self, Chain};
 use os_model::target::{self, MEMBER_IDS, MEMBER_WET};
 use os_model::{Id, Project};
 
-use crate::playlist::{Cmd, PItem};
 use crate::plugins::{fx_key, fx_of, Hosted, Plugins, FX_KEY, MEMBER_KEY};
 
 /// The slot plugin name a container is kept under (Lemon Studio's own; the original's Patcher slots whose patch is a
@@ -124,12 +123,12 @@ pub fn encode(members: &[Member]) -> Vec<u8> {
 
 /// The name an icon is saved by: its name in the Change icon... list (empty: none).
 fn icon_name(icon: Option<crate::icon::Icon>) -> &'static str {
-    icon.and_then(|i| crate::playlist::ICONS.iter().find(|(_, x)| *x == i)).map_or("", |(name, _)| name)
+    icon.and_then(|i| crate::icon::ICONS.iter().find(|(_, x)| *x == i)).map_or("", |(name, _)| name)
 }
 
 /// The icon saved as `name` (a name the list does not have: none).
 fn icon_named(name: &str) -> Option<crate::icon::Icon> {
-    crate::playlist::ICONS.iter().find(|(n, _)| *n == name).map(|(_, i)| *i)
+    crate::icon::ICONS.iter().find(|(n, _)| *n == name).map(|(_, i)| *i)
 }
 
 /// The members a container slot's state lists; `None` for bytes that are not one.
@@ -303,17 +302,6 @@ pub enum CAct {
     Menu(usize),
     /// Add effect: the effect list of an empty slot (a channel's container: the instruments too).
     Add,
-}
-
-/// The commands of the window's menus run with their container's track selected (as a slot window's do); a channel's
-/// container's run with its row in the track's place, which is how they find it.
-pub(crate) fn on_track(t: u16, items: &mut [PItem]) {
-    for it in items.iter_mut() {
-        if let Cmd::Mixer(_) = it.cmd {
-            it.cmd = Cmd::SlotWin(t, Box::new(std::mem::replace(&mut it.cmd, Cmd::Nothing)));
-        }
-        on_track(t, &mut it.children);
-    }
 }
 
 /// What the container's list does to a member.
@@ -514,8 +502,8 @@ pub fn open_patchers(s: &mut crate::session::Session, effects: &[crate::plugins:
         .flat_map(|m| m.slots.iter().enumerate().filter(|(_, p)| p.as_ref().is_some_and(|p| p.name == PATCHER)).map(move |(k, _)| (m.index, k as u8)))
         .collect();
     for (t, k) in places {
-        let place = format!("{}, slot {}", crate::mixer::name(s, t), k + 1);
-        let Some(slot) = crate::mixer::track_mut(s, t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
+        let place = format!("{}, slot {}", crate::edit::mixer::name(s, t), k + 1);
+        let Some(slot) = crate::edit::mixer::track_mut(s, t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
         let Some(patch) = patcher::parse(&slot.state) else {
             left.push(format!("{place} (a state Lemon Studio does not read)"));
             continue;
@@ -700,6 +688,7 @@ pub(crate) fn sync_containers_in(ses: &mut crate::session::Session) -> Option<St
 
 #[cfg(test)]
 mod tests {
+    use crate::playlist::{Cmd, PItem};
     use super::*;
 
     /// The state round-trips; version 1 (no ids) numbers the members; other bytes are not a container.
@@ -710,7 +699,7 @@ mod tests {
                 cpu: os_model::PluginCpu { threaded: false, smart_disable: true },
                 label: Some("Lead".into()),
                 color: Some(os_model::Rgb::new(1, 2, 3)),
-                icon: Some(crate::playlist::ICONS[0].1),
+                icon: Some(crate::icon::ICONS[0].1),
             },
             Member { id: 1, instrument: false, uid: "vst3:b".into(), name: "B".into(), wet: 0.25, dry: 0.75, state: vec![], ..Member::default() },
         ];

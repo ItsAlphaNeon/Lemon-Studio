@@ -102,7 +102,7 @@ pub(crate) fn follow_apply(ses: &mut crate::session::Session, plan: FollowPlan) 
     let row_id = |r: usize| p.channels.get(r).map(|c| c.id);
     let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.id);
     let session = &*ses;
-    let member_id = |key: usize| session.plugin_members.get(&key).and_then(|&(t, k, id)| crate::control::command::member_owner(crate::container::place_id(session, t, k)?.0, id)).map(Id);
+    let member_id = |key: usize| session.plugin_members.get(&key).and_then(|&(t, k, id)| crate::control::command::member_owner(crate::edit::container::place_id(session, t, k)?.0, id)).map(Id);
     let owners: Vec<(usize, Id)> = session
         .plugins
         .hosted

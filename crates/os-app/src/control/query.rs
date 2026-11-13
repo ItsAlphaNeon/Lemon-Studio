@@ -46,7 +46,7 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
             json!({
                 "id": c.id.0,
                 "row": row,
-                "name": crate::rack::channel_name(s, row),
+                "name": crate::edit::rack::channel_name(s, row),
                 "kind": kind(c.kind),
                 "plugin": c.plugin,
                 "sample": c.sample_path,
@@ -59,7 +59,7 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
             })
         })
         .collect();
-    let used = crate::mixer::inserts(s);
+    let used = crate::edit::mixer::inserts(s);
     let tracks: Vec<Value> = p
         .mixer
         .iter()
@@ -85,7 +85,7 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
             json!({
                 "id": m.id.0,
                 "number": m.index,
-                "name": crate::mixer::name(s, m.index),
+                "name": crate::edit::mixer::name(s, m.index),
                 "color": color_text(m.color),
                 "volume": m.volume.unwrap_or(0.8),
                 "pan": m.pan.unwrap_or(0.0),
@@ -108,9 +108,9 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
             json!({
                 "id": q.id.0,
                 "number": q.number,
-                "name": crate::patterns::name_of(s, q.number),
+                "name": crate::edit::patterns::name_of(s, q.number),
                 "color": color_text(q.color),
-                "length": crate::playlist::source_len(s, os_model::ClipSource::Pattern(q.number)),
+                "length": crate::edit::playlist::source_len(s, os_model::ClipSource::Pattern(q.number)),
                 "auto_length": q.length.is_none(),
                 "notes": q.notes.len(),
             })

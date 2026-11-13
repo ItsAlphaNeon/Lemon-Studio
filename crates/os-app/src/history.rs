@@ -141,8 +141,8 @@ pub fn timebase(s: &mut crate::session::Session) {
 pub(crate) fn put_rack(s: &mut crate::session::Session, r: RackSide) {
     let RackSide { row, ch, groups: (names, of, shown) } = r;
     match ch {
-        None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
-        Some(c) if row == s.project.channels.len() => crate::rack::push_channel_in(s, c),
+        None if row + 1 == s.project.channels.len() => crate::edit::rack::remove_last(s),
+        Some(c) if row == s.project.channels.len() => crate::edit::rack::push_channel_in(s, c),
         _ => {}
     }
     s.project.write_if(|p| {
@@ -161,9 +161,9 @@ pub(crate) fn knob_value(s: &crate::session::Session, id: KnobId) -> Option<f64>
         KnobId::ChanVol(i) => s.project.channels.get(i).map_or(0.0, |c| c.volume),
         KnobId::ChanPan(i) => s.project.channels.get(i).map_or(0.0, |c| c.pan),
         // The level the container's list holds (the knob shows the chain's, an automated one included).
-        KnobId::Member(t, k, id, wet) => crate::container::level(s, t, k, id, wet).map_or(0.0, f64::from),
+        KnobId::Member(t, k, id, wet) => crate::edit::container::level(s, t, k, id, wet).map_or(0.0, f64::from),
         // A route with no level record: the knob shows unity, and the record is what the step must put back.
-        KnobId::Send(a, b) => return crate::mixer::track(s, a).map_or(Some(0.8), |m| m.send_levels.iter().find(|(d, _)| *d == b).map(|&(_, l)| l)),
+        KnobId::Send(a, b) => return crate::edit::mixer::track(s, a).map_or(Some(0.8), |m| m.send_levels.iter().find(|(d, _)| *d == b).map(|&(_, l)| l)),
         _ => f64::from(s.knob(id).unwrap_or(0.0)),
     })
 }
@@ -171,7 +171,7 @@ pub(crate) fn knob_value(s: &crate::session::Session, id: KnobId) -> Option<f64>
 pub(crate) fn set_knob_value(s: &mut crate::session::Session, id: KnobId, v: Option<f64>) {
     let Some(v) = v else {
         if let KnobId::Send(a, b) = id {
-            if let Some(m) = crate::mixer::track_mut(s, a) {
+            if let Some(m) = crate::edit::mixer::track_mut(s, a) {
                 m.send_levels.retain(|&(d, _)| d != b);
                 s.dirty = true;
             }
@@ -445,7 +445,7 @@ pub(crate) fn track_io_of(m: &os_model::MixerTrack) -> [i32; 4] {
 /// Before mixer track `track`'s audio input, output, record source or monitor mode changes: a step, "Mixer track audio
 /// input / output".
 pub fn track_io(s: &mut crate::session::Session, track: u16) {
-    let Some(m) = crate::mixer::track(s, track) else { return };
+    let Some(m) = crate::edit::mixer::track(s, track) else { return };
     let snap = Snap::TrackIo(track, track_io_of(m));
     record(s, MIXER_TRACK_IO, snap);
 }
@@ -594,10 +594,10 @@ impl Snap {
     fn now(&self, s: &crate::session::Session) -> Snap {
         match self {
             Snap::Pattern { number, .. } => Snap::pattern(s, *number),
-            Snap::Playlist(_) => Snap::Playlist(Box::new(crate::playlist::capture(s))),
+            Snap::Playlist(_) => Snap::Playlist(Box::new(crate::edit::playlist::capture(s))),
             Snap::Knob(id, _) => Snap::Knob(*id, knob_value(s, *id)),
             // A track gone since is left as the step has it (`put` does nothing then).
-            Snap::TrackIo(t, _) => crate::mixer::track(s, *t).map_or_else(|| self.clone(), |m| Snap::TrackIo(*t, track_io_of(m))),
+            Snap::TrackIo(t, _) => crate::edit::mixer::track(s, *t).map_or_else(|| self.clone(), |m| Snap::TrackIo(*t, track_io_of(m))),
             // A channel gone since is left as the step has it (`put` does nothing then).
             Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
             Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
@@ -661,15 +661,15 @@ impl Snap {
     fn put(self, s: &mut crate::session::Session) {
         match self {
             Snap::Pattern { number, notes, controls, length, loops } => {
-                let p = crate::patterns::pat_mut(s, number);
+                let p = crate::edit::patterns::pat_mut(s, number);
                 (p.notes, p.controls, p.length) = (notes, controls, length);
                 (p.loops, p.loop_mode) = loops;
                 s.touched.notes = true;
             }
-            Snap::Playlist(p) => crate::playlist::restore(s, *p),
+            Snap::Playlist(p) => crate::edit::playlist::restore(s, *p),
             Snap::Knob(id, v) => set_knob_value(s, id, v),
             Snap::TrackIo(t, [i, o, r, m]) => {
-                if let Some(x) = crate::mixer::track_mut(s, t) {
+                if let Some(x) = crate::edit::mixer::track_mut(s, t) {
                     (x.audio_in, x.audio_out, x.rec_source, x.monitor) = (i, o, r as u8, m as u8);
                 }
             }
@@ -684,8 +684,8 @@ impl Snap {
             }
             // The channel goes or comes back only as the last row: rows below it would move.
             Snap::Channel { row, ch } => match ch {
-                None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
-                Some(c) if row == s.project.channels.len() => crate::rack::push_channel_in(s, *c),
+                None if row + 1 == s.project.channels.len() => crate::edit::rack::remove_last(s),
+                Some(c) if row == s.project.channels.len() => crate::edit::rack::push_channel_in(s, *c),
                 _ => {}
             },
             Snap::Init(t, e) => crate::init::put(s, t, e),

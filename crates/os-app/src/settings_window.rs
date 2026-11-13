@@ -680,7 +680,7 @@ mod tests {
         app.wheel(0.0, -1.0, false, false);
         assert_eq!((number(&BROWSER_PREVIEW_TRACK), app.state.message.as_deref()), (0, Some("Browser preview track: ---")));
         // Up to the open project's last insert track.
-        let inserts = crate::mixer::inserts(&app.state.session);
+        let inserts = crate::edit::mixer::inserts(&app.state.session);
         assert!(inserts > 0);
         set_number(&BROWSER_PREVIEW_TRACK, inserts);
         app.wheel(0.0, 1.0, false, false);
@@ -718,7 +718,7 @@ mod tests {
         app.wheel(0.0, 1.0, false, false);
         assert_eq!((number(&METRONOME_TRACK), crate::metronome::switch().track()), (1, 1));
         assert_eq!(app.state.message.as_deref(), Some("Metronome track: 1"));
-        let inserts = crate::mixer::inserts(&app.state.session);
+        let inserts = crate::edit::mixer::inserts(&app.state.session);
         set_number(&METRONOME_TRACK, inserts);
         app.wheel(0.0, 1.0, false, false);
         assert_eq!(number(&METRONOME_TRACK), inserts, "up to the last insert track");

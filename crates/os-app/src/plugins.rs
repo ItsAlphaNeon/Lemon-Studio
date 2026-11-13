@@ -3150,7 +3150,7 @@ mod tests {
         assert_eq!(b.state.session.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
         assert_eq!(b.state.session.plugins.state(row).as_deref(), Some(&ch_state[..]));
         assert_eq!(b.state.session.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
-        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ"));
+        assert_eq!(crate::edit::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ"));
     }
 
     /// VST3 editors inside Lemon Studio's plugin frame, moved off every screen and captured with PrintWindow:

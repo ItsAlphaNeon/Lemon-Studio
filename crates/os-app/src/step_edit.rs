@@ -140,8 +140,8 @@ impl App {
         let Some(ch) = crate::piano::channel(s) else { return };
         let pos = crate::song_pos::stored(s);
         let at = if s.song_mode() {
-            let Some(t) = crate::piano::pattern_tick_in_song(&s.session, f64::from(pos)) else {
-                let m = format!("Step edit: {} does not play at the song position", crate::patterns::name_of(&s.session, s.pattern()));
+            let Some(t) = crate::edit::notes::pattern_tick_in_song(&s.session, f64::from(pos)) else {
+                let m = format!("Step edit: {} does not play at the song position", crate::edit::patterns::name_of(&s.session, s.pattern()));
                 return self.say(m);
             };
             t as u32
@@ -154,7 +154,7 @@ impl App {
         let mut new = Vec::with_capacity(keys.len());
         for &(key, velocity) in keys {
             let i = crate::piano::add_note(s, ch, at, i32::from(key));
-            let n = &mut crate::piano::pattern_mut(&mut s.session).notes[i];
+            let n = &mut crate::edit::notes::pattern_mut(&mut s.session).notes[i];
             (n.length, n.velocity) = (len, velocity);
             new.push(i);
         }
@@ -269,7 +269,7 @@ mod tests {
         app.state.set_song_mode(true);
         let bar = app.state.session.project.bar_ticks();
         let clip = os_model::Clip::new(2 * bar, bar, 0, os_model::ClipSource::Pattern(app.state.pattern()));
-        crate::playlist::arr_mut(&mut app.state.session).clips = vec![clip];
+        crate::edit::playlist::arr_mut(&mut app.state.session).clips = vec![clip];
         app.state.session.song_pos = 2 * bar + 4 * st;
         tap(&mut app, KeyCode::KeyC);
         assert_eq!(notes(&app)[2], (4 * st, st, 52, 100));

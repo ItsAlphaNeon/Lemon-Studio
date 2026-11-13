@@ -37,14 +37,14 @@ pub enum SongSig {
 
 /// Accept on a song marker: a time signature marker named after its signature ("3/4"), one undo step.
 pub fn set_song(s: &mut State, at: SongSig, num: u8, den: u8) {
-    crate::playlist::snapshot(&mut s.session);
+    crate::edit::playlist::snapshot(&mut s.session);
     let name = format!("{num}/{den}");
     match at {
         SongSig::At(t) => {
-            crate::playlist::add_marker(&mut s.session, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) });
+            crate::edit::playlist::add_marker(&mut s.session, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) });
         }
         SongSig::Marker(i) => {
-            if let Some(m) = crate::playlist::arr_mut(&mut s.session).markers.get_mut(i) {
+            if let Some(m) = crate::edit::playlist::arr_mut(&mut s.session).markers.get_mut(i) {
                 *m = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, name, ..m.clone() };
             }
         }
@@ -69,10 +69,10 @@ const STEP: &str = "Pattern time signature";
 
 fn set_start_now(s: &mut State, n: u16, num: u8, den: u8) {
     let old = s.session.project.pattern_length(n);
-    let markers = &mut crate::patterns::pat_mut(&mut s.session, n).markers;
+    let markers = &mut crate::edit::patterns::pat_mut(&mut s.session, n).markers;
     markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && m.position == 0));
     markers.insert(0, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(0, &format!("{num}/{den}")) });
-    crate::playlist::refit_pattern_clips(&mut s.session, n, old);
+    crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
 }
 
 /// Yes to the conflict question took the start marker away: the pattern's bars are the project's again (§3).
@@ -80,8 +80,8 @@ pub fn remove_start(s: &mut State, n: u16) {
     let Some(i) = start_marker(s, n) else { return };
     crate::control_ui::edit(s, STEP, crate::control::command::Region::Project, |s| {
         let old = s.session.project.pattern_length(n);
-        crate::patterns::pat_mut(&mut s.session, n).markers.remove(i);
-        crate::playlist::refit_pattern_clips(&mut s.session, n, old);
+        crate::edit::patterns::pat_mut(&mut s.session, n).markers.remove(i);
+        crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
     });
 }
 

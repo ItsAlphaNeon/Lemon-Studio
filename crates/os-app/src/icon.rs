@@ -72,3 +72,24 @@ pub enum Icon {
     FileZip,
     FileBlank,
 }
+
+/// Change icon... (Lemon Studio's design, spec: ui/plugin-window.md "Change icon"): the icons a channel or an effect slot
+/// can show, by name.
+pub const ICONS: &[(&str, crate::icon::Icon)] = {
+    use crate::icon::Icon::*;
+    &[
+        ("Drum", Kick),
+        ("Keys", PianoRoll),
+        ("Microphone", Mic),
+        ("Wave", Wave),
+        ("Note", Note),
+        ("Speaker", Speaker),
+        ("Metronome", Metronome),
+        ("Star", Star),
+        ("Plug", Plug),
+        ("Slice", Slice),
+        ("Touch", Touch),
+        ("Blend", Blend),
+    ]
+};
+

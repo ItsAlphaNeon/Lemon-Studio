@@ -27,9 +27,9 @@ const REPEAT: Duration = Duration::from_millis(60);
 /// (the slider is disabled); the current pattern's length in PAT mode (§2).
 pub fn range(s: &State) -> Option<u32> {
     if s.song_mode() {
-        crate::playlist::clips(&s.session).iter().map(|c| c.end()).max().filter(|&e| e > 0)
+        crate::edit::playlist::clips(&s.session).iter().map(|c| c.end()).max().filter(|&e| e > 0)
     } else {
-        Some(crate::piano::pattern_length(&s.session, s.pattern()).max(1))
+        Some(crate::edit::notes::pattern_length(&s.session, s.pattern()).max(1))
     }
 }
 

@@ -279,7 +279,7 @@ impl App {
         let song_ok = p.arrangement().is_some_and(|a| !a.clips.is_empty());
         let pat_ok = p.patterns.iter().find(|q| q.number == s.pattern()).is_some_and(|q| !q.notes.is_empty());
         if !song_ok && !pat_ok {
-            let text = format!("Nothing to export: the arranger is empty and {} has no notes.", crate::patterns::name_of(&s.session, s.pattern()));
+            let text = format!("Nothing to export: the arranger is empty and {} has no notes.", crate::edit::patterns::name_of(&s.session, s.pattern()));
             return self.tell(Kind::Warning, TITLE, spans(&[&text]));
         }
         let song = if song { song_ok } else { !pat_ok };
@@ -297,8 +297,8 @@ impl App {
         let device_rate = crate::transport::Transport::device_rate().unwrap_or(44100);
         let tempo = s.session.project.tick_tempo(s.tempo());
         let secs_per_tick = 60.0 / tempo.max(1.0) / f64::from(s.session.project.ppq.max(1));
-        let song_end = crate::playlist::clips(&s.session).iter().map(|c| c.end()).max().unwrap_or(0);
-        let pat_len = crate::piano::pattern_length(&s.session, s.pattern());
+        let song_end = crate::edit::playlist::clips(&s.session).iter().map(|c| c.end()).max().unwrap_or(0);
+        let pat_len = crate::edit::notes::pattern_length(&s.session, s.pattern());
         let sel = |r: Option<(u32, u32)>| r.filter(|(a, b)| b > a);
         let mut name_field = Field::default();
         name_field.set(&name);
@@ -434,7 +434,7 @@ impl App {
         let rate = f.device_rate;
         let tempo = s.session.project.tick_tempo(s.tempo());
         let ppq = s.session.project.ppq;
-        let song_end = crate::playlist::clips(&s.session).iter().map(|c| c.end()).max().unwrap_or(0);
+        let song_end = crate::edit::playlist::clips(&s.session).iter().map(|c| c.end()).max().unwrap_or(0);
         // The spans of ticks the file plays, in order: the export's span; a whole song from its start marker, broken at
         // skips (spec: audio/song-structure.md "Time markers"); else everything. A tick is placed in the file through
         // them, or is not in it.
@@ -481,7 +481,7 @@ impl App {
         let ticks = match f.span() {
             Some((a, b)) => b - a,
             None if f.song => spans.iter().map(|&(a, b)| b - a).sum::<u64>().min(u64::from(u32::MAX)) as u32,
-            None => crate::piano::pattern_length(&s.session, s.pattern()),
+            None => crate::edit::notes::pattern_length(&s.session, s.pattern()),
         };
         let tracks = s.session.project.mixer.iter().map(|m| m.index).max().unwrap_or(0);
         // Render to wave file... renders the tracks' outputs, as Split mixer tracks does.
@@ -494,7 +494,7 @@ impl App {
             markers,
             loop_frames,
             tempo: (tempo, f64::from(ticks) / f64::from(ppq.max(1))),
-            track_names: (0..=tracks).map(|t| crate::mixer::name(&s.session, t)).collect(),
+            track_names: (0..=tracks).map(|t| crate::edit::mixer::name(&s.session, t)).collect(),
             tracks: f.tracks.clone(),
         }
     }
@@ -508,7 +508,7 @@ impl App {
             return;
         }
         let name = match tracks[..] {
-            [t] => Some(crate::mixer::name(&self.state.session, t)),
+            [t] => Some(crate::edit::mixer::name(&self.state.session, t)),
             _ => None,
         };
         self.open_export(false);
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(empty.state.dialogs.len(), 1, "a warning says why");
         // PAT with an empty pattern still exports the playlist (and SONG with an empty playlist the pattern).
         empty.state.dialogs.clear();
-        crate::playlist::arr_mut(&mut empty.state.session).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
+        crate::edit::playlist::arr_mut(&mut empty.state.session).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
         empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));
         let f = form(&empty).expect("the Export form");
         assert!(f.song && f.song_ok && !f.pat_ok, "Play starts on Song");
@@ -604,7 +604,7 @@ mod tests {
     fn the_parts_change_the_choices() {
         let mut app = app();
         app.state.piano.range = Some((0, 96));
-        crate::playlist::arr_mut(&mut app.state.session).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
+        crate::edit::playlist::arr_mut(&mut app.state.session).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
         app.act(crate::app::Action::MenuItem(0, FILE_EXPORT_MP3));
         click(&mut app, FHit::Seg(1, 1));
         assert_eq!(form(&app).unwrap().span(), Some((0, 96)), "the piano roll's selection");

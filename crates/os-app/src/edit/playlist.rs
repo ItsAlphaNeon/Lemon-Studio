@@ -38,8 +38,8 @@ pub fn put_icon(s: &mut crate::session::Session, owner: IconOwner, icon: Option<
 /// track's `TRACK_ICON_KEY + track` or an `fx_key`).
 pub fn icon_items(s: &crate::session::Session, key: usize) -> Vec<PItem> {
     // A container's member: its own icon, saved with the container (`crate::container::Member::icon`).
-    let cur = match crate::container::of_key(s, key) {
-        Some((t, k, id)) => crate::container::member(s, t, k, id).and_then(|m| m.icon),
+    let cur = match crate::edit::container::of_key(s, key) {
+        Some((t, k, id)) => crate::edit::container::member(s, t, k, id).and_then(|m| m.icon),
         None => window_icon(&s.project, key),
     };
     let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];
@@ -917,8 +917,8 @@ pub fn toggle_collapse(s: &mut crate::session::Session, t: u16) {
 /// channel that hosts none, a sampler's or an audio clip's).
 pub fn plugin_cpu(s: &crate::session::Session, key: usize) -> Option<os_model::PluginCpu> {
     // A container's member: its own (Lemon Studio's design, `crate::container::Member::cpu`).
-    if let Some((t, k, id)) = crate::container::of_key(s, key) {
-        return crate::container::member(s, t, k, id).map(|m| m.cpu);
+    if let Some((t, k, id)) = crate::edit::container::of_key(s, key) {
+        return crate::edit::container::member(s, t, k, id).map(|m| m.cpu);
     }
     match crate::plugins::fx_of(key) {
         Some((t, k)) => {
@@ -944,3 +944,68 @@ pub(crate) fn fill_cpu(s: &crate::session::Session, key: usize, menu: &mut Popup
         it.mark = Mark::Check(on);
     }
 }
+
+/// The project's samples as decoded once (a waveform's peaks and length, its tones), shared with the samplers playing
+/// them: the session's, since what a clip's length is follows from them (`source_len`).
+#[derive(Debug, Default)]
+pub struct Samples {
+    /// Waveform cache by sample path (`None` = could not be loaded).
+    pub waves: RefCell<HashMap<String, Option<Rc<Wave>>>>,
+    /// Tones of the same samples for colourful waveforms, analysed when first needed (`tones`).
+    pub tones: RefCell<HashMap<String, Option<Rc<os_dsp::tone::Tones>>>>,
+    /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
+    pub wait: bool,
+}
+
+impl Samples {
+    /// The waveform of a sample path (loaded and summarised once).
+    pub fn wave(&self, path: &str) -> Option<Rc<Wave>> {
+        if let Some(w) = self.waves.borrow().get(path) {
+            return w.clone();
+        }
+        if self.wait {
+            return None;
+        }
+        // The decode is shared with the sampler playing the file (decoded once, while the project loaded).
+        let file = crate::plugins::resolve_sample(path);
+        let w = os_engine::sample::load_shared(std::path::Path::new(&file)).ok().map(|s| {
+            let per = 64usize;
+            let peaks = s
+                .left
+                .chunks(per)
+                .zip(s.right.chunks(per))
+                .map(|(l, r)| {
+                    // The chunk's own range (a DC sample is one value, not a band from zero; §9a signed waveforms).
+                    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+                    for (a, b) in l.iter().zip(r) {
+                        let v = (a + b) * 0.5;
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                    (lo, hi)
+                })
+                .collect();
+            Rc::new(Wave { rate: s.rate, frames: s.frames(), per, peaks })
+        });
+        self.waves.borrow_mut().insert(path.to_string(), w.clone());
+        w
+    }
+
+    /// The tones of a sample path, block by block (spec: ui/settings-choices.md "Display: Colorful waveforms
+    /// (2026-10-16)"): analysed once, the first time a waveform is drawn in colour, and kept with the peaks.
+    pub fn tones(&self, path: &str) -> Option<Rc<os_dsp::tone::Tones>> {
+        if let Some(t) = self.tones.borrow().get(path) {
+            return t.clone();
+        }
+        if self.wait {
+            return None;
+        }
+        let file = crate::plugins::resolve_sample(path);
+        let t = os_engine::sample::load_shared(std::path::Path::new(&file))
+            .ok()
+            .map(|s| Rc::new(os_dsp::tone::Tones::analyse_stereo(&s.left, &s.right, s.rate)));
+        self.tones.borrow_mut().insert(path.to_string(), t.clone());
+        t
+    }
+}
+

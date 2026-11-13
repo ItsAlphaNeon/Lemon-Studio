@@ -240,10 +240,10 @@ pub(crate) fn point_in(s: &mut Session, kind: u32, value: i32) {
     take.controls.retain(|c| c.0 != kind);
     take.controls.push((kind, tick));
     if let Some(last) = last.filter(|&l| l < tick && !Opt::Blend.on()) {
-        let p = crate::piano::pattern_mut(s);
+        let p = crate::edit::notes::pattern_mut(s);
         p.controls.retain(|c| !(c.kind == kind && c.position > last && c.position < tick));
     }
-    crate::piano::set_control(s, (kind >> 16) as u16, kind as u16, tick, value);
+    crate::edit::notes::set_control(s, (kind >> 16) as u16, kind as u16, tick, value);
     s.dirty = true;
 }
 
@@ -283,8 +283,8 @@ fn open_take_in(s: &mut Session, song: bool) {
     let pattern = s.pattern();
     let snap = crate::history::Snap::pattern(s, pattern);
     let snap = if song {
-        crate::playlist::arr_mut(s);
-        crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(crate::playlist::capture(s))), snap])
+        crate::edit::playlist::arr_mut(s);
+        crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(crate::edit::playlist::capture(s))), snap])
     } else {
         snap
     };
@@ -308,9 +308,9 @@ fn rec_pattern_tick_in(s: &mut Session, t: f64, song: bool) -> Option<f64> {
     let pattern = s.pattern();
     let whole = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none();
     let ti = t.max(0.0) as u32;
-    if let Some(p) = crate::piano::pattern_tick_in_song(s, t) {
+    if let Some(p) = crate::edit::notes::pattern_tick_in_song(s, t) {
         // The whole-pattern clip playing there becomes the take's.
-        let under = crate::playlist::clips(s)
+        let under = crate::edit::playlist::clips(s)
             .iter()
             .filter(|c| whole(c) && c.position <= ti && (f64::from(c.position) + p - t).abs() < 1e-6)
             .max_by_key(|c| c.position)
@@ -323,7 +323,7 @@ fn rec_pattern_tick_in(s: &mut Session, t: f64, song: bool) -> Option<f64> {
     // Right after a whole-pattern clip, less than a bar past the bar line at or after its end, with its track free
     // up to the end of `t`'s bar: that clip becomes the take's and grows instead of a second one being placed.
     let end = (ti / bar + 1) * bar;
-    let clips = crate::playlist::clips(s);
+    let clips = crate::edit::playlist::clips(s);
     let before = clips
         .iter()
         .filter(|c| whole(c) && !c.muted && c.end() <= ti && ti < c.end().div_ceil(bar) * bar + bar)
@@ -335,15 +335,15 @@ fn rec_pattern_tick_in(s: &mut Session, t: f64, song: bool) -> Option<f64> {
         return grow_take_clip(s, t).map(|(p, _)| p);
     }
     let at = ti / bar * bar;
-    let len = crate::piano::pattern_length(s, pattern).max(bar);
-    let track = crate::playlist::free_track(s, 0, at, at + len);
+    let len = crate::edit::notes::pattern_length(s, pattern).max(bar);
+    let track = crate::edit::playlist::free_track(s, 0, at, at + len);
     let clip = os_model::Clip::new(at, len, track, ClipSource::Pattern(pattern));
-    crate::playlist::arr_mut(s).clips.push(clip);
+    crate::edit::playlist::arr_mut(s).clips.push(clip);
     if let Some(k) = s.rec.take.as_mut() {
         k.clip = Some((track, at));
     }
     s.dirty = true;
-    crate::piano::pattern_tick_in_song(s, t)
+    crate::edit::notes::pattern_tick_in_song(s, t)
 }
 
 /// Writes held note `h`, ending at playback tick `now` (None: where it started). A note held over the pattern's
@@ -446,7 +446,7 @@ pub(crate) fn tick_in(s: &mut Session, sel: Option<(u32, u32)>) -> bool {
     // goes on as usual: FL recorded from the song's start with a Start recording marker later on.
     if live && s.transport.song() {
         let from = s.rec.last.filter(|&l| l <= now);
-        let mut passed: Vec<(u32, u8)> = crate::playlist::markers(s)
+        let mut passed: Vec<(u32, u8)> = crate::edit::playlist::markers(s)
             .iter()
             .filter(|m| matches!(m.kind, TimeMarker::PUNCH_IN | TimeMarker::PUNCH_OUT))
             .filter(|m| from.is_some_and(|l| f64::from(m.position) > l && f64::from(m.position) <= now))
@@ -514,7 +514,7 @@ fn grow_take_clip(s: &mut Session, t: f64) -> Option<(f64, bool)> {
     }
     let bar = s.project.bar_ticks().max(1);
     let pattern = s.pattern();
-    let c = crate::playlist::arr_mut(s)
+    let c = crate::edit::playlist::arr_mut(s)
         .clips
         .iter_mut()
         .find(|c| c.source == ClipSource::Pattern(pattern) && c.window.is_none() && c.track == track && c.position == at)?;

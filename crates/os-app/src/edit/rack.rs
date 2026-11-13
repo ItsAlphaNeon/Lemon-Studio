@@ -160,7 +160,7 @@ pub fn set_len(s: &mut crate::session::Session, steps: Option<u32>) {
     let n = s.pattern().max(1);
     let max = max_steps(s);
     // No undo step, as in FL (measured 2026-10-28).
-    crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
+    crate::edit::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
     s.dirty = true;
 }
 
@@ -265,7 +265,7 @@ pub fn row_notes(s: &crate::session::Session, r: usize) -> Vec<Note> {
 pub(crate) fn set_row_notes(s: &mut crate::session::Session, r: usize, notes: Vec<Note>) {
     let Some(ch) = ch_index(s, r) else { return };
     let n = s.pattern().max(1);
-    let p = crate::patterns::pat_mut(s, n);
+    let p = crate::edit::patterns::pat_mut(s, n);
     p.notes.retain(|x| x.channel != ch);
     p.notes.extend(notes.into_iter().map(|x| Note { channel: ch, ..x }));
     p.notes.sort_by_key(|x| (x.position, x.channel));
@@ -525,7 +525,7 @@ pub(crate) fn put_loop(s: &mut crate::session::Session, r: usize, v: Option<u32>
         return;
     }
     let n = s.pattern();
-    let pat = crate::patterns::pat_mut(s, n);
+    let pat = crate::edit::patterns::pat_mut(s, n);
     pat.loops.retain(|l| l.0 != ch);
     if let Some(v) = v {
         pat.loops.push((ch, v));
@@ -548,7 +548,7 @@ pub fn set_loop_mode(s: &mut crate::session::Session, on: bool) {
         return;
     }
     let (n, t) = (s.pattern(), loop_type(s));
-    crate::patterns::pat_mut(s, n).loop_mode = on.then(|| LOOP_TYPE_CODES[usize::from(t.min(2))]);
+    crate::edit::patterns::pat_mut(s, n).loop_mode = on.then(|| LOOP_TYPE_CODES[usize::from(t.min(2))]);
     if on && t == 1 {
         fill_all(s);
     }
@@ -559,9 +559,57 @@ pub fn set_loop_type(s: &mut crate::session::Session, t: u8) {
     (s.loop_type, s.loop_type_of) = (t, s.pattern());
     if loop_mode(s) {
         let n = s.pattern();
-        crate::patterns::pat_mut(s, n).loop_mode = Some(LOOP_TYPE_CODES[usize::from(t.min(2))]);
+        crate::edit::patterns::pat_mut(s, n).loop_mode = Some(LOOP_TYPE_CODES[usize::from(t.min(2))]);
         if t == 1 {
             fill_all(s);
         }
     }
 }
+
+/// `play_project` on the session.
+pub fn play_project_in(s: &crate::session::Session) -> Project {
+    let mut p = s.project.clone();
+    // Playback reads nothing of the rack's locks and zips: without them, locking or zipping builds no new engine.
+    for c in &mut p.channels {
+        (c.rack.locked, c.rack.zipped) = (false, false);
+    }
+    p.tempo = Some(s.tempo());
+    // The pattern shown: a song with no clips plays it (os-engine), not the one the project was opened or saved on.
+    p.current_pattern = Some(s.pattern().max(1));
+    // Each pattern plays its own loops, in its own loop mode (FL keeps them per pattern).
+    expand_loops(&mut p, s, None);
+    crate::perform::apply(s, &mut p);
+    p
+}
+
+/// In each pattern in loop mode, a looping row repeats its first loop length's steps up to the end of the pattern (its
+/// length as played, §23); notes past the loop length go. The pattern's own loops (FL 24.1.1's form): a length, and
+/// under Advanced looping a loop point too, which is the row's notes there rounded up to the unit. `rows`: only those.
+pub(crate) fn expand_loops(p: &mut Project, s: &crate::session::Session, rows: Option<&[usize]>) {
+    let ps = per_step(s);
+    let ends: Vec<u32> = p.patterns.iter().map(|pat| p.pattern_length(pat.number)).collect();
+    let chans: Vec<u16> = p.channels.iter().enumerate().filter(|(r, _)| rows.is_none_or(|rs| rs.contains(r))).map(|(_, c)| c.index).collect();
+    for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
+        let Some(code) = pat.loop_mode else { continue };
+        let advanced = loop_type_of(code) == 2;
+        for &ch in &chans {
+            let Some(v) = pat.loops.iter().find(|l| l.0 == ch).map(|l| l.1) else { continue };
+            let len = if advanced { unit_steps(s, &pat.notes, ch, unit_of(v)).or(length_of(v)) } else { length_of(v) };
+            let Some(len) = len else { continue };
+            let span = len.max(1) * ps;
+            let src: Vec<Note> = pat.notes.iter().filter(|n| n.channel == ch && n.position < span).copied().collect();
+            if src.is_empty() {
+                continue;
+            }
+            pat.notes.retain(|n| n.channel != ch);
+            let mut off = 0;
+            while off < end {
+                pat.notes.extend(src.iter().filter(|n| n.position + off < end).map(|n| Note { position: n.position + off, ..*n }));
+                off += span;
+            }
+            pat.notes.sort_by_key(|n| (n.position, n.channel));
+        }
+    }
+}
+
+

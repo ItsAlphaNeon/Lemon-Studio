@@ -176,7 +176,7 @@ pub fn name(s: &State, t: u32) -> String {
         Some(row) => s.session.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1)),
         None => format!("Channel {}", ch + 1),
     };
-    let mix = |t: u16| crate::mixer::name(&s.session, t);
+    let mix = |t: u16| crate::edit::mixer::name(&s.session, t);
     match t {
         InitControl::MAIN_VOLUME => return "Main volume".into(),
         InitControl::MAIN_SWING => return "Main swing".into(),
@@ -184,8 +184,8 @@ pub fn name(s: &State, t: u32) -> String {
         _ => {}
     }
     // A container member's wet or dry level (spec: plugins/patcher/README.md §4.2).
-    if let Some((m, k, id, wet)) = crate::container::level_of(&s.session, target::decode(t)) {
-        return crate::container::level_name(&s.session, m, k, id, wet);
+    if let Some((m, k, id, wet)) = crate::edit::container::level_of(&s.session, target::decode(t)) {
+        return crate::edit::container::level_name(&s.session, m, k, id, wet);
     }
     match target::decode(t) {
         Target::Tempo => "Tempo".into(),

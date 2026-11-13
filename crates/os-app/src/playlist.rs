@@ -8,10 +8,9 @@
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 pub use crate::edit::playlist::*;
+pub use crate::icon::ICONS;
 
 use os_model::{
     target, AutoMode, AutoPoint, Automation, Channel, ChannelKind, Clip, ClipSource, PlaylistTrack, Rgb, TimeMarker,
@@ -681,26 +680,6 @@ pub struct PlaylistState {
     pub perf_velocity_subclips: bool,
 }
 
-/// Change icon... (Lemon Studio's design, spec: ui/plugin-window.md "Change icon"): the icons a channel or an effect slot
-/// can show, by name.
-pub const ICONS: &[(&str, crate::icons::Icon)] = {
-    use crate::icons::Icon::*;
-    &[
-        ("Drum", Kick),
-        ("Keys", PianoRoll),
-        ("Microphone", Mic),
-        ("Wave", Wave),
-        ("Note", Note),
-        ("Speaker", Speaker),
-        ("Metronome", Metronome),
-        ("Star", Star),
-        ("Plug", Plug),
-        ("Slice", Slice),
-        ("Touch", Touch),
-        ("Blend", Blend),
-    ]
-};
-
 /// The icon numbers of a project file (a channel's event 155, a mixer track's event 95) whose pictures [`ICONS`] has,
 /// and the icon each opens as (Lemon Studio's design, spec: ui/plugin-window.md "Change icon", the pictures in
 /// flp/events/mixer.md "Icon numbers"): a snare drum or a drum kit the drum, the piano keys the keys, the microphone,
@@ -777,7 +756,7 @@ pub fn icons(p: &os_model::Project) -> HashMap<IconOwner, crate::icons::Icon> {
 /// Sets (or with `None` clears) the icon of `key`. A container member's icon is part of its container's state: one undo
 /// step.
 fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
-    if let Some((t, k, id)) = crate::container::of_key(&s.session, key) {
+    if let Some((t, k, id)) = crate::edit::container::of_key(&s.session, key) {
         let icon = icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i);
         crate::container_ui::edit_own(s, t, k, id, crate::container::ICON, |m| m.icon = icon);
         return;
@@ -840,70 +819,6 @@ impl PlaylistState {
     }
 }
 
-
-/// The project's samples as decoded once (a waveform's peaks and length, its tones), shared with the samplers playing
-/// them: the session's, since what a clip's length is follows from them (`source_len`).
-#[derive(Debug, Default)]
-pub struct Samples {
-    /// Waveform cache by sample path (`None` = could not be loaded).
-    pub waves: RefCell<HashMap<String, Option<Rc<Wave>>>>,
-    /// Tones of the same samples for colourful waveforms, analysed when first needed (`tones`).
-    pub tones: RefCell<HashMap<String, Option<Rc<os_dsp::tone::Tones>>>>,
-    /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
-    pub wait: bool,
-}
-
-impl Samples {
-    /// The waveform of a sample path (loaded and summarised once).
-    pub fn wave(&self, path: &str) -> Option<Rc<Wave>> {
-        if let Some(w) = self.waves.borrow().get(path) {
-            return w.clone();
-        }
-        if self.wait {
-            return None;
-        }
-        // The decode is shared with the sampler playing the file (decoded once, while the project loaded).
-        let file = crate::plugins::resolve_sample(path);
-        let w = os_engine::sample::load_shared(std::path::Path::new(&file)).ok().map(|s| {
-            let per = 64usize;
-            let peaks = s
-                .left
-                .chunks(per)
-                .zip(s.right.chunks(per))
-                .map(|(l, r)| {
-                    // The chunk's own range (a DC sample is one value, not a band from zero; §9a signed waveforms).
-                    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
-                    for (a, b) in l.iter().zip(r) {
-                        let v = (a + b) * 0.5;
-                        lo = lo.min(v);
-                        hi = hi.max(v);
-                    }
-                    (lo, hi)
-                })
-                .collect();
-            Rc::new(Wave { rate: s.rate, frames: s.frames(), per, peaks })
-        });
-        self.waves.borrow_mut().insert(path.to_string(), w.clone());
-        w
-    }
-
-    /// The tones of a sample path, block by block (spec: ui/settings-choices.md "Display: Colorful waveforms
-    /// (2026-10-16)"): analysed once, the first time a waveform is drawn in colour, and kept with the peaks.
-    pub fn tones(&self, path: &str) -> Option<Rc<os_dsp::tone::Tones>> {
-        if let Some(t) = self.tones.borrow().get(path) {
-            return t.clone();
-        }
-        if self.wait {
-            return None;
-        }
-        let file = crate::plugins::resolve_sample(path);
-        let t = os_engine::sample::load_shared(std::path::Path::new(&file))
-            .ok()
-            .map(|s| Rc::new(os_dsp::tone::Tones::analyse_stereo(&s.left, &s.right, s.rate)));
-        self.tones.borrow_mut().insert(path.to_string(), t.clone());
-        t
-    }
-}
 
 // ---------------------------------------------------------------------------------------------------------
 // Geometry
@@ -2153,7 +2068,7 @@ fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
             }
         }
         PickCmd::RandomColor => {
-            crate::rack::random_color(&mut s.session, row, u64::from(ch));
+            crate::edit::rack::random_color(&mut s.session, row, u64::from(ch));
             s.session.dirty = true;
         }
         PickCmd::LoadSample => return crate::rack::run(app, crate::rack::RCmd::LoadSample(row)),
@@ -3427,9 +3342,9 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
             }
         }
         EditTarget::PatternName(n) => source_name(&s.session, ClipSource::Pattern(n)),
-        EditTarget::MixerName(n) => crate::mixer::name(&s.session, n),
-        EditTarget::SlotName(t, k) => crate::mixer::slot_name(&s.session, t, k).unwrap_or_default(),
-        EditTarget::MemberName(t, k, id) => crate::container::member(&s.session, t, k, id).map(|m| m.shown().to_string()).unwrap_or_default(),
+        EditTarget::MixerName(n) => crate::edit::mixer::name(&s.session, n),
+        EditTarget::SlotName(t, k) => crate::edit::mixer::slot_name(&s.session, t, k).unwrap_or_default(),
+        EditTarget::MemberName(t, k, id) => crate::edit::container::member(&s.session, t, k, id).map(|m| m.shown().to_string()).unwrap_or_default(),
         EditTarget::MixerInsert(_) => "2".into(),
         EditTarget::MixerGroup(_) => String::new(),
         EditTarget::Chords => crate::chord_tool::last(),
@@ -3490,7 +3405,7 @@ pub fn commit_edit(s: &mut State) {
             });
         }
         EditTarget::SlotName(t, k) => crate::control_ui::edit(s, "Slot name", crate::control::command::Region::Project, |s| {
-            crate::mixer::set_slot_label(&mut s.session, t, k, (!text.is_empty()).then_some(text));
+            crate::edit::mixer::set_slot_label(&mut s.session, t, k, (!text.is_empty()).then_some(text));
         }),
         EditTarget::MemberName(t, k, id) => crate::container_ui::rename(s, t, k, id, &text),
         EditTarget::TypeIn(t, norm) => crate::typein_ui::accept(s, t, norm, &text),
@@ -4740,7 +4655,7 @@ pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
         *b = !*b;
     };
     let name = if smart { "Auto-bypass when silent" } else { "Threaded processing" };
-    if let Some((t, k, id)) = crate::container::of_key(&s.session, key) {
+    if let Some((t, k, id)) = crate::edit::container::of_key(&s.session, key) {
         crate::container_ui::edit_own(s, t, k, id, name, |m| flip(&mut m.cpu));
         return;
     }
@@ -4781,7 +4696,7 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
     // removes it from the container. Its own name, colour, icon and CPU switches are a slot's entries on the member
     // (Lemon Studio's design, spec: plugins/patcher/README.md §4.5), each one undo step, saved with the container.
     if let Some(&(t, k, id)) = s.session.plugin_members.get(&key) {
-        let Some(list) = crate::container::members(&s.session, t, k) else { return };
+        let Some(list) = crate::edit::container::members(&s.session, t, k) else { return };
         let Some(i) = list.iter().position(|m| m.id == id) else { return };
         let target = if list[i].instrument { crate::plugin_menu::Target::MemberInst(k, i) } else { crate::plugin_menu::Target::Member(k, i) };
         for it in menu.items.iter_mut() {
@@ -5019,7 +4934,7 @@ mod tests {
         app.state.session.plugins.effects = crate::plugins::builtin_effects();
         app.state.plugdb.rebuild(&app.state.session.plugins);
         let (t, k) = (3u16, 2u8);
-        crate::mixer::track_mut(&mut app.state.session, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));
+        crate::edit::mixer::track_mut(&mut app.state.session, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));
         app.state.selected_mixer = 5;
         let key = crate::plugins::fx_key(t, k);
         let mut m = plugin_window_menu(key, false, 0.0, 0.0);
@@ -5056,10 +4971,10 @@ mod tests {
         assert_eq!(app.state.playlist.edit.as_ref().map(|e| e.target.clone()), Some(EditTarget::SlotName(t, k)));
         app.state.playlist.edit = None;
         run(&mut app, entry(&m, "Delete...").cmd.clone());
-        assert!(crate::mixer::track(&app.state.session, t).unwrap().slots[usize::from(k)].is_none(), "the slot is cleared");
+        assert!(crate::edit::mixer::track(&app.state.session, t).unwrap().slots[usize::from(k)].is_none(), "the slot is cleared");
         assert_eq!(app.state.selected_mixer, 5, "the selection stays");
         crate::history_ui::undo(&mut app.state);
-        assert!(crate::mixer::track(&app.state.session, t).unwrap().slots[usize::from(k)].is_some(), "one undo step");
+        assert!(crate::edit::mixer::track(&app.state.session, t).unwrap().slots[usize::from(k)].is_some(), "one undo step");
     }
 
     /// Change icon... (Lemon Studio's design, ui/plugin-window.md "Change icon"): the picker's and the window menu's
@@ -5118,18 +5033,18 @@ mod tests {
         assert!(!app.state.session.project.channels[1].misc.cpu.smart_disable, "one undo step");
 
         let (t, k) = (3u16, 2u8);
-        crate::mixer::track_mut(&mut app.state.session, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));
+        crate::edit::mixer::track_mut(&mut app.state.session, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));
         let key = crate::plugins::fx_key(t, k);
         let cmd = entry(&menu(&app, key), "Allow threaded processing").cmd.clone();
         run(&mut app, cmd);
-        assert!(!crate::mixer::track(&app.state.session, t).unwrap().slot_cpu[usize::from(k)].threaded);
+        assert!(!crate::edit::mixer::track(&app.state.session, t).unwrap().slot_cpu[usize::from(k)].threaded);
         assert_eq!(entry(&menu(&app, key), "Allow threaded processing").mark, Mark::Check(false));
         app.state.selected_mixer = t;
         run(&mut app, Cmd::Mixer(crate::mixer::MCmd::SlotMove(k, 1)));
-        let m = crate::mixer::track(&app.state.session, t).unwrap();
+        let m = crate::edit::mixer::track(&app.state.session, t).unwrap();
         assert_eq!((m.slot_cpu[2].threaded, m.slot_cpu[3].threaded), (true, false), "the switches follow the plugin");
         crate::history_ui::undo(&mut app.state);
         crate::history_ui::undo(&mut app.state);
-        assert!(crate::mixer::track(&app.state.session, t).unwrap().slot_cpu.iter().all(|c| c.threaded));
+        assert!(crate::edit::mixer::track(&app.state.session, t).unwrap().slot_cpu.iter().all(|c| c.threaded));
     }
 }

@@ -202,18 +202,6 @@ pub enum MCmd {
     InsertState(u16, std::path::PathBuf),
 }
 
-/// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
-#[derive(Debug, Clone, PartialEq)]
-pub enum FxReq {
-    /// `state`: the instance starts from it (a Tesla set up for recording), else from its defaults.
-    Create { track: u16, slot: u8, index: usize, state: Option<Vec<u8>> },
-    Toggle { track: u16, slot: u8 },
-    Show { track: u16, slot: u8 },
-    Delete { track: u16, slot: u8 },
-    /// Slots moved inside a track or tracks moved: `map[(t, s)] = (t2, s2)`; unlisted instances are dropped.
-    Remap(Vec<((u16, u8), (u16, u8))>),
-}
-
 pub const LAYOUTS: [&str; 8] = ["Compact", "Compact 2", "Compact alt", "Wide", "Wide 2", "Wide 3", "Wide alt", "Extra large"];
 /// Index of "Wide" (the only layout drawn).
 pub const WIDE: u8 = 3;
@@ -954,7 +942,7 @@ pub fn route_channels(s: &mut State, dst: u16, spread: bool) -> Option<String> {
     s.selected_mixer = dst;
     changed(&mut s.session);
     Some(if moved == 1 {
-        format!("Routed {} to {}", crate::rack::channel_name(&s.session, first), name(&s.session, dst))
+        format!("Routed {} to {}", crate::edit::rack::channel_name(&s.session, first), name(&s.session, dst))
     } else {
         format!("Routed {moved} channels")
     })
@@ -985,7 +973,7 @@ pub fn route_free(s: &mut State, rows: &[usize]) -> Option<String> {
     s.selected_mixer = t;
     changed(&mut s.session);
     Some(if rows.len() == 1 {
-        format!("Routed {} to {}", crate::rack::channel_name(&s.session, r), name(&s.session, t))
+        format!("Routed {} to {}", crate::edit::rack::channel_name(&s.session, r), name(&s.session, t))
     } else {
         format!("Routed {} channels to free tracks", rows.len())
     })
@@ -1177,7 +1165,7 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         // the channel rack's gradient (no dialog).
         if is_selected(s, n) && selected(s).len() > 1 { PItem::new("Gradient color...", mx(MCmd::GradientColor)) } else { PItem::not_yet("Gradient color...") },
         // Lemon Studio's design (session only, as the rack's): drawn under the track's name.
-        PItem::sub("Change icon...", crate::playlist::icon_items(&s.session, crate::playlist::TRACK_ICON_KEY + usize::from(n))),
+        PItem::sub("Change icon...", crate::edit::playlist::icon_items(&s.session, crate::playlist::TRACK_ICON_KEY + usize::from(n))),
         // Greyed on tracks that have an audio track already (Assign) or none (Unassign), as in the original.
         {
             let tg = targets(s, n);
@@ -1335,7 +1323,7 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
     let replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), true);
     // CPU: the plugin's switches, as in its window menu (spec: ui/plugin-window.md "CPU", audio/auto-bypass.md).
     let key = crate::plugins::fx_key(s.selected_mixer, slot);
-    let cpu = crate::playlist::plugin_cpu(&s.session, key).unwrap_or_default();
+    let cpu = crate::edit::playlist::plugin_cpu(&s.session, key).unwrap_or_default();
     let items = vec![
         PItem::sub("Replace", replace),
         PItem::new("Delete...", mx(MCmd::SlotDelete(slot))),
@@ -1370,7 +1358,7 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
         PItem::sub("Change color...", color_items(|c| mx(MCmd::SlotColor(slot, c)))),
         PItem::new("Random color", mx(MCmd::SlotRandomColor(slot))),
         // Lemon Studio's design (session only): drawn before the slot's name and on its plugin window.
-        PItem::sub("Change icon...", crate::playlist::icon_items(&s.session, crate::plugins::fx_key(s.selected_mixer, slot))),
+        PItem::sub("Change icon...", crate::edit::playlist::icon_items(&s.session, crate::plugins::fx_key(s.selected_mixer, slot))),
         PItem::sep(),
         scaling_menu(app, slot),
         PItem::new("Help", mx(MCmd::SlotHelp(slot))),
@@ -1801,21 +1789,21 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::MemberRename(slot, i) => {
             let t = s.selected_mixer;
-            if let Some(m) = crate::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
+            if let Some(m) = crate::edit::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
                 crate::playlist::start_edit(s, EditTarget::MemberName(t, slot, m.id), at);
             }
             None
         }
         MCmd::MemberColor(slot, i, c) => {
             let t = s.selected_mixer;
-            if let Some(m) = crate::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
+            if let Some(m) = crate::edit::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
                 crate::container_ui::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = c);
             }
             None
         }
         MCmd::MemberRandomColor(slot, i) => {
             let t = s.selected_mixer;
-            if let Some(m) = crate::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
+            if let Some(m) = crate::edit::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
                 let seed = (u64::from(t) << 16 | u64::from(slot) << 8 | u64::from(m.id)).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed());
                 let c = crate::patterns::random_color(seed);
                 crate::container_ui::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = Some(c));
@@ -2131,7 +2119,7 @@ impl App {
     pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
         let key = crate::plugins::fx_key(track, slot);
         // A container: its list's window.
-        if crate::container::members(&self.state.session, track, slot).is_some() {
+        if crate::edit::container::members(&self.state.session, track, slot).is_some() {
             crate::container_ui::show(&mut self.state, track, slot);
             return;
         }
@@ -2629,8 +2617,8 @@ mod tests {
         use crate::playlist::IconOwner;
         let mut a = app();
         let red = Rgb { r: 200, g: 0, b: 0 };
-        crate::mixer::set_slot_color(&mut a.state.session, 3, 0, Some(red));
-        crate::playlist::put_icon(&mut a.state.session, IconOwner::Track(3), Some(crate::icons::Icon::Star));
+        crate::edit::mixer::set_slot_color(&mut a.state.session, 3, 0, Some(red));
+        crate::edit::playlist::put_icon(&mut a.state.session, IconOwner::Track(3), Some(crate::icons::Icon::Star));
         run(&mut a, MCmd::Delete(2));
         assert_eq!(crate::mixer::slot_colors_of(&a.state.session.project).get(&(2, 0)), Some(&red), "the colour follows its track left");
         crate::history_ui::undo(&mut a.state);

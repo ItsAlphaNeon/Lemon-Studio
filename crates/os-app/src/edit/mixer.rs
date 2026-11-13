@@ -324,7 +324,7 @@ pub(crate) fn name_after(s: &mut crate::session::Session, t: u16, r: usize) {
     if t == 0 {
         return;
     }
-    let nm = crate::rack::channel_name(s, r);
+    let nm = crate::edit::rack::channel_name(s, r);
     let col = s.project.channels.get(r).and_then(|c| c.color);
     if let Some(m) = track_mut(s, t) {
         m.name = Some(nm);
@@ -524,3 +524,16 @@ pub fn inputs(s: &crate::session::Session, n: u16) -> Vec<u16> {
     ins.sort_unstable();
     ins
 }
+
+/// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FxReq {
+    /// `state`: the instance starts from it (a Tesla set up for recording), else from its defaults.
+    Create { track: u16, slot: u8, index: usize, state: Option<Vec<u8>> },
+    Toggle { track: u16, slot: u8 },
+    Show { track: u16, slot: u8 },
+    Delete { track: u16, slot: u8 },
+    /// Slots moved inside a track or tracks moved: `map[(t, s)] = (t2, s2)`; unlisted instances are dropped.
+    Remap(Vec<((u16, u8), (u16, u8))>),
+}
+

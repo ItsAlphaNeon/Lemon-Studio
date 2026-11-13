@@ -674,7 +674,7 @@ pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
     let ps = per_step(&s.session);
     let n = s.pattern().max(1);
     let mute = s.rack.opts.contains(MUTE_REMOVED);
-    let p = crate::patterns::pat_mut(&mut s.session, n);
+    let p = crate::edit::patterns::pat_mut(&mut s.session, n);
     let has = step_on(&p.notes, ch, k, ps);
     let at = |x: &Note| x.channel == ch && x.position / ps == k;
     if on && !has {
@@ -873,7 +873,7 @@ pub fn cuts_itself(m: &os_model::ChannelMisc) -> bool {
 pub fn transpose_selected(s: &mut State, semis: i32) {
     let chans: Vec<u16> = s.rack.sel.iter().filter_map(|&r| ch_index(&s.session, r)).collect();
     let n = s.pattern().max(1);
-    for note in crate::patterns::pat_mut(&mut s.session, n).notes.iter_mut().filter(|x| chans.contains(&x.channel)) {
+    for note in crate::edit::patterns::pat_mut(&mut s.session, n).notes.iter_mut().filter(|x| chans.contains(&x.channel)) {
         note.key = (i32::from(note.key) + semis).clamp(0, 131) as u16;
     }
     s.session.dirty = true;
@@ -1622,7 +1622,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Rename, color and icon...", RCmd::Rename(r)),
         it("Change color...", RCmd::ChangeColor(r)),
         it("Random color", RCmd::RandomColor(r)),
-        PItem::sub("Change icon...", crate::playlist::icon_items(&s.session, r)),
+        PItem::sub("Change icon...", crate::edit::playlist::icon_items(&s.session, r)),
         PItem::sep(),
         if sampler { it("Load sample...", RCmd::LoadSample(r)) } else { PItem::new("Load sample...", Cmd::Nothing).off() },
         it("Chokes itself", RCmd::CutItself(r)).mark(Mark::Check(s.session.project.channels.get(r).is_some_and(|c| cuts_itself(&c.misc)))),
@@ -2384,7 +2384,7 @@ pub fn open_fill(s: &mut State, r: usize) {
 /// (ui/playlist.md §9c).
 fn restretch_all(app: &mut App) -> Option<String> {
     let rows: Vec<usize> = (0..app.state.session.project.channels.len()).filter(|&r| tempo_fitted(&app.state.session.project.channels[r])).collect();
-    if let Some(fits) = crate::playlist::audio_fits(&app.state.session) {
+    if let Some(fits) = crate::edit::playlist::audio_fits(&app.state.session) {
         if crate::playlist::fit_clips(&mut app.state.session.project.get_mut().arrangements, &fits) {
             crate::playlist::fit_clips(&mut app.state.session.saved.0.arrangements, &fits);
             app.damage_win(Win::Playlist);
@@ -2439,52 +2439,6 @@ pub fn sync_playback(ses: &mut crate::session::Session) -> bool {
         return true;
     }
     false
-}
-
-/// `play_project` on the session.
-pub fn play_project_in(s: &crate::session::Session) -> Project {
-    let mut p = s.project.clone();
-    // Playback reads nothing of the rack's locks and zips: without them, locking or zipping builds no new engine.
-    for c in &mut p.channels {
-        (c.rack.locked, c.rack.zipped) = (false, false);
-    }
-    p.tempo = Some(s.tempo());
-    // The pattern shown: a song with no clips plays it (os-engine), not the one the project was opened or saved on.
-    p.current_pattern = Some(s.pattern().max(1));
-    // Each pattern plays its own loops, in its own loop mode (FL keeps them per pattern).
-    expand_loops(&mut p, s, None);
-    crate::perform::apply(s, &mut p);
-    p
-}
-
-/// In each pattern in loop mode, a looping row repeats its first loop length's steps up to the end of the pattern (its
-/// length as played, §23); notes past the loop length go. The pattern's own loops (FL 24.1.1's form): a length, and
-/// under Advanced looping a loop point too, which is the row's notes there rounded up to the unit. `rows`: only those.
-fn expand_loops(p: &mut Project, s: &crate::session::Session, rows: Option<&[usize]>) {
-    let ps = per_step(s);
-    let ends: Vec<u32> = p.patterns.iter().map(|pat| p.pattern_length(pat.number)).collect();
-    let chans: Vec<u16> = p.channels.iter().enumerate().filter(|(r, _)| rows.is_none_or(|rs| rs.contains(r))).map(|(_, c)| c.index).collect();
-    for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
-        let Some(code) = pat.loop_mode else { continue };
-        let advanced = loop_type_of(code) == 2;
-        for &ch in &chans {
-            let Some(v) = pat.loops.iter().find(|l| l.0 == ch).map(|l| l.1) else { continue };
-            let len = if advanced { unit_steps(s, &pat.notes, ch, unit_of(v)).or(length_of(v)) } else { length_of(v) };
-            let Some(len) = len else { continue };
-            let span = len.max(1) * ps;
-            let src: Vec<Note> = pat.notes.iter().filter(|n| n.channel == ch && n.position < span).copied().collect();
-            if src.is_empty() {
-                continue;
-            }
-            pat.notes.retain(|n| n.channel != ch);
-            let mut off = 0;
-            while off < end {
-                pat.notes.extend(src.iter().filter(|n| n.position + off < end).map(|n| Note { position: n.position + off, ..*n }));
-                off += span;
-            }
-            pat.notes.sort_by_key(|n| (n.position, n.channel));
-        }
-    }
 }
 
 /// Loop button > Burn: write the loops into the current pattern's notes and drop the loop lengths.
@@ -2709,7 +2663,7 @@ pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
     let ps = per_step(&s.session);
     let tab = s.rack.graph_tab;
     let n = s.pattern().max(1);
-    let p = crate::patterns::pat_mut(&mut s.session, n);
+    let p = crate::edit::patterns::pat_mut(&mut s.session, n);
     let idx = p
         .notes
         .iter()
@@ -2847,14 +2801,14 @@ mod tests {
         a.state.set_pattern(1);
         let ch = a.state.session.project.channels[0].index;
         let follow = os_model::Pattern::LOOP_FOLLOW;
-        let pat = crate::patterns::pat_mut(&mut a.state.session, 1);
+        let pat = crate::edit::patterns::pat_mut(&mut a.state.session, 1);
         // FL 24.1.1's form: the type (2, Loop all channels) while loop mode is on.
         (pat.loops, pat.loop_mode) = (vec![(ch, follow)], Some(2));
         assert!(loop_mode(&a.state.session) && loop_type(&a.state.session) == 1);
         let p = a.state.session.project.pattern(1).expect("pattern 1");
         assert_eq!((p.loops.clone(), p.loop_mode), (vec![(ch, follow)], Some(2)), "the file's form is kept");
         // Switched on in a pattern that had none: written so that it reads back on.
-        let pat = crate::patterns::pat_mut(&mut a.state.session, 1);
+        let pat = crate::edit::patterns::pat_mut(&mut a.state.session, 1);
         (pat.loops, pat.loop_mode) = (Vec::new(), None);
         set_loop_type(&mut a.state.session, 1);
         set_loop_mode(&mut a.state.session, true);
@@ -2869,7 +2823,7 @@ mod tests {
         a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let ch = a.state.session.project.channels[0].index;
         for (n, len) in [(1, 3), (2, 5)] {
-            let pat = crate::patterns::pat_mut(&mut a.state.session, n);
+            let pat = crate::edit::patterns::pat_mut(&mut a.state.session, n);
             (pat.loops, pat.loop_mode) = (vec![(ch, len)], None);
         }
         a.state.set_pattern(1);
@@ -2892,12 +2846,12 @@ mod tests {
         let mut a = crate::app::App::new(None);
         a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let ch = a.state.session.project.channels[0].index;
-        let pat = crate::patterns::pat_mut(&mut a.state.session, 1);
+        let pat = crate::edit::patterns::pat_mut(&mut a.state.session, 1);
         pat.notes.push(os_model::Note::step(ch, 0));
         (pat.loops, pat.loop_mode) = (vec![(ch, 0)], Some(LOOP_TYPE_CODES[0]));
         let before = a.state.session.project.pattern(1).cloned();
         a.state.set_pattern(1);
-        let p2 = crate::patterns::pat_mut(&mut a.state.session, 2);
+        let p2 = crate::edit::patterns::pat_mut(&mut a.state.session, 2);
         p2.notes.push(os_model::Note::step(ch, 0));
         (p2.loops, p2.loop_mode) = (vec![(ch, 4)], None);
         crate::control_ui::edit(&mut a.state, "Project step", crate::control::command::Region::Project, |s| s.session.project.get_mut().main_volume = Some(50));
@@ -2953,7 +2907,7 @@ mod tests {
         // A pattern with nothing in it is not saved: pattern 2 gets a note.
         let ch = a.state.session.project.channels[0].index;
         let note = os_model::Note { position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
-        crate::patterns::pat_mut(&mut a.state.session, 2).notes.push(note);
+        crate::edit::patterns::pat_mut(&mut a.state.session, 2).notes.push(note);
         a.state.set_pattern(2);
         put_loop(&mut a.state.session, 0, Some(8));
         a.save_to(file.clone());
@@ -3139,7 +3093,7 @@ mod tests {
         let cur = app.state.pattern().max(1);
         app.state.set_pattern(cur);
         let ch = app.state.session.project.channels[1].index;
-        crate::patterns::pat_mut(&mut app.state.session, cur).notes.push(os_model::Note::step(ch, 0));
+        crate::edit::patterns::pat_mut(&mut app.state.session, cur).notes.push(os_model::Note::step(ch, 0));
         let e = &mut app.state.session.project.get_mut().channels[1].misc.echo;
         (e.feed, e.echoes, e.time) = (0.25, 2, 48.0 / 384.0);
         let Cmd::Rack(c) = burn(&app, 1)[1].2.clone() else { panic!() };
@@ -3190,7 +3144,7 @@ mod tests {
         let ps = per_step(&s.session);
         let at = |s: &State| s.session.project.pattern(s.pattern()).map(|p| p.notes.iter().filter(|n| n.channel == ch && n.position / ps == 3).copied().collect::<Vec<_>>()).unwrap_or_default();
         set_step(s, 0, 3, true);
-        { let n = s.pattern().max(1); crate::patterns::pat_mut(&mut s.session, n) }.notes.iter_mut().filter(|n| n.channel == ch && n.position / ps == 3).for_each(|n| n.velocity = 33);
+        { let n = s.pattern().max(1); crate::edit::patterns::pat_mut(&mut s.session, n) }.notes.iter_mut().filter(|n| n.channel == ch && n.position / ps == 3).for_each(|n| n.velocity = 33);
         run(&mut app, RCmd::Opt(MUTE_REMOVED));
         let s = &mut app.state;
         set_step(s, 0, 3, false);
@@ -3250,7 +3204,7 @@ mod tests {
         let ch = s.session.project.channels[0].index;
         let ps = per_step(&s.session);
         let n = s.pattern().max(1);
-        let p = crate::patterns::pat_mut(&mut s.session, n);
+        let p = crate::edit::patterns::pat_mut(&mut s.session, n);
         p.notes.retain(|x| x.channel != ch);
         p.notes.extend([Note::step(ch, 0), Note::step(ch, 5 * ps)]);
         p.notes.sort_by_key(|x| (x.position, x.channel));
@@ -3520,8 +3474,8 @@ mod tests {
         }
         let idx = |app: &App, r: usize| app.state.session.project.channels[r].index;
         let (i0, i2, i3) = (idx(&app, 0), idx(&app, 2), idx(&app, 3));
-        crate::patterns::pat_mut(&mut app.state.session, 2).notes = vec![Note::step(i0, 0), Note::step(i2, 3)];
-        crate::playlist::arr_mut(&mut app.state.session).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
+        crate::edit::patterns::pat_mut(&mut app.state.session, 2).notes = vec![Note::step(i0, 0), Note::step(i2, 3)];
+        crate::edit::playlist::arr_mut(&mut app.state.session).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
         let tools = |label: &str| (0..80).find(|&i| item_at(TOOLS_MENU, i).is_some_and(|it| it.label == label)).unwrap();
         for label in ["Select unused instruments", "Remove unused audio clips"] {
             assert!(works(TOOLS_MENU, item_at(TOOLS_MENU, tools(label)).unwrap()), "{label} is not greyed out");
@@ -3606,8 +3560,8 @@ mod tests {
             app.state.session.project.get_mut().channels[r].kind = ChannelKind::AudioClip;
         }
         let (i2, i3) = (app.state.session.project.channels[2].index, app.state.session.project.channels[3].index);
-        crate::patterns::pat_mut(&mut app.state.session, 2).notes = vec![Note::step(i2, 0)];
-        crate::playlist::arr_mut(&mut app.state.session).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
+        crate::edit::patterns::pat_mut(&mut app.state.session, 2).notes = vec![Note::step(i2, 0)];
+        crate::edit::playlist::arr_mut(&mut app.state.session).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
         let before = ids(&app);
         assert_eq!(run(&mut app, RCmd::Purge).as_deref(), Some("Deleted the channel"));
         assert!(!app.state.pat_ui.confirm && !app.state.rack.purging);
@@ -3620,7 +3574,7 @@ mod tests {
     fn rack_settings_save_and_reopen() {
         let path = std::env::temp_dir().join(format!("os_rack_save_{}.flp", std::process::id()));
         let mut app = App::new(None);
-        crate::patterns::pat_mut(&mut app.state.session, 1).notes = vec![os_model::Note::step(2, 0), os_model::Note::step(0, 1)];
+        crate::edit::patterns::pat_mut(&mut app.state.session, 1).notes = vec![os_model::Note::step(2, 0), os_model::Note::step(0, 1)];
         app.save_to(path.clone());
         app.open(path.clone());
         let n = app.state.session.project.channels.len();
@@ -3712,7 +3666,7 @@ mod tests {
                 assert_eq!(got, (0..5).map(|i| i != 4 && want(i)).collect::<Vec<_>>(), "rack, {what}");
 
                 // Playlist tracks.
-                let tracks = |s: &mut State| crate::playlist::arr_mut(&mut s.session).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
+                let tracks = |s: &mut State| crate::edit::playlist::arr_mut(&mut s.session).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
                 crate::playlist::toggle_track(s, b as u16);
                 crate::playlist::toggle_solo(s, a as u16);
                 if moved {
@@ -3723,7 +3677,7 @@ mod tests {
                 assert!(tracks(s).iter().enumerate().all(|(i, &on)| on == want(i)), "playlist, {what}");
 
                 // Mixer inserts (right-click on the LEDs): inserts 1, 2 and 3 are A, B and C.
-                crate::mixer::track_mut(&mut s.session, 2).expect("insert 2").enabled = false;
+                crate::edit::mixer::track_mut(&mut s.session, 2).expect("insert 2").enabled = false;
                 crate::mixer::solo(s, 1);
                 if moved {
                     crate::mixer::solo(s, 3);
@@ -3744,7 +3698,7 @@ mod tests {
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let s = &mut app.state;
-        let tracks = |s: &mut State| crate::playlist::arr_mut(&mut s.session).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
+        let tracks = |s: &mut State| crate::edit::playlist::arr_mut(&mut s.session).tracks.iter().map(|t| t.enabled).collect::<Vec<bool>>();
         crate::playlist::toggle_solo(s, 0);
         crate::playlist::toggle_track(s, 2);
         let got = tracks(s);
@@ -3837,7 +3791,7 @@ mod tests {
         let ch = ch_index(&app.state.session, 0).expect("row 0");
         let ps = per_step(&app.state.session);
         let n = app.state.pattern();
-        crate::patterns::pat_mut(&mut app.state.session, n).notes = on.iter().map(|&k| Note::step(ch, k * ps)).collect();
+        crate::edit::patterns::pat_mut(&mut app.state.session, n).notes = on.iter().map(|&k| Note::step(ch, k * ps)).collect();
         app.paint(c, None);
         app
     }

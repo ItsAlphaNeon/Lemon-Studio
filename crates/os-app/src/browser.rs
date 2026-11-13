@@ -509,7 +509,7 @@ impl App {
         let slot = || {
             let k = match hit.action {
                 Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k)) => k,
-                _ => (0..10).find(|&k| crate::mixer::slot_name(&s.session, s.selected_mixer, k).is_none())?,
+                _ => (0..10).find(|&k| crate::edit::mixer::slot_name(&s.session, s.selected_mixer, k).is_none())?,
             };
             let part = |a: Action| self.hits.iter().rev().find(|h| h.action == a).map(|h| h.rect);
             let name = part(Action::Mix(crate::mixer::MHit::SlotName(k)))?;

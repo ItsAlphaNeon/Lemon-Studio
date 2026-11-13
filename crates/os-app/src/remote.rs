@@ -286,11 +286,11 @@ pub fn label(s: &State, l: &Link) -> String {
     let what = match l.target {
         Target::Knob(KnobId::ChanVol(r) | KnobId::ChanPan(r)) if !l.omni => format!("{} - {name}", channel(r)),
         Target::RackTrack(r) | Target::RackLed(r) => format!("{} - {name}", channel(r)),
-        Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::mixer::name(&s.session, a)),
+        Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::edit::mixer::name(&s.session, a)),
         Target::Param(key, index) => crate::params_ui::clip_name(s, key, index),
-        Target::MemberParam(m, k, id, index) => match crate::container::member_key(&s.session, crate::container::place_key(m, k), id) {
+        Target::MemberParam(m, k, id, index) => match crate::edit::container::member_key(&s.session, crate::container::place_key(m, k), id) {
             Some(key) => crate::params_ui::clip_name(s, key, index),
-            None => format!("{} - {name}", crate::container::place_name(&s.session, m, k)),
+            None => format!("{} - {name}", crate::edit::container::place_name(&s.session, m, k)),
         },
         _ => name,
     };
@@ -648,7 +648,7 @@ impl App {
                 self.record_knob(k);
             }
             Target::Fader(m) => {
-                if let Some(tr) = crate::mixer::track_mut(&mut self.state.session, m) {
+                if let Some(tr) = crate::edit::mixer::track_mut(&mut self.state.session, m) {
                     tr.volume = Some(f64::from(v));
                     self.state.session.dirty = true;
                 }
@@ -660,7 +660,7 @@ impl App {
             }
             // An effect inside a container: its instance while it is loaded.
             Target::MemberParam(m, k, id, index) => {
-                if let Some(key) = crate::container::member_key(&self.state.session, crate::container::place_key(m, k), id) {
+                if let Some(key) = crate::edit::container::member_key(&self.state.session, crate::container::place_key(m, k), id) {
                     crate::params_ui::set_param_value(&mut self.state, key, index, f64::from(v));
                     self.record_plugin_param(key, index, f64::from(v));
                 }
@@ -668,7 +668,7 @@ impl App {
             // A container member's level: one undo step while it keeps moving; recorded as its automation target.
             Target::Member(m, k, id, wet) => {
                 crate::container_ui::set_level_run(&mut self.state, m, k, id, wet, v);
-                if let Some(target) = crate::container::level_target(&self.state.session, m, k, id, wet) {
+                if let Some(target) = crate::edit::container::level_target(&self.state.session, m, k, id, wet) {
                     self.record_param(target, (0.0, 1.0), f64::from(v));
                 }
             }
@@ -830,11 +830,11 @@ impl App {
 pub fn group_name(s: &State, b: &LinkBox) -> String {
     match b.target {
         Target::Param(key, _) => crate::params::owner_name(&s.session, key),
-        Target::MemberParam(m, k, id, _) => match crate::container::member_key(&s.session, crate::container::place_key(m, k), id) {
+        Target::MemberParam(m, k, id, _) => match crate::edit::container::member_key(&s.session, crate::container::place_key(m, k), id) {
             Some(key) => crate::params::owner_name(&s.session, key),
-            None => crate::container::place_name(&s.session, m, k),
+            None => crate::edit::container::place_name(&s.session, m, k),
         },
-        Target::Fader(t) => crate::mixer::name(&s.session, t),
+        Target::Fader(t) => crate::edit::mixer::name(&s.session, t),
         t => crate::typein_ui::caption(s, t).trim_start_matches("Value for ").to_string(),
     }
 }
@@ -843,14 +843,14 @@ pub fn group_name(s: &State, b: &LinkBox) -> String {
 /// pan, stereo separation, the equaliser's three bands (gain, frequency, width each), the send levels of its routes,
 /// then the mix levels of its filled slots.
 pub fn track_targets(s: &crate::session::Session, t: u16) -> Vec<Target> {
-    let Some(track) = crate::mixer::track(s, t) else { return Vec::new() };
+    let Some(track) = crate::edit::mixer::track(s, t) else { return Vec::new() };
     let mut v = vec![Target::Fader(t), Target::Knob(KnobId::MixPan(t)), Target::Knob(KnobId::MixSep(t))];
     v.extend((0..3).flat_map(|b| (0..3).map(move |f| Target::Knob(KnobId::Eq(t, b, f)))));
     let mut routes: Vec<u16> = track.routes.iter().copied().filter(|&d| d != t).collect();
     routes.sort_unstable();
     routes.dedup();
     v.extend(routes.into_iter().map(|d| Target::Knob(KnobId::Send(t, d))));
-    v.extend((0..10u8).filter(|&k| crate::mixer::slot_name(s, t, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(t, k))));
+    v.extend((0..10u8).filter(|&k| crate::edit::mixer::slot_name(s, t, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(t, k))));
     v
 }
 
@@ -909,7 +909,7 @@ mod tests {
         let key = section_key(REMOTE_CONTROL).unwrap();
         assert!(app.state.show_browser && app.state.browser_open.contains(&key) && app.state.browser_sel.as_ref() == Some(&key));
         let listed: Vec<String> = rows(&app.state).into_iter().filter(|r| r.key.starts_with(&format!("{key}/"))).map(|r| r.label).collect();
-        let bus2 = crate::mixer::name(&app.state.session, 2);
+        let bus2 = crate::edit::mixer::name(&app.state.session, 2);
         assert_eq!(listed, ["Clap - Channel volume: channel 1, ctrl 7".to_string(), "Channel panning: channel 2, ctrl 10, omni".into(), format!("{bus2} - Volume: channel 16, ctrl 74")]);
         set_links(&[]);
     }
@@ -948,7 +948,7 @@ mod tests {
         app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         set_links(&[]);
         app.state.selected_mixer = 1;
-        if let Some(t) = crate::mixer::track_mut(&mut app.state.session, 1) {
+        if let Some(t) = crate::edit::mixer::track_mut(&mut app.state.session, 1) {
             t.routes = vec![2, 0];
         }
         let menu = crate::mixer::options_menu(&app.state, 0.0, 0.0);
@@ -960,7 +960,7 @@ mod tests {
         let mut want = vec![Target::Fader(1), Target::Knob(KnobId::MixPan(1)), Target::Knob(KnobId::MixSep(1))];
         want.extend((0..3).flat_map(|b| (0..3).map(move |f| Target::Knob(KnobId::Eq(1, b, f)))));
         want.extend([Target::Knob(KnobId::Send(1, 0)), Target::Knob(KnobId::Send(1, 2))]);
-        want.extend((0..10u8).filter(|&k| crate::mixer::slot_name(&app.state.session, 1, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(1, k))));
+        want.extend((0..10u8).filter(|&k| crate::edit::mixer::slot_name(&app.state.session, 1, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(1, k))));
         assert_eq!((b.target, &b.all), (Target::Fader(1), &want));
         // The controller moved: every control linked, controllers 20 and on.
         app.remote_cc("Test", 0, 20, 64);
@@ -968,10 +968,10 @@ mod tests {
         let made = links();
         assert_eq!(made.iter().map(|l| l.target).collect::<Vec<_>>(), want);
         assert_eq!(made.iter().map(|l| l.cc).collect::<Vec<_>>(), (20..20 + want.len() as u8).collect::<Vec<_>>());
-        assert!(app.state.message.as_deref().is_some_and(|m| m.contains(&crate::mixer::name(&app.state.session, 1))), "{:?}", app.state.message);
+        assert!(app.state.message.as_deref().is_some_and(|m| m.contains(&crate::edit::mixer::name(&app.state.session, 1))), "{:?}", app.state.message);
         // The volume follows its controller.
         assert!(app.remote_cc("Test", 0, 20, 127));
-        assert_eq!(crate::mixer::track(&app.state.session, 1).and_then(|t| t.volume), Some(1.0));
+        assert_eq!(crate::edit::mixer::track(&app.state.session, 1).and_then(|t| t.volume), Some(1.0));
         set_links(&[]);
     }
 

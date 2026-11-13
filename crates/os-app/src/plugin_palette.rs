@@ -649,10 +649,10 @@ mod tests {
         app.key(&Key::Named(NamedKey::Enter), false, false);
         app.shift = false;
         assert!(is_open(&app.state), "Shift keeps it open");
-        assert_eq!(crate::mixer::slot_name(&app.state.session, 1, 3).as_deref(), Some("Space Reverb"));
+        assert_eq!(crate::edit::mixer::slot_name(&app.state.session, 1, 3).as_deref(), Some("Space Reverb"));
         assert_eq!(app.state.palette.target, Target::Fx(None));
         app.key(&Key::Named(NamedKey::Enter), false, false);
-        assert_eq!(crate::mixer::slot_name(&app.state.session, 1, 0).as_deref(), Some("Space Reverb"), "the first empty slot");
+        assert_eq!(crate::edit::mixer::slot_name(&app.state.session, 1, 0).as_deref(), Some("Space Reverb"), "the first empty slot");
         assert!(!is_open(&app.state));
     }
 

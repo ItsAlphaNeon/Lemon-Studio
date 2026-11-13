@@ -131,7 +131,7 @@ pub fn used(p: &Pattern) -> bool {
 /// source (a new pattern, empty until notes are added).
 pub fn listed(s: &State) -> Vec<u16> {
     let mut v: Vec<u16> = s.session.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).collect();
-    v.extend(crate::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }));
+    v.extend(crate::edit::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }));
     if let Some(ClipSource::Pattern(n)) = s.playlist.source {
         v.push(n);
     }
@@ -245,7 +245,7 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             s.playlist.source = Some(ClipSource::Pattern(s.pattern()));
         }
         Cmd::SelectInPlaylist => {
-            let sel: Vec<usize> = crate::playlist::clips(&s.session)
+            let sel: Vec<usize> = crate::edit::playlist::clips(&s.session)
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| c.source == ClipSource::Pattern(cur))
@@ -336,7 +336,7 @@ pub fn split_by_channel(s: &mut State) {
         .iter()
         .enumerate()
         .filter(|(_, c)| orig.notes.iter().any(|n| n.channel == c.index))
-        .map(|(r, c)| (c.index, crate::rack::channel_name(&s.session, r)))
+        .map(|(r, c)| (c.index, crate::edit::rack::channel_name(&s.session, r)))
         .collect();
     let Some(((first, name), rest)) = chans.split_first() else { return };
     let k = rest.len() as u16;
@@ -346,7 +346,7 @@ pub fn split_by_channel(s: &mut State) {
         return;
     }
     let undo = crate::history::Snap::Patterns { patterns: s.session.project.patterns.clone(), current: cur };
-    crate::playlist::snapshot_with(&mut s.session, "Split by instrument", undo);
+    crate::edit::playlist::snapshot_with(&mut s.session, "Split by instrument", undo);
     // Notes of a channel no longer in the rack stay with the original.
     let p = pat_mut(&mut s.session, cur);
     p.notes.retain(|n| n.channel == *first || !chans.iter().any(|c| c.0 == n.channel));
@@ -572,12 +572,12 @@ mod tests {
             Pattern { number: 3, notes: vec![Note::step(1, 0)], ..Pattern::default() },
             Pattern { number: 5, name: Some("Lead".into()), ..Pattern::default() },
         ];
-        crate::playlist::arr_mut(&mut s.session).clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Pattern(3))];
+        crate::edit::playlist::arr_mut(&mut s.session).clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Pattern(3))];
         app
     }
 
     fn clip_pats(s: &State) -> Vec<u16> {
-        crate::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }).collect()
+        crate::edit::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }).collect()
     }
 
     #[test]

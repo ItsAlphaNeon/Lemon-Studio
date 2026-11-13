@@ -622,6 +622,17 @@ impl App {
     }
 }
 
+/// The commands of the window's menus run with their container's track selected (as a slot window's do); a channel's
+/// container's run with its row in the track's place, which is how they find it.
+pub(crate) fn on_track(t: u16, items: &mut [PItem]) {
+    for it in items.iter_mut() {
+        if let Cmd::Mixer(_) = it.cmd {
+            it.cmd = Cmd::SlotWin(t, Box::new(std::mem::replace(&mut it.cmd, Cmd::Nothing)));
+        }
+        on_track(t, &mut it.children);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

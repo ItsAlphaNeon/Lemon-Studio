@@ -105,7 +105,7 @@ fn begin(s: &mut Session, pos: u32) {
     let mut names: Vec<String> = Vec::new();
     for &t in &armed {
         // Two tracks of one name get files of their own.
-        let name = crate::mixer::name(s, t);
+        let name = crate::edit::mixer::name(s, t);
         names.push(if names.contains(&name) { format!("{name} ({t})") } else { name });
     }
     let mut recs = Vec::new();
@@ -176,7 +176,7 @@ fn place(s: &mut Session, lock_len: Option<(os_model::ClipSource, u32)>) {
         (0, _) => errors.first().map_or_else(|| "Nothing was recorded".to_string(), |e| format!("Disk recording: {e}")),
         (_, false) => format!("Recorded {} file(s) into the Recorded folder", made.len()),
         (_, true) => {
-            crate::playlist::snapshot_as(s, crate::one_click::RECORDED);
+            crate::edit::playlist::snapshot_as(s, crate::one_click::RECORDED);
             let p = &s.project;
             let tempo = p.tick_tempo(s.tempo().max(1.0));
             let ppq = f64::from(p.ppq.max(1));
