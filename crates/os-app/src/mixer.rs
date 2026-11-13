@@ -1380,7 +1380,7 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
         items.insert(3, PItem::sub("Container", list));
     }
     let mut menu = Popup { x, y, items, sub: None, scroll: [0; 2] };
-    crate::presets::fill_window_menu(app, crate::plugins::fx_key(s.selected_mixer, slot), &mut menu);
+    crate::presets_ui::fill_window_menu(app, crate::plugins::fx_key(s.selected_mixer, slot), &mut menu);
     menu
 }
 

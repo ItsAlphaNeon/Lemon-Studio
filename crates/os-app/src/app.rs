@@ -2184,7 +2184,7 @@ impl App {
             }
             Then::SavePreset(key) => {
                 if let Some(p) = file {
-                    self.state.message = crate::presets::save_chosen(self, key, p);
+                    self.state.message = crate::presets_ui::save_chosen(self, key, p);
                 }
             }
             Then::SaveChannelState(row) => {
@@ -2194,17 +2194,17 @@ impl App {
             }
             Then::ImportPreset(key) => {
                 if let Some(p) = file {
-                    self.state.message = crate::presets::import_chosen(self, key, p);
+                    self.state.message = crate::presets_ui::import_chosen(self, key, p);
                 }
             }
             Then::RenamePreset(key, old) => {
                 if let Some(p) = file {
-                    self.state.message = crate::presets::rename_chosen(self, key, old, p);
+                    self.state.message = crate::presets_ui::rename_chosen(self, key, old, p);
                 }
             }
             Then::DeletePreset(key, path) => {
                 if reply == Reply::Button(Answer::Yes) {
-                    self.state.message = crate::presets::delete_chosen(self, key, path);
+                    self.state.message = crate::presets_ui::delete_chosen(self, key, path);
                 }
             }
             Then::SaveToolbarPreset => {
@@ -2454,7 +2454,7 @@ impl App {
         self.mixer_tick();
         self.follow_ids(false, true);
         self.host_commands();
-        crate::presets::pending_tick(self);
+        crate::presets_ui::pending_tick(self);
         self.params_tick();
         // While a project loads, `loading_tick` starts these a few per tick.
         if self.state.session.loading.is_none() {
@@ -2599,7 +2599,7 @@ impl App {
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
                         // A container's member has its presets too (plugins/patcher/README.md §4.2).
-                        crate::presets::fill_window_menu(self, row, &mut menu);
+                        crate::presets_ui::fill_window_menu(self, row, &mut menu);
                         crate::playlist::fill_plugin_window_menu(&self.state, row, &mut menu);
                         // A channel's window: Replace ▸ lists the generators (an effect slot's stays greyed here; the
                         // mixer's slot menu has its own Replace ▸).
@@ -2616,13 +2616,13 @@ impl App {
                     Request::Presets(row, x, y) => {
                         let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
-                        self.state.playlist.popup = Some(crate::presets::popup(self, row, lx, ly));
+                        self.state.playlist.popup = Some(crate::presets_ui::popup(self, row, lx, ly));
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
                         continue;
                     }
                     Request::PresetStep(row, d) => {
-                        self.state.message = crate::presets::run(self, crate::presets::PCmd::Step(row, d));
+                        self.state.message = crate::presets_ui::run(self, crate::presets::PCmd::Step(row, d));
                         continue;
                     }
                     Request::DropFile(row, path) => {
@@ -4528,7 +4528,7 @@ impl App {
         }
         // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
         if crate::presets::is_preset_file(&path) {
-            self.state.message = crate::presets::dropped(self, &path);
+            self.state.message = crate::presets_ui::dropped(self, &path);
             return self.invalidate();
         }
         if path.is_dir() {
@@ -4736,7 +4736,7 @@ impl App {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn file_on_plugin_window(&mut self, row: usize, path: PathBuf) {
         if crate::presets::is_preset_file(&path) {
-            self.state.message = crate::presets::load_into(self, row, &path);
+            self.state.message = crate::presets_ui::load_into(self, row, &path);
             return self.invalidate();
         }
         let p = path.to_string_lossy().into_owned();

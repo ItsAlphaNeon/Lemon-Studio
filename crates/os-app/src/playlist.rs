@@ -3639,7 +3639,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return None;
         }
-        Cmd::Preset(c) => return crate::presets::run(app, c),
+        Cmd::Preset(c) => return crate::presets_ui::run(app, c),
         Cmd::Piano(c) => {
             let m = crate::piano_tools::run(app, c);
             app.invalidate();

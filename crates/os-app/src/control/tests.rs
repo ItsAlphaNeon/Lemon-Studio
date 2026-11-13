@@ -866,7 +866,8 @@ fn knob_state(v: [f64; 2]) -> Vec<u8> {
 /// it makes none.
 #[test]
 fn preset_loads_are_undo_steps() {
-    use crate::presets::{load_into, save, Header};
+    use crate::presets::{save, Header};
+    use crate::presets_ui::load_into;
     let mut a = app();
     a.state.session.plugins = crate::plugins::Plugins::default();
     let desc = crate::plugins::builtin()[0].desc.clone();
@@ -949,7 +950,7 @@ fn preset_loads_are_undo_steps() {
     // A preset dropped where a new instance was made loads into it as part of the step that made it.
     let steps = a.state.session.history.at();
     a.state.session.plugins.preset_waits.push((1, dark.clone(), std::time::Instant::now()));
-    crate::presets::pending_tick(&mut a);
+    crate::presets_ui::pending_tick(&mut a);
     assert_eq!((a.state.session.history.at(), knob.lock().unwrap().value), (steps, [0.1, 0.9]));
     let _ = std::fs::remove_dir_all(&dir);
 }

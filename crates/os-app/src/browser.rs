@@ -564,7 +564,7 @@ impl App {
         }
         // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
         if let Item::Preset(path) = &item {
-            self.state.message = crate::presets::dropped(self, std::path::Path::new(path));
+            self.state.message = crate::presets_ui::dropped(self, std::path::Path::new(path));
             return;
         }
         // Plugin windows float above the main window: a sample released over one goes into that plugin.
