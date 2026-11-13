@@ -1741,7 +1741,7 @@ impl App {
         // that layout (spec: flp/layouts.md "Converting to the newer layout"). One the conversion cannot handle gets a
         // dialog that says so, not just a line in the hint bar.
         let (result, legacy) = match crate::project_io::read(&path) {
-            Ok(r) => (Ok(r), None),
+            Ok((f, p, _)) => (Ok((f, p)), None),
             Err((e, legacy)) => (Err(e), legacy),
         };
         if let Some(v) = legacy {
@@ -4032,7 +4032,7 @@ impl App {
             self.state.playlist.pos = t;
             self.damage_win(Win::Playlist);
         }
-        crate::rack::sync_playback(&mut self.state.session);
+        let _ = crate::rack::sync_playback(&mut self.state.session);
         self.playback_damage();
         self.has_damage()
     }

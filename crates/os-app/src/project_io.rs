@@ -177,13 +177,13 @@ pub(crate) fn start_loading(ses: &mut Session) {
     ses.samples.wait = true;
 }
 
-/// Reads the project file at `path`: its file and project. A project in the layout used before version 24.2 is
-/// converted to the current one (spec: flp/layouts.md "Converting to the newer layout"); one the conversion cannot handle
-/// is refused with the version it was saved by (the second part of the error).
-pub(crate) fn read(path: &Path) -> Result<(os_flp::FlpFile, os_model::Project), (String, Option<String>)> {
+/// Reads the project file at `path`: its file and project, and whether it was converted. A project in the layout used
+/// before version 24.2 is converted to the current one (spec: flp/layouts.md "Converting to the newer layout"); one the
+/// conversion cannot handle is refused with the version it was saved by (the second part of the error).
+pub(crate) fn read(path: &Path) -> Result<(os_flp::FlpFile, os_model::Project, bool), (String, Option<String>)> {
     let mut f = std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| os_flp::FlpFile::parse(&b).map_err(|e| e.to_string())).map_err(|e| (e, None))?;
-    match os_flp::project::upgrade(&mut f).and_then(|_| os_flp::project::load(&f)) {
-        Ok(p) => Ok((f, p)),
+    match os_flp::project::upgrade(&mut f).and_then(|converted| Ok((os_flp::project::load(&f)?, converted))) {
+        Ok((p, converted)) => Ok((f, p, converted)),
         Err(os_flp::project::ProjectError::LegacyLayout(v)) => Err((os_flp::project::ProjectError::LegacyLayout(v.clone()).to_string(), Some(v))),
         Err(e) => Err((e.to_string(), None)),
     }

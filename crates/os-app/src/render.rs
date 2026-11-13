@@ -117,7 +117,7 @@ pub fn render(o: &Opts) -> Result<(), String> {
     };
     // Instances start at the render rate (`Plugins::create_with` activates at the current rate).
     ses.plugins.set_rate(o.rate);
-    let (file, project) = match crate::project_io::read(&o.project) {
+    let (file, project, _) = match crate::project_io::read(&o.project) {
         Ok(r) => r,
         Err((e, _)) => {
             eprintln!("OPEN Could not open {}: {e}", o.project.display());

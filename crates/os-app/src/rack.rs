@@ -2418,8 +2418,9 @@ pub fn play_project(s: &State) -> Project {
 }
 
 /// Edits reach playback right away, also during a drag (at most once per tick): every write to the project
-/// (`locked::Locked`), and the flag for what playback reads outside it (`Session::dirty`).
-pub fn sync_playback(ses: &mut crate::session::Session) {
+/// (`locked::Locked`), and the flag for what playback reads outside it (`Session::dirty`). Returns whether playback was
+/// given the project again.
+pub fn sync_playback(ses: &mut crate::session::Session) -> bool {
     let written = ses.project.take_written();
     // A write alone that changes nothing playback reads (the project's info, a plugin state stored for a save) builds no
     // new engine.
@@ -2433,7 +2434,9 @@ pub fn sync_playback(ses: &mut crate::session::Session) {
         }
         // Also while Play is still starting (not `playing` yet); ignored when stopped.
         ses.transport.update(&play.unwrap_or_else(|| play_project_in(ses)));
+        return true;
     }
+    false
 }
 
 /// `play_project` on the session.
