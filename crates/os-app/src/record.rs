@@ -11,6 +11,7 @@
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::{App, State};
+use crate::session::{Session, View};
 use crate::knobs::KnobId;
 use crate::playlist::Snap;
 use crate::step_edit::Src;
@@ -197,6 +198,9 @@ pub struct Rec {
     /// SONG mode: playback has passed a Stop recording marker (and no Start recording marker since), so notes are not
     /// recorded until playback stops or goes back (spec: audio/transport.md "Time markers in SONG mode").
     punched_out: bool,
+    /// The grid notes are quantized to when written: the interface's main snap, set before each call (None: as
+    /// played).
+    pub unit: Option<u32>,
 }
 
 impl Rec {
@@ -225,7 +229,11 @@ fn round(t: u32, u: u32) -> u32 {
 
 /// A note from `start` to `end` (pattern ticks) quantized as the menu says; never ending at or before its start.
 pub fn quantized(s: &State, start: u32, end: u32) -> (u32, u32) {
-    let u = unit(s);
+    quantized_on(unit(s), start, end)
+}
+
+/// `quantized` on grid `u` (None: as played).
+fn quantized_on(u: Option<u32>, start: u32, end: u32) -> (u32, u32) {
     let q = |t: u32, on: bool| match u {
         Some(u) if on => round(t, u),
         _ => t,
@@ -239,9 +247,9 @@ pub fn quantized(s: &State, start: u32, end: u32) -> (u32, u32) {
 impl App {
     /// The Record button and R: disarms, or asks what to record (spec §2 What to record), or arms when asking is off.
     pub(crate) fn toggle_record(&mut self) {
-        if self.state.rec.armed {
+        if self.state.session.rec.armed {
             self.end_take();
-            self.state.rec.armed = false;
+            self.state.session.rec.armed = false;
         } else if Opt::Ask.on() {
             self.record_question();
         } else {
@@ -252,8 +260,8 @@ impl App {
 
     /// Arms; while stopped this starts playback when "Recording starts playback" is on.
     fn arm(&mut self) {
-        self.state.rec.armed = true;
-        if !self.state.session.transport.playing() && !self.state.rec.waiting && Opt::StartsPlayback.on() {
+        self.state.session.rec.armed = true;
+        if !self.state.session.transport.playing() && !self.state.session.rec.waiting && Opt::StartsPlayback.on() {
             self.play_from_stop();
         }
         self.invalidate();
@@ -307,7 +315,7 @@ impl App {
             RecCmd::Dump(minutes) => self.dump_score_log(minutes, None),
             RecCmd::DumpAs(minutes, replace) => self.dump_score_log(minutes, Some(replace)),
             RecCmd::ClearLog => {
-                self.state.rec.log.clear();
+                self.state.session.rec.log.clear();
                 Some("Score log cleared".into())
             }
             RecCmd::AudioLog(m) => Some(self.set_audio_log_minutes(m)),
@@ -323,7 +331,7 @@ impl App {
         let s = &mut self.state;
         let tps = crate::score_log::ticks_per_second(s);
         let channels: Vec<u16> = s.session.project.channels.iter().map(|c| c.index).collect();
-        let mut new = s.rec.log.notes(minutes, std::time::Instant::now(), tps);
+        let mut new = s.session.rec.log.notes(minutes, std::time::Instant::now(), tps);
         new.retain(|n| channels.contains(&n.channel));
         if new.is_empty() {
             return Some(format!("The score log has no notes from the last {minutes} minutes"));
@@ -379,7 +387,7 @@ impl App {
     /// Start on input waits for the first note instead (Play again cancels the wait); Recording precount, armed,
     /// counts in first.
     pub(crate) fn play_from_stop(&mut self) {
-        let r = &mut self.state.rec;
+        let r = &mut self.state.session.rec;
         if r.waiting {
             r.waiting = false;
         } else if Opt::Wait.on() && (r.armed || !Opt::WaitArmed.on()) {
@@ -392,29 +400,29 @@ impl App {
 
     /// Play, with Recording precount's count-in when armed.
     pub(crate) fn play_counted_if_armed(&mut self) {
-        let bars = if self.state.rec.armed && Opt::Precount.on() { precount_bars() } else { 0 };
+        let bars = if self.state.session.rec.armed && Opt::Precount.on() { precount_bars() } else { 0 };
         self.start_playback_counted(bars);
         if bars > 0 && self.state.session.transport.playing() {
             let p = &self.state.session.project;
             let tempo = p.tick_tempo(self.state.tempo().max(1.0));
             let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
             let beats = bars * u32::from(p.bar().0.max(1));
-            self.state.rec.count = Some(CountIn { from: std::time::Instant::now(), beat, beats });
-            self.state.rec.shown = beats;
+            self.state.session.rec.count = Some(CountIn { from: std::time::Instant::now(), beat, beats });
+            self.state.session.rec.shown = beats;
         }
     }
 
     /// Stop ends a wait or a count-in.
     pub(crate) fn record_stopped(&mut self) {
-        self.state.rec.waiting = false;
-        self.state.rec.count = None;
+        self.state.session.rec.waiting = false;
+        self.state.session.rec.count = None;
     }
 
     /// Start on input: the first input that counts starts playback from the start (spec §3). `what` is what the input
     /// is (notes, automation); with Respect recording filter, the filter must record it.
     fn start_on_input(&mut self, what: Opt) {
-        if self.state.rec.waiting && (!Opt::WaitFilter.on() || what.on()) {
-            self.state.rec.waiting = false;
+        if self.state.session.rec.waiting && (!Opt::WaitFilter.on() || what.on()) {
+            self.state.session.rec.waiting = false;
             self.start_playback();
             self.invalidate();
         }
@@ -445,7 +453,7 @@ impl App {
     pub(crate) fn toggle_record_option(&mut self, o: Opt) {
         let on = o.toggle();
         if o == Opt::Wait && !on {
-            self.state.rec.waiting = false;
+            self.state.session.rec.waiting = false;
         }
         let name = match o {
             Opt::Wait => "Start on input",
@@ -481,7 +489,7 @@ impl App {
     /// Whether something played now is recorded: armed, `what` on in the filter, playing and not paused.
     /// Nothing is recorded during a count-in (spec §3).
     fn rec_live(&self, what: Opt) -> bool {
-        let r = &self.state.rec;
+        let r = &self.state.session.rec;
         r.armed && r.count.is_none() && what.on() && self.state.session.transport.playing() && !self.state.session.transport.paused()
     }
 
@@ -519,22 +527,7 @@ impl App {
 
     /// Writes a control point on target word `kind` at the playback position, replacing the move's earlier points.
     fn record_point(&mut self, kind: u32, value: i32) {
-        let song = self.state.session.transport.song();
-        let t = self.state.session.transport.tick();
-        self.open_take(song);
-        let Some(at) = self.rec_pattern_tick(t, song) else { return };
-        let tick = at.max(0.0).round() as u32;
-        let s = &mut self.state;
-        let Some(take) = s.rec.take.as_mut() else { return };
-        let last = take.controls.iter().find(|c| c.0 == kind).map(|c| c.1);
-        take.controls.retain(|c| c.0 != kind);
-        take.controls.push((kind, tick));
-        if let Some(last) = last.filter(|&l| l < tick && !Opt::Blend.on()) {
-            let p = crate::piano::pattern_mut(&mut s.session);
-            p.controls.retain(|c| !(c.kind == kind && c.position > last && c.position < tick));
-        }
-        crate::piano::set_control(&mut s.session, (kind >> 16) as u16, kind as u16, tick, value);
-        s.session.dirty = true;
+        self.host(|ses| point_in(ses, kind, value));
     }
 
     /// A note went down (typing keyboard, MIDI, Touch controller): recorded from the playback position while
@@ -542,296 +535,61 @@ impl App {
     pub(crate) fn record_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: Extra) {
         let target = extra.channel.or_else(|| crate::piano::channel(&self.state));
         if let Some(channel) = target {
-            self.state.rec.log.down(src, key, velocity, channel, std::time::Instant::now());
+            self.state.session.rec.log.down(src, key, velocity, channel, std::time::Instant::now());
         }
         self.start_on_input(Opt::Notes);
         if !self.rec_live(Opt::Notes) {
             return;
         }
         let Some(channel) = target else { return };
-        let song = self.state.session.transport.song();
-        if song && self.state.rec.punched_out {
-            return;
-        }
-        let start = self.state.session.transport.tick();
-        self.open_take(song);
-        let Some(at) = self.rec_pattern_tick(start, song) else { return };
-        let r = &mut self.state.rec;
-        r.held.retain(|h| h.src != src);
-        r.held.push(Held { src, key, velocity, channel, start, at, extra, release: None });
-        if let Some(t) = r.take.as_mut().filter(|t| !t.channels.contains(&channel)) {
-            t.channels.push(channel);
-        }
+        self.host(|ses| down_in(ses, src, key, velocity, channel, extra));
     }
 
     /// A note went up: written when it was being recorded.
     pub(crate) fn record_up_with(&mut self, src: Src, release: Option<u8>) {
-        self.state.rec.log.up(src, std::time::Instant::now());
-        let r = &mut self.state.rec;
-        let Some(i) = r.held.iter().position(|h| h.src == src) else { return };
-        let mut h = r.held.remove(i);
-        h.release = release;
-        let now = if self.state.session.transport.playing() && !self.state.session.transport.paused() { Some(self.state.session.transport.tick()) } else { r.last };
-        self.write_held(h, now);
-    }
-
-    /// The take starts: one undo step for it, with the playlist too in SONG mode (a clip may be placed).
-    fn open_take(&mut self, song: bool) {
-        let s = &mut self.state;
-        if s.rec.take.as_ref().is_some_and(|t| t.pattern == s.pattern()) {
-            return;
-        }
-        let pattern = s.pattern();
-        let snap = crate::history::Snap::pattern(&s.session, pattern);
-        let snap = if song {
-            crate::playlist::arr_mut(&mut s.session);
-            crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(crate::playlist::capture(&s.session))), snap])
-        } else {
-            snap
-        };
-        crate::history::record(&mut s.session, RECORDED, snap);
-        let before = s.session.project.pattern(pattern).map(|p| p.notes.clone()).unwrap_or_default();
-        s.rec.take = Some(Take { pattern, before, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new(), clip: None });
-    }
-
-    /// The current pattern's tick at playback tick `t`: the tick itself in PAT mode; in SONG mode where a clip of the
-    /// pattern plays there. Past the end of the take's clip that clip is made longer (to the end of `t`'s bar); with
-    /// no clip, a whole-pattern clip just before `t` becomes the take's and grows, else one is placed from the start
-    /// of that bar on the first free track (spec §2).
-    fn rec_pattern_tick(&mut self, t: f64, song: bool) -> Option<f64> {
-        if !song {
-            return Some(t);
-        }
-        let s = &mut self.state;
-        if let Some((p, _)) = grow_take_clip(s, t) {
-            return Some(p);
-        }
-        let bar = s.session.project.bar_ticks().max(1);
-        let pattern = s.pattern();
-        let whole = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none();
-        let ti = t.max(0.0) as u32;
-        if let Some(p) = crate::piano::pattern_tick_in_song(&s.session, t) {
-            // The whole-pattern clip playing there becomes the take's.
-            let under = crate::playlist::clips(&s.session)
-                .iter()
-                .filter(|c| whole(c) && c.position <= ti && (f64::from(c.position) + p - t).abs() < 1e-6)
-                .max_by_key(|c| c.position)
-                .map(|c| (c.track, c.position));
-            if let Some(k) = s.rec.take.as_mut().filter(|k| k.clip.is_none()) {
-                k.clip = under;
-            }
-            return Some(p);
-        }
-        // Right after a whole-pattern clip, less than a bar past the bar line at or after its end, with its track free
-        // up to the end of `t`'s bar: that clip becomes the take's and grows instead of a second one being placed.
-        let end = (ti / bar + 1) * bar;
-        let clips = crate::playlist::clips(&s.session);
-        let before = clips
-            .iter()
-            .filter(|c| whole(c) && !c.muted && c.end() <= ti && ti < c.end().div_ceil(bar) * bar + bar)
-            .filter(|c| !clips.iter().any(|o| o.track == c.track && o.position < end && o.end() > c.end()))
-            .max_by_key(|c| c.end())
-            .map(|c| (c.track, c.position));
-        if let Some(k) = s.rec.take.as_mut().filter(|k| k.clip.is_none() && before.is_some()) {
-            k.clip = before;
-            return grow_take_clip(s, t).map(|(p, _)| p);
-        }
-        let at = ti / bar * bar;
-        let len = crate::piano::pattern_length(&s.session, pattern).max(bar);
-        let track = crate::playlist::free_track(&s.session, 0, at, at + len);
-        let clip = os_model::Clip::new(at, len, track, ClipSource::Pattern(pattern));
-        crate::playlist::arr_mut(&mut s.session).clips.push(clip);
-        if let Some(k) = s.rec.take.as_mut() {
-            k.clip = Some((track, at));
-        }
-        s.session.dirty = true;
-        crate::piano::pattern_tick_in_song(&s.session, t)
-    }
-
-    /// Writes held note `h`, ending at playback tick `now` (None: where it started). A note held over the pattern's
-    /// loop ends at the pattern's end.
-    fn write_held(&mut self, h: Held, now: Option<f64>) {
-        let s = &mut self.state;
-        let Some(take) = s.rec.take.as_mut() else { return };
-        let start = h.at.max(0.0).round() as u32;
-        let end = match now {
-            Some(n) if n >= h.start => (h.at + (n - h.start)).round() as u32,
-            Some(_) => s.session.project.pattern_length(take.pattern).max(start),
-            None => start,
-        };
-        let pattern = take.pattern;
-        let (a, b) = quantized(s, start, end);
-        let take = s.rec.take.as_mut().expect("checked");
-        let mut note = Note { length: b - a, key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) };
-        note.mod_x = h.extra.mod_x.unwrap_or(note.mod_x);
-        note.mod_y = h.extra.mod_y.unwrap_or(note.mod_y);
-        if let Some(g) = h.extra.group {
-            note.group = note.group & !0x0F | g & 0x0F;
-        }
-        note.release = h.release.unwrap_or(note.release);
-        take.new.push(note);
-        let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
-        take.span = Some((lo, hi));
-        // Blend recorded notes: the earlier notes stay (spec §3).
-        let (lo, hi) = if Opt::Blend.on() { (0, 0) } else { (lo, hi) };
-        let notes: Vec<Note> = take
-            .before
-            .iter()
-            .filter(|n| !(take.channels.contains(&n.channel) && n.position >= lo && n.position < hi))
-            .chain(take.new.iter())
-            .cloned()
-            .collect();
-        if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
-            p.notes = notes;
-        } else {
-            s.session.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
-        }
-        // The time selection stays (it may be looping, spec §5).
-        let range = s.piano.range;
-        s.piano.select(pattern, h.channel, Vec::new());
-        s.piano.range = range;
-        s.session.dirty = true;
-        self.invalidate();
+        self.state.session.rec.log.up(src, std::time::Instant::now());
+        self.state.session.rec.unit = unit(&self.state);
+        self.host(|ses| up_in(ses, src, release));
     }
 
     /// The take ends: the notes still held end where playback last was.
     pub(crate) fn end_take(&mut self) {
-        let held = std::mem::take(&mut self.state.rec.held);
-        let last = self.state.rec.last;
-        for h in held {
-            self.write_held(h, last);
-        }
-        self.state.rec.take = None;
+        self.state.session.rec.unit = unit(&self.state);
+        self.host(end_take_in);
     }
 
-    /// Each tick: notes the playback position; when playback stops or pauses, or the pattern changes, the take ends;
-    /// a stop disarms when "Disarm on stop" is on.
+    /// Each tick: one-click and track recording, then the session's half (`tick_in`) with the looping time selection;
+    /// a punch out stops playback.
     pub(crate) fn record_tick(&mut self) {
         self.one_click_tick();
         self.track_rec_tick();
-        // A count-in ends after its beats (or with the playback); the clock shows each beat left. A wait ends when
-        // something else starts playback.
-        if let Some(c) = self.state.rec.count {
-            let left = c.left();
-            if left == 0 || !self.state.session.transport.playing() || self.state.session.transport.paused() {
-                self.state.rec.count = None;
-                self.invalidate();
-            } else if left != self.state.rec.shown {
-                self.state.rec.shown = left;
-                self.invalidate();
-            }
-        }
-        if self.state.rec.waiting && self.state.session.transport.playing() {
-            self.state.rec.waiting = false;
-            self.invalidate();
-        }
-        let run_on = self.state.rec.armed && !Opt::Loop.on();
-        crate::transport::run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
+        self.state.session.rec.unit = unit(&self.state);
         let sel = self.sync_loop_range();
-        let live = self.state.session.transport.playing() && !self.state.session.transport.paused();
-        // Punch (spec §5): armed with Loop record off, playback stops at the selection's end; held notes end there.
-        if let Some((_, end)) = sel.filter(|_| live && run_on && self.state.rec.count.is_none()) {
-            let end = f64::from(end);
-            if self.state.session.transport.tick() >= end && self.state.rec.last.is_some_and(|l| l < end) {
-                self.state.rec.last = Some(end);
-                self.end_take();
-                self.act(crate::app::Action::Stop);
-                return;
-            }
+        if self.host(|ses| tick_in(ses, sel)) {
+            self.act(crate::app::Action::Stop);
         }
-        // Playback went back to the start (a loop, or a jump back): the pass's take ends there, its held notes at the
-        // pattern's end; the next note starts a new take (spec §4).
-        let now = self.state.session.transport.tick();
-        if live && self.state.rec.last.is_some_and(|l| now < l) && self.state.rec.take.is_some() {
-            let held = std::mem::take(&mut self.state.rec.held);
-            for h in held {
-                self.write_held(h, Some(f64::MIN));
-            }
-            self.state.rec.take = None;
-        }
-        // SONG mode, Start / Stop recording markers (audio/transport.md): passing a Stop recording marker ends the take
-        // there (held notes end on it) and later notes are not recorded; passing a Start recording marker records
-        // again (Lemon Studio's choice). Recording before any of them goes on as usual, from the song's start with a
-        // Start recording marker later on.
-        if live && self.state.session.transport.song() {
-            let from = self.state.rec.last.filter(|&l| l <= now);
-            let mut passed: Vec<(u32, u8)> = crate::playlist::markers(&self.state.session)
-                .iter()
-                .filter(|m| matches!(m.kind, TimeMarker::PUNCH_IN | TimeMarker::PUNCH_OUT))
-                .filter(|m| from.is_some_and(|l| f64::from(m.position) > l && f64::from(m.position) <= now))
-                .map(|m| (m.position, m.kind))
-                .collect();
-            passed.sort_unstable();
-            for (at, kind) in passed {
-                let out = kind == TimeMarker::PUNCH_OUT;
-                if out && !self.state.rec.punched_out && self.state.rec.take.is_some() {
-                    self.state.rec.last = Some(f64::from(at));
-                    self.end_take();
-                    self.invalidate();
-                }
-                self.state.rec.punched_out = out;
-            }
-        }
-        if !live || self.state.rec.last.is_some_and(|l| now < l) {
-            self.state.rec.punched_out = false;
-        }
-        // SONG mode: a note held past the take's clip makes it longer as playback runs (spec §2).
-        if live && self.state.session.transport.song() && !self.state.rec.held.is_empty() && grow_take_clip(&mut self.state, now).is_some_and(|(_, g)| g) {
-            self.invalidate();
-        }
-        if live {
-            self.state.rec.last = Some(now);
-        }
-        // Performance mode (spec: ui/performance-mode.md §3b): a stop with Record armed (since playback started) writes
-        // what the launched tracks played.
-        let r = &self.state.rec;
-        if r.was_live && !live && r.armed && r.since.is_some() && self.state.session.transport.song()
-            && let Some(stop) = r.last
-        {
-            let n = crate::perform::record(&mut self.state, stop.max(0.0) as u32);
-            if n > 0 {
-                self.state.message = Some(format!("Performance recorded: {n} clip{}", if n == 1 { "" } else { "s" }));
-                self.invalidate();
-            }
-        }
-        let r = &self.state.rec;
-        let changed = r.take.as_ref().is_some_and(|t| t.pattern != self.state.pattern());
-        if (r.was_live && !live) || changed {
-            self.end_take();
-            if !self.state.session.transport.playing() && self.state.rec.armed && Opt::DisarmOnStop.on() {
-                self.state.rec.armed = false;
-                self.invalidate();
-            }
-        }
-        if !live {
-            self.state.rec.last = None;
-        }
-        if live && !self.state.rec.was_live {
-            self.state.rec.since = self.state.rec.armed.then(|| self.state.session.history.done());
-        }
-        self.state.rec.was_live = live;
     }
 
     /// TOOLS ▸ Cancel recording (spec: ui/cancel-recording.md §2): while Record is armed
     /// and playing (or counting in, or waiting for input), playback stops and every take recorded since it started is
     /// undone; notes still held are dropped. The undone takes can be redone.
     pub(crate) fn cancel_recording(&mut self) -> String {
-        let r = &self.state.rec;
+        let r = &self.state.session.rec;
         if !r.armed || !(self.state.session.transport.playing() || r.count.is_some() || r.waiting) {
             return "Nothing is being recorded".into();
         }
         let since = r.since;
-        self.state.rec.held.clear();
-        self.state.rec.take = None;
-        self.state.rec.waiting = false;
-        self.state.rec.count = None;
+        self.state.session.rec.held.clear();
+        self.state.session.rec.take = None;
+        self.state.session.rec.waiting = false;
+        self.state.session.rec.count = None;
         self.act(crate::app::Action::Stop);
         let mut undone = 0;
         while since.is_some_and(|k| self.state.session.history.done() > k) && self.state.session.history.newest_done() == Some(RECORDED) {
             crate::history::undo(&mut self.state);
             undone += 1;
         }
-        self.state.rec.since = None;
+        self.state.session.rec.since = None;
         self.state.session.dirty = true;
         self.invalidate();
         match undone {
@@ -842,10 +600,286 @@ impl App {
     }
 }
 
+/// Writes a control point on target word `kind` at the playback position, replacing the move's earlier points.
+pub(crate) fn point_in(s: &mut Session, kind: u32, value: i32) {
+    let song = s.transport.song();
+    let t = s.transport.tick();
+    open_take_in(s, song);
+    let Some(at) = rec_pattern_tick_in(s, t, song) else { return };
+    let tick = at.max(0.0).round() as u32;
+    let Some(take) = s.rec.take.as_mut() else { return };
+    let last = take.controls.iter().find(|c| c.0 == kind).map(|c| c.1);
+    take.controls.retain(|c| c.0 != kind);
+    take.controls.push((kind, tick));
+    if let Some(last) = last.filter(|&l| l < tick && !Opt::Blend.on()) {
+        let p = crate::piano::pattern_mut(s);
+        p.controls.retain(|c| !(c.kind == kind && c.position > last && c.position < tick));
+    }
+    crate::piano::set_control(s, (kind >> 16) as u16, kind as u16, tick, value);
+    s.dirty = true;
+}
+
+/// A note went down on `channel` while recording (the interface has checked that it records): it is held from the
+/// playback position.
+pub(crate) fn down_in(s: &mut Session, src: Src, key: u16, velocity: u8, channel: u16, extra: Extra) {
+    let song = s.transport.song();
+    if song && s.rec.punched_out {
+        return;
+    }
+    let start = s.transport.tick();
+    open_take_in(s, song);
+    let Some(at) = rec_pattern_tick_in(s, start, song) else { return };
+    let r = &mut s.rec;
+    r.held.retain(|h| h.src != src);
+    r.held.push(Held { src, key, velocity, channel, start, at, extra, release: None });
+    if let Some(t) = r.take.as_mut().filter(|t| !t.channels.contains(&channel)) {
+        t.channels.push(channel);
+    }
+}
+
+/// A note went up: written when it was being recorded.
+pub(crate) fn up_in(s: &mut Session, src: Src, release: Option<u8>) {
+    let r = &mut s.rec;
+    let Some(i) = r.held.iter().position(|h| h.src == src) else { return };
+    let mut h = r.held.remove(i);
+    h.release = release;
+    let now = if s.transport.playing() && !s.transport.paused() { Some(s.transport.tick()) } else { r.last };
+    write_held_in(s, h, now);
+}
+
+/// The take starts: one undo step for it, with the playlist too in SONG mode (a clip may be placed).
+fn open_take_in(s: &mut Session, song: bool) {
+    if s.rec.take.as_ref().is_some_and(|t| t.pattern == s.pattern()) {
+        return;
+    }
+    let pattern = s.pattern();
+    let snap = crate::history::Snap::pattern(s, pattern);
+    let snap = if song {
+        crate::playlist::arr_mut(s);
+        crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(crate::playlist::capture(s))), snap])
+    } else {
+        snap
+    };
+    crate::history::record(s, RECORDED, snap);
+    let before = s.project.pattern(pattern).map(|p| p.notes.clone()).unwrap_or_default();
+    s.rec.take = Some(Take { pattern, before, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new(), clip: None });
+}
+
+/// The current pattern's tick at playback tick `t`: the tick itself in PAT mode; in SONG mode where a clip of the
+/// pattern plays there. Past the end of the take's clip that clip is made longer (to the end of `t`'s bar); with
+/// no clip, a whole-pattern clip just before `t` becomes the take's and grows, else one is placed from the start
+/// of that bar on the first free track (spec §2).
+fn rec_pattern_tick_in(s: &mut Session, t: f64, song: bool) -> Option<f64> {
+    if !song {
+        return Some(t);
+    }
+    if let Some((p, _)) = grow_take_clip(s, t) {
+        return Some(p);
+    }
+    let bar = s.project.bar_ticks().max(1);
+    let pattern = s.pattern();
+    let whole = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none();
+    let ti = t.max(0.0) as u32;
+    if let Some(p) = crate::piano::pattern_tick_in_song(s, t) {
+        // The whole-pattern clip playing there becomes the take's.
+        let under = crate::playlist::clips(s)
+            .iter()
+            .filter(|c| whole(c) && c.position <= ti && (f64::from(c.position) + p - t).abs() < 1e-6)
+            .max_by_key(|c| c.position)
+            .map(|c| (c.track, c.position));
+        if let Some(k) = s.rec.take.as_mut().filter(|k| k.clip.is_none()) {
+            k.clip = under;
+        }
+        return Some(p);
+    }
+    // Right after a whole-pattern clip, less than a bar past the bar line at or after its end, with its track free
+    // up to the end of `t`'s bar: that clip becomes the take's and grows instead of a second one being placed.
+    let end = (ti / bar + 1) * bar;
+    let clips = crate::playlist::clips(s);
+    let before = clips
+        .iter()
+        .filter(|c| whole(c) && !c.muted && c.end() <= ti && ti < c.end().div_ceil(bar) * bar + bar)
+        .filter(|c| !clips.iter().any(|o| o.track == c.track && o.position < end && o.end() > c.end()))
+        .max_by_key(|c| c.end())
+        .map(|c| (c.track, c.position));
+    if let Some(k) = s.rec.take.as_mut().filter(|k| k.clip.is_none() && before.is_some()) {
+        k.clip = before;
+        return grow_take_clip(s, t).map(|(p, _)| p);
+    }
+    let at = ti / bar * bar;
+    let len = crate::piano::pattern_length(s, pattern).max(bar);
+    let track = crate::playlist::free_track(s, 0, at, at + len);
+    let clip = os_model::Clip::new(at, len, track, ClipSource::Pattern(pattern));
+    crate::playlist::arr_mut(s).clips.push(clip);
+    if let Some(k) = s.rec.take.as_mut() {
+        k.clip = Some((track, at));
+    }
+    s.dirty = true;
+    crate::piano::pattern_tick_in_song(s, t)
+}
+
+/// Writes held note `h`, ending at playback tick `now` (None: where it started). A note held over the pattern's
+/// loop ends at the pattern's end.
+fn write_held_in(s: &mut Session, h: Held, now: Option<f64>) {
+    let Some(take) = s.rec.take.as_mut() else { return };
+    let start = h.at.max(0.0).round() as u32;
+    let end = match now {
+        Some(n) if n >= h.start => (h.at + (n - h.start)).round() as u32,
+        Some(_) => s.project.pattern_length(take.pattern).max(start),
+        None => start,
+    };
+    let pattern = take.pattern;
+    let (a, b) = quantized_on(s.rec.unit, start, end);
+    let take = s.rec.take.as_mut().expect("checked");
+    let mut note = Note { length: b - a, key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) };
+    note.mod_x = h.extra.mod_x.unwrap_or(note.mod_x);
+    note.mod_y = h.extra.mod_y.unwrap_or(note.mod_y);
+    if let Some(g) = h.extra.group {
+        note.group = note.group & !0x0F | g & 0x0F;
+    }
+    note.release = h.release.unwrap_or(note.release);
+    take.new.push(note);
+    let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
+    take.span = Some((lo, hi));
+    // Blend recorded notes: the earlier notes stay (spec §3).
+    let (lo, hi) = if Opt::Blend.on() { (0, 0) } else { (lo, hi) };
+    let notes: Vec<Note> = take
+        .before
+        .iter()
+        .filter(|n| !(take.channels.contains(&n.channel) && n.position >= lo && n.position < hi))
+        .chain(take.new.iter())
+        .cloned()
+        .collect();
+    if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
+        p.notes = notes;
+    } else {
+        s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
+    }
+    s.touched.views.push(View::Recorded { pattern, channel: h.channel });
+    s.dirty = true;
+    s.touched.repaint = true;
+}
+
+/// The take ends: the notes still held end where playback last was.
+pub(crate) fn end_take_in(s: &mut Session) {
+    let held = std::mem::take(&mut s.rec.held);
+    let last = s.rec.last;
+    for h in held {
+        write_held_in(s, h, last);
+    }
+    s.rec.take = None;
+}
+
+/// Each tick: notes the playback position; when playback stops or pauses, or the pattern changes, the take ends;
+/// a stop disarms when "Disarm on stop" is on. `sel` is the time selection looping playback. True when a punch out
+/// asks for playback to stop.
+pub(crate) fn tick_in(s: &mut Session, sel: Option<(u32, u32)>) -> bool {
+    // A count-in ends after its beats (or with the playback); the clock shows each beat left. A wait ends when
+    // something else starts playback.
+    if let Some(c) = s.rec.count {
+        let left = c.left();
+        if left == 0 || !s.transport.playing() || s.transport.paused() {
+            s.rec.count = None;
+            s.touched.repaint = true;
+        } else if left != s.rec.shown {
+            s.rec.shown = left;
+            s.touched.repaint = true;
+        }
+    }
+    if s.rec.waiting && s.transport.playing() {
+        s.rec.waiting = false;
+        s.touched.repaint = true;
+    }
+    let run_on = s.rec.armed && !Opt::Loop.on();
+    crate::transport::run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
+    let live = s.transport.playing() && !s.transport.paused();
+    // Punch (spec §5): armed with Loop record off, playback stops at the selection's end; held notes end there.
+    if let Some((_, end)) = sel.filter(|_| live && run_on && s.rec.count.is_none()) {
+        let end = f64::from(end);
+        if s.transport.tick() >= end && s.rec.last.is_some_and(|l| l < end) {
+            s.rec.last = Some(end);
+            end_take_in(s);
+            return true;
+        }
+    }
+    // Playback went back to the start (a loop, or a jump back): the pass's take ends there, its held notes at the
+    // pattern's end; the next note starts a new take (spec §4).
+    let now = s.transport.tick();
+    if live && s.rec.last.is_some_and(|l| now < l) && s.rec.take.is_some() {
+        let held = std::mem::take(&mut s.rec.held);
+        for h in held {
+            write_held_in(s, h, Some(f64::MIN));
+        }
+        s.rec.take = None;
+    }
+    // SONG mode, Start / Stop recording markers (audio/transport.md): passing a Stop recording marker ends the take
+    // there (held notes end on it) and later notes are not recorded; passing a Start recording marker records
+    // again (Lemon Studio's choice). Recording before any of them goes on as usual, from the song's start with a
+    // Start recording marker later on.
+    if live && s.transport.song() {
+        let from = s.rec.last.filter(|&l| l <= now);
+        let mut passed: Vec<(u32, u8)> = crate::playlist::markers(s)
+            .iter()
+            .filter(|m| matches!(m.kind, TimeMarker::PUNCH_IN | TimeMarker::PUNCH_OUT))
+            .filter(|m| from.is_some_and(|l| f64::from(m.position) > l && f64::from(m.position) <= now))
+            .map(|m| (m.position, m.kind))
+            .collect();
+        passed.sort_unstable();
+        for (at, kind) in passed {
+            let out = kind == TimeMarker::PUNCH_OUT;
+            if out && !s.rec.punched_out && s.rec.take.is_some() {
+                s.rec.last = Some(f64::from(at));
+                end_take_in(s);
+                s.touched.repaint = true;
+            }
+            s.rec.punched_out = out;
+        }
+    }
+    if !live || s.rec.last.is_some_and(|l| now < l) {
+        s.rec.punched_out = false;
+    }
+    // SONG mode: a note held past the take's clip makes it longer as playback runs (spec §2).
+    if live && s.transport.song() && !s.rec.held.is_empty() && grow_take_clip(s, now).is_some_and(|(_, g)| g) {
+        s.touched.repaint = true;
+    }
+    if live {
+        s.rec.last = Some(now);
+    }
+    // Performance mode (spec: ui/performance-mode.md §3b): a stop with Record armed (since playback started) writes
+    // what the launched tracks played.
+    let r = &s.rec;
+    if r.was_live && !live && r.armed && r.since.is_some() && s.transport.song()
+        && let Some(stop) = r.last
+    {
+        let n = crate::perform::record(s, stop.max(0.0) as u32);
+        if n > 0 {
+            s.touched.views.push(View::Message(format!("Performance recorded: {n} clip{}", if n == 1 { "" } else { "s" })));
+            s.touched.repaint = true;
+        }
+    }
+    let r = &s.rec;
+    let changed = r.take.as_ref().is_some_and(|t| t.pattern != s.pattern());
+    if (r.was_live && !live) || changed {
+        end_take_in(s);
+        if !s.transport.playing() && s.rec.armed && Opt::DisarmOnStop.on() {
+            s.rec.armed = false;
+            s.touched.repaint = true;
+        }
+    }
+    if !live {
+        s.rec.last = None;
+    }
+    if live && !s.rec.was_live {
+        s.rec.since = s.rec.armed.then(|| s.history.done());
+    }
+    s.rec.was_live = live;
+    false
+}
+
 /// The notes held for the current pattern's take, from their start (quantized as they will be written) to playback
 /// tick `now` (spec §2 "Shown while held").
 pub fn held_notes(s: &State, now: f64) -> Vec<Note> {
-    if s.rec.take.as_ref().is_none_or(|t| t.pattern != s.pattern()) {
+    if s.session.rec.take.as_ref().is_none_or(|t| t.pattern != s.pattern()) {
         return Vec::new();
     }
     let note = |h: &Held| {
@@ -854,27 +888,27 @@ pub fn held_notes(s: &State, now: f64) -> Vec<Note> {
         let (a, _) = quantized(s, start, end.max(start));
         Note { length: end.saturating_sub(a).max(1), key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) }
     };
-    s.rec.held.iter().filter(|h| now >= h.start).map(note).collect()
+    s.session.rec.held.iter().filter(|h| now >= h.start).map(note).collect()
 }
 
 /// SONG mode: the pattern tick at song tick `t` in the take's clip, when `t` is at or past its start; past its end the
 /// clip is made longer, to the end of `t`'s bar (spec §2 "one clip per performance"). Also says whether it grew.
-fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
+fn grow_take_clip(s: &mut Session, t: f64) -> Option<(f64, bool)> {
     let (track, at) = s.rec.take.as_ref().and_then(|k| k.clip)?;
     let ti = t.max(0.0) as u32;
     if ti < at {
         return None;
     }
-    let bar = s.session.project.bar_ticks().max(1);
+    let bar = s.project.bar_ticks().max(1);
     let pattern = s.pattern();
-    let c = crate::playlist::arr_mut(&mut s.session)
+    let c = crate::playlist::arr_mut(s)
         .clips
         .iter_mut()
         .find(|c| c.source == ClipSource::Pattern(pattern) && c.window.is_none() && c.track == track && c.position == at)?;
     let grow = ti >= at + c.length;
     if grow {
         c.length = (ti / bar + 1) * bar - at;
-        s.session.dirty = true;
+        s.dirty = true;
     }
     Some((t - f64::from(at), grow))
 }
@@ -966,7 +1000,7 @@ mod tests {
         app.mouse_move(b.cx(), b.cy());
         app.mouse_down();
         app.mouse_up();
-        assert!(!app.state.rec.armed, "it asks first");
+        assert!(!app.state.session.rec.armed, "it asks first");
         let Some(Popup { items, x, .. }) = app.state.playlist.popup.clone() else { panic!("no question") };
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(
@@ -986,15 +1020,15 @@ mod tests {
         assert!(items[5].enabled && items[5].cmd == Cmd::OneClickEditor);
         app.state.playlist.popup = None;
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Arm { notes: true, automation: false }));
-        assert!(app.state.rec.armed && Opt::Notes.on() && !Opt::Automation.on());
+        assert!(app.state.session.rec.armed && Opt::Notes.on() && !Opt::Automation.on());
         app.toggle_record();
-        assert!(!app.state.rec.armed && app.state.playlist.popup.is_none(), "disarming never asks");
+        assert!(!app.state.session.rec.armed && app.state.playlist.popup.is_none(), "disarming never asks");
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::AskOff));
         assert!(!Opt::Ask.on());
         crate::playlist::run(&mut app, Cmd::Record(Opt::Automation));
         app.mouse_down();
         app.mouse_up();
-        assert!(app.state.rec.armed);
+        assert!(app.state.session.rec.armed);
         app.mouse_down_right();
         app.mouse_up();
         let Some(Popup { items, .. }) = app.state.playlist.popup.clone() else { panic!("no menu") };
@@ -1021,7 +1055,7 @@ mod tests {
         app.state.playlist.popup = None;
         app.mouse_down();
         app.mouse_up();
-        assert!(!app.state.rec.armed, "a click disarms");
+        assert!(!app.state.session.rec.armed, "a click disarms");
     }
 
     /// PAT mode: notes go in the current pattern for the selected channel, quantized to the main snap, as long as they
@@ -1036,13 +1070,13 @@ mod tests {
         app.toggle_record();
         // 30..100 rounds to 24..96; 190..205 to 192..216 (the end rounds onto the start: one step long).
         key(&mut app, KeyCode::KeyZ, true, 30.0, false);
-        assert!(app.state.rec.recording());
+        assert!(app.state.session.rec.recording());
         key(&mut app, KeyCode::KeyZ, false, 100.0, false);
         key(&mut app, KeyCode::KeyX, true, 190.0, false);
         key(&mut app, KeyCode::KeyX, false, 205.0, false);
         stop(&mut app);
         assert_eq!(notes(&app), [(24, 72, 0), (192, 24, 0)]);
-        assert!(!app.state.rec.recording() && app.state.rec.armed, "a stop ends the take and keeps Record armed");
+        assert!(!app.state.session.rec.recording() && app.state.session.rec.armed, "a stop ends the take and keeps Record armed");
         assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some(RECORDED));
 
         // Another take from 170 to 260: the note starting at 192 goes, the one at 24 (before the take) stays.
@@ -1173,7 +1207,7 @@ mod tests {
         let bar = app.state.session.project.bar_ticks();
         app.toggle_record();
         key(&mut app, KeyCode::KeyW, true, 50.0, true);
-        assert!(app.state.rec.holding());
+        assert!(app.state.session.rec.holding());
         assert_eq!(held_notes(&app.state, 50.0).iter().map(|n| (n.position, n.length)).collect::<Vec<_>>(), [(48, 2)]);
         let held = |at: f64| held_notes(&app.state, at).iter().map(|n| (n.position, n.length)).collect::<Vec<_>>();
         assert_eq!(held(500.0), [(48, 452)]);
@@ -1181,7 +1215,7 @@ mod tests {
         app.record_tick();
         assert_eq!(crate::playlist::clips(&app.state.session)[0].length, 3 * bar);
         key(&mut app, KeyCode::KeyW, false, f64::from(2 * bar + 200), true);
-        assert!(!app.state.rec.holding() && held_notes(&app.state, 1000.0).is_empty());
+        assert!(!app.state.session.rec.holding() && held_notes(&app.state, 1000.0).is_empty());
         stop(&mut app);
         let n = notes(&app);
         assert_eq!(n.len(), 1);
@@ -1196,9 +1230,9 @@ mod tests {
         let mut app = app();
         app.state.toggles.retain(|t| *t != "typing");
         app.key(&Key::Character("r".into()), false, false);
-        assert!(app.state.rec.armed);
+        assert!(app.state.session.rec.armed);
         app.key(&Key::Character("r".into()), false, false);
-        assert!(!app.state.rec.armed);
+        assert!(!app.state.session.rec.armed);
     }
 
     /// The metronome menu's Recording precount: Off, 1 bar, 2 bars set the precount switch and length (spec §3).
@@ -1234,7 +1268,7 @@ mod tests {
         app.record_tick();
         assert!(!app.state.session.transport.playing(), "punched out");
         assert_eq!(notes(&app), [(120, 72, 0)], "the held note ends at the selection's end");
-        assert_eq!(app.state.piano.marker, 96);
+        assert_eq!(app.state.session.pat_pos, 96);
         app.state.piano.range = None;
         assert_eq!(app.selection_loop(), None);
     }
@@ -1259,7 +1293,7 @@ mod tests {
         key(&mut app, KeyCode::KeyX, true, 1488.0, true);
         app.state.session.transport.pretend_at(1560.0, true);
         app.record_tick();
-        assert!(!app.state.rec.recording(), "the take ended on the marker");
+        assert!(!app.state.session.rec.recording(), "the take ended on the marker");
         key(&mut app, KeyCode::KeyX, false, 1600.0, true);
         // Past it: not recorded.
         key(&mut app, KeyCode::KeyC, true, 1700.0, true);
@@ -1270,7 +1304,7 @@ mod tests {
         key(&mut app, KeyCode::KeyV, false, 2448.0, true);
         assert_eq!(notes(&app).len(), 3);
         stop(&mut app);
-        assert!(!app.state.rec.punched_out);
+        assert!(!app.state.session.rec.punched_out);
     }
 
     /// Dump score log: notes played (playing or not) go into the pattern at their real time offsets from the first,
@@ -1282,7 +1316,7 @@ mod tests {
         let now = Instant::now();
         let t0 = now.checked_sub(Duration::from_secs(10)).expect("a clock");
         let src = |c| crate::step_edit::Src::Typing(c);
-        let log = &mut app.state.rec.log;
+        let log = &mut app.state.session.rec.log;
         log.down(src(KeyCode::KeyZ), 60, 100, 0, t0);
         log.up(src(KeyCode::KeyZ), t0 + Duration::from_millis(300));
         log.down(src(KeyCode::KeyX), 62, 90, 0, t0 + Duration::from_millis(700));
@@ -1422,7 +1456,7 @@ mod tests {
         key(&mut app, KeyCode::KeyZ, true, 0.0, false);
         key(&mut app, KeyCode::KeyZ, false, 24.0, false);
         stop(&mut app);
-        assert!(!app.state.rec.armed);
+        assert!(!app.state.session.rec.armed);
         assert_eq!(notes(&app), [(0, 24, 0)], "only the recorded note: step edit wrote nothing while playing");
     }
 
@@ -1480,18 +1514,18 @@ mod tests {
         Opt::Wait.toggle();
         app.toggle_record();
         app.act(Action::Play);
-        assert!(app.state.rec.waiting && !app.state.session.transport.playing());
+        assert!(app.state.session.rec.waiting && !app.state.session.transport.playing());
         app.act(Action::Play);
-        assert!(!app.state.rec.waiting, "Play again cancels");
+        assert!(!app.state.session.rec.waiting, "Play again cancels");
         app.act(Action::Play);
         Opt::Notes.toggle();
         assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
         assert!(app.typing_key(KeyCode::KeyZ, false, false, false));
-        assert!(app.state.rec.waiting, "Notes are off in the filter");
+        assert!(app.state.session.rec.waiting, "Notes are off in the filter");
         Opt::Notes.toggle();
         assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
-        assert!(!app.state.rec.waiting && app.state.session.transport.playing() && app.state.session.transport.tick() == 0.0);
-        assert!(app.state.rec.recording(), "the note that started playback is recorded");
+        assert!(!app.state.session.rec.waiting && app.state.session.transport.playing() && app.state.session.transport.tick() == 0.0);
+        assert!(app.state.session.rec.recording(), "the note that started playback is recorded");
         key(&mut app, KeyCode::KeyZ, false, 48.0, false);
         stop(&mut app);
         assert_eq!(notes(&app), [(0, 48, 0)]);
@@ -1499,7 +1533,7 @@ mod tests {
         Opt::WaitArmed.toggle();
         app.toggle_record();
         app.act(Action::Play);
-        assert!(!app.state.rec.waiting && app.state.session.transport.playing());
+        assert!(!app.state.session.rec.waiting && app.state.session.transport.playing());
         app.act(Action::Stop);
     }
 
@@ -1510,17 +1544,17 @@ mod tests {
         let mut app = app();
         Opt::Precount.toggle();
         app.act(Action::Play);
-        assert!(app.state.rec.count.is_none(), "disarmed: no count-in");
+        assert!(app.state.session.rec.count.is_none(), "disarmed: no count-in");
         app.act(Action::Stop);
         app.toggle_record();
         app.act(Action::Play);
         let beats = u32::from(app.state.session.project.bar().0);
-        assert_eq!(app.state.rec.count.map(|c| c.left()), Some(beats));
+        assert_eq!(app.state.session.rec.count.map(|c| c.left()), Some(beats));
         assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
         assert!(app.typing_key(KeyCode::KeyZ, false, false, false));
-        assert!(!app.state.rec.recording(), "not during the count-in");
+        assert!(!app.state.session.rec.recording(), "not during the count-in");
         app.act(Action::Stop);
-        assert!(app.state.rec.count.is_none(), "Stop ends it");
+        assert!(app.state.session.rec.count.is_none(), "Stop ends it");
     }
 
     /// Loop record: the flag the engines read is set while armed with Loop record off; each pass of a loop is a take
@@ -1578,7 +1612,7 @@ mod tests {
         assert_eq!(app.cancel_recording(), "Recording canceled: 2 takes undone");
         app.record_tick();
         assert_eq!(notes(&app), [(24, 72, 0)]);
-        assert!(!app.state.session.transport.playing() && !app.state.rec.recording() && app.state.rec.armed);
+        assert!(!app.state.session.transport.playing() && !app.state.session.rec.recording() && app.state.session.rec.armed);
         assert_eq!(app.state.session.history.newest_done(), Some(RECORDED), "the earlier take is still in the history");
     }
 
@@ -1595,5 +1629,32 @@ mod tests {
         key(&mut app, KeyCode::KeyX, false, 48.0, false);
         stop(&mut app);
         assert_eq!(notes(&app), [(0, 48, 0), (0, 96, 0)]);
+    }
+
+    /// A session with no interface records a take: notes held from a source, written into the current pattern on
+    /// the grid it was given, one undo step; the stop ends the take and the session says the pattern changed.
+    #[test]
+    fn a_session_records_without_the_interface() {
+        crate::settings_file::set_flag("rec_ask", false);
+        let mut ses = crate::session::Session::new(crate::app::test_project(), crate::transport::Transport::new(None));
+        ses.set_pattern(1);
+        ses.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
+        ses.rec.armed = true;
+        ses.rec.unit = Some(24);
+        let done = ses.history.done();
+        ses.transport.pretend_at(30.0, false);
+        assert!(!tick_in(&mut ses, None));
+        down_in(&mut ses, Src::Midi(60), 60, 100, 0, Extra::default());
+        ses.transport.pretend_at(100.0, false);
+        assert!(!tick_in(&mut ses, None));
+        up_in(&mut ses, Src::Midi(60), None);
+        ses.transport.stop();
+        tick_in(&mut ses, None);
+        let notes: Vec<(u32, u32, u16)> = ses.project.pattern(1).map(|p| p.notes.iter().map(|n| (n.position, n.length, n.key)).collect()).unwrap_or_default();
+        assert_eq!(notes, [(24, 72, 60)]);
+        assert_eq!(ses.history.done(), done + 1);
+        assert_eq!(ses.history.newest_done(), Some(RECORDED));
+        assert!(ses.touched.views.contains(&crate::session::View::Recorded { pattern: 1, channel: 0 }));
+        assert!(!ses.rec.recording());
     }
 }

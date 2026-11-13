@@ -160,7 +160,7 @@ impl App {
             return "The audio logger has heard nothing yet".into();
         }
         let sample = tesla::sample::Sample::from_channels(self.audio_log.rate.max(1), vec![l, r], tesla::sample::Format::Float32);
-        let dir = crate::track_rec::folder(&self.state);
+        let dir = crate::track_rec::folder(&self.state.session);
         let name = format!("Audio log_{}.wav", chrono::Local::now().format("%Y-%m-%d %H-%M-%S"));
         let path = dir.join(name);
         let wrote = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, tesla::wav::write(&sample, tesla::wav::Depth::Own)));

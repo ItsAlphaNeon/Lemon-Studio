@@ -94,7 +94,7 @@ pub fn job(s: &State, dir: &Path, stem: &str) -> ex::Job {
 pub fn add_channel(s: &mut State, path: &str, pattern: u16) -> u16 {
     let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = crate::playlist::unique_channel_name(&s.session, &crate::patterns::name_of(&s.session, pattern));
-    let color = s.session.project.pattern(pattern).and_then(|p| p.color).or_else(|| Some(s.clip_colors.new_channel(index)));
+    let color = s.session.project.pattern(pattern).and_then(|p| p.color).or_else(|| Some(s.session.clip_colors.new_channel(index)));
     s.session.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,

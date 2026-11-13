@@ -96,8 +96,6 @@ pub struct PianoState {
     pub clipboard: Vec<Note>,
     /// Zoom tool: the view before "zoom out" (px per beat, scroll x, scroll y), for right-click.
     pub zoom_back: Option<(f32, f32, f32)>,
-    /// Play-start marker in the ruler (ticks; pattern playback starts here, §10).
-    pub marker: u32,
     /// The user put the play-start marker somewhere (a click or drag in the ruler, the song position slider in pattern
     /// mode) since the project opened: Ctrl+V pastes there (spec: ui/piano-keys.md §4 rule 7).
     pub marker_placed: bool,
@@ -139,7 +137,6 @@ impl Default for PianoState {
             overlay: None,
             clipboard: Vec::new(),
             zoom_back: None,
-            marker: 0,
             marker_placed: false,
             range: None,
             row_h: ROW,
@@ -469,10 +466,10 @@ pub fn undo(s: &mut State) -> bool {
 pub fn rescale(s: &mut State, from: u16, to: u16) {
     use os_model::{rescale_length, rescale_tick};
     let k = f32::from(to.max(1)) / f32::from(from.max(1));
+    s.session.pat_pos = rescale_tick(s.session.pat_pos, from, to);
     let p = &mut s.piano;
     p.scroll_x *= k;
     p.last_len = rescale_length(p.last_len, from, to);
-    p.marker = rescale_tick(p.marker, from, to);
     p.range = p.range.map(|(a, b)| (rescale_tick(a, from, to), rescale_tick(b, from, to)));
     p.clipboard.iter_mut().for_each(|n| n.rescale(from, to));
     if let Some((_, x, _)) = &mut p.zoom_back {
@@ -656,7 +653,7 @@ pub fn slice(s: &mut State, tick: u32) -> usize {
 /// then start on or inside an unselected note of the same key, the whole paste goes one snap unit later (once).
 pub fn paste_tick(s: &State, clip: &[Note]) -> u32 {
     let Some(first) = clip.iter().map(|n| n.position).min() else { return 0 };
-    let at = if s.piano.marker_placed { s.piano.marker } else { first - bar_start(&s.session, first) };
+    let at = if s.piano.marker_placed { s.session.pat_pos } else { first - bar_start(&s.session, first) };
     let ch = channel(s);
     let sel = s.piano.selection(s.pattern(), ch);
     let lands_on = |m: &Note| clip.iter().any(|n| n.key == m.key && (m.position..m.position + shown_len(&s.session, m)).contains(&(n.position - first + at)));

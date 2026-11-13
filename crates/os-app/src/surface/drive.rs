@@ -663,7 +663,7 @@ impl App {
             button::STOP => self.act(crate::app::Action::Stop),
             button::RECORD => {
                 // From the keyboard the Record button arms at once (no "What to record?" question).
-                if self.state.rec.armed || !Opt::Ask.on() {
+                if self.state.session.rec.armed || !Opt::Ask.on() {
                     self.act(crate::app::Action::Record);
                 } else {
                     let msg = self.rec_cmd(RecCmd::Arm { notes: Opt::Notes.on(), automation: Opt::Automation.on() });
@@ -1266,7 +1266,7 @@ impl App {
         // An arrow: dim when it can go further, white while held, dark at the end.
         let arrow = |cc: u8, can: bool| if !can { lk::OFF } else if held.contains(&cc) { lk::WHITE } else { lk::DIM };
         lights.push((Led::Button(button::PLAY), lit(playing), false));
-        lights.push((Led::Button(button::RECORD), lit(s.rec.armed), false));
+        lights.push((Led::Button(button::RECORD), lit(s.session.rec.armed), false));
         lights.push((Led::Button(button::METRONOME), lit(crate::metronome::on()), false));
         lights.push((Led::Button(button::LOOP), lit(Opt::Loop.on()), false));
         for cc in [button::STOP, button::CAPTURE, button::QUANTISE, button::UNDO] {

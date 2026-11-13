@@ -1653,7 +1653,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::sep(),
         {
             let it = it("Assign to new instrument track", RCmd::AssignInstrument(r));
-            if crate::track_links::can_assign_instrument(s, &menu_rows(s, r)) { it } else { it.off() }
+            if crate::track_links::can_assign_instrument(&s.session, &menu_rows(s, r)) { it } else { it.off() }
         },
         PItem::col(),
         it("Cut", RCmd::Cut(r)),
@@ -4510,6 +4510,7 @@ mod tests {
         app.state.session.project.get_mut().ppq = 96;
         app.state.set_tempo(130.0);
         app.state.playlist.reset();
+        app.state.session.song_pos = 0;
         let enabled = |app: &App| options_menu(&app.state, 0.0, 0.0).items.iter().find(|i| i.label == "Restretch all").map(|i| (i.enabled, i.key));
         assert_eq!(enabled(&app), Some((true, "Ctrl+Alt+R")));
         assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("No stretched channels to restretch"));

@@ -703,6 +703,12 @@ impl Transport {
         self.shared.loop_range.store(packed, Ordering::Relaxed);
     }
 
+    /// The loop points last set (`set_loop`).
+    pub fn loop_range(&self) -> Option<(u32, u32)> {
+        let r = self.shared.loop_range.load(Ordering::Relaxed);
+        (r != 0).then(|| ((r >> 32) as u32, r as u32))
+    }
+
     /// The playing song jumps to tick `to` when it reaches the next multiple of `unit` ticks (the playlist's Quantize
     /// song jumps); a later call replaces one still waiting.
     pub fn jump_on(&self, unit: u32, to: u32) {

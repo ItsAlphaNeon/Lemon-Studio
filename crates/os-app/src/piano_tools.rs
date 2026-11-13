@@ -226,7 +226,7 @@ pub fn span_to_range(s: &mut State) {
     let picked: Vec<&Note> = sel.iter().filter_map(|&i| all.get(i)).collect();
     let (Some(a), Some(b)) = (picked.iter().map(|n| n.position).min(), picked.iter().map(|n| n.position + piano::shown_len(&s.session, n)).max()) else { return };
     s.piano.range = Some((a, b));
-    s.piano.marker = a;
+    s.session.pat_pos = a;
 }
 
 /// Select the channel `dir` rows away, wrapping; `with_notes` skips channels without notes in the pattern (§11).
@@ -342,7 +342,7 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             format!("Ghost channels {}", if s.piano.ghosts { "on" } else { "off" })
         }
         NCmd::AddMarker => {
-            let tick = if app.state.session.transport.playing() && !app.state.session.transport.song() { app.state.session.transport.tick() as u32 } else { app.state.piano.marker };
+            let tick = if app.state.session.transport.playing() && !app.state.session.transport.song() { app.state.session.transport.tick() as u32 } else { app.state.session.pat_pos };
             return Some(add_marker(&mut app.state, tick));
         }
         NCmd::Snap(p) => return Some(crate::piano_snap::set(s, p)),

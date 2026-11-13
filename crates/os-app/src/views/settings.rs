@@ -708,7 +708,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         RECORDING => {
             use crate::prefs as p;
             // Where takes go now: the project's data folder's Recorded folder, else the user folder's.
-            let folder = crate::track_rec::folder(s).display().to_string();
+            let folder = crate::track_rec::folder(&s.session).display().to_string();
             vec![
                 g("Recording filter", vec![Check2(p::REC_NOTES.label, true, p::REC_AUTOMATION.label, true), Check(p::REC_AUDIO.label, false)]),
                 g("Options", vec![

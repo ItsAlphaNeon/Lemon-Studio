@@ -386,7 +386,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let icon = crate::playlist::window_icon(&s.session.project, i);
         let icon_lead = if icon.is_some() { 16.0 } else { 0.0 };
         // A channel with an instrument track (playlist §6c): the "I" disc before the name, as on the track header.
-        let inst = crate::track_links::instrument_track_of(s, ch.index).is_some();
+        let inst = crate::track_links::instrument_track_of(&s.session, ch.index).is_some();
         let lead = icon_lead + if inst { 14.0 } else { 0.0 };
         let tb = Rect::new(nb.x + lead, nb.y, nb.w - lead - if locked { 12.0 } else { 0.0 }, nb.h);
         let label = shorten(ui, nf, &label, tb.w - 8.0);

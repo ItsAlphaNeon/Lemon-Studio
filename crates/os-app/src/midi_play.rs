@@ -10,10 +10,10 @@
 // spec: ui/midi-settings.md
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::app::App;
+use crate::session::Session;
 use crate::midi_cfg::{self as cfg, CurveOf, Offset, Switch};
 use crate::midi_in::{Ev, InPort, Msg};
 use crate::prefs;
@@ -66,10 +66,6 @@ pub struct Play {
     pedal: bool,
     /// The row bent by pitch bend, while off centre.
     bend_row: Option<usize>,
-    /// When the external clock's tempo was last applied.
-    tempo_at: Option<Instant>,
-    /// External sync messages waiting out a positive offset.
-    pending: VecDeque<(Instant, Msg)>,
     /// Generator muting keys held with Toggle on release on: (key, row).
     muted: Vec<(u8, usize)>,
 }
@@ -78,11 +74,6 @@ impl Play {
     /// Rows and keys sounding from the devices (the piano roll's keyboard lights them).
     pub fn lit(&self) -> impl Iterator<Item = (usize, u16)> + '_ {
         self.held.iter().filter(|h| h.up.is_none()).map(|h| (h.row, h.play))
-    }
-
-    /// Something waits for its time: the shell keeps ticking.
-    pub fn busy(&self) -> bool {
-        !self.pending.is_empty()
     }
 }
 
@@ -257,7 +248,7 @@ impl App {
     }
 
     /// Tests: messages from a device named "Test".
-    #[cfg(test)]
+        #[cfg(test)]
     pub(crate) fn midi_notes(&mut self, msgs: Vec<Msg>) {
         let dev: std::sync::Arc<str> = std::sync::Arc::from("Test");
         self.midi_events(msgs.into_iter().map(|msg| Ev { dev: dev.clone(), msg }).collect());
@@ -419,74 +410,13 @@ impl App {
 
     /// The external sync device's transport message (spec §8): with a positive offset it waits that long.
     fn ext_message(&mut self, m: Msg) {
-        let off = cfg::offset(Offset::External);
-        if off > 0 {
-            self.midi_play.pending.push_back((Instant::now() + Duration::from_millis(off as u64), m));
-        } else {
-            self.ext_apply(m, (-off) as u32);
-        }
+        let sel = self.selection_loop();
+        self.host(|ses| ext_message_in(ses, m, sel));
     }
 
     fn midi_pending(&mut self) {
-        let now = Instant::now();
-        while self.midi_play.pending.front().is_some_and(|p| p.0 <= now) {
-            let Some((_, m)) = self.midi_play.pending.pop_front() else { break };
-            self.ext_apply(m, 0);
-        }
-    }
-
-    /// Start plays from the beginning, Continue resumes, Stop pauses, Song Position Pointer moves the position;
-    /// `ahead_ms` starts that far into the song (a negative offset).
-    fn ext_apply(&mut self, m: Msg, ahead_ms: u32) {
-        use crate::transport::State as T;
-        let ppq = u32::from(self.state.session.project.ppq.max(1));
-        let ahead = (f64::from(ahead_ms) / 1000.0 * self.state.tempo() / 60.0 * f64::from(ppq)).round() as u32;
-        match m {
-            Msg::Start => {
-                self.state.session.transport.stop();
-                self.ext_position(ahead);
-                self.start_playback();
-            }
-            Msg::Continue => match self.state.session.transport.state() {
-                T::Paused => self.state.session.transport.resume(),
-                T::Stopped => {
-                    if ahead > 0 {
-                        let at = if self.state.song_mode() { self.state.playlist.pos } else { self.state.piano.marker };
-                        self.ext_position(at + ahead);
-                    }
-                    self.start_playback();
-                }
-                T::Playing => {}
-            },
-            Msg::Stop => {
-                if self.state.session.transport.state() == T::Playing {
-                    self.state.session.transport.pause();
-                }
-            }
-            Msg::Spp(sixteenths) => {
-                let t = u32::from(sixteenths) * ppq / 4;
-                let running = self.state.session.transport.state() == T::Playing;
-                // The position counts from a stop: a paused playback would resume where it paused.
-                self.state.session.transport.stop();
-                self.ext_position(t);
-                if running {
-                    self.start_playback();
-                }
-            }
-            _ => {}
-        }
-        self.invalidate();
-    }
-
-    /// Puts the song position (SONG) or the play-start marker (PAT) at `t` without restarting.
-    fn ext_position(&mut self, t: u32) {
-        let s = &mut self.state;
-        if s.song_mode() {
-            s.playlist.pos = t;
-            crate::init::apply(&mut s.session);
-        } else {
-            s.piano.marker = t;
-        }
+        let sel = self.selection_loop();
+        self.host(|ses| ext_pending_in(ses, sel));
     }
 
     /// The external clock's tempo and the status line (spec §8).
@@ -500,11 +430,8 @@ impl App {
             }
         }
         let Some(bpm) = st.tempo else { return };
-        let bpm = (bpm * 100.0).round() / 100.0;
-        let due = self.midi_play.tempo_at.is_none_or(|t| t.elapsed() >= TEMPO_EVERY);
-        if due && (bpm - self.state.tempo()).abs() > TEMPO_STEP {
-            self.midi_play.tempo_at = Some(Instant::now());
-            self.set_tempo(bpm);
+        if self.host(|ses| ext_tempo_in(ses, bpm)) {
+            self.damage_band(crate::app::TEMPO_RECT);
         }
     }
 
@@ -906,5 +833,96 @@ mod tests {
         // 1 s at the tempo: 24 clocks a beat.
         let want = app.state.tempo() / 60.0 * 24.0;
         assert!((clocks as f64 - want).abs() < want * 0.25, "{clocks} clocks, want about {want}");
+    }
+}
+
+/// The external sync device's transport message (spec §8): with a positive offset it waits that long. `sel` is the
+/// time selection that loops playback.
+pub(crate) fn ext_message_in(s: &mut Session, m: Msg, sel: Option<(u32, u32)>) {
+    let off = cfg::offset(Offset::External);
+    if off > 0 {
+        s.ext_pending.push_back((Instant::now() + Duration::from_millis(off as u64), m));
+    } else {
+        ext_apply_in(s, m, (-off) as u32, sel);
+    }
+}
+
+/// The messages whose offset has passed.
+pub(crate) fn ext_pending_in(s: &mut Session, sel: Option<(u32, u32)>) {
+    let now = Instant::now();
+    while s.ext_pending.front().is_some_and(|p| p.0 <= now) {
+        let Some((_, m)) = s.ext_pending.pop_front() else { break };
+        ext_apply_in(s, m, 0, sel);
+    }
+}
+
+/// The external clock's tempo `bpm`, applied at most every `TEMPO_EVERY` when it moved by more than `TEMPO_STEP`;
+/// whether the tempo changed.
+pub(crate) fn ext_tempo_in(s: &mut Session, bpm: f64) -> bool {
+    let bpm = (bpm * 100.0).round() / 100.0;
+    let due = s.ext_tempo_at.is_none_or(|t| t.elapsed() >= TEMPO_EVERY);
+    if !(due && (bpm - s.tempo()).abs() > TEMPO_STEP) {
+        return false;
+    }
+    s.ext_tempo_at = Some(Instant::now());
+    let t = bpm.clamp(10.0, 522.0);
+    if s.tempo() == t {
+        return false;
+    }
+    s.set_tempo(t);
+    s.dirty = true;
+    true
+}
+
+/// Start plays from the beginning, Continue resumes, Stop pauses, Song Position Pointer moves the position;
+/// `ahead_ms` starts that far into the song (a negative offset).
+pub(crate) fn ext_apply_in(s: &mut Session, m: Msg, ahead_ms: u32, sel: Option<(u32, u32)>) {
+    use crate::transport::State as T;
+    let ppq = u32::from(s.project.ppq.max(1));
+    let ahead = (f64::from(ahead_ms) / 1000.0 * s.tempo() / 60.0 * f64::from(ppq)).round() as u32;
+    match m {
+        Msg::Start => {
+            s.transport.stop();
+            ext_position_in(s, ahead);
+            crate::app::play_in(s, sel, 0);
+        }
+        Msg::Continue => match s.transport.state() {
+            T::Paused => s.transport.resume(),
+            T::Stopped => {
+                if ahead > 0 {
+                    let at = if s.song_mode() { s.song_pos } else { s.pat_pos };
+                    ext_position_in(s, at + ahead);
+                }
+                crate::app::play_in(s, sel, 0);
+            }
+            T::Playing => {}
+        },
+        Msg::Stop => {
+            if s.transport.state() == T::Playing {
+                s.transport.pause();
+            }
+        }
+        Msg::Spp(sixteenths) => {
+            let t = u32::from(sixteenths) * ppq / 4;
+            let running = s.transport.state() == T::Playing;
+            // The position counts from a stop: a paused playback would resume where it paused.
+            s.transport.stop();
+            ext_position_in(s, t);
+            if running {
+                crate::app::play_in(s, sel, 0);
+            }
+        }
+        _ => {}
+    }
+    s.touched.repaint = true;
+}
+
+/// Puts the song position (SONG) or the play-start marker (PAT) at `t` without restarting.
+fn ext_position_in(s: &mut Session, t: u32) {
+    if s.song_mode() {
+        s.song_pos = t;
+        crate::init::apply(s);
+    } else {
+        s.pat_pos = t;
     }
 }

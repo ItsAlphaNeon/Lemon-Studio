@@ -81,6 +81,23 @@ pub struct Session {
     pub perform: crate::perform::Perform,
     /// The live engine has had the project once (`sync_live`); each tick's `rack::sync_playback` keeps it current.
     pub(crate) live_synced: bool,
+    /// The rule for the colours of new audio and automation clips' channels: the interface's theme's (`App::clip_colors`,
+    /// kept up to date by `App::follow_settings`).
+    pub clip_colors: crate::clip_colors::ClipColors,
+    /// The song position (ticks): song playback starts here (the playlist's, spec ui/playlist.md).
+    pub song_pos: u32,
+    /// The piano roll's play-start marker (ticks): pattern playback starts here (spec ui/piano-roll.md §10).
+    pub pat_pos: u32,
+    /// External sync messages waiting out a positive offset (`midi_play::ext_message_in`).
+    pub ext_pending: std::collections::VecDeque<(std::time::Instant, crate::midi_in::Msg)>,
+    /// When the external clock's tempo was last applied.
+    pub ext_tempo_at: Option<std::time::Instant>,
+    /// Recording: armed, the take, count-in, the score logger (`crate::record`).
+    pub rec: crate::record::Rec,
+    /// One-click audio recording under way (spec: ui/one-click-recording.md §2).
+    pub(crate) audio_rec: Option<crate::one_click::AudioRec>,
+    /// Disk recording into the armed mixer tracks under way (spec: audio/track-io.md §2.5).
+    pub(crate) track_rec: Option<crate::track_rec::TrackRec>,
     /// Playback: the audio thread and what it plays (`crate::transport`). Last, so it goes after the plugins it plays.
     pub transport: crate::transport::Transport,
 }
@@ -129,6 +146,12 @@ pub enum View {
     Retimed(u16, u16),
     /// A message for the hint bar.
     Message(String),
+    /// Recording wrote notes of `channel` into `pattern`: the piano roll shows them, nothing selected (its time
+    /// selection stays: it may be looping).
+    Recorded { pattern: u16, channel: u16 },
+    /// An audio clip channel numbered `channel` was made and its clip `clip` placed: it becomes the playlist's clip
+    /// source, the clip the selection.
+    AudioClipAdded { channel: u16, clip: usize },
 }
 
 impl View {
@@ -178,6 +201,14 @@ impl Session {
             rpc_server: None,
             perform: Default::default(),
             live_synced: false,
+            clip_colors: Default::default(),
+            song_pos: 0,
+            ext_pending: Default::default(),
+            ext_tempo_at: None,
+            pat_pos: 0,
+            rec: Default::default(),
+            audio_rec: None,
+            track_rec: None,
             transport,
         }
     }

@@ -686,7 +686,7 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
     }
     // Song position: a flag ◤ on the playhead while playing the song, else on the start position (§7: its left edge
     // on the position, its top along the ruler's top).
-    let tick = if f.playing && f.song { f.tick as f32 } else { s.playlist.pos as f32 };
+    let tick = if f.playing && f.song { f.tick as f32 } else { s.session.song_pos as f32 };
     let x = g.x_of(tick);
     let (y0, k) = (ruler.y + 0.5, 9.0);
     ui.c.fill_polygon(&[(x - 0.5, y0 - 0.5), (x + k + 1.0, y0 - 0.5), (x - 0.5, y0 + k + 1.0)], t.s(0x0b1114));
@@ -1469,7 +1469,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     let led = Rect::new(hr.right() - 19.0, (h - gap - 15.0).max(1.0) + hr.y, 14.0, 14.0);
     ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo)");
     // An audio or instrument track (§6c): a light disc with "A" / "I" before its name, which is drawn bright.
-    let link = crate::track_links::link(s, row);
+    let link = crate::track_links::link(&s.session, row);
     let badge = match link.kind {
         os_model::TrackLink::AUDIO => Some(("A", "Audio track: its audio clips play through its mixer track (Track mode in the menu)")),
         os_model::TrackLink::INSTRUMENT => Some(("I", "Instrument track: linked to a channel (Track mode in the menu)")),

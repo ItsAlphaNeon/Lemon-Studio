@@ -102,6 +102,16 @@ fn view(s: &mut State, v: crate::session::View) {
         View::ClipsCleared => s.playlist.sel.clear(),
         View::Retimed(from, to) => crate::app::retime_views(s, from, to),
         View::Message(m) => s.message = Some(m),
+        View::AudioClipAdded { channel, clip } => {
+            s.playlist.source = Some(os_model::ClipSource::Channel(channel));
+            s.playlist.picker = crate::playlist::PickKind::Audio;
+            s.playlist.sel = vec![clip];
+        }
+        View::Recorded { pattern, channel } => {
+            let range = s.piano.range;
+            s.piano.select(pattern, channel, Vec::new());
+            s.piano.range = range;
+        }
         View::MemberLevel { t, k, id, wet, v } => crate::container::show_level(s, t, k, id, wet, v),
         View::PatternsRenumbered => {
             s.playlist.sel.clear();

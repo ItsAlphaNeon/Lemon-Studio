@@ -378,7 +378,7 @@ fn transport(ui: &mut Ui, c: &Ctx) {
         }
         let g = Rect::new(r.x + 8.0, r.y + 8.0, r.w - 16.0, r.h - 16.0);
         let c = if on { t.on_glyph } else { t.glyph };
-        if icon == Icon::Play && s.rec.waiting {
+        if icon == Icon::Play && s.session.rec.waiting {
             // Waiting for input (spec: ui/recording.md §3): three dots.
             for k in [-1.0, 0.0, 1.0] {
                 ui.c.fill_circle(g.cx() + k * g.w * 0.32, g.cy(), (g.w * 0.1).max(1.5), c);
@@ -398,7 +398,7 @@ fn transport(ui: &mut Ui, c: &Ctx) {
     // (`crate::high_visibility`).
     let rec = a.span(486.0, 513.0, 7.0, 33.0);
     let hov = ui.hit(rec, Action::Record, crate::record::hint());
-    let armed = s.rec.armed;
+    let armed = s.session.rec.armed;
     let down = ui.down(rec, &Action::Record);
     let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());
     let face = Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0);
@@ -521,7 +521,7 @@ fn time(ui: &mut Ui, c: &Ctx) {
     let bar_x = (step_x - 8.0 - bw).max(tp.x + 2.0);
     ui.c.push_clip(tp.inset(1.0));
     let g = if lemon { t.pill } else { t.glyph };
-    if let Some(c) = s.rec.count.filter(|c| c.left() > 0) {
+    if let Some(c) = s.session.rec.count.filter(|c| c.left() > 0) {
         // A recording count-in (spec: ui/recording.md §3): the beats left.
         ui.c.text_center(Font::light(22, 8), Rect::new(tp.x, tp.y + 2.0, tp.w, tp.h - 2.0), g, &format!("REC IN {}", c.left()));
     } else if lemon {
@@ -715,7 +715,7 @@ fn utilities(ui: &mut Ui, c: &Ctx) -> bool {
             Icon::Mic => Action::OneClick,
             _ => Action::Placeholder(hint),
         };
-        let lit = icon == Icon::Mic && s.rec.audio;
+        let lit = icon == Icon::Mic && s.session.rec.audio;
         tool_button(ui, r, icon, lit, action, hint);
     }
     true

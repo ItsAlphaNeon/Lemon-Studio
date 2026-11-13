@@ -571,7 +571,7 @@ impl Rig {
         }
         // And stopped: a take still recording (a Touch controller note with Start on input on) would keep changing the
         // project, by the clock of a device that is not there, while the checks undo, redo and save.
-        if self.app.state.session.transport.playing() || self.app.state.rec.recording() {
+        if self.app.state.session.transport.playing() || self.app.state.session.rec.recording() {
             self.app.act(crate::app::Action::Stop);
             self.run(&[]);
         }
