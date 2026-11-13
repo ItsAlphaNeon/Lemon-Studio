@@ -176,3 +176,40 @@ pub(crate) fn start_loading(ses: &mut Session) {
     ses.loading = Some(crate::loading::Loading::start(&ses.project));
     ses.samples.wait = true;
 }
+
+/// Reads the project file at `path`: its file and project. A project in the layout used before version 24.2 is
+/// converted to the current one (spec: flp/layouts.md "Converting to the newer layout"); one the conversion cannot handle
+/// is refused with the version it was saved by (the second part of the error).
+pub(crate) fn read(path: &Path) -> Result<(os_flp::FlpFile, os_model::Project), (String, Option<String>)> {
+    let mut f = std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| os_flp::FlpFile::parse(&b).map_err(|e| e.to_string())).map_err(|e| (e, None))?;
+    match os_flp::project::upgrade(&mut f).and_then(|_| os_flp::project::load(&f)) {
+        Ok(p) => Ok((f, p)),
+        Err(os_flp::project::ProjectError::LegacyLayout(v)) => Err((os_flp::project::ProjectError::LegacyLayout(v.clone()).to_string(), Some(v))),
+        Err(e) => Err((e.to_string(), None)),
+    }
+}
+
+/// The plugin host's work on one tick without an interface (`--render`): the opened project's loading, the stock
+/// plugins kept in step with the project, the mixer's effects and containers, samples into the samplers, and the
+/// instances' housekeeping. What it would show is dropped.
+pub(crate) fn host_tick(ses: &mut Session) {
+    crate::loading::tick(ses, false);
+    crate::lemon_midi_out::sync_midi_outs(ses);
+    let _ = crate::mixer::fx_requests_in(ses);
+    let _ = crate::container::sync_containers_in(ses);
+    if ses.loading.is_none() {
+        crate::app::sync_effects(ses);
+        crate::project_plugins::sync_wrapped(ses);
+        crate::osc3::sync_osc3(ses);
+        crate::citrus::sync_citrus(ses);
+        crate::smith::sync_smith(ses);
+        crate::slicer::sync_slicer(ses);
+        crate::drums::sync_drums(ses);
+        if os_native::enabled() {
+            crate::project_plugins::host_native(ses, false);
+        }
+    }
+    crate::control::host::sample_loads(ses);
+    let _ = ses.plugins.idle(|_| None);
+    ses.touched = Default::default();
+}

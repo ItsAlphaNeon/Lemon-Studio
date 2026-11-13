@@ -1740,19 +1740,10 @@ impl App {
         // A project in the layout used before version 24.2 is converted to the current one as it opens, and is saved in
         // that layout (spec: flp/layouts.md "Converting to the newer layout"). One the conversion cannot handle gets a
         // dialog that says so, not just a line in the hint bar.
-        let mut legacy = None;
-        let result = std::fs::read(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|b| os_flp::FlpFile::parse(&b).map_err(|e| e.to_string()))
-            .and_then(|mut f| match os_flp::project::upgrade(&mut f).and_then(|_| os_flp::project::load(&f)) {
-                Ok(p) => Ok((f, p)),
-                Err(os_flp::project::ProjectError::LegacyLayout(v)) => {
-                    let e = os_flp::project::ProjectError::LegacyLayout(v.clone()).to_string();
-                    legacy = Some(v);
-                    Err(e)
-                }
-                Err(e) => Err(e.to_string()),
-            });
+        let (result, legacy) = match crate::project_io::read(&path) {
+            Ok(r) => (Ok(r), None),
+            Err((e, legacy)) => (Err(e), legacy),
+        };
         if let Some(v) = legacy {
             let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             let saved = if v.trim().is_empty() { "an older version".to_string() } else { format!("version {}", v.trim()) };
