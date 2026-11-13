@@ -1903,8 +1903,22 @@ impl App {
     /// Writes the project to `target`: the size of the file written, None when the save failed. `edit` changes what is
     /// written (not the project), once the project's state is gathered.
     fn write_project(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<u64> {
+        let (result, message) = self.write_with(&target, edit, false);
+        self.state.message = Some(message);
+        if result.is_ok() {
+            crate::templates::remember(&target);
+            crate::recent::add(&target);
+            self.mark_saved();
+        }
+        result.ok()
+    }
+
+    /// The interface's part of a save (`project_io::write_in`) or, with `copy`, of a copy (`project_io::copy_in`): what
+    /// it stores into the project and the file (the playlist's view, its own state, the time spent, the data folder).
+    fn write_with(&mut self, target: &std::path::Path, edit: &mut dyn FnMut(&mut os_model::Project), copy: bool) -> (Result<u64, String>, String) {
+        let kept = copy.then(|| crate::project_io::Kept::of(&self.state.session));
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
-        crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
+        crate::backup::keep_overwritten(target, crate::data_folder::backup_folder(&self.state.session, Some(target)));
         crate::project_io::store_samplers(&mut self.state.session);
         // What the save writes into the project from the interface (below) reaches playback like any edit: the engine
         // holds the project as it is.
@@ -1924,14 +1938,11 @@ impl App {
             }
             edit(p);
         };
-        let (result, message) = crate::project_io::write_in(&mut s.session, &target, before, extra, &mut stamp);
-        s.message = Some(message);
-        if result.is_ok() {
-            crate::templates::remember(&target);
-            crate::recent::add(&target);
-            self.mark_saved();
+        let out = crate::project_io::write_in(&mut s.session, target, before, extra, &mut stamp);
+        if let Some(k) = kept {
+            k.put(&mut s.session);
         }
-        result.ok()
+        out
     }
 
     /// Writes the project to `target` as Save does, as a copy: the project keeps its file, name, unsaved changes and the
@@ -1945,25 +1956,8 @@ impl App {
         if self.state.session.loading.is_some() || self.state.session.export.is_some() {
             return None;
         }
-        let s = &mut self.state;
-        let keep = (s.session.project.clone(), s.session.path.clone(), s.session.file.clone(), s.message.take(), s.session.saved.clone(), s.session.plugin_edited);
-        let written = s.session.project.written_at();
-        // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a
-        // recent one (spec: ui/recent-projects.md §2).
-        let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
-        // A copy never warns about its size.
-        self.write_project(target, edit);
-        crate::templates::restore_last(last);
-        crate::recent::restore(&recent);
-        let s = &mut self.state;
-        let done = match s.message.take() {
-            Some(m) if m.starts_with("Saved") => Ok(()),
-            m => Err(m.map_or_else(String::new, |m| m.trim_start_matches("Save failed: ").to_string())),
-        };
-        let project;
-        (project, s.session.path, s.session.file, s.message, s.session.saved, s.session.plugin_edited) = keep;
-        s.session.project = crate::locked::Locked::restored(project, written);
-        Some(done)
+        let (result, message) = self.write_with(&target, edit, true);
+        Some(result.map(|_| ()).map_err(|_| message.trim_start_matches("Save failed: ").to_string()))
     }
 
     /// The project as it is now counts as saved (opened, saved, new).
@@ -9762,7 +9756,7 @@ pub(crate) fn add_channel(p: &mut Project) -> usize {
 /// insert 1, and pattern 1.
 /// `now` is the project as `saved` but for what FL does not count as an unsaved change though the file keeps it
 /// (`ui/undo-steps.md`): the channels' locks, the song mode, the filter groups and filter shown, and the patterns' loops.
-fn same_as_saved(saved: &Project, now: &Project) -> bool {
+pub(crate) fn same_as_saved(saved: &Project, now: &Project) -> bool {
     if saved == now {
         return true;
     }
