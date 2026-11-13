@@ -1397,7 +1397,7 @@ pub struct App {
     /// Keys held now that launched Performance mode slots (spec: ui/performance-mode.md §3), as (physical key, note).
     perf_typed: Vec<(KeyCode, u8)>,
     pub typing_octave: i32,
-    typing_synced: bool,
+
     /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key, velocity).
     mouse_note: Option<(usize, u16, u8)>,
     /// The notes the Playback tool's line holds sounding: (rack row, key, velocity).
@@ -1630,7 +1630,6 @@ impl App {
             typing_held: Vec::new(),
             perf_typed: Vec::new(),
             typing_octave: 0,
-            typing_synced: false,
             mouse_note: None,
             scrub_notes: Vec::new(),
             cables_at: None,
@@ -2708,9 +2707,9 @@ impl App {
                         // The plugin's own keyboard plays on the live stream, like the typing keyboard.
                         if on {
                             self.sync_live();
-                            self.state.session.transport.note_on(row, u16::from(key), vel);
+                            self.state.session.live(crate::session::Live::NoteOn { row, key: u16::from(key), velocity: vel, midi: 0 });
                         } else {
-                            self.state.session.transport.note_off(row, u16::from(key));
+                            self.state.session.live(crate::session::Live::NoteOff { row, key: u16::from(key) });
                         }
                         continue;
                     }
@@ -6939,14 +6938,14 @@ impl App {
         }
         self.state.piano.held = key;
         if let Some((row, k, _)) = self.mouse_note.take() {
-            self.state.session.transport.note_off(row, k);
+            self.state.session.live(crate::session::Live::NoteOff { row, key: k });
         }
         let row = piano::channel(&self.state).and_then(|ch| self.state.session.project.channels.iter().position(|c| c.index == ch));
         if let (Some(k), true, Some(row)) = (key, play, row) {
             let k = k.clamp(0, crate::piano::TOP_KEY) as u16;
             self.sync_live();
             let velocity = std::mem::replace(&mut self.key_velocity, TYPING_VELOCITY);
-            self.state.session.transport.note_on(row, k, velocity);
+            self.state.session.live(crate::session::Live::NoteOn { row, key: k, velocity, midi: 0 });
             self.mouse_note = Some((row, k, velocity));
         }
         // The keyboard column.
@@ -7063,7 +7062,7 @@ impl App {
             self.sync_live();
         }
         for (k, velocity) in new {
-            self.state.session.transport.note_on(row, k, velocity);
+            self.state.session.live(crate::session::Live::NoteOn { row, key: k, velocity, midi: 0 });
             self.scrub_notes.push((row, k, velocity));
         }
     }
@@ -7071,7 +7070,7 @@ impl App {
     /// The Playback tool's notes stop with the button.
     fn scrub_release(&mut self) {
         for (row, key, _) in std::mem::take(&mut self.scrub_notes) {
-            self.state.session.transport.note_off(row, key);
+            self.state.session.live(crate::session::Live::NoteOff { row, key });
         }
     }
 
@@ -7938,7 +7937,7 @@ impl App {
             }
             let Some(i) = self.typing_held.iter().position(|h| h.0 == code) else { return false };
             let (_, row, key) = self.typing_held.remove(i);
-            self.state.session.transport.note_off(row, key);
+            self.state.session.live(crate::session::Live::NoteOff { row, key });
             self.typing_lit_changed();
             self.step_edit_up(crate::step_edit::Src::Typing(code));
             return true;
@@ -7981,7 +7980,7 @@ impl App {
         self.locked_hint(crate::rack::NoteSrc::Typing, row);
         self.sync_live();
         let key = key as u16;
-        self.state.session.transport.note_on(row, key, TYPING_VELOCITY);
+        self.state.session.live(crate::session::Live::NoteOn { row, key, velocity: TYPING_VELOCITY, midi: 0 });
         self.typing_held.push((code, row, key));
         self.step_edit_down(crate::step_edit::Src::Typing(code), key, TYPING_VELOCITY);
         self.typing_lit_changed();
@@ -8003,10 +8002,7 @@ impl App {
 
     /// The live stream needs the project before the first live note.
     pub(crate) fn sync_live(&mut self) {
-        if !self.typing_synced {
-            self.typing_synced = true;
-            self.state.session.transport.update(&crate::rack::play_project(&self.state));
-        }
+        self.state.session.sync_live();
     }
 
     /// Release every held typing-keyboard note and the piano-roll key held with the mouse (focus lost, switch off,
@@ -8014,7 +8010,7 @@ impl App {
     pub fn typing_release_all(&mut self) {
         self.step_chord.clear();
         if let Some((row, key, _)) = self.mouse_note.take() {
-            self.state.session.transport.note_off(row, key);
+            self.state.session.live(crate::session::Live::NoteOff { row, key });
         }
         self.scrub_release();
         for (_, note) in std::mem::take(&mut self.perf_typed) {
@@ -8024,7 +8020,7 @@ impl App {
             return;
         }
         for (_, row, key) in std::mem::take(&mut self.typing_held) {
-            self.state.session.transport.note_off(row, key);
+            self.state.session.live(crate::session::Live::NoteOff { row, key });
         }
         self.typing_lit_changed();
     }
