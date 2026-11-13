@@ -9,6 +9,7 @@
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 #![allow(unused_imports)]
 
+use crate::icon::ICONS;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -16,8 +17,6 @@ use std::rc::Rc;
 use os_model::{
     target, AutoMode, AutoPoint, Arrangement, Automation, Channel, ChannelKind, Clip, ClipSource, PlaylistTrack, Rgb, TimeMarker,
 };
-use crate::app::{App, Drag, State};
-use crate::playlist::*;
 
 /// Sets (`None`: clears) the icon `owner` shows; the project is written only when it changes.
 pub fn put_icon(s: &mut crate::session::Session, owner: IconOwner, icon: Option<crate::icon::Icon>) {
@@ -30,19 +29,6 @@ pub fn put_icon(s: &mut crate::session::Session, owner: IconOwner, icon: Option<
         };
         slot.is_some_and(|v| std::mem::replace(v, name) != *v)
     });
-}
-
-/// Change icon... ▸: None, then [`ICONS`], the current one ticked; each sets the icon of `key` (a rack row, a mixer
-/// track's `TRACK_ICON_KEY + track` or an `fx_key`).
-pub fn icon_items(s: &crate::session::Session, key: usize) -> Vec<PItem> {
-    // A container's member: its own icon, saved with the container (`crate::container::Member::icon`).
-    let cur = match crate::edit::container::of_key(s, key) {
-        Some((t, k, id)) => crate::edit::container::member(s, t, k, id).and_then(|m| m.icon),
-        None => window_icon(&s.project, key),
-    };
-    let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];
-    v.extend(ICONS.iter().enumerate().map(|(i, &(name, icon))| PItem::new(name, Cmd::SetIcon(key, Some(i))).mark(Mark::Check(cur == Some(icon)))));
-    v
 }
 
 /// The arrangement being edited, created (with FL's 500 default tracks) when the project has none.
@@ -433,11 +419,6 @@ pub(crate) fn restore(s: &mut crate::session::Session, (c, m, t, a, st): Snapsho
     s.dirty = true;
 }
 
-/// Topmost clip under (x, y): the last one in the list (drawn on top).
-pub fn clip_at(s: &crate::session::Session, g: &PGeom, x: f32, y: f32) -> Option<usize> {
-    clips(s).iter().enumerate().rev().find(|(_, c)| g.clip_rect(c).contains(x, y)).map(|(i, _)| i)
-}
-
 /// `idx` plus every clip that shares a group with one of them (grouped clips select and move as one, §3a); just `idx`
 /// while Enable groups is off (spec: ui/enable-groups.md §3).
 pub fn with_groups(s: &crate::session::Session, mut idx: Vec<usize>) -> Vec<usize> {
@@ -579,25 +560,6 @@ pub fn resize_left(s: &mut crate::session::Session, i: usize, orig: &Clip, dt: i
     s.dirty = true;
 }
 
-/// `c` as drawn with its edges `left` and `right` px from where they are, for a resize on its way
-/// (spec: ui/animations.md §4.10). The window goes with the edges, as in [`resize_left`] and [`resize_right`], so that
-/// the content stays put.
-pub fn with_edges(s: &crate::session::Session, g: &PGeom, c: &Clip, left: f32, right: f32) -> Clip {
-    let dl = f64::from(left / g.ppt).round() as i64;
-    let dr = f64::from(right / g.ppt).round() as i64;
-    let end = (i64::from(c.end()) + dr).max(1);
-    let pos = (i64::from(c.position) + dl).clamp(0, end - 1);
-    let mut drawn = *c;
-    drawn.position = pos as u32;
-    drawn.length = (end - pos) as u32;
-    if c.window.is_some() || dl != 0 {
-        let (w0, w1) = window(s, c);
-        let from = (w0 + to_src(s, c.source, (pos - i64::from(c.position)) as f64)).max(0.0);
-        drawn.window = Some((from, w1 + to_src(s, c.source, dr as f64)));
-    }
-    drawn
-}
-
 /// Swap two tracks with their clips.
 pub fn swap_tracks(s: &mut crate::session::Session, a: u16, b: u16) {
     let arr = arr_mut(s);
@@ -650,60 +612,6 @@ pub fn unique_channel_name(s: &crate::session::Session, name: &str) -> String {
     (2..).map(|k| format!("{name} #{k}")).find(|n| !taken(n)).unwrap_or_default()
 }
 
-/// Screen x of an automation point of clip `c`.
-pub fn point_x(s: &crate::session::Session, g: &PGeom, c: &Clip, beat: f64) -> f32 {
-    let (w0, _) = window(s, c);
-    g.x_of(c.position as f32 + ((beat - w0) * f64::from(g.ppq)) as f32)
-}
-
-/// Beat in the automation under screen x for clip `c`.
-pub fn beat_at(s: &crate::session::Session, g: &PGeom, c: &Clip, x: f32) -> f64 {
-    let (w0, _) = window(s, c);
-    w0 + f64::from(g.tick_at(x) - c.position as f32) / f64::from(g.ppq)
-}
-
-/// The point of an automation clip near (x, y) (8 px).
-pub fn point_near(s: &crate::session::Session, g: &PGeom, ci: usize, x: f32, y: f32) -> Option<usize> {
-    let c = clips(s).get(ci)?;
-    let ClipSource::Channel(ch) = c.source else { return None };
-    let a = s.project.automation(ch)?;
-    let body = g.body(c);
-    a.points
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (i, (point_x(s, g, c, p.beat) - x).hypot(value_y(body, p.value) - y)))
-        .filter(|&(_, d)| d <= 8.0)
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(i, _)| i)
-}
-
-/// The tension handle (the segment's midpoint on the curve) near (x, y): index of the segment's end point.
-pub fn handle_near(s: &crate::session::Session, g: &PGeom, ci: usize, x: f32, y: f32) -> Option<usize> {
-    let c = clips(s).get(ci)?;
-    let ClipSource::Channel(ch) = c.source else { return None };
-    let a = s.project.automation(ch)?;
-    let body = g.body(c);
-    (1..a.points.len()).find(|&i| {
-        let (p, q) = (a.points[i - 1], a.points[i]);
-        if !q.mode.has_tension() || matches!(q.mode, AutoMode::Hold) {
-            return false;
-        }
-        let mid = (p.beat + q.beat) / 2.0;
-        let hx = point_x(s, g, c, mid);
-        let hy = value_y(body, a.value_at(mid).unwrap_or(0.0));
-        (hx - x).hypot(hy - y) <= 6.0 && (point_x(s, g, c, q.beat) - point_x(s, g, c, p.beat)) > 16.0
-    })
-}
-
-/// Distance from (x, y) to the curve at x.
-pub fn curve_dist(s: &crate::session::Session, g: &PGeom, ci: usize, x: f32, y: f32) -> Option<f32> {
-    let c = clips(s).get(ci)?;
-    let ClipSource::Channel(ch) = c.source else { return None };
-    let a = s.project.automation(ch)?;
-    let v = a.value_at(beat_at(s, g, c, x))?;
-    Some((value_y(g.body(c), v) - y).abs())
-}
-
 /// Add a point to automation channel `ch` at `beat` with `value`; returns its index.
 pub fn add_point(s: &mut crate::session::Session, ch: u16, beat: f64, value: f64) -> Option<usize> {
     let a = s.project.get_mut().automation_mut(ch)?;
@@ -752,131 +660,9 @@ pub fn parse_value(s: &crate::session::Session, ch: u16, text: &str) -> Option<f
     .map(|v| v.clamp(0.0, 1.0))
 }
 
-pub fn clip_menu(s: &crate::session::Session, i: usize, x: f32, y: f32) -> Popup {
-    let c = clips(s)[i];
-    let head = match source_kind(s, c.source) {
-        PickKind::Pattern => "Pattern clip",
-        PickKind::Audio => "Audio clip",
-        PickKind::Automation => "Automation clip",
-    };
-    let mut items = vec![
-        PItem::head(head),
-        PItem::new("Preview", Cmd::ClipPreview(i)),
-        PItem::sep(),
-        PItem::new("Muted", Cmd::ClipMute(i)).mark(Mark::Check(c.muted)),
-        PItem::sep(),
-        PItem::new("Rename...", Cmd::ClipRename(i)),
-        PItem::new("Random color", Cmd::ClipRandomColor(i)),
-        PItem::sep(),
-    ];
-    if let ClipSource::Pattern(_) = c.source {
-        items.push(PItem::new("Edit pattern", Cmd::ClipEditSource(i)));
-        items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
-    }
-    items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
-    items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
-}
-
-/// Right-click on an audio or automation clip in the picker (§10a): its channel's menu, as FL shows it there.
-pub fn pick_menu(s: &crate::session::Session, ch: u16, x: f32, y: f32) -> Popup {
-    let audio = source_kind(s, ClipSource::Channel(ch)) == PickKind::Audio;
-    let it = |label: &'static str, c: PickCmd| PItem::new(label, Cmd::Pick(c, ch));
-    let mut items = Vec::new();
-    if audio {
-        items.push(it("Preview", PickCmd::Preview));
-    }
-    items.extend([
-        it("Select in arranger", PickCmd::SelectInPlaylist),
-        it("Group selected...", PickCmd::Group),
-        PItem::sep(),
-        it("Rename, color and icon...", PickCmd::Rename),
-        it("Change color...", PickCmd::ChangeColor),
-        it("Random color", PickCmd::RandomColor),
-        match s.project.channels.iter().position(|c| c.index == ch) {
-            Some(row) => PItem::sub("Change icon...", icon_items(s, row)),
-            None => PItem::not_yet("Change icon..."),
-        },
-        PItem::sep(),
-    ]);
-    if audio {
-        // Greyed while the channel has no sample to open.
-        let edit = it("Edit sample...", PickCmd::EditSample);
-        let has = s.project.channel(ch).is_some_and(|c| c.sample_path.as_deref().is_some_and(|p| !p.is_empty()));
-        items.extend([it("Load sample...", PickCmd::LoadSample), if has { edit } else { edit.off() }]);
-    }
-    // Ticked while the channel's cut and cut by are one group, as on the rack's channel menu (ui/channel-rack.md §18).
-    let cuts = s.project.channel(ch).is_some_and(|c| crate::rack::cuts_itself(&c.misc));
-    items.extend([it("Chokes itself", PickCmd::CutItself).mark(Mark::Check(cuts)), PItem::sep(), it("Clone", PickCmd::Clone)]);
-    if !audio {
-        items.push(it("Clone with links", PickCmd::Clone));
-    }
-    items.push(it("Delete...", PickCmd::Delete));
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
-}
-
-/// A track's Performance settings ▸ (spec: ui/performance-mode.md §4): Press, Motion, Trigger sync with Queue and
-/// Tolerant, Position sync, a column each.
-pub(crate) fn perf_items(s: &crate::session::Session, t: u16) -> Vec<PItem> {
-    use os_model::PerfSettings as P;
-    let p = track_info(s, t).map(|x| x.perf).unwrap_or_default();
-    let list = |head: &'static str, which: u8, labels: &[&'static str], on: u8, col: bool| {
-        let mut v = vec![PItem { col, ..PItem::head(head) }];
-        v.extend(labels.iter().enumerate().map(|(k, l)| PItem::new(*l, Cmd::PerfSet(t, which, k as u8)).mark(Mark::Radio(on == k as u8))));
-        v
-    };
-    let mut items = list("Press", 0, &P::PRESSES, p.press, false);
-    items.extend(list("Motion", 1, &P::MOTIONS, p.motion, true));
-    items.extend(list("Trigger sync", 2, &P::SYNCS, p.trigger_sync, true));
-    items.push(PItem::new("Queue", Cmd::PerfSet(t, 4, u8::from(!p.queue))).mark(Mark::Check(p.queue)));
-    items.push(PItem::new("Tolerant", Cmd::PerfSet(t, 5, u8::from(!p.tolerant))).mark(Mark::Check(p.tolerant)));
-    items.extend(list("Position sync", 3, &P::SYNCS, p.position_sync, true));
-    items
-}
-
-/// Marker `i`'s menu (§7a): the row's items at `tick`, a header "<name> at <bar>:<step>:<tick>", Delete, Rename...,
-/// Move content left / right, then its action.
-pub fn marker_menu(s: &crate::session::Session, i: usize, tick: u32, x: f32, y: f32) -> Popup {
-    let Some(m) = markers(s).get(i) else { return lane_menu(tick, x, y) };
-    let (b, st, t) = crate::views::toolbar::bst_ticks(f64::from(m.position) * 96.0 / f64::from(ppq(s)));
-    let mut items = lane_items(tick);
-    items.extend([
-        PItem { head: true, ..PItem::new(format!("{} at {b}:{st:02}:{t:02}", m.name), Cmd::Nothing) },
-        PItem::new("Delete", Cmd::DeleteMarker(i)),
-        PItem::new("Rename...", Cmd::RenameMarker(i)),
-        PItem::sep(),
-        PItem::new("Move content left", Cmd::MoveContent(i, false)),
-        PItem::new("Move content right", Cmd::MoveContent(i, true)),
-        PItem::head("Action"),
-    ]);
-    items.extend(MARKER_ACTIONS.iter().map(|&(l, k)| PItem::new(l, Cmd::MarkerAction(i, k)).mark(Mark::Radio(m.kind == k))));
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
-}
-
-/// An audio clip (not a collapsed group's strip): the clips with fades and gain.
-pub fn is_audio_clip(s: &crate::session::Session, g: &PGeom, c: &Clip) -> bool {
-    source_kind(s, c.source) == PickKind::Audio && matches!(c.source, ClipSource::Channel(_)) && !g.rows.strip(c.track)
-}
-
-/// Pixels of `ms` milliseconds of an audio clip's fades: the song's time at the tempo, as the engine plays them
-/// (spec: audio/audio-clips.md "Fades and clip gain"), whatever the channel's pitch or stretch.
-pub fn ms_px(s: &crate::session::Session, g: &PGeom, ms: f32) -> f32 {
-    (f64::from(ms) / fade_ms_per_tick(s)) as f32 * g.ppt
-}
-
 /// Milliseconds of a fade per tick at the tempo.
 pub fn fade_ms_per_tick(s: &crate::session::Session) -> f64 {
     secs_per_tick(s) * 1000.0
-}
-
-/// Where an audio clip's fades end on screen: (fade-in end x, fade-out start x). The fades the record holds, bits or
-/// not: automatic crossfades keep them in step with the clips (`follow_crossfades`), and with the switch off every
-/// stored fade plays.
-pub fn fade_xs(s: &crate::session::Session, g: &PGeom, c: &Clip) -> (f32, f32) {
-    let body = g.body(c);
-    let fin = c.stored_fade_in().map_or(0.0, |f| ms_px(s, g, f.0)).min(body.w);
-    let fout = c.stored_fade_out().map_or(0.0, |f| ms_px(s, g, f.0)).min(body.w);
-    (snap(f64::from(body.x) + f64::from(fin)), snap(f64::from(body.right()) - f64::from(fout)))
 }
 
 /// Whether a clip's fade-in (`out` false) or fade-out belongs to the automatic crossfades: the switch is on and the
@@ -884,17 +670,6 @@ pub fn fade_xs(s: &crate::session::Session, g: &PGeom, c: &Clip) -> (f32, f32) {
 /// "Automatic crossfades"), so it has no tension handle of its own.
 pub fn managed(s: &crate::session::Session, c: &Clip, out: bool) -> bool {
     os_model::crossfade::on(&s.project) && !if out { c.fade_out_set() } else { c.fade_in_set() }
-}
-
-/// The crossfade audio clip `b` makes with an earlier clip, when there is one to draw: the switch is on, both edges
-/// belong to it and each is the other's longest overlap (`os_model::crossfade::partner_before`), neither clip is muted.
-pub fn crossfade(s: &crate::session::Session, g: &PGeom, b: usize) -> Option<Xfade> {
-    let all = clips(s);
-    let c = all.get(b).filter(|c| !c.muted && is_audio_clip(s, g, c))?;
-    let a = os_model::crossfade::partner_before(&s.project, all, b).filter(|&a| !all[a].muted)?;
-    let (_, t_in) = c.stored_fade_in()?;
-    let t_out = all[a].fade_out_tension();
-    Some(Xfade { a, b, x0: g.body(c).x, x1: fade_xs(s, g, c).0, t_in, t_out })
 }
 
 /// The current arrangement's name.
@@ -924,22 +699,6 @@ pub fn plugin_cpu(s: &crate::session::Session, key: usize) -> Option<os_model::P
             m.slots.get(usize::from(k))?.as_ref().map(|_| m.slot_cpu[usize::from(k)])
         }
         None => s.project.channels.get(key).filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| c.misc.cpu),
-    }
-}
-
-/// The window menu's CPU entries, ticked from the plugin's switches; greyed (with the defaults' ticks) for a channel
-/// hosting no plugin, as in the original.
-pub(crate) fn fill_cpu(s: &crate::session::Session, key: usize, menu: &mut Popup) {
-    let Some(c) = plugin_cpu(s, key) else { return };
-    for it in menu.items.iter_mut() {
-        let (on, smart) = match &*it.label {
-            "Allow threaded processing" => (c.threaded, false),
-            "Auto-bypass when silent" => (c.smart_disable, true),
-            _ => continue,
-        };
-        it.cmd = Cmd::PluginCpu(key, smart);
-        it.enabled = true;
-        it.mark = Mark::Check(on);
     }
 }
 
@@ -1006,4 +765,97 @@ impl Samples {
         t
     }
 }
+
+/// Number of tracks (flp playlist.md).
+pub const TRACKS: u16 = 500;
+
+/// Picker panel lists (§1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PickKind {
+    #[default]
+    Pattern,
+    Audio,
+    Automation,
+}
+
+/// A waveform summary for drawing audio clips: min/max per `per` frames (left channel + right mixed).
+#[derive(Debug, Clone)]
+pub struct Wave {
+    pub rate: u32,
+    pub frames: usize,
+    pub per: usize,
+    pub peaks: Vec<(f32, f32)>,
+}
+
+impl Wave {
+    pub fn secs(&self) -> f64 {
+        self.frames as f64 / f64::from(self.rate.max(1))
+    }
+}
+
+/// What a playlist undo step keeps (`crate::history`): the shown arrangement's clips, markers and tracks, the
+/// automation data and the channels' stretch settings and mixer tracks (an audio clip placed on an audio track moves
+/// its channel to the track's mixer track, `track_links::route_clips`).
+pub(crate) type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>, Vec<([u32; 4], u16)>);
+
+/// Whose icon: a channel (by id, so it follows the channel when rows move), a mixer slot (track, slot) or a mixer track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IconOwner {
+    Channel(u32),
+    Slot(u16, u8),
+    Track(u16),
+}
+
+/// A pastel of FL's audio-clip family (one component 0x68, one 0x7e, the third between), its hue from a hash of
+/// `seed` (a Lemon Studio choice for clips whose file has no colour).
+pub fn pastel(seed: &str) -> Rgb {
+    let h = seed.bytes().fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619));
+    let hue = (h % 360) as f32 / 60.0;
+    let (lo, hi) = (f32::from(0x68u8), f32::from(0x7eu8));
+    let mid = lo + (hi - lo) * (1.0 - (hue % 2.0 - 1.0).abs());
+    let (r, g, b) = match hue as u32 {
+        0 => (hi, mid, lo),
+        1 => (mid, hi, lo),
+        2 => (lo, hi, mid),
+        3 => (lo, mid, hi),
+        4 => (mid, lo, hi),
+        _ => (hi, lo, mid),
+    };
+    Rgb { r: r.round() as u8, g: g.round() as u8, b: b.round() as u8 }
+}
+
+/// Per audio channel, the whole sample in ticks and in ms; `None` for a channel whose sample is not loaded.
+pub type Fits = HashMap<u16, Option<(f64, f64)>>;
+
+/// The number a new group gets: the lowest from 1 up that none of `used` holds (§3a, checked in FL).
+pub(crate) fn free_group(used: &[u16]) -> u16 {
+    (1..=u16::MAX).find(|g| !used.contains(g)).unwrap_or(u16::MAX)
+}
+
+/// The automation value of a tempo (the inverse of [`auto_tempo`]).
+pub fn tempo_value(bpm: f64) -> f64 {
+    ((bpm * 1000.0 - 10000.0) / 512000.0).clamp(0.0, 1.0)
+}
+
+/// Gives the audio clips of `arrangements` their lengths from `fits` (`fit_audio`). Returns whether one changed.
+pub fn fit_clips(arrangements: &mut [os_model::Arrangement], fits: &Fits) -> bool {
+    let mut changed = false;
+    for a in arrangements {
+        for c in &mut a.clips {
+            let ClipSource::Channel(ch) = c.source else { continue };
+            let Some(&Some((t, ms))) = fits.get(&ch) else { continue };
+            let (w0, w1) = c.window.unwrap_or((0.0, ms));
+            // Scaled from the whole length, so a point that falls on half a tick stays a tie and rounds up as in FL.
+            let tick = |w: f64| (w * t / ms).round();
+            let len = (tick(w1) - tick(w0)).max(1.0) as u32;
+            if c.length != len {
+                c.length = len;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+
 

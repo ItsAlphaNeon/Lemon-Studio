@@ -11,11 +11,8 @@
 
 use std::collections::HashMap;
 use os_model::{MixerTrack, Rgb};
-use crate::app::{App, State};
 use crate::control::command::Region;
 use crate::knob_id::KnobId;
-use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
-use crate::mixer::*;
 
 /// Inserts shown: stored tracks minus the master and the last (hidden) one (§1).
 pub fn inserts(s: &crate::session::Session) -> u16 {
@@ -196,61 +193,6 @@ pub fn input_label(s: &crate::session::Session, n: u16) -> (String, bool) {
 pub fn output_label(s: &crate::session::Session, n: u16) -> String {
     let v = track(s, n).map_or(-1, |m| m.audio_out);
     choice_label(v, &output_choices(crate::device::last().as_ref()))
-}
-
-/// The input choices for track `t`, as its input menu lists them; `marked`: the track's current input marked (an
-/// audio track's Select audio input ▸, spec: ui/playlist.md §6c). `None` when the device has no inputs.
-pub fn input_items(s: &crate::session::Session, t: u16, marked: bool) -> Option<Vec<PItem>> {
-    let d = crate::device::input_source();
-    let (pairs, monos) = input_choices(d.as_ref());
-    let driver = d.map(|d| d.name).unwrap_or_default();
-    if pairs.is_empty() && monos.is_empty() {
-        return None;
-    }
-    let now = track(s, t).map_or(-1, |m| m.audio_in);
-    let item = |(v, name): (i32, String)| {
-        let it = PItem::new(name, Cmd::Mixer(MCmd::Input(t, v)));
-        if marked { it.mark(Mark::Radio(v == now)) } else { it }
-    };
-    let mut items = Vec::new();
-    if !pairs.is_empty() {
-        items.push(PItem::head(format!("{driver} - stereo")));
-        items.extend(pairs.into_iter().map(item));
-    }
-    items.push(PItem::head(format!("{driver} - mono")));
-    items.extend(monos.into_iter().map(item));
-    items.extend([PItem::sep(), item((-1, "(none)".into()))]);
-    Some(items)
-}
-
-/// The input clock's (`input`) or the track latency combo's menu (spec: audio/track-io.md §1.1, §2.6): Reset, Set in
-/// ms / samples / beats; the original's other entries are greyed (its own greyed ones checked as it shows them).
-pub(crate) fn latency_menu(s: &crate::session::Session, t: u16, input: bool, x: f32, y: f32) -> Popup {
-    use crate::typein::LatUnit;
-    let now = track(s, t).map_or(0.0, |m| if input { m.latency_in } else { m.latency_out });
-    let set = |label: &'static str, u: LatUnit| PItem::new(label, Cmd::Mixer(MCmd::Latency(t, input, Some(u))));
-    let reset = PItem::new("Reset", Cmd::Mixer(MCmd::Latency(t, input, None)));
-    let mut items = vec![
-        PItem::head(format!("{} latency: {}", if input { "Input" } else { "Track" }, latency_text(now))),
-        if now == 0.0 { reset.off() } else { reset },
-        set("Set in ms...", LatUnit::Ms),
-        set("Set in samples...", LatUnit::Samples),
-        set("Set in beats...", LatUnit::Beats),
-    ];
-    if input {
-        items.extend([PItem::sep(), PItem::not_yet("Adjust position of recorded audio").mark(Mark::Check(true))]);
-    } else {
-        items.extend([
-            PItem::sub("Set from", vec![PItem::not_yet("(nothing to set it from)")]),
-            PItem::sep(),
-            PItem::not_yet("Delay audio output").mark(Mark::Check(true)),
-            PItem::head("Bypass track latency compensation"),
-            PItem::not_yet("Never").mark(Mark::Radio(true)),
-            PItem::not_yet("Always").mark(Mark::Radio(false)),
-            PItem::not_yet("When recording or not playing").mark(Mark::Radio(false)),
-        ]);
-    }
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Track `t` takes its input alone (the External input question's Yes).
@@ -505,18 +447,6 @@ pub(crate) fn open_state(s: &mut crate::session::Session, n: u16, path: &std::pa
     Some(format!("{} takes the mixer track state \"{file}\"", name(s, n)))
 }
 
-/// Trim unused tracks ▸ (spec: ui/mixer-track-commands.md §6): each choice with the number of tracks it deletes.
-pub(crate) fn trim_items(s: &crate::session::Session) -> Vec<PItem> {
-    [(false, "Unlinked tracks only"), (true, "Unlinked and non-empty tracks")]
-        .into_iter()
-        .map(|(non_empty, label)| {
-            let k = trim_list(s, non_empty).len();
-            let it = PItem::new(format!("{label} ({k})"), Cmd::Mixer(MCmd::Trim { non_empty }));
-            if k == 0 { it.off() } else { it }
-        })
-        .collect()
-}
-
 /// The tracks routed into track `n`, in track order: its inputs, numbered from 1 (spec: audio/sidechain.md "Settings").
 pub fn inputs(s: &crate::session::Session, n: u16) -> Vec<u16> {
     let mut ins: Vec<u16> = s.project.mixer.iter().filter(|m| m.index != 0 && m.index != n && m.routes.contains(&n)).map(|m| m.index).collect();
@@ -535,4 +465,78 @@ pub enum FxReq {
     /// Slots moved inside a track or tracks moved: `map[(t, s)] = (t2, s2)`; unlisted instances are dropped.
     Remap(Vec<((u16, u8), (u16, u8))>),
 }
+
+/// Where remote control link target `l` goes as mixer places move (`follow_places`); `None`: its place went.
+pub(crate) fn moved_link(l: crate::typein::Target, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) -> Option<crate::typein::Target> {
+    use crate::typein::Target as T;
+    Some(match l {
+        T::Knob(KnobId::MixPan(t)) => T::Knob(KnobId::MixPan(track(t)?)),
+        T::Knob(KnobId::MixSep(t)) => T::Knob(KnobId::MixSep(track(t)?)),
+        T::Knob(KnobId::Send(t, d)) => T::Knob(KnobId::Send(track(t)?, track(d)?)),
+        T::Knob(KnobId::Eq(t, b, k)) => T::Knob(KnobId::Eq(track(t)?, b, k)),
+        T::Knob(KnobId::SlotMix(t, k)) => {
+            let (t, k) = slot(t, k)?;
+            T::Knob(KnobId::SlotMix(t, k))
+        }
+        T::Knob(KnobId::Member(t, k, id, wet)) => {
+            let (t, k) = slot(t, k)?;
+            T::Knob(KnobId::Member(t, k, id, wet))
+        }
+        T::Fader(t) => T::Fader(track(t)?),
+        T::Latency(t, input, unit) => T::Latency(track(t)?, input, unit),
+        T::Param(key, i) => match crate::plugins::fx_of(key) {
+            Some((t, k)) => {
+                let (t, k) = slot(t, k)?;
+                T::Param(crate::plugins::fx_key(t, k), i)
+            }
+            None => l,
+        },
+        T::Member(t, k, id, wet) => {
+            let (t, k) = slot(t, k)?;
+            T::Member(t, k, id, wet)
+        }
+        T::MemberParam(t, k, id, i) => {
+            let (t, k) = slot(t, k)?;
+            T::MemberParam(t, k, id, i)
+        }
+        l => l,
+    })
+}
+
+/// The device's inputs as the input menu lists them (§2.1): its stereo pairs, then each input alone, each with its
+/// stored number (`device::input_source`: an ASIO driver's, else the system's input device's).
+pub fn input_choices(d: Option<&crate::device::InputSource>) -> (Vec<(i32, String)>, Vec<(i32, String)>) {
+    let Some(d) = d.filter(|d| !d.names.is_empty()) else { return (Vec::new(), Vec::new()) };
+    let n = d.names.len();
+    let name = |c: usize| d.names[c].clone();
+    let pairs: Vec<(i32, String)> = (0..n / 2).map(|k| (k as i32, format!("{} - {}", name(2 * k), name(2 * k + 1)))).collect();
+    let p = pairs.len() as i32;
+    (pairs, (0..n).map(|c| (p + c as i32, name(c))).collect())
+}
+
+/// The device's outputs as the output menu lists them (§2.1) with their stored numbers: an ASIO driver's stereo pairs
+/// (its one output by its name), else one entry, the device.
+pub fn output_choices(d: Option<&crate::device::DeviceInfo>) -> Vec<(i32, String)> {
+    match d {
+        Some(d) if d.host == crate::device::ASIO => {
+            let name = |c: usize| d.out_names.get(c).cloned().unwrap_or_else(|| format!("Out {}", c + 1));
+            if d.channels == 1 {
+                return vec![(0, name(0))];
+            }
+            (0..d.pairs()).map(|k| (k as i32, format!("{} - {}", name(2 * k), name(2 * k + 1)))).collect()
+        }
+        Some(d) => vec![(0, d.name.clone())],
+        None => vec![(0, "Audio output".into())],
+    }
+}
+
+/// What a combo shows for stored number `v` among `choices`: "(none)", the entry's name, or "(not available)" for a
+/// number the device does not have.
+pub(crate) fn choice_label(v: i32, choices: &[(i32, String)]) -> String {
+    if v < 0 {
+        return "(none)".into();
+    }
+    choices.iter().find(|c| c.0 == v).map_or_else(|| "(not available)".into(), |c| c.1.clone())
+}
+
 

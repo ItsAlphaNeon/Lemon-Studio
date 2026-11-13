@@ -10,7 +10,6 @@
 #![allow(unused_imports)]
 
 use os_model::{ClipSource, Pattern, Rgb};
-use crate::patterns::*;
 
 pub fn name_of(s: &crate::session::Session, n: u16) -> String {
     s.project.pattern(n).and_then(|p| p.name.clone()).unwrap_or_else(|| format!("Pattern {n}"))
@@ -98,3 +97,12 @@ pub fn transpose(s: &mut crate::session::Session, n: u16, semis: i32) {
         s.dirty = true;
     }
 }
+
+/// Highest pattern number (§1).
+pub const MAX: u16 = 999;
+
+/// A pattern with notes, control points or its own name (listed in menus, §2).
+pub fn used(p: &Pattern) -> bool {
+    !p.notes.is_empty() || !p.controls.is_empty() || p.name.is_some()
+}
+

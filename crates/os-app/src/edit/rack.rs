@@ -11,10 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use os_model::{target, ChannelKind, ClipSource, Note, Project, Rgb};
-use crate::app::{App, State, Win};
 use crate::knob_id::KnobId;
-use crate::playlist::{Cmd, Mark, PItem, Popup};
-use crate::rack::*;
 
 /// Whether row `r` passes the display filter.
 pub fn in_filter(s: &crate::session::Session, r: usize) -> bool {
@@ -435,34 +432,6 @@ pub(crate) fn remap_session(s: &mut crate::session::Session, map: &[Option<usize
     s.dirty = true;
 }
 
-/// Group combo (§7): left click lists the filters.
-pub fn filter_menu(s: &crate::session::Session, x: f32, y: f32) -> Popup {
-    let f = filter(&s.project);
-    let mut items = vec![it("All", RCmd::SetFilter(Filter::All)).mark(Mark::Radio(f == Filter::All))];
-    items.extend(groups(&s.project).iter().enumerate().map(|(i, g)| it(g.name.clone(), RCmd::SetFilter(Filter::Group(i))).mark(Mark::Radio(f == Filter::Group(i)))));
-    items.push(it("Unsorted", RCmd::SetFilter(Filter::Unsorted)).mark(Mark::Radio(f == Filter::Unsorted)));
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
-}
-
-/// Group combo right click (§7).
-pub fn filter_edit_menu(s: &crate::session::Session, x: f32, y: f32) -> Popup {
-    let group = matches!(filter(&s.project), Filter::Group(_));
-    let del = it("Delete filter group", RCmd::DeleteGroup);
-    let ren = it("Rename filter group", RCmd::RenameGroup);
-    Popup { x, y, items: vec![it("Add filter group", RCmd::AddGroup), if group { del } else { del.off() }, if group { ren } else { ren.off() }], sub: None, scroll: [0; 2] }
-}
-
-/// Pattern length box right click (§7).
-pub fn length_menu(s: &crate::session::Session, x: f32, y: f32) -> Popup {
-    let (cur, bar) = (explicit_len(s), bar_steps(s));
-    let mut items = vec![PItem::head("Set to"), it("Auto", RCmd::SetLen(None)).mark(Mark::Radio(cur.is_none()))];
-    for bars in [1u32, 2, 4, 8, 16, 32] {
-        let label = if bars == 1 { "1 bar".to_string() } else { format!("{bars} bars") };
-        items.push(it(label, RCmd::SetLen(Some(bars * bar))).mark(Mark::Radio(cur == Some(bars * bar))));
-    }
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
-}
-
 /// One undo step for a loop edit in the shown pattern (a drag's press takes it; one that changes nothing goes on
 /// release, as the graph editor's).
 pub fn loop_step(s: &mut crate::session::Session, name: &'static str) {
@@ -611,5 +580,238 @@ pub(crate) fn expand_loops(p: &mut Project, s: &crate::session::Session, rows: O
         }
     }
 }
+
+/// Longest pattern the length box sets in a 4/4 project (32 bars, §7); see [`max_steps`].
+pub const MAX_STEPS: u32 = 512;
+
+/// Display filter (§21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Filter {
+    #[default]
+    All,
+    Group(usize),
+    Unsorted,
+}
+
+/// The file's index of the rack's group `g`.
+pub(crate) fn file_group(p: &os_model::Project, g: usize) -> Option<u32> {
+    let u = p.unsorted_group() as usize;
+    (0..p.groups.len()).filter(|&i| i != u).nth(g).map(|i| i as u32)
+}
+
+/// Where "Unsorted" is among the rack's groups, if the file lists it before others (`None`: last).
+pub fn unsorted_at(p: &os_model::Project) -> Option<usize> {
+    p.groups.iter().position(|g| g == os_model::UNSORTED_GROUP)
+}
+
+/// The filter shown.
+pub fn filter(p: &os_model::Project) -> Filter {
+    match p.current_group {
+        None => Filter::All,
+        Some(i) if i == p.unsorted_group() => Filter::Unsorted,
+        Some(i) => rack_group(p, i).map_or(Filter::All, Filter::Group),
+    }
+}
+
+/// A new group named `name` in the file's list at `at` (`None`: after the others, before "Unsorted" if it is last),
+/// with the channels after it renumbered; the list gets "Unsorted" if it had none. Returns its file index.
+pub(crate) fn insert_group(p: &mut os_model::Project, at: Option<usize>, name: &str) -> u32 {
+    if !p.groups.iter().any(|g| g == os_model::UNSORTED_GROUP) {
+        p.groups.push(os_model::UNSORTED_GROUP.to_string());
+    }
+    let u = p.unsorted_group() as usize;
+    let at = at.unwrap_or(if u + 1 == p.groups.len() { u } else { p.groups.len() }).min(p.groups.len());
+    p.groups.insert(at, name.to_string());
+    let at32 = at as u32;
+    for c in &mut p.channels {
+        if let Some(g) = &mut c.rack.group {
+            if *g >= at32 {
+                *g += 1;
+            }
+        }
+    }
+    if let Some(g) = &mut p.current_group {
+        if *g >= at32 {
+            *g += 1;
+        }
+    }
+    at32
+}
+
+/// Puts `rows` in the file's group `g` (out of any other: a channel is in one).
+pub(crate) fn put_in_group(p: &mut os_model::Project, rows: impl IntoIterator<Item = usize>, g: Option<u32>) {
+    for r in rows {
+        if let Some(c) = p.channels.get_mut(r) {
+            c.rack.group = g;
+        }
+    }
+}
+
+/// Advanced looping's loop point (§7 Loop type, §15; the original's manual: a row plays to the end of its last used
+/// step, beat or bar, then loops; "···" does not loop). How the boxes set it is Lemon Studio's design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopUnit {
+    Step,
+    Beat,
+    Bar,
+}
+
+/// The loop box's values under Advanced looping, in its wheel's order: no loop, then the units.
+pub const LOOP_UNITS: [Option<LoopUnit>; 4] = [None, Some(LoopUnit::Step), Some(LoopUnit::Beat), Some(LoopUnit::Bar)];
+
+impl LoopUnit {
+    pub fn name(self) -> &'static str {
+        match self {
+            LoopUnit::Step => "Step",
+            LoopUnit::Beat => "Beat",
+            LoopUnit::Bar => "Bar",
+        }
+    }
+
+    /// Steps in one unit: a beat and a bar of the project's signature (§23).
+    pub(crate) fn steps(self, s: &crate::session::Session) -> u32 {
+        match self {
+            LoopUnit::Step => 1,
+            LoopUnit::Beat => beat_steps(s),
+            LoopUnit::Bar => bar_steps(s),
+        }
+    }
+}
+
+pub(crate) fn seed() -> u64 {
+    crate::clip_colors::clock()
+}
+
+/// Whether a channel cuts itself: it cuts and is cut by the same group (spec: audio/note-rules.md).
+pub fn cuts_itself(m: &os_model::ChannelMisc) -> bool {
+    m.cut != 0 && m.cut == m.cut_by
+}
+
+/// Reorder / remove channels in the project: `map[old row] = new row`. Every reference follows (notes, control
+/// points, automation clips and their targets, playlist clips, layer children); indices become positions.
+pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
+    let idx: BTreeMap<u16, u16> =
+        p.channels.iter().enumerate().filter_map(|(pos, c)| map.get(pos).copied().flatten().map(|n| (c.index, n as u16))).collect();
+    let mut chans: Vec<(usize, os_model::Channel)> =
+        std::mem::take(&mut p.channels).into_iter().enumerate().filter_map(|(pos, c)| map.get(pos).copied().flatten().map(|n| (n, c))).collect();
+    chans.sort_by_key(|(n, _)| *n);
+    p.channels = chans
+        .into_iter()
+        .map(|(n, mut c)| {
+            c.index = n as u16;
+            c.layer_children = c.layer_children.iter().filter_map(|k| idx.get(k).copied()).collect();
+            c
+        })
+        .collect();
+    for pat in &mut p.patterns {
+        pat.notes.retain_mut(|n| idx.get(&n.channel).map(|&m| n.channel = m).is_some());
+        // Points of no channel (the tempo's, channel 0x4000) stay as they are.
+        pat.controls.retain_mut(|c| {
+            c.channel() >= 0x4000 || idx.get(&c.channel()).map(|&m| *c = os_model::ControlPoint::new(c.position, m, c.param(), c.value)).is_some()
+        });
+    }
+    p.automations.retain_mut(|a| {
+        let Some(&m) = idx.get(&a.channel) else { return false };
+        a.channel = m;
+        // Channel targets keep the channel in the high half (spec: flp/events/automation.md "Targets").
+        a.targets.retain_mut(|t| {
+            let hi = (*t >> 16) as u16;
+            if *t == target::TEMPO || hi >= 0x4000 {
+                return true;
+            }
+            idx.get(&hi).map(|&n| *t = target::channel(n, *t as u16)).is_some()
+        });
+        true
+    });
+    for arr in &mut p.arrangements {
+        arr.clips.retain_mut(|c| match c.source {
+            ClipSource::Channel(ch) => idx.get(&ch).map(|&m| c.source = ClipSource::Channel(m)).is_some(),
+            ClipSource::Pattern(_) => true,
+        });
+    }
+    // Instrument tracks follow their channel; one whose channel goes is unassigned (spec: ui/playlist.md §6c).
+    p.remap_link_channels(|c| idx.get(&c).copied());
+    // Initial values: a place below 0x2000 is a channel's index (spec: flp/layouts.md "Mixer places").
+    p.init_controls.retain_mut(|c| {
+        let hi = (c.target >> 16) as u16;
+        hi >= 0x2000 || idx.get(&hi).map(|&n| c.target = u32::from(n) << 16 | (c.target & 0xFFFF)).is_some()
+    });
+    // Controller links: a channel's target, and a controller that is a channel, follow it; a link whose channel goes
+    // goes (spec: audio/automation.md "Targets follow moves").
+    p.controller_links.retain_mut(|l| {
+        let (hi, source) = ((l.target() >> 16) as u16, l.source());
+        if hi < 0x2000 {
+            let Some(&n) = idx.get(&hi) else { return false };
+            l.set_target(u32::from(n) << 16 | (l.target() & 0xFFFF));
+        }
+        if source < 0x2000 {
+            let Some(&n) = idx.get(&source) else { return false };
+            l.set_source(n);
+        }
+        true
+    });
+}
+
+/// Loop type values of event 162 for the rack's loop types (Loop step channels, Loop all channels, Advanced looping),
+/// as FL 24.1.1 writes them while loop mode is on (spec: flp/events/patterns.md "Loop settings on FL 24.1.1").
+pub(crate) const LOOP_TYPE_CODES: [u32; 3] = [1, 2, 3];
+
+/// The rack's loop type of an event 162 value (Loop step channels when it is none of them).
+pub(crate) fn loop_type_of(code: u32) -> u8 {
+    LOOP_TYPE_CODES.iter().position(|&c| c == code).unwrap_or(0) as u8
+}
+
+/// An Advanced looping loop point as the file stores it, and back.
+pub(crate) fn unit_code(u: LoopUnit) -> u32 {
+    match u {
+        LoopUnit::Step => os_model::Pattern::LOOP_STEP,
+        LoopUnit::Beat => os_model::Pattern::LOOP_BEAT,
+        LoopUnit::Bar => os_model::Pattern::LOOP_BAR,
+    }
+}
+
+pub(crate) fn unit_of(v: u32) -> Option<LoopUnit> {
+    match v {
+        os_model::Pattern::LOOP_STEP => Some(LoopUnit::Step),
+        os_model::Pattern::LOOP_BEAT => Some(LoopUnit::Beat),
+        os_model::Pattern::LOOP_BAR => Some(LoopUnit::Bar),
+        _ => None,
+    }
+}
+
+/// A loop length of the file's values (a step count; 0 and the units are none).
+pub(crate) fn length_of(v: u32) -> Option<u32> {
+    (v != 0 && unit_of(v).is_none()).then_some(v)
+}
+
+/// The rack's group of the file's index `i`.
+pub(crate) fn rack_group(p: &os_model::Project, i: u32) -> Option<usize> {
+    let u = p.unsorted_group();
+    (i != u && (i as usize) < p.groups.len()).then(|| (0..i).filter(|&j| j != u).count())
+}
+
+/// A named set of channels (§21).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub name: String,
+    pub members: BTreeSet<usize>,
+}
+
+/// The groups as the rack lists them (all but "Unsorted"), each with its rows.
+pub fn groups(p: &os_model::Project) -> Vec<Group> {
+    let u = p.unsorted_group() as usize;
+    p.groups
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| i != u)
+        .map(|(i, name)| Group {
+            name: name.clone(),
+            members: p.channels.iter().enumerate().filter(|(_, c)| c.rack.group == Some(i as u32)).map(|(r, _)| r).collect(),
+        })
+        .collect()
+}
+
+
+
 
 

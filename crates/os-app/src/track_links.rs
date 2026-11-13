@@ -261,7 +261,7 @@ pub fn mode_items(s: &State, t: u16, cmd: impl Fn(Mode) -> crate::playlist::Cmd)
     if let Some(m) = l.audio_mixer() {
         use crate::mixer::MCmd;
         use crate::playlist::Cmd;
-        let inputs = crate::edit::mixer::input_items(&s.session, m, true);
+        let inputs = crate::mixer::input_items(&s.session, m, true);
         let armed = crate::edit::mixer::track(&s.session, m).is_some_and(|x| x.armed);
         items.extend([
             PItem::head("Audio track options"),

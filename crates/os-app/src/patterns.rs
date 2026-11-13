@@ -13,8 +13,6 @@ pub use crate::edit::patterns::*;
 
 use crate::app::State;
 
-/// Highest pattern number (§1).
-pub const MAX: u16 = 999;
 /// Pixels of vertical drag per pattern step on the name box (§1, OS: linear).
 pub const DRAG_STEP: f32 = 8.0;
 /// Name box size (§4).
@@ -121,11 +119,6 @@ pub const SWATCHES: [u32; 20] = [
 ];
 
 // ---------------------------------------------------------------------------------------------------------
-
-/// A pattern with notes, control points or its own name (listed in menus, §2).
-pub fn used(p: &Pattern) -> bool {
-    !p.notes.is_empty() || !p.controls.is_empty() || p.name.is_some()
-}
 
 /// Numbers of the listed patterns, ascending: the used ones, those placed in the playlist, and the playlist's clip
 /// source (a new pattern, empty until notes are added).

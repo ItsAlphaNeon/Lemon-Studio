@@ -10,7 +10,6 @@
 #![allow(unused_imports)]
 
 use os_model::{ControlPoint, Note, Pattern};
-use crate::piano::*;
 
 /// Where the current pattern plays in the song: each clip of it that sounds (not muted, on a track that is on), as
 /// (song tick of the clip's start, pattern tick there, length), in song order. A clip that plays its whole pattern
