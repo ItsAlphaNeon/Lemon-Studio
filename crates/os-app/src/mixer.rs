@@ -2787,7 +2787,7 @@ mod tests {
         assert_eq!(wrapper::input_ports(&state(&a)), [0, 2]);
         assert_eq!(wrapper::decode(&state(&a)), Some(plugin));
         assert_eq!(labels(&a)[2].1, true);
-        assert_eq!(crate::project_plugins::slot_ports(&a.state.session.project, 1, 0), (0, 2));
+        assert_eq!(crate::effect_ports::slot_ports(&a.state.session.project, 1, 0), (0, 2));
         track_mut(&mut a.state.session, 1).unwrap().slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![] });
         assert!(run(&mut a, MCmd::SlotSidechain(1, 1)).is_some());
     }

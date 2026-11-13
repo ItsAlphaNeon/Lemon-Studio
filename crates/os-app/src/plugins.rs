@@ -1649,7 +1649,7 @@ pub const LEMON_FORMULA_CONTROLLER: &str = "Lemon Formula Controller";
 pub const LEMON_VOCODER: &str = "Lemon Vocoder";
 /// The plugin name a project file stores for Vocodex (file-format identifier, kept for interop): slots with it are
 /// played and edited by Lemon Vocoder (spec: plugins/lemon-vocoder.md §6).
-pub const VOCODEX_FILE_NAME: &str = "Vocodex";
+pub use crate::effect_ports::VOCODEX_FILE_NAME;
 /// Name of Lemon Drop, Lemon Studio's audio visualizer (spec: plugins/lemon-drop.md).
 pub const LEMON_DROP: &str = lemon_drop::NAME;
 /// The plugin name a project file stores for Wave Candy (file-format identifier, kept for interop): slots with it are

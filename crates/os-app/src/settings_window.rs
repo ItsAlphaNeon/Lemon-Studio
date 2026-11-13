@@ -144,7 +144,7 @@ mod tests {
             keys.push(c.key);
             labels.push(c.label);
         }
-        for c in OFF_PAGE_COMBOS {
+        for c in crate::shortcuts::OFF_PAGE_COMBOS {
             assert!(!combos_shown.contains(&c.label), "{} is not on a settings page", c.label);
             assert!(c.default < c.choices.len(), "{}: default among its choices", c.label);
             keys.push(c.key);

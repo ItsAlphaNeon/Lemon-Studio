@@ -205,26 +205,6 @@ pub fn wrapped_slot(s: &SlotPlugin) -> Option<PluginRef> {
     (s.name == WRAPPER).then(|| wrapper::decode(&s.state)).flatten()
 }
 
-/// The input ports a mixer slot's wrapped plugin is saved with: its main and first auxiliary input bus, each the number
-/// of a track's input counted from 1, 0 for none (spec: audio/sidechain.md "Hosted plugins' input buses"). A Vocodex
-/// slot (played by Lemon Vocoder) feeds its sidechain bus the input its carrier selector names, or else its modulator
-/// selector's (spec: plugins/lemon-vocoder.md §1).
-pub fn slot_ports(project: &Project, track: usize, slot: usize) -> (usize, usize) {
-    let Some(s) = project.mixer.iter().find(|m| usize::from(m.index) == track).and_then(|m| m.slots.get(slot)?.as_ref()) else {
-        return (0, 0);
-    };
-    if s.name.eq_ignore_ascii_case(crate::plugins::VOCODEX_FILE_NAME) {
-        let routing = os_engine::effects::vocoder::Settings::from_state(&s.state).unwrap_or_default().routing();
-        return (0, routing.key_input());
-    }
-    if s.name != WRAPPER {
-        return (0, 0);
-    }
-    let ports = wrapper::input_ports(&s.state);
-    let port = |b: usize| ports.get(b).map_or(0, |&p| p.max(0) as usize);
-    (port(0), port(1))
-}
-
 /// Sets the sidechain port (the first auxiliary input bus) of the hosted plugin in mixer slot `slot` of track `track`:
 /// the number of the track's input it listens to, 0 for none. A slot that does not hold a wrapped plugin yet becomes
 /// one, as a save makes it. `false` when the slot holds no wrapped plugin (spec: audio/sidechain.md "Hosted plugins'
@@ -244,14 +224,6 @@ pub fn set_slot_sidechain(proj: &mut Project, plugins: &Plugins, track: u16, slo
     true
 }
 
-/// Attaches hosted effects to `e`, each with the input ports its slot is saved with in `project`.
-pub fn attach_effects(e: &mut os_engine::Engine, project: &Project, fx: impl IntoIterator<Item = (usize, usize, os_engine::SharedEffect)>) {
-    for (t, s, f) in fx {
-        e.set_effect(t, s, f);
-        let (main, aux) = slot_ports(project, t, s);
-        e.set_effect_ports(t, s, main, aux);
-    }
-}
 
 fn same_file(a: &std::path::Path, b: &str) -> bool {
     let b = b.rsplit(['\\', '/']).next().unwrap_or(b);

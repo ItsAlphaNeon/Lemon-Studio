@@ -142,7 +142,7 @@ pub fn render(o: &Opts) -> Result<(), String> {
     let mut library = crate::transport::host_library(crate::factory_folder::dir());
     lemon_sampler::set_host_ticks(project.ppq);
     let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &ses.plugins.instruments());
-    crate::project_plugins::attach_effects(&mut e, &project, ses.plugins.effects());
+    crate::effect_ports::attach_effects(&mut e, &project, ses.plugins.effects());
     if o.from > 0 {
         e.seek_tick(o.from);
     } else {

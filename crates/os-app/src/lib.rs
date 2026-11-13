@@ -16,6 +16,7 @@ mod anim;
 mod app;
 mod arrange;
 mod audio_clipboard;
+mod audio_log_ui;
 mod help_links;
 mod diagnostics;
 mod audio_cfg;
@@ -26,6 +27,7 @@ mod backup;
 mod audio_bench;
 #[cfg(target_os = "linux")]
 mod dropout_log;
+mod effect_ports;
 #[cfg(test)]
 mod checks;
 #[cfg(test)]
