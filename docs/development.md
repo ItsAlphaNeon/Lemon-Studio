@@ -130,11 +130,12 @@ Some parts are cargo features, on by default, so a build can leave them out:
 | Feature | Of | What it leaves out when off |
 |---|---|---|
 | `vst3`, `vst2` | `os-session` (passed on by `os-app` and `lemonstudio`) | VST 3 and VST 2 hosting: those plugins are not found, and a saved one does not load |
+| `export-flac`, `export-mp3`, `export-ogg` | `os-session` (passed on likewise) | That export format: exporting to it says it is not in this build |
 | `editor` | each built-in plugin | Its editor (the session builds its plugins without them; the interface turns them on) |
 | `gui` | `os-plugkit` | The plugin editors' native windows, popups and type-in boxes |
 
-`cargo check -p lemonstudio --no-default-features` builds the program with `vst3` and `vst2` off; CI builds that, each of
-the two alone, and the session without its plugins' editors (`cargo check -p os-session`).
+`cargo check -p lemonstudio --no-default-features` builds the program with the session's features off; CI builds that, each
+of them alone, and the session without its plugins' editors (`cargo check -p os-session`).
 
 ## Old plugin names
 

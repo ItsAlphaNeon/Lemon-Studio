@@ -6,10 +6,14 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["vst3", "vst2"]
+default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg"]
 # Hosting VST 3 and VST 2 plugins (off: CLAP and the stock plugins only).
 vst3 = ["dep:os-vst3"]
 vst2 = ["dep:os-vst2"]
+# The export encoders (off: that format is not written).
+export-flac = ["dep:flacenc"]
+export-mp3 = ["dep:mp3lame-encoder"]
+export-ogg = ["dep:vorbis_rs"]
 # The test helpers and test-mode switches (per-thread settings, test folders) for the tests of a crate built on this
 # one (`os-app`'s).
 test-util = []
@@ -63,9 +67,9 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 # Export encoders (`export::encode`): FLAC (pure Rust), MP3 (LAME, built from source) and Ogg Vorbis (libvorbis, built
 # from source).
-flacenc = "0.5"
-mp3lame-encoder = "0.2"
-vorbis_rs = "0.5"
+flacenc = { version = "0.5", optional = true }
+mp3lame-encoder = { version = "0.2", optional = true }
+vorbis_rs = { version = "0.5", optional = true }
 zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
