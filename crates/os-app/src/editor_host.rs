@@ -952,6 +952,11 @@ mod frame_tests {
         }
     }
 
+    /// A plugin of no stock kind (a stock one opens in the app's own window where that exists).
+    fn desc() -> os_host::Descriptor {
+        os_host::Descriptor { format: os_host::Format::Clap, id: "test.editing".into(), name: "Editing".into(), vendor: String::new(), version: String::new(), features: Vec::new(), kind: os_host::Kind::Instrument, path: std::path::PathBuf::new() }
+    }
+
     fn info(name: &str) -> ChannelInfo {
         ChannelInfo { name: name.into(), icon: None, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None }
     }
@@ -965,7 +970,7 @@ mod frame_tests {
         host.frames = Box::new(Recording(log.clone()));
         let mut pl = Plugins::default();
         pl.scale = 1.0;
-        let desc = crate::plugins::builtin()[0].desc.clone();
+        let desc = desc();
         let p = Arc::new(Mutex::new(Editing { desc, open: false }));
         pl.hosted.insert(0, Hosted::new(p.clone()));
 
@@ -991,7 +996,7 @@ mod frame_tests {
     fn without_frames_no_window_opens() {
         let mut host = EditorHost::default();
         let mut pl = Plugins::default();
-        let desc = crate::plugins::builtin()[0].desc.clone();
+        let desc = desc();
         pl.hosted.insert(0, Hosted::new(Arc::new(Mutex::new(Editing { desc, open: false }))));
         assert!(host.open_window(&mut pl, 0, info("Keys")).is_err());
         assert!(!host.editor_open());
