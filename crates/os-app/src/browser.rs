@@ -22,7 +22,7 @@ const PREVIEW_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl App {
     /// Browser actions; returns whether `a` was one.
-    pub(crate) fn browser_act(&mut self, a: &Action) -> bool {
+    pub fn browser_act(&mut self, a: &Action) -> bool {
         if *a == Action::BrowserSplitter {
             self.browser_split_press();
             return true;
@@ -85,7 +85,7 @@ impl App {
     }
 
     /// Clicking a sample plays it once (spec §7): cut off after `PREVIEW_LIMIT` unless "Full sample preview" is ticked.
-    pub(crate) fn preview_sample(&self, path: &str) {
+    pub fn preview_sample(&self, path: &str) {
         let mut p = crate::projects::preview_project(&self.state.session.settings, path);
         p.tempo = Some(self.state.tempo());
         crate::preview_track::route(&mut p, &self.state.session.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
@@ -94,7 +94,7 @@ impl App {
     }
 
     /// A browser options-menu command (spec §4); returns a message.
-    pub(crate) fn browser_cmd(&mut self, c: BCmd) -> Option<String> {
+    pub fn browser_cmd(&mut self, c: BCmd) -> Option<String> {
         self.invalidate();
         let s = &mut self.state;
         match c {
@@ -174,7 +174,7 @@ impl App {
 
     /// Keeps the folder index up to date (spec §11): read again when the indexed folders change, at once with "Re-index
     /// changed folders on startup", else when a search needs it; a search repaints when its index arrives.
-    pub(crate) fn browser_index_tick(&mut self) {
+    pub fn browser_index_tick(&mut self) {
         let s = &mut self.state;
         if s.browser_index.poll() {
             if s.browser_index.cut() {
@@ -203,7 +203,7 @@ impl App {
 
     /// A way into the browser from the menu bar or its keys (spec: ui/browser-commands.md): the browser is shown first
     /// when hidden.
-    pub(crate) fn browser_jump(&mut self, j: Jump) {
+    pub fn browser_jump(&mut self, j: Jump) {
         self.state.show_browser = true;
         let s = &mut self.state;
         match j {
@@ -275,18 +275,18 @@ impl App {
     }
 
     /// Whether the mouse is over the docked browser.
-    pub(crate) fn over_browser(&self) -> bool {
+    pub fn over_browser(&self) -> bool {
         let (x, y) = self.mouse;
         self.state.show_browser && x < crate::views::browser_w(&self.state) && y >= crate::views::work_y(&self.state)
     }
 
     /// Whether typed letters belong to the browser search (the typing keyboard leaves them alone).
-    pub(crate) fn browser_takes_typing(&self) -> bool {
+    pub fn browser_takes_typing(&self) -> bool {
         self.state.browser_search_focus || (view::opt(&self.state, view::OPT_TYPE) && self.over_browser())
     }
 
     /// Browser keys (spec §4, §5); returns whether the key was used.
-    pub(crate) fn browser_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    pub fn browser_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
         use crate::keys::{Key, NamedKey};
         let shift = self.shift;
         let focus = self.state.browser_search_focus;
@@ -411,7 +411,7 @@ impl App {
     }
 
     /// Whether a held key repeats in the browser: Up and Down go on walking the rows (`browser_arrow`).
-    pub(crate) fn browser_repeats(&self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    pub fn browser_repeats(&self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
         use crate::keys::{Key, NamedKey};
         matches!(key, Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)) && !ctrl && !alt && !self.shift && (self.over_browser() || self.state.browser_search_focus)
     }
@@ -432,7 +432,7 @@ impl App {
 
     /// The splitter dragged so that the browser (its splitter included) ends at `right`: whole px, from its default width
     /// to half the window. Everything right of it moves, so the whole frame is repainted.
-    pub(crate) fn browser_split_drag(&mut self, right: f32) {
+    pub fn browser_split_drag(&mut self, right: f32) {
         let s = &mut self.state;
         let w = right.min(s.screen.0 / 2.0).max(crate::views::BROWSER_W).round();
         if w != s.browser_w {
@@ -442,7 +442,7 @@ impl App {
     }
 
     /// A hovered row's scrolling label (spec §9): repainted whenever its offset moves; the scroll ends with the hover.
-    pub(crate) fn marquee_tick(&mut self, now: std::time::Instant) {
+    pub fn marquee_tick(&mut self, now: std::time::Instant) {
         let hovered = self.state.show_browser && matches!(self.hover, Some(Action::BrowserRow(_)));
         let m = self.state.browser_marquee.get_mut();
         let Some(mq) = m.as_ref() else { return };
@@ -457,14 +457,14 @@ impl App {
     }
 
     /// Wheel over the browser list.
-    pub(crate) fn browser_wheel(&mut self, dy: f32) {
+    pub fn browser_wheel(&mut self, dy: f32) {
         let s = &mut self.state;
         s.browser_scroll = (s.browser_scroll - dy * 3.0 * view::ROW_H).clamp(0.0, view::max_scroll(s));
         self.invalidate();
     }
 
     /// Mouse moved while an item is pressed: start the drag, move the label.
-    pub(crate) fn browser_drag_move(&mut self, label: String, m0: (f32, f32), started: bool, item: Item) {
+    pub fn browser_drag_move(&mut self, label: String, m0: (f32, f32), started: bool, item: Item) {
         let (x, y) = self.mouse;
         if !started && (x - m0.0).hypot(y - m0.1) < DRAG_START {
             return;
@@ -536,7 +536,7 @@ impl App {
 
     /// Esc during a browser drag cancels it: nothing is dropped when the button comes up, and the tag falls away
     /// (spec §3, ui/animations.md §4.1). False when no item is being dragged.
-    pub(crate) fn browser_cancel(&mut self) -> bool {
+    pub fn browser_cancel(&mut self) -> bool {
         if !matches!(self.drag, Some(Drag::Browser { started: true, .. })) {
             return false;
         }
@@ -554,7 +554,7 @@ impl App {
     }
 
     /// Release: drop the dragged item on whatever is under the mouse (spec §3).
-    pub(crate) fn browser_drop(&mut self, item: Item, started: bool) {
+    pub fn browser_drop(&mut self, item: Item, started: bool) {
         self.state.browser_drag = None;
         self.state.drag_on = None;
         self.state.drop_on = None;
@@ -680,7 +680,7 @@ impl App {
     }
 
     /// A folder dropped on the window becomes an All-tab root, opened and selected (spec §6).
-    pub(crate) fn add_browser_folder(&mut self, path: std::path::PathBuf) {
+    pub fn add_browser_folder(&mut self, path: std::path::PathBuf) {
         let s = &mut self.state;
         if !s.browser_folders.contains(&path) {
             s.browser_folders.push(path.clone());
@@ -697,7 +697,7 @@ impl App {
     }
 
     /// Right click on row `i` (spec §8): selects it and opens its menu at the mouse; returns whether there was a row.
-    pub(crate) fn browser_row_menu(&mut self, i: usize, x: f32, y: f32) -> bool {
+    pub fn browser_row_menu(&mut self, i: usize, x: f32, y: f32) -> bool {
         let s = &mut self.state;
         let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
         select(s, &row.key);
@@ -708,7 +708,7 @@ impl App {
 
     /// Middle click on row `i` (spec §7): selects it, and a sample goes into the selected channel as the row menu's
     /// "Send to selected channel" sends it (§8). Returns whether there was a row.
-    pub(crate) fn browser_row_middle(&mut self, i: usize) -> bool {
+    pub fn browser_row_middle(&mut self, i: usize) -> bool {
         let s = &mut self.state;
         let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
         select(s, &row.key);
@@ -827,7 +827,7 @@ fn parse_opts(text: &str) -> std::collections::HashSet<&'static str> {
 }
 
 /// The options kept from the last run (tests: the defaults).
-pub(crate) fn load_opts() -> std::collections::HashSet<&'static str> {
+pub fn load_opts() -> std::collections::HashSet<&'static str> {
     parse_opts(&width_file().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default())
 }
 
@@ -854,12 +854,12 @@ fn save_opts(opts: &std::collections::HashSet<&'static str>) {
 }
 
 /// The browser's width kept from the last run (spec §9; tests: the default).
-pub(crate) fn load_width() -> f32 {
+pub fn load_width() -> f32 {
     width_file().and_then(|p| std::fs::read_to_string(p).ok()).map_or(crate::views::BROWSER_W, |t| parse_width(&t))
 }
 
 /// Keeps the browser's width for the next run.
-pub(crate) fn save_width(w: f32) {
+pub fn save_width(w: f32) {
     save_value("width", &w.to_string());
 }
 
@@ -894,7 +894,7 @@ fn favs_text(favs: &[Fav]) -> String {
 }
 
 /// The favorite files kept from the last run.
-pub(crate) fn load_favs() -> Vec<Fav> {
+pub fn load_favs() -> Vec<Fav> {
     favs_file().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| parse_favs(&t)).unwrap_or_default()
 }
 
@@ -907,7 +907,7 @@ fn save_favs(favs: &[Fav]) {
 }
 
 /// The folders the index reads (spec §11): the dropped folders and the project's data folder.
-pub(crate) fn index_roots(s: &crate::app::State) -> Vec<std::path::PathBuf> {
+pub fn index_roots(s: &crate::app::State) -> Vec<std::path::PathBuf> {
     let mut v = s.browser_folders.clone();
     v.extend(crate::data_folder_ui::folder(s));
     v
@@ -927,17 +927,17 @@ fn read_folders() -> Vec<(std::path::PathBuf, String)> {
     crate::search_folders::parse_file(&text)
 }
 
-pub(crate) fn load_folders() -> Vec<std::path::PathBuf> {
+pub fn load_folders() -> Vec<std::path::PathBuf> {
     read_folders().into_iter().map(|f| f.0).collect()
 }
 
 /// The dropped folders' Browser names.
-pub(crate) fn load_names() -> std::collections::BTreeMap<std::path::PathBuf, String> {
+pub fn load_names() -> std::collections::BTreeMap<std::path::PathBuf, String> {
     read_folders().into_iter().filter(|f| !f.1.is_empty()).collect()
 }
 
 /// Keeps the dropped folders and their names.
-pub(crate) fn save_folders(s: &crate::app::State) {
+pub fn save_folders(s: &crate::app::State) {
     let Some(p) = folders_file() else { return };
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
@@ -1168,7 +1168,7 @@ fn reread(s: &mut crate::app::State) {
 }
 
 /// Select a row and record it in the navigation history (spec §4).
-pub(crate) fn select(s: &mut crate::app::State, key: &str) {
+pub fn select(s: &mut crate::app::State, key: &str) {
     s.browser_sel = Some(key.to_string());
     if s.browser_hist.get(s.browser_hist_pos).map(String::as_str) != Some(key) {
         let keep = if s.browser_hist.is_empty() { 0 } else { s.browser_hist_pos + 1 };
@@ -1181,7 +1181,7 @@ pub(crate) fn select(s: &mut crate::app::State, key: &str) {
 /// Ctrl+Z with "Show undo history in the browser when undoing changes": the browser shows Current project ▸ History,
 /// opened, where the project now is selected (spec: ui/settings-choices.md "Undo history: the four checks
 /// (2026-10-16)"). The All tab shows it too; the others switch to the project's.
-pub(crate) fn show_history(s: &mut crate::app::State) {
+pub fn show_history(s: &mut crate::app::State) {
     s.show_browser = true;
     if s.browser_tab > 1 {
         s.browser_tab = 1;
@@ -1195,7 +1195,7 @@ pub(crate) fn show_history(s: &mut crate::app::State) {
 }
 
 /// Scroll the selected row into view.
-pub(crate) fn reveal(s: &mut crate::app::State) {
+pub fn reveal(s: &mut crate::app::State) {
     let rows = view::rows(s);
     let Some(i) = rows.iter().position(|r| Some(&r.key) == s.browser_sel.as_ref()) else { return };
     let y = i as f32 * view::ROW_H;

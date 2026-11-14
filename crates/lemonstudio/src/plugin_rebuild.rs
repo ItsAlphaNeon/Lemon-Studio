@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! `cargo run -p os-app --release` keeps Lemon Studio's own plugins current: before the window opens, a release build
+//! `cargo run -p lemonstudio --release` keeps Lemon Studio's own plugins current: before the window opens, a release build
 //! that Cargo started from its checkout runs `bundle-plugins --install`, which rebuilds the plugins and installs the
 //! ones that changed where the plugin scan (and any DAW) finds them. A plugin added to the repository then shows up at
 //! the next run, without a separate step. An installed `lemonstudio`, or one started outside Cargo, builds nothing.

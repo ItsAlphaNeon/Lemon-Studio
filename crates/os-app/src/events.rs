@@ -542,7 +542,7 @@ pub fn menu(s: &State, x: f32, y: f32) -> Popup {
 impl App {
     /// Edit automation on a control's menu: the editor shows that control's events in the current pattern, centred over
     /// the main window the first time (then where it was left), in front (§1).
-    pub(crate) fn edit_events(&mut self, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> Option<String> {
+    pub fn edit_events(&mut self, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> Option<String> {
         let s = &mut self.state;
         if !open(s, target, name, value, range) {
             return None;
@@ -565,7 +565,7 @@ impl App {
     /// second editor window on the control, in front, 30 px right of and below the editor showing, which keeps its
     /// control and goes behind. With no editor showing, this is Edit automation. A second window already open gives
     /// way: there are two at most.
-    pub(crate) fn edit_events_window(&mut self, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> Option<String> {
+    pub fn edit_events_window(&mut self, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> Option<String> {
         if !self.state.shown(Win::Events) {
             return self.edit_events(target, name, value, range);
         }
@@ -593,7 +593,7 @@ impl App {
     }
 
     /// A control of the window, pressed.
-    pub(crate) fn events_act(&mut self, a: EvAct) {
+    pub fn events_act(&mut self, a: EvAct) {
         match a {
             EvAct::Menu => {
                 let r = crate::views::events::rect(&self.state);
@@ -609,7 +609,7 @@ impl App {
     }
 
     /// A press on the graph (`right`: the right button) or the ruler (`ruler`): a stroke starts (§3).
-    pub(crate) fn events_press(&mut self, right: bool, ruler: bool) {
+    pub fn events_press(&mut self, right: bool, ruler: bool) {
         let (x, y) = self.mouse;
         let ctrl = self.ctrl;
         let s = &mut self.state;
@@ -649,7 +649,7 @@ impl App {
     }
 
     /// The mouse moved during a stroke.
-    pub(crate) fn events_drag(&mut self, stroke: Stroke, x: f32, y: f32) {
+    pub fn events_drag(&mut self, stroke: Stroke, x: f32, y: f32) {
         let s = &mut self.state;
         let alt = self.alt || s.events.tool == Tool::Paint;
         let tick = snapped(s, crate::views::events::tick_at(s, x), alt);
@@ -686,7 +686,7 @@ impl App {
     }
 
     /// The button went up: a line is drawn, or the events under it interpolated (one undo step).
-    pub(crate) fn events_release(&mut self, stroke: Stroke) {
+    pub fn events_release(&mut self, stroke: Stroke) {
         let s = &mut self.state;
         let alt = self.alt || s.events.tool == Tool::Paint;
         // Zoom: a drag of 4 px or more zooms on its stretch, a click zooms in about it; the selection comes back.
@@ -729,7 +729,7 @@ impl App {
     }
 
     /// The menu's entries (§4).
-    pub(crate) fn events_cmd(&mut self, c: EvCmd) -> Option<String> {
+    pub fn events_cmd(&mut self, c: EvCmd) -> Option<String> {
         let s = &mut self.state;
         let m = match c {
             EvCmd::Copy => {
@@ -819,7 +819,7 @@ impl App {
 
     /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I, Ctrl+B, Ctrl+Ins / Del,
     /// Ctrl+Left / Right, PgUp / PgDn, Shift+5.
-    pub(crate) fn events_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    pub fn events_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
         use crate::keys::{Key, NamedKey};
         let shift = self.shift;
         let c = match key {
@@ -852,7 +852,7 @@ impl App {
     }
 
     /// The wheel over the graph or the ruler: it scrolls time, a beat a notch; with Ctrl it zooms about the mouse.
-    pub(crate) fn events_wheel(&mut self, d: f32, ctrl: bool) {
+    pub fn events_wheel(&mut self, d: f32, ctrl: bool) {
         let x = self.mouse.0;
         let s = &mut self.state;
         let ppq = f64::from(s.session.project.ppq.max(4));

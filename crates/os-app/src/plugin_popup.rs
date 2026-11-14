@@ -71,7 +71,7 @@ impl App {
     /// open closes unpicked (the same plugin's was replaced by this one). A menu with no entry closes at once. True
     /// when shown.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
-    pub(crate) fn show_plugin_menu(&mut self, key: usize, m: &Menu, at: (f32, f32)) -> bool {
+    pub fn show_plugin_menu(&mut self, key: usize, m: &Menu, at: (f32, f32)) -> bool {
         let p = popup(key, m, at.0, at.1);
         if let Some((k, id)) = self.plugin_menu.take() {
             if self.state.playlist.popup.as_ref().is_some_and(|q| holds(q, id)) {
@@ -92,7 +92,7 @@ impl App {
 
     /// Each tick: the plugin menu's popup closed without a pick (a click elsewhere, Escape, another popup), or the
     /// plugin's editor closed under it (the menu went with it, so the popup goes too). The plugin is told.
-    pub(crate) fn plugin_menu_tick(&mut self) {
+    pub fn plugin_menu_tick(&mut self) {
         let Some((key, id)) = self.plugin_menu else { return };
         let shown = self.state.playlist.popup.as_ref().is_some_and(|p| holds(p, id));
         // An instance busy on the audio thread is taken as still showing its editor.
@@ -110,7 +110,7 @@ impl App {
 
     /// An entry picked in a plugin's menu (`Cmd::PluginMenu`, the popup already closed): the plugin runs it now, on the
     /// UI thread. The host's "Create automation clip" comes back as an automation request (`App::params_tick`).
-    pub(crate) fn plugin_menu_pick(&mut self, key: usize, id: u64, pick: usize) {
+    pub fn plugin_menu_pick(&mut self, key: usize, id: u64, pick: usize) {
         if self.plugin_menu.is_some_and(|(_, m)| m == id) {
             self.plugin_menu = None;
         }

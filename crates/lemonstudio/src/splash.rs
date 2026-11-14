@@ -27,7 +27,7 @@ use tiny_skia::{
     Transform,
 };
 
-use crate::logo;
+use os_app::logo;
 
 /// The splash window in logical px: the disc, its shadow and the status line under it.
 pub const SIZE: (f32, f32) = (500.0, 500.0);
@@ -133,7 +133,7 @@ const LONGEST: f32 = 120.0;
 
 /// Whether this start shows the splash.
 pub fn wanted() -> bool {
-    crate::prefs::check(&crate::prefs::SHOW_SPLASH)
+    os_app::prefs::check(&os_app::prefs::SHOW_SPLASH)
 }
 
 /// What the UI thread tells the splash.
@@ -453,7 +453,7 @@ struct Painter {
 impl Painter {
     /// The painter of this build's logo.
     fn new(scale: f32) -> Option<Painter> {
-        Painter::with_face(scale, if crate::version::NIGHTLY { &NIGHTLY_FACE } else { &FACE })
+        Painter::with_face(scale, if os_app::version::NIGHTLY { &NIGHTLY_FACE } else { &FACE })
     }
 
     fn with_face(scale: f32, face: &'static Face) -> Option<Painter> {
@@ -742,7 +742,7 @@ mod win {
                 dx = 96;
             }
             // The UI scale there: the monitor's, or Main GUI scaling's (spec: ui/ui-scaling.md §1).
-            let scale = crate::gui_scale(f64::from(dx) / 96.0) as f32;
+            let scale = os_app::gui_scale(f64::from(dx) / 96.0) as f32;
             let Some(painter) = Painter::new(scale) else { return };
             let (w, h) = device(scale);
             let (w, h) = (w as i32, h as i32);
@@ -774,7 +774,7 @@ mod win {
             wc.hInstance = inst;
             wc.lpszClassName = class.as_ptr();
             RegisterClassW(&wc);
-            let title = wide(crate::version::NAME);
+            let title = wide(os_app::version::NAME);
             // Layered (per-pixel alpha) and transparent to the mouse; above every window that is not topmost too; a
             // tool window takes no taskbar button; never activated, so the main window gets the focus as before.
             let hwnd = CreateWindowExW(
@@ -934,7 +934,7 @@ mod x11 {
             .visual_id;
         // The UI scale: the X resources' `Xft.dpi` / 96, or Main GUI scaling's (spec: ui/ui-scaling.md §1).
         let dpi = x11rb::resource_manager::new_from_default(&c).ok().and_then(|db| db.get_value::<u32>("Xft.dpi", "").ok().flatten());
-        let scale = crate::gui_scale(dpi.map_or(1.0, |d| f64::from(d) / 96.0)) as f32;
+        let scale = os_app::gui_scale(dpi.map_or(1.0, |d| f64::from(d) / 96.0)) as f32;
         let mut painter = Painter::new(scale)?;
         let (w, h) = device(scale);
         // The primary monitor (RandR), else the first, else the whole screen.
@@ -968,7 +968,7 @@ mod x11 {
         if let (Some(ty), Some(splash)) = (atom(b"_NET_WM_WINDOW_TYPE"), atom(b"_NET_WM_WINDOW_TYPE_SPLASH")) {
             let _ = c.change_property32(PropMode::REPLACE, win, ty, AtomEnum::ATOM, &[splash]);
         }
-        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, crate::version::NAME.as_bytes());
+        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, os_app::version::NAME.as_bytes());
         let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"lemonstudio\0LemonStudio\0");
         // No input region: clicks go through to what is behind.
         let _ = c.shape_rectangles(shape::SO::SET, shape::SK::INPUT, ClipOrdering::UNSORTED, win, 0, 0, &[]);
@@ -1131,7 +1131,7 @@ mod mac {
         // The primary screen (the one with the menu bar), in points from its bottom left.
         let screen = NSScreen::screens(mtm).firstObject()?;
         let (frame, backing) = (screen.frame(), screen.backingScaleFactor());
-        let scale = crate::gui_scale(backing) as f32;
+        let scale = os_app::gui_scale(backing) as f32;
         let (w, h) = device(scale);
         let size = NSSize::new(f64::from(w) / backing, f64::from(h) / backing);
         let at = NSPoint::new(frame.origin.x + (frame.size.width - size.width) / 2.0, frame.origin.y + (frame.size.height - size.height) / 2.0);
@@ -1204,7 +1204,7 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prefs::{check, find_check, set_check, SHOW_SPLASH, SILENT_STARTUP};
+    use os_app::prefs::{check, find_check, set_check, SHOW_SPLASH, SILENT_STARTUP};
 
     /// The colour at a point of the logo (its own units), the whole logo showing.
     fn logo_pixel(p: &mut Painter, at: (f32, f32)) -> (u8, u8, u8) {

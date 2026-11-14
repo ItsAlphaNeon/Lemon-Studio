@@ -106,7 +106,7 @@ fn top(app: &mut App) -> Option<&mut Form> {
 
 impl App {
     /// Settings ▸ Project ▸ Data folder ▸ Rename: the Rename project form (spec: ui/data-folder.md §6).
-    pub(crate) fn open_rename(&mut self) {
+    pub fn open_rename(&mut self) {
         if !crate::data_folder_ui::can_rename(&self.state) {
             return;
         }
@@ -116,7 +116,7 @@ impl App {
     }
 
     /// A click on a part of the top form; `Some` closes it with that answer.
-    pub(crate) fn form_click(&mut self, h: FHit) -> Option<Reply> {
+    pub fn form_click(&mut self, h: FHit) -> Option<Reply> {
         if matches!(top(self), Some(Form::Save(_))) {
             return self.save_form_click(h);
         }
@@ -163,7 +163,7 @@ impl App {
     }
 
     /// A key while a form is on top; `Some` closes it with that answer.
-    pub(crate) fn form_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> Option<Reply> {
+    pub fn form_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> Option<Reply> {
         if matches!(top(self), Some(Form::Save(_))) {
             return self.save_form_key(key, ctrl, alt);
         }
@@ -196,7 +196,7 @@ impl App {
 
     /// The top form closed with `reply`: Rename asks for confirmation (spec: ui/data-folder.md §6); Save as and New
     /// project: `App::save_form_closed`.
-    pub(crate) fn form_closed(&mut self, f: Form, reply: Reply) {
+    pub fn form_closed(&mut self, f: Form, reply: Reply) {
         match f {
             Form::Save(f) => self.save_form_closed(*f, reply),
             Form::Export(f) => self.export_form_closed(*f, reply),

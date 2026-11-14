@@ -15,14 +15,14 @@ impl crate::app::App {
     /// Hosts Lemon Slicer on every Fruity Slicer channel without an instance, started from the channel's saved state
     /// (a new instance's when it has none). A row waiting for the picker's own instance is left to it; a row whose
     /// instance failed is not tried again.
-    pub(crate) fn sync_slicer(&mut self) {
+    pub fn sync_slicer(&mut self) {
         self.host(sync_slicer);
     }
 
     /// Notes a plugin sent for channel row `row` (Lemon Slicer's dump): they replace the channel's notes in the
     /// current pattern, positions rounded to the project's ticks, as one undo step. An effect's notes (`row` a mixer
     /// slot's key: Tesla's Convert to score) go to the selected channel.
-    pub(crate) fn notes_from_plugin(&mut self, row: usize, notes: &[os_hostlink::NoteOut]) {
+    pub fn notes_from_plugin(&mut self, row: usize, notes: &[os_hostlink::NoteOut]) {
         let row = if crate::plugins::fx_of(row).is_some() { self.state.selected_channel } else { row };
         let s = &mut self.state;
         let Some(ch) = s.session.project.channels.get(row).map(|c| c.index) else { return };

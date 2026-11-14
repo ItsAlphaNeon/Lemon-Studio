@@ -309,7 +309,7 @@ struct Counters {
 }
 
 impl Counters {
-    pub(crate) fn now() -> Counters {
+    pub fn now() -> Counters {
         #[cfg(target_os = "linux")]
         let ((promoted, demoted), refused) = (crate::rt::counts(), crate::rt::refused());
         #[cfg(not(target_os = "linux"))]

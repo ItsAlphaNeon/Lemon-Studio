@@ -91,12 +91,12 @@ impl NoteType {
 
 impl App {
     /// A press just started a drag of `kind`'s sort: with the check on, it is held from now.
-    pub(crate) fn hold_start(&mut self, kind: Kind) {
+    pub fn hold_start(&mut self, kind: Kind) {
         self.hold = prefs::check(&prefs::CLICK_AND_HOLD).then(|| Hold { at: crate::anim::now(), from: self.mouse, kind, periods: 0 });
     }
 
     /// The mouse moved to (`x`, `y`): further than [`SLOP`] from the press, the hold ends and the drag goes on as one.
-    pub(crate) fn hold_moved(&mut self, x: f32, y: f32) {
+    pub fn hold_moved(&mut self, x: f32, y: f32) {
         if self.hold.is_some_and(|h| (x - h.from.0).abs().max((y - h.from.1).abs()) > SLOP) {
             self.hold = None;
         }
@@ -137,7 +137,7 @@ impl App {
     /// The moved notes are copied: the originals go back to where they were, the copies (selected when the
     /// originals were) are dragged from here on, starting one snap step later (a step without a snap) when `step`.
     /// A Shift+drag picks them up on its first move, without the step (spec: ui/piano-roll.md §8).
-    pub(crate) fn pick_up_notes(&mut self, step: bool) {
+    pub fn pick_up_notes(&mut self, step: bool) {
         let Some(Drag::NoteMove { x0, y0, orig }) = self.drag.clone() else { return };
         let (Some(g), Some(ch)) = (self.piano_geom(), piano::channel(&self.state)) else { return };
         let s = &mut self.state;

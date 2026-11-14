@@ -266,7 +266,7 @@ impl App {
     /// FILE > Export audio (Ctrl+R; `mp3`: Export MP3, Shift+Ctrl+R, with MP3 the only format): the Export form with
     /// the last choices, unless there is nothing to render (spec §2).
     // spec: audio/export.md §2
-    pub(crate) fn open_export(&mut self, mp3: bool) {
+    pub fn open_export(&mut self, mp3: bool) {
         if self.state.session.export.is_some() {
             return;
         }
@@ -326,7 +326,7 @@ impl App {
 
     /// A click on a part of the Export form; `Some` closes it with that answer. With a list open, a click picks from it
     /// or only closes it.
-    pub(crate) fn export_form_click(&mut self, h: FHit) -> Option<Reply> {
+    pub fn export_form_click(&mut self, h: FHit) -> Option<Reply> {
         let f = top(self)?;
         if let Some(k) = f.list.take() {
             if let FHit::Item(i) = h {
@@ -371,7 +371,7 @@ impl App {
     }
 
     /// Keys on the Export form: Esc closes an open list, then the form; Enter exports; the rest types in the name.
-    pub(crate) fn export_form_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> Option<Reply> {
+    pub fn export_form_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> Option<Reply> {
         let f = top(self)?;
         if f.list.is_some() {
             if matches!(key, Key::Named(NamedKey::Escape)) {
@@ -400,7 +400,7 @@ impl App {
     }
 
     /// The picker chose `dir`: the files go there.
-    pub(crate) fn export_folder_chosen(&mut self, dir: PathBuf) {
+    pub fn export_folder_chosen(&mut self, dir: PathBuf) {
         if let Some(f) = top(self) {
             f.folder = dir;
         }
@@ -408,7 +408,7 @@ impl App {
     }
 
     /// The form closed: Export keeps the choices and starts the render.
-    pub(crate) fn export_form_closed(&mut self, f: ExportForm, reply: Reply) {
+    pub fn export_form_closed(&mut self, f: ExportForm, reply: Reply) {
         if reply != Reply::Button(Answer::Ok) {
             return;
         }
@@ -428,7 +428,7 @@ impl App {
 
     /// What the audio thread needs for form `f`: the span, the markers, loop and tempo at the device's rate, the
     /// mixer tracks' names.
-    pub(crate) fn export_job(&self, f: &ExportForm) -> ex::Job {
+    pub fn export_job(&self, f: &ExportForm) -> ex::Job {
         let s = &self.state;
         let o = f.o.clone();
         let rate = f.device_rate;
@@ -503,7 +503,7 @@ impl App {
     /// Export form with the last choices and WAV the only format ticked (others can be), named after the track when it
     /// is one; Export writes each track's output (`ex::Job::tracks`). Lemon Studio's choice: the original renders the
     /// selected tracks to wave files, through a form that was not looked at.
-    pub(crate) fn open_track_render(&mut self, tracks: Vec<u16>) {
+    pub fn open_track_render(&mut self, tracks: Vec<u16>) {
         if self.state.session.export.is_some() || tracks.is_empty() {
             return;
         }

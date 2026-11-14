@@ -48,7 +48,7 @@ pub fn template_items(_: &State) -> Vec<PItem> {
 impl App {
     /// FILE ▸ Revert to last backup: the newest backup of the project, after the unsaved changes question as Open asks
     /// it; without one, a box says so.
-    pub(crate) fn revert_to_backup(&mut self) {
+    pub fn revert_to_backup(&mut self) {
         let Some(path) = self.state.session.path.clone() else { return };
         let name = crate::backup::project_name(Some(&path));
         let mut dirs: Vec<PathBuf> = crate::data_folder::backup_folder(&self.state.session, Some(&path)).into_iter().collect();
@@ -64,7 +64,7 @@ impl App {
 
     /// The revert goes on: backup `b` is opened as the project, keeping the project's file and name (Save writes it
     /// over the project file); the project counts as changed. It is not a recent or last used project.
-    pub(crate) fn revert_from(&mut self, b: PathBuf) {
+    pub fn revert_from(&mut self, b: PathBuf) {
         let Some(own) = self.state.session.path.clone() else { return };
         let (kept, recent) = (crate::templates::last_kept(), crate::recent::list());
         self.open(b.clone());
@@ -82,7 +82,7 @@ impl App {
     }
 
     /// FILE ▸ Save as template...: the save dialog, in the Templates folder's User category, for the template's name.
-    pub(crate) fn save_template_dialog(&mut self) {
+    pub fn save_template_dialog(&mut self) {
         use crate::filedlg::{FileDlg, Mode};
         let Some(root) = crate::templates::root() else {
             self.state.message = Some("Save as template: no user folder".into());
@@ -97,7 +97,7 @@ impl App {
 
     /// The template's name was given (`chosen`, from the save dialog): a copy of the project is written as that
     /// template (`template_target`); the project keeps its file and name.
-    pub(crate) fn template_chosen(&mut self, chosen: PathBuf) {
+    pub fn template_chosen(&mut self, chosen: PathBuf) {
         let Some(root) = crate::templates::root() else { return };
         let target = template_target(&root, &chosen);
         if let Some(Err(e)) = target.parent().map(std::fs::create_dir_all) {
@@ -114,14 +114,14 @@ impl App {
 
     /// A row of New from template ▸ (`Cmd::NewTemplate`: "Empty" or "<category>/<template>"): after the unsaved changes
     /// question as New asks it, a new untitled project from it.
-    pub(crate) fn pick_new_template(&mut self, pick: &str) {
+    pub fn pick_new_template(&mut self, pick: &str) {
         let file = pick.split_once('/').and_then(|(cat, name)| Some(crate::templates::file_in(&crate::templates::root()?, cat, name)));
         self.ask_discard("starting a new project", Next::Template(file));
     }
 
     /// The new project from template `file` (None: Empty, or a template that does not load: the built-in project); the
     /// New project form follows as after New.
-    pub(crate) fn new_from_pick(&mut self, file: Option<PathBuf>) {
+    pub fn new_from_pick(&mut self, file: Option<PathBuf>) {
         let name = file.as_deref().and_then(Path::file_stem).map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         if !file.is_some_and(|f| self.new_from_file(&f, &name)) {
             self.empty_project();
@@ -131,7 +131,7 @@ impl App {
 
     /// FILE ▸ Save to new project folder...: a folder picker, starting in the project's folder, for where the new
     /// folder goes.
-    pub(crate) fn new_folder_dialog(&mut self) {
+    pub fn new_folder_dialog(&mut self) {
         use crate::filedlg::{FileDlg, Mode};
         let Some(path) = self.state.session.path.clone() else { return };
         let dlg = FileDlg::new(Mode::Folder, "Save to new project folder", "project folder", Then::NewProjectFolder).start(path.parent());
@@ -141,7 +141,7 @@ impl App {
     /// The place was picked (`root`): the project is saved as `<root>/<name>/<name>.lemon`, named after the project, that
     /// new folder its data folder (the used samples copied there while Copy used samples to the project folder is on). A
     /// project file already there is refused.
-    pub(crate) fn new_folder_chosen(&mut self, root: PathBuf) {
+    pub fn new_folder_chosen(&mut self, root: PathBuf) {
         const TITLE: &str = "Save to new project folder";
         let name = crate::backup::project_name(self.state.session.path.as_deref());
         let dir = root.join(&name);
@@ -177,7 +177,7 @@ impl App {
     /// FILE / TOOLS ▸ Delete unused files and save project: the data folder's files the project does not use
     /// (`unused_files`) are listed in a Yes / No question; Yes deletes them, then saves. With none, it only saves. A
     /// data folder that holds other project files is not looked in.
-    pub(crate) fn delete_unused_ask(&mut self) {
+    pub fn delete_unused_ask(&mut self) {
         const TITLE: &str = "Clean up";
         let Some(path) = self.state.session.path.clone() else { return };
         let dir = crate::data_folder_ui::folder(&self.state).filter(|d| d.is_dir());
@@ -204,7 +204,7 @@ impl App {
     }
 
     /// The delete question was answered: Yes deletes `files` and saves the project; No changes nothing.
-    pub(crate) fn delete_unused_done(&mut self, files: Vec<PathBuf>, reply: &Reply) {
+    pub fn delete_unused_done(&mut self, files: Vec<PathBuf>, reply: &Reply) {
         if *reply != Reply::Button(Answer::Yes) {
             return;
         }

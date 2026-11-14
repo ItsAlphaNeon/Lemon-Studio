@@ -38,12 +38,12 @@ impl App {
     }
 
     /// A note started sounding (typing keyboard or MIDI): collected while step editing takes notes.
-    pub(crate) fn step_edit_down(&mut self, src: Src, key: u16, velocity: u8) {
+    pub fn step_edit_down(&mut self, src: Src, key: u16, velocity: u8) {
         self.step_edit_down_with(src, key, velocity, crate::record::Extra::default());
     }
 
     /// `step_edit_down` for a note with more than a key and velocity (a MIDI note's Mod X / Y, another channel).
-    pub(crate) fn step_edit_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: crate::record::Extra) {
+    pub fn step_edit_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: crate::record::Extra) {
         // While playing, Record takes the note instead (spec: ui/recording.md §2 Taking notes).
         self.record_down_with(src, key, velocity, extra);
         if self.step_edit_live() && extra.channel.is_none() {
@@ -52,12 +52,12 @@ impl App {
     }
 
     /// A note was released: the release of the last held one writes the chord.
-    pub(crate) fn step_edit_up(&mut self, src: Src) {
+    pub fn step_edit_up(&mut self, src: Src) {
         self.step_edit_up_with(src, None);
     }
 
     /// `step_edit_up` with the note's release velocity, when it has one.
-    pub(crate) fn step_edit_up_with(&mut self, src: Src, release: Option<u8>) {
+    pub fn step_edit_up_with(&mut self, src: Src, release: Option<u8>) {
         self.record_up_with(src, release);
         let Some(keys) = self.step_chord.up(src) else { return };
         if self.step_edit_live() && !keys.is_empty() {

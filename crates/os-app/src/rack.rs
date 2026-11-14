@@ -673,7 +673,7 @@ fn solo_now(s: &mut State, r: usize) {
 ///   the new pattern becomes the only selected channel and the focused one; a pattern without any (also one just made
 ///   with "+") leaves the selection alone.
 impl App {
-    pub(crate) fn pattern_tick(&mut self) {
+    pub fn pattern_tick(&mut self) {
         let now = self.state.pattern();
         let seen = self.state.rack.pattern_seen.replace(now);
         if seen.is_none_or(|p| p == now) {
@@ -814,19 +814,19 @@ pub fn push_channel(s: &mut State, ch: os_model::Channel) {
 }
 
 /// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
-pub(crate) fn remap_state(s: &mut State, map: &[Option<usize>]) {
+pub fn remap_state(s: &mut State, map: &[Option<usize>]) {
     remap_project(s.session.project.get_mut(), map);
     remap_ui(s, map);
 }
 
 /// `remap_state`'s part in the app state, for a project already renumbered (`map` as there).
-pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
+pub fn remap_ui(s: &mut State, map: &[Option<usize>]) {
     remap_session(&mut s.session, map);
     remap_view(s, map);
 }
 
 /// `remap_ui`'s part in the interface: the rack's state, the selections and the plugin window follow their rows.
-pub(crate) fn remap_view(s: &mut State, map: &[Option<usize>]) {
+pub fn remap_view(s: &mut State, map: &[Option<usize>]) {
     let m = |r: usize| map.get(r).copied().flatten();
     let len = s.session.project.channels.len().max(1);
     s.rack.remap(&m);
@@ -1192,7 +1192,7 @@ pub enum RCmd {
     Restretch,
 }
 
-pub(crate) fn it(label: impl Into<std::borrow::Cow<'static, str>>, c: RCmd) -> PItem {
+pub fn it(label: impl Into<std::borrow::Cow<'static, str>>, c: RCmd) -> PItem {
     PItem::new(label, Cmd::Rack(c))
 }
 
@@ -1294,13 +1294,13 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
 }
 
 /// Add one ▸: the generator menu, a pick goes to the bottom of the rack (spec: ui/plugin-menu.md §1).
-pub(crate) fn add_one_items(s: &State) -> Vec<PItem> {
+pub fn add_one_items(s: &State) -> Vec<PItem> {
     crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(None), true)
 }
 
 /// Change declicking for selected channels to ▸ (§17, also TOOLS): the six declick modes in their order, named as Lemon
 /// Sampler's list names them (spec: audio/declick.md), greyed out while no channel is selected.
-pub(crate) fn declick_items(s: &State) -> Vec<PItem> {
+pub fn declick_items(s: &State) -> Vec<PItem> {
     let none = s.rack.sel.is_empty();
     lemon_sampler::params::DECLICK
         .iter()
@@ -1314,14 +1314,14 @@ pub(crate) fn declick_items(s: &State) -> Vec<PItem> {
 
 /// Switch all plugin editors to ▸ (§17 "Switch", also TOOLS; spec: ui/plugin-window.md "Docking"); greyed out where
 /// plugin editors have no windows of their own.
-pub(crate) fn editor_items() -> Vec<PItem> {
+pub fn editor_items() -> Vec<PItem> {
     let item = |label: &'static str, on: bool| if cfg!(plugin_windows) { it(label, RCmd::DetachAll(on)) } else { it(label, RCmd::DetachAll(on)).off() };
     vec![item("Attached", false), item("Detached", true)]
 }
 
 /// Set keyboard focus of all plugins to ▸ (TOOLS; spec: ui/channel-switches.md §3, §6): Enabled or Disabled, the
 /// current one dotted (Lemon Studio's), greyed where Lemon Studio cannot keep keys from an editor (Linux).
-pub(crate) fn key_focus_items() -> Vec<PItem> {
+pub fn key_focus_items() -> Vec<PItem> {
     #[cfg(any(windows, target_os = "macos"))]
     let (works, on) = (true, crate::plugin_window::editor_keys());
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -1335,7 +1335,7 @@ pub(crate) fn key_focus_items() -> Vec<PItem> {
 
 /// Switch all (`all`) / selected audio clip channels to ▸ (§17 "Switch", also TOOLS; spec: ui/channel-switches.md §1):
 /// the stretch methods named and stored as audio/time-stretch.md gives them, in two columns with headers, no marks.
-pub(crate) fn stretch_items(all: bool) -> Vec<PItem> {
+pub fn stretch_items(all: bool) -> Vec<PItem> {
     use lemon_sampler::params::{STRETCH, STRETCH_FILE};
     let pick = |i: usize| it(STRETCH[i], RCmd::StretchClips(all, STRETCH_FILE[i]));
     let mut v = Vec::new();
@@ -1367,7 +1367,7 @@ fn ask_stretch(app: &mut App, all: bool, method: i32, sel: &[usize]) {
 
 /// Rows `rows` take stretch method `method`, their TIME, PITCH and MUL kept: the channel's sound settings, which the
 /// engine plays and the project saves, and its Lemon Sampler (spec: ui/channel-switches.md §1).
-pub(crate) fn set_stretch(app: &mut App, rows: &[usize], method: i32) {
+pub fn set_stretch(app: &mut App, rows: &[usize], method: i32) {
     for &r in rows {
         let Some(c) = app.state.session.project.get_mut().channels.get_mut(r) else { continue };
         c.sound.stretch[3] = method as u32;

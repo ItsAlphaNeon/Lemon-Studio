@@ -134,7 +134,7 @@ pub enum Request {
 /// Of the open windows (`hosted` key, when it opened), the one to close before another opens, so that no more than
 /// `max` are open: the one opened earliest, while `max` or more are open.
 #[cfg_attr(not(plugin_windows), allow(dead_code))]
-pub(crate) fn earliest_over(open: impl Iterator<Item = (usize, u64)>, max: usize) -> Option<usize> {
+pub fn earliest_over(open: impl Iterator<Item = (usize, u64)>, max: usize) -> Option<usize> {
     let open: Vec<(usize, u64)> = open.collect();
     open.iter().min_by_key(|o| o.1).filter(|_| open.len() >= max).map(|o| o.0)
 }
@@ -142,7 +142,7 @@ pub(crate) fn earliest_over(open: impl Iterator<Item = (usize, u64)>, max: usize
 /// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`). A Lemon plugin answers the host
 /// link's hello: its page tabs go into the strip row and its editor shrinks to what is below them.
 #[cfg(plugin_windows)]
-pub(crate) fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_hostlink::Link> {
+pub fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_hostlink::Link> {
     let link = os_hostlink::Link::connect(w.area() as isize);
     match &link {
         Some(l) => {
@@ -159,7 +159,7 @@ pub(crate) fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> O
 /// (`DragAcceptFiles`). The drop handle is ours: the receiver's `DragFinish` frees it. Same process only.
 #[cfg(windows)]
 /// `frame` bounds the search: a docked frame's parent is the main window, which takes files itself.
-pub(crate) fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
+pub fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::Foundation::GlobalFree;
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
@@ -225,12 +225,12 @@ pub struct EditorHost {
 }
 
 impl Default for EditorHost {
-    /// The editors' frames of this platform's window system (`plugin_window::NativeFrames`).
+    /// No frames until the program gives its window system's (`plugin_window::NoFrames`).
     fn default() -> Self {
         EditorHost {
             editors: BTreeMap::new(),
             #[cfg(plugin_windows)]
-            frames: Box::new(crate::plugin_window::NativeFrames),
+            frames: Box::new(crate::plugin_window::NoFrames),
             #[cfg(plugin_windows)]
             opens: 0,
         }

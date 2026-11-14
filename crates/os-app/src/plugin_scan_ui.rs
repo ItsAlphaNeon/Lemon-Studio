@@ -59,7 +59,7 @@ impl App {
     }
 
     /// UI tick: the running scan's progress and results.
-    pub(crate) fn scan_tick(&mut self) {
+    pub fn scan_tick(&mut self) {
         let Some(sw) = &self.sweep else { return };
         let mut done = None;
         let mut moved = false;
@@ -101,7 +101,7 @@ impl App {
     }
 
     /// The user changed a plugin choice: saved, and the lists follow.
-    pub(crate) fn prefs_changed(&mut self) {
+    pub fn prefs_changed(&mut self) {
         self.state.plugdb.prefs.save();
         self.state.plugdb.rebuild(&self.state.session.plugins);
         self.invalidate();

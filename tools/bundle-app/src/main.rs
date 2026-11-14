@@ -50,7 +50,7 @@ fn main() {
     let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
     let target = if target.is_relative() { root.join(target) } else { target };
     let ok = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["build", "--release", "--bin", EXE, "-p", "os-app"])
+        .args(["build", "--release", "--bin", EXE, "-p", "lemonstudio"])
         .current_dir(&root)
         .env("CARGO_TARGET_DIR", &target)
         .status()

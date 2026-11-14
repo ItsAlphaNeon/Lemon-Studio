@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! winit's key events as the interface's keys (`crate::keys`): one place that knows both (control-plane step 10, part
+//! winit's key events as the interface's keys (`os_app::keys`): one place that knows both (control-plane step 10, part
 //! of the program's window code).
 
-use crate::keys::{Key, KeyCode, NamedKey};
+use os_app::keys::{Key, KeyCode, NamedKey};
 use winit::keyboard as w;
 
 /// A physical key code.

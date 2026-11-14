@@ -142,7 +142,7 @@ fn created_box(s: &mut State) {
 
 /// Renumber patterns (`None` removes one): playlist clips follow (clips of removed patterns go). Numbers that
 /// end up without a pattern keep an empty entry so saving clears their blocks.
-pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
+pub fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
     crate::follow::around(s, |s| renumber_in(&mut s.session, map));
 }
 

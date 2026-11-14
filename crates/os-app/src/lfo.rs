@@ -224,7 +224,7 @@ pub fn points(set: &Settings, lane: Lane, ppq: u32, len: u32) -> Vec<(u32, i32)>
 mod tests {
     use super::*;
 
-    pub(crate) fn note(pos: u32, key: u16) -> Note {
+    pub fn note(pos: u32, key: u16) -> Note {
         Note { length: 24, key, velocity: 100, ..Note::step(0, pos) }
     }
 

@@ -1032,7 +1032,7 @@ pub fn keys_down() -> Option<[u8; 32]> {
 }
 
 /// Whether `code` is down in `keymap` (`keys_down`): the X key code is the evdev scancode winit reads, plus 8.
-pub fn in_keymap(keymap: &[u8; 32], code: crate::keys::KeyCode) -> bool {
+pub fn in_keymap(keymap: &[u8; 32], code: os_app::keys::KeyCode) -> bool {
     let Some(k) = crate::winit_keys::to_scancode(code).map(|s| s as usize + 8) else { return false };
     keymap.get(k / 8).is_some_and(|&b| b >> (k % 8) & 1 != 0)
 }

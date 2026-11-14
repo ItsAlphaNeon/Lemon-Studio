@@ -151,7 +151,7 @@ impl App {
     /// PATTERNS > Quick render as audio clip (`replace` false) and Render and replace (§2, §3): renders the current
     /// pattern as an export does, with its progress panel; `pattern_render_done` takes the file. A pattern without
     /// notes is refused in a warning box, as the Export form refuses one.
-    pub(crate) fn render_pattern(&mut self, replace: bool) {
+    pub fn render_pattern(&mut self, replace: bool) {
         if self.state.session.export.is_some() {
             return;
         }
@@ -175,7 +175,7 @@ impl App {
     /// PATTERNS > Render as audio clip... (§1): the Export form in its render mode: Play fixed on the current
     /// pattern, the Rendered folder, the pattern's file name and the quick render's choices, changeable before the
     /// render; Export renders and makes the channel as Quick render does.
-    pub(crate) fn open_render_form(&mut self) {
+    pub fn open_render_form(&mut self) {
         if self.state.session.export.is_some() {
             return;
         }
@@ -200,7 +200,7 @@ impl App {
     }
 
     /// The render mode's Export (§1): the form's choices for the current pattern into its folder, then the channel.
-    pub(crate) fn render_pattern_with(&mut self, f: &crate::export_form::ExportForm) {
+    pub fn render_pattern_with(&mut self, f: &crate::export_form::ExportForm) {
         if let Err(e) = std::fs::create_dir_all(&f.folder) {
             self.state.message = Some(format!("Render failed: {}: {e}", f.folder.display()));
             return self.invalidate();
@@ -211,7 +211,7 @@ impl App {
     }
 
     /// A render has finished (`App::export_tick`): the channel and clips for its file, or what went wrong.
-    pub(crate) fn pattern_render_done(&mut self, p: Pending, r: Result<(f64, Vec<PathBuf>), String>) {
+    pub fn pattern_render_done(&mut self, p: Pending, r: Result<(f64, Vec<PathBuf>), String>) {
         self.state.message = Some(match r {
             Ok((_, files)) => match files.first() {
                 Some(f) => {

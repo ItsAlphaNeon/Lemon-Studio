@@ -150,11 +150,11 @@ pub fn paint(c: &mut os_ui::Canvas, t: &os_theme::Palette, s: &Search) {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
 
     /// A 16-bit mono 44.1 kHz WAV file of `frames` silent frames.
-    pub(crate) fn wav(frames: u32) -> Vec<u8> {
+    pub fn wav(frames: u32) -> Vec<u8> {
         let data = frames * 2;
         let mut b = Vec::new();
         b.extend(b"RIFF");
@@ -255,7 +255,7 @@ pub(crate) mod tests {
 }
 
 /// The box: what is missing, that the project keeps it, and Find samples... when samples are missing.
-pub(crate) fn missing_box(samples: &[String], plugins: &[String]) -> Msg {
+pub fn missing_box(samples: &[String], plugins: &[String]) -> Msg {
     let count = |v: &[String]| v.iter().collect::<HashSet<_>>().len();
     let mut parts: Vec<String> = vec!["Some files this project uses were not found. The project keeps them: saving it does not remove them.\n".into()];
     if !samples.is_empty() {

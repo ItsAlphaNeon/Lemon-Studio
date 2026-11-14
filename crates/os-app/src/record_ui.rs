@@ -30,7 +30,7 @@ pub fn quantized(s: &State, start: u32, end: u32) -> (u32, u32) {
 
 impl App {
     /// The Record button and R: disarms, or asks what to record (spec §2 What to record), or arms when asking is off.
-    pub(crate) fn toggle_record(&mut self) {
+    pub fn toggle_record(&mut self) {
         if self.state.session.rec.armed {
             self.end_take();
             self.state.session.rec.armed = false;
@@ -72,7 +72,7 @@ impl App {
     }
 
     /// A record popup's command (`Cmd::Rec`); returns the message to show.
-    pub(crate) fn rec_cmd(&mut self, c: RecCmd) -> Option<String> {
+    pub fn rec_cmd(&mut self, c: RecCmd) -> Option<String> {
         let set = |o: Opt, on: bool| {
             if o.on(&self.state.session.settings) != on {
                 o.toggle(&self.state.session.settings);
@@ -153,7 +153,7 @@ impl App {
     }
 
     /// Hands the looping time selection to the playback (`Transport::set_loop`); returns it.
-    pub(crate) fn sync_loop_range(&self) -> Option<(u32, u32)> {
+    pub fn sync_loop_range(&self) -> Option<(u32, u32)> {
         let sel = self.selection_loop();
         self.state.session.transport.set_loop(sel);
         sel
@@ -161,7 +161,7 @@ impl App {
 
     /// The time selection that loops playback (spec §5): the piano roll's in PAT mode while it is shown, the
     /// playlist's in SONG mode; one with no length does not count.
-    pub(crate) fn selection_loop(&self) -> Option<(u32, u32)> {
+    pub fn selection_loop(&self) -> Option<(u32, u32)> {
         let s = &self.state;
         let r = if s.song_mode() { s.playlist.range } else if s.shown(crate::app::Win::PianoRoll) { s.piano.range } else { None };
         r.filter(|r| r.1 > r.0)
@@ -170,7 +170,7 @@ impl App {
     /// Play from stopped (the Play button, Space, Recording starts playback), with the record options (spec §3):
     /// Start on input waits for the first note instead (Play again cancels the wait); Recording precount, armed,
     /// counts in first.
-    pub(crate) fn play_from_stop(&mut self) {
+    pub fn play_from_stop(&mut self) {
         let r = &mut self.state.session.rec;
         if r.waiting {
             r.waiting = false;
@@ -183,7 +183,7 @@ impl App {
     }
 
     /// Play, with Recording precount's count-in when armed.
-    pub(crate) fn play_counted_if_armed(&mut self) {
+    pub fn play_counted_if_armed(&mut self) {
         let bars = if self.state.session.rec.armed && Opt::Precount.on(&self.state.session.settings) { precount_bars(&self.state.session.settings) } else { 0 };
         self.start_playback_counted(bars);
         if bars > 0 && self.state.session.transport.playing() {
@@ -197,7 +197,7 @@ impl App {
     }
 
     /// Stop ends a wait or a count-in.
-    pub(crate) fn record_stopped(&mut self) {
+    pub fn record_stopped(&mut self) {
         self.state.session.rec.waiting = false;
         self.state.session.rec.count = None;
     }
@@ -213,7 +213,7 @@ impl App {
     }
 
     /// The option buttons' right-click menus (spec §3): Start on input's checks, Recording precount's length.
-    pub(crate) fn record_option_menu(&mut self, o: Opt, x: f32, y: f32) {
+    pub fn record_option_menu(&mut self, o: Opt, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let items = match o {
             Opt::Wait => vec![
@@ -234,7 +234,7 @@ impl App {
     }
 
     /// An option switch (the buttons, OPTIONS menu, Ctrl+I / Ctrl+P / Ctrl+B); turning Start on input off ends a wait.
-    pub(crate) fn toggle_record_option(&mut self, o: Opt) {
+    pub fn toggle_record_option(&mut self, o: Opt) {
         let on = o.toggle(&self.state.session.settings);
         if o == Opt::Wait && !on {
             self.state.session.rec.waiting = false;
@@ -250,7 +250,7 @@ impl App {
     }
 
     /// The right-click menu (spec §2 Right-click menu).
-    pub(crate) fn record_menu(&mut self, x: f32, y: f32) {
+    pub fn record_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let it = |label: &'static str, o: Opt| PItem::new(label, Cmd::Record(o)).mark(Mark::Check(o.on(&self.state.session.settings)));
         let items = vec![
@@ -278,7 +278,7 @@ impl App {
     }
 
     /// A knob moved (`record_control`).
-    pub(crate) fn record_knob(&mut self, id: KnobId) {
+    pub fn record_knob(&mut self, id: KnobId) {
         // A container member's level is recorded on its target, as its controller link records it.
         if let KnobId::Member(t, k, m, wet) = id {
             if let Some(target) = crate::container::level_target(&self.state.session, t, k, m, wet) {
@@ -292,7 +292,7 @@ impl App {
     /// A control moved (a channel's volume or pan knob, a mixer track's fader, pan, separation, equaliser or slot mix
     /// knob, the tempo): while recording automation its value goes into the current pattern as a control point at the
     /// playback position, in the setting's own unit (spec §2 Taking automation).
-    pub(crate) fn record_control(&mut self, a: &crate::app::Action) {
+    pub fn record_control(&mut self, a: &crate::app::Action) {
         let Some((kind, value)) = point_of(&self.state, a) else { return };
         self.start_on_input(Opt::Automation);
         if self.rec_live(Opt::Automation) {
@@ -302,7 +302,7 @@ impl App {
 
     /// A plugin's parameter `target` moved in its own window to normalized `level`; `range` is its plain range as the
     /// plugin states it (spec §2 Taking automation; the value: `os_model::target::plugin_point_value`).
-    pub(crate) fn record_param(&mut self, target: u32, range: (f64, f64), level: f64) {
+    pub fn record_param(&mut self, target: u32, range: (f64, f64), level: f64) {
         self.start_on_input(Opt::Automation);
         if self.rec_live(Opt::Automation) {
             self.record_point(target, os_model::target::plugin_point_value(range.0, range.1, level));
@@ -316,7 +316,7 @@ impl App {
 
     /// A note went down (typing keyboard, MIDI, Touch controller): recorded from the playback position while
     /// recording (spec §2 Taking notes).
-    pub(crate) fn record_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: Extra) {
+    pub fn record_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: Extra) {
         let target = extra.channel.or_else(|| crate::piano::channel(&self.state));
         if let Some(channel) = target {
             self.state.session.rec.log.down(src, key, velocity, channel, std::time::Instant::now());
@@ -330,21 +330,21 @@ impl App {
     }
 
     /// A note went up: written when it was being recorded.
-    pub(crate) fn record_up_with(&mut self, src: Src, release: Option<u8>) {
+    pub fn record_up_with(&mut self, src: Src, release: Option<u8>) {
         self.state.session.rec.log.up(src, std::time::Instant::now());
         self.state.session.rec.unit = unit(&self.state);
         self.host(|ses| up_in(ses, src, release));
     }
 
     /// The take ends: the notes still held end where playback last was.
-    pub(crate) fn end_take(&mut self) {
+    pub fn end_take(&mut self) {
         self.state.session.rec.unit = unit(&self.state);
         self.host(end_take_in);
     }
 
     /// Each tick: one-click and track recording, then the session's half (`tick_in`) with the looping time selection;
     /// a punch out stops playback.
-    pub(crate) fn record_tick(&mut self) {
+    pub fn record_tick(&mut self) {
         self.one_click_tick();
         self.track_rec_tick();
         self.state.session.rec.unit = unit(&self.state);
@@ -357,7 +357,7 @@ impl App {
     /// TOOLS ▸ Cancel recording (spec: ui/cancel-recording.md §2): while Record is armed
     /// and playing (or counting in, or waiting for input), playback stops and every take recorded since it started is
     /// undone; notes still held are dropped. The undone takes can be redone.
-    pub(crate) fn cancel_recording(&mut self) -> String {
+    pub fn cancel_recording(&mut self) -> String {
         let r = &self.state.session.rec;
         if !r.armed || !(self.state.session.transport.playing() || r.count.is_some() || r.waiting) {
             return "Nothing is being recorded".into();

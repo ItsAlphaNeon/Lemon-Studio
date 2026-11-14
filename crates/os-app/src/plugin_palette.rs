@@ -421,7 +421,7 @@ impl App {
     }
 
     /// The palette's controls.
-    pub(crate) fn palette_act(&mut self, a: PalAct) {
+    pub fn palette_act(&mut self, a: PalAct) {
         let s = &mut self.state;
         match a {
             PalAct::Search | PalAct::List => {}
@@ -479,7 +479,7 @@ impl App {
     }
 
     /// The wheel over the list: three rows a notch (§6.4).
-    pub(crate) fn palette_wheel(&mut self, notches: f32) {
+    pub fn palette_wheel(&mut self, notches: f32) {
         let s = &mut self.state;
         let (_, total) = tops(&rows(s));
         let max = (total - crate::views::plugin_palette::list_h(s)).max(0.0);
@@ -488,7 +488,7 @@ impl App {
 
     /// The palette's keys while it has the keyboard (§6.1, §6.4); returns whether the key was taken. Typed text goes
     /// into the search; shortcuts with Ctrl or Alt (but AltGr's characters) and the function keys are left to the app.
-    pub(crate) fn palette_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
+    pub fn palette_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
         if !has_keys(&self.state) {
             return false;
         }

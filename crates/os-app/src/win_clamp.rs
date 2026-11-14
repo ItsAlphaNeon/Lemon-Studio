@@ -155,7 +155,7 @@ impl App {
     /// Piano roll not below their smallest size, the Channel rack in whole steps and rows); one that can't shrink goes
     /// to the workspace's left or top edge. Hidden windows too, so they open inside; a maximized window's floating
     /// rect too.
-    pub(crate) fn move_into_workspace(&mut self) {
+    pub fn move_into_workspace(&mut self) {
         let s = &mut self.state;
         let work = s.work_rect();
         for w in [Win::Playlist, Win::Mixer, Win::PianoRoll] {

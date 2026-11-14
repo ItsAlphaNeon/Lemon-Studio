@@ -378,7 +378,7 @@ pub fn offer_text(f: &Found) -> Vec<(String, bool)> {
 
 impl crate::app::App {
     /// At start, once the window's state is restored: how the last update went, and the check at start.
-    pub(crate) fn update_startup(&mut self) {
+    pub fn update_startup(&mut self) {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
         match self.updates.startup() {
             Some((true, m)) => self.state.message = Some(m),
@@ -388,7 +388,7 @@ impl crate::app::App {
     }
 
     /// HELP ▸ Check for updates.
-    pub(crate) fn check_updates_now(&mut self) {
+    pub fn check_updates_now(&mut self) {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
         let info = |app: &mut Self, text: &str| {
             app.show_msg(Msg::new(Kind::Info, "Check for updates", spans(&[text]), &[Answer::Ok], Then::Nothing));
@@ -396,7 +396,7 @@ impl crate::app::App {
         if !enabled() {
             return info(
                 self,
-                "This copy of Lemon Studio was built from its source code, so it doesn't update itself: update it with git pull, then cargo run -p os-app --release (see the README).",
+                "This copy of Lemon Studio was built from its source code, so it doesn't update itself: update it with git pull, then cargo run -p lemonstudio --release (see the README).",
             );
         }
         if let Err(e) = target() {
@@ -417,7 +417,7 @@ impl crate::app::App {
     }
 
     /// The updater's answers, and the update offered once no dialog is in the way (and nothing is being recorded).
-    pub(crate) fn update_tick(&mut self) {
+    pub fn update_tick(&mut self) {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
         for e in self.updates.poll() {
             let asked = self.updates.asked || self.updates.install_when_staged;
@@ -477,7 +477,7 @@ impl crate::app::App {
     }
 
     /// The update's message box was answered: Install (Yes), Skip this version (No) or Later (Cancel).
-    pub(crate) fn update_answer(&mut self, f: Found, answer: crate::dialog::Answer) {
+    pub fn update_answer(&mut self, f: Found, answer: crate::dialog::Answer) {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
         match answer {
             Answer::Yes if f.staged.is_some() => self.install_update(f),
@@ -507,7 +507,7 @@ impl crate::app::App {
 
     /// Closing for the update was called off (Cancel to the unsaved changes): it installs when Lemon Studio closes,
     /// without starting it again.
-    pub(crate) fn update_put_off(&mut self) {
+    pub fn update_put_off(&mut self) {
         if let Some(i) = self.updates.install.as_mut().filter(|i| i.relaunch) {
             i.relaunch = false;
             self.state.message = Some(format!("Lemon Studio {} installs when Lemon Studio closes", i.version));

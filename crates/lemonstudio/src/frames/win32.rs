@@ -289,10 +289,10 @@ impl FrameWindow {
                 unsafe { refit(self.hwnd, w) };
             }
         }
-        // The workspace may have shrunk: the window keeps its part in it (`crate::win_clamp::keep_px`).
+        // The workspace may have shrunk: the window keeps its part in it (`os_app::win_clamp::keep_px`).
         if work[2] > work[0] && work[3] > work[1] {
             let k = self.scale();
-            self.place(|me| crate::win_clamp::keep_px((me[0], me[1]), me[2] - me[0], work, k));
+            self.place(|me| os_app::win_clamp::keep_px((me[0], me[1]), me[2] - me[0], work, k));
         }
         unsafe { apply_clip(self.hwnd, &self.state) };
     }
@@ -302,7 +302,7 @@ impl FrameWindow {
     pub fn move_into_workspace(&self) {
         let work = self.state.borrow().clip.as_ref().map(|c| c.0);
         let Some(work) = work.filter(|_| !self.detached()) else { return };
-        self.place(|me| crate::win_clamp::inside_px(me, work));
+        self.place(|me| os_app::win_clamp::inside_px(me, work));
         unsafe { apply_clip(self.hwnd, &self.state) };
     }
 
@@ -967,8 +967,8 @@ unsafe fn unhold(w: &mut Win) {
 
 /// Where a window moved by hand to `p` goes (spec: ui/settings-choices.md "Advanced: Don't limit windows to screen
 /// (2026-10-16)"): a docked one (`p` in the parent's client area) keeps its part in the workspace it was clipped to
-/// (`crate::win_clamp::keep_px`); a detached one (`p` on screen) keeps its title bar on the screens unless "Don't
-/// limit windows to screen" is on (`crate::win_clamp::bar_on_screens`).
+/// (`os_app::win_clamp::keep_px`); a detached one (`p` on screen) keeps its title bar on the screens unless "Don't
+/// limit windows to screen" is on (`os_app::win_clamp::bar_on_screens`).
 fn kept(hwnd: HWND, w: &Win, docked: bool, p: (i32, i32)) -> (i32, i32) {
     let mut r: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetWindowRect(hwnd, &mut r) };
@@ -976,15 +976,15 @@ fn kept(hwnd: HWND, w: &Win, docked: bool, p: (i32, i32)) -> (i32, i32) {
     if docked {
         let work = w.state.borrow().clip.as_ref().map(|c| c.0);
         return match work {
-            Some(work) if work[2] > work[0] && work[3] > work[1] => crate::win_clamp::keep_px(p, width, work, w.scale),
+            Some(work) if work[2] > work[0] && work[3] > work[1] => os_app::win_clamp::keep_px(p, width, work, w.scale),
             _ => p,
         };
     }
-    if crate::prefs::check(&crate::prefs::DONT_LIMIT_WINDOWS) {
+    if os_app::prefs::check(&os_app::prefs::DONT_LIMIT_WINDOWS) {
         return p;
     }
     let bar = [p.0, p.1, p.0 + width, p.1 + (TITLE_H * w.scale).round() as i32];
-    crate::win_clamp::bar_on_screens(bar, &screens())
+    os_app::win_clamp::bar_on_screens(bar, &screens())
 }
 
 /// The monitors' work areas (screen px).
@@ -1179,7 +1179,7 @@ mod tests {
 
     /// A docked window that closes, hides, detaches or shrinks uncovers part of the main window, which must be presented
     /// whole again or that part keeps showing the plugin window. Opens real windows:
-    /// `cargo test -p os-app --lib docked_windows_expose_the_main_window -- --ignored`.
+    /// `cargo test -p lemonstudio docked_windows_expose_the_main_window -- --ignored`.
     #[test]
     #[ignore]
     fn docked_windows_expose_the_main_window() {
@@ -1242,7 +1242,7 @@ mod tests {
     /// Spec ui/settings-choices.md "Advanced: Don't limit windows to screen (2026-10-16)": a docked window keeps 31 px
     /// of its width and its title bar in the workspace it is clipped to, also when the workspace shrinks, and Into
     /// workspace brings it fully back in, keeping its size. Opens real windows:
-    /// `cargo test -p os-app --lib docked_windows_keep_their_part -- --ignored`.
+    /// `cargo test -p lemonstudio docked_windows_keep_their_part -- --ignored`.
     #[test]
     #[ignore]
     fn docked_windows_keep_their_part() {
@@ -1288,7 +1288,7 @@ mod tests {
     /// A resizable editor's frame (Tesla) maximizes from its title bar's button or a double-click: docked, to the
     /// workspace it is clipped to, which it keeps filling when that changes; detached, to its monitor's work area. Again
     /// restores where it was (spec: ui/plugin-window.md "Frame"). Opens real windows:
-    /// `cargo test -p os-app --lib resizable_windows_maximize -- --ignored`.
+    /// `cargo test -p lemonstudio resizable_windows_maximize -- --ignored`.
     #[test]
     #[ignore]
     fn resizable_windows_maximize() {

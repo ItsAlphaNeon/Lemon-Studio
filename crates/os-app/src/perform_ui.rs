@@ -491,13 +491,13 @@ pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
 
 impl App {
     /// Prepare for performance mode (§1): the question first, then Marker settings, then the markers.
-    pub(crate) fn ask_prepare(&mut self) {
+    pub fn ask_prepare(&mut self) {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
         self.show_msg(Msg::new(Kind::Question, "Confirm", spans(&[CONFIRM]), &[Answer::Ok, Answer::Cancel], Then::PerfConfirm));
     }
 
     /// Ok to the question: the Marker settings dialog at its defaults.
-    pub(crate) fn open_marker_settings(&mut self) {
+    pub fn open_marker_settings(&mut self) {
         self.state.playlist.popup = None;
         self.show_form(crate::dialog::Body::Markers(MarkerForm::default()));
     }
@@ -510,7 +510,7 @@ impl App {
     }
 
     /// A click on a Marker settings box: its list under it, the current value marked.
-    pub(crate) fn marker_list(&mut self, spacing: bool) {
+    pub fn marker_list(&mut self, spacing: bool) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let Some(f) = self.marker_form().copied() else { return };
         let act = crate::app::Action::Dlg(crate::dialog::DHit::MarkerValue(spacing));
@@ -522,7 +522,7 @@ impl App {
     }
 
     /// A pick in a Marker settings list sets its box.
-    pub(crate) fn marker_pick(&mut self, spacing: bool, v: u8) {
+    pub fn marker_pick(&mut self, spacing: bool, v: u8) {
         if let Some(f) = self.marker_form() {
             if spacing {
                 f.spacing = v;

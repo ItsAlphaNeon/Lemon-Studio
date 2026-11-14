@@ -13,7 +13,7 @@ use crate::views::settings::{self, Plug};
 
 impl App {
     /// The plugin manager's checks (`settings::plugin_check`).
-    pub(crate) fn plugin_check(&mut self, key: &str) {
+    pub fn plugin_check(&mut self, key: &str) {
         let p = &mut self.state.plugdb.prefs;
         match key {
             settings::STARTUP_CHECK => p.startup_scan = !p.startup_scan,
@@ -25,7 +25,7 @@ impl App {
     }
 
     /// The plugin manager's other controls.
-    pub(crate) fn plugin_act(&mut self, a: Plug) {
+    pub fn plugin_act(&mut self, a: Plug) {
         if a != Plug::Find {
             self.state.plugdb.finding = false;
         }
@@ -71,13 +71,13 @@ impl App {
     }
 
     /// Add folder... (§2): a folder dialog; the folder and its sub-folders are searched for every format.
-    pub(crate) fn add_plugin_folder(&mut self) {
+    pub fn add_plugin_folder(&mut self) {
         use crate::filedlg::{FileDlg, Mode};
         self.file_dialog(FileDlg::new(Mode::Folder, "Add a plugin folder", "plugins", crate::dialog::Then::PluginFolder));
     }
 
     /// The folder chosen in Add folder...
-    pub(crate) fn plugin_folder_chosen(&mut self, path: std::path::PathBuf) {
+    pub fn plugin_folder_chosen(&mut self, path: std::path::PathBuf) {
         self.state.message = Some(if self.state.plugdb.prefs.add_folder(&path) {
             self.prefs_changed();
             self.start_scan(Mode::Changed);
@@ -88,7 +88,7 @@ impl App {
     }
 
     /// Typing into the plugin table's Find box (§2). True when the key was taken.
-    pub(crate) fn plugin_find_key(&mut self, key: &Key, ctrl: bool) -> bool {
+    pub fn plugin_find_key(&mut self, key: &Key, ctrl: bool) -> bool {
         let s = &mut self.state;
         if !(s.settings.open && s.settings.tab == settings::PLUGINS && s.plugdb.finding) {
             s.plugdb.finding = false;

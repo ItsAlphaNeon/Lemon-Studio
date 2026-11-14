@@ -1743,7 +1743,7 @@ pub fn sample_path_of(blob: &[u8]) -> Option<String> {
 }
 
 /// Opens the bundled Lemon Sampler in a real plugin window, clicks through the strip and captures the window
-/// (`OS_SHOT_DIR=<dir> OS_CLAP=<Lemon Sampler.clap> cargo test -p os-app plugin_window_shots -- --ignored`).
+/// (`OS_SHOT_DIR=<dir> OS_CLAP=<Lemon Sampler.clap> cargo test -p os-session plugin_window_shots -- --ignored`).
 
 #[cfg(test)]
 mod slot_tests {
@@ -1806,7 +1806,7 @@ mod slot_tests {
     /// A UI call holding a plugin 3 ms every 40 ms beside an audio thread that processes it every 5.33 ms (256 frames at
     /// 48 kHz) and gives up after waiting 2 ms, as the engine does: taken at any moment it makes the plugin late now and
     /// then; taken between two blocks (`lock_between_blocks`), never. Timing on the real clock for 3 s per way:
-    /// `cargo test -p os-app --lib long_ui_calls_between_blocks -- --ignored --nocapture`.
+    /// `cargo test -p os-session --lib long_ui_calls_between_blocks -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn long_ui_calls_between_blocks_make_no_plugin_late() {

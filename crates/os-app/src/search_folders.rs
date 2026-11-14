@@ -101,7 +101,7 @@ fn remove(s: &mut State, row: usize) {
 
 /// Commits the cell being typed into: a Browser name relabels its root (empty: the folder's own name); an emptied
 /// Folder cell removes the row, another folder replaces the row's. No cell: nothing.
-pub(crate) fn commit(s: &mut State) {
+pub fn commit(s: &mut State) {
     let Some(e) = s.settings.folder_edit.take() else { return };
     let Some(path) = s.browser_folders.get(e.row).cloned() else { return };
     let text = e.text.text.replace(['\t', '\r', '\n'], " ");
@@ -138,7 +138,7 @@ pub(crate) fn commit(s: &mut State) {
 
 impl App {
     /// Row `row`'s folder button: the folder dialog; the folder chosen goes to `folder_chosen`.
-    pub(crate) fn search_folder_pick(&mut self, row: usize) {
+    pub fn search_folder_pick(&mut self, row: usize) {
         use crate::filedlg::{FileDlg, Mode};
         commit(&mut self.state);
         let title = if row < self.state.browser_folders.len() { "Replace a browser folder" } else { "Add a browser folder" };
@@ -150,7 +150,7 @@ impl App {
 
     /// The folder chosen for row `row`: an empty row adds it to the browser (as a dropped folder), a filled one has
     /// its folder replaced.
-    pub(crate) fn search_folder_chosen(&mut self, row: usize, path: PathBuf) {
+    pub fn search_folder_chosen(&mut self, row: usize, path: PathBuf) {
         let s = &mut self.state;
         if s.browser_folders.get(row) == Some(&path) {
             return;
@@ -168,7 +168,7 @@ impl App {
 
     /// A click on cell `col` of row `row`: selected for typing (all of its text: typing replaces it). Another cell
     /// being typed into is committed first; empty rows have no cells.
-    pub(crate) fn search_folder_cell(&mut self, row: usize, col: Col) {
+    pub fn search_folder_cell(&mut self, row: usize, col: Col) {
         let s = &mut self.state;
         if s.settings.folder_edit.as_ref().is_some_and(|e| e.row == row && e.col == col) {
             return;
@@ -184,7 +184,7 @@ impl App {
 
     /// Keys while a cell is typed into. It takes every key, so none reaches the typing keyboard or a shortcut; false
     /// when no cell has it.
-    pub(crate) fn folder_cell_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
+    pub fn folder_cell_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
         let s = &mut self.state;
         let Some(e) = s.settings.folder_edit.as_mut() else { return false };
         // The list is on screen only while the File page is.
