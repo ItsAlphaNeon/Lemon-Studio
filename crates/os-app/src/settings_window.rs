@@ -25,7 +25,7 @@ impl App {
         let Some(c) = find_check(label) else { return };
         let on = toggle(c);
         if c.key == MULTITHREADED_MIXER.key || c.key == MULTITHREADED_GENERATORS.key || c.key == MULTITHREADED_AUTO.key {
-            crate::mix_threads::apply();
+            crate::mix_threads::apply(&self.state.session.settings);
         }
         // Recording ▸ Start on input off ends a wait for input, as its toolbar button does.
         if c.key == REC_WAIT.key && !on {
@@ -144,7 +144,7 @@ mod tests {
             keys.push(c.key);
             labels.push(c.label);
         }
-        for c in OFF_PAGE_COMBOS {
+        for c in crate::shortcuts::OFF_PAGE_COMBOS {
             assert!(!combos_shown.contains(&c.label), "{} is not on a settings page", c.label);
             assert!(c.default < c.choices.len(), "{}: default among its choices", c.label);
             keys.push(c.key);
@@ -680,7 +680,7 @@ mod tests {
         app.wheel(0.0, -1.0, false, false);
         assert_eq!((number(&BROWSER_PREVIEW_TRACK), app.state.message.as_deref()), (0, Some("Browser preview track: ---")));
         // Up to the open project's last insert track.
-        let inserts = crate::mixer::inserts(&app.state.session);
+        let inserts = crate::edit::mixer::inserts(&app.state.session);
         assert!(inserts > 0);
         set_number(&BROWSER_PREVIEW_TRACK, inserts);
         app.wheel(0.0, 1.0, false, false);
@@ -718,7 +718,7 @@ mod tests {
         app.wheel(0.0, 1.0, false, false);
         assert_eq!((number(&METRONOME_TRACK), crate::metronome::switch().track()), (1, 1));
         assert_eq!(app.state.message.as_deref(), Some("Metronome track: 1"));
-        let inserts = crate::mixer::inserts(&app.state.session);
+        let inserts = crate::edit::mixer::inserts(&app.state.session);
         set_number(&METRONOME_TRACK, inserts);
         app.wheel(0.0, 1.0, false, false);
         assert_eq!(number(&METRONOME_TRACK), inserts, "up to the last insert track");
@@ -798,20 +798,20 @@ mod tests {
         ];
         for o in opts {
             let label = o.check().label;
-            let was = o.on();
+            let was = o.on(&crate::settings_file::store());
             let r = hit_rect(&app, &Action::Settings(SAct::Check(label)));
             click(&mut app, &mut c, r);
-            assert_eq!(o.on(), !was, "{label}: the page's click changes what recording reads");
+            assert_eq!(o.on(&crate::settings_file::store()), !was, "{label}: the page's click changes what recording reads");
             assert_eq!(app.state.message.as_deref(), Some(format!("{label}: {}", if was { "off" } else { "on" }).as_str()));
-            o.toggle();
+            o.toggle(&crate::settings_file::store());
             assert_eq!(check(o.check()), was, "{label}: the menus' toggle is the page's check");
         }
         // Start on input off from the page ends a wait for input, as its button does.
-        Opt::Wait.toggle();
+        Opt::Wait.toggle(&crate::settings_file::store());
         app.state.session.rec.waiting = true;
         let r = hit_rect(&app, &Action::Settings(SAct::Check(REC_WAIT.label)));
         click(&mut app, &mut c, r);
-        assert!(!Opt::Wait.on() && !app.state.session.rec.waiting);
+        assert!(!Opt::Wait.on(&crate::settings_file::store()) && !app.state.session.rec.waiting);
         // Loop record from the page reaches the playback at the next tick: armed with it off, playback runs on.
         app.state.session.rec.armed = true;
         app.record_tick();
@@ -830,8 +830,8 @@ mod tests {
         assert_eq!(labels, ["1 bar", "2 bars"]);
         let item = hit_rect(&app, &Action::PlPopup(1));
         click(&mut app, &mut c, item);
-        assert_eq!(crate::record::precount_bars(), 2);
-        crate::record::set_precount_bars(1);
+        assert_eq!(crate::record::precount_bars(&crate::settings_file::store()), 2);
+        crate::record::set_precount_bars(&crate::settings_file::store(), 1);
         assert_eq!(choice(&COUNT_IN_LENGTH), "1 bar");
         // Auto-create audio clips is the mixer menu's.
         let r = hit_rect(&app, &Action::Settings(SAct::Check(AUTO_AUDIO_CLIPS.label)));

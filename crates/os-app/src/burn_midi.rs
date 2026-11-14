@@ -92,7 +92,7 @@ impl Play {
     }
 
     /// The note written for it; the velocity, pan and mods of a note whose levels did not change stay its bytes.
-    fn note(&self) -> Note {
+    pub(crate) fn note(&self) -> Note {
         let n = &self.src;
         let key = (self.pitch / 100.0).round();
         let rest = self.pitch - key * 100.0;
@@ -686,7 +686,7 @@ impl App {
         }
         let s = &self.state;
         let ch = &s.session.project.channels[row];
-        let name = crate::rack::channel_name(&s.session, row);
+        let name = crate::edit::rack::channel_name(&s.session, row);
         let (ppq, cur) = (s.session.project.ppq.max(4), s.pattern().max(1));
         let src: Vec<Note> = s.session.project.pattern(cur).map(|p| p.notes.iter().filter(|n| n.channel == ch.index).copied().collect()).unwrap_or_default();
         if !src.iter().any(|n| !n.muted() && !n.slide()) {
@@ -710,10 +710,10 @@ impl App {
         };
         let index = ch.index;
         let count = notes.iter().filter(|n| !n.muted() && !n.slide()).count();
-        let msg = crate::control::edit_app(self, STEP, crate::control::command::Region::Project, |app| {
+        let msg = crate::control_ui::edit_app(self, STEP, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
-            let to = if new { crate::patterns::next_empty(&s.session, cur) } else { cur };
-            let p = crate::patterns::pat_mut(&mut s.session, to);
+            let to = if new { crate::edit::patterns::next_empty(&s.session, cur) } else { cur };
+            let p = crate::edit::patterns::pat_mut(&mut s.session, to);
             if new {
                 p.notes.extend(notes.iter().filter(|n| !n.muted() && !n.slide()).copied());
             } else {
@@ -727,7 +727,7 @@ impl App {
             m.echo.feed = 0.0;
             s.set_pattern(to);
             s.session.dirty = true;
-            if new { format!("{count} notes of {name} burnt to {}", crate::patterns::name_of(&s.session, to)) } else { format!("{count} notes of {name} burnt") }
+            if new { format!("{count} notes of {name} burnt to {}", crate::edit::patterns::name_of(&s.session, to)) } else { format!("{count} notes of {name} burnt") }
         });
         self.invalidate();
         Some(msg)
@@ -740,7 +740,7 @@ mod tests {
     use os_model::Arpeggio;
 
     /// A note of channel 0 at `pos`, `len` ticks long, on `key`.
-    fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub(crate) fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, ..Note::step(0, pos) }
     }
 
@@ -749,7 +749,7 @@ mod tests {
     }
 
     fn arp_channel(f: impl FnOnce(&mut Arpeggio)) -> Channel {
-        let mut ch = crate::app::sampler_channel(0, "Ch", 0);
+        let mut ch = crate::projects::sampler_channel(0, "Ch", 0);
         f(&mut ch.misc.arp);
         ch
     }
@@ -767,7 +767,7 @@ mod tests {
     /// Off: nothing generated.
     #[test]
     fn nothing_without_the_arpeggiator_or_echoes() {
-        assert_eq!(generate(&crate::app::sampler_channel(0, "Ch", 0), &[note(0, 96, 60)], 96), None);
+        assert_eq!(generate(&crate::projects::sampler_channel(0, "Ch", 0), &[note(0, 96, 60)], 96), None);
     }
 
     /// A major chord upwards, one step a note: a note four steps long plays C E G C (spec: "The note list", "Timing").
@@ -807,7 +807,7 @@ mod tests {
     /// The echo delay: each echo later by the time, quieter by the feed, its pitch stepped (spec: "Echo delay").
     #[test]
     fn echoes() {
-        let mut ch = crate::app::sampler_channel(0, "Ch", 0);
+        let mut ch = crate::projects::sampler_channel(0, "Ch", 0);
         let e = &mut ch.misc.echo;
         (e.feed, e.echoes, e.time, e.pitch) = (0.25, 2, 48.0 / 384.0, 100.0 / 1200.0);
         let got = generate(&ch, &[note(0, 12, 60)], 96).unwrap();
@@ -843,7 +843,7 @@ mod tests {
         let (a, b) = (app.state.session.project.channels[0].index, app.state.session.project.channels[1].index);
         let cur = app.state.pattern().max(1);
         app.state.set_pattern(cur);
-        let p = crate::patterns::pat_mut(&mut app.state.session, cur);
+        let p = crate::edit::patterns::pat_mut(&mut app.state.session, cur);
         p.notes = notes.iter().map(|n| Note { channel: a, ..*n }).collect();
         p.notes.push(Note::step(b, 0));
         app
@@ -869,7 +869,7 @@ mod tests {
         assert_eq!(notes_of(&app, cur, 1).len(), 1, "another channel's notes stay");
         assert_eq!(app.state.session.project.channels[0].misc.arp.direction, 0, "the arpeggiator is off: not generated twice");
         assert_eq!(app.state.pattern(), cur);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 96, 60)], "one undo step");
         assert_eq!(app.state.session.project.channels[0].misc.arp.direction, 1);
     }
@@ -882,7 +882,7 @@ mod tests {
         let e = &mut app.state.session.project.get_mut().channels[0].misc.echo;
         (e.feed, e.echoes, e.time, e.pitch) = (0.25, 2, 48.0 / 384.0, 100.0 / 1200.0);
         let cur = app.state.pattern();
-        let to = crate::patterns::next_empty(&app.state.session, cur);
+        let to = crate::edit::patterns::next_empty(&app.state.session, cur);
         assert_ne!(to, cur);
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, true));
         assert_eq!(app.state.pattern(), to, "the new pattern is the current one");
@@ -890,7 +890,7 @@ mod tests {
         assert!(notes_of(&app, to, 1).is_empty(), "only the burnt channel's notes");
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 12, 60)], "the pattern burnt from keeps its notes");
         assert_eq!(app.state.session.project.channels[0].misc.echo.feed, 0.0, "the echo delay is off");
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert!(notes_of(&app, to, 0).is_empty(), "one undo step");
         assert_eq!(app.state.session.project.channels[0].misc.echo.feed, 0.25);
     }
@@ -1009,11 +1009,11 @@ mod tests {
             let f = fifths.lock().unwrap();
             assert_eq!((f.capture, f.resets), (false, 2), "reset before and after, not capturing");
         }
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         // With the channel's arpeggiator on, the plugin is played the arpeggio.
         (app.state.session.project.get_mut().channels[0].misc.arp.direction, app.state.session.project.get_mut().channels[0].misc.arp.chord) = (1, 1);
         let ch = app.state.session.project.channels[0].index;
-        crate::patterns::pat_mut(&mut app.state.session, cur).notes.retain(|n| n.position == 0 || n.channel != ch);
+        crate::edit::patterns::pat_mut(&mut app.state.session, cur).notes.retain(|n| n.position == 0 || n.channel != ch);
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false));
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 24, 67), (24, 24, 71)]);
         assert_eq!(app.state.session.project.channels[0].misc.arp.direction, 0);

@@ -102,7 +102,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
 pub fn render(o: &Opts) -> Result<(), String> {
     // The audio thread must not open the user's audio device (an ASIO driver opens at start).
     crate::transport::headless();
-    let mut ses = crate::session::Session::new(os_model::Project::default(), crate::transport::Transport::new(crate::factory_folder::dir()));
+    let mut ses = crate::session::Session::new(os_model::Project::default(), crate::transport::Transport::new(crate::factory_folder::dir(&crate::settings_file::store())), crate::settings_file::store());
     ses.plugins = match o.hosted {
         Hosted::Builtin => crate::plugins::Plugins::builtins(),
         Hosted::LastScan => crate::project_io::last_scan(),
@@ -139,10 +139,10 @@ pub fn render(o: &Opts) -> Result<(), String> {
 
     ses.plugins.set_offline(true);
     let project = crate::rack::play_project_in(&ses);
-    let mut library = crate::transport::host_library(crate::factory_folder::dir());
+    let mut library = crate::transport::host_library(crate::factory_folder::dir(&crate::settings_file::store()));
     lemon_sampler::set_host_ticks(project.ppq);
     let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &ses.plugins.instruments());
-    crate::project_plugins::attach_effects(&mut e, &project, ses.plugins.effects());
+    crate::effect_ports::attach_effects(&mut e, &project, ses.plugins.effects());
     if o.from > 0 {
         e.seek_tick(o.from);
     } else {
@@ -254,7 +254,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lemon-render-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (flp, out) = (dir.join("song.flp"), dir.join("song.wav"));
-        let file = os_flp::project::create(&crate::app::test_project()).expect("create");
+        let file = os_flp::project::create(&crate::projects::test_project()).expect("create");
         std::fs::write(&flp, file.to_bytes().expect("bytes")).unwrap();
         let o = Opts { hosted: Hosted::Builtin, seconds: Some(2.0), ..Opts::new(flp, out.clone()) };
         render(&o).expect("render");
@@ -302,7 +302,7 @@ mod tests {
         wav.extend(b);
         std::fs::write(&sample, wav).unwrap();
 
-        let mut p = crate::app::test_project();
+        let mut p = crate::projects::test_project();
         p.channels.truncate(1);
         p.channels[0].sample_path = Some(sample.to_string_lossy().into_owned());
         // One beat (96 ticks at 130 BPM: about 0.46 s).

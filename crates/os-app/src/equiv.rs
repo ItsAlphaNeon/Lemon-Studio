@@ -139,10 +139,10 @@ fn side(app: &App) -> String {
     // Since step 5 a channel's own (`rack.locked`); read the same way as when the rack kept the rows.
     f("locked", &crate::rack::locked_rows(&s.session.project));
     // Since step 5 the shown pattern's (`rack::loop_mode` and the rest), read as the rack held them.
-    f("loop_mode", &crate::rack::loop_mode(&s.session));
-    f("loop_len", &crate::rack::loop_lens(&s.session));
-    f("loop_unit", &crate::rack::loop_units(&s.session));
-    f("loop_type", &crate::rack::loop_type(&s.session));
+    f("loop_mode", &crate::edit::rack::loop_mode(&s.session));
+    f("loop_len", &crate::edit::rack::loop_lens(&s.session));
+    f("loop_unit", &crate::edit::rack::loop_units(&s.session));
+    f("loop_type", &crate::edit::rack::loop_type(&s.session));
     f("unsorted_at", &unsorted);
     out
 }
@@ -155,11 +155,11 @@ impl Fp {
     fn of(app: &App) -> Fp {
         let s = &app.state;
         let side = hash(&side(app));
-        let history = hash(&(s.session.history.entries(), s.session.history.at()));
+        let history = hash(&(s.session.history.entries(&app.state.session.settings), s.session.history.at()));
         Fp(vec![
             ("project", project_hash(&s.session.project)),
             ("side", side),
-            ("lemon", hash(&crate::lemon_state::saved_form(s, &app.state.session.plugins))),
+            ("lemon", hash(&crate::lemon_state_ui::saved_form(s, &app.state.session.plugins))),
             ("history", history),
             // Whether the engine holds the project as it is: 0 nothing sent yet, 1 in step, 2 behind. Not the copy
             // itself: what it was last handed while playing starts or pauses follows the audio thread's timing.
@@ -552,7 +552,7 @@ impl Rig {
 
     /// With no steps in the history (just opened, or a project opened or made by a step), undo starts from here.
     fn undo_start(&self, start: &mut os_model::Project) {
-        if self.app.state.session.history.entries().len() <= 1 {
+        if self.app.state.session.history.entries(&crate::settings_file::store()).len() <= 1 {
             start.clone_from(&self.app.state.session.project);
         }
     }
@@ -595,7 +595,7 @@ impl Rig {
         let last_side = side(&self.app);
         // Undo back to the start, then redo to where the trace ended.
         let mut undone = 0;
-        while crate::history::undo(&mut self.app.state).is_some() && undone < 10_000 {
+        while crate::history_ui::undo(&mut self.app.state).is_some() && undone < 10_000 {
             undone += 1;
             self.tick();
         }
@@ -606,7 +606,7 @@ impl Rig {
         }
         // Redo as many steps as were done at the end: steps the trace itself undid stay undone.
         for _ in 0..undone {
-            if crate::history::redo(&mut self.app.state).is_none() {
+            if crate::history_ui::redo(&mut self.app.state).is_none() {
                 break;
             }
             self.tick();

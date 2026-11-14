@@ -30,7 +30,7 @@ pub fn items(s: &State) -> Vec<PItem> {
     nums.dedup();
     let mut v = vec![PItem::head("Patterns")];
     v.extend(nums.into_iter().map(|n| {
-        PItem::new(crate::patterns::name_of(&s.session, n), Cmd::Project(ProjCmd::Pattern(n))).mark(Mark::Radio(n == s.pattern()))
+        PItem::new(crate::edit::patterns::name_of(&s.session, n), Cmd::Project(ProjCmd::Pattern(n))).mark(Mark::Radio(n == s.pattern()))
     }));
     v.push(PItem::sep());
     v.push(PItem::new("New pattern", Cmd::Project(ProjCmd::NewPattern)));
@@ -42,7 +42,7 @@ pub fn items(s: &State) -> Vec<PItem> {
         v.push(PItem::new("(no channels)", Cmd::Nothing).off());
     }
     v.extend(rows.into_iter().map(|r| {
-        PItem::new(crate::rack::channel_name(&s.session, r), Cmd::Project(ProjCmd::Channel(r))).mark(Mark::Radio(r == s.selected_channel))
+        PItem::new(crate::edit::rack::channel_name(&s.session, r), Cmd::Project(ProjCmd::Channel(r))).mark(Mark::Radio(r == s.selected_channel))
     }));
     v
 }

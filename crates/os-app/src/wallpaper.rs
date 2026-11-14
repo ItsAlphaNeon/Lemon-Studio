@@ -136,7 +136,7 @@ pub fn paint(ui: &mut Ui, work: Rect) -> bool {
         let mut held = held.borrow_mut();
         if held.as_ref().is_none_or(|h| h.name != name) {
             // Read once per name (a name still relative is the user folder's, where `current.flstheme` is).
-            let image = read(&resolve(name, crate::app::theme_dir().as_deref()));
+            let image = read(&resolve(name, crate::user_dir::theme_dir().as_deref()));
             *held = Some(Held { name: name.to_string(), image, scaled: None });
         }
         let h = held.as_mut().expect("just set");

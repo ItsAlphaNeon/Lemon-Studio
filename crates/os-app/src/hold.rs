@@ -326,7 +326,7 @@ mod tests {
         assert_eq!((ns[1].position, ns[1].key), (orig.position + unit, orig.key), "one snap step later");
         assert_eq!(Note { position: orig.position, ..ns[1] }, orig, "a copy of it");
         assert_eq!(app.state.session.history.len(), steps + 1, "one step");
-        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some("Piano roll clone note"));
+        assert_eq!(app.state.session.history.entries(&crate::settings_file::store()).last().map(|e| e.1), Some("Piano roll clone note"));
         undo(&mut app);
         assert_eq!(notes(&app), vec![orig], "one undo step");
         // A move after the pick-up: a semitone up and three steps later than the copy's start.
@@ -372,7 +372,7 @@ mod tests {
         app.shift = false;
         assert_eq!(notes(&app), vec![a, Note { position: a.position + 4 * unit, ..a }], "a copy, on the original's key");
         assert_eq!(app.state.session.history.len(), steps + 1, "one step");
-        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some("Piano roll clone note"));
+        assert_eq!(app.state.session.history.entries(&crate::settings_file::store()).last().map(|e| e.1), Some("Piano roll clone note"));
         undo(&mut app);
         assert_eq!(notes(&app), vec![a], "one undo step");
         // Two notes selected: both are copied, and the copies are the selection.
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(cs[0], orig, "the original stays");
         assert_eq!((cs[1].position, cs[1].track, cs[1].source), (orig.position + unit, orig.track, orig.source), "one snap step later");
         assert_eq!(app.state.session.history.len(), steps + 1, "one step");
-        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some("Arranger clone clip"));
+        assert_eq!(app.state.session.history.entries(&crate::settings_file::store()).last().map(|e| e.1), Some("Arranger clone clip"));
         undo(&mut app);
         assert_eq!(pl::clips(&app.state.session).to_vec(), vec![orig], "one undo step");
         // Empty grid: the usual new clip, and nothing more while held.

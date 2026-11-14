@@ -18,7 +18,8 @@ pub use crate::edit::mixer::*;
 use os_model::{MixerTrack, Rgb};
 
 use crate::app::{App, State};
-use crate::control::{command::Region, edit};
+use crate::control::command::Region;
+use crate::control_ui::edit;
 
 /// Undo step names of the mixer's edits.
 const ROUTING: &str = "Mixer routing";
@@ -184,7 +185,7 @@ pub enum MCmd {
     ContainerList(u8),
     /// A member window's Rename, color and icon..., Change color... ▸ and Random color on member `.1` (its place) of the
     /// container in the current track's slot `.0`, as `Member` addresses it: the member's own name and colour, one undo
-    /// step each (`crate::container::edit_own`).
+    /// step each (`crate::container_ui::edit_own`).
     MemberRename(u8, usize),
     MemberColor(u8, usize, Option<Rgb>),
     MemberRandomColor(u8, usize),
@@ -199,18 +200,6 @@ pub enum MCmd {
     SaveState(u16),
     OpenState(u16, std::path::PathBuf),
     InsertState(u16, std::path::PathBuf),
-}
-
-/// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
-#[derive(Debug, Clone, PartialEq)]
-pub enum FxReq {
-    /// `state`: the instance starts from it (a Tesla set up for recording), else from its defaults.
-    Create { track: u16, slot: u8, index: usize, state: Option<Vec<u8>> },
-    Toggle { track: u16, slot: u8 },
-    Show { track: u16, slot: u8 },
-    Delete { track: u16, slot: u8 },
-    /// Slots moved inside a track or tracks moved: `map[(t, s)] = (t2, s2)`; unlisted instances are dropped.
-    Remap(Vec<((u16, u8), (u16, u8))>),
 }
 
 pub const LAYOUTS: [&str; 8] = ["Compact", "Compact 2", "Compact alt", "Wide", "Wide 2", "Wide 3", "Wide alt", "Extra large"];
@@ -280,15 +269,6 @@ impl Default for MixerUi {
     }
 }
 
-/// Highest insert a channel can target (at least 1).
-pub fn max_insert(p: &os_model::Project) -> u16 {
-    max_insert_of(&p.mixer)
-}
-
-pub fn max_insert_of(mixer: &[MixerTrack]) -> u16 {
-    (mixer.len().saturating_sub(2) as u16).max(1)
-}
-
 /// The current track first, then the other selected ones.
 pub fn selected(s: &State) -> Vec<u16> {
     let mut v = vec![s.selected_mixer];
@@ -332,43 +312,6 @@ pub fn group_fader(other: f64, level: f64, v: f64) -> f64 {
     fader_of_gain(fader_gain(other) * fader_gain(v) / fader_gain(level))
 }
 
-
-/// Where remote control link target `l` goes as mixer places move (`follow_places`); `None`: its place went.
-pub(crate) fn moved_link(l: crate::typein::Target, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) -> Option<crate::typein::Target> {
-    use crate::typein::Target as T;
-    Some(match l {
-        T::Knob(KnobId::MixPan(t)) => T::Knob(KnobId::MixPan(track(t)?)),
-        T::Knob(KnobId::MixSep(t)) => T::Knob(KnobId::MixSep(track(t)?)),
-        T::Knob(KnobId::Send(t, d)) => T::Knob(KnobId::Send(track(t)?, track(d)?)),
-        T::Knob(KnobId::Eq(t, b, k)) => T::Knob(KnobId::Eq(track(t)?, b, k)),
-        T::Knob(KnobId::SlotMix(t, k)) => {
-            let (t, k) = slot(t, k)?;
-            T::Knob(KnobId::SlotMix(t, k))
-        }
-        T::Knob(KnobId::Member(t, k, id, wet)) => {
-            let (t, k) = slot(t, k)?;
-            T::Knob(KnobId::Member(t, k, id, wet))
-        }
-        T::Fader(t) => T::Fader(track(t)?),
-        T::Latency(t, input, unit) => T::Latency(track(t)?, input, unit),
-        T::Param(key, i) => match crate::plugins::fx_of(key) {
-            Some((t, k)) => {
-                let (t, k) = slot(t, k)?;
-                T::Param(crate::plugins::fx_key(t, k), i)
-            }
-            None => l,
-        },
-        T::Member(t, k, id, wet) => {
-            let (t, k) = slot(t, k)?;
-            T::Member(t, k, id, wet)
-        }
-        T::MemberParam(t, k, id, i) => {
-            let (t, k) = slot(t, k)?;
-            T::MemberParam(t, k, id, i)
-        }
-        l => l,
-    })
-}
 
 /// Every slot's name typed in Lemon Studio, by (track, slot).
 #[cfg(test)]
@@ -629,42 +572,6 @@ pub const REC_SOURCES: [(&str, &str); 6] = [
 /// The monitor modes (event 166) with their menu names.
 pub const MONITOR_MODES: [(u8, &str); 3] = [(os_model::MONITOR_OFF, "Off"), (os_model::MONITOR_ARMED, "When armed"), (os_model::MONITOR_ON, "On")];
 
-/// The device's inputs as the input menu lists them (§2.1): its stereo pairs, then each input alone, each with its
-/// stored number (`device::input_source`: an ASIO driver's, else the system's input device's).
-pub fn input_choices(d: Option<&crate::device::InputSource>) -> (Vec<(i32, String)>, Vec<(i32, String)>) {
-    let Some(d) = d.filter(|d| !d.names.is_empty()) else { return (Vec::new(), Vec::new()) };
-    let n = d.names.len();
-    let name = |c: usize| d.names[c].clone();
-    let pairs: Vec<(i32, String)> = (0..n / 2).map(|k| (k as i32, format!("{} - {}", name(2 * k), name(2 * k + 1)))).collect();
-    let p = pairs.len() as i32;
-    (pairs, (0..n).map(|c| (p + c as i32, name(c))).collect())
-}
-
-/// The device's outputs as the output menu lists them (§2.1) with their stored numbers: an ASIO driver's stereo pairs
-/// (its one output by its name), else one entry, the device.
-pub fn output_choices(d: Option<&crate::device::DeviceInfo>) -> Vec<(i32, String)> {
-    match d {
-        Some(d) if d.host == crate::device::ASIO => {
-            let name = |c: usize| d.out_names.get(c).cloned().unwrap_or_else(|| format!("Out {}", c + 1));
-            if d.channels == 1 {
-                return vec![(0, name(0))];
-            }
-            (0..d.pairs()).map(|k| (k as i32, format!("{} - {}", name(2 * k), name(2 * k + 1)))).collect()
-        }
-        Some(d) => vec![(0, d.name.clone())],
-        None => vec![(0, "Audio output".into())],
-    }
-}
-
-/// What a combo shows for stored number `v` among `choices`: "(none)", the entry's name, or "(not available)" for a
-/// number the device does not have.
-pub(crate) fn choice_label(v: i32, choices: &[(i32, String)]) -> String {
-    if v < 0 {
-        return "(none)".into();
-    }
-    choices.iter().find(|c| c.0 == v).map_or_else(|| "(not available)".into(), |c| c.1.clone())
-}
-
 /// The input menu of the current track (§1.2): `<driver> - stereo` and its pairs, `<driver> - mono` and the inputs,
 /// then "(none)". `None` when the device has no inputs.
 fn input_menu(s: &State, x: f32, y: f32) -> Option<Popup> {
@@ -876,7 +783,7 @@ pub fn create_group(s: &mut State, n: u16, text: &str) {
     let last = inserts(&s.session);
     let def = format!("Bus {n}");
     let name = text.trim().to_string();
-    crate::control::edit(s, "Create group", Region::Project, |s| {
+    crate::control_ui::edit(s, "Create group", Region::Project, |s| {
         if let Some(m) = track_mut(&mut s.session, n).filter(|_| !name.is_empty()) {
             m.name = (name != def).then_some(name);
         }
@@ -953,7 +860,7 @@ pub fn route_channels(s: &mut State, dst: u16, spread: bool) -> Option<String> {
     s.selected_mixer = dst;
     changed(&mut s.session);
     Some(if moved == 1 {
-        format!("Routed {} to {}", crate::rack::channel_name(&s.session, first), name(&s.session, dst))
+        format!("Routed {} to {}", crate::edit::rack::channel_name(&s.session, first), name(&s.session, dst))
     } else {
         format!("Routed {moved} channels")
     })
@@ -984,7 +891,7 @@ pub fn route_free(s: &mut State, rows: &[usize]) -> Option<String> {
     s.selected_mixer = t;
     changed(&mut s.session);
     Some(if rows.len() == 1 {
-        format!("Routed {} to {}", crate::rack::channel_name(&s.session, r), name(&s.session, t))
+        format!("Routed {} to {}", crate::edit::rack::channel_name(&s.session, r), name(&s.session, t))
     } else {
         format!("Routed {} channels to free tracks", rows.len())
     })
@@ -1334,14 +1241,14 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
     let replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), true);
     // CPU: the plugin's switches, as in its window menu (spec: ui/plugin-window.md "CPU", audio/auto-bypass.md).
     let key = crate::plugins::fx_key(s.selected_mixer, slot);
-    let cpu = crate::playlist::plugin_cpu(&s.session, key).unwrap_or_default();
+    let cpu = crate::edit::playlist::plugin_cpu(&s.session, key).unwrap_or_default();
     let items = vec![
         PItem::sub("Replace", replace),
         PItem::new("Delete...", mx(MCmd::SlotDelete(slot))),
         PItem::sep(),
         // Lemon Studio's Patcher, slice 1 (`crate::container`).
-        PItem { enabled: crate::container::can_wrap(app, slot, false), ..PItem::new(crate::container::WRAP, mx(MCmd::Wrap(slot, false))) },
-        PItem { enabled: crate::container::can_wrap(app, slot, true), ..PItem::new(crate::container::WRAP_ALL, mx(MCmd::Wrap(slot, true))) },
+        PItem { enabled: crate::container_ui::can_wrap(app, slot, false), ..PItem::new(crate::container::WRAP, mx(MCmd::Wrap(slot, false))) },
+        PItem { enabled: crate::container_ui::can_wrap(app, slot, true), ..PItem::new(crate::container::WRAP_ALL, mx(MCmd::Wrap(slot, true))) },
         PItem::head("Presets"),
         PItem::sub("Presets", vec![PItem::not_yet("(none)")]),
         PItem::not_yet("Browse presets"),
@@ -1376,11 +1283,11 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
     ];
     let mut items = items;
     // A container's members, listed (slice 1 gives them no windows of their own).
-    if let Some(list) = crate::container::list_items(s, slot) {
+    if let Some(list) = crate::container_ui::list_items(s, slot) {
         items.insert(3, PItem::sub("Container", list));
     }
     let mut menu = Popup { x, y, items, sub: None, scroll: [0; 2] };
-    crate::presets::fill_window_menu(app, crate::plugins::fx_key(s.selected_mixer, slot), &mut menu);
+    crate::presets_ui::fill_window_menu(app, crate::plugins::fx_key(s.selected_mixer, slot), &mut menu);
     menu
 }
 
@@ -1403,7 +1310,7 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     if let MCmd::SlotScale(slot, pct) = c {
         let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
-        app.state.session.plugins.set_editor_scale(key, pct.map(|p| f32::from(p) / 100.0));
+        app.state.editor_host.set_editor_scale(&mut app.state.session.plugins, key, pct.map(|p| f32::from(p) / 100.0));
         return None;
     }
     // A track's state takes its effects' settings from their instances.
@@ -1465,12 +1372,12 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         if matches!(c, MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberAddInst(..) | MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..)) {
             crate::container::store_members(app.state.session.project.get_mut(), &app.state.session.plugins);
         }
-        return crate::control::edit_app(app, name, Region::Project, |app| run_now(app, c));
+        return crate::control_ui::edit_app(app, name, Region::Project, |app| run_now(app, c));
     }
     // A slot's sidechain input is the track's own (its slot's saved state).
     if let MCmd::SlotSidechain(..) = c {
         let t = app.state.selected_mixer;
-        return crate::control::edit_app(app, "Sidechain input", Region::Track(t), |app| run_now(app, c));
+        return crate::control_ui::edit_app(app, "Sidechain input", Region::Track(t), |app| run_now(app, c));
     }
     run_now(app, c)
 }
@@ -1592,7 +1499,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             None
         }
         MCmd::Latency(t, input, Some(u)) => {
-            crate::typein::open(s, crate::typein::Target::Latency(t, input, u), at);
+            crate::typein_ui::open(s, crate::typein::Target::Latency(t, input, u), at);
             None
         }
         MCmd::Separator(n) => {
@@ -1699,7 +1606,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::AssignAudio(n) => {
             let tg = targets(s, n);
-            crate::track_links::assign_audio(s, &tg)
+            crate::track_links_ui::assign_audio(s, &tg)
         }
         MCmd::UnassignAudio(n) => {
             let tg = targets(s, n);
@@ -1800,29 +1707,29 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::MemberRename(slot, i) => {
             let t = s.selected_mixer;
-            if let Some(m) = crate::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
+            if let Some(m) = crate::edit::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
                 crate::playlist::start_edit(s, EditTarget::MemberName(t, slot, m.id), at);
             }
             None
         }
         MCmd::MemberColor(slot, i, c) => {
             let t = s.selected_mixer;
-            if let Some(m) = crate::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
-                crate::container::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = c);
+            if let Some(m) = crate::edit::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
+                crate::container_ui::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = c);
             }
             None
         }
         MCmd::MemberRandomColor(slot, i) => {
             let t = s.selected_mixer;
-            if let Some(m) = crate::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
+            if let Some(m) = crate::edit::container::members(&s.session, t, slot).and_then(|l| l.get(i).cloned()) {
                 let seed = (u64::from(t) << 16 | u64::from(slot) << 8 | u64::from(m.id)).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed());
                 let c = crate::patterns::random_color(seed);
-                crate::container::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = Some(c));
+                crate::container_ui::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = Some(c));
             }
             None
         }
         MCmd::ContainerList(slot) => {
-            crate::container::show(s, s.selected_mixer, slot);
+            crate::container_ui::show(s, s.selected_mixer, slot);
             None
         }
         MCmd::SlotMove(slot, d) => {
@@ -2001,7 +1908,7 @@ impl App {
             }
         }
         for (track, slot, toggle) in done.windows {
-            if !(toggle && self.state.session.plugins.close_if_open(crate::plugins::fx_key(track, slot))) {
+            if !(toggle && self.state.editor_host.close_if_open(&mut self.state.session.plugins, crate::plugins::fx_key(track, slot))) {
                 self.open_fx(track, slot);
             }
         }
@@ -2018,14 +1925,14 @@ impl App {
                 return self.invalidate();
             }
         }
-        crate::control::edit_app(self, "Add effect", Region::Project, |app| app.add_tesla(t, None));
+        crate::control_ui::edit_app(self, "Add effect", Region::Project, |app| app.add_tesla(t, None));
     }
 
     /// Open audio editor and record: a Tesla on track `t` set up as an audio logger, as FL's quick load sets Edison
     /// (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"): records on the host's play, for 5
     /// minutes, appended, slaved to the transport, armed.
     pub(crate) fn audio_logger(&mut self, t: u16) {
-        crate::control::edit_app(self, "Add effect", Region::Project, |app| app.tesla_for_recording(t, |s| {
+        crate::control_ui::edit_app(self, "Add effect", Region::Project, |app| app.tesla_for_recording(t, |s| {
             s.rec.when = tesla::state::WHEN_ON_PLAY;
             s.rec.max = AUDIO_LOG_5_MINUTES;
             s.rec.append = true;
@@ -2130,8 +2037,8 @@ impl App {
     pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
         let key = crate::plugins::fx_key(track, slot);
         // A container: its list's window.
-        if crate::container::members(&self.state.session, track, slot).is_some() {
-            crate::container::show(&mut self.state, track, slot);
+        if crate::edit::container::members(&self.state.session, track, slot).is_some() {
+            crate::container_ui::show(&mut self.state, track, slot);
             return;
         }
         if !self.state.session.plugins.hosted.contains_key(&key) {
@@ -2145,7 +2052,7 @@ impl App {
         #[cfg(plugin_windows)]
         {
             let info = fx_info(&self.state.session.project, key);
-            match info.map(|i| self.state.session.plugins.open_window(key, i)) {
+            match info.map(|i| self.state.editor_host.open_window(&mut self.state.session.plugins, key, i)) {
                 Some(Ok(())) => {
                     self.state.raise(crate::app::Win::Hosted(key));
                     self.select_window_track(key);
@@ -2186,73 +2093,6 @@ impl App {
     }
 }
 
-/// What the mixer's effect requests leave to the interface (`fx_requests_in`): the windows to open (or with `toggle`,
-/// to close when open), in order, and the effect whose first check a create waits for.
-pub(crate) struct FxDone {
-    pub windows: Vec<(u16, u8, bool)>,
-    pub trying: Option<usize>,
-}
-
-/// The mixer's effect requests (`Session::fx_requests`) on the session: effects created, deleted and moved with their
-/// slots. A create waits for a native plugin's first check (`Plugins::effect_ready`); a newer request for the same slot
-/// replaces a waiting one.
-pub(crate) fn fx_requests_in(ses: &mut crate::session::Session) -> FxDone {
-    let reqs = std::mem::take(&mut ses.fx_requests);
-    let mut out = FxDone { windows: Vec::new(), trying: None };
-    let mut relink = false;
-    let mut waiting: Vec<FxReq> = Vec::new();
-    for r in reqs {
-        if let FxReq::Create { track, slot, .. } | FxReq::Delete { track, slot } = r {
-            waiting.retain(|w| !matches!(*w, FxReq::Create { track: t, slot: s, .. } if (t, s) == (track, slot)));
-        }
-        if let FxReq::Create { index, .. } = r {
-            if !ses.plugins.effect_ready(index) {
-                out.trying = Some(index);
-                waiting.push(r);
-                continue;
-            }
-        }
-        ses.touched.repaint = true;
-        match r {
-            FxReq::Create { track, slot, index, state } => match ses.plugins.create_effect(track, slot, index, state.as_deref()) {
-                Ok(_) => {
-                    ses.plugins.added(crate::plugins::fx_key(track, slot));
-                    relink = true;
-                    out.windows.push((track, slot, false));
-                }
-                Err(e) => {
-                    if let Some(m) = track_mut(ses, track) {
-                        m.slots[usize::from(slot)] = None;
-                    }
-                    ses.touched.views.push(crate::session::View::Message(format!("Effect: {e}")));
-                }
-            },
-            FxReq::Toggle { track, slot } => out.windows.push((track, slot, true)),
-            FxReq::Show { track, slot } => out.windows.push((track, slot, false)),
-            FxReq::Delete { track, slot } => {
-                let key = crate::plugins::fx_key(track, slot);
-                if ses.plugins.hosted.contains_key(&key) {
-                    // Kept for an undo that brings the slot back (`control::host`).
-                    ses.plugins.keep(key);
-                    ses.plugins.drop_key(key);
-                    relink = true;
-                }
-            }
-            FxReq::Remap(map) => {
-                ses.plugins.remap_fx(&|t, k| Some(map.iter().find(|(a, _)| *a == (t, k)).map_or((t, k), |&(_, b)| b)));
-                relink = true;
-            }
-        }
-    }
-    waiting.append(&mut ses.fx_requests);
-    ses.fx_requests = waiting;
-    if relink {
-        ses.transport.set_effects(ses.plugins.effects());
-        ses.dirty = true;
-    }
-    out
-}
-
 /// The plugin frame's title for a mixer slot: "Name (Insert N)" / "(Master)" (§7).
 #[cfg(plugin_windows)]
 pub fn fx_info(p: &os_model::Project, key: usize) -> Option<crate::plugin_window::ChannelInfo> {
@@ -2272,6 +2112,73 @@ pub fn fx_info(p: &os_model::Project, key: usize) -> Option<crate::plugin_window
         track: t,
         max_track: t,
     })
+}
+
+/// The input choices for track `t`, as its input menu lists them; `marked`: the track's current input marked (an
+/// audio track's Select audio input ▸, spec: ui/playlist.md §6c). `None` when the device has no inputs.
+pub fn input_items(s: &crate::session::Session, t: u16, marked: bool) -> Option<Vec<PItem>> {
+    let d = crate::device::input_source();
+    let (pairs, monos) = input_choices(d.as_ref());
+    let driver = d.map(|d| d.name).unwrap_or_default();
+    if pairs.is_empty() && monos.is_empty() {
+        return None;
+    }
+    let now = track(s, t).map_or(-1, |m| m.audio_in);
+    let item = |(v, name): (i32, String)| {
+        let it = PItem::new(name, Cmd::Mixer(MCmd::Input(t, v)));
+        if marked { it.mark(Mark::Radio(v == now)) } else { it }
+    };
+    let mut items = Vec::new();
+    if !pairs.is_empty() {
+        items.push(PItem::head(format!("{driver} - stereo")));
+        items.extend(pairs.into_iter().map(item));
+    }
+    items.push(PItem::head(format!("{driver} - mono")));
+    items.extend(monos.into_iter().map(item));
+    items.extend([PItem::sep(), item((-1, "(none)".into()))]);
+    Some(items)
+}
+
+/// The input clock's (`input`) or the track latency combo's menu (spec: audio/track-io.md §1.1, §2.6): Reset, Set in
+/// ms / samples / beats; the original's other entries are greyed (its own greyed ones checked as it shows them).
+pub(crate) fn latency_menu(s: &crate::session::Session, t: u16, input: bool, x: f32, y: f32) -> Popup {
+    use crate::typein::LatUnit;
+    let now = track(s, t).map_or(0.0, |m| if input { m.latency_in } else { m.latency_out });
+    let set = |label: &'static str, u: LatUnit| PItem::new(label, Cmd::Mixer(MCmd::Latency(t, input, Some(u))));
+    let reset = PItem::new("Reset", Cmd::Mixer(MCmd::Latency(t, input, None)));
+    let mut items = vec![
+        PItem::head(format!("{} latency: {}", if input { "Input" } else { "Track" }, latency_text(now))),
+        if now == 0.0 { reset.off() } else { reset },
+        set("Set in ms...", LatUnit::Ms),
+        set("Set in samples...", LatUnit::Samples),
+        set("Set in beats...", LatUnit::Beats),
+    ];
+    if input {
+        items.extend([PItem::sep(), PItem::not_yet("Adjust position of recorded audio").mark(Mark::Check(true))]);
+    } else {
+        items.extend([
+            PItem::sub("Set from", vec![PItem::not_yet("(nothing to set it from)")]),
+            PItem::sep(),
+            PItem::not_yet("Delay audio output").mark(Mark::Check(true)),
+            PItem::head("Bypass track latency compensation"),
+            PItem::not_yet("Never").mark(Mark::Radio(true)),
+            PItem::not_yet("Always").mark(Mark::Radio(false)),
+            PItem::not_yet("When recording or not playing").mark(Mark::Radio(false)),
+        ]);
+    }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// Trim unused tracks ▸ (spec: ui/mixer-track-commands.md §6): each choice with the number of tracks it deletes.
+pub(crate) fn trim_items(s: &crate::session::Session) -> Vec<PItem> {
+    [(false, "Unlinked tracks only"), (true, "Unlinked and non-empty tracks")]
+        .into_iter()
+        .map(|(non_empty, label)| {
+            let k = trim_list(s, non_empty).len();
+            let it = PItem::new(format!("{label} ({k})"), Cmd::Mixer(MCmd::Trim { non_empty }));
+            if k == 0 { it.off() } else { it }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2303,7 +2210,7 @@ mod tests {
         assert_eq!(a.state.session.history.at(), steps + 1);
         assert_eq!(track_entry(&a, 3, "Separator").2, Mark::Check(true));
         assert_eq!((group(&a.state.session, 2), group(&a.state.session, 3), group(&a.state.session, 16)), (None, Some(3..=16), Some(3..=16)));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(!track(&a.state.session, 3).unwrap().separator);
 
         // Create group... on 5 with 5 to 7 selected: the name box, then Enter.
@@ -2399,7 +2306,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app
     }
 
@@ -2444,7 +2351,9 @@ mod tests {
     /// spec: audio/track-io.md §2.6: the latency menus; values typed in ms, samples or beats; one undo step each.
     #[test]
     fn latency_settings_are_typed_in_and_undo() {
-        use crate::typein::{accept, parse, LatUnit, Target};
+        use crate::typein::{LatUnit, Target};
+        use crate::typein_ui::parse;
+        use crate::typein_ui::accept;
         let mut a = app();
         a.state.set_tempo(120.0);
         // The app's tick gives the tracks their ids, which the undo steps name them by.
@@ -2464,7 +2373,7 @@ mod tests {
         assert_eq!(parse(t, false, "12.5%"), None);
         accept(&mut a.state, t, false, "12.5");
         assert_eq!(track(&a.state.session, 2).unwrap().latency_out, 12.5);
-        assert_eq!(crate::typein::text(&a.state, Target::Latency(2, false, LatUnit::Beats), false), "0.025");
+        assert_eq!(crate::typein_ui::text(&a.state, Target::Latency(2, false, LatUnit::Beats), false), "0.025");
         accept(&mut a.state, Target::Latency(2, true, LatUnit::Beats), false, "0.5 beats");
         assert_eq!(track(&a.state.session, 2).unwrap().latency_in, 250.0);
         accept(&mut a.state, Target::Latency(2, true, LatUnit::Beats), false, "x");
@@ -2476,10 +2385,10 @@ mod tests {
         assert_eq!(latency_text(250.0), "250 ms");
         assert_eq!(latency_text(-1.25), "-1.25 ms");
         // Each change is one step, undone in turn.
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(track(&a.state.session, 2).unwrap().latency_out, 1000.0);
-        crate::history::undo(&mut a.state);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(track(&a.state.session, 2).unwrap().latency_in, 0.0);
         assert_eq!(track(&a.state.session, 2).unwrap().latency_out, 12.5);
     }
@@ -2514,12 +2423,12 @@ mod tests {
         hit(&mut a, MHit::Arm(3));
         run(&mut a, MCmd::Monitor(3, os_model::MONITOR_ON));
         run(&mut a, MCmd::Output(3, 1));
-        crate::history::undo(&mut a.state);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         let m = track(&a.state.session, 3).unwrap();
         assert_eq!((m.audio_out, m.monitor, m.armed), (-1, os_model::MONITOR_ARMED, true));
         assert!(m.monitored(), "armed with an input");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(!track(&a.state.session, 3).unwrap().monitored(), "no input");
     }
 
@@ -2626,11 +2535,11 @@ mod tests {
         use crate::playlist::IconOwner;
         let mut a = app();
         let red = Rgb { r: 200, g: 0, b: 0 };
-        crate::mixer::set_slot_color(&mut a.state.session, 3, 0, Some(red));
-        crate::playlist::put_icon(&mut a.state.session, IconOwner::Track(3), Some(crate::icons::Icon::Star));
+        crate::edit::mixer::set_slot_color(&mut a.state.session, 3, 0, Some(red));
+        crate::edit::playlist::put_icon(&mut a.state.session, IconOwner::Track(3), Some(crate::icons::Icon::Star));
         run(&mut a, MCmd::Delete(2));
         assert_eq!(crate::mixer::slot_colors_of(&a.state.session.project).get(&(2, 0)), Some(&red), "the colour follows its track left");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(crate::mixer::slot_colors_of(&a.state.session.project).get(&(3, 0)), Some(&red));
         assert_eq!(crate::mixer::slot_colors_of(&a.state.session.project).get(&(2, 0)), None);
         assert_eq!(crate::playlist::icons(&a.state.session.project).get(&IconOwner::Track(3)), Some(&crate::icons::Icon::Star));
@@ -2693,7 +2602,7 @@ mod tests {
         p.patterns[0].controls.push(os_model::ControlPoint { position: 0, kind: target::send(4, 5), value: 0 });
         p.init_controls.push(os_model::InitControl { head: 0, target: target::slot(3, 0, SLOT_MIX), value: 1 });
         p.controller_links.push(os_model::ControllerLink::new(0x7000 + 3 * 64 + 1, 0, target::mixer(4, MIXER_PAN)));
-        crate::remote::set_links(&[
+        crate::remote::set_links(&crate::settings_file::store(), &[
             Link::new(0, 20, T::Param(crate::plugins::fx_key(3, 0), 5)),
             Link::new(0, 21, T::Fader(4)),
             Link::new(0, 22, T::Knob(KnobId::SlotMix(3, 1))),
@@ -2709,7 +2618,7 @@ mod tests {
                 p.patterns[0].controls.iter().map(|c| c.kind).collect(),
                 p.init_controls.iter().map(|c| c.target).collect(),
                 p.controller_links.iter().map(|l| (l.source(), l.target())).collect(),
-                crate::remote::links().iter().map(|l| l.target).collect(),
+                crate::remote::links(&crate::settings_file::store()).iter().map(|l| l.target).collect(),
             )
         };
         // Where everything is with tracks 3 and 4 (and 5, the send's destination) at `t3`, `t4`, `t5`, and track 3's
@@ -2730,28 +2639,28 @@ mod tests {
         run(&mut a, MCmd::SlotMove(0, 1));
         assert_eq!(slot_name(&a.state.session, 3, 1).as_deref(), Some("Test FX"));
         assert_eq!(places(&a), at(3, 4, 5, 1, 0));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(places(&a), start, "undo puts them back");
-        crate::history::redo(&mut a.state);
+        crate::history_ui::redo(&mut a.state);
         assert_eq!(places(&a), at(3, 4, 5, 1, 0), "redo moves them again");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
 
         // Move right: tracks 3 and 4 swap.
         run(&mut a, MCmd::MoveRight(3));
         assert_eq!(places(&a), at(4, 3, 5, 0, 1));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(places(&a), start);
 
         // Insert multiple... before track 2: three tracks, one step.
         insert_many(&mut a.state, 2, "3");
         assert_eq!(places(&a), at(6, 7, 8, 0, 1));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(places(&a), start, "one step puts back three moves");
 
         // Delete track 2: the later ones move one left.
         run(&mut a, MCmd::Delete(2));
         assert_eq!(places(&a), at(2, 3, 4, 0, 1));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(places(&a), start);
 
         // Delete track 4: its targets go; the clip stays with track 3's.
@@ -2760,10 +2669,10 @@ mod tests {
         assert_eq!(clip, [target::slot_param(3, 0, 5)]);
         assert_eq!((events, init, ctl), (vec![], vec![target::slot(3, 0, SLOT_MIX)], vec![]));
         assert_eq!(links, [T::Param(crate::plugins::fx_key(3, 0), 5), T::Knob(KnobId::SlotMix(3, 1))]);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         let (clip, events, init, ctl, _) = places(&a);
         assert_eq!((clip, events, init, ctl), (start.0, start.1, start.2, start.3), "the project's come back");
-        crate::remote::set_links(&[]);
+        crate::remote::set_links(&crate::settings_file::store(), &[]);
     }
 
     /// spec: audio/sidechain.md "Hosted plugins' input buses": Sidechain input ▸ lists None and the tracks routed into
@@ -2787,7 +2696,7 @@ mod tests {
         assert_eq!(wrapper::input_ports(&state(&a)), [0, 2]);
         assert_eq!(wrapper::decode(&state(&a)), Some(plugin));
         assert_eq!(labels(&a)[2].1, true);
-        assert_eq!(crate::project_plugins::slot_ports(&a.state.session.project, 1, 0), (0, 2));
+        assert_eq!(crate::effect_ports::slot_ports(&a.state.session.project, 1, 0), (0, 2));
         track_mut(&mut a.state.session, 1).unwrap().slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![] });
         assert!(run(&mut a, MCmd::SlotSidechain(1, 1)).is_some());
     }
@@ -3038,8 +2947,8 @@ mod tests {
         assert_eq!(a.state.session.history.at(), steps + 1, "shown again: no step");
         run(&mut a, MCmd::AudioEditorRecord(3));
         assert_eq!(a.state.session.history.at(), steps + 2);
-        crate::history::undo(&mut a.state);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(teslas(&a.state.session).is_empty());
     }
 
@@ -3093,7 +3002,7 @@ mod tests {
         assert_eq!((name(&a.state.session, 3), a.state.selected_mixer), ("Bus 3".to_string(), 3));
         assert_eq!(a.state.message.as_deref(), Some("Inserted 3 mixer tracks"));
         assert_eq!((a.state.session.history.at(), a.state.session.history.newest_done()), (steps + 1, Some(INSERT)));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!((a.state.session.project.mixer.len(), name(&a.state.session, 3)), (len, "Three".to_string()));
         assert_eq!(insert_many(&mut a.state, 3, "lots").as_deref(), Some("Insert multiple: \"lots\" is not a number"));
         assert_eq!(a.state.session.project.mixer.len(), len);
@@ -3122,7 +3031,7 @@ mod tests {
         assert_eq!((col(&a, 2), col(&a, 4), col(&a, 6)), (Some(red), Some(Rgb::new(100, 0, 50)), Some(blue)));
         assert_eq!(col(&a, 3), None, "unselected tracks keep theirs");
         assert_eq!(a.state.session.history.at(), steps + 1);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(col(&a, 4), None);
     }
 
@@ -3163,7 +3072,7 @@ mod tests {
         assert_eq!((name(&a.state.session, 5), name(&a.state.session, 6)), ("Lead".to_string(), "Old five".to_string()));
         assert_eq!(track(&a.state.session, 5).unwrap().color, Some(Rgb::new(10, 20, 30)));
         assert_eq!(a.state.session.history.at(), steps + 2);
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert_eq!(name(&a.state.session, 5), "Old five");
         let _ = std::fs::remove_dir_all(crate::mixer_state::dir().unwrap());
     }
@@ -3307,7 +3216,7 @@ mod tests {
         assert_eq!(entry(&a, "Auto-bypass when silent").1, Mark::Check(true));
         let smart = |a: &App, k: usize| track(&a.state.session, 2).unwrap().slot_cpu[k].smart_disable;
         assert!(smart(&a, 0) && !smart(&a, 1), "only that slot");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(!smart(&a, 0), "one undo step");
         crate::playlist::run(&mut a, Cmd::PluginCpu(key, false));
         assert_eq!(entry(&a, "Allow threaded processing").1, Mark::Check(false));
@@ -3321,7 +3230,7 @@ mod tests {
         assert!(!track(&a.state.session, 2).unwrap().slot_cpu[2].smart_disable, "an empty slot stays as it is");
         run(&mut a, MCmd::AutoBypassAll);
         assert!(!smart(&a, 0) && !smart(&a, 1) && !a.state.session.project.channels[0].misc.cpu.smart_disable, "all on: all off");
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(smart(&a, 0) && smart(&a, 1), "one undo step");
         // The instrument rack's options menu runs the same command.
         assert_eq!(find(crate::rack::options_menu(&a.state, 0.0, 0.0)), (true, Cmd::Mixer(MCmd::AutoBypassAll)));
@@ -3348,7 +3257,7 @@ mod tests {
         assert_eq!(run(&mut a, MCmd::PdcAuto).as_deref(), Some("Automatic plugin delay compensation off"));
         assert!(a.state.session.project.pdc_off);
         assert_eq!(auto(&a).1, Mark::Check(false));
-        crate::history::undo(&mut a.state);
+        crate::history_ui::undo(&mut a.state);
         assert!(!a.state.session.project.pdc_off, "one undo step");
     }
 

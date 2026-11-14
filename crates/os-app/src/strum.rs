@@ -52,38 +52,8 @@ impl Default for Settings {
     }
 }
 
-/// A knob of the dialog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Knob {
-    Time,
-    TimeTension,
-    Vel,
-    VelTension,
-    EndTime,
-    EndTension,
-}
 
-impl Knob {
-    pub fn tension(self) -> bool {
-        matches!(self, Knob::TimeTension | Knob::VelTension | Knob::EndTension)
-    }
-
-    /// Change of the 0..1 knob position per wheel notch: a strength's side is 32 notches, a tension's 16 (§1).
-    pub fn notch(self) -> f32 {
-        if self.tension() { 1.0 / 32.0 } else { 1.0 / 64.0 }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Knob::Time => "Start strength",
-            Knob::TimeTension => "Start tension",
-            Knob::Vel => "Velocity strength",
-            Knob::VelTension => "Velocity tension",
-            Knob::EndTime => "End strength",
-            Knob::EndTension => "End tension",
-        }
-    }
-}
+pub use crate::knob_id::strum::Knob;
 
 /// A switch or button of the dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,7 +327,7 @@ pub fn act(s: &mut State, a: Act) {
 mod tests {
     use super::*;
 
-    fn note(pos: u32, len: u32, key: u16, vel: u8) -> Note {
+    pub(crate) fn note(pos: u32, len: u32, key: u16, vel: u8) -> Note {
         Note { length: len, key, velocity: vel, ..Note::step(0, pos) }
     }
 

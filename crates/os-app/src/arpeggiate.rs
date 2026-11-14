@@ -61,8 +61,7 @@ impl Sync {
 pub const TIME_MUL: [(u32, u32); 7] = [(1, 8), (1, 4), (1, 2), (1, 1), (2, 1), (3, 1), (4, 1)];
 pub(crate) const TIME_MUL_NAMES: [&str; 7] = ["1/8", "1/4", "1/2", "x1", "x2", "x3", "x4"];
 
-/// The highest Range; 0 is `---`.
-pub const RANGE_MAX: u8 = 6;
+pub use crate::knob_id::arpeggiate::RANGE_MAX;
 
 /// The Levels knobs (§7): label, hint, neutral row value, highest value.
 pub const LEVELS: [(&str, &str, u8, u8); 6] = [
@@ -97,26 +96,8 @@ impl Default for Settings {
     }
 }
 
-/// The dialog's knobs (Range is a spin box, driven like a knob).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Knob {
-    TimeMul,
-    Range,
-    Gate,
-    /// Index into `LEVELS`.
-    Level(u8),
-}
 
-impl Knob {
-    /// Value change per wheel notch: the stepped controls move one value.
-    pub fn notch(self) -> f32 {
-        match self {
-            Knob::TimeMul => 1.0 / 6.0,
-            Knob::Range => 1.0 / f32::from(RANGE_MAX),
-            Knob::Gate | Knob::Level(_) => 1.0 / 32.0,
-        }
-    }
-}
+pub use crate::knob_id::arpeggiate::Knob;
 
 impl Settings {
     /// A knob as 0..=1.
@@ -303,7 +284,7 @@ pub fn load(path: &Path) -> Result<Pattern, String> {
 
 /// FL's Arpeggiator folder (read in place when FL Studio is installed; §9).
 pub fn folder() -> PathBuf {
-    let fl = crate::factory_folder::dir().unwrap_or_else(os_paths::default_fl_dir);
+    let fl = crate::factory_folder::dir(&crate::settings_file::store()).unwrap_or_else(os_paths::default_fl_dir);
     fl.join("Data").join("Patches").join("Scores").join("Arpeggiator")
 }
 
@@ -735,7 +716,7 @@ pub fn command(s: &mut State, c: ACmd) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub(crate) fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, velocity: 100, ..Note::step(0, pos) }
     }
 
@@ -788,7 +769,7 @@ mod tests {
 
     /// §4: Block and Chord restart the pattern; Time keeps counting from tick 0.
     #[test]
-    fn sync() {
+    pub(crate) fn sync() {
         let ns = || vec![note(384, 192, 62), note(384, 192, 65), note(384, 192, 69)];
         assert_eq!(keys(&arp(ns(), |_| {}))[0], 65);
         assert_eq!(keys(&arp(ns(), |s| s.sync = Sync::Block))[..3], [62, 65, 69]);

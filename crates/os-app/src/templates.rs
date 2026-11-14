@@ -170,7 +170,7 @@ impl App {
         }
         let s = &mut self.state;
         s.session.path = None;
-        crate::project_info::created(s);
+        crate::project_info_ui::created(s);
         s.message = Some(format!("New project from the template {name}"));
         self.mark_saved();
         true

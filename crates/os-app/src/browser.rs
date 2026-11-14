@@ -66,7 +66,7 @@ impl App {
                         s.selected_channel = c;
                         s.rack.select_only(c);
                     }
-                    Item::History(e) => s.message = crate::history::go_to(s, e),
+                    Item::History(e) => s.message = crate::history_ui::go_to(s, e),
                     _ => {}
                 }
                 if let Item::Sample(path) = &row.item {
@@ -86,7 +86,7 @@ impl App {
 
     /// Clicking a sample plays it once (spec §7): cut off after `PREVIEW_LIMIT` unless "Full sample preview" is ticked.
     pub(crate) fn preview_sample(&self, path: &str) {
-        let mut p = crate::app::preview_project(path);
+        let mut p = crate::projects::preview_project(&self.state.session.settings, path);
         p.tempo = Some(self.state.tempo());
         crate::preview_track::route(&mut p, &self.state.session.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
         let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
@@ -509,7 +509,7 @@ impl App {
         let slot = || {
             let k = match hit.action {
                 Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k)) => k,
-                _ => (0..10).find(|&k| crate::mixer::slot_name(&s.session, s.selected_mixer, k).is_none())?,
+                _ => (0..10).find(|&k| crate::edit::mixer::slot_name(&s.session, s.selected_mixer, k).is_none())?,
             };
             let part = |a: Action| self.hits.iter().rev().find(|h| h.action == a).map(|h| h.rect);
             let name = part(Action::Mix(crate::mixer::MHit::SlotName(k)))?;
@@ -564,7 +564,7 @@ impl App {
         }
         // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
         if let Item::Preset(path) = &item {
-            self.state.message = crate::presets::dropped(self, std::path::Path::new(path));
+            self.state.message = crate::presets_ui::dropped(self, std::path::Path::new(path));
             return;
         }
         // Plugin windows float above the main window: a sample released over one goes into that plugin.
@@ -741,7 +741,7 @@ impl App {
                     s.selected_channel = c;
                     s.rack.select_only(c);
                 }
-                Item::History(e) => return crate::history::go_to(s, e),
+                Item::History(e) => return crate::history_ui::go_to(s, e),
                 _ => {}
             },
             RowCmd::Pattern(pc) => {
@@ -909,7 +909,7 @@ fn save_favs(favs: &[Fav]) {
 /// The folders the index reads (spec §11): the dropped folders and the project's data folder.
 pub(crate) fn index_roots(s: &crate::app::State) -> Vec<std::path::PathBuf> {
     let mut v = s.browser_folders.clone();
-    v.extend(crate::data_folder::folder(s));
+    v.extend(crate::data_folder_ui::folder(s));
     v
 }
 
@@ -1252,11 +1252,11 @@ fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<Str
         return Some("The selected channel is not a sampler".into());
     }
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
-    let path = crate::data_folder::adopt(s, path);
+    let path = crate::data_folder_ui::adopt(s, path);
     crate::history::load_sample(&mut s.session, row);
     let ch = &mut s.session.project.get_mut().channels[row];
-    crate::rack::auto_name(ch, std::path::Path::new(&path));
-    crate::rack::read_tags(ch, std::path::Path::new(&path));
+    crate::rack::auto_name(&s.session.settings, ch, std::path::Path::new(&path));
+    crate::rack::read_tags(&s.session.settings, ch, std::path::Path::new(&path));
     ch.sample_path = Some(path.clone());
     s.session.sample_loads.push((row, path));
     s.session.dirty = true;
@@ -1342,7 +1342,7 @@ mod tests {
         assert_eq!(labels(&app), [crate::plugins::LEMON_SAMPLER]);
         assert!(app.state.browser_favs.is_empty());
         // "Add to plugin database (flag as favorite)" of a hosted plugin toggles the same star.
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let row = 0;
         app.state.session.plugins.create(row, 0).expect("Lemon Sampler hosted");
         assert!(app.browser_cmd(BCmd::Star(row)).is_some_and(|m| m.contains("no longer")));

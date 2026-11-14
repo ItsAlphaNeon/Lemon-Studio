@@ -520,7 +520,7 @@ pub(crate) fn next(rng: &mut u64) -> u64 {
 mod tests {
     use super::*;
 
-    fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub(crate) fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, ..Note::step(0, pos) }
     }
 

@@ -682,7 +682,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     let mut g = Glyph::new();
     g.ring(sx, by - 117.0, 6.0, 1.6).rect(sx - 0.7, by - 121.0, 1.4, 4.5).rect(sx - 0.7, by - 117.7, 3.5, 1.4);
     ui.c.glyph(clk, &g);
-    let hint = if armed { format!("Record to: {}", crate::track_rec::armed_file(s, n)) } else { "Arm disk recording".into() };
+    let hint = if armed { format!("Record to: {}", crate::track_rec_ui::armed_file(s, n)) } else { "Arm disk recording".into() };
     let arm = Rect::new(sx - 7.0, by - 107.0, 14.0, 14.0);
     let hov = ui.hit(arm, Action::Mix(MHit::Arm(n)), hint);
     if armed {

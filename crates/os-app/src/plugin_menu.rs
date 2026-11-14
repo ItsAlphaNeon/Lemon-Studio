@@ -201,14 +201,14 @@ pub fn run(app: &mut App, c: PlugCmd) -> Option<String> {
 /// channel hosting it. Its plugin window opens once it is hosted. One undo step, "Add channel" (`control::edit_app`):
 /// undone, the channel goes and its instance is kept; redone, it comes back with it (`control::host`).
 pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
-    crate::control::edit_app(app, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| add_generator_now(app, index, after))
+    crate::control_ui::edit_app(app, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| add_generator_now(app, index, after))
 }
 
 pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
     let d = app.state.session.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
-    let mut ch = if sampler { crate::app::add_channel(s.session.project.get_mut()) } else { crate::app::add_plugin_channel(s.session.project.get_mut(), &d.name) };
+    let mut ch = if sampler { crate::projects::add_channel(s.session.project.get_mut()) } else { crate::projects::add_plugin_channel(s.session.project.get_mut(), &d.name) };
     if sampler {
         s.session.pending_open = Some(ch);
     } else {
@@ -240,7 +240,7 @@ pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize
 /// channel" (`control::edit_app`): the channel takes a new id, so its old instrument, kept by the old one's
 /// (`Plugins::keep`), comes back with an undo and the new one with a redo (`control::host`).
 pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<String> {
-    crate::control::edit_app(app, crate::history::REPLACE_CHANNEL, crate::control::command::Region::Project, |app| replace_generator_now(app, index, row))
+    crate::control_ui::edit_app(app, crate::history::REPLACE_CHANNEL, crate::control::command::Region::Project, |app| replace_generator_now(app, index, row))
 }
 
 fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<String> {

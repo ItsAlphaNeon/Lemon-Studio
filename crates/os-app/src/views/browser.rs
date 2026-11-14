@@ -71,7 +71,7 @@ const PROJECT: &[(&str, Icon)] = &[
     ("Samples", Icon::Wave),
 ];
 pub const INITIALIZED_CONTROLS: &str = "Controls with a start value";
-/// The controller links, one row each (`crate::remote::label`); VIEW > Remote control opens it.
+/// The controller links, one row each (`crate::remote_ui::label`); VIEW > Remote control opens it.
 pub const REMOTE_CONTROL: &str = "Remote control";
 pub const PROJECT_DATA: &str = "Project data";
 
@@ -423,7 +423,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             continue;
         }
         if name == PROJECT_DATA {
-            if let Some(dir) = crate::data_folder::folder(s) {
+            if let Some(dir) = crate::data_folder_ui::folder(s) {
                 data_folder_rows(s, root, &dir, cat, out);
             }
             continue;
@@ -435,7 +435,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
         match name {
             // Undone steps grey, their arrow mirrored (spec: ui/settings-choices.md "Undo history: the four checks").
             "History" => {
-                for (e, step) in s.session.history.entries() {
+                for (e, step) in s.session.history.entries(&s.session.settings) {
                     let icon = if s.session.history.undone(e) { Icon::Redo } else { Icon::Undo };
                     let (bright, item) = (s.session.history.current(e), Item::History(e));
                     out.push(Row { key: format!("{parent}/{e}"), depth: 2, label: step.into(), icon, cat, open: None, bright, item, path: None });
@@ -479,14 +479,14 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 }
             }
             REMOTE_CONTROL => {
-                for l in crate::remote::links() {
-                    leaf(out, &parent, crate::remote::label(s, &l), Icon::MidiControl, cat, false, Item::None);
+                for l in crate::remote::links(&s.session.settings) {
+                    leaf(out, &parent, crate::remote_ui::label(s, &l), Icon::MidiControl, cat, false, Item::None);
                 }
             }
             // "<owner> - <setting>", as the automation clip on the control is named.
             INITIALIZED_CONTROLS => {
                 for c in &p.init_controls {
-                    leaf(out, &parent, crate::init::name(s, c.target), Icon::Slide, cat, false, Item::None);
+                    leaf(out, &parent, crate::init_ui::name(s, c.target), Icon::Slide, cat, false, Item::None);
                 }
             }
             "Samples" => {
@@ -575,7 +575,7 @@ fn preset_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 preset(out, &pk, 2, crate::presets::shown_name(&e.path), &e.path);
             }
         }
-        let fac = crate::presets::factory(&plugin);
+        let fac = crate::presets::factory(&s.session.settings, &plugin);
         if fac.is_empty() {
             continue;
         }
@@ -873,7 +873,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         let rect = Rect::new(13.0, y, bw - 13.0, ROW_H);
         // A parameter row's hint carries its value (spec: plugins/plugin-parameters.md §6); read for the hovered row only.
         let hint = match row.item {
-            Item::Param(key, index) if ui.hovering(rect) => crate::params::row_hint(s, key, index),
+            Item::Param(key, index) if ui.hovering(rect) => crate::params_ui::row_hint(s, key, index),
             _ => row.label.clone(),
         };
         let hov = ui.hit(rect, Action::BrowserRow(i), hint);

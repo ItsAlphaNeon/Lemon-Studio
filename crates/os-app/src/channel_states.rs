@@ -65,7 +65,7 @@ fn save_as(app: &mut App, row: usize) -> Option<String> {
     }
     let dir = root()?;
     let _ = std::fs::create_dir_all(&dir);
-    let name = crate::presets::folder_name(&crate::rack::channel_name(&app.state.session, row));
+    let name = crate::presets::folder_name(&crate::edit::rack::channel_name(&app.state.session, row));
     let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Save, "Save channel state as", "channel state", crate::dialog::Then::SaveChannelState(row))
         .filter("Lemon Studio channel state", &[EXT])
         .start(Some(&dir))
@@ -100,10 +100,10 @@ pub fn state_bytes(app: &mut App, row: usize) -> Result<Vec<u8>, String> {
     if ch.kind.is_sampler() {
         let lemon = app.state.session.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
         if let Some(st) = app.state.session.plugins.state(row).filter(|_| lemon) {
-            crate::plugins::store_sampler(&mut ch, &st);
+            crate::plugins::store_sampler(&app.state.session.settings, &mut ch, &st);
         }
         if let Some(p) = app.state.session.plugins.sampler_path(row).filter(|p| !p.is_empty()) {
-            if !ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
+            if !ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(&app.state.session.settings, old) == p) {
                 ch.sample_path = Some(p);
             }
         }
@@ -186,7 +186,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         ROOT.with(|r| *r.borrow_mut() = Some(dir.clone()));
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let row = 1;
         {
             let ch = &mut app.state.session.project.get_mut().channels[row];
@@ -209,7 +209,7 @@ pub(crate) mod tests {
         let added = &app.state.session.project.channels[n];
         assert_eq!((added.index as usize, added.name.as_deref(), added.volume), (n, Some("Snare top"), 0.25));
         assert_eq!(app.state.selected_channel, n);
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.channels.len(), n, "one undo step");
 
         assert!(read(&dir.join("missing.oschannel")).is_err());

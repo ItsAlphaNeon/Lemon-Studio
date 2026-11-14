@@ -9,11 +9,12 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::control_ui::*;
 use crate::app::App;
 
 fn app() -> App {
     let mut a = App::new(None);
-    a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+    a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
     a.state.session.project.get_mut().arrangements = vec![os_flp::project::default_arrangement()];
     a.state.session.control.settle(a.state.session.project.get_mut());
     a
@@ -26,7 +27,7 @@ fn test_client() -> By {
 /// The project and the rack's state of it, ids included (`==` on the model leaves ids out). Not the selection: an
 /// undo leaves it where it is, as before.
 fn reading(a: &App) -> (os_model::Project, Value, f64) {
-    let mut q = query::project(&a.state);
+    let mut q = crate::control::query_ui::project(&a.state);
     q.as_object_mut().unwrap().remove("selected_channel");
     (a.state.session.project.clone(), q, a.state.tempo())
 }
@@ -50,9 +51,9 @@ fn round_trip(a: &mut App, c: Value) -> Vec<Value> {
     let after = reading(a);
     assert_ne!(before, after, "{what} changes something");
     assert_eq!(a.state.session.history.at(), steps + 1, "{what} is one step");
-    crate::history::undo(&mut a.state).unwrap();
+    crate::history_ui::undo(&mut a.state).unwrap();
     assert_eq!(reading(a), before, "{what} undone");
-    crate::history::redo(&mut a.state).unwrap();
+    crate::history_ui::redo(&mut a.state).unwrap();
     assert_eq!(reading(a), after, "{what} redone");
     r
 }
@@ -99,8 +100,8 @@ fn every_command_undoes_and_redoes() {
     round_trip(&mut a, json!({"op": "delete_clip", "clip": clip}));
     let pat2 = ids(&a).2.last().copied().unwrap();
     round_trip(&mut a, json!({"op": "delete_pattern", "pattern": pat2}));
-    let slot = query::project(&a.state)["mixer"].as_array().unwrap().iter().flat_map(|t| t["slots"].as_array().unwrap().clone()).next().unwrap();
-    let track = query::project(&a.state)["mixer"].as_array().unwrap().iter().find(|t| !t["slots"].as_array().unwrap().is_empty()).unwrap()["id"].as_u64().unwrap();
+    let slot = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().flat_map(|t| t["slots"].as_array().unwrap().clone()).next().unwrap();
+    let track = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().find(|t| !t["slots"].as_array().unwrap().is_empty()).unwrap()["id"].as_u64().unwrap();
     round_trip(&mut a, json!({"op": "remove_effect", "track": track, "slot": slot["slot"]}));
 }
 
@@ -134,9 +135,9 @@ fn a_transaction_is_one_named_step_and_all_or_nothing() {
     apply(&mut a.state, &test_client(), Some("Build Drum Kit"), good).unwrap();
     assert_eq!(a.state.session.history.at(), steps + 1);
     let h = &a.state.session.history;
-    let name = h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string());
+    let name = h.entries(&crate::settings_file::store()).into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string());
     assert_eq!(name.as_deref(), Some("Test: build Drum Kit"), "named after the client");
-    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Test: build Drum Kit"));
+    assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some("Test: build Drum Kit"));
     assert_eq!(reading(&a), before, "one undo takes back both");
     // Out of range values fail before anything changes.
     for c in [json!({"op": "set_tempo", "bpm": 900}), json!({"op": "set_channel", "channel": kick, "pan": 2}), json!({"op": "set_eq", "track": 1, "band": 3})] {
@@ -152,12 +153,12 @@ fn the_interface_and_the_commands_share_one_history() {
     crate::history::knob(&mut a.state.session, crate::knobs::KnobId::ChanVol(0), false);
     a.state.session.project.get_mut().channels[0].volume = 0.3;
     apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": kick, "volume": 0.6}))]).unwrap();
-    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Test: channel settings"));
+    assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some("Test: channel settings"));
     assert_eq!(a.state.session.project.channels[0].volume, 0.3);
-    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Channel volume"));
+    assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some("Channel volume"));
     assert_eq!(a.state.session.project.channels[0].volume, 0.78125);
-    crate::history::redo(&mut a.state);
-    crate::history::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     assert_eq!(a.state.session.project.channels[0].volume, 0.6);
 }
 
@@ -242,7 +243,7 @@ fn events_tell_clients_what_changed() {
     a.state.session.control.watched = true;
     let (_, last) = a.state.session.control.events_since(0);
     apply(&mut a.state, &test_client(), Some("Faster"), vec![cmd(json!({"op": "set_tempo", "bpm": 150}))]).unwrap();
-    crate::history::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
     let (ev, newest) = a.state.session.control.events_since(last);
     assert_eq!(ev.len(), 1);
     assert_eq!((ev[0].kind, ev[0].name.as_str(), ev[0].ops.clone(), ev[0].by.as_str()), ("apply", "Faster", vec!["set_tempo"], "Test"));
@@ -343,11 +344,11 @@ fn an_effect_added_by_a_command_is_hosted_without_a_window() {
     let key = crate::plugins::fx_key(1, 2);
     assert_eq!(a.state.session.plugins.hosted.get(&key).map(|h| h.owner.0), Some(slot));
     #[cfg(plugin_windows)]
-    assert!(a.state.session.plugins.editors.get(&key).is_none_or(|e| e.window.is_none()));
-    crate::history::undo(&mut a.state);
+    assert!(a.state.editor_host.editors.get(&key).is_none_or(|e| e.window.is_none()));
+    crate::history_ui::undo(&mut a.state);
     a.plugin_tick();
     assert!(!a.state.session.plugins.hosted.contains_key(&key), "undone: the instance goes");
-    crate::history::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     a.plugin_tick();
     assert_eq!(a.state.session.plugins.hosted.get(&key).map(|h| h.owner.0), Some(slot), "redone: back from what it kept");
 }
@@ -387,7 +388,7 @@ fn clients_connect_over_a_local_socket() {
     assert!(r2.get("error").is_none(), "{r2}");
     assert_eq!(a.state.tempo(), 111.0);
     let h = &a.state.session.history;
-    assert_eq!(h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string()).as_deref(), Some("Socket: tempo"), "the client's name stays with its connection");
+    assert_eq!(h.entries(&crate::settings_file::store()).into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string()).as_deref(), Some("Socket: tempo"), "the client's name stays with its connection");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -431,7 +432,7 @@ fn a_first_clip_makes_the_playlist_and_its_undo_takes_it_away() {
     let pat = ids(&a).2[0];
     let r = round_trip(&mut a, json!({"op": "add_clip", "track": 1, "position": 0, "pattern": pat}));
     assert!(r[0]["clip"].as_u64().is_some());
-    crate::history::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
     assert!(a.state.session.project.arrangements.is_empty());
 }
 
@@ -445,10 +446,10 @@ fn ui_round_trip(a: &mut App, name: &str, f: impl FnOnce(&mut App)) {
     let after = reading(a);
     assert_ne!(before, after, "{name} changes something");
     assert_eq!(a.state.session.history.at(), steps + 1, "{name} is one step");
-    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(name));
+    assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(name));
     let now = reading(a);
     assert!(now == before, "{name} undone: {:?}, the model alike: {}", query::changes(&before.1, &now.1), now.0 == before.0);
-    assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(name));
+    assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some(name));
     assert_eq!(reading(a), after, "{name} redone");
 }
 
@@ -488,7 +489,7 @@ fn the_mixer_s_edits_are_undoable() {
     ui_round_trip(&mut a, "Mixer track reset", |a| {
         run(a, MCmd::Reset(1));
     });
-    crate::mixer::track_mut(&mut a.state.session, 3).unwrap().routes = vec![5];
+    crate::edit::mixer::track_mut(&mut a.state.session, 3).unwrap().routes = vec![5];
     ui_round_trip(&mut a, "Mixer routing", |a| {
         a.state.mixer.sel.clear();
         run(a, MCmd::ResetRouting(3));
@@ -518,11 +519,11 @@ fn the_mixer_s_edits_are_undoable() {
     crate::playlist::start_edit(&mut a.state, crate::playlist::EditTarget::SlotName(2, 1), (0.0, 0.0));
     a.state.playlist.edit.as_mut().unwrap().text = "Glue".into();
     crate::playlist::commit_edit(&mut a.state);
-    assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
-    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Slot name"));
-    assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Test FX"));
-    assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some("Slot name"));
-    assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
+    assert_eq!(crate::edit::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
+    assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some("Slot name"));
+    assert_eq!(crate::edit::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Test FX"));
+    assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some("Slot name"));
+    assert_eq!(crate::edit::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
     ui_round_trip(&mut a, "Remove effect", |a| {
         run(a, MCmd::SlotDelete(1));
     });
@@ -583,7 +584,7 @@ fn a_deleted_channel_s_instrument_comes_back_with_an_undo() {
     a.plugin_tick();
     assert_eq!(key(&a, ch[1]), None);
     assert_eq!(key(&a, ch[2]), Some(1));
-    crate::history::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
     a.plugin_tick();
     assert_eq!((0..5).map(|r| key(&a, ch[r])).collect::<Vec<_>>(), (0..5).map(Some).collect::<Vec<_>>());
     assert_eq!(a.state.session.hosted_rows.iter().copied().collect::<std::collections::BTreeSet<_>>(), (0..5).collect());
@@ -694,10 +695,10 @@ fn a_dry_run_leaves_the_instruments_and_the_selections() {
 #[test]
 fn slot_names_come_back_with_their_track() {
     let mut a = app();
-    crate::mixer::set_slot_label(&mut a.state.session, 3, 1, Some("Crunch".into()));
+    crate::edit::mixer::set_slot_label(&mut a.state.session, 3, 1, Some("Crunch".into()));
     crate::mixer::run(&mut a, crate::mixer::MCmd::Delete(2));
     assert_eq!(crate::mixer::slot_names_of(&a.state.session.project).get(&(2, 1)).map(String::as_str), Some("Crunch"), "moved left with its track");
-    crate::history::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
     assert_eq!(crate::mixer::slot_names_of(&a.state.session.project).get(&(3, 1)).map(String::as_str), Some("Crunch"));
     assert_eq!(crate::mixer::slot_names_of(&a.state.session.project).len(), 1);
 }
@@ -830,13 +831,13 @@ fn edits_in_a_plugin_s_window_are_undo_steps() {
     assert_eq!(a.state.session.history.at(), steps, "nothing until the gesture ends");
     drag(&mut a, vec![Value(7, 0.7), End(7)]);
     assert_eq!(a.state.session.history.at(), steps + 1, "a gesture is one step");
-    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PARAMETER));
+    assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PARAMETER));
     assert_eq!(value(&mut a)[0], 0.25, "back to the value before the gesture");
     // Undo, tweak, undo: the tweak moves from the value the undo put back.
     drag(&mut a, vec![Begin(7), Value(7, 0.5), End(7)]);
-    crate::history::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
     assert_eq!(value(&mut a)[0], 0.25);
-    crate::history::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     assert_eq!(value(&mut a)[0], 0.5);
     let steps = a.state.session.history.at();
     // A gesture that ends where it began is none; so is the plugin echoing a value the host set.
@@ -849,9 +850,9 @@ fn edits_in_a_plugin_s_window_are_undo_steps() {
     drag(&mut a, vec![Value(7, 0.15), Value(8, 0.3)]);
     drag(&mut a, vec![Value(8, 0.4)]);
     assert_eq!(a.state.session.history.at(), steps + 1);
-    crate::history::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
     assert_eq!(value(&mut a), [0.5, 0.5], "both back to before the run");
-    crate::history::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     assert_eq!(value(&mut a), [0.15, 0.4]);
 }
 
@@ -866,7 +867,8 @@ fn knob_state(v: [f64; 2]) -> Vec<u8> {
 /// it makes none.
 #[test]
 fn preset_loads_are_undo_steps() {
-    use crate::presets::{load_into, save, Header};
+    use crate::presets::{save, Header};
+    use crate::presets_ui::load_into;
     let mut a = app();
     a.state.session.plugins = crate::plugins::Plugins::default();
     let desc = crate::plugins::builtin()[0].desc.clone();
@@ -904,28 +906,28 @@ fn preset_loads_are_undo_steps() {
     a.state.session.project.get_mut().channels.swap(0, 1);
     a.follow_ids(true, false);
     assert!(a.state.session.plugins.hosted.contains_key(&1));
-    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PRESET));
+    assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PRESET));
     assert_eq!(seen(&mut a, 1), at([0.9, 0.1], "Bright", Some("Bright")));
-    crate::history::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
     assert_eq!(seen(&mut a, 1), at([0.25, 0.5], "808 Snare", None), "back to before the first preset");
-    crate::history::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     assert_eq!(seen(&mut a, 1), at([0.9, 0.1], "Bright", Some("Bright")));
-    crate::history::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     assert_eq!(seen(&mut a, 1), at([0.1, 0.9], "Dark", Some("Dark")));
 
     // Several undos and redos before the app's tick (the browser's History, a client) come out the same.
-    crate::history::undo(&mut a.state);
-    crate::history::undo(&mut a.state);
-    crate::history::redo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     assert_eq!(seen(&mut a, 1), at([0.9, 0.1], "Bright", Some("Bright")));
-    crate::history::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     assert_eq!(seen(&mut a, 1), at([0.1, 0.9], "Dark", Some("Dark")));
 
     // An edit the host saw no step for (Undo knob tweaks off, a plugin's own page) comes back with the redo.
     knob.lock().unwrap().value = [0.3, 0.7];
-    crate::history::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
     assert_eq!(seen(&mut a, 1).0, [0.9, 0.1]);
-    crate::history::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     assert_eq!(seen(&mut a, 1).0, [0.3, 0.7]);
 
     // A mixer slot: the name "Auto name effect slots" gave it goes with the undo.
@@ -933,23 +935,23 @@ fn preset_loads_are_undo_steps() {
     let fx = crate::plugins::fx_key(1, 0);
     let slot_knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
     a.state.session.plugins.hosted.insert(fx, crate::plugins::Hosted::new(slot_knob.clone()));
-    crate::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
-    let slot = |a: &App| crate::mixer::slot_name(&a.state.session, 1, 0).unwrap_or_default();
+    crate::edit::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
+    let slot = |a: &App| crate::edit::mixer::slot_name(&a.state.session, 1, 0).unwrap_or_default();
     let plain = slot(&a);
     let steps = a.state.session.history.at();
     load_into(&mut a, fx, &bright);
     assert_eq!((a.state.session.history.at(), slot(&a), slot_knob.lock().unwrap().value), (steps + 1, "Bright".to_string(), [0.9, 0.1]));
-    crate::history::undo(&mut a.state);
+    crate::history_ui::undo(&mut a.state);
     a.host_commands();
     assert_eq!((slot(&a), slot_knob.lock().unwrap().value, a.state.session.plugins.preset_name(fx)), (plain.clone(), [0.5, 0.5], None));
-    crate::history::redo(&mut a.state);
+    crate::history_ui::redo(&mut a.state);
     a.host_commands();
     assert_eq!((slot(&a), slot_knob.lock().unwrap().value), ("Bright".to_string(), [0.9, 0.1]));
 
     // A preset dropped where a new instance was made loads into it as part of the step that made it.
     let steps = a.state.session.history.at();
     a.state.session.plugins.preset_waits.push((1, dark.clone(), std::time::Instant::now()));
-    crate::presets::pending_tick(&mut a);
+    crate::presets_ui::pending_tick(&mut a);
     assert_eq!((a.state.session.history.at(), knob.lock().unwrap().value), (steps, [0.1, 0.9]));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -993,10 +995,10 @@ fn mutes_follow_fl_s_history() {
     a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 5);
     crate::mixer::hit(&mut a, crate::mixer::MHit::Led(3));
     let now = on(&a);
-    crate::history::undo(&mut a.state).unwrap();
+    crate::history_ui::undo(&mut a.state).unwrap();
     assert_eq!(a.state.session.project.channels[0].mixer_track, track, "undone");
     assert_eq!(on(&a), now, "the mutes stay through the undo");
-    crate::history::redo(&mut a.state).unwrap();
+    crate::history_ui::redo(&mut a.state).unwrap();
     assert_eq!(on(&a), now, "and the redo");
     // With Undo knob tweaks off, a channel's mute makes no step either, and an undo of an earlier step keeps it.
     let was = crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS);
@@ -1006,7 +1008,7 @@ fn mutes_follow_fl_s_history() {
     let now = on(&a);
     crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, was);
     assert_eq!(a.state.session.history.at(), steps, "no step with Undo knob tweaks off");
-    crate::history::undo(&mut a.state).unwrap();
+    crate::history_ui::undo(&mut a.state).unwrap();
     assert_eq!(on(&a), now, "the mute stays through an undo of the step before it");
 }
 
@@ -1021,7 +1023,7 @@ fn a_hosted_slots_scaling_and_help() {
     let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
     let fx = crate::plugins::fx_key(1, 0);
     a.state.session.plugins.hosted.insert(fx, crate::plugins::Hosted::new(knob));
-    crate::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Lemon Sampler"));
+    crate::edit::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Lemon Sampler"));
     crate::mixer::select(&mut a.state, 1, false);
     let scaling = |a: &App| slot_menu(a, 0, 0.0, 0.0).items.into_iter().find(|i| i.label == "Scaling").unwrap();
     let m = scaling(&a);
@@ -1087,7 +1089,7 @@ fn a_proposal_hands_playback_nothing() {
 /// and opens again with the change.
 #[test]
 fn a_session_without_a_window_serves_clients() {
-    let mut ses = crate::session::Session::new(crate::app::test_project(), crate::transport::Transport::new(None));
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::store());
     let mut c = rpc::Client { name: "Headless".into(), level: Level::Edit, saves: true, token: None };
     let mut call = |ses: &mut crate::session::Session, m: &str, params: Value| -> Value {
         let mut asks = rpc::Asks::default();

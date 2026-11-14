@@ -22,7 +22,7 @@ pub fn paint_row(ui: &mut Ui, g: Rect, x0: f32, y: f32, h: f32) {
     let ty = (y + h / 2.0 - ui.c.line_height(f) / 2.0).round();
     // Reset: greyed while no folder is chosen (the install found on this computer is in use).
     let b = Rect::new(x0, y + 4.0, 76.0, 24.0);
-    let on = ff::chosen().is_some();
+    let on = ff::chosen(&crate::settings_file::store()).is_some();
     let hov = if on {
         ui.hit(b, Action::Settings(SAct::Button(RESET)), RESET_HINT)
     } else {
@@ -37,7 +37,7 @@ pub fn paint_row(ui: &mut Ui, g: Rect, x0: f32, y: f32, h: f32) {
     }
     // The folder button and the path beside it both pick the folder.
     let fb = Rect::new(b.right() + 8.0, y + 4.0, 26.0, 24.0);
-    let path = ff::path_text();
+    let path = ff::path_text(&crate::settings_file::store());
     let pr = Rect::new(fb.right() + 8.0, y + 4.0, (g.right() - 12.0 - (fb.right() + 8.0)).max(0.0), 24.0);
     let hov_f = ui.hit(fb, Action::Settings(SAct::Button(SET_FOLDER)), FOLDER_HINT);
     let pw = ui.c.text_width(f, &path).min(pr.w);

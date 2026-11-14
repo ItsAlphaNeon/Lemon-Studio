@@ -563,8 +563,8 @@ fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
     let max = crate::mixer::max_insert(&s.session.project);
     for (i, part) in imp.parts.iter().enumerate() {
         let row = match o.instrument {
-            Instrument::Sampler => crate::app::add_channel(s.session.project.get_mut()),
-            k => crate::app::add_plugin_channel(s.session.project.get_mut(), k.label()),
+            Instrument::Sampler => crate::projects::add_channel(s.session.project.get_mut()),
+            k => crate::projects::add_plugin_channel(s.session.project.get_mut(), k.label()),
         };
         let ch = &mut s.session.project.get_mut().channels[row];
         ch.name = Some(part.name.clone());
@@ -572,7 +572,7 @@ fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
     }
     let index: Vec<u16> = s.session.project.channels[base..].iter().map(|c| c.index).collect();
     let old = s.session.project.pattern_length(n);
-    let pat = crate::patterns::pat_mut(&mut s.session, n);
+    let pat = crate::edit::patterns::pat_mut(&mut s.session, n);
     if pat.name.is_none() {
         pat.name = Some(name.to_string());
     }
@@ -587,12 +587,12 @@ fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
         pat.markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
         pat.markers.extend(imp.signatures.iter().cloned());
         pat.markers.sort_by_key(|m| m.position);
-        crate::playlist::refit_pattern_clips(&mut s.session, n, old);
+        crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
     }
     if !imp.markers.is_empty() {
-        crate::playlist::arr_mut(&mut s.session).markers.extend(imp.markers.iter().cloned());
+        crate::edit::playlist::arr_mut(&mut s.session).markers.extend(imp.markers.iter().cloned());
     }
-    crate::rack::import_group(&mut s.session, name, base..base + index.len());
+    crate::edit::rack::import_group(&mut s.session, name, base..base + index.len());
     s.selected_channel = base;
     s.rack.select_only(base);
     crate::rack::autosize(s);
@@ -668,10 +668,10 @@ impl App {
             self.reset_hosted();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;
-            s.session.project = crate::locked::Locked::new(crate::app::empty_project());
+            s.session.project = crate::locked::Locked::new(crate::projects::empty_project(&crate::settings_file::store()));
             s.session.project.get_mut().ppq = ppq;
             s.session.project.get_mut().tempo = Some(tempo);
-            crate::project_info::created(s);
+            crate::project_info_ui::created(s);
             s.session.file = None;
             s.session.path = None;
             s.set_tempo(tempo);
@@ -692,10 +692,10 @@ impl App {
         } else {
             let s = &mut self.state;
             // As every playlist step does (`playlist::snapshot_as`), the arrangement exists before the step.
-            crate::playlist::arr_mut(&mut s.session);
+            crate::edit::playlist::arr_mut(&mut s.session);
             // One undo step through the control plane, as the rack's other channel adds (`control::edit`).
             let n = s.pattern();
-            crate::control::edit(s, IMPORT_STEP, crate::control::command::Region::Project, |s| place(s, imp, o, &name, n));
+            crate::control_ui::edit(s, IMPORT_STEP, crate::control::command::Region::Project, |s| place(s, imp, o, &name, n));
         }
         let s = &mut self.state;
         crate::piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
@@ -717,7 +717,7 @@ impl App {
         let snap = Snap::Patterns { patterns: s.session.project.patterns.clone(), current: n };
         history::record(&mut s.session, IMPORT_STEP, snap);
         let old = s.session.project.pattern_length(n);
-        let pat = crate::patterns::pat_mut(&mut s.session, n);
+        let pat = crate::edit::patterns::pat_mut(&mut s.session, n);
         let mut all: Vec<(Note, bool)> = std::mem::take(&mut pat.notes).into_iter().filter(|x| o.blend || x.channel != ch).map(|x| (x, false)).collect();
         all.extend(new.iter().map(|x| (*x, true)));
         all.sort_by_key(|(x, _)| x.position);
@@ -727,7 +727,7 @@ impl App {
             pat.markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
             pat.markers.extend(imp.signatures.iter().cloned());
             pat.markers.sort_by_key(|m| m.position);
-            crate::playlist::refit_pattern_clips(&mut s.session, n, old);
+            crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
         }
         s.piano.select(n, ch, sel);
         s.session.dirty = true;
@@ -1085,7 +1085,7 @@ mod tests {
 
     fn test_app() -> App {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.set_song_mode(false);
         app
     }
@@ -1137,7 +1137,7 @@ mod tests {
     fn import_into_the_open_project_undoes_in_one_step() {
         let path = write_three("append");
         let mut app = test_app();
-        crate::playlist::arr_mut(&mut app.state.session);
+        crate::edit::playlist::arr_mut(&mut app.state.session);
         let before = app.state.session.project.clone();
         let rows = before.channels.len();
         crate::dialog::fake::answer(Some(path.clone()));
@@ -1151,9 +1151,9 @@ mod tests {
         let notes = app.state.session.project.pattern(1).unwrap().notes.len();
         assert_eq!(notes, before.pattern(1).map_or(0, |p| p.notes.len()) + 4);
         let after = app.state.session.project.clone();
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(IMPORT_STEP));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(IMPORT_STEP));
         assert_eq!(app.state.session.project, before);
-        crate::history::redo(&mut app.state);
+        crate::history_ui::redo(&mut app.state);
         assert_eq!(app.state.session.project.channels.len(), after.channels.len());
         assert_eq!(app.state.session.project.pattern(1), after.pattern(1));
         let _ = std::fs::remove_file(path);
@@ -1166,7 +1166,7 @@ mod tests {
         let mut app = test_app();
         app.state.selected_channel = 1;
         let ch = app.state.session.project.channels[1].index;
-        crate::patterns::pat_mut(&mut app.state.session, 1).notes = vec![Note::step(ch, 0), Note::step(0, 0)];
+        crate::edit::patterns::pat_mut(&mut app.state.session, 1).notes = vec![Note::step(ch, 0), Note::step(0, 0)];
         crate::dialog::fake::answer(Some(path.clone()));
         app.import_midi_dialog(true);
         let f = form(&app).unwrap();
@@ -1185,7 +1185,7 @@ mod tests {
     #[test]
     fn shortcut_and_drop() {
         let mut app = test_app();
-        crate::patterns::pat_mut(&mut app.state.session, 1).notes = vec![Note { length: 48, ..Note::step(0, 0) }];
+        crate::edit::patterns::pat_mut(&mut app.state.session, 1).notes = vec![Note { length: 48, ..Note::step(0, 0) }];
         let out = std::env::temp_dir().join(format!("os_midi_export_{}", std::process::id()));
         crate::dialog::fake::answer(Some(out.clone()));
         app.shift = true;
@@ -1267,9 +1267,9 @@ mod tests {
     #[test]
     fn exports_read_back() {
         let imp = convert(&three(96), &Options::default(), 96);
-        let mut p = crate::app::empty_project();
+        let mut p = crate::projects::empty_project(&crate::settings_file::store());
         p.channels = (0..3).map(|i| {
-            let mut c = crate::app::test_project().channels[0].clone();
+            let mut c = crate::projects::test_project().channels[0].clone();
             c.index = i;
             c.name = Some(imp.parts[usize::from(i)].name.clone());
             c

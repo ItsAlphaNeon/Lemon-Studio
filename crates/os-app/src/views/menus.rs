@@ -608,17 +608,17 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         // spec: ui/midi-files.md §1: FL's Import holds only MIDI file...
         Sub::Import => |_| vec![crate::playlist::PItem::new("MIDI file...", crate::playlist::Cmd::MidiImport(false))],
         // spec: ui/project-templates.md
-        Sub::Templates => crate::project_files::template_items,
+        Sub::Templates => crate::project_files_ui::template_items,
         // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
         Sub::Effect => |s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true),
         Sub::Editors => |_| crate::rack::editor_items(),
         // spec: ui/channel-switches.md §3, §6
         Sub::KeyFocus => |_| crate::rack::key_focus_items(),
         // spec: ui/one-click-recording.md §2
-        Sub::OneClick => crate::one_click::items,
+        Sub::OneClick => crate::one_click_ui::items,
         // spec: ui/recording.md §6
-        Sub::DumpLog => crate::score_log::items,
-        Sub::AudioLog => crate::audio_log::items,
+        Sub::DumpLog => crate::score_log_ui::items,
+        Sub::AudioLog => crate::audio_log_ui::items,
         Sub::Declick => crate::rack::declick_items,
         Sub::ClipsAll => |_| crate::rack::stretch_items(true),
         Sub::ClipsSel => |_| crate::rack::stretch_items(false),
@@ -688,13 +688,13 @@ fn mark_of(s: &State, _menu: usize, item: &Item) -> Mark {
             MenuCmd::Window(w) => s.shown(w),
             MenuCmd::Typing => s.toggles.contains(&"typing"),
             MenuCmd::Metronome => crate::metronome::on(),
-            MenuCmd::Record(o) => o.on(),
+            MenuCmd::Record(o) => o.on(&s.session.settings),
             MenuCmd::Autoscroll => crate::autoscroll::on(),
             MenuCmd::Groups => crate::enable_groups::on(),
-            MenuCmd::StepEdit => crate::step_edit::on(),
+            MenuCmd::StepEdit => crate::step_edit::on(&s.session.settings),
             MenuCmd::Multilink => s.multilink.on,
-            MenuCmd::Midi(sw) => sw.on(),
-            MenuCmd::AudioLog => crate::audio_log::enabled(),
+            MenuCmd::Midi(sw) => sw.on(&s.session.settings),
+            MenuCmd::AudioLog => crate::audio_log::enabled(&s.session.settings),
             _ => false,
         },
         (mk, _) => return mk,
