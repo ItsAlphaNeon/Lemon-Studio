@@ -13,6 +13,8 @@ use std::path::PathBuf;
 
 pub struct Session {
     pub project: crate::locked::Locked,
+    /// The program's settings this session reads and keeps (`crate::prefs`, `crate::settings_file`).
+    pub settings: crate::settings_file::SettingsStore,
     /// The project's undo history (spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
     pub history: crate::history::History,
     /// The control plane: ids, its commands' requests for the app, events, proposals (`crate::control`).
@@ -166,9 +168,12 @@ impl View {
 }
 
 impl Session {
-    pub fn new(project: os_model::Project, transport: crate::transport::Transport) -> Self {
+    pub fn new(project: os_model::Project, mut transport: crate::transport::Transport, settings: crate::settings_file::SettingsStore) -> Self {
+        transport.set_settings(settings.clone());
+        crate::metronome::switch().set_track(settings.number(&crate::prefs::METRONOME_TRACK));
         Session {
             project: crate::locked::Locked::new(project),
+            settings,
             history: Default::default(),
             control: Default::default(),
             file: None,

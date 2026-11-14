@@ -1445,7 +1445,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     // One undo step, "Create automation clip": the playlist, the rack's side (the channel, its group, the filter and the
     // selection) and the control's initial value while "Initialize controls automatically" is on (spec:
     // ui/settings-choices.md "Advanced: Initialize controls automatically").
-    let init = crate::init::automatic(tgt, value);
+    let init = crate::init::automatic(&s.session.settings, tgt, value);
     arr_mut(&mut s.session);
     let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
     let mut snaps = vec![crate::history::Snap::Playlist(Box::new(capture(&s.session))), rack];
@@ -1643,7 +1643,7 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
 
 /// `add_audio_clip` as the undo step `name` (One-click audio recording's "Recorded items").
 pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name: &'static str) -> Option<usize> {
-    s.session.samples.wave(path)?;
+    s.session.samples.wave(&s.session.settings, path)?;
     snapshot_as(&mut s.session, name);
     add_audio_clip_in(s, path, track, tick, None)
 }
@@ -1904,7 +1904,7 @@ fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
 /// "Recording into Tesla from Lemon Studio"). Tesla keeps the file's path; the channel keeps its sample as it was.
 fn edit_sample(app: &mut App, row: usize) -> Option<String> {
     let path = app.state.session.project.channels.get(row)?.sample_path.clone().filter(|p| !p.is_empty())?;
-    let file = std::path::PathBuf::from(crate::plugins::resolve_sample(&path));
+    let file = std::path::PathBuf::from(crate::plugins::resolve_sample(&app.state.session.settings, &path));
     let name = file.file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
     // A WAV keeps its own sample format; other files are decoded as the engine plays them.
     let sample = match std::fs::read(&file).map_err(|e| e.to_string()).and_then(|b| tesla::wav::read(&b)) {
@@ -3456,7 +3456,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::DataFolder(c) => return app.data_folder_cmd(c),
         Cmd::Record(o) => {
-            o.toggle();
+            o.toggle(&app.state.session.settings);
             app.invalidate();
             return None;
         }
@@ -3470,7 +3470,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::Rec(c) => return app.rec_cmd(c),
         Cmd::RecPrecountBars(bars) => {
-            crate::record::set_precount_bars(bars);
+            crate::record::set_precount_bars(&app.state.session.settings, bars);
             app.invalidate();
             return None;
         }
@@ -4177,7 +4177,7 @@ pub fn export_tracks(app: &mut App) -> String {
         return format!("Export tracks: {e}");
     }
     let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
+    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir(&app.state.session.settings));
     let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.session.project.ppq, s.session.project.tick_tempo(s.tempo()), rate) as usize;
     let mut written = 0;
     for &t in &tracks {
@@ -4251,7 +4251,7 @@ pub fn consolidate(app: &mut App) -> String {
         }
     }
     let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
+    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir(&crate::settings_file::store()));
     let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
     let mut audio = e.render_all(512);
     let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo()), rate) as usize) * 2;

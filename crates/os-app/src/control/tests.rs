@@ -135,7 +135,7 @@ fn a_transaction_is_one_named_step_and_all_or_nothing() {
     apply(&mut a.state, &test_client(), Some("Build Drum Kit"), good).unwrap();
     assert_eq!(a.state.session.history.at(), steps + 1);
     let h = &a.state.session.history;
-    let name = h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string());
+    let name = h.entries(&crate::settings_file::store()).into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string());
     assert_eq!(name.as_deref(), Some("Test: build Drum Kit"), "named after the client");
     assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some("Test: build Drum Kit"));
     assert_eq!(reading(&a), before, "one undo takes back both");
@@ -388,7 +388,7 @@ fn clients_connect_over_a_local_socket() {
     assert!(r2.get("error").is_none(), "{r2}");
     assert_eq!(a.state.tempo(), 111.0);
     let h = &a.state.session.history;
-    assert_eq!(h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string()).as_deref(), Some("Socket: tempo"), "the client's name stays with its connection");
+    assert_eq!(h.entries(&crate::settings_file::store()).into_iter().find(|e| e.0 == h.at()).map(|e| e.1.to_string()).as_deref(), Some("Socket: tempo"), "the client's name stays with its connection");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1097,7 +1097,7 @@ fn a_proposal_hands_playback_nothing() {
 /// and opens again with the change.
 #[test]
 fn a_session_without_a_window_serves_clients() {
-    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None));
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::store());
     let mut c = rpc::Client { name: "Headless".into(), level: Level::Edit, saves: true, token: None };
     let mut call = |ses: &mut crate::session::Session, m: &str, params: Value| -> Value {
         let mut asks = rpc::Asks::default();

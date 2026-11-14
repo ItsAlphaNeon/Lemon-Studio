@@ -116,8 +116,8 @@ pub fn keep_overwritten(target: &Path, dir: Option<PathBuf>) {
 }
 
 /// Whether the Autosave timer ran out (it follows the interval set: Never stops it).
-pub fn due(b: &mut Backup, now: Instant) -> bool {
-    let every = interval(prefs::index(&prefs::AUTOSAVE));
+pub fn due(st: &crate::settings_file::SettingsStore, b: &mut Backup, now: Instant) -> bool {
+    let every = interval(st.index(&prefs::AUTOSAVE));
     if every != b.every {
         b.every = every;
         b.due = every.map(|e| now + e);
@@ -161,14 +161,14 @@ pub fn place(ses: &crate::session::Session, t: NaiveDateTime) -> Result<Place, S
 pub fn wrote(ses: &mut crate::session::Session, target: &Path, snap: (Project, f64)) {
     ses.backup.last = Some(snap);
     if let Some(dir) = target.parent() {
-        prune(dir, &project_name(ses.path.as_deref()), usize::from(prefs::number(&prefs::BACKUP_MAXIMUM)));
+        prune(dir, &project_name(ses.path.as_deref()), usize::from(ses.settings.number(&prefs::BACKUP_MAXIMUM)));
     }
 }
 
 /// The Autosave timer of a session without an interface (`--serve`): as `App::backup_tick`, the copy written by the
 /// session (`project_io::copy`). Returns what failed.
 pub fn tick_headless(ses: &mut crate::session::Session, now: Instant) -> Option<String> {
-    if !due(&mut ses.backup, now) {
+    if !due(&ses.settings, &mut ses.backup, now) {
         return None;
     }
     let mut failed = None;

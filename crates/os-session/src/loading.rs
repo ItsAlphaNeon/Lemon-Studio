@@ -45,17 +45,17 @@ pub struct Loading {
 
 impl Loading {
     /// Starts decoding the sample files of `project`'s sampler channels on worker threads.
-    pub fn start(project: &os_model::Project) -> Loading {
+    pub fn start(st: &crate::settings_file::SettingsStore, project: &os_model::Project) -> Loading {
         let samplers: Vec<&os_model::Channel> = project.channels.iter().filter(|c| c.kind.is_sampler()).collect();
         // The paths Lemon Sampler opens (`plugins::sampler_state`), each once.
         let files: BTreeSet<String> = samplers
             .iter()
-            .map(|c| crate::plugins::resolve_sample(c.sample_path.as_deref().unwrap_or("")))
+            .map(|c| crate::plugins::resolve_sample(st, c.sample_path.as_deref().unwrap_or("")))
             .filter(|p| !p.is_empty())
             .collect();
         let queue = Arc::new(Mutex::new(files.iter().rev().map(PathBuf::from).collect::<Vec<_>>()));
         let (tx, rx) = channel();
-        let workers = workers(files.len());
+        let workers = workers(st, files.len());
         for _ in 0..workers {
             let (queue, tx) = (queue.clone(), tx.clone());
             std::thread::spawn(move || loop {
@@ -137,8 +137,8 @@ impl Loading {
 /// the machine runs at once); off, one, a file at a time. Either way off the UI thread, behind the progress panel.
 /// Spec: ui/settings-choices.md "Advanced: Fast sample preview, Auto keep long audio on disk, Threaded project sample
 /// loading (2026-10-16)".
-pub fn workers(files: usize) -> usize {
-    let most = if crate::prefs::check(&crate::prefs::THREADED_SAMPLE_LOADING) {
+pub fn workers(st: &crate::settings_file::SettingsStore, files: usize) -> usize {
+    let most = if st.check(&crate::prefs::THREADED_SAMPLE_LOADING) {
         std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4)
     } else {
         1
@@ -193,7 +193,7 @@ pub fn sync_samplers(ses: &mut crate::session::Session, deadline: Option<std::ti
             done = false;
             break;
         }
-        let st = crate::plugins::sampler_state(ch);
+        let st = crate::plugins::sampler_state(&ses.settings, ch);
         if let Some(l) = &mut ses.loading {
             l.hosted += 1;
             l.label = ch.name.clone().unwrap_or_default();
@@ -205,7 +205,7 @@ pub fn sync_samplers(ses: &mut crate::session::Session, deadline: Option<std::ti
                 // A channel just added (ADD ▸ Lemon Sampler): its window is about to open (spec:
                 // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
                 if ses.pending_open == Some(row) {
-                    ses.plugins.added(row);
+                    ses.plugins.added(&ses.settings, row);
                 }
             }
             Err(e) => {

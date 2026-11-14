@@ -48,7 +48,7 @@ pub fn menu_items(t: Option<Target>) -> Vec<PItem> {
         },
         PItem::new("Override global mapping...", Cmd::Nothing).off(),
     ];
-    if let Some(t) = t.filter(|&t| link_of(t).is_some()) {
+    if let Some(t) = t.filter(|&t| link_of(&crate::settings_file::store(), t).is_some()) {
         v.push(PItem::new("Remove link", Cmd::Remote(RCmd::Unlink(t))));
     }
     v
@@ -67,7 +67,7 @@ impl App {
     /// A controller message from device `dev` (spec §2-§5): the open box detects it, Multilink links it, the links it
     /// drives take it. Returns whether something took it (otherwise it goes to the instrument).
     pub(crate) fn remote_cc(&mut self, dev: &str, ch: u8, cc: u8, v: u8) -> bool {
-        let port = crate::midi_cfg::input(dev).port;
+        let port = crate::midi_cfg::input(&self.state.session.settings, dev).port;
         if let Some(b) = self.state.link_box.as_mut().filter(|b| b.auto) {
             b.port = port;
             b.ch = ch;
@@ -79,14 +79,14 @@ impl App {
             self.invalidate();
             return true;
         }
-        self.remote.sync();
+        self.remote.sync(&self.state.session.settings);
         let hit: Vec<usize> = (0..self.remote.links.len()).filter(|&i| self.remote.links[i].hears(port, ch, cc)).collect();
         if hit.is_empty() && self.state.multilink.on {
             if let Some(t) = self.state.multilink.queue.pop_front() {
                 let mut l = Link::new(ch, cc, t);
                 l.port = port;
-                add(l, true);
-                self.remote.sync();
+                add(&self.state.session.settings, l, true);
+                self.remote.sync(&self.state.session.settings);
                 let name = crate::typein_ui::caption(&self.state, t);
                 self.state.message = Some(format!("Linked channel {}, controller {cc} to {}", ch + 1, name.trim_start_matches("Value for ")));
                 if self.state.multilink.queue.is_empty() {
@@ -223,11 +223,11 @@ impl App {
                 let (w, h) = crate::views::remote_box::SIZE;
                 let (sw, sh) = self.state.screen;
                 let at = ((self.mouse.0 - 20.0).clamp(0.0, (sw - w).max(0.0)), (self.mouse.1 - 20.0).clamp(0.0, (sh - h).max(0.0)));
-                self.state.link_box = Some(LinkBox::new(t, at));
+                self.state.link_box = Some(LinkBox::new(&self.state.session.settings, t, at));
                 self.state.message = Some("Just move your MIDI controller".into());
             }
             RCmd::Unlink(t) => {
-                remove(t);
+                remove(&self.state.session.settings, t);
                 self.state.message = Some("Link removed".into());
             }
             RCmd::LinkAll(key) => {
@@ -266,7 +266,7 @@ impl App {
         if !b.all.is_empty() {
             let made = b.links();
             for l in &made {
-                add(*l, b.conflicts);
+                add(&self.state.session.settings, *l, b.conflicts);
             }
             self.state.message = Some(match (made.first(), made.last()) {
                 (Some(a), Some(z)) => format!(
@@ -283,7 +283,7 @@ impl App {
         }
         match b.link() {
             Some(l) => {
-                add(l, b.conflicts);
+                add(&self.state.session.settings, l, b.conflicts);
                 let name = crate::typein_ui::caption(&self.state, b.target);
                 self.state.message = Some(format!("Linked channel {}, controller {} to {}", l.ch + 1, l.cc, name.trim_start_matches("Value for ")));
             }
@@ -389,10 +389,10 @@ mod tests {
         use crate::views::menus::{item_at, works, VIEW};
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
-        set_links(&[]);
-        add(Link::new(0, 7, Target::Knob(KnobId::ChanVol(1))), true);
-        add(Link { omni: true, ..Link::new(1, 10, Target::Knob(KnobId::ChanPan(0))) }, true);
-        add(Link::new(15, 74, Target::Fader(2)), true);
+        set_links(&crate::settings_file::store(), &[]);
+        add(&crate::settings_file::store(), Link::new(0, 7, Target::Knob(KnobId::ChanVol(1))), true);
+        add(&crate::settings_file::store(), Link { omni: true, ..Link::new(1, 10, Target::Knob(KnobId::ChanPan(0))) }, true);
+        add(&crate::settings_file::store(), Link::new(15, 74, Target::Fader(2)), true);
         let at = (0..40).find(|&i| item_at(VIEW, i).is_some_and(|it| it.label == "Remote control")).unwrap();
         assert!(works(VIEW, item_at(VIEW, at).unwrap()));
         app.state.show_browser = false;
@@ -402,7 +402,7 @@ mod tests {
         let listed: Vec<String> = rows(&app.state).into_iter().filter(|r| r.key.starts_with(&format!("{key}/"))).map(|r| r.label).collect();
         let bus2 = crate::edit::mixer::name(&app.state.session, 2);
         assert_eq!(listed, ["Clap - Channel volume: channel 1, ctrl 7".to_string(), "Channel panning: channel 2, ctrl 10, omni".into(), format!("{bus2} - Volume: channel 16, ctrl 74")]);
-        set_links(&[]);
+        set_links(&crate::settings_file::store(), &[]);
     }
 
     /// The mixer's Link all parameters... (Lemon Studio's design): the current track's volume, pan, separation, nine
@@ -412,7 +412,7 @@ mod tests {
         use crate::playlist::Cmd;
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
-        set_links(&[]);
+        set_links(&crate::settings_file::store(), &[]);
         app.state.selected_mixer = 1;
         if let Some(t) = crate::edit::mixer::track_mut(&mut app.state.session, 1) {
             t.routes = vec![2, 0];
@@ -431,14 +431,14 @@ mod tests {
         // The controller moved: every control linked, controllers 20 and on.
         app.remote_cc("Test", 0, 20, 64);
         assert!(app.state.link_box.is_none(), "auto accepted");
-        let made = links();
+        let made = links(&crate::settings_file::store());
         assert_eq!(made.iter().map(|l| l.target).collect::<Vec<_>>(), want);
         assert_eq!(made.iter().map(|l| l.cc).collect::<Vec<_>>(), (20..20 + want.len() as u8).collect::<Vec<_>>());
         assert!(app.state.message.as_deref().is_some_and(|m| m.contains(&crate::edit::mixer::name(&app.state.session, 1))), "{:?}", app.state.message);
         // The volume follows its controller.
         assert!(app.remote_cc("Test", 0, 20, 127));
         assert_eq!(crate::edit::mixer::track(&app.state.session, 1).and_then(|t| t.volume), Some(1.0));
-        set_links(&[]);
+        set_links(&crate::settings_file::store(), &[]);
     }
 
 }

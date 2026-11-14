@@ -29,10 +29,10 @@ mod tests {
     /// The settings choose the names; the defaults are English with sharps.
     #[test]
     fn follows_the_settings() {
-        assert_eq!((note_name(60), note_name(61), key_hint(60)), ("C5".to_string(), "C#5".to_string(), "C5 / 60".to_string()));
+        assert_eq!((note_name(&crate::settings_file::store(), 60), note_name(&crate::settings_file::store(), 61), key_hint(&crate::settings_file::store(), 60)), ("C5".to_string(), "C#5".to_string(), "C5 / 60".to_string()));
         prefs::set_choice(&prefs::NOTE_NAMES, 2);
         prefs::set_choice(&prefs::BLACK_NOTES, 1);
-        assert_eq!((note_name(70), key_hint(61)), ("S♭5".to_string(), "R♭5 / 61".to_string()));
+        assert_eq!((note_name(&crate::settings_file::store(), 70), key_hint(&crate::settings_file::store(), 61)), ("S♭5".to_string(), "R♭5 / 61".to_string()));
         prefs::set_choice(&prefs::NOTE_NAMES, 0);
         prefs::set_choice(&prefs::BLACK_NOTES, 0);
     }

@@ -64,8 +64,8 @@ pub fn delete(s: &mut crate::session::Session, t: u32) {
 
 /// What "Create automation clip" on control `t` (value `v`) puts in the list: its entry while "Initialize controls
 /// automatically" is on, `None` while it is off or for a control whose stored units aren't known.
-pub fn automatic(t: u32, v: f64) -> Option<InitControl> {
-    crate::prefs::check(&crate::prefs::INIT_CONTROLS).then(|| InitControl::from_unit(t, v)).flatten()
+pub fn automatic(st: &crate::settings_file::SettingsStore, t: u32, v: f64) -> Option<InitControl> {
+    st.check(&crate::prefs::INIT_CONTROLS).then(|| InitControl::from_unit(t, v)).flatten()
 }
 
 /// In song mode: every control in the list takes its value at once (where playback starts, the song position moves

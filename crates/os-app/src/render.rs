@@ -102,7 +102,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
 pub fn render(o: &Opts) -> Result<(), String> {
     // The audio thread must not open the user's audio device (an ASIO driver opens at start).
     crate::transport::headless();
-    let mut ses = crate::session::Session::new(os_model::Project::default(), crate::transport::Transport::new(crate::factory_folder::dir()));
+    let mut ses = crate::session::Session::new(os_model::Project::default(), crate::transport::Transport::new(crate::factory_folder::dir(&crate::settings_file::store())), crate::settings_file::store());
     ses.plugins = match o.hosted {
         Hosted::Builtin => crate::plugins::Plugins::builtins(),
         Hosted::LastScan => crate::project_io::last_scan(),
@@ -139,7 +139,7 @@ pub fn render(o: &Opts) -> Result<(), String> {
 
     ses.plugins.set_offline(true);
     let project = crate::rack::play_project_in(&ses);
-    let mut library = crate::transport::host_library(crate::factory_folder::dir());
+    let mut library = crate::transport::host_library(crate::factory_folder::dir(&crate::settings_file::store()));
     lemon_sampler::set_host_ticks(project.ppq);
     let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &ses.plugins.instruments());
     crate::effect_ports::attach_effects(&mut e, &project, ses.plugins.effects());

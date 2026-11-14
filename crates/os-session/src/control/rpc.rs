@@ -150,7 +150,7 @@ pub fn rpc_in(ses: &mut Session, c: &mut Client, m: &str, params: &Value, select
         "params" => params_of(ses, uint(params, "owner")? as u32),
         "history" => {
             let h = &ses.history;
-            let steps: Vec<Value> = h.entries().into_iter().map(|(k, name)| json!({ "step": k, "name": name, "undone": h.undone(k) })).collect();
+            let steps: Vec<Value> = h.entries(&ses.settings).into_iter().map(|(k, name)| json!({ "step": k, "name": name, "undone": h.undone(k) })).collect();
             Ok(json!({ "at": h.at(), "steps": steps }))
         }
         "events" => {

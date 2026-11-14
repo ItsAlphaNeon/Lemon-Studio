@@ -25,7 +25,7 @@ fn unit(s: &State) -> Option<u32> {
 
 /// A note from `start` to `end` (pattern ticks) quantized as the menu says; never ending at or before its start.
 pub fn quantized(s: &State, start: u32, end: u32) -> (u32, u32) {
-    quantized_on(unit(s), start, end)
+    quantized_on(&s.session.settings, unit(s), start, end)
 }
 
 impl App {
@@ -34,7 +34,7 @@ impl App {
         if self.state.session.rec.armed {
             self.end_take();
             self.state.session.rec.armed = false;
-        } else if Opt::Ask.on() {
+        } else if Opt::Ask.on(&self.state.session.settings) {
             self.record_question();
         } else {
             self.arm();
@@ -45,7 +45,7 @@ impl App {
     /// Arms; while stopped this starts playback when "Recording starts playback" is on.
     fn arm(&mut self) {
         self.state.session.rec.armed = true;
-        if !self.state.session.transport.playing() && !self.state.session.rec.waiting && Opt::StartsPlayback.on() {
+        if !self.state.session.transport.playing() && !self.state.session.rec.waiting && Opt::StartsPlayback.on(&self.state.session.settings) {
             self.play_from_stop();
         }
         self.invalidate();
@@ -74,8 +74,8 @@ impl App {
     /// A record popup's command (`Cmd::Rec`); returns the message to show.
     pub(crate) fn rec_cmd(&mut self, c: RecCmd) -> Option<String> {
         let set = |o: Opt, on: bool| {
-            if o.on() != on {
-                o.toggle();
+            if o.on(&self.state.session.settings) != on {
+                o.toggle(&self.state.session.settings);
             }
         };
         let msg = match c {
@@ -92,7 +92,7 @@ impl App {
             RecCmd::Precount(bars) => {
                 set(Opt::Precount, bars > 0);
                 if bars > 0 {
-                    set_precount_bars(bars);
+                    set_precount_bars(&self.state.session.settings, bars);
                 }
                 Some(if bars > 0 { format!("Count-in: {bars} bar{}", if bars == 1 { "" } else { "s" }) } else { "Count-in off".into() })
             }
@@ -174,7 +174,7 @@ impl App {
         let r = &mut self.state.session.rec;
         if r.waiting {
             r.waiting = false;
-        } else if Opt::Wait.on() && (r.armed || !Opt::WaitArmed.on()) {
+        } else if Opt::Wait.on(&self.state.session.settings) && (r.armed || !Opt::WaitArmed.on(&self.state.session.settings)) {
             r.waiting = true;
         } else {
             self.play_counted_if_armed();
@@ -184,7 +184,7 @@ impl App {
 
     /// Play, with Recording precount's count-in when armed.
     pub(crate) fn play_counted_if_armed(&mut self) {
-        let bars = if self.state.session.rec.armed && Opt::Precount.on() { precount_bars() } else { 0 };
+        let bars = if self.state.session.rec.armed && Opt::Precount.on(&self.state.session.settings) { precount_bars(&self.state.session.settings) } else { 0 };
         self.start_playback_counted(bars);
         if bars > 0 && self.state.session.transport.playing() {
             let p = &self.state.session.project;
@@ -205,7 +205,7 @@ impl App {
     /// Start on input: the first input that counts starts playback from the start (spec §3). `what` is what the input
     /// is (notes, automation); with Respect recording filter, the filter must record it.
     fn start_on_input(&mut self, what: Opt) {
-        if self.state.session.rec.waiting && (!Opt::WaitFilter.on() || what.on()) {
+        if self.state.session.rec.waiting && (!Opt::WaitFilter.on(&self.state.session.settings) || what.on(&self.state.session.settings)) {
             self.state.session.rec.waiting = false;
             self.start_playback();
             self.invalidate();
@@ -217,11 +217,11 @@ impl App {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let items = match o {
             Opt::Wait => vec![
-                PItem::new("Respect recording filter", Cmd::Record(Opt::WaitFilter)).mark(Mark::Check(Opt::WaitFilter.on())),
-                PItem::new("Only when recording", Cmd::Record(Opt::WaitArmed)).mark(Mark::Check(Opt::WaitArmed.on())),
+                PItem::new("Respect recording filter", Cmd::Record(Opt::WaitFilter)).mark(Mark::Check(Opt::WaitFilter.on(&self.state.session.settings))),
+                PItem::new("Only when recording", Cmd::Record(Opt::WaitArmed)).mark(Mark::Check(Opt::WaitArmed.on(&self.state.session.settings))),
             ],
             Opt::Precount => {
-                let bars = precount_bars();
+                let bars = precount_bars(&self.state.session.settings);
                 vec![
                     PItem::head("Count-in length"),
                     PItem::new("1 bar", Cmd::RecPrecountBars(1)).mark(Mark::Radio(bars == 1)),
@@ -235,7 +235,7 @@ impl App {
 
     /// An option switch (the buttons, OPTIONS menu, Ctrl+I / Ctrl+P / Ctrl+B); turning Start on input off ends a wait.
     pub(crate) fn toggle_record_option(&mut self, o: Opt) {
-        let on = o.toggle();
+        let on = o.toggle(&self.state.session.settings);
         if o == Opt::Wait && !on {
             self.state.session.rec.waiting = false;
         }
@@ -252,7 +252,7 @@ impl App {
     /// The right-click menu (spec §2 Right-click menu).
     pub(crate) fn record_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
-        let it = |label: &'static str, o: Opt| PItem::new(label, Cmd::Record(o)).mark(Mark::Check(o.on()));
+        let it = |label: &'static str, o: Opt| PItem::new(label, Cmd::Record(o)).mark(Mark::Check(o.on(&self.state.session.settings)));
         let items = vec![
             PItem::head("Recording filter"),
             it("Notes", Opt::Notes),
@@ -274,7 +274,7 @@ impl App {
     /// Nothing is recorded during a count-in (spec §3).
     fn rec_live(&self, what: Opt) -> bool {
         let r = &self.state.session.rec;
-        r.armed && r.count.is_none() && what.on() && self.state.session.transport.playing() && !self.state.session.transport.paused()
+        r.armed && r.count.is_none() && what.on(&self.state.session.settings) && self.state.session.transport.playing() && !self.state.session.transport.paused()
     }
 
     /// A knob moved (`record_control`).
@@ -635,13 +635,13 @@ mod tests {
         assert_eq!(vol(&app), [(70, 1000), (200, 2000)]);
 
         // Automation off: knob moves write nothing.
-        Opt::Automation.toggle();
+        Opt::Automation.toggle(&crate::settings_file::store());
         app.state.session.transport.pretend_at(10.0, false);
         app.record_tick();
         app.state.set_knob(KnobId::ChanVol(1), 0.1);
         app.record_knob(KnobId::ChanVol(1));
         assert_eq!(vol(&app), [(70, 1000), (200, 2000)]);
-        assert_eq!(crate::record::hint(), "Record (notes) (R) - right-click for options");
+        assert_eq!(crate::record::hint(&crate::settings_file::store()), "Record (notes) (R) - right-click for options");
     }
 
     #[test]
@@ -699,7 +699,7 @@ mod tests {
         app.mouse_move(b.cx(), b.cy());
         app.mouse_down();
         app.mouse_up();
-        assert!(Opt::Blend.on());
+        assert!(Opt::Blend.on(&crate::settings_file::store()));
         let p = hit_rect(&app, &Action::RecOpt(Opt::Precount));
         app.mouse_move(p.cx(), p.cy());
         app.mouse_down_right();
@@ -708,7 +708,7 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(labels, ["Count-in length", "1 bar", "2 bars"]);
         crate::playlist::run(&mut app, Cmd::RecPrecountBars(2));
-        assert_eq!(precount_bars(), 2);
+        assert_eq!(precount_bars(&crate::settings_file::store()), 2);
         let w = hit_rect(&app, &Action::RecOpt(Opt::Wait));
         app.mouse_move(w.cx(), w.cy());
         app.mouse_down_right();
@@ -722,11 +722,11 @@ mod tests {
         ctrl(&mut app, "i");
         ctrl(&mut app, "p");
         ctrl(&mut app, "b");
-        assert_eq!((Opt::Wait.on(), Opt::Precount.on(), Opt::Blend.on()), (true, false, true));
+        assert_eq!((Opt::Wait.on(&crate::settings_file::store()), Opt::Precount.on(&crate::settings_file::store()), Opt::Blend.on(&crate::settings_file::store())), (true, false, true));
         app.state.z.retain(|&w| w != crate::app::Win::Playlist && w != crate::app::Win::PianoRoll);
         ctrl(&mut app, "p");
         ctrl(&mut app, "b");
-        assert_eq!((Opt::Wait.on(), Opt::Precount.on(), Opt::Blend.on()), (true, true, false));
+        assert_eq!((Opt::Wait.on(&crate::settings_file::store()), Opt::Precount.on(&crate::settings_file::store()), Opt::Blend.on(&crate::settings_file::store())), (true, true, false));
     }
 
     /// A session with no interface records a take: notes held from a source, written into the current pattern on
@@ -734,7 +734,7 @@ mod tests {
     #[test]
     fn a_session_records_without_the_interface() {
         crate::settings_file::set_flag("rec_ask", false);
-        let mut ses = crate::session::Session::new(crate::app::test_project(), crate::transport::Transport::new(None));
+        let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::store());
         ses.set_pattern(1);
         ses.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
         ses.rec.armed = true;
@@ -791,11 +791,11 @@ mod tests {
         assert!(items[5].enabled && items[5].cmd == Cmd::OneClickEditor);
         app.state.playlist.popup = None;
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Arm { notes: true, automation: false }));
-        assert!(app.state.session.rec.armed && Opt::Notes.on() && !Opt::Automation.on());
+        assert!(app.state.session.rec.armed && Opt::Notes.on(&crate::settings_file::store()) && !Opt::Automation.on(&crate::settings_file::store()));
         app.toggle_record();
         assert!(!app.state.session.rec.armed && app.state.playlist.popup.is_none(), "disarming never asks");
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::AskOff));
-        assert!(!Opt::Ask.on());
+        assert!(!Opt::Ask.on(&crate::settings_file::store()));
         crate::playlist::run(&mut app, Cmd::Record(Opt::Automation));
         app.mouse_down();
         app.mouse_up();
@@ -820,9 +820,9 @@ mod tests {
                 "Note end time"
             ]
         );
-        assert!(Opt::Notes.on() && Opt::Automation.on() && Opt::QuantizeStart.on() && Opt::QuantizeEnd.on() && !Opt::DisarmOnStop.on());
+        assert!(Opt::Notes.on(&crate::settings_file::store()) && Opt::Automation.on(&crate::settings_file::store()) && Opt::QuantizeStart.on(&crate::settings_file::store()) && Opt::QuantizeEnd.on(&crate::settings_file::store()) && !Opt::DisarmOnStop.on(&crate::settings_file::store()));
         crate::playlist::run(&mut app, Cmd::Record(Opt::DisarmOnStop));
-        assert!(Opt::DisarmOnStop.on());
+        assert!(Opt::DisarmOnStop.on(&crate::settings_file::store()));
         app.state.playlist.popup = None;
         app.mouse_down();
         app.mouse_up();
@@ -848,7 +848,7 @@ mod tests {
         stop(&mut app);
         assert_eq!(notes(&app), [(24, 72, 0), (192, 24, 0)]);
         assert!(!app.state.session.rec.recording() && app.state.session.rec.armed, "a stop ends the take and keeps Record armed");
-        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some(RECORDED));
+        assert_eq!(app.state.session.history.entries(&crate::settings_file::store()).last().map(|e| e.1), Some(RECORDED));
 
         // Another take from 170 to 260: the note starting at 192 goes, the one at 24 (before the take) stays.
         let steps = app.state.session.history.len();
@@ -918,9 +918,9 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(labels[labels.len() - 4..], ["Count-in", "Off", "1 bar", "2 bars"]);
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Precount(2)));
-        assert!(Opt::Precount.on() && precount_bars() == 2);
+        assert!(Opt::Precount.on(&crate::settings_file::store()) && precount_bars(&crate::settings_file::store()) == 2);
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Precount(0)));
-        assert!(!Opt::Precount.on());
+        assert!(!Opt::Precount.on(&crate::settings_file::store()));
     }
 
     /// SONG mode, a Stop recording marker (audio/transport.md "Time markers in SONG mode"): the take ends on it, a note
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(msg.as_deref(), Some("Captured 2 notes into the pattern"));
         let t = |s: f64| (s * tps).round() as u32;
         assert_eq!(notes(&app), [(0, t(0.3), 0), (t(0.7), t(0.3), 0)]);
-        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some(crate::score_log::DUMPED));
+        assert_eq!(app.state.session.history.entries(&crate::settings_file::store()).last().map(|e| e.1), Some(crate::score_log::DUMPED));
         // A full pattern: asks first.
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Dump(2)));
         let Some(Popup { items, .. }) = app.state.playlist.popup.clone() else { panic!("no question") };
@@ -1009,8 +1009,8 @@ mod tests {
     #[test]
     fn disarm_on_stop_and_step_edit() {
         let mut app = app();
-        Opt::DisarmOnStop.toggle();
-        crate::step_edit::toggle();
+        Opt::DisarmOnStop.toggle(&crate::settings_file::store());
+        crate::step_edit::toggle(&crate::settings_file::store());
         app.toggle_record();
         key(&mut app, KeyCode::KeyZ, true, 0.0, false);
         key(&mut app, KeyCode::KeyZ, false, 24.0, false);
@@ -1024,18 +1024,18 @@ mod tests {
     #[test]
     fn start_on_input() {
         let mut app = app();
-        Opt::Wait.toggle();
+        Opt::Wait.toggle(&crate::settings_file::store());
         app.toggle_record();
         app.act(Action::Play);
         assert!(app.state.session.rec.waiting && !app.state.session.transport.playing());
         app.act(Action::Play);
         assert!(!app.state.session.rec.waiting, "Play again cancels");
         app.act(Action::Play);
-        Opt::Notes.toggle();
+        Opt::Notes.toggle(&crate::settings_file::store());
         assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
         assert!(app.typing_key(KeyCode::KeyZ, false, false, false));
         assert!(app.state.session.rec.waiting, "Notes are off in the filter");
-        Opt::Notes.toggle();
+        Opt::Notes.toggle(&crate::settings_file::store());
         assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
         assert!(!app.state.session.rec.waiting && app.state.session.transport.playing() && app.state.session.transport.tick() == 0.0);
         assert!(app.state.session.rec.recording(), "the note that started playback is recorded");
@@ -1043,7 +1043,7 @@ mod tests {
         stop(&mut app);
         assert_eq!(notes(&app), [(0, 48, 0)]);
         // Only when recording: disarmed, Play plays at once.
-        Opt::WaitArmed.toggle();
+        Opt::WaitArmed.toggle(&crate::settings_file::store());
         app.toggle_record();
         app.act(Action::Play);
         assert!(!app.state.session.rec.waiting && app.state.session.transport.playing());
@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn precount_counts_in_when_armed() {
         let mut app = app();
-        Opt::Precount.toggle();
+        Opt::Precount.toggle(&crate::settings_file::store());
         app.act(Action::Play);
         assert!(app.state.session.rec.count.is_none(), "disarmed: no count-in");
         app.act(Action::Stop);
@@ -1137,7 +1137,7 @@ mod tests {
         key(&mut app, KeyCode::KeyZ, true, 0.0, false);
         key(&mut app, KeyCode::KeyZ, false, 96.0, false);
         stop(&mut app);
-        Opt::Blend.toggle();
+        Opt::Blend.toggle(&crate::settings_file::store());
         key(&mut app, KeyCode::KeyX, true, 0.0, false);
         key(&mut app, KeyCode::KeyX, false, 48.0, false);
         stop(&mut app);

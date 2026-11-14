@@ -52,14 +52,14 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
 }
 
 /// FL's Ogun factory presets, when FL is installed.
-fn factory_dir() -> PathBuf {
-    let fl = crate::factory_folder::dir().unwrap_or_else(os_paths::default_fl_dir);
+fn factory_dir(st: &crate::settings_file::SettingsStore) -> PathBuf {
+    let fl = crate::factory_folder::dir(st).unwrap_or_else(os_paths::default_fl_dir);
     fl.join("Data").join("Patches").join("Plugin presets").join("Generators").join("Ogun")
 }
 
 /// Smith's presets beyond its own folder: FL's factory ones.
-pub fn more_presets(plugin: &str) -> Vec<crate::presets::Preset> {
-    if plugin == SMITH { crate::citrus::fst_presets_in(&factory_dir()) } else { Vec::new() }
+pub fn more_presets(st: &crate::settings_file::SettingsStore, plugin: &str) -> Vec<crate::presets::Preset> {
+    if plugin == SMITH { crate::citrus::fst_presets_in(&factory_dir(st)) } else { Vec::new() }
 }
 
 /// The plugin state of an FL preset file for Smith; `None` when `plugin` is not Smith or `path` is not an `.fst` file,

@@ -463,12 +463,12 @@ impl App {
             return;
         }
         crate::settings_file::write(KEY, "1");
-        if !Opt::Loop.on() {
+        if !Opt::Loop.on(&self.state.session.settings) {
             self.toggle_record_option(Opt::Loop);
         }
         if let Some(d) = &self.surface {
             let name = d.port.name.clone();
-            crate::midi_cfg::set_output(&name, crate::midi_cfg::OutCfg { sync: true, ..crate::midi_cfg::output(&name) });
+            crate::midi_cfg::set_output(&self.state.session.settings, &name, crate::midi_cfg::OutCfg { sync: true, ..crate::midi_cfg::output(&self.state.session.settings, &name) });
         }
     }
 
@@ -663,10 +663,10 @@ impl App {
             button::STOP => self.act(crate::app::Action::Stop),
             button::RECORD => {
                 // From the keyboard the Record button arms at once (no "What to record?" question).
-                if self.state.session.rec.armed || !Opt::Ask.on() {
+                if self.state.session.rec.armed || !Opt::Ask.on(&self.state.session.settings) {
                     self.act(crate::app::Action::Record);
                 } else {
-                    let msg = self.rec_cmd(RecCmd::Arm { notes: Opt::Notes.on(), automation: Opt::Automation.on() });
+                    let msg = self.rec_cmd(RecCmd::Arm { notes: Opt::Notes.on(&self.state.session.settings), automation: Opt::Automation.on(&self.state.session.settings) });
                     if let Some(m) = msg {
                         self.say(m);
                     }
@@ -1268,7 +1268,7 @@ impl App {
         lights.push((Led::Button(button::PLAY), lit(playing), false));
         lights.push((Led::Button(button::RECORD), lit(s.session.rec.armed), false));
         lights.push((Led::Button(button::METRONOME), lit(crate::metronome::on()), false));
-        lights.push((Led::Button(button::LOOP), lit(Opt::Loop.on()), false));
+        lights.push((Led::Button(button::LOOP), lit(Opt::Loop.on(&self.state.session.settings)), false));
         for cc in [button::STOP, button::CAPTURE, button::QUANTISE, button::UNDO] {
             lights.push((Led::Button(cc), momentary(cc), false));
         }

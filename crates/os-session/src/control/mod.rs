@@ -341,7 +341,7 @@ pub fn record_edit(s: &mut crate::session::Session, name: &'static str, before: 
 /// with its value before. The step comes from no press of the app's, so no release looks at it.
 pub fn param_edit(s: &mut crate::session::Session, owner: u32, before: &[(u32, f64)], run: bool) {
     s.plugin_edited = true;
-    if !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
+    if !s.settings.check(&crate::prefs::UNDO_KNOB_TWEAKS) {
         return;
     }
     let put = |&(param, v): &(u32, f64)| Command::Put(Box::new(command::Taken::Param(owner, param, v)));

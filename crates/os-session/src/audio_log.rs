@@ -49,8 +49,8 @@ impl Feed {
     }
 }
 
-pub fn enabled() -> bool {
-    crate::settings_file::flag(ON, true)
+pub fn enabled(st: &crate::settings_file::SettingsStore) -> bool {
+    st.flag(ON, true)
 }
 
 /// Bytes the log holds (the menu's header shows them).
@@ -61,8 +61,8 @@ pub fn memory_mb() -> usize {
     HELD.load(Ordering::Relaxed) / (1024 * 1024)
 }
 
-pub fn minutes() -> u32 {
-    crate::settings_file::get(LENGTH).and_then(|v| v.parse().ok()).filter(|m| MINUTES.contains(m)).unwrap_or(DEFAULT_MINUTES)
+pub fn minutes(st: &crate::settings_file::SettingsStore) -> u32 {
+    st.get(LENGTH).and_then(|v| v.parse().ok()).filter(|m| MINUTES.contains(m)).unwrap_or(DEFAULT_MINUTES)
 }
 
 /// The log: interleaved stereo at `rate`, oldest first.
@@ -75,9 +75,9 @@ pub struct Log {
 
 impl Log {
     /// Keeps what the device played since the last tick, at the device's rate; off, the log empties.
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self, st: &crate::settings_file::SettingsStore) {
         let f = feed();
-        let on = enabled();
+        let on = enabled(st);
         f.on.store(on, Ordering::Release);
         if !on {
             f.ring.clear();
@@ -93,7 +93,7 @@ impl Log {
         // At the rate of the device that played them, the one last opened (`device::rate` would ask the system for the
         // settings' device on every tick while none is open, which takes milliseconds).
         let rate = crate::device::last().map_or(self.rate, |i| i.rate);
-        self.keep(&incoming, rate, minutes());
+        self.keep(&incoming, rate, minutes(st));
         self.incoming = incoming;
         HELD.store(self.kept.capacity() * std::mem::size_of::<f32>(), Ordering::Relaxed);
     }

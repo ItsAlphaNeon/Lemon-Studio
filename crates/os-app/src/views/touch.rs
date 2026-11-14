@@ -75,7 +75,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     button(ui, at(8.0, 34.0, 32.0, 24.0), Action::Touch(TouchAct::Octave(-1)), "Octave down", Err(Icon::ArrowLeft), false);
     button(ui, at(380.0, 34.0, 32.0, 24.0), Action::Touch(TouchAct::Octave(1)), "Octave up", Err(Icon::ArrowRight), false);
     let (low, n) = tc.range();
-    let name = |k: u8| crate::note_names::note_name(i32::from(k));
+    let name = |k: u8| crate::note_names::note_name(&s.session.settings, i32::from(k));
     let range = format!("{} \u{2013} {}", name(low), name(low + n - 1));
     label(ui, Font::new(15), x0 + SIZE.0 / 2.0, y0 + 46.0, true, t.text_dim, &range);
 

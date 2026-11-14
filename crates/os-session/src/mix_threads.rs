@@ -7,14 +7,14 @@
 //! Audio ▸ CPU's switches, "Multithreaded mixer processing", "Multithreaded instrument processing" and "Extra cores only
 //! when needed", which engines read every tick.
 
-use crate::prefs::{check, MULTITHREADED_AUTO, MULTITHREADED_GENERATORS, MULTITHREADED_MIXER};
+use crate::prefs::{MULTITHREADED_AUTO, MULTITHREADED_GENERATORS, MULTITHREADED_MIXER};
 use os_engine::parallel::{self, Pool};
 use std::sync::Arc;
 
 /// Starts the pool and applies the switches. `OS_MIX_THREADS=n` sets the number of workers (0: the program renders on
 /// one thread).
-pub fn start() {
-    apply();
+pub fn start(st: &crate::settings_file::SettingsStore) {
+    apply(st);
     let workers = match std::env::var("OS_MIX_THREADS").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
         Some(n) => n,
         None => parallel::default_workers(physical_cores()),
@@ -28,9 +28,9 @@ pub fn start() {
 }
 
 /// Applies the two switches as set (at startup, and when either is clicked).
-pub fn apply() {
-    parallel::configure(check(&MULTITHREADED_MIXER), check(&MULTITHREADED_GENERATORS));
-    parallel::configure_auto(check(&MULTITHREADED_AUTO));
+pub fn apply(st: &crate::settings_file::SettingsStore) {
+    parallel::configure(st.check(&MULTITHREADED_MIXER), st.check(&MULTITHREADED_GENERATORS));
+    parallel::configure_auto(st.check(&MULTITHREADED_AUTO));
 }
 
 /// The machine's physical cores, when the system says.

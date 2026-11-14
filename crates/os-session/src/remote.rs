@@ -208,31 +208,31 @@ fn parse_link(s: &str) -> Option<Link> {
 const KEY: &str = "midi_links";
 
 /// The links kept (spec §5).
-pub fn links() -> Vec<Link> {
-    crate::settings_file::get(KEY).map(|v| v.split(';').filter_map(parse_link).collect()).unwrap_or_default()
+pub fn links(st: &crate::settings_file::SettingsStore) -> Vec<Link> {
+    st.get(KEY).map(|v| v.split(';').filter_map(parse_link).collect()).unwrap_or_default()
 }
 
-pub fn set_links(l: &[Link]) {
-    crate::settings_file::write(KEY, &l.iter().map(link_text).collect::<Vec<_>>().join(";"));
+pub fn set_links(st: &crate::settings_file::SettingsStore, l: &[Link]) {
+    st.write(KEY, &l.iter().map(link_text).collect::<Vec<_>>().join(";"));
 }
 
 /// The link of target `t`, if it has one.
-pub fn link_of(t: Target) -> Option<Link> {
-    links().into_iter().find(|l| l.target == t)
+pub fn link_of(st: &crate::settings_file::SettingsStore, t: Target) -> Option<Link> {
+    links(st).into_iter().find(|l| l.target == t)
 }
 
 /// Makes link `l`: it replaces the target's earlier link; with `remove_conflicts`, links of the same controller go too.
-pub fn add(l: Link, remove_conflicts: bool) {
-    let mut all = links();
+pub fn add(st: &crate::settings_file::SettingsStore, l: Link, remove_conflicts: bool) {
+    let mut all = links(st);
     all.retain(|o| o.target != l.target && !(remove_conflicts && o.same_controller(&l)));
     all.push(l);
-    set_links(&all);
+    set_links(st, &all);
 }
 
 /// Each link on the first target of a pair goes onto the second (an undo or redo of a wrap into a container, which
 /// moved the links of the plugins it wrapped: `crate::container`).
-pub fn retarget(pairs: &[(Target, Target)]) {
-    let mut all = links();
+pub fn retarget(st: &crate::settings_file::SettingsStore, pairs: &[(Target, Target)]) {
+    let mut all = links(st);
     let mut moved = false;
     for l in &mut all {
         if let Some(&(_, to)) = pairs.iter().find(|p| p.0 == l.target) {
@@ -241,7 +241,7 @@ pub fn retarget(pairs: &[(Target, Target)]) {
         }
     }
     if moved {
-        set_links(&all);
+        set_links(st, &all);
     }
 }
 
@@ -249,7 +249,7 @@ pub fn retarget(pairs: &[(Target, Target)]) {
 /// what it drove went, and the link with it. The moves join the edit's (`State::link_moves`), so its undo step puts
 /// them back; a link that went does not come back.
 pub fn follow(s: &mut crate::session::Session, f: impl Fn(Target) -> Option<Target>) {
-    let old = links();
+    let old = links(&s.settings);
     let mut all = old.clone();
     let before = std::mem::take(&mut s.link_moves);
     let mut moves = Vec::new();
@@ -263,15 +263,15 @@ pub fn follow(s: &mut crate::session::Session, f: impl Fn(Target) -> Option<Targ
         true
     });
     if all != old {
-        set_links(&all);
+        set_links(&s.settings, &all);
     }
     s.link_moves = moves;
 }
 
-pub fn remove(t: Target) {
-    let mut all = links();
+pub fn remove(st: &crate::settings_file::SettingsStore, t: Target) {
+    let mut all = links(st);
     all.retain(|o| o.target != t);
-    set_links(&all);
+    set_links(st, &all);
 }
 
 /// The menu commands.
@@ -309,7 +309,7 @@ pub struct LinkBox {
 }
 
 impl LinkBox {
-    pub fn new(target: Target, at: (f32, f32)) -> LinkBox {
+    pub fn new(st: &crate::settings_file::SettingsStore, target: Target, at: (f32, f32)) -> LinkBox {
         let mut b = LinkBox {
             target,
             at,
@@ -326,7 +326,7 @@ impl LinkBox {
             all: Vec::new(),
         };
         // An existing link opens with its settings.
-        if let Some(l) = link_of(target) {
+        if let Some(l) = link_of(st, target) {
             b.port = l.port;
             b.ch = l.ch;
             b.cc = Some(l.cc);
@@ -461,10 +461,10 @@ pub struct Remote {
 
 impl Remote {
     /// The kept links, read again when `settings.txt`'s text changed.
-    pub fn sync(&mut self) {
-        let now = crate::settings_file::get(KEY);
+    pub fn sync(&mut self, st: &crate::settings_file::SettingsStore) {
+        let now = st.get(KEY);
         if self.read != now {
-            self.links = links();
+            self.links = links(st);
             self.live = vec![Live::default(); self.links.len()];
             self.read = now;
         }
@@ -500,20 +500,21 @@ mod tests {
 
     #[test]
     fn links_are_kept() {
+        let st = &crate::settings_file::SettingsStore::memory();
         let mut l = Link::new(2, 21, Target::Knob(KnobId::ChanVol(3)));
         l.port = Some(4);
         l.mode = Mode::Inc;
         l.smooth = Some(250);
         let p = Link::new(0, 7, Target::Param(1, 12));
-        add(l, true);
-        add(p, true);
-        assert_eq!(links(), vec![l, p]);
+        add(st, l, true);
+        add(st, p, true);
+        assert_eq!(links(st), vec![l, p]);
         // The same controller: the earlier link goes.
         let m = Link { target: Target::Fader(2), ..l };
-        add(m, true);
-        assert_eq!(links(), vec![p, m]);
-        remove(Target::Param(1, 12));
-        assert_eq!(links(), vec![m]);
+        add(st, m, true);
+        assert_eq!(links(st), vec![p, m]);
+        remove(st, Target::Param(1, 12));
+        assert_eq!(links(st), vec![m]);
         for t in [Target::Knob(KnobId::Eq(1, 2, 0)), Target::Knob(KnobId::Send(1, 0)), Target::Knob(KnobId::MasterPitch), Target::RackTrack(4), Target::RackLed(2)] {
             assert_eq!(parse_target(&target_text(t)), Some(t));
         }
@@ -552,7 +553,8 @@ mod tests {
 
     #[test]
     fn the_box_makes_its_link() {
-        let mut b = LinkBox::new(Target::Knob(KnobId::ChanPan(0)), (0.0, 0.0));
+        let st = &crate::settings_file::SettingsStore::memory();
+        let mut b = LinkBox::new(st, Target::Knob(KnobId::ChanPan(0)), (0.0, 0.0));
         assert_eq!(b.link(), None, "no controller yet");
         b.cc = Some(10);
         b.omni = true;

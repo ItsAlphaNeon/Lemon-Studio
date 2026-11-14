@@ -240,10 +240,10 @@ impl MidiIn {
     /// Lists the devices, opens the enabled inputs and starts the watcher. `wake` is called from the driver's thread
     /// after each message the UI should handle, and from the watcher when devices come or go. Devices come through
     /// `midir`: WinMM on Windows, ALSA on Linux, CoreMIDI on macOS.
-    pub fn open(wake: fn()) -> MidiIn {
+    pub fn open(st: &crate::settings_file::SettingsStore, wake: fn()) -> MidiIn {
         let mut m = MidiIn::none();
         m.wake = wake;
-        m.refresh();
+        m.refresh(st);
         let changed = m.changed.clone();
         let (ins, outs) = (m.inputs.iter().map(|i| i.name.clone()).collect::<Vec<_>>(), m.outputs.clone());
         let _ = std::thread::Builder::new().name("midi-watch".into()).spawn(move || {
@@ -280,10 +280,10 @@ impl MidiIn {
 
     /// Lists the devices again and opens / closes inputs as their Enable says (`crate::midi_cfg`). Returns the
     /// inputs that opened now.
-    pub fn refresh(&mut self) -> Vec<String> {
+    pub fn refresh(&mut self, st: &crate::settings_file::SettingsStore) -> Vec<String> {
         let names = input_names();
         self.outputs = output_names();
-        self.conns.retain(|(n, _)| names.contains(n) && crate::midi_cfg::input(n).enabled && !crate::surface_port::claims(n) && !own(n));
+        self.conns.retain(|(n, _)| names.contains(n) && crate::midi_cfg::input(st, n).enabled && !crate::surface_port::claims(n) && !own(n));
         let mut opened = Vec::new();
         let mut inputs = Vec::with_capacity(names.len());
         for (i, name) in names.iter().enumerate() {
@@ -291,7 +291,7 @@ impl MidiIn {
                 continue;
             }
             // A control surface's port is `crate::surface`'s.
-            let want = crate::midi_cfg::input(name).enabled && !crate::surface_port::claims(name);
+            let want = crate::midi_cfg::input(st, name).enabled && !crate::surface_port::claims(name);
             let mut failed = false;
             if want && !self.conns.iter().any(|(n, _)| n == name) {
                 match self.connect(i, name) {
@@ -413,7 +413,7 @@ mod tests {
         fn wake() {
             WAKES.fetch_add(1, Ordering::Relaxed);
         }
-        let midi = MidiIn::open(wake);
+        let midi = MidiIn::open(&crate::settings_file::SettingsStore::memory(), wake);
         let names = midi.open_names();
         let out = midir::MidiOutput::new("Lemon Studio test").expect("MIDI output");
         let port = out.ports().into_iter().find(|p| out.port_name(p).is_ok_and(|n| names.contains(&n)));

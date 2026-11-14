@@ -115,7 +115,7 @@ mod tests {
         assert_eq!(saved.channels[row].plugin_state.as_deref(), Some(lemon_slicer::params::default_state().as_slice()));
 
         let fl = state_for(&wav);
-        assert!(a.state.session.plugins.set_state(row, &plugin_state(&fl)));
+        assert!(a.state.session.plugins.set_state(row, &plugin_state(&crate::settings_file::store(), &fl)));
         a.state.session.project.get_mut().channels[row].plugin = Some("Fruity slicer".into());
         a.save_to(file.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&file).unwrap()).unwrap()).unwrap();

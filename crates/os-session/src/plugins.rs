@@ -685,8 +685,8 @@ impl Plugins {
     /// The user just added the instance under `key` (a new channel's plugin, a new effect in a slot): its window opens
     /// detached while "Open new plugin windows floating" is on. Instances a project brings open docked, as before (spec:
     /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
-    pub fn added(&mut self, key: usize) {
-        let on = crate::prefs::check(&crate::prefs::DETACH_NEW);
+    pub fn added(&mut self, st: &crate::settings_file::SettingsStore, key: usize) {
+        let on = st.check(&crate::prefs::DETACH_NEW);
         if self.hosted.contains_key(&key) {
             self.editor_events.push(EditorEvent::Detached(key, on));
         }
@@ -1316,7 +1316,7 @@ const CLIP_END: &str = "Clip end";
 /// stretch settings, the sample's start, length, loop points, loop options and precomputed effects, the channel
 /// filter, declick mode and sampler flags, and the root note page (nih-plug JSON state with the u64 length prefix of
 /// its CLAP state; spec: plugins/lemon-sampler.md §6, §7).
-pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
+pub fn sampler_state(st: &crate::settings_file::SettingsStore, ch: &os_model::Channel) -> Vec<u8> {
     let mut params = Vec::new();
     // Model records: panning, volume, cutoff (Mod X), resonance (Mod Y), pitch.
     for (k, (e, pre)) in ch.envelopes.iter().zip(ENV_PREFIXES).enumerate() {
@@ -1357,9 +1357,9 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
         params.push(format!("\"{id}\":{v}"));
     }
     // Factory placeholders (`%FLStudioFactoryData%`...) become real paths: the plugin opens files directly.
-    let path = resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
+    let path = resolve_sample(st, ch.sample_path.as_deref().unwrap_or(""));
     let path = path.as_str();
-    for (id, v) in channel_params(ch, || sample_frames(path)) {
+    for (id, v) in channel_params(ch, || sample_frames(st, path)) {
         params.push(format!("\"{id}\":{v}"));
     }
     // The persisted fields are JSON strings holding JSON. The file's own precomputed values travel whole: Lemon Sampler
@@ -1383,7 +1383,7 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
 /// plugins/lemon-sampler.md §7). A value whose knob still stands where the channel's value puts it keeps the channel's
 /// value, so an untouched setting is saved as the file had it. The stretch settings follow the editor's edits as they
 /// happen (`params_tick`).
-pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
+pub fn store_sampler(st: &crate::settings_file::SettingsStore, ch: &mut os_model::Channel, state: &[u8]) {
     use lemon_sampler::params as sp;
     let (_, json) = state_json(state);
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(json) else { return };
@@ -1462,7 +1462,7 @@ pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
     if s.loop_points.is_some() || ls > 0.0 || le < 1.0 {
         let path = v.get("fields").and_then(|x| x.get("sample-path")).and_then(|x| x.as_str());
         let path = path.and_then(|p| serde_json::from_str::<String>(p).ok()).unwrap_or_default();
-        if let Some(n) = sample_frames(&path).filter(|&n| (ls, le) != loop_knobs(s.loop_points, n)) {
+        if let Some(n) = sample_frames(st, &path).filter(|&n| (ls, le) != loop_knobs(s.loop_points, n)) {
             s.loop_points = Some([loop_frame(ls, n), loop_frame(le, n)]);
         }
     }
@@ -1538,8 +1538,8 @@ fn zone_units(key: i32) -> i32 {
 }
 
 /// Frames of the sample file at `path` (placeholders resolved), when it can be read.
-fn sample_frames(path: &str) -> Option<u64> {
-    let path = resolve_sample(path);
+fn sample_frames(st: &crate::settings_file::SettingsStore, path: &str) -> Option<u64> {
+    let path = resolve_sample(st, path);
     if path.is_empty() {
         return None;
     }
@@ -1621,11 +1621,11 @@ pub fn misc_param(name: &str, norm: f64, misc: &mut os_model::ChannelMisc) -> bo
 
 /// A project sample path as a file path (placeholders resolved against the factory content folder, `crate::factory_folder`;
 /// parts matched ignoring case where the path as written is not found; else unchanged).
-pub fn resolve_sample(path: &str) -> String {
+pub fn resolve_sample(st: &crate::settings_file::SettingsStore, path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }
-    os_engine::SampleLibrary::new(crate::factory_folder::dir())
+    os_engine::SampleLibrary::new(crate::factory_folder::dir(st))
         .resolve(path)
         .map_or_else(|| path.to_string(), |p| p.to_string_lossy().into_owned())
 }

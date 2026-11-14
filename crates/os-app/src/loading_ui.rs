@@ -51,19 +51,19 @@ mod tests {
     #[test]
     fn decoding_threads_follow_threaded_loading() {
         assert!(!check(&THREADED_SAMPLE_LOADING), "off by default");
-        assert_eq!((workers(0), workers(1), workers(10)), (0, 1, 1));
+        assert_eq!((workers(&crate::settings_file::store(), 0), workers(&crate::settings_file::store(), 1), workers(&crate::settings_file::store(), 10)), (0, 1, 1));
         set_check(&THREADED_SAMPLE_LOADING, true);
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4);
-        assert_eq!((workers(0), workers(1), workers(10)), (0, 1, cores));
+        assert_eq!((workers(&crate::settings_file::store(), 0), workers(&crate::settings_file::store(), 1), workers(&crate::settings_file::store(), 10)), (0, 1, cores));
         // A project of six sampler channels, each with a file of its own (missing: the workers report them failed).
-        let mut p = crate::projects::default_project();
+        let mut p = crate::projects::default_project(&crate::settings_file::store());
         for i in 0..6 {
             let r = crate::projects::add_channel(&mut p);
             p.channels[r].sample_path = Some(format!("Z:/no such folder/loading-{i}.wav"));
         }
-        assert_eq!(Loading::start(&p).workers, cores.min(6), "on");
+        assert_eq!(Loading::start(&crate::settings_file::store(), &p).workers, cores.min(6), "on");
         set_check(&THREADED_SAMPLE_LOADING, false);
-        let mut l = Loading::start(&p);
+        let mut l = Loading::start(&crate::settings_file::store(), &p);
         assert_eq!(l.workers, 1, "off");
         // Off the UI thread all the same: every file comes back from the one worker.
         let t = std::time::Instant::now();

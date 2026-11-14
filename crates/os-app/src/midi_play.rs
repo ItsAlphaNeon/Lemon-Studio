@@ -95,7 +95,7 @@ pub fn white_index(key: u8) -> Option<usize> {
 
 /// Velocity `v` (1..127) through curve `of`, 1..127.
 fn curved(of: CurveOf, v: u8) -> u8 {
-    let c = cfg::curve(of);
+    let c = cfg::curve(&crate::settings_file::store(), of);
     if c.is_line() {
         return v;
     }
@@ -156,9 +156,9 @@ impl App {
     /// changed in the hint bar.
     pub(crate) fn midi_refresh(&mut self, said: bool) {
         let before: Vec<String> = self.midi_page().inputs.iter().map(|i| i.name.clone()).collect();
-        let opened = self.state.session.midi.refresh();
+        let opened = self.state.session.midi.refresh(&self.state.session.settings);
         self.surface_refresh();
-        self.state.session.midi.set_ext_sync(cfg::ext_sync().as_deref());
+        self.state.session.midi.set_ext_sync(cfg::ext_sync(&self.state.session.settings).as_deref());
         let p = &mut self.state.midi;
         p.inputs = self.state.session.midi.inputs.clone();
         p.outputs = self.state.session.midi.outputs.clone();
@@ -187,10 +187,10 @@ impl App {
 
     /// Messages received, oldest first (spec §3, §4, §8). With Enable MIDI remote control off, all are ignored.
     pub(crate) fn midi_events(&mut self, evs: Vec<Ev>) {
-        if evs.is_empty() || !Switch::Remote.on() {
+        if evs.is_empty() || !Switch::Remote.on(&self.state.session.settings) {
             return;
         }
-        let ext = cfg::ext_sync();
+        let ext = cfg::ext_sync(&self.state.session.settings);
         let mut notes = false;
         for ev in evs {
             match ev.msg {
@@ -438,13 +438,13 @@ impl App {
     /// Master sync (spec §7): the outputs with Send master sync while Enable MIDI output and master sync are on; and
     /// while Enable MIDI output is on, the outputs with a port, for Lemon MIDI Out (spec: plugins/midi-out.md §6.4).
     fn midi_out_tick(&mut self) {
-        let send = Switch::Output.on() && Switch::MasterSync.on();
+        let send = Switch::Output.on(&self.state.session.settings) && Switch::MasterSync.on(&self.state.session.settings);
         let sync = if send {
             self.state.session.midi
                 .outputs
                 .iter()
                 .filter_map(|name| {
-                    let c = cfg::output(name);
+                    let c = cfg::output(&self.state.session.settings, name);
                     c.sync.then(|| (name.clone(), c.notes_off))
                 })
                 .collect()
@@ -452,9 +452,9 @@ impl App {
             Vec::new()
         };
         let (mut ports, mut ports_off) = (Vec::new(), Vec::new());
-        if Switch::Output.on() {
+        if Switch::Output.on(&self.state.session.settings) {
             for name in &self.state.session.midi.outputs {
-                let c = cfg::output(name);
+                let c = cfg::output(&self.state.session.settings, name);
                 if let Some(p) = c.port {
                     ports.push((name.clone(), p));
                     if c.notes_off {
@@ -468,7 +468,7 @@ impl App {
             ports,
             ports_off,
             kind: crate::midi_out::SyncKind::of(prefs::index(&prefs::SYNC_TYPE)),
-            offset_ms: cfg::offset(Offset::MasterSync),
+            offset_ms: cfg::offset(&self.state.session.settings, Offset::MasterSync),
             ppq: self.state.session.project.ppq.max(1),
             tempo: self.state.tempo(),
         };
@@ -503,7 +503,7 @@ impl App {
             }
             MAct::OutSync | MAct::OutNotesOff => {
                 let Some(name) = out else { return };
-                let mut c = cfg::output(&name);
+                let mut c = cfg::output(&self.state.session.settings, &name);
                 let (what, on) = if m == MAct::OutSync {
                     c.sync = !c.sync;
                     ("Send master sync", c.sync)
@@ -511,14 +511,14 @@ impl App {
                     c.notes_off = !c.notes_off;
                     ("Send all notes off", c.notes_off)
                 };
-                cfg::set_output(&name, c);
+                cfg::set_output(&self.state.session.settings, &name, c);
                 let mut msg = format!("{name}: {what} {}", if on { "on" } else { "off" });
-                if m == MAct::OutSync && on && !(Switch::MasterSync.on() && Switch::Output.on()) {
+                if m == MAct::OutSync && on && !(Switch::MasterSync.on(&self.state.session.settings) && Switch::Output.on(&self.state.session.settings)) {
                     msg.push_str(" (OPTIONS > Enable MIDI master sync is off)");
                 }
                 self.state.message = Some(msg);
             }
-            MAct::Curve(of) => self.state.midi.curve = Some(CurveEdit { of, curve: cfg::curve(of) }),
+            MAct::Curve(of) => self.state.midi.curve = Some(CurveEdit { of, curve: cfg::curve(&self.state.session.settings, of) }),
             MAct::CurveClose => self.state.midi.curve = None,
             MAct::CurveReset => {
                 if let Some(e) = self.state.midi.curve.as_mut() {
@@ -527,7 +527,7 @@ impl App {
             }
             MAct::CurveAccept => {
                 if let Some(e) = self.state.midi.curve.take() {
-                    cfg::set_curve(e.of, e.curve);
+                    cfg::set_curve(&self.state.session.settings, e.of, e.curve);
                     self.state.message = Some(format!("{}: kept", e.of.title()));
                 }
             }
@@ -554,9 +554,9 @@ impl App {
 
     /// Switches input `name` on or off; it opens or closes at once (spec §2).
     fn midi_enable(&mut self, name: &str) {
-        let mut c = cfg::input(name);
+        let mut c = cfg::input(&self.state.session.settings, name);
         c.enabled = !c.enabled;
-        cfg::set_input(name, c);
+        cfg::set_input(&self.state.session.settings, name, c);
         if !c.enabled {
             self.midi_release_all();
         }
@@ -589,23 +589,23 @@ impl App {
         let msg = match m {
             MAct::OutPort => {
                 let Some(name) = p.selected_output().cloned() else { return };
-                let mut c = cfg::output(&name);
+                let mut c = cfg::output(&self.state.session.settings, &name);
                 c.port = port(c.port);
-                cfg::set_output(&name, c);
+                cfg::set_output(&self.state.session.settings, &name, c);
                 format!("{name}: port {}", c.port.map_or_else(|| "---".into(), |p| p.to_string()))
             }
             MAct::InPort => {
                 let Some(name) = p.selected_input().map(|i| i.name.clone()) else { return };
-                let mut c = cfg::input(&name);
+                let mut c = cfg::input(&self.state.session.settings, &name);
                 c.port = port(c.port);
-                cfg::set_input(&name, c);
+                cfg::set_input(&self.state.session.settings, &name, c);
                 format!("{name}: port {}", c.port.map_or_else(|| "---".into(), |p| p.to_string()))
             }
             MAct::Offset(o) => {
-                let v = steps.map_or(0, |s| cfg::offset(o) + s);
-                cfg::set_offset(o, v);
+                let v = steps.map_or(0, |s| cfg::offset(&self.state.session.settings, o) + s);
+                cfg::set_offset(&self.state.session.settings, o, v);
                 let what = if o == Offset::MasterSync { "Master sync offset" } else { "External sync offset" };
-                format!("{what}: {} ms", cfg::offset(o))
+                format!("{what}: {} ms", cfg::offset(&self.state.session.settings, o))
             }
             _ => return,
         };
@@ -616,12 +616,12 @@ impl App {
     /// External clock sync's menu: Off and the input devices (spec §8).
     fn ext_sync_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
-        let now = cfg::ext_sync();
+        let now = cfg::ext_sync(&self.state.session.settings);
         let mut items = vec![PItem::new("Off", Cmd::MidiExt(None)).mark(Mark::Radio(now.is_none()))];
         for d in &self.state.midi.inputs {
             let on = now.as_deref() == Some(d.name.as_str());
             let it = PItem::new(d.name.clone(), Cmd::MidiExt(Some(d.name.clone()))).mark(Mark::Radio(on));
-            items.push(if cfg::input(&d.name).enabled { it } else { it.off() });
+            items.push(if cfg::input(&self.state.session.settings, &d.name).enabled { it } else { it.off() });
         }
         self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None, scroll: [0; 2] });
         self.invalidate();
@@ -629,7 +629,7 @@ impl App {
 
     /// External clock sync chosen (`Cmd::MidiExt`).
     pub(crate) fn set_ext_sync(&mut self, device: Option<String>) -> Option<String> {
-        cfg::set_ext_sync(device.as_deref());
+        cfg::set_ext_sync(&self.state.session.settings, device.as_deref());
         self.state.session.midi.set_ext_sync(device.as_deref());
         self.invalidate();
         Some(format!("External clock sync: {}", device.as_deref().unwrap_or("Off")))
@@ -637,8 +637,8 @@ impl App {
 
     /// An OPTIONS menu MIDI switch (spec §5).
     pub(crate) fn toggle_midi_switch(&mut self, sw: Switch) {
-        let on = !sw.on();
-        sw.set(on);
+        let on = !sw.on(&self.state.session.settings);
+        sw.set(&self.state.session.settings, on);
         if sw == Switch::Remote && !on {
             self.midi_release_all();
         }
@@ -773,7 +773,7 @@ mod tests {
         assert!(app.state.link_box.is_some());
         app.midi_notes(vec![cc(21, 5)]);
         assert!(app.state.link_box.is_none(), "auto accepted");
-        assert_eq!(crate::remote::link_of(vol).map(|l| (l.ch, l.cc)), Some((0, 21)));
+        assert_eq!(crate::remote::link_of(&crate::settings_file::store(), vol).map(|l| (l.ch, l.cc)), Some((0, 21)));
         app.midi_notes(vec![cc(21, 127)]);
         assert!((app.state.knob(KnobId::ChanVol(0)) - 1.0).abs() < 1e-4);
         app.midi_notes(vec![cc(21, 0)]);
@@ -791,13 +791,13 @@ mod tests {
         app.multilink_knob(pan);
         app.multilink_knob(Target::Knob(KnobId::MasterVol));
         app.midi_notes(vec![cc(30, 64), cc(31, 64)]);
-        assert_eq!(crate::remote::link_of(pan).map(|l| l.cc), Some(30));
-        assert_eq!(crate::remote::link_of(Target::Knob(KnobId::MasterVol)).map(|l| l.cc), Some(31));
+        assert_eq!(crate::remote::link_of(&crate::settings_file::store(), pan).map(|l| l.cc), Some(30));
+        assert_eq!(crate::remote::link_of(&crate::settings_file::store(), Target::Knob(KnobId::MasterVol)).map(|l| l.cc), Some(31));
         assert!(!app.state.multilink.on, "the queue is empty: off");
         // An unlinked controller goes to the instrument; Remove link drops the link.
         assert!(!app.remote_cc("Test", 0, 99, 1));
         app.remote_cmd(RCmd::Unlink(pan));
-        assert!(crate::remote::link_of(pan).is_none());
+        assert!(crate::remote::link_of(&crate::settings_file::store(), pan).is_none());
     }
     /// Master sync to a real loopback port (loopMIDI's "LemonKeys" here): Start, then clocks at 24 a quarter, then Stop
     /// (needs the port and an audio device): `cargo test -p os-app master_clock_loopback -- --ignored`.
@@ -806,7 +806,7 @@ mod tests {
     fn master_clock_loopback() {
         use std::sync::{Arc, Mutex};
         let mut app = App::new(None);
-        app.state.session.midi = crate::midi_in::MidiIn::open(|| {});
+        app.state.session.midi = crate::midi_in::MidiIn::open(&crate::settings_file::store(), || {});
         app.state.session.midi_out = crate::midi_out::MidiOut::start(app.state.session.transport.watch());
         let name = app.state.session.midi.outputs.iter().find(|n| n.contains("LemonKeys")).cloned().expect("a LemonKeys output");
         let input = midir::MidiInput::new("Lemon Studio clock test").unwrap();
@@ -818,9 +818,9 @@ mod tests {
         let _conn = input
             .connect(&port.expect("a LemonKeys input"), "clock", move |_, b, _| sink.lock().unwrap().push(b[0]), ())
             .unwrap();
-        cfg::set_output(&name, cfg::OutCfg { sync: true, ..cfg::OutCfg::default() });
-        Switch::Output.set(true);
-        Switch::MasterSync.set(true);
+        cfg::set_output(&crate::settings_file::store(), &name, cfg::OutCfg { sync: true, ..cfg::OutCfg::default() });
+        Switch::Output.set(&crate::settings_file::store(), true);
+        Switch::MasterSync.set(&crate::settings_file::store(), true);
         app.midi_out_tick();
         std::thread::sleep(Duration::from_millis(300));
         app.act(crate::app::Action::Play);
@@ -839,7 +839,7 @@ mod tests {
 /// The external sync device's transport message (spec §8): with a positive offset it waits that long. `sel` is the
 /// time selection that loops playback.
 pub(crate) fn ext_message_in(s: &mut Session, m: Msg, sel: Option<(u32, u32)>) {
-    let off = cfg::offset(Offset::External);
+    let off = cfg::offset(&s.settings, Offset::External);
     if off > 0 {
         s.ext_pending.push_back((Instant::now() + Duration::from_millis(off as u64), m));
     } else {

@@ -397,7 +397,7 @@ fn transport(ui: &mut Ui, c: &Ctx) {
     // dark dot in the middle; disarmed, a small dimmed dot. The record colour is white under High visibility
     // (`crate::high_visibility`).
     let rec = a.span(486.0, 513.0, 7.0, 33.0);
-    let hov = ui.hit(rec, Action::Record, crate::record::hint());
+    let hov = ui.hit(rec, Action::Record, crate::record::hint(&crate::settings_file::store()));
     let armed = s.session.rec.armed;
     let down = ui.down(rec, &Action::Record);
     let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());
@@ -475,7 +475,7 @@ fn recording(ui: &mut Ui, c: &Ctx) -> bool {
         if r.right() > c.fit {
             return false;
         }
-        tool_button(ui, r, icon, opt.on(), Action::RecOpt(opt), crate::record::option_hint(opt));
+        tool_button(ui, r, icon, opt.on(&crate::settings_file::store()), Action::RecOpt(opt), crate::record::option_hint(opt));
     }
     true
 }
@@ -836,7 +836,7 @@ fn mode_buttons(s: &State) -> [(Icon, bool, Action, &'static str); 5] {
     [
         (Icon::TypingKeyboard, s.toggles.contains(&"typing"), Action::Typing, "Computer MIDI keyboard (Ctrl+T)"),
         (Icon::AutoScroll, crate::autoscroll::on(), Action::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
-        (Icon::StepEdit, crate::step_edit::on(), Action::StepEdit, "Step editing (Ctrl+E)"),
+        (Icon::StepEdit, crate::step_edit::on(&s.session.settings), Action::StepEdit, "Step editing (Ctrl+E)"),
         (Icon::Link, crate::enable_groups::on(), Action::EnableGroups, "Grouped clips move together (Shift+Alt+G)"),
         (Icon::MidiControl, s.multilink.on, Action::Multilink, "Multi MIDI learn (Ctrl+J)"),
     ]

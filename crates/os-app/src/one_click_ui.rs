@@ -46,7 +46,7 @@ impl App {
             self.state.message = Some("Already recording audio".into());
             return self.invalidate();
         }
-        capture::set_last_input(&input);
+        capture::set_last_input(&self.state.session.settings, &input);
         if self.state.session.transport.playing() {
             self.act(Action::Stop);
         }
@@ -113,7 +113,7 @@ impl App {
 /// A stereo and a mono header per device with its inputs, each recording into the audio editor (`editor`) or the
 /// playlist; the input picked last has a dot.
 pub fn inputs(editor: bool) -> Vec<PItem> {
-    let last = capture::last_input();
+    let last = capture::last_input(&crate::settings_file::store());
     let mut v = Vec::new();
     let list = devices();
     for (device, asio, channels) in &list {
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(labels(&v), ["Into the audio editor", "Test ASIO - stereo", "In 1 - In 2", "Test ASIO - mono", "In 1", "In 2"]);
         assert!(v[0].enabled && v[0].cmd == Cmd::OneClickEditor && v[1].head && v[3].head);
         assert!(v.iter().all(|p| p.mark != Mark::Radio(true)), "nothing picked yet");
-        capture::set_last_input(&Input { device: "Test ASIO".into(), asio: true, first: 1, stereo: false });
+        capture::set_last_input(&crate::settings_file::store(), &Input { device: "Test ASIO".into(), asio: true, first: 1, stereo: false });
         let v = submenu(TOOLS_MENU, "Quick record").expect("TOOLS submenu")(&app.state);
         assert_eq!(v[5].mark, Mark::Radio(true), "In 2 dotted");
     }
@@ -245,7 +245,7 @@ mod tests {
         assert!(name.starts_with("untitled_") && name.ends_with("_REC.wav"), "{name}");
         let clip = app.state.session.project.arrangement().unwrap().clips.last().unwrap().clone();
         assert_eq!(clip.position, 0);
-        assert!(app.state.session.history.entries().iter().any(|e| e.1 == RECORDED));
+        assert!(app.state.session.history.entries(&crate::settings_file::store()).iter().any(|e| e.1 == RECORDED));
         let _ = std::fs::remove_file(&path);
     }
 }

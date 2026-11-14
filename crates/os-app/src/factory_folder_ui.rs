@@ -15,7 +15,7 @@ impl App {
     /// The folder button (or the path beside it): a folder picker starting at the folder in use.
     pub(crate) fn factory_folder_pick(&mut self) {
         use crate::filedlg::{FileDlg, Mode};
-        let start = dir().filter(|d| d.is_dir());
+        let start = dir(&self.state.session.settings).filter(|d| d.is_dir());
         let dlg = FileDlg::new(Mode::Folder, PICK_TITLE, "factory content folder", Then::FactoryFolder).start(start.as_deref());
         self.file_dialog(dlg);
     }
@@ -24,15 +24,15 @@ impl App {
     /// take the samples behind the placeholders from there, and so do the hosted Lemon Samplers.
     pub(crate) fn set_factory_folder(&mut self, chosen: Option<PathBuf>) {
         crate::settings_file::write(KEY, &chosen.as_deref().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default());
-        self.state.session.transport.set_factory(dir());
+        self.state.session.transport.set_factory(dir(&self.state.session.settings));
         for row in self.state.session.hosted_rows.clone() {
             let Some(ch) = self.state.session.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { continue };
             let Some(path) = ch.sample_path.as_deref().filter(|p| os_engine::SampleLibrary::has_placeholder(p)) else { continue };
             if self.state.session.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER) {
-                self.state.session.plugins.load_sample(row, &crate::plugins::resolve_sample(path));
+                self.state.session.plugins.load_sample(row, &crate::plugins::resolve_sample(&self.state.session.settings, path));
             }
         }
-        self.state.message = Some(format!("FL Studio factory content folder: {}", path_text()));
+        self.state.message = Some(format!("FL Studio factory content folder: {}", path_text(&self.state.session.settings)));
         self.invalidate();
     }
 }
@@ -54,14 +54,14 @@ mod tests {
         std::fs::create_dir_all(&packs).unwrap();
         std::fs::write(packs.join("Kick.wav"), b"RIFF").unwrap();
         let mut app = App::new(None);
-        assert_eq!(chosen(), None);
-        assert_eq!(dir(), os_engine::SampleLibrary::default_factory_dir());
+        assert_eq!(chosen(&crate::settings_file::store()), None);
+        assert_eq!(dir(&crate::settings_file::store()), os_engine::SampleLibrary::default_factory_dir());
         app.set_factory_folder(Some(root.clone()));
         assert_eq!(crate::settings_file::get(KEY), Some(root.to_string_lossy().into_owned()));
-        assert_eq!(dir(), Some(root.clone()));
-        let file = crate::plugins::resolve_sample(r"%flstudiodata%\PATCHES\packs\kick.WAV");
+        assert_eq!(dir(&crate::settings_file::store()), Some(root.clone()));
+        let file = crate::plugins::resolve_sample(&crate::settings_file::store(), r"%flstudiodata%\PATCHES\packs\kick.WAV");
         assert!(std::path::Path::new(&file).is_file(), "{file}");
-        assert!(path_text().starts_with(&root.to_string_lossy().into_owned()));
+        assert!(path_text(&crate::settings_file::store()).starts_with(&root.to_string_lossy().into_owned()));
         assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("FL Studio factory content folder: ")));
         // The File page shows it, with Reset and the folder button working; Reset goes back to the install found.
         if let Ok(mut c) = Canvas::new(1920, 1080, 1.0) {
@@ -79,7 +79,7 @@ mod tests {
         } else {
             app.set_factory_folder(None);
         }
-        assert_eq!((chosen(), dir()), (None, os_engine::SampleLibrary::default_factory_dir()));
+        assert_eq!((chosen(&crate::settings_file::store()), dir(&crate::settings_file::store())), (None, os_engine::SampleLibrary::default_factory_dir()));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

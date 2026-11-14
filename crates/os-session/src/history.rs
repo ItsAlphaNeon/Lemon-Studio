@@ -326,9 +326,9 @@ impl History {
 
     /// The list as the browser's History folder shows it: (entry, name), oldest first from "Last reset", or newest
     /// first with Show recent changes at the top.
-    pub fn entries(&self) -> Vec<(usize, &str)> {
+    pub fn entries(&self, st: &crate::settings_file::SettingsStore) -> Vec<(usize, &str)> {
         let mut v: Vec<(usize, &str)> = std::iter::once(LAST_RESET).chain(self.steps.iter().map(|st| &*st.name)).enumerate().collect();
-        if prefs::check(&prefs::RECENT_CHANGES_TOP) {
+        if st.check(&prefs::RECENT_CHANGES_TOP) {
             v.reverse();
         }
         v
@@ -345,8 +345,8 @@ impl History {
         self.steps.iter().any(|st| st.id == id)
     }
 
-    fn trim(&mut self) {
-        let max = usize::from(prefs::number(&prefs::MAX_UNDO_LEVELS));
+    fn trim(&mut self, st: &crate::settings_file::SettingsStore) {
+        let max = usize::from(st.number(&prefs::MAX_UNDO_LEVELS));
         while self.steps.len() > max && self.done > 0 {
             self.steps.remove(0);
             self.done -= 1;
@@ -355,8 +355,8 @@ impl History {
     }
 
     /// What Ctrl+Z does next: redo (Alternate undo mode off, after an undo) or undo.
-    pub fn ctrl_z_redoes(&self) -> bool {
-        !prefs::check(&prefs::ALTERNATE_UNDO) && self.undid && self.done < self.steps.len()
+    pub fn ctrl_z_redoes(&self, st: &crate::settings_file::SettingsStore) -> bool {
+        !st.check(&prefs::ALTERNATE_UNDO) && self.undid && self.done < self.steps.len()
     }
 }
 
@@ -376,7 +376,7 @@ pub fn record_named(s: &mut crate::session::Session, name: Cow<'static, str>, sn
     h.undid = false;
     h.run = None;
     h.fresh = true;
-    h.trim();
+    h.trim(&s.settings);
 }
 
 /// Adds to the newest step's commands (a plugin's values joining its step, `control::param_edit`), when it is done
@@ -467,7 +467,7 @@ pub fn track_io(s: &mut crate::session::Session, track: u16) {
 /// of the notches just before it on the same knob.
 pub fn knob(s: &mut crate::session::Session, id: KnobId, wheel: bool) {
     // The piano roll tool dialogs' knobs only preview; their Accept is the step (spec: ui/piano-strum.md §1).
-    if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) || matches!(id, KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_)) {
+    if !s.settings.check(&prefs::UNDO_KNOB_TWEAKS) || matches!(id, KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_)) {
         return;
     }
     let h = &s.history;
@@ -536,7 +536,7 @@ pub fn lower(name: &str) -> String {
 /// undo mode only). Without a step to act on, plain "Undo" / "Redo".
 pub fn edit_label(s: &crate::session::Session, redo_entry: bool) -> String {
     let h = &s.history;
-    let redo_it = redo_entry || h.ctrl_z_redoes();
+    let redo_it = redo_entry || h.ctrl_z_redoes(&s.settings);
     let (verb, step) = if redo_it { ("Redo", h.steps.get(h.done)) } else { ("Undo", h.done.checked_sub(1).and_then(|i| h.steps.get(i))) };
     match step {
         Some(st) => format!("{verb} {}", lower(&st.name)),
@@ -547,17 +547,17 @@ pub fn edit_label(s: &crate::session::Session, redo_entry: bool) -> String {
 /// Whether EDIT's entry has a step to act on.
 pub fn edit_enabled(s: &crate::session::Session, redo_entry: bool) -> bool {
     let h = &s.history;
-    if redo_entry || h.ctrl_z_redoes() { h.done < h.steps.len() } else { h.done > 0 }
+    if redo_entry || h.ctrl_z_redoes(&s.settings) { h.done < h.steps.len() } else { h.done > 0 }
 }
 
 /// Whether EDIT shows its Redo entry: Alternate undo mode on and a history to act on (only Undo while it is empty).
 pub fn redo_shown(s: &crate::session::Session) -> bool {
-    prefs::check(&prefs::ALTERNATE_UNDO) && !s.history.steps.is_empty()
+    s.settings.check(&prefs::ALTERNATE_UNDO) && !s.history.steps.is_empty()
 }
 
 /// Maximum undo levels changed: the history keeps that many.
 pub fn trim(s: &mut crate::session::Session) {
-    s.history.trim();
+    s.history.trim(&s.settings);
 }
 
 /// Another arrangement is shown: the playlist's steps belong to the one left (spec: ui/playlist.md §10).
@@ -743,9 +743,10 @@ mod tests {
     /// (spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
     #[test]
     fn recycle_bin_check_is_kept() {
-        assert!(prefs::check(&prefs::UNDONE_RECORDINGS_TO_BIN));
-        assert!(!prefs::toggle(&prefs::UNDONE_RECORDINGS_TO_BIN));
-        assert!(!prefs::check(&prefs::UNDONE_RECORDINGS_TO_BIN));
-        prefs::set_check(&prefs::UNDONE_RECORDINGS_TO_BIN, true);
+        let st = crate::settings_file::SettingsStore::memory();
+        assert!(st.check(&prefs::UNDONE_RECORDINGS_TO_BIN));
+        assert!(!st.toggle(&prefs::UNDONE_RECORDINGS_TO_BIN));
+        assert!(!st.check(&prefs::UNDONE_RECORDINGS_TO_BIN));
+        st.set_check(&prefs::UNDONE_RECORDINGS_TO_BIN, true);
     }
 }

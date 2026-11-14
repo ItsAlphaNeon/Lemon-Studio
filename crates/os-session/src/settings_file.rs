@@ -9,14 +9,15 @@
 //! The file is `key=value` lines. A key's value is its last line's; setting one replaces its first line (dropping any
 //! later one) or adds a line at the end; lines of keys this version does not know are written back as they were, so an
 //! older or newer Lemon Studio keeps what the other wrote. A missing or unreadable value is the reader's default. The
-//! file is read once, at the first read, and written whole whenever a value changes. Tests never read or write the user folder: each test thread has a store of its own, empty at its start.
+//! file is read when its store is made (`SettingsStore::at`) and written whole whenever a value changes. A session has its
+//! store (`Session::settings`); tests keep theirs in memory and never read or write the user folder.
 //!
 //! Keys so far: `toolbar_separators`, `toolbar_flat_buttons`, `toolbar_hint_bar` (`views::toolbar::Opts`),
 //! `clock_mode`, `clock_middle_unit` (`clock::Clock`), `step_edit` (`crate::step_edit`), the `window_*` positions
 //! (`crate::layout`), `factory_folder` (`crate::factory_folder`), the settings window's declared controls
 //! (`crate::prefs`), and `recent_project_1` .. `recent_project_50` (`crate::recent`).
 
-use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o.
+use std::sync::Mutex; // This code is a part of L e m o n S t u d i o.
 
 /// The file's lines as read: lines of keys this version does not know are written back as they were.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -59,42 +60,51 @@ impl Store {
     }
 }
 
-#[cfg_attr(any(test, feature = "test-util"), allow(dead_code))]
-static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
-
-#[cfg(any(test, feature = "test-util"))]
-thread_local! {
-    /// Tests run in parallel threads: each has its own settings, and none reads or writes the user folder.
-    static TEST: std::cell::RefCell<Store> = std::cell::RefCell::new(Store::default());
+/// The settings a session keeps: `settings.txt` of a folder (the user folder for Lemon Studio), or memory only (tests,
+/// a frontend that keeps none). Clones share one store.
+#[derive(Clone, Debug, Default)]
+pub struct SettingsStore {
+    store: std::sync::Arc<Mutex<Store>>,
+    file: Option<std::path::PathBuf>,
 }
 
-/// Runs `f` on the settings: read from `settings.txt` the first time.
-pub fn read<R>(f: impl FnOnce(&Store) -> R) -> R {
-    #[cfg(any(test, feature = "test-util"))]
-    return TEST.with(|s| f(&s.borrow()));
-    #[cfg(not(any(test, feature = "test-util")))]
-    f(&STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner()))
-}
+impl SettingsStore {
+    /// `settings.txt` in `dir`: read now, written whole whenever a value changes.
+    pub fn at(dir: impl Into<std::path::PathBuf>) -> SettingsStore {
+        let file = dir.into().join("settings.txt");
+        let store = std::fs::read_to_string(&file).map(|t| Store::parse(&t)).unwrap_or_default();
+        SettingsStore { store: std::sync::Arc::new(Mutex::new(store)), file: Some(file) }
+    }
 
-/// Sets `key` to `value` (one line: line breaks become spaces) and keeps the file when that changed it.
-pub fn write(key: &str, value: &str) {
-    let value = value.replace(['\r', '\n'], " ");
-    #[cfg(any(test, feature = "test-util"))]
-    TEST.with(|s| s.borrow_mut().set(key, &value));
-    #[cfg(not(any(test, feature = "test-util")))]
-    {
-        let mut s = STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner());
+    /// Kept in memory only, empty at the start.
+    pub fn memory() -> SettingsStore {
+        SettingsStore::default()
+    }
+
+    /// The user folder's (`os_paths::user_dir`), in memory when there is none.
+    pub fn user() -> SettingsStore {
+        os_paths::user_dir().map_or_else(SettingsStore::memory, SettingsStore::at)
+    }
+
+    /// Runs `f` on the settings.
+    pub fn read<R>(&self, f: impl FnOnce(&Store) -> R) -> R {
+        f(&self.store.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Sets `key` to `value` (one line: line breaks become spaces) and keeps the file when that changed it.
+    pub fn write(&self, key: &str, value: &str) {
+        let value = value.replace(['\r', '\n'], " ");
+        let mut s = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if s.get(key) != Some(value.as_str()) {
             s.set(key, &value);
-            save(&s);
+            self.keep(&s);
         }
     }
-}
 
-/// Sets each key to its value as `write` does, keeping the file once. A key without a line stays without one when its
-/// value is empty.
-pub fn write_all(pairs: &[(String, String)]) {
-    let set = |s: &mut Store| {
+    /// Sets each key to its value as `write` does, keeping the file once. A key without a line stays without one when
+    /// its value is empty.
+    pub fn write_all(&self, pairs: &[(String, String)]) {
+        let mut s = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
         for (key, value) in pairs {
             let value = value.replace(['\r', '\n'], " ");
@@ -103,50 +113,39 @@ pub fn write_all(pairs: &[(String, String)]) {
                 changed = true;
             }
         }
-        changed
-    };
-    #[cfg(any(test, feature = "test-util"))]
-    TEST.with(|s| set(&mut s.borrow_mut()));
-    #[cfg(not(any(test, feature = "test-util")))]
-    {
-        let mut s = STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner());
-        if set(&mut s) {
-            save(&s);
+        if changed {
+            self.keep(&s);
         }
     }
-}
 
-/// `key`'s value as text, `None` when it is not set or empty.
-pub fn get(key: &str) -> Option<String> {
-    read(|s| s.get(key).filter(|v| !v.is_empty()).map(String::from))
-}
+    /// `key`'s value as text, `None` when it is not set or empty.
+    pub fn get(&self, key: &str) -> Option<String> {
+        self.read(|s| s.get(key).filter(|v| !v.is_empty()).map(String::from))
+    }
 
-/// A switch kept as `1` / `0` under `key`; `default` when it is not set or is something else.
-pub fn flag(key: &str, default: bool) -> bool {
-    read(|s| match s.get(key) {
-        Some("1") => true,
-        Some("0") => false,
-        _ => default,
-    })
-}
+    /// A switch kept as `1` / `0` under `key`; `default` when it is not set or is something else.
+    pub fn flag(&self, key: &str, default: bool) -> bool {
+        self.read(|s| match s.get(key) {
+            Some("1") => true,
+            Some("0") => false,
+            _ => default,
+        })
+    }
 
-/// Keeps switch `key` as `1` / `0`.
-pub fn set_flag(key: &str, on: bool) {
-    write(key, if on { "1" } else { "0" });
-}
+    /// Keeps switch `key` as `1` / `0`.
+    pub fn set_flag(&self, key: &str, on: bool) {
+        self.write(key, if on { "1" } else { "0" });
+    }
 
-#[cfg_attr(any(test, feature = "test-util"), allow(dead_code))]
-fn load() -> Store {
-    os_paths::user_file("settings.txt").and_then(|f| std::fs::read_to_string(f).ok()).map(|t| Store::parse(&t)).unwrap_or_default()
-}
-
-/// Writes a whole new file beside the old one and then puts it in its place, so a crash part-way leaves the old file.
-#[cfg_attr(any(test, feature = "test-util"), allow(dead_code))]
-fn save(s: &Store) {
-    if let Some(dir) = os_paths::user_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        let tmp = dir.join("settings.txt.tmp");
-        if std::fs::write(&tmp, s.text()).is_ok() && std::fs::rename(&tmp, dir.join("settings.txt")).is_err() {
+    /// Writes a whole new file beside the old one and then puts it in its place, so a crash part-way leaves the old
+    /// file.
+    fn keep(&self, s: &Store) {
+        let Some(file) = &self.file else { return };
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = file.with_extension("txt.tmp");
+        if std::fs::write(&tmp, s.text()).is_ok() && std::fs::rename(&tmp, file).is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
     }
@@ -168,18 +167,35 @@ mod tests {
         assert_eq!(Store::parse(&s.text()), s);
     }
 
-    /// Switches read their default when unset or unreadable; values are one line; a test's store is its own.
+    /// Switches read their default when unset or unreadable; values are one line; a store in memory starts empty.
     #[test]
     fn flags_and_text() {
-        assert!(flag("toolbar_separators", true) && !flag("toolbar_hint_bar", false));
-        write("toolbar_hint_bar", "yes");
-        assert!(!flag("toolbar_hint_bar", false), "not 1 or 0: the default");
-        set_flag("toolbar_hint_bar", true);
-        set_flag("toolbar_separators", false);
-        assert!(flag("toolbar_hint_bar", false) && !flag("toolbar_separators", true));
-        write("clock_mode", "two\nlines");
-        assert_eq!(get("clock_mode").as_deref(), Some("two lines"));
-        write("clock_mode", "");
-        assert_eq!(get("clock_mode"), None);
+        let st = SettingsStore::memory();
+        assert!(st.flag("toolbar_separators", true) && !st.flag("toolbar_hint_bar", false));
+        st.write("toolbar_hint_bar", "yes");
+        assert!(!st.flag("toolbar_hint_bar", false), "not 1 or 0: the default");
+        st.set_flag("toolbar_hint_bar", true);
+        st.set_flag("toolbar_separators", false);
+        assert!(st.flag("toolbar_hint_bar", false) && !st.flag("toolbar_separators", true));
+        st.write("clock_mode", "two\nlines");
+        assert_eq!(st.get("clock_mode").as_deref(), Some("two lines"));
+        st.write("clock_mode", "");
+        assert_eq!(st.get("clock_mode"), None);
+    }
+
+    /// A store at a folder reads its file when made and writes it whole on a change; a second store at the same folder
+    /// reads what the first wrote.
+    #[test]
+    fn a_store_at_a_folder_keeps_its_file() {
+        let dir = std::env::temp_dir().join(format!("lemon-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.txt"), "future_key=x\n").unwrap();
+        let st = SettingsStore::at(&dir);
+        assert_eq!(st.get("future_key").as_deref(), Some("x"));
+        st.set_flag("toolbar_hint_bar", true);
+        assert_eq!(std::fs::read_to_string(dir.join("settings.txt")).unwrap(), "future_key=x\ntoolbar_hint_bar=1\n");
+        assert!(SettingsStore::at(&dir).flag("toolbar_hint_bar", false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

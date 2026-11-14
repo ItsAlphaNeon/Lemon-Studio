@@ -44,7 +44,7 @@ fn did(s: &mut State, redo_it: bool) -> String {
 /// (undo, redo, undo). With Show undo history in the browser when undoing changes on, the browser shows the history.
 /// Returns the hint bar's message.
 pub fn ctrl_z(s: &mut State) -> Option<String> {
-    let m = did(s, s.session.history.ctrl_z_redoes());
+    let m = did(s, s.session.history.ctrl_z_redoes(&s.session.settings));
     shown_in_browser(s);
     Some(m)
 }
@@ -129,7 +129,7 @@ mod tests {
         let snap = Snap::pattern(&s.session, s.pattern());
         record(&mut s.session, "Piano roll add note", snap);
         crate::rack::set_step(s, 0, 14, true);
-        assert_eq!(s.session.history.entries().iter().map(|e| e.1).collect::<Vec<_>>(), [LAST_RESET, STEP_SEQ_EDIT, "Piano roll add note"]);
+        assert_eq!(s.session.history.entries(&crate::settings_file::store()).iter().map(|e| e.1).collect::<Vec<_>>(), [LAST_RESET, STEP_SEQ_EDIT, "Piano roll add note"]);
         assert_eq!(redo(s), None);
         // Three levels kept: the oldest go.
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, 3);
@@ -139,7 +139,7 @@ mod tests {
             crate::rack::set_step(s, 0, 20 + k, true);
         }
         assert_eq!(s.session.history.len(), 3);
-        assert!(s.session.history.entries().iter().skip(1).all(|e| e.1 == "Piano roll edit"), "{:?}", s.session.history.entries());
+        assert!(s.session.history.entries(&crate::settings_file::store()).iter().skip(1).all(|e| e.1 == "Piano roll edit"), "{:?}", s.session.history.entries(&crate::settings_file::store()));
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, 2);
         trim(&mut s.session);
         assert_eq!((s.session.history.len(), s.session.history.done), (2, 2));
@@ -502,7 +502,7 @@ mod tests {
     }
 
     fn names(s: &State) -> Vec<&str> {
-        s.session.history.entries().into_iter().map(|e| e.1).collect()
+        s.session.history.entries(&s.session.settings).into_iter().map(|e| e.1).collect()
     }
 
     /// A mixer fader drag is one step, "Mixer track volume", as EDIT names it; Ctrl+Z puts the fader back exactly and

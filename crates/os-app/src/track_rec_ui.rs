@@ -38,8 +38,8 @@ impl App {
         }
         self.state.session.dirty = true;
         self.invalidate();
-        (on && n > 0 && !Opt::Audio.on()).then(|| {
-            Opt::Audio.toggle();
+        (on && n > 0 && !Opt::Audio.on(&self.state.session.settings)).then(|| {
+            Opt::Audio.toggle(&self.state.session.settings);
             "Recording filter: Audio on (armed tracks record while Record is armed)".to_string()
         })
     }
@@ -57,11 +57,11 @@ mod tests {
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.set_song_mode(true);
-        if Opt::Audio.on() {
-            Opt::Audio.toggle();
+        if Opt::Audio.on(&crate::settings_file::store()) {
+            Opt::Audio.toggle(&crate::settings_file::store());
         }
         let msg = app.arm_tracks(&[1], true);
-        assert!(msg.is_some_and(|m| m.contains("Audio on")) && Opt::Audio.on());
+        assert!(msg.is_some_and(|m| m.contains("Audio on")) && Opt::Audio.on(&crate::settings_file::store()));
         assert!(app.arm_tracks(&[1], true).is_none(), "already armed: says nothing");
         app.state.session.transport.pretend_at(0.0, true);
         app.track_rec_tick();
@@ -90,7 +90,7 @@ mod tests {
         assert!(path.parent().unwrap().ends_with("Recorded") && name.ends_with("_Bus 1.wav"), "{name}");
         let clip = app.state.session.project.arrangement().unwrap().clips.last().unwrap().clone();
         assert_eq!(clip.position, 96);
-        assert!(app.state.session.history.entries().iter().any(|e| e.1 == crate::one_click::RECORDED));
+        assert!(app.state.session.history.entries(&crate::settings_file::store()).iter().any(|e| e.1 == crate::one_click::RECORDED));
         assert_eq!(app.arm_tracks(&[1], false), None);
         assert!(!app.state.session.project.mixer.iter().any(|m| m.armed));
         let _ = std::fs::remove_file(&path);

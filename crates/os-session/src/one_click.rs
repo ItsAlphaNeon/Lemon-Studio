@@ -160,7 +160,7 @@ fn place_take(s: &mut Session, path: &std::path::Path, frames: u64, rate: u32, s
     let len = (frames as f64 / f64::from(rate) * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
     let track = crate::edit::playlist::free_track(s, 0, start, start + len.max(1));
     let text = path.to_string_lossy();
-    let added = s.samples.wave(&text).and_then(|_| {
+    let added = s.samples.wave(&s.settings, &text).and_then(|_| {
         crate::edit::playlist::snapshot_as(s, RECORDED);
         crate::edit::playlist::add_audio_clip_on(s, &text, track, start, None, lock_len)
     });

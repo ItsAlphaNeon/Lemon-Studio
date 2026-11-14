@@ -98,13 +98,13 @@ pub fn same_as_saved(saved: &Project, now: &Project) -> bool {
     *saved == now
 }
 
-pub fn default_project() -> Project {
-    template_project(&[crate::plugins::LEMON_SAMPLER])
+pub fn default_project(st: &crate::settings_file::SettingsStore) -> Project {
+    template_project(st, &[crate::plugins::LEMON_SAMPLER])
 }
 
 /// A one-channel project that plays `path` once from the start (browser sample preview, spec: ui/browser.md §7).
-pub fn preview_project(path: &str) -> Project {
-    let mut p = template_project(&["Preview"]);
+pub fn preview_project(st: &crate::settings_file::SettingsStore, path: &str) -> Project {
+    let mut p = template_project(st, &["Preview"]);
     p.channels[0].sample_path = Some(path.to_string());
     p.patterns = vec![Pattern { number: 1, notes: vec![Note { length: u32::from(p.ppq.max(4)), ..Note::step(0, 0) }], ..Pattern::default() }];
     p.arrangements.clear();
@@ -112,19 +112,19 @@ pub fn preview_project(path: &str) -> Project {
 }
 
 /// A project with no channels: the mixer and pattern 1 of a new one (FILE ▸ Import ▸ MIDI file adds its channels).
-pub fn empty_project() -> Project {
-    template_project(&[])
+pub fn empty_project(st: &crate::settings_file::SettingsStore) -> Project {
+    template_project(st, &[])
 }
 
-/// The old five-channel template (tests that need several channels).
+/// The old five-channel template (tests that need several channels), with the settings' defaults.
 #[cfg(any(test, feature = "test-util"))]
 pub fn test_project() -> Project {
-    template_project(&["Kick", "Clap", "Hat", "Snare", "Pluck"])
+    template_project(&crate::settings_file::SettingsStore::memory(), &["Kick", "Clap", "Hat", "Snare", "Pluck"])
 }
 
 /// Sampler channels named `names` (channel i on insert i + 1), 18 mixer tracks (master, Insert 1-16 and the hidden
 /// last one, as the reference's default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
-fn template_project(names: &[&str]) -> Project {
+fn template_project(st: &crate::settings_file::SettingsStore, names: &[&str]) -> Project {
     let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
     let mut mixer: Vec<MixerTrack> = (0..18u16).map(MixerTrack::new).collect();
     // The hidden last track is routed nowhere, as FL stores it (spec: flp/events/mixer.md).
@@ -141,7 +141,7 @@ fn template_project(names: &[&str]) -> Project {
         play_truncated: true,
         // Automatic crossfades (event 44) as the program setting says, whatever the template holds (spec:
         // ui/settings-choices.md "Project").
-        auto_crossfades: Some(crate::prefs::check(&crate::prefs::AUTO_CROSSFADES_NEW)),
+        auto_crossfades: Some(st.check(&crate::prefs::AUTO_CROSSFADES_NEW)),
         ..Project::default()
     }
 }

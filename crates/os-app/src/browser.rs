@@ -93,7 +93,7 @@ impl App {
 
     /// Clicking a sample plays it once (spec §7): cut off after `PREVIEW_LIMIT` unless "Full sample preview" is ticked.
     pub(crate) fn preview_sample(&self, path: &str) {
-        let mut p = crate::projects::preview_project(path);
+        let mut p = crate::projects::preview_project(&self.state.session.settings, path);
         p.tempo = Some(self.state.tempo());
         crate::preview_track::route(&mut p, &self.state.session.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
         let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
@@ -1274,8 +1274,8 @@ fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<Str
     let path = crate::data_folder_ui::adopt(s, path);
     crate::history::load_sample(&mut s.session, row);
     let ch = &mut s.session.project.get_mut().channels[row];
-    crate::rack::auto_name(ch, std::path::Path::new(&path));
-    crate::rack::read_tags(ch, std::path::Path::new(&path));
+    crate::rack::auto_name(&s.session.settings, ch, std::path::Path::new(&path));
+    crate::rack::read_tags(&s.session.settings, ch, std::path::Path::new(&path));
     ch.sample_path = Some(path.clone());
     s.session.sample_loads.push((row, path));
     s.session.dirty = true;

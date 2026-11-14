@@ -57,8 +57,8 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
 }
 
 /// FL's Sytrus factory presets, when FL is installed.
-fn factory_dir() -> PathBuf {
-    let fl = crate::factory_folder::dir().unwrap_or_else(os_paths::default_fl_dir);
+fn factory_dir(st: &crate::settings_file::SettingsStore) -> PathBuf {
+    let fl = crate::factory_folder::dir(st).unwrap_or_else(os_paths::default_fl_dir);
     fl.join("Data").join("Patches").join("Plugin presets").join("Generators").join("Sytrus")
 }
 
@@ -88,8 +88,8 @@ pub fn fst_presets_in(dir: &Path) -> Vec<crate::presets::Preset> {
 }
 
 /// Citrus's presets beyond its own folder: FL's factory ones.
-pub fn more_presets(plugin: &str) -> Vec<crate::presets::Preset> {
-    if plugin == CITRUS { fst_presets_in(&factory_dir()) } else { Vec::new() }
+pub fn more_presets(st: &crate::settings_file::SettingsStore, plugin: &str) -> Vec<crate::presets::Preset> {
+    if plugin == CITRUS { fst_presets_in(&factory_dir(st)) } else { Vec::new() }
 }
 
 /// The plugin state of an FL preset file for Citrus; `None` when `path` is not an `.fst` file, an error text when it

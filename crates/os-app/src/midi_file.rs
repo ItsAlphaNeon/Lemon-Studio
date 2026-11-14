@@ -668,7 +668,7 @@ impl App {
             self.reset_hosted();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;
-            s.session.project = crate::locked::Locked::new(crate::projects::empty_project());
+            s.session.project = crate::locked::Locked::new(crate::projects::empty_project(&crate::settings_file::store()));
             s.session.project.get_mut().ppq = ppq;
             s.session.project.get_mut().tempo = Some(tempo);
             crate::project_info_ui::created(s);
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn exports_read_back() {
         let imp = convert(&three(96), &Options::default(), 96);
-        let mut p = crate::projects::empty_project();
+        let mut p = crate::projects::empty_project(&crate::settings_file::store());
         p.channels = (0..3).map(|i| {
             let mut c = crate::projects::test_project().channels[0].clone();
             c.index = i;

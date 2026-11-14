@@ -11,8 +11,8 @@ use crate::playlist::{Cmd, Mark, PItem};
 use crate::record::RecCmd;
 
 /// TOOLS > Retro audio capture > Settings ▸.
-pub fn items(_: &State) -> Vec<PItem> {
-    let now = minutes();
+pub fn items(s: &State) -> Vec<PItem> {
+    let now = minutes(&s.session.settings);
     let mut items = vec![PItem::head("Keep the last")];
     items.extend(MINUTES.iter().map(|&m| {
         PItem::new(format!("{m} minute{}", if m == 1 { "" } else { "s" }), Cmd::Rec(RecCmd::AudioLog(m))).mark(Mark::Radio(m == now))
@@ -23,10 +23,10 @@ pub fn items(_: &State) -> Vec<PItem> {
 impl App {
     /// TOOLS > Retro audio capture > Enabled.
     pub(crate) fn toggle_audio_log(&mut self) {
-        let on = !enabled();
+        let on = !enabled(&self.state.session.settings);
         crate::settings_file::set_flag(ON, on);
-        self.audio_log.tick();
-        self.state.message = Some(if on { format!("Retro audio capture on: the last {} minute(s)", minutes()) } else { "Retro audio capture off".into() });
+        self.audio_log.tick(&self.state.session.settings);
+        self.state.message = Some(if on { format!("Retro audio capture on: the last {} minute(s)", minutes(&self.state.session.settings)) } else { "Retro audio capture off".into() });
     }
 
     pub(crate) fn set_audio_log_minutes(&mut self, m: u32) -> String {
@@ -37,7 +37,7 @@ impl App {
     /// TOOLS > Retro audio capture > Open capture in audio editor: the log (silence at either end left out) into a WAV in the
     /// `Recorded` folder, and into Tesla on the master track as One-click recording's takes go.
     pub(crate) fn dump_audio_log(&mut self) -> String {
-        if !enabled() {
+        if !enabled(&self.state.session.settings) {
             return "Retro audio capture is off: TOOLS > Retro audio capture > Enabled".into();
         }
         let (l, r) = self.audio_log.audio();

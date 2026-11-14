@@ -90,14 +90,14 @@ impl Plugins {
 
 /// Before a save: every hosted Lemon Trio writes its settings into its channel as the file's 3x Osc, and its custom
 /// shape's sample as the channel's.
-pub fn store(proj: &mut Project, plugins: &Plugins) {
+pub fn store(settings: &crate::settings_file::SettingsStore, proj: &mut Project, plugins: &Plugins) {
     for row in plugins.hosted.range(..FX_KEY).map(|(&k, _)| k).collect::<Vec<_>>() {
         let Some(st) = plugins.osc3_file_state(row) else { continue };
         if let Some(ch) = proj.channels.get_mut(row).filter(|c| c.kind == ChannelKind::Plugin) {
             ch.plugin = Some(FILE_NAME.into());
             ch.plugin_state = Some(st);
         }
-        follow_sample(proj, plugins, row, true);
+        follow_sample(settings, proj, plugins, row, true);
     }
 }
 
@@ -107,17 +107,17 @@ pub const LOOK_EVERY: Duration = Duration::from_millis(500);
 /// The custom shape's sample of the Lemon Trio on 3x Osc channel `row` becomes the channel's sample (event 196) and,
 /// while Auto name channels is on, its name, unless the channel names that file already (spec: plugins/3x-osc.md §1).
 /// Whether the channel changed. `wait`: lock an instance the audio thread is rendering (a save) or leave it.
-pub fn follow_sample(proj: &mut Project, plugins: &Plugins, row: usize, wait: bool) -> bool {
+pub fn follow_sample(st: &crate::settings_file::SettingsStore, proj: &mut Project, plugins: &Plugins, row: usize, wait: bool) -> bool {
     if !proj.channels.get(row).is_some_and(is_osc3) {
         return false;
     }
     let Some(p) = plugins.osc3_sample(row, wait).filter(|p| !p.is_empty()) else { return false };
     let ch = &mut proj.channels[row];
     // A placeholder path (`%FLStudioFactoryData%`...) that still names the same file is kept as the project wrote it.
-    if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
+    if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(st, old) == p) {
         return false;
     }
-    crate::edit::rack::auto_name(ch, std::path::Path::new(&p));
+    crate::edit::rack::auto_name(st, ch, std::path::Path::new(&p));
     ch.sample_path = Some(p);
     true
 }
@@ -149,7 +149,7 @@ pub fn sync_osc3(s: &mut crate::session::Session) {
         let mut st = lemon_3x_osc::params::plugin_state_from_fl(&channel_voicing(ch, &fl));
         // The channel's sample is the custom shape's (spec: plugins/3x-osc.md §1); the plugin opens the file
         // directly, so factory placeholders become real paths.
-        let sample = crate::plugins::resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
+        let sample = crate::plugins::resolve_sample(&s.settings, ch.sample_path.as_deref().unwrap_or(""));
         if !sample.is_empty()
             && let Some(b) = crate::plugins::with_sample_path(&st, &sample)
         {

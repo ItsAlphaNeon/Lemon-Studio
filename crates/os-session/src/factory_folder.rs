@@ -34,16 +34,16 @@ pub const FOLDER_HINT: &str = "The FL Studio installation folder that projects' 
 pub const PICK_TITLE: &str = "Select a directory";
 
 /// The folder the user chose, if any.
-pub fn chosen() -> Option<PathBuf> {
-    crate::settings_file::get(KEY).map(PathBuf::from)
+pub fn chosen(st: &crate::settings_file::SettingsStore) -> Option<PathBuf> {
+    st.get(KEY).map(PathBuf::from)
 }
 
 /// The install folder in use: the chosen one, else the one found on this computer.
-pub fn dir() -> Option<PathBuf> {
-    chosen().or_else(os_engine::SampleLibrary::default_factory_dir)
+pub fn dir(st: &crate::settings_file::SettingsStore) -> Option<PathBuf> {
+    chosen(st).or_else(os_engine::SampleLibrary::default_factory_dir)
 }
 
 /// The path shown beside the folder button: the folder in use with a trailing separator, or `(not found)`.
-pub fn path_text() -> String {
-    dir().map_or_else(|| NONE_TEXT.to_string(), |d| format!("{}{}", d.display(), std::path::MAIN_SEPARATOR))
+pub fn path_text(st: &crate::settings_file::SettingsStore) -> String {
+    dir(st).map_or_else(|| NONE_TEXT.to_string(), |d| format!("{}{}", d.display(), std::path::MAIN_SEPARATOR))
 }

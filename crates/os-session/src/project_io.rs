@@ -19,12 +19,12 @@ pub fn store_samplers(ses: &mut Session) {
         if ses.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) {
             let lemon = ses.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
             if let Some(st) = ses.plugins.state(row).filter(|_| lemon) {
-                crate::plugins::store_sampler(&mut ses.project.get_mut().channels[row], &st);
+                crate::plugins::store_sampler(&ses.settings, &mut ses.project.get_mut().channels[row], &st);
             }
             if let Some(p) = ses.plugins.sampler_path(row) {
                 // A placeholder path that still names the same file is kept as the project wrote it.
                 let ch = &mut ses.project.get_mut().channels[row];
-                if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
+                if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(&ses.settings, old) == p) {
                     continue;
                 }
                 // An empty path: the sample was taken out (spec: flp/events/channels.md "Loop points (event 251)").
@@ -57,7 +57,7 @@ pub fn store_builtin_states(ses: &mut Session) {
             slot.state = st;
         }
     }
-    crate::osc3::store(ses.project.get_mut(), &ses.plugins);
+    crate::osc3::store(&ses.settings, ses.project.get_mut(), &ses.plugins);
     crate::citrus::store(ses.project.get_mut(), &ses.plugins);
     crate::smith::store(ses.project.get_mut(), &ses.plugins);
     crate::slicer::store(ses.project.get_mut(), &ses.plugins);
@@ -174,7 +174,7 @@ pub fn open_in(ses: &mut Session, file: os_flp::FlpFile, mut project: os_model::
 
 /// The opened project's samples start decoding and its plugins starting (`loading::tick`).
 pub fn start_loading(ses: &mut Session) {
-    ses.loading = Some(crate::loading::Loading::start(&ses.project));
+    ses.loading = Some(crate::loading::Loading::start(&ses.settings, &ses.project));
     ses.samples.wait = true;
 }
 

@@ -48,7 +48,7 @@ pub fn adopt(s: &State, path: &str) -> String {
     }
     let Some(dir) = folder(s) else { return path.to_string() };
     reread(s);
-    copy_sample(Path::new(&crate::plugins::resolve_sample(path)), &dir).map_or_else(|_| path.to_string(), |p| p.to_string_lossy().into_owned())
+    copy_sample(Path::new(&crate::plugins::resolve_sample(&s.session.settings, path)), &dir).map_or_else(|_| path.to_string(), |p| p.to_string_lossy().into_owned())
 }
 
 /// Files were made or renamed in the data folder: the browser reads its folders again (`views::browser::list_dir`).
@@ -90,7 +90,7 @@ impl App {
         for row in 0..self.state.session.project.channels.len() {
             // A hosted Lemon Sampler's own sample is the one it plays; it loads the copy too.
             let hosted = self.state.session.plugins.sampler_path(row);
-            let listed = self.state.session.project.channels[row].sample_path.as_deref().filter(|p| !p.is_empty()).map(crate::plugins::resolve_sample);
+            let listed = self.state.session.project.channels[row].sample_path.as_deref().filter(|p| !p.is_empty()).map(|p| crate::plugins::resolve_sample(&self.state.session.settings, p));
             let Some(src) = hosted.clone().filter(|p| !p.is_empty()).or(listed) else { continue };
             match copy_sample(Path::new(&src), dir) {
                 Ok(to) => {
@@ -210,7 +210,7 @@ impl App {
             for row in 0..self.state.session.project.channels.len() {
                 let hosted = self.state.session.plugins.sampler_path(row);
                 let ch = &mut self.state.session.project.get_mut().channels[row];
-                let Some(p) = hosted.clone().filter(|p| !p.is_empty()).or_else(|| ch.sample_path.as_deref().map(crate::plugins::resolve_sample)) else { continue };
+                let Some(p) = hosted.clone().filter(|p| !p.is_empty()).or_else(|| ch.sample_path.as_deref().map(|p| crate::plugins::resolve_sample(&self.state.session.settings, p))) else { continue };
                 let Ok(rel) = Path::new(&p).strip_prefix(old) else { continue };
                 let moved = new.join(rel).to_string_lossy().into_owned();
                 ch.sample_path = Some(moved.clone());

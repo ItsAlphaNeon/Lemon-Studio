@@ -26,7 +26,7 @@ pub fn step(s: &State) -> u32 {
 impl App {
     /// Step edit switch (toolbar, OPTIONS menu, Ctrl+E); a chord being collected is dropped.
     pub fn toggle_step_edit(&mut self) {
-        toggle();
+        toggle(&self.state.session.settings);
         self.step_chord.clear();
         self.invalidate();
     }
@@ -34,7 +34,7 @@ impl App {
     /// Whether step editing takes notes now: the switch is on and the transport is stopped (while playing it writes
     /// nothing: Lemon Studio's choice).
     fn step_edit_live(&self) -> bool {
-        on() && !self.state.session.transport.playing()
+        on(&self.state.session.settings) && !self.state.session.transport.playing()
     }
 
     /// A note started sounding (typing keyboard or MIDI): collected while step editing takes notes.
@@ -134,9 +134,9 @@ mod tests {
         app.state.set_song_mode(false);
         app.state.selected_channel = 0;
         app.state.session.project.get_mut().patterns.iter_mut().for_each(|p| p.notes.clear());
-        assert!(app.typing_on() && !on(), "the typing keyboard is on and step edit off at start");
+        assert!(app.typing_on() && !on(&crate::settings_file::store()), "the typing keyboard is on and step edit off at start");
         ctrl_e(&mut app);
-        assert!(on());
+        assert!(on(&crate::settings_file::store()));
         app
     }
 
@@ -235,7 +235,7 @@ mod tests {
         let mut app = app();
         let nothing = |app: &App| notes(app).is_empty() && app.state.session.pat_pos == 0;
         ctrl_e(&mut app);
-        assert!(!on());
+        assert!(!on(&crate::settings_file::store()));
         tap(&mut app, KeyCode::KeyZ);
         assert!(nothing(&app), "off");
         ctrl_e(&mut app);
@@ -275,7 +275,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.paint(&mut c, None);
-        assert!(!on(), "off at start");
+        assert!(!on(&crate::settings_file::store()), "off at start");
         let ticked = |app: &App| {
             let rows = &bar_model(&app.state)[OPTIONS_MENU].rows;
             let row = rows.iter().find(|r| r.label == "Step edit").expect("OPTIONS > Step edit");
@@ -289,16 +289,16 @@ mod tests {
         app.mouse_move(r.cx(), r.cy());
         app.mouse_down();
         app.mouse_up();
-        assert!(on() && ticked(&app), "the button");
+        assert!(on(&crate::settings_file::store()) && ticked(&app), "the button");
         assert_ne!(look(&mut app, &mut c, r), unlit, "lit while on");
         let opt = (0..60).find(|&i| item_at(OPTIONS_MENU, i).is_some_and(|it| it.label == "Step edit")).unwrap();
         app.menu_item(OPTIONS_MENU, opt);
-        assert!(!on() && !ticked(&app), "the menu");
+        assert!(!on(&crate::settings_file::store()) && !ticked(&app), "the menu");
         assert_eq!(look(&mut app, &mut c, r), unlit);
         ctrl_e(&mut app);
-        assert!(on() && ticked(&app), "Ctrl+E");
+        assert!(on(&crate::settings_file::store()) && ticked(&app), "Ctrl+E");
         ctrl_e(&mut app);
-        assert!(!on());
+        assert!(!on(&crate::settings_file::store()));
     }
 
     /// Keys held together give one chord, written on the release of the last one with every key pressed since the
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!((app.state.session.pat_pos, selected(&app)), (st, vec![0, 1, 2, 3]));
         let h = &app.state.session.history;
         assert_eq!(h.at(), at + 1, "one undo step");
-        assert_eq!(h.entries().into_iter().find(|e| e.0 == h.at()).map(|e| e.1), Some("Step edit"));
+        assert_eq!(h.entries(&crate::settings_file::store()).into_iter().find(|e| e.0 == h.at()).map(|e| e.1), Some("Step edit"));
         app.key(&Key::Character("z".into()), true, false);
         assert!(notes(&app).is_empty(), "one undo removes the chord");
         assert_eq!(app.state.session.history.at(), at);

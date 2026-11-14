@@ -113,10 +113,10 @@ pub fn forget(ids: &mut Ids) {
 mod tests {
     use super::*;
 
-    fn project(channels: usize) -> Project {
+    fn project(st: &crate::settings_file::SettingsStore, channels: usize) -> Project {
         let mut p = Project::default();
         for i in 0..channels {
-            p.channels.push(crate::projects::default_project().channels[0].clone());
+            p.channels.push(crate::projects::default_project(st).channels[0].clone());
             p.channels[i].index = i as u16;
         }
         p
@@ -124,8 +124,9 @@ mod tests {
 
     #[test]
     fn every_thing_gets_its_own_id() {
+        let st = &crate::settings_file::SettingsStore::memory();
         let mut ids = Ids::default();
-        let mut p = project(3);
+        let mut p = project(st, 3);
         assert!(settle(&mut ids, &mut p));
         let got: Vec<u32> = p.channels.iter().map(|c| c.id.0).collect();
         assert!(got.iter().all(|&i| i != 0));
@@ -135,8 +136,9 @@ mod tests {
 
     #[test]
     fn ids_follow_moves_and_deletes() {
+        let st = &crate::settings_file::SettingsStore::memory();
         let mut ids = Ids::default();
-        let mut p = project(3);
+        let mut p = project(st, 3);
         settle(&mut ids, &mut p);
         let (a, c) = (p.channels[0].id.0, p.channels[2].id.0);
         p.channels.remove(1);
@@ -147,9 +149,10 @@ mod tests {
 
     #[test]
     fn a_copy_gets_a_new_id_and_the_original_keeps_its_own() {
+        let st = &crate::settings_file::SettingsStore::memory();
         // A copy below its original (Clone channel, a pasted clip): the one still at the id's place keeps it.
         let mut ids = Ids::default();
-        let mut p = project(2);
+        let mut p = project(st, 2);
         settle(&mut ids, &mut p);
         let a = p.channels[0].id.0;
         let copy = p.channels[0].clone();
@@ -161,16 +164,17 @@ mod tests {
 
     #[test]
     fn ids_are_not_given_twice() {
+        let st = &crate::settings_file::SettingsStore::memory();
         let mut ids = Ids::default();
-        let mut p = project(2);
+        let mut p = project(st, 2);
         settle(&mut ids, &mut p);
         let gone = p.channels.pop().unwrap().id.0;
-        p.channels.push(crate::projects::default_project().channels[0].clone());
+        p.channels.push(crate::projects::default_project(st).channels[0].clone());
         p.channels[1].id = Id::NONE;
         settle(&mut ids, &mut p);
         assert_ne!(p.channels[1].id.0, gone);
         forget(&mut ids);
-        let mut q = project(1);
+        let mut q = project(st, 1);
         settle(&mut ids, &mut q);
         assert!(q.channels[0].id.0 > gone, "ids after a new project are new too");
     }

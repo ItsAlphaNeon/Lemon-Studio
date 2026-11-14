@@ -73,7 +73,7 @@ pub fn folder(s: &Session) -> std::path::PathBuf {
 /// Whether the armed tracks record now: Record armed with Audio in the filter, playing, not paused or counting in.
 fn live(s: &Session) -> bool {
     let r = &s.rec;
-    r.armed && r.count.is_none() && Opt::Audio.on() && s.transport.playing() && !s.transport.paused()
+    r.armed && r.count.is_none() && Opt::Audio.on(&s.settings) && s.transport.playing() && !s.transport.paused()
 }
 
 /// Every tick: starts a take when the armed tracks start recording, ends it when they stop, and places its files
@@ -151,7 +151,7 @@ fn end(s: &mut Session) {
 /// the mixer track it was recorded on: one undo step (or, with Auto-create audio clips off, only the files).
 fn place(s: &mut Session, lock_len: Option<(os_model::ClipSource, u32)>) {
     let Some(r) = s.track_rec.take() else { return };
-    let auto = crate::prefs::check(&crate::prefs::AUTO_AUDIO_CLIPS);
+    let auto = s.settings.check(&crate::prefs::AUTO_AUDIO_CLIPS);
     let mut made: Vec<(u16, std::path::PathBuf, u64, u32)> = Vec::new();
     let mut errors = Vec::new();
     let mut lost = 0;

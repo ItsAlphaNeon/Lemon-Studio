@@ -571,7 +571,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
         }
         (PickKind::Audio, ClipSource::Channel(ch)) if tall => {
             let Some(path) = s.session.project.channel(ch).and_then(|c| c.sample_path.clone()) else { return };
-            let Some(w) = s.session.samples.wave(&path) else { return };
+            let Some(w) = s.session.samples.wave(&s.session.settings, &path) else { return };
             if w.peaks.is_empty() {
                 return;
             }
@@ -1128,7 +1128,7 @@ fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body
 #[allow(clippy::too_many_arguments)]
 fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color, colours: Option<(&Waves, &dyn Fn(Color) -> Color)>) {
     let Some(path) = s.session.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
-    let Some(w) = s.session.samples.wave(&path) else { return };
+    let Some(w) = s.session.samples.wave(&s.session.settings, &path) else { return };
     let Some(area) = ui.c.paint_bounds() else { return };
     let (w0, _) = pl::window(&s.session, c);
     let ms_per_tick = pl::to_src(&s.session, c.source, 1.0);
@@ -1214,7 +1214,7 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     outline.extend(bottom.into_iter().rev());
     // Colorful waveforms (spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"): the same shape,
     // each device-pixel column in the colour of the frames it shows; silence keeps the plain colour.
-    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.session.samples.tones(&path));
+    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.session.samples.tones(&s.session.settings, &path));
     match (colours, tones) {
         (Some((waves, dim)), Some(tones)) => {
             let frames = |d: f64| (w0 + d / ppt * ms_per_tick) * frames_per_ms;

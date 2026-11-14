@@ -530,9 +530,9 @@ pub struct Starts {
 }
 
 impl Starts {
-    pub fn from_prefs() -> Starts {
-        use crate::prefs::{check, PLAY_TRUNCATED_ON_TRANSPORT, RESET_PLUGINS_ON_TRANSPORT};
-        Starts { truncated: check(&PLAY_TRUNCATED_ON_TRANSPORT), reset: check(&RESET_PLUGINS_ON_TRANSPORT), count_in: 0 }
+    pub fn from_prefs(st: &crate::settings_file::SettingsStore) -> Starts {
+        use crate::prefs::{PLAY_TRUNCATED_ON_TRANSPORT, RESET_PLUGINS_ON_TRANSPORT};
+        Starts { truncated: st.check(&PLAY_TRUNCATED_ON_TRANSPORT), reset: st.check(&RESET_PLUGINS_ON_TRANSPORT), count_in: 0 }
     }
 }
 
@@ -568,6 +568,9 @@ pub struct Transport {
     shared: Arc<Shared>,
     /// The audio thread: joined when the transport goes (see `Drop`).
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The session's settings (`Session::new` gives it them): a start reads "Play truncated notes on transport" and
+    /// "Reset plugins on transport" there (`Starts::from_prefs`).
+    settings: crate::settings_file::SettingsStore,
 }
 
 impl Transport {
@@ -588,7 +591,7 @@ impl Transport {
                 }
             })
             .expect("spawn audio thread");
-        Transport { tx, latest, sent: Mutex::new(None), updates: Default::default(), instruments, shared, thread: Some(thread) }
+        Transport { tx, latest, sent: Mutex::new(None), updates: Default::default(), instruments, shared, thread: Some(thread), settings: Default::default() }
     }
 
     /// Hosted generator plugins by rack row; playing engines pick them up at once.
@@ -679,6 +682,15 @@ impl Transport {
         self.play_counted(project, mode, start_tick, 0);
     }
 
+    /// The settings a start reads (in memory until the session gives its own).
+    pub fn settings(&self) -> &crate::settings_file::SettingsStore {
+        &self.settings
+    }
+
+    pub fn set_settings(&mut self, st: crate::settings_file::SettingsStore) {
+        self.settings = st;
+    }
+
     /// `play`, after a recording count-in of `bars` bars (spec: ui/recording.md §3): the position holds at
     /// `start_tick` while the metronome counts in.
     pub fn play_counted(&self, project: &Project, mode: PlayMode, start_tick: f64, bars: u32) {
@@ -692,7 +704,7 @@ impl Transport {
         self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
-        let starts = Starts { count_in: bars, ..Starts::from_prefs() };
+        let starts = Starts { count_in: bars, ..Starts::from_prefs(&self.settings) };
         let _ = self.tx.send(Cmd::Play(Box::new(project.clone()), mode, start_tick, generation, starts));
     }
 
@@ -4010,7 +4022,7 @@ mod tests {
     #[test]
     fn stop_lets_an_instruments_release_ring() {
         let _sim = Sim::new();
-        use crate::prefs::{set_check, RESET_PLUGINS_ON_TRANSPORT};
+        use crate::prefs::RESET_PLUGINS_ON_TRANSPORT;
         use os_engine::Instrument;
         struct Releaser {
             level: f32,
@@ -4042,7 +4054,6 @@ mod tests {
                 self.resets.fetch_add(1, Ordering::Relaxed);
             }
         }
-        set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
         let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.channels[0].kind = os_model::ChannelKind::Plugin;
@@ -4050,6 +4061,7 @@ mod tests {
         let (calls, resets) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
         let inst = Arc::new(Mutex::new(Releaser { level: 0.0, on: false, calls: calls.clone(), resets: resets.clone() }));
         let t = Transport::new(None);
+        t.settings().set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
         t.set_instruments(vec![(0, inst.clone() as SharedInstrument)]);
         t.play(&project, PlayMode::Pattern(1), 0.0);
         wait_for(|| t.peaks().0 > 0.05);
@@ -4083,7 +4095,7 @@ mod tests {
     #[test]
     fn the_stopped_playback_keeps_the_stream_while_its_tails_ring() {
         let _sim = Sim::new();
-        use crate::prefs::{set_check, RESET_PLUGINS_ON_TRANSPORT};
+        use crate::prefs::RESET_PLUGINS_ON_TRANSPORT;
         use os_engine::Instrument;
         /// A release that falls by half every 50 ms or so; any key but the song's makes no sound (a slow attack).
         struct Releaser {
@@ -4121,7 +4133,6 @@ mod tests {
                 self.resets.fetch_add(1, Ordering::Relaxed);
             }
         }
-        set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
         let mut project = crate::projects::test_project();
         let ch = project.channels[0].index;
         project.channels[0].kind = os_model::ChannelKind::Plugin;
@@ -4129,6 +4140,7 @@ mod tests {
         let (keys, resets) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
         let inst = Arc::new(Mutex::new(Releaser { level: 0.0, on: false, keys: keys.clone(), resets: resets.clone() }));
         let t = Transport::new(None);
+        t.settings().set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
         t.set_instruments(vec![(0, inst.clone() as SharedInstrument)]);
         // An editor is open: the live engine would take the instruments over whenever nothing holds the stream.
         t.listen(true);
@@ -4253,12 +4265,12 @@ mod tests {
     #[test]
     #[ignore]
     fn a_jump_resets_hosted_effects_only_with_the_setting() {
-        use crate::prefs::{set_check, RESET_PLUGINS_ON_TRANSPORT};
+        use crate::prefs::RESET_PLUGINS_ON_TRANSPORT;
         let (_, project) = looping_engine();
         for on in [false, true] {
-            set_check(&RESET_PLUGINS_ON_TRANSPORT, on);
             let fx = Arc::new(AtomicU32::new(0));
             let t = Transport::new(None);
+            t.settings().set_check(&RESET_PLUGINS_ON_TRANSPORT, on);
             t.set_effects(vec![(0, 0, Arc::new(Mutex::new(Counted(fx.clone()))) as SharedEffect)]);
             let resets = |n: u32| if on { n } else { 0 };
             t.play(&project, PlayMode::Pattern(1), 0.0);
@@ -4311,7 +4323,7 @@ mod tests {
     #[test]
     #[ignore]
     fn stop_lets_effect_tails_ring() {
-        use crate::prefs::{set_check, RESET_PLUGINS_ON_TRANSPORT};
+        use crate::prefs::RESET_PLUGINS_ON_TRANSPORT;
         struct Tail {
             level: f32,
             calls: Arc<AtomicU32>,
@@ -4331,11 +4343,11 @@ mod tests {
                 self.resets.fetch_add(1, Ordering::Relaxed);
             }
         }
-        set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
         let (_, project) = looping_engine();
         let (calls, resets) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
         let fx = Arc::new(Mutex::new(Tail { level: 0.0, calls: calls.clone(), resets: resets.clone() }));
         let t = Transport::new(None);
+        t.settings().set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
         t.set_effects(vec![(0, 0, fx.clone() as SharedEffect)]);
         t.play(&project, PlayMode::Pattern(1), 0.0);
         wait_for(|| t.seconds() > 0.3 && fx.lock().unwrap().level > 0.2);

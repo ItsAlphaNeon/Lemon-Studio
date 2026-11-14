@@ -435,7 +435,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
         match name {
             // Undone steps grey, their arrow mirrored (spec: ui/settings-choices.md "Undo history: the four checks").
             "History" => {
-                for (e, step) in s.session.history.entries() {
+                for (e, step) in s.session.history.entries(&s.session.settings) {
                     let icon = if s.session.history.undone(e) { Icon::Redo } else { Icon::Undo };
                     let (bright, item) = (s.session.history.current(e), Item::History(e));
                     out.push(Row { key: format!("{parent}/{e}"), depth: 2, label: step.into(), icon, cat, open: None, bright, item, path: None });
@@ -479,7 +479,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 }
             }
             REMOTE_CONTROL => {
-                for l in crate::remote::links() {
+                for l in crate::remote::links(&s.session.settings) {
                     leaf(out, &parent, crate::remote_ui::label(s, &l), Icon::MidiControl, cat, false, Item::None);
                 }
             }
@@ -575,7 +575,7 @@ fn preset_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 preset(out, &pk, 2, crate::presets::shown_name(&e.path), &e.path);
             }
         }
-        let fac = crate::presets::factory(&plugin);
+        let fac = crate::presets::factory(&s.session.settings, &plugin);
         if fac.is_empty() {
             continue;
         }

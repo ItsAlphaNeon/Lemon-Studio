@@ -181,12 +181,12 @@ impl Input {
 }
 
 /// The input picked last (`rec_input`).
-pub fn last_input() -> Option<Input> {
-    crate::settings_file::get("rec_input").as_deref().and_then(Input::parse)
+pub fn last_input(st: &crate::settings_file::SettingsStore) -> Option<Input> {
+    st.get("rec_input").as_deref().and_then(Input::parse)
 }
 
-pub fn set_last_input(i: &Input) {
-    crate::settings_file::write("rec_input", &i.key());
+pub fn set_last_input(st: &crate::settings_file::SettingsStore, i: &Input) {
+    st.write("rec_input", &i.key());
 }
 
 /// The devices to record from, with their input count: the ASIO driver when the output is one (its inputs once it has

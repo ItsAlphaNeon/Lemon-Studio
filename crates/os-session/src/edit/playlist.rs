@@ -324,7 +324,7 @@ pub fn audio_ticks(s: &crate::session::Session, ch: &os_model::Channel) -> f64 {
 
 /// Seconds the channel's sample lasts (0 while its waveform is not loaded).
 pub fn sample_secs(s: &crate::session::Session, ch: &os_model::Channel) -> f64 {
-    ch.sample_path.as_deref().and_then(|p| s.samples.wave(p)).map_or(0.0, |w| w.secs())
+    ch.sample_path.as_deref().and_then(|p| s.samples.wave(&s.settings, p)).map_or(0.0, |w| w.secs())
 }
 
 /// Seconds per tick at the project tempo (the ticks run at `Project::tick_tempo`).
@@ -716,7 +716,7 @@ pub struct Samples {
 
 impl Samples {
     /// The waveform of a sample path (loaded and summarised once).
-    pub fn wave(&self, path: &str) -> Option<Rc<Wave>> {
+    pub fn wave(&self, st: &crate::settings_file::SettingsStore, path: &str) -> Option<Rc<Wave>> {
         if let Some(w) = self.waves.borrow().get(path) {
             return w.clone();
         }
@@ -724,7 +724,7 @@ impl Samples {
             return None;
         }
         // The decode is shared with the sampler playing the file (decoded once, while the project loaded).
-        let file = crate::plugins::resolve_sample(path);
+        let file = crate::plugins::resolve_sample(st, path);
         let w = os_engine::sample::load_shared(std::path::Path::new(&file)).ok().map(|s| {
             let per = 64usize;
             let peaks = s
@@ -750,14 +750,14 @@ impl Samples {
 
     /// The tones of a sample path, block by block (spec: ui/settings-choices.md "Display: Colorful waveforms
     /// (2026-10-16)"): analysed once, the first time a waveform is drawn in colour, and kept with the peaks.
-    pub fn tones(&self, path: &str) -> Option<Rc<os_dsp::tone::Tones>> {
+    pub fn tones(&self, st: &crate::settings_file::SettingsStore, path: &str) -> Option<Rc<os_dsp::tone::Tones>> {
         if let Some(t) = self.tones.borrow().get(path) {
             return t.clone();
         }
         if self.wait {
             return None;
         }
-        let file = crate::plugins::resolve_sample(path);
+        let file = crate::plugins::resolve_sample(st, path);
         let t = os_engine::sample::load_shared(std::path::Path::new(&file))
             .ok()
             .map(|s| Rc::new(os_dsp::tone::Tones::analyse_stereo(&s.left, &s.right, s.rate)));
@@ -880,7 +880,7 @@ pub fn follow_audio(s: &mut crate::session::Session) -> bool {
 /// `add_audio_clip_in` on the session (`lock_len` as `place_in` takes it): the playlist's clip source becomes the new
 /// channel and the clip is selected (`View::AudioClipAdded`).
 pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16, tick: u32, mixer: Option<u16>, lock_len: Option<(ClipSource, u32)>) -> Option<usize> {
-    s.samples.wave(path)?;
+    s.samples.wave(&s.settings, path)?;
     // Not on an instrument track: the next free track below it (§6c); on an audio track, through its mixer track.
     let track = crate::track_links::audio_drop_track(s, track, tick, tick + 1);
     let mixer = mixer.or_else(|| crate::track_links::audio_mixer(s, track));
