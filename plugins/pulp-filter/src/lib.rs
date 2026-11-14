@@ -303,11 +303,11 @@ mod tests {
         assert_eq!(p.dsp.state(), &State::new_default());
     }
 
-    /// Every factory preset (`crates/os-app/factory-presets/Pulp Filter/`, spec: plugins/factory-presets.md) holds the
+    /// Every factory preset (`crates/os-session/factory-presets/Pulp Filter/`, spec: plugins/factory-presets.md) holds the
     /// plugin's saved state with a Love Philter state that reads.
     #[test]
     fn factory_presets_hold_readable_states() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets/Pulp Filter");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-session/factory-presets/Pulp Filter");
         let (mut n, mut walk) = (0, vec![root]);
         while let Some(d) = walk.pop() {
             for e in std::fs::read_dir(&d).unwrap() {

@@ -47,6 +47,10 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets --locked
 
+      # The session (the project, playing, recording, loading, saving) builds without the interface.
+      - name: Build the session alone
+        run: cargo check --locked -p os-session --all-targets
+
       # The plugin bundles (VST3 + CLAP): the hosting tests load them, and skip without them.
       - name: Bundle plugins
         run: cargo run -p bundle-plugins --locked

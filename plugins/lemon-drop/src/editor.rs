@@ -1295,7 +1295,7 @@ mod tests {
             return;
         };
         let dir = std::path::PathBuf::from(dir);
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets/Lemon Drop");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-session/factory-presets/Lemon Drop");
         let mut walk = vec![root.clone()];
         let rate = 44100.0f32;
         while let Some(d) = walk.pop() {
