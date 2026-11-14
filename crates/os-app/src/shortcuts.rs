@@ -188,7 +188,7 @@ impl App {
     /// The Manage shortcuts button: the window, filled with the applied shortcuts. The settings window closes while it
     /// is open.
     pub(crate) fn open_shortcuts(&mut self) {
-        crate::project_info::accept_info(&mut self.state);
+        crate::project_info_ui::accept_info(&mut self.state);
         self.state.settings.open = false;
         self.state.dialogs.push(Modal::new(Body::Shortcuts(Form::applied())));
         self.modal_changed();

@@ -283,7 +283,7 @@ impl MidiIn {
     pub fn refresh(&mut self) -> Vec<String> {
         let names = input_names();
         self.outputs = output_names();
-        self.conns.retain(|(n, _)| names.contains(n) && crate::midi_cfg::input(n).enabled && !crate::surface::claims(n) && !own(n));
+        self.conns.retain(|(n, _)| names.contains(n) && crate::midi_cfg::input(n).enabled && !crate::surface_port::claims(n) && !own(n));
         let mut opened = Vec::new();
         let mut inputs = Vec::with_capacity(names.len());
         for (i, name) in names.iter().enumerate() {
@@ -291,7 +291,7 @@ impl MidiIn {
                 continue;
             }
             // A control surface's port is `crate::surface`'s.
-            let want = crate::midi_cfg::input(name).enabled && !crate::surface::claims(name);
+            let want = crate::midi_cfg::input(name).enabled && !crate::surface_port::claims(name);
             let mut failed = false;
             if want && !self.conns.iter().any(|(n, _)| n == name) {
                 match self.connect(i, name) {

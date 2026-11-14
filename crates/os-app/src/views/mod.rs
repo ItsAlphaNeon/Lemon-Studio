@@ -605,7 +605,7 @@ fn paint_rest(ui: &mut Ui, s: &State, f: &FrameInfo, w: f32) -> usize {
         cabledebug::paint(ui, s);
     }
     // The Song info box of a project opened with "Show info on opening" (spec: flp/events/project-info.md).
-    crate::project_info::paint_song_info(ui, s);
+    crate::project_info_ui::paint_song_info(ui, s);
     // The Remote control settings box (spec: ui/remote-control.md §2).
     if let Some(b) = &s.link_box {
         remote_box::paint(ui, s, b);

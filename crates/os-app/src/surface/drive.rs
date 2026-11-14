@@ -1107,7 +1107,7 @@ impl App {
                 self.set_song_pos(to, true);
                 self.invalidate();
                 let shown = self.song_pos_now();
-                let hint = crate::song_pos::hint(&self.state, shown);
+                let hint = crate::song_pos_ui::hint(&self.state, shown);
                 ("Scrub", value_part(hint))
             }
             1 => {

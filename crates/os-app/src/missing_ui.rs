@@ -20,7 +20,7 @@ use crate::missing::*;
 pub fn search_folders(s: &State, picked: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let project = s.session.path.as_deref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()).map(PathBuf::from);
-    let data = crate::data_folder::folder(s);
+    let data = crate::data_folder_ui::folder(s);
     let samples = data.as_ref().map(|d| d.join(crate::data_folder::SAMPLES_DIR));
     for d in project.into_iter().chain(data).chain(samples).chain(picked.iter().cloned()) {
         if !dirs.contains(&d) {
@@ -101,7 +101,7 @@ pub fn tick(app: &mut App) {
     let dirs = match s.rx.try_recv() {
         Ok(d) => d,
         Err(TryRecvError::Empty) => {
-            app.damage_rect(crate::loading::panel_rect(app.state.screen).outset(4.0));
+            app.damage_rect(crate::loading_ui::panel_rect(app.state.screen).outset(4.0));
             return;
         }
         Err(TryRecvError::Disconnected) => Vec::new(),
@@ -216,9 +216,9 @@ pub(crate) mod tests {
         let wav = wav(4410);
         std::fs::write(dir.join("Here.wav"), &wav).unwrap();
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::default_project());
-        let a = crate::app::add_channel(app.state.session.project.get_mut());
-        let b = crate::app::add_channel(app.state.session.project.get_mut());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::default_project());
+        let a = crate::projects::add_channel(app.state.session.project.get_mut());
+        let b = crate::projects::add_channel(app.state.session.project.get_mut());
         app.state.session.project.get_mut().channels[a].sample_path = Some(r"C:\Users\someone\AppData\Local\Temp\Image-Line\x\Here.wav".into());
         app.state.session.project.get_mut().channels[b].sample_path = Some(r"C:\Users\someone\Downloads\Gone.wav".into());
         app.state.session.file = None;
@@ -252,4 +252,27 @@ pub(crate) mod tests {
         os_engine::sample::set_search_folders(Vec::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// The box: what is missing, that the project keeps it, and Find samples... when samples are missing.
+pub(crate) fn missing_box(samples: &[String], plugins: &[String]) -> Msg {
+    let count = |v: &[String]| v.iter().collect::<HashSet<_>>().len();
+    let mut parts: Vec<String> = vec!["Some files this project uses were not found. The project keeps them: saving it does not remove them.\n".into()];
+    if !samples.is_empty() {
+        parts.push(format!("\nSamples ({}): ", count(samples)));
+        parts.push(listed(samples.to_vec()));
+    }
+    if !plugins.is_empty() {
+        parts.push(format!("\nPlugins ({}): ", count(plugins)));
+        parts.push(listed(plugins.to_vec()));
+    }
+    if !samples.is_empty() {
+        parts.push("\n\nFind samples... looks for the missing samples by name in a folder you choose and its subfolders.".into());
+    }
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let text = spans(&parts);
+    if samples.is_empty() {
+        return Msg::new(Kind::Warning, "Missing project files", text, &[Answer::Ok], Then::MissingFiles);
+    }
+    Msg::new(Kind::Warning, "Missing project files", text, &[Answer::Yes, Answer::Ok], Then::MissingFiles).labelled(&["Find samples...", "OK"])
 }

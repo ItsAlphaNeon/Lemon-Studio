@@ -133,7 +133,7 @@ impl App {
             None => j.write("new", json!({})),
         }
         j.known.clear();
-        j.reading = Some(crate::control::query::project(&self.state));
+        j.reading = Some(crate::control::query_ui::project(&self.state));
         j.notes = self.state.session.project.patterns.iter().map(|p| (p.id.0, p.notes.clone())).collect();
         j.dirty = false;
         j.history = (self.state.session.history.steps(), self.state.session.history.done());
@@ -199,7 +199,7 @@ impl App {
         let j = &mut self.journal;
         j.dirty = false;
         j.read_at = Some(Instant::now());
-        let now = crate::control::query::project(&self.state);
+        let now = crate::control::query_ui::project(&self.state);
         if let Some(was) = &j.reading {
             let changes = crate::control::query::changes(was, &now);
             if !changes.is_empty() {

@@ -9,7 +9,6 @@
 
 use crate::session::{Session, View};
 use crate::capture::{self, capture, Input, InputStream, Recorder};
-use crate::playlist::{Cmd, Mark, PItem};
 
 /// The undo step a take is placed with (the reference's History name; spec: ui/one-click-recording.md "Into the
 /// playlist").
@@ -40,44 +39,8 @@ impl AudioRec {
     }
 }
 
-/// A stereo and a mono header per device with its inputs, each recording into the audio editor (`editor`) or the
-/// playlist; the input picked last has a dot.
-pub fn inputs(editor: bool) -> Vec<PItem> {
-    let last = capture::last_input();
-    let mut v = Vec::new();
-    let list = devices();
-    for (device, asio, channels) in &list {
-        if *channels == 0 {
-            v.push(header(device.clone()));
-            v.push(PItem::new("(no audio inputs)", Cmd::Nothing).off());
-            continue;
-        }
-        let inputs = Input::of(device, *asio, *channels);
-        for stereo in [true, false] {
-            let group: Vec<&Input> = inputs.iter().filter(|i| i.stereo == stereo).collect();
-            if group.is_empty() {
-                continue;
-            }
-            v.push(header(format!("{device} - {}", if stereo { "stereo" } else { "mono" })));
-            for i in group {
-                v.push(PItem::new(i.label(), Cmd::OneClick(i.clone(), editor)).mark(Mark::Radio(last.as_ref() == Some(i))));
-            }
-        }
-    }
-    if list.is_empty() {
-        v.push(PItem::new("(no audio inputs)", Cmd::Nothing).off());
-    }
-    v
-}
-
-fn header(label: String) -> PItem {
-    let mut h = PItem::new(label, Cmd::Nothing);
-    h.head = true;
-    h
-}
-
 /// `capture::devices`, listed again at most every few seconds (the menu is drawn on every repaint while open).
-fn devices() -> Vec<(String, bool, u16)> {
+pub(crate) fn devices() -> Vec<(String, bool, u16)> {
     #[cfg(test)]
     {
         vec![("Test ASIO".to_string(), true, 2)]
@@ -103,7 +66,7 @@ fn devices() -> Vec<(String, bool, u16)> {
 /// `begin`'s work for `App::one_click_begin`: `pos` is the song position, where the clip goes.
 pub(crate) fn begin_in(s: &mut Session, input: Input, stream: Option<InputStream>, editor: bool, pos: u32) -> Result<(), String> {
     let rate = stream.as_ref().map(|s| s.rate);
-    let dir = crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded");
+    let dir = crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::user_dir::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded");
     let name = capture::file_name(&crate::backup::project_name(s.path.as_deref()), chrono::Local::now().naive_local());
     capture().start(input.first, input.stereo);
     let recorder = match Recorder::start(dir.join(name), rate.unwrap_or(48000)) {
@@ -195,11 +158,11 @@ fn place_take(s: &mut Session, path: &std::path::Path, frames: u64, rate: u32, s
     let p = &s.project;
     let tempo = p.tick_tempo(s.tempo().max(1.0));
     let len = (frames as f64 / f64::from(rate) * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
-    let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
+    let track = crate::edit::playlist::free_track(s, 0, start, start + len.max(1));
     let text = path.to_string_lossy();
     let added = s.samples.wave(&text).and_then(|_| {
-        crate::playlist::snapshot_as(s, RECORDED);
-        crate::playlist::add_audio_clip_on(s, &text, track, start, None, lock_len)
+        crate::edit::playlist::snapshot_as(s, RECORDED);
+        crate::edit::playlist::add_audio_clip_on(s, &text, track, start, None, lock_len)
     });
     match added {
         Some(i) => {
@@ -214,7 +177,6 @@ fn place_take(s: &mut Session, path: &std::path::Path, frames: u64, rate: u32, s
 
 #[cfg(test)]
 mod tests {
-
     /// The tests that record share the one input capture.
     static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

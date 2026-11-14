@@ -13,9 +13,7 @@ use std::sync::{Arc, Mutex};
 use os_engine::chain::{self, Chain};
 use os_model::target::{self, Target as Auto, MEMBER_DRY, MEMBER_IDS, MEMBER_WET};
 use os_model::{Id, Project, SlotPlugin};
-use crate::app::{App, State, Win};
-use crate::knobs::KnobId;
-use crate::playlist::{Cmd, PItem, Popup};
+use crate::knob_id::KnobId;
 use crate::plugins::{fx_key, fx_of, Hosted, Plugins, FX_KEY, MEMBER_KEY};
 use crate::container::*;
 
@@ -65,7 +63,7 @@ pub fn id_place(s: &crate::session::Session, id: u32) -> Option<(u16, u8)> {
 /// What the container at place (`t`, `k`) is shown as: its track's name for a slot's ("Bus 2"), its channel's name.
 pub fn place_name(s: &crate::session::Session, t: u16, k: u8) -> String {
     if k != CHANNEL {
-        return crate::mixer::name(s, t);
+        return crate::edit::mixer::name(s, t);
     }
     let ch = s.project.channels.get(usize::from(t));
     ch.and_then(|c| c.name.clone()).unwrap_or_else(|| format!("Channel {}", usize::from(t) + 1))

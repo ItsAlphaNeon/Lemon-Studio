@@ -117,7 +117,7 @@ pub(crate) fn follow_sample(proj: &mut Project, plugins: &Plugins, row: usize, w
     if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
         return false;
     }
-    crate::rack::auto_name(ch, std::path::Path::new(&p));
+    crate::edit::rack::auto_name(ch, std::path::Path::new(&p));
     ch.sample_path = Some(p);
     true
 }

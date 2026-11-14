@@ -71,7 +71,7 @@ const PROJECT: &[(&str, Icon)] = &[
     ("Samples", Icon::Wave),
 ];
 pub const INITIALIZED_CONTROLS: &str = "Controls with a start value";
-/// The controller links, one row each (`crate::remote::label`); VIEW > Remote control opens it.
+/// The controller links, one row each (`crate::remote_ui::label`); VIEW > Remote control opens it.
 pub const REMOTE_CONTROL: &str = "Remote control";
 pub const PROJECT_DATA: &str = "Project data";
 
@@ -423,7 +423,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             continue;
         }
         if name == PROJECT_DATA {
-            if let Some(dir) = crate::data_folder::folder(s) {
+            if let Some(dir) = crate::data_folder_ui::folder(s) {
                 data_folder_rows(s, root, &dir, cat, out);
             }
             continue;
@@ -480,13 +480,13 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             }
             REMOTE_CONTROL => {
                 for l in crate::remote::links() {
-                    leaf(out, &parent, crate::remote::label(s, &l), Icon::MidiControl, cat, false, Item::None);
+                    leaf(out, &parent, crate::remote_ui::label(s, &l), Icon::MidiControl, cat, false, Item::None);
                 }
             }
             // "<owner> - <setting>", as the automation clip on the control is named.
             INITIALIZED_CONTROLS => {
                 for c in &p.init_controls {
-                    leaf(out, &parent, crate::init::name(s, c.target), Icon::Slide, cat, false, Item::None);
+                    leaf(out, &parent, crate::init_ui::name(s, c.target), Icon::Slide, cat, false, Item::None);
                 }
             }
             "Samples" => {

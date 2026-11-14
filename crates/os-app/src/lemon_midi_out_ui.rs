@@ -26,7 +26,7 @@ impl crate::app::App {
     pub(crate) fn add_midi_out(&mut self) -> Option<String> {
         crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
-            let row = crate::app::add_plugin_channel(s.session.project.get_mut(), LEMON_MIDI_OUT);
+            let row = crate::projects::add_plugin_channel(s.session.project.get_mut(), LEMON_MIDI_OUT);
             make_midi_out(&mut s.session.project.get_mut().channels[row], &Settings::default());
             s.session.dirty = true;
             s.selected_channel = row;
@@ -90,7 +90,7 @@ mod tests {
 
     fn app() -> App {
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.state.session.plugins = crate::plugins::Plugins::default();
@@ -157,8 +157,8 @@ mod tests {
     fn set_up_for_midi_export() {
         let mut a = app();
         // The five samplers, then a Lemon Trio and an automation clip channel.
-        let trio = crate::app::add_plugin_channel(a.state.session.project.get_mut(), crate::osc3::LEMON_TRIO);
-        let auto = crate::app::add_channel(a.state.session.project.get_mut());
+        let trio = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), crate::osc3::LEMON_TRIO);
+        let auto = crate::projects::add_channel(a.state.session.project.get_mut());
         a.state.session.project.get_mut().channels[auto].kind = ChannelKind::Automation;
         a.state.session.project.get_mut().channels[1].misc.cut = 4;
         for _ in 0..4 {

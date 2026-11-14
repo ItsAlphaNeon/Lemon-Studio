@@ -20,10 +20,6 @@ use std::time::Instant;
 
 use launchkey::Model;
 
-/// Whether `name` (a system MIDI port) is a control port this module opens.
-pub fn claims(name: &str) -> bool {
-    Model::of_port(name).is_some()
-}
 
 /// An open control port.
 pub struct Port {

@@ -9,7 +9,6 @@ use os_model::{ChannelKind, ClipSource, Project};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-use crate::app::State;
 use crate::control::command::color_text;
 
 fn kind(k: ChannelKind) -> &'static str {
@@ -27,13 +26,6 @@ fn track_id(p: &Project, n: u16) -> Option<u32> {
     p.mixer.iter().find(|m| m.index == n).map(|m| m.id.0)
 }
 
-/// The project: settings, channels, mixer tracks in use, patterns and the playlist shown. Notes are read per pattern
-/// (`notes`).
-#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
-pub fn project(s: &State) -> Value {
-    project_in(&s.session, s.selected_channel)
-}
-
 /// `project` on the session; `selected` is the channel the interface has selected (0 without one).
 pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
     let p = &s.project;
@@ -46,7 +38,7 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
             json!({
                 "id": c.id.0,
                 "row": row,
-                "name": crate::rack::channel_name(s, row),
+                "name": crate::edit::rack::channel_name(s, row),
                 "kind": kind(c.kind),
                 "plugin": c.plugin,
                 "sample": c.sample_path,
@@ -59,7 +51,7 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
             })
         })
         .collect();
-    let used = crate::mixer::inserts(s);
+    let used = crate::edit::mixer::inserts(s);
     let tracks: Vec<Value> = p
         .mixer
         .iter()
@@ -85,7 +77,7 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
             json!({
                 "id": m.id.0,
                 "number": m.index,
-                "name": crate::mixer::name(s, m.index),
+                "name": crate::edit::mixer::name(s, m.index),
                 "color": color_text(m.color),
                 "volume": m.volume.unwrap_or(0.8),
                 "pan": m.pan.unwrap_or(0.0),
@@ -103,14 +95,14 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
     let patterns: Vec<Value> = p
         .patterns
         .iter()
-        .filter(|q| crate::patterns::used(q) || q.name.is_some())
+        .filter(|q| crate::edit::patterns::used(q) || q.name.is_some())
         .map(|q| {
             json!({
                 "id": q.id.0,
                 "number": q.number,
-                "name": crate::patterns::name_of(s, q.number),
+                "name": crate::edit::patterns::name_of(s, q.number),
                 "color": color_text(q.color),
-                "length": crate::playlist::source_len(s, os_model::ClipSource::Pattern(q.number)),
+                "length": crate::edit::playlist::source_len(s, os_model::ClipSource::Pattern(q.number)),
                 "auto_length": q.length.is_none(),
                 "notes": q.notes.len(),
             })

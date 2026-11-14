@@ -33,6 +33,12 @@ pub fn panel(c: &mut Canvas, t: &os_theme::Palette, title: &str, status: &str, p
     }
 }
 
+/// The progress panel, centred in the window (Lemon Studio design, spec: ui/project-loading.md §3).
+pub fn panel_rect(screen: (f32, f32)) -> Rect {
+    let (w, h) = (420.0, 92.0);
+    Rect::new(((screen.0 - w) / 2.0).round(), ((screen.1 - h) / 2.0).round(), w, h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,9 +56,9 @@ mod tests {
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4);
         assert_eq!((workers(0), workers(1), workers(10)), (0, 1, cores));
         // A project of six sampler channels, each with a file of its own (missing: the workers report them failed).
-        let mut p = crate::app::default_project();
+        let mut p = crate::projects::default_project();
         for i in 0..6 {
-            let r = crate::app::add_channel(&mut p);
+            let r = crate::projects::add_channel(&mut p);
             p.channels[r].sample_path = Some(format!("Z:/no such folder/loading-{i}.wav"));
         }
         assert_eq!(Loading::start(&p).workers, cores.min(6), "on");
@@ -67,99 +73,4 @@ mod tests {
         }
         assert_eq!((l.decoded, l.files), (6, 6));
     }
-}
-
-/// Every sampler channel is played and edited by Lemon Sampler (owner, 2026-10-10; spec: plugins/lemon-sampler.md §7):
-/// a channel without an instance gets one, started from the channel's sample and envelopes. Without Lemon Sampler
-/// (plugin not found) sampler channels keep the engine's own sample playback.
-/// With a `deadline` it stops after the instance that passes it; returns whether every sampler row is done.
-pub(crate) fn sync_samplers(ses: &mut crate::session::Session, deadline: Option<std::time::Instant>) -> bool {
-    let Some(index) = ses.plugins.index_of(crate::plugins::LEMON_SAMPLER) else { return true };
-    let mut added = false;
-    let mut done = true;
-    for row in 0..ses.project.channels.len() {
-        let ch = &ses.project.channels[row];
-        if !ch.kind.is_sampler() || ses.hosted_rows.contains(&row) || ses.plugins.sampler_failed.contains(&row) {
-            continue;
-        }
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            done = false;
-            break;
-        }
-        let st = crate::plugins::sampler_state(ch);
-        if let Some(l) = &mut ses.loading {
-            l.hosted += 1;
-            l.label = ch.name.clone().unwrap_or_default();
-        }
-        match ses.plugins.create_with(row, index, Some(&st)) {
-            Ok(_) => {
-                ses.hosted_rows.push(row);
-                added = true;
-                // A channel just added (ADD ▸ Lemon Sampler): its window is about to open (spec:
-                // ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
-                if ses.pending_open == Some(row) {
-                    ses.plugins.added(row);
-                }
-            }
-            Err(e) => {
-                ses.plugins.sampler_failed.push(row);
-                ses.touched.views.push(crate::session::View::Message(format!("Lemon Sampler: {e}")));
-            }
-        }
-    }
-    if added {
-        ses.transport.set_instruments(ses.plugins.instruments());
-        ses.dirty = true;
-    }
-    done
-}
-
-/// Project loading on each tick (spec: ui/project-loading.md): samples decode on worker threads first, then the sampler
-/// instances, the plugin channels and the mixer effects start a few per tick (`HOST_BUDGET`) so the progress panel keeps
-/// moving. Without a loading project, new sampler rows are hosted at once (`None`). `Some(true)`: the project has just
-/// finished loading; `Some(false)`: it is still loading.
-pub(crate) fn tick(ses: &mut crate::session::Session, scanning: bool) -> Option<bool> {
-    let Some(decoded) = ses.loading.as_mut().map(|l| l.decode_done()) else {
-        sync_samplers(ses, None);
-        return None;
-    };
-    let deadline = std::time::Instant::now() + HOST_BUDGET;
-    // Then the plugin channels and mixer effects, under the same budget, then the samplers' played samples.
-    if decoded && sync_samplers(ses, Some(deadline)) && host_plugins(ses, deadline, scanning) && ses.loading.as_mut().is_some_and(|l| l.builds_done()) {
-        ses.loading = None;
-        ses.samples.wait = false;
-        return Some(true);
-    }
-    Some(false)
-}
-
-/// Starts the opened project's plugin channels and mixer effects until `deadline` (`project_plugins::sync_wrapped`
-/// and the other hosts stop after the instance that passes it): true when none is left to start. `scanning`: a plugin
-/// scan is running (`project_plugins::host_native`).
-fn host_plugins(ses: &mut crate::session::Session, deadline: std::time::Instant, scanning: bool) -> bool {
-    ses.plugins.host_deadline = Some(deadline);
-    ses.plugins.host_more = false;
-    crate::app::sync_effects(ses);
-    crate::project_plugins::sync_wrapped(ses);
-    crate::osc3::sync_osc3(ses);
-    crate::citrus::sync_citrus(ses);
-    crate::smith::sync_smith(ses);
-    crate::slicer::sync_slicer(ses);
-    crate::drums::sync_drums(ses);
-    if os_native::enabled() {
-        crate::project_plugins::host_native(ses, scanning);
-    }
-    ses.plugins.host_deadline = None;
-    let samplers = ses.hosted_rows.iter().filter(|&&r| ses.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
-    let done = (ses.plugins.hosted.len() + ses.plugins.wrap_failed.len() + ses.plugins.fx_failed.len() + ses.plugins.native_failed.len()).saturating_sub(samplers);
-    let more = ses.plugins.host_more;
-    if let Some(l) = &mut ses.loading {
-        l.label.clear();
-        l.plugins_done = done;
-        // Plugins no host plays (FL's own effects without a recreation) are not waited for.
-        if !more {
-            l.plugins = done;
-        }
-    }
-    !more
 }

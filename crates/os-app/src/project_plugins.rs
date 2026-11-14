@@ -505,6 +505,101 @@ pub(crate) fn sync_wrapped(ses: &mut crate::session::Session) {
     }
 }
 
+/// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ, started
+/// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
+/// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
+/// settings (spec: plugins/tesla/README.md "Opening Edison slots"), Love Philter's as Pulp Filter and Maximus's as
+/// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6), and the FL effects
+/// another Lemon effect recreates (`plugins::FL_RECREATIONS`: Reeverb 2, Balance, Chorus, ...) by that effect.
+pub(crate) fn sync_effects(ses: &mut crate::session::Session) {
+    use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
+    // The installed EQ plays these slots instead (`host_native`).
+    if crate::project_plugins::native_first() {
+        return;
+    }
+    // Runs every tick: the slots already hosted are passed over before their states are read, as an Edison slot's
+    // can hold tens of megabytes of audio.
+    let todo: Vec<(u16, u8, String)> = ses.project
+        .mixer
+        .iter()
+        .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
+        .filter(|&(t, k, _)| !ses.plugins.hosted.contains_key(&fx_key(t, k)) && !ses.plugins.fx_failed.contains(&fx_key(t, k)))
+        .filter_map(|(t, k, s)| {
+            s.as_ref()
+                .filter(|s| {
+                    [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str())
+                        || crate::plugins::recreation_of(&s.name).is_some()
+                })
+                .map(|s| (t, k, s.name.clone()))
+        })
+        .collect();
+    let mut made = false;
+    for (t, k, file) in todo {
+        if ses.plugins.past_deadline() {
+            break;
+        }
+        let recreation = crate::plugins::recreation_of(&file);
+        let name = match file.as_str() {
+            EQ_FILE_NAME => LEMON_EQ,
+            LOVE_PHILTER_FILE_NAME => PULP_FILTER,
+            MAXIMUS_FILE_NAME => PRESS,
+            _ => recreation.unwrap_or(TESLA),
+        };
+        let Some(index) = ses.plugins.effect_index(name) else { continue };
+        let track = ses.project.mixer.iter().find(|m| m.index == t);
+        let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
+        let st = if file == EQ_FILE_NAME {
+            Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
+        } else if file == LOVE_PHILTER_FILE_NAME {
+            // Bytes that are not a Love Philter state open Pulp Filter's starting state.
+            Some(pulp_filter::plugin_state_from_fl(fl))
+        } else if file == MAXIMUS_FILE_NAME {
+            // Bytes that are not a Maximus state open Press's starting state.
+            Some(press::plugin_state_from_fl(fl))
+        } else if let Some(lemon) = recreation {
+            // A state shorter than the original's, or of a later version, opens the defaults (spec:
+            // plugins/lemon-small-effects.md §5).
+            crate::plugins::recreation_state_from_fl(lemon, fl)
+        } else {
+            // Bytes that are not an Edison state open an empty Tesla.
+            tesla::plugin_state_from_edison(fl)
+        };
+        made = true;
+        if let Err(e) = ses.plugins.create_effect(t, k, index, st.as_deref()) {
+            ses.plugins.fx_failed.push(fx_key(t, k));
+            ses.touched.views.push(crate::session::View::Message(format!("{name}: {e}")));
+        }
+    }
+    if !made {
+        return;
+    }
+    ses.transport.set_effects(ses.plugins.effects());
+    ses.dirty = true;
+}
+
+/// `App::remap_rows` in the session: the instances follow rows that moved (`m` gives each row's new row), after the
+/// notes held from the keyboard ended.
+pub(crate) fn remap_rows_in(s: &mut crate::session::Session, m: &dyn Fn(usize) -> Option<usize>) {
+    s.plugins.remap(m);
+    // The rows hosted are the instances' rows.
+    s.hosted_rows = s.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
+    s.plugins.sampler_failed = s.plugins.sampler_failed.iter().filter_map(|&r| m(r)).collect();
+    s.plugins.wrap_failed = s.plugins.wrap_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+    s.plugins.native_failed = s.plugins.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
+    s.transport.set_instruments(s.plugins.instruments());
+    s.dirty = true;
+}
+
+/// `App::plugin_paste` in the session: row `row` hosts available plugin `index` from saved state `blob`.
+pub(crate) fn plugin_paste_in(s: &mut crate::session::Session, row: usize, index: usize, blob: &[u8]) {
+    if s.plugins.create_with(row, index, Some(blob)).is_ok() {
+        if !s.hosted_rows.contains(&row) {
+            s.hosted_rows.push(row);
+        }
+        s.transport.set_instruments(s.plugins.instruments());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

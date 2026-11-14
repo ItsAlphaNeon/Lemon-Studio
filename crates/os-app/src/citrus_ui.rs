@@ -38,11 +38,11 @@ mod tests {
     fn sytrus_channels_save_and_reopen() {
         let path = std::env::temp_dir().join(format!("openstudio-citrus-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.state.session.plugins.available = crate::plugins::builtin();
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), CITRUS);
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), CITRUS);
         let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(CITRUS));

@@ -116,7 +116,7 @@ mod tests {
     fn project(channels: usize) -> Project {
         let mut p = Project::default();
         for i in 0..channels {
-            p.channels.push(crate::app::default_project().channels[0].clone());
+            p.channels.push(crate::projects::default_project().channels[0].clone());
             p.channels[i].index = i as u16;
         }
         p
@@ -165,7 +165,7 @@ mod tests {
         let mut p = project(2);
         settle(&mut ids, &mut p);
         let gone = p.channels.pop().unwrap().id.0;
-        p.channels.push(crate::app::default_project().channels[0].clone());
+        p.channels.push(crate::projects::default_project().channels[0].clone());
         p.channels[1].id = Id::NONE;
         settle(&mut ids, &mut p);
         assert_ne!(p.channels[1].id.0, gone);

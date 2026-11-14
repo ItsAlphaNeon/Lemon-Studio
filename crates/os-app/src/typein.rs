@@ -9,7 +9,7 @@
 // spec: ui/type-in-value.md
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
-use crate::knobs::KnobId;
+use crate::knob_id::KnobId;
 
 /// What a value box sets.
 #[derive(Debug, Clone, Copy, PartialEq)]

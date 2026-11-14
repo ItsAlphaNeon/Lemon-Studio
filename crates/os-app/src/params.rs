@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex, Weak};
 
 use os_model::target::{self, Target};
 
-use crate::app::Action;
 use crate::plugins::{fx_key, fx_of, MEMBER_KEY};
 
 /// The values of an instance's parameters, by id.
@@ -62,14 +61,6 @@ pub struct List {
 /// automation clip moving a parameter does on every tick).
 const REREAD_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Something the user moved last (spec §5).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Tweak {
-    /// A plugin parameter changed in the plugin's own editor: hosted key, parameter index.
-    Plugin { key: usize, index: usize },
-    /// A host control with an automation target (knob, fader, tempo).
-    Host(Action),
-}
 
 impl ParamUi {
     /// The host set parameter `id` of instance `key` to `v` (an undo, the value box, Paste): what the plugin's window
@@ -93,8 +84,6 @@ impl ParamUi {
 pub struct ParamUi {
     /// By hosted key (`plugins::Plugins::hosted`).
     pub lists: BTreeMap<usize, List>,
-    /// Newest first: "Most recent", "Second most recent".
-    pub last: Vec<Tweak>,
 }
 
 impl ParamUi {
@@ -107,14 +96,6 @@ impl ParamUi {
         self.visible(key).next().is_some()
     }
 
-    pub(crate) fn note(&mut self, t: Tweak) {
-        if self.last.first() == Some(&t) {
-            return;
-        }
-        self.last.retain(|x| *x != t);
-        self.last.insert(0, t);
-        self.last.truncate(2);
-    }
 
     /// The instance behind `key`, if it is still hosted.
     pub(crate) fn plugin(&self, key: usize) -> Option<Arc<Mutex<dyn os_host::Plugin>>> {
@@ -139,9 +120,9 @@ pub enum PCmd {
 /// The hosted key of the instance an automation target points at, and the parameter index. A container's parameter
 /// (a slot's or a channel's) is its member's (`None` for a member's level, or a member whose plugin is not loaded).
 pub fn key_of(s: &crate::session::Session, t: Target) -> Option<(usize, usize)> {
-    if let Some((track, slot, k)) = crate::container::target_place(s, t) {
+    if let Some((track, slot, k)) = crate::edit::container::target_place(s, t) {
         let (id, item) = target::member_of(k).filter(|m| m.1 < target::MEMBER_WET)?;
-        return Some((crate::container::member_key(s, crate::container::place_key(track, slot), id)?, usize::from(item)));
+        return Some((crate::edit::container::member_key(s, crate::container::place_key(track, slot), id)?, usize::from(item)));
     }
     match t {
         Target::ChannelParam(ch, k) => Some((s.project.channels.iter().position(|c| c.index == ch)?, usize::from(k))),
@@ -156,7 +137,7 @@ pub fn target_of(s: &crate::session::Session, key: usize, index: usize) -> Optio
     let k = u16::try_from(index).ok().filter(|&k| k < 0x8000)?;
     if key >= MEMBER_KEY {
         let &(track, slot, id) = s.plugin_members.get(&key)?;
-        return crate::container::item_target(s, track, slot, target::member_item(id, k).filter(|_| k < target::MEMBER_WET)?);
+        return crate::edit::container::item_target(s, track, slot, target::member_item(id, k).filter(|_| k < target::MEMBER_WET)?);
     }
     Some(match fx_of(key) {
         Some((track, slot)) => target::slot_param(track, slot, k),
@@ -177,17 +158,17 @@ pub fn link_target(s: &crate::session::Session, key: usize, index: usize) -> cra
 /// or for an effect inside a container "<effect> in <container> - <track>".
 pub(crate) fn owner_name(s: &crate::session::Session, key: usize) -> String {
     if let Some(&(track, slot, id)) = s.plugin_members.get(&key) {
-        let name = crate::container::members(s, track, slot).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
+        let name = crate::edit::container::members(s, track, slot).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
         if slot == crate::container::CHANNEL {
-            return format!("{name} in Container - {}", crate::container::place_name(s, track, slot));
+            return format!("{name} in Container - {}", crate::edit::container::place_name(s, track, slot));
         }
-        let plugin = crate::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
-        return format!("{name} in {} - {}", crate::plugins::slot_label(&plugin), crate::mixer::name(s, track));
+        let plugin = crate::edit::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
+        return format!("{name} in {} - {}", crate::plugins::slot_label(&plugin), crate::edit::mixer::name(s, track));
     }
     match fx_of(key) {
         Some((track, slot)) => {
-            let plugin = crate::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
-            format!("{} - {}", crate::plugins::slot_label(&plugin), crate::mixer::name(s, track))
+            let plugin = crate::edit::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
+            format!("{} - {}", crate::plugins::slot_label(&plugin), crate::edit::mixer::name(s, track))
         }
         None => {
             let ch = s.project.channels.get(key);
@@ -206,7 +187,7 @@ pub(crate) const SET_STEPS: u32 = 32;
 
 /// A slot's row label under Effects: "<slot plugin> (<track name>)" (FL observed, spec §6).
 pub fn effect_label(s: &crate::session::Session, track: u16, slot: u8) -> Option<String> {
-    Some(format!("{} ({})", crate::mixer::slot_name(s, track, slot)?, crate::mixer::name(s, track)))
+    Some(format!("{} ({})", crate::edit::mixer::slot_name(s, track, slot)?, crate::edit::mixer::name(s, track)))
 }
 
 /// The menu entries for the last tweaked parameters (spec §5; `views::menus::MenuCmd::Params`).
@@ -221,8 +202,8 @@ pub enum MenuEntry {
 
 /// What a plugin tick of the parameters leaves to the app (`App::params_tick`).
 pub(crate) struct Tick {
-    /// A parameter was tweaked in its window: the hint shows it.
-    pub(crate) moved: bool,
+    /// A parameter was tweaked in its window, (key, index): the hint shows it and it is the last tweaked.
+    pub(crate) moved: Option<(usize, usize)>,
     /// Values for automation recording: (key, index, range, value).
     pub(crate) recorded: Vec<(usize, usize, (f64, f64), f64)>,
     /// "Create automation clip" picked in a plugin's own menu: (key, index).
@@ -318,7 +299,7 @@ pub(crate) fn params_in(ses: &mut crate::session::Session) -> Tick {
             let (os_host::ParamEvent::Begin(id) | os_host::ParamEvent::Value(id, _)) = e else { continue };
             edited.push(key);
             if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
-                moved = Some(Tweak::Plugin { key, index });
+                moved = Some((key, index));
                 // What automation recording takes: the value with the parameter's stated range.
                 if let (os_host::ParamEvent::Value(_, v), Some(info)) = (e, p.param_info(index)) {
                     recorded.push((key, index, (info.min, info.max), v));
@@ -366,9 +347,5 @@ pub(crate) fn params_in(ses: &mut crate::session::Session) -> Tick {
             ses.dirty = true;
         }
     }
-    let tweaked = moved.is_some();
-    if let Some(t) = moved {
-        ses.params.note(t);
-    }
-    Tick { moved: tweaked, recorded, automate }
+    Tick { moved, recorded, automate }
 }

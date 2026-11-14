@@ -179,7 +179,7 @@ impl Server {
 /// `--serve`: the app without a window, `project` opened, answering clients until the process is ended.
 pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Option<std::path::PathBuf>) -> ! {
     // A session of its own: no window, no `App` (control-plane step 8).
-    let mut ses = crate::session::Session::new(crate::app::default_project(), crate::transport::Transport::new(crate::factory_folder::dir()));
+    let mut ses = crate::session::Session::new(crate::projects::default_project(), crate::transport::Transport::new(crate::factory_folder::dir()));
     // The plugins of the last scan, as the window's app has them before its own scan.
     ses.plugins = crate::project_io::last_scan();
     ses.project.get_mut().work_time = Some(crate::project_info::work_time_now());
@@ -229,7 +229,7 @@ pub(crate) fn serve_tick(ses: &mut crate::session::Session) {
     if let Some(e) = crate::backup::tick_headless(ses, std::time::Instant::now()) {
         eprintln!("Lemon Studio: {e}");
     }
-    crate::playlist::follow_audio(ses);
-    let _ = crate::rack::sync_playback(ses);
+    crate::edit::playlist::follow_audio(ses);
+    let _ = crate::edit::rack::sync_playback(ses);
     ses.touched = Default::default();
 }

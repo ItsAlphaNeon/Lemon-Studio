@@ -303,7 +303,7 @@ impl PluginSide {
             // A container's effect has no name of its own (a preset renames nothing).
             None if key >= crate::plugins::MEMBER_KEY => None,
             None => s.project.channels[key].name.clone(),
-            Some((t, k)) => crate::mixer::slot_label(s, t, k),
+            Some((t, k)) => crate::edit::mixer::slot_label(s, t, k),
         })
     }
 
@@ -312,7 +312,7 @@ impl PluginSide {
         let Some(key) = owner_key(s, owner).filter(|&k| k < crate::plugins::MEMBER_KEY) else { return };
         match crate::plugins::fx_of(key) {
             None => s.project.get_mut().channels[key].name = self.name.clone(),
-            Some((t, k)) => crate::mixer::set_slot_label(s, t, k, self.name.clone()),
+            Some((t, k)) => crate::edit::mixer::set_slot_label(s, t, k, self.name.clone()),
         }
     }
 }
@@ -460,7 +460,7 @@ pub fn owner_key(s: &crate::session::Session, owner: u32) -> Option<usize> {
         })
     };
     if owner & MEMBER_OWNER != 0 {
-        let (t, k) = crate::container::id_place(s, owner & MEMBER_SLOT)?;
+        let (t, k) = crate::edit::container::id_place(s, owner & MEMBER_SLOT)?;
         let id = (owner & !MEMBER_OWNER) >> 24;
         return s.plugin_members.iter().find(|(_, m)| **m == (t, k, id)).map(|(&key, _)| key);
     }
@@ -477,7 +477,7 @@ pub fn key_owner(s: &crate::session::Session, key: usize) -> Option<u32> {
     let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t)?.slots.get(usize::from(k))?.as_ref().map(|s| s.id.0);
     if key >= crate::plugins::MEMBER_KEY {
         let &(t, k, id) = s.plugin_members.get(&key)?;
-        return match crate::container::place_id(s, t, k)?.0 {
+        return match crate::edit::container::place_id(s, t, k)?.0 {
             0 => Some(0),
             slot => member_owner(slot, id),
         };
@@ -732,15 +732,15 @@ impl Command {
                     return Err("a sample goes into a sampler channel (no plugin)".into());
                 }
                 let row = match &plugin {
-                    Some(p) if !sampler => crate::app::add_plugin_channel(s.project.get_mut(), p),
-                    _ => crate::app::add_channel(s.project.get_mut()),
+                    Some(p) if !sampler => crate::projects::add_plugin_channel(s.project.get_mut(), p),
+                    _ => crate::projects::add_channel(s.project.get_mut()),
                 };
                 let ch = &mut s.project.get_mut().channels[row];
                 if let Some(t) = track {
                     ch.mixer_track = t;
                 }
                 if let Some(path) = sample.filter(|p| !p.is_empty()) {
-                    crate::rack::auto_name(ch, std::path::Path::new(&path));
+                    crate::edit::rack::auto_name(ch, std::path::Path::new(&path));
                     ch.sample_path = Some(path.clone());
                     s.sample_loads.push((row, path));
                 }
@@ -762,7 +762,7 @@ impl Command {
                     return Err("a project keeps at least one channel".into());
                 }
                 let map: Vec<Option<usize>> = (0..n).map(|r| (r != row).then(|| if r < row { r } else { r - 1 })).collect();
-                crate::rack::remap_in(s, &map);
+                crate::edit::rack::remap_in(s, &map);
                 none
             }
             Command::MoveChannel { channel, row: to } => {
@@ -778,7 +778,7 @@ impl Command {
                 for (new, &old) in order.iter().enumerate() {
                     map[old] = Some(new);
                 }
-                crate::rack::remap_in(s, &map);
+                crate::edit::rack::remap_in(s, &map);
                 none
             }
             Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track } => {
@@ -820,8 +820,8 @@ impl Command {
                 if path.is_empty() {
                     ch.sample_path = None;
                 } else {
-                    crate::rack::auto_name(ch, std::path::Path::new(&path));
-                    crate::rack::read_tags(ch, std::path::Path::new(&path));
+                    crate::edit::rack::auto_name(ch, std::path::Path::new(&path));
+                    crate::edit::rack::read_tags(ch, std::path::Path::new(&path));
                     ch.sample_path = Some(path.clone());
                 }
                 s.sample_loads.push((row, path));
@@ -829,11 +829,11 @@ impl Command {
             }
 
             Command::AddTrack { at } => {
-                let last = crate::mixer::inserts(s) + 1;
+                let last = crate::edit::mixer::inserts(s) + 1;
                 if at.is_some_and(|a| a == 0 || a > last) {
                     return Err(format!("a new track goes at 1..={last}"));
                 }
-                let n = crate::mixer::add_track_in(s, at);
+                let n = crate::edit::mixer::add_track_in(s, at);
                 let place = s.project.mixer.iter().position(|m| m.index == n).unwrap_or(0);
                 s.control.settle(s.project.get_mut());
                 let id = s.project.mixer[place].id;
@@ -844,7 +844,7 @@ impl Command {
                 if n == 0 {
                     return Err("the master track can't be deleted".into());
                 }
-                crate::mixer::delete_track_in(s, n);
+                crate::edit::mixer::delete_track_in(s, n);
                 none
             }
             Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled } => {
@@ -889,7 +889,7 @@ impl Command {
                     return Err("a track can't send to itself".into());
                 }
                 let level = level.map(|v| unit("level", v, 0.0, 1.0)).transpose()?;
-                if level.is_some() && crate::mixer::makes_loop(s, a, b) {
+                if level.is_some() && crate::edit::mixer::makes_loop(s, a, b) {
                     return Err("that route would make a loop".into());
                 }
                 let place = track_place(&s.project, from)?;
@@ -978,7 +978,7 @@ impl Command {
             Command::AddPattern { name, color } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;
                 let n = s.project.patterns.iter().map(|p| p.number).max().unwrap_or(0) + 1;
-                let p = crate::patterns::pat_mut(s, n);
+                let p = crate::edit::patterns::pat_mut(s, n);
                 p.name = name.as_deref().and_then(text);
                 p.color = color.flatten();
                 let place = s.project.patterns.iter().position(|p| p.number == n).unwrap_or(0);
@@ -988,7 +988,7 @@ impl Command {
             }
             Command::DeletePattern { pattern } => {
                 let n = s.project.patterns[pattern_place(&s.project, pattern)?].number;
-                crate::patterns::renumber_in(s, |m| if m == n { None } else if m > n { Some(m - 1) } else { Some(m) });
+                crate::edit::patterns::renumber_in(s, |m| if m == n { None } else if m > n { Some(m - 1) } else { Some(m) });
                 none
             }
             Command::SetPattern { pattern, name, color, length } => {
@@ -1041,22 +1041,22 @@ impl Command {
                     }
                     _ => return Err("a clip has a pattern or a channel".into()),
                 };
-                if track == 0 || track > crate::playlist::TRACKS {
-                    return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
+                if track == 0 || track > crate::edit::playlist::TRACKS {
+                    return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
                 }
                 // Else the source's own length, as a clip placed in the playlist gets.
-                let length = length.filter(|&l| l > 0).unwrap_or_else(|| crate::playlist::source_len(s, source));
-                let a = crate::playlist::arr_mut(s);
+                let length = length.filter(|&l| l > 0).unwrap_or_else(|| crate::edit::playlist::source_len(s, source));
+                let a = crate::edit::playlist::arr_mut(s);
                 let at = a.clips.partition_point(|c| c.position <= position);
                 a.clips.insert(at, Clip::new(position, length, track - 1, source));
                 s.control.settle(s.project.get_mut());
-                let id = crate::playlist::clips(s)[at].id;
+                let id = crate::edit::playlist::clips(s)[at].id;
                 s.touched.clips = true;
                 Ok(id_result("clip", id))
             }
             Command::DeleteClip { clip } => {
                 let i = clip_place(&s.project, clip)?;
-                crate::playlist::arr_mut(s).clips.remove(i);
+                crate::edit::playlist::arr_mut(s).clips.remove(i);
                 s.touched.clips = true;
                 none
             }
@@ -1064,13 +1064,13 @@ impl Command {
                 position.map(|v| ticks("position", v)).transpose()?;
                 length.map(|v| ticks("length", v)).transpose()?;
                 let i = clip_place(&s.project, clip)?;
-                if track.is_some_and(|t| t == 0 || t > crate::playlist::TRACKS) {
-                    return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
+                if track.is_some_and(|t| t == 0 || t > crate::edit::playlist::TRACKS) {
+                    return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
                 }
                 if length == Some(0) {
                     return Err("a clip's length can't be 0".into());
                 }
-                let a = crate::playlist::arr_mut(s);
+                let a = crate::edit::playlist::arr_mut(s);
                 let mut c = a.clips.remove(i);
                 c.position = position.unwrap_or(c.position);
                 c.track = track.map_or(c.track, |t| t - 1);
@@ -1083,10 +1083,10 @@ impl Command {
             }
             Command::SetPlaylistTrack { track, name, color, enabled } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;
-                if track == 0 || track > crate::playlist::TRACKS {
-                    return Err(format!("playlist tracks are 1..={}", crate::playlist::TRACKS));
+                if track == 0 || track > crate::edit::playlist::TRACKS {
+                    return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
                 }
-                let t = &mut crate::playlist::arr_mut(s).tracks[usize::from(track - 1)];
+                let t = &mut crate::edit::playlist::arr_mut(s).tracks[usize::from(track - 1)];
                 if let Some(n) = name {
                     t.name = text(&n);
                 }
@@ -1198,7 +1198,7 @@ fn restore(s: &mut crate::session::Session, side: Side) {
     mutes.keep(s.project.get_mut());
     s.set_tempo(tempo);
     s.set_pattern(pattern);
-    crate::rack::remap_session(s, &map);
+    crate::edit::rack::remap_session(s, &map);
     // The views follow the rows by id (`crate::follow`).
     s.touched.rows.get_or_insert(old);
     (s.loop_type, s.loop_type_of) = loop_type;

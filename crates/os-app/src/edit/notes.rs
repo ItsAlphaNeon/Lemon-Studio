@@ -10,9 +10,6 @@
 #![allow(unused_imports)]
 
 use os_model::{ControlPoint, Note, Pattern};
-use os_ui::Rect;
-use crate::app::State;
-use crate::piano::*;
 
 /// Where the current pattern plays in the song: each clip of it that sounds (not muted, on a track that is on), as
 /// (song tick of the clip's start, pattern tick there, length), in song order. A clip that plays its whole pattern
@@ -20,7 +17,7 @@ use crate::piano::*;
 pub fn song_spans(s: &crate::session::Session) -> Vec<(u32, u32, u32)> {
     let whole = pattern_length(s, s.pattern());
     let track_on = |t: u16| s.project.arrangement().and_then(|a| a.tracks.get(usize::from(t))).is_none_or(|t| t.enabled);
-    let mut v: Vec<(u32, u32, u32)> = crate::playlist::clips(s)
+    let mut v: Vec<(u32, u32, u32)> = crate::edit::playlist::clips(s)
         .iter()
         .filter(|c| c.source == os_model::ClipSource::Pattern(s.pattern()) && !c.muted && track_on(c.track))
         .map(|c| match c.window {

@@ -26,7 +26,6 @@
 use serde_json::{json, Value};
 
 use super::{By, Command, Level};
-use crate::app::App;
 use crate::session::Session;
 
 /// The protocol's version (a client checks it in `hello`'s result).
@@ -44,24 +43,24 @@ pub struct Client {
 }
 
 /// A JSON-RPC error: its code and message.
-pub struct Fail(i64, String);
+pub struct Fail(pub(crate) i64, pub(crate) String);
 
 const PARSE: i64 = -32700;
 const INVALID: i64 = -32600;
-const NO_METHOD: i64 = -32601;
+pub(crate) const NO_METHOD: i64 = -32601;
 const BAD_PARAMS: i64 = -32602;
 const FAILED: i64 = -32000;
 const NOT_ALLOWED: i64 = -32001;
 
-fn bad(e: impl std::fmt::Display) -> Fail {
+pub(crate) fn bad(e: impl std::fmt::Display) -> Fail {
     Fail(BAD_PARAMS, e.to_string())
 }
 
-fn failed(e: impl std::fmt::Display) -> Fail {
+pub(crate) fn failed(e: impl std::fmt::Display) -> Fail {
     Fail(FAILED, e.to_string())
 }
 
-fn need(c: &Client, level: Level) -> Result<(), Fail> {
+pub(crate) fn need(c: &Client, level: Level) -> Result<(), Fail> {
     if c.level >= level {
         Ok(())
     } else {
@@ -69,7 +68,7 @@ fn need(c: &Client, level: Level) -> Result<(), Fail> {
     }
 }
 
-fn uint(params: &Value, key: &str) -> Result<u64, Fail> {
+pub(crate) fn uint(params: &Value, key: &str) -> Result<u64, Fail> {
     params.get(key).and_then(Value::as_u64).ok_or_else(|| bad(format!("`{key}` is missing or not a number")))
 }
 
@@ -83,10 +82,10 @@ fn commands(params: &Value) -> Result<Vec<Command>, Fail> {
 }
 
 /// The methods the window's app answers itself: Lemon Studio's journal of edits and plugin states.
-const JOURNAL: [&str; 3] = ["journal", "plugin_states", "restore_state"];
+pub(crate) const JOURNAL: [&str; 3] = ["journal", "plugin_states", "restore_state"];
 
 /// A JSON-RPC answer to request `id`.
-fn reply(id: Value, out: Result<Value, Fail>) -> String {
+pub(crate) fn reply(id: Value, out: Result<Value, Fail>) -> String {
     match out {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err(Fail(code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
@@ -99,77 +98,6 @@ fn reply(id: Value, out: Result<Value, Fail>) -> String {
 pub struct Asks {
     pub proposal: Option<u64>,
     pub save: Option<(String, std::path::PathBuf)>,
-}
-
-impl App {
-    /// Answers one request line from client `c` (`None`: a notification, no answer): on the session, with the views
-    /// following and what the user is to decide asked.
-    pub fn rpc_line(&mut self, c: &mut Client, line: &str) -> Option<String> {
-        let selected = self.state.selected_channel;
-        let mut asks = Asks::default();
-        // The journal's methods are the interface's own (Lemon Studio's journal lives with the window).
-        if let Ok(req) = serde_json::from_str::<Value>(line) {
-            if let Some(m) = req.get("method").and_then(Value::as_str).filter(|m| JOURNAL.contains(m)) {
-                let params = req.get("params").cloned().unwrap_or(Value::Null);
-                let out = self.rpc(c, m, &params);
-                return req.get("id").cloned().map(|id| reply(id, out));
-            }
-        }
-        let out = self.host(|s| rpc_line_in(s, c, line, selected, &mut asks));
-        self.asked(asks);
-        out
-    }
-
-    /// Method `m` with `params` for client `c`, as `rpc_line` answers it.
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests
-    pub fn rpc(&mut self, c: &mut Client, m: &str, params: &Value) -> Result<Value, Fail> {
-        if JOURNAL.contains(&m) && c.token.is_none() {
-            return self.journal_rpc(c, m, params);
-        }
-        let selected = self.state.selected_channel;
-        let mut asks = Asks::default();
-        let out = self.host(|s| rpc_in(s, c, m, params, selected, &mut asks));
-        self.asked(asks);
-        out
-    }
-
-    /// The journal's methods (`JOURNAL`), on the window's journal.
-    fn journal_rpc(&mut self, c: &mut Client, m: &str, params: &Value) -> Result<Value, Fail> {
-        match m {
-            "journal" => {
-                let since = params.get("since").and_then(Value::as_u64).unwrap_or(0);
-                let (entries, last) = self.journal.since(since);
-                Ok(json!({ "entries": entries, "last": last, "file": self.journal.path.as_ref().map(|p| p.display().to_string()) }))
-            }
-            "plugin_states" => {
-                let owner = uint(params, "owner")? as u32;
-                let key = super::command::owner_key(&self.state.session, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
-                let name = self.state.session.plugins.descriptor(key).map(|d| d.name).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
-                let found = self.journal.states_of(&name, 50);
-                let list: Vec<Value> = found.iter().map(|f| json!({ "file": f.file.display().to_string(), "seq": f.seq, "t": f.t, "at": f.at, "hash": f.hash })).collect();
-                Ok(json!({ "plugin": name, "states": list }))
-            }
-            "restore_state" => {
-                need(c, Level::Edit)?;
-                let owner = uint(params, "owner")? as u32;
-                let key = super::command::owner_key(&self.state.session, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
-                let file = params.get("file").and_then(Value::as_str).map(std::path::PathBuf::from).or_else(|| self.journal.path.clone()).ok_or_else(|| bad("no journal file"))?;
-                let msg = self.recover_state(key, &file, uint(params, "seq")?);
-                Ok(json!({ "message": msg }))
-            }
-            _ => Err(Fail(NO_METHOD, format!("no method `{m}`"))),
-        }
-    }
-
-    /// What a request left to the user is asked.
-    fn asked(&mut self, asks: Asks) {
-        if let Some(n) = asks.proposal {
-            self.ask_proposal(n);
-        }
-        if let Some((who, path)) = asks.save {
-            self.ask_save(&who, path);
-        }
-    }
 }
 
 /// Answers one request line from client `c` (`None`: a notification, no answer).
@@ -347,36 +275,4 @@ pub(crate) fn fill_params(ses: &mut Session, cmds: &mut [Command]) -> Result<(),
         }
     }
     Ok(())
-}
-
-impl App {
-    /// Asks the user whether client `who` may save the project to `path`.
-    pub(crate) fn ask_save(&mut self, who: &str, path: std::path::PathBuf) {
-        use crate::dialog::{Answer, Kind, Msg, Then};
-        let text = vec![(who.to_string(), true), (" asks to save the project to ".into(), false), (path.display().to_string(), true), (".".into(), false)];
-        let mut msg = Msg::new(Kind::Warning, "Save", text, &[Answer::Yes, Answer::No], Then::ClientSave(path));
-        msg.labels = vec!["Save", "Don't save"];
-        self.show_msg(msg);
-    }
-
-    /// Asks the user about proposal `n`: what it would change, Apply or Discard (spec: roadmap/control-plane.md
-    /// "Proposals").
-    pub(crate) fn ask_proposal(&mut self, n: u64) {
-        use crate::dialog::{Answer, Kind, Msg, Then};
-        let Some(p) = self.state.session.control.proposals.iter().find(|p| p.n == n) else { return };
-        let who = match &p.by {
-            super::By::Client(c) => c.clone(),
-            super::By::User => "You".into(),
-        };
-        const SHOWN: usize = 8;
-        let mut lines: Vec<String> = p.changes.iter().take(SHOWN).map(|c| format!("\n  {}: {} > {}", c.path, c.before, c.after)).collect();
-        if p.changes.len() > SHOWN {
-            lines.push(format!("\n  and {} more", p.changes.len() - SHOWN));
-        }
-        let head = format!(" proposes \"{}\" ({} change{}):", p.name, p.changes.len(), if p.changes.len() == 1 { "" } else { "s" });
-        let text = vec![(who, true), (head, false), (lines.concat(), false)];
-        let mut msg = Msg::new(Kind::Info, "Proposal", text, &[Answer::Yes, Answer::No], Then::Proposal(n));
-        msg.labels = vec!["Apply", "Discard"];
-        self.show_msg(msg);
-    }
 }

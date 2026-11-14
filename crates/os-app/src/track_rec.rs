@@ -67,7 +67,7 @@ pub fn file_name(project: &str, now: chrono::NaiveDateTime, track: &str) -> Stri
 }
 
 pub(crate) fn folder(s: &Session) -> std::path::PathBuf {
-    crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded")
+    crate::data_folder::resolve(&s.project, s.path.as_deref()).or_else(crate::user_dir::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded")
 }
 
 /// Whether the armed tracks record now: Record armed with Audio in the filter, playing, not paused or counting in.
@@ -105,7 +105,7 @@ fn begin(s: &mut Session, pos: u32) {
     let mut names: Vec<String> = Vec::new();
     for &t in &armed {
         // Two tracks of one name get files of their own.
-        let name = crate::mixer::name(s, t);
+        let name = crate::edit::mixer::name(s, t);
         names.push(if names.contains(&name) { format!("{name} ({t})") } else { name });
     }
     let mut recs = Vec::new();
@@ -176,7 +176,7 @@ fn place(s: &mut Session, lock_len: Option<(os_model::ClipSource, u32)>) {
         (0, _) => errors.first().map_or_else(|| "Nothing was recorded".to_string(), |e| format!("Disk recording: {e}")),
         (_, false) => format!("Recorded {} file(s) into the Recorded folder", made.len()),
         (_, true) => {
-            crate::playlist::snapshot_as(s, crate::one_click::RECORDED);
+            crate::edit::playlist::snapshot_as(s, crate::one_click::RECORDED);
             let p = &s.project;
             let tempo = p.tick_tempo(s.tempo().max(1.0));
             let ppq = f64::from(p.ppq.max(1));
@@ -185,7 +185,7 @@ fn place(s: &mut Session, lock_len: Option<(os_model::ClipSource, u32)>) {
                 let len = (*frames as f64 / f64::from(r.rate) * tempo / 60.0 * ppq).ceil() as u32;
                 // Into the mixer track's audio track when it has one free over the take (spec: ui/playlist.md §6c).
                 let track = crate::track_links::record_track(s, *t, *at, at + len.max(1));
-                if crate::playlist::add_audio_clip_on(s, &path.to_string_lossy(), track, *at, Some(*t), lock_len).is_some() {
+                if crate::edit::playlist::add_audio_clip_on(s, &path.to_string_lossy(), track, *at, Some(*t), lock_len).is_some() {
                     placed += 1;
                 }
             }

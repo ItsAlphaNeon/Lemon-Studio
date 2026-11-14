@@ -254,7 +254,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lemon-render-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (flp, out) = (dir.join("song.flp"), dir.join("song.wav"));
-        let file = os_flp::project::create(&crate::app::test_project()).expect("create");
+        let file = os_flp::project::create(&crate::projects::test_project()).expect("create");
         std::fs::write(&flp, file.to_bytes().expect("bytes")).unwrap();
         let o = Opts { hosted: Hosted::Builtin, seconds: Some(2.0), ..Opts::new(flp, out.clone()) };
         render(&o).expect("render");
@@ -302,7 +302,7 @@ mod tests {
         wav.extend(b);
         std::fs::write(&sample, wav).unwrap();
 
-        let mut p = crate::app::test_project();
+        let mut p = crate::projects::test_project();
         p.channels.truncate(1);
         p.channels[0].sample_path = Some(sample.to_string_lossy().into_owned());
         // One beat (96 ticks at 130 BPM: about 0.46 s).

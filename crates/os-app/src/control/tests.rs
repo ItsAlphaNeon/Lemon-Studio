@@ -14,7 +14,7 @@ use crate::app::App;
 
 fn app() -> App {
     let mut a = App::new(None);
-    a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+    a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
     a.state.session.project.get_mut().arrangements = vec![os_flp::project::default_arrangement()];
     a.state.session.control.settle(a.state.session.project.get_mut());
     a
@@ -27,7 +27,7 @@ fn test_client() -> By {
 /// The project and the rack's state of it, ids included (`==` on the model leaves ids out). Not the selection: an
 /// undo leaves it where it is, as before.
 fn reading(a: &App) -> (os_model::Project, Value, f64) {
-    let mut q = query::project(&a.state);
+    let mut q = crate::control::query_ui::project(&a.state);
     q.as_object_mut().unwrap().remove("selected_channel");
     (a.state.session.project.clone(), q, a.state.tempo())
 }
@@ -100,8 +100,8 @@ fn every_command_undoes_and_redoes() {
     round_trip(&mut a, json!({"op": "delete_clip", "clip": clip}));
     let pat2 = ids(&a).2.last().copied().unwrap();
     round_trip(&mut a, json!({"op": "delete_pattern", "pattern": pat2}));
-    let slot = query::project(&a.state)["mixer"].as_array().unwrap().iter().flat_map(|t| t["slots"].as_array().unwrap().clone()).next().unwrap();
-    let track = query::project(&a.state)["mixer"].as_array().unwrap().iter().find(|t| !t["slots"].as_array().unwrap().is_empty()).unwrap()["id"].as_u64().unwrap();
+    let slot = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().flat_map(|t| t["slots"].as_array().unwrap().clone()).next().unwrap();
+    let track = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().find(|t| !t["slots"].as_array().unwrap().is_empty()).unwrap()["id"].as_u64().unwrap();
     round_trip(&mut a, json!({"op": "remove_effect", "track": track, "slot": slot["slot"]}));
 }
 
@@ -489,7 +489,7 @@ fn the_mixer_s_edits_are_undoable() {
     ui_round_trip(&mut a, "Mixer track reset", |a| {
         run(a, MCmd::Reset(1));
     });
-    crate::mixer::track_mut(&mut a.state.session, 3).unwrap().routes = vec![5];
+    crate::edit::mixer::track_mut(&mut a.state.session, 3).unwrap().routes = vec![5];
     ui_round_trip(&mut a, "Mixer routing", |a| {
         a.state.mixer.sel.clear();
         run(a, MCmd::ResetRouting(3));
@@ -519,11 +519,11 @@ fn the_mixer_s_edits_are_undoable() {
     crate::playlist::start_edit(&mut a.state, crate::playlist::EditTarget::SlotName(2, 1), (0.0, 0.0));
     a.state.playlist.edit.as_mut().unwrap().text = "Glue".into();
     crate::playlist::commit_edit(&mut a.state);
-    assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
+    assert_eq!(crate::edit::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
     assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some("Slot name"));
-    assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Test FX"));
+    assert_eq!(crate::edit::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Test FX"));
     assert_eq!(crate::history_ui::redo(&mut a.state).as_deref(), Some("Slot name"));
-    assert_eq!(crate::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
+    assert_eq!(crate::edit::mixer::slot_name(&a.state.session, 2, 1).as_deref(), Some("Glue"));
     ui_round_trip(&mut a, "Remove effect", |a| {
         run(a, MCmd::SlotDelete(1));
     });
@@ -695,7 +695,7 @@ fn a_dry_run_leaves_the_instruments_and_the_selections() {
 #[test]
 fn slot_names_come_back_with_their_track() {
     let mut a = app();
-    crate::mixer::set_slot_label(&mut a.state.session, 3, 1, Some("Crunch".into()));
+    crate::edit::mixer::set_slot_label(&mut a.state.session, 3, 1, Some("Crunch".into()));
     crate::mixer::run(&mut a, crate::mixer::MCmd::Delete(2));
     assert_eq!(crate::mixer::slot_names_of(&a.state.session.project).get(&(2, 1)).map(String::as_str), Some("Crunch"), "moved left with its track");
     crate::history_ui::undo(&mut a.state);
@@ -935,8 +935,8 @@ fn preset_loads_are_undo_steps() {
     let fx = crate::plugins::fx_key(1, 0);
     let slot_knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
     a.state.session.plugins.hosted.insert(fx, crate::plugins::Hosted::new(slot_knob.clone()));
-    crate::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
-    let slot = |a: &App| crate::mixer::slot_name(&a.state.session, 1, 0).unwrap_or_default();
+    crate::edit::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
+    let slot = |a: &App| crate::edit::mixer::slot_name(&a.state.session, 1, 0).unwrap_or_default();
     let plain = slot(&a);
     let steps = a.state.session.history.at();
     load_into(&mut a, fx, &bright);
@@ -970,8 +970,8 @@ fn interface_edits_are_undo_steps() {
         a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 4);
     });
     ui_round_trip(&mut a, "Channel settings", |a| {
-        crate::misc::set(a, 0, crate::misc_page::M::Fine, 20.0);
-        crate::misc::set(a, 0, crate::misc_page::M::Fine, 30.0);
+        crate::misc_ui::set(a, 0, crate::misc_page::M::Fine, 20.0);
+        crate::misc_ui::set(a, 0, crate::misc_page::M::Fine, 30.0);
     });
     ui_round_trip(&mut a, "Pattern time signature", |a| crate::timesig::set_start(&mut a.state, 1, 3, 8));
     ui_round_trip(&mut a, "Add arrangement", |a| {
@@ -1031,7 +1031,7 @@ fn a_hosted_slots_scaling_and_help() {
     let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
     let fx = crate::plugins::fx_key(1, 0);
     a.state.session.plugins.hosted.insert(fx, crate::plugins::Hosted::new(knob));
-    crate::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Lemon Sampler"));
+    crate::edit::mixer::track_mut(&mut a.state.session, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Lemon Sampler"));
     crate::mixer::select(&mut a.state, 1, false);
     let scaling = |a: &App| slot_menu(a, 0, 0.0, 0.0).items.into_iter().find(|i| i.label == "Scaling").unwrap();
     let m = scaling(&a);
@@ -1097,7 +1097,7 @@ fn a_proposal_hands_playback_nothing() {
 /// and opens again with the change.
 #[test]
 fn a_session_without_a_window_serves_clients() {
-    let mut ses = crate::session::Session::new(crate::app::test_project(), crate::transport::Transport::new(None));
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None));
     let mut c = rpc::Client { name: "Headless".into(), level: Level::Edit, saves: true, token: None };
     let mut call = |ses: &mut crate::session::Session, m: &str, params: Value| -> Value {
         let mut asks = rpc::Asks::default();

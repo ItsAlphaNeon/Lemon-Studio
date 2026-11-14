@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 /// The user's themes folder (`themes` in the user folder; in tests, under the test's theme folder).
 pub fn user_dir() -> Option<PathBuf> {
-    crate::app::theme_dir().map(|d| d.join("themes"))
+    crate::user_dir::theme_dir().map(|d| d.join("themes"))
 }
 
 /// The user's themes: (name, text) of each `.flstheme` in `user_dir`, by name.
@@ -245,7 +245,7 @@ impl App {
     pub(crate) fn theme_restore(&mut self, s: Snap) {
         self.theme = crate::app::skin_theme(self.design(), &self.theme.name.clone(), s.text.as_deref());
         os_theme::set_current(&self.theme.colors);
-        if let Some(d) = crate::app::theme_dir() {
+        if let Some(d) = crate::user_dir::theme_dir() {
             match &s.text {
                 Some(t) => {
                     let _ = std::fs::create_dir_all(&d);

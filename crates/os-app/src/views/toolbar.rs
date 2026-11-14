@@ -782,20 +782,20 @@ fn pitch(ui: &mut Ui, c: &Ctx) {
 fn song_pos(ui: &mut Ui, c: &Ctx) {
     let (t, a, s, f) = (ui.t, c.a, c.s, c.f);
     let lemon = super::lemon(ui);
-    let sp = a.r(crate::song_pos::PANEL);
-    let range = crate::song_pos::range(s);
-    let pos = crate::song_pos::shown(s, f.playing, f.song, f.tick, f.song_pos_drag);
+    let sp = a.r(crate::song_pos_ui::PANEL);
+    let range = crate::song_pos_ui::range(s);
+    let pos = crate::song_pos_ui::shown(s, f.playing, f.song, f.tick, f.song_pos_drag);
     ui.live(Live::Clock, sp);
     match range {
         Some(_) => {
-            ui.hit(sp, Action::SongPos, crate::song_pos::hint(s, pos));
+            ui.hit(sp, Action::SongPos, crate::song_pos_ui::hint(s, pos));
         }
         // An empty playlist in SONG mode: nothing to move through.
         None => {
             ui.hit(sp, Action::Swallow, "Song position: the arranger is empty");
         }
     }
-    let hx = range.map(|len| a.x(crate::song_pos::handle_x(pos, len).round()));
+    let hx = range.map(|len| a.x(crate::song_pos_ui::handle_x(pos, len).round()));
     let y = |v: f32| a.y(v);
     if lemon {
         let x0 = a.x(390.0);

@@ -7,6 +7,7 @@
 //! Values are normalised 0..1. Every knob reads and writes the project model.
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
+use crate::piano_dlg::DlgKnob;
 use os_ui::Rect;
 
 use crate::app::State;
@@ -18,58 +19,9 @@ pub const PITCH_SNAP: f32 = 0.2;
 /// Normalised value change per mouse-wheel notch (1/64).
 pub const PER_NOTCH: f32 = 1.0 / 64.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum KnobId {
-    /// The toolbar's main volume (stored 0..16000, 12800 = unity at 0.8) and main pitch (-1200..1200 cents) (model
-    /// `Project::main_volume` / `main_pitch`; spec: audio/mixer.md "Main volume", audio/voice-levels.md).
-    MasterVol,
-    MasterPitch,
-    /// Mixer track pan (model).
-    MixPan(u16),
-    MixSep(u16),
-    SlotMix(u16, u8),
-    /// Send level from mixer track `.0` to `.1` (model `send_levels`, fader law; spec: ui/mixer.md §5).
-    Send(u16, u16),
-    /// Channel rack row / plugin window (model).
-    ChanVol(usize),
-    ChanPan(usize),
-    /// Channel rack main swing, 0..100 % (spec: ui/channel-rack.md §7; playback: flp/events/project-info.md).
-    Swing,
-    /// Mixer track `.0`'s equaliser: band `.1` (0 low shelf, 1 peaking, 2 high shelf), setting `.2` (0 gain, the
-    /// band's fader; 1 frequency; 2 width) (model `MixerTrack::eq`; spec: ui/mixer.md §8, audio/mixer.md "Equaliser").
-    Eq(u16, u8, u8),
-    /// A knob of the piano roll's Strum dialog (dialog state, not project data; spec: ui/piano-strum.md §1).
-    Strum(crate::strum::Knob),
-    /// A knob (or the Range box) of the piano roll's Arpeggiate dialog (dialog state; spec: ui/piano-arpeggiate.md §1).
-    Arp(crate::arpeggiate::Knob),
-    /// A knob or fader of the piano roll's Flam or Scale levels dialog (dialog state; spec: ui/piano-flam.md §1,
-    /// ui/piano-level-scaling.md §1).
-    PianoDlg(crate::piano_dlg::Knob),
-    /// A control of the LFO of the automation clip on channel row `.0` (model `Automation::lfo`; spec:
-    /// audio/automation.md "The LFO"). Its switch and mode are two-position controls that a click flips.
-    AutoLfo(usize, LfoKnob),
-    /// A setting of the Lemon MIDI Out on channel row `.0` (its plugin state; spec: plugins/midi-out.md §6). The checks
-    /// are two-position controls that a click flips.
-    MidiOut(usize, crate::lemon_midi_out::MoKnob),
-    /// The wet (`.3`) or dry level of member `.2` of the container in slot `.1` of track `.0`, 0..1 (the container's
-    /// window, `crate::container`; Lemon Studio's design: spec plugins/patcher/README.md §4.3). It shows the level the
-    /// chain plays, an automated one included.
-    Member(u16, u8, u32, bool),
-}
+pub use crate::knob_id::KnobId;
 
-/// The controls of an automation clip's LFO, each over its stored range: switch (off, on), mode (multiply, add),
-/// amount 0..128, speed 0..65536, tension, skew and pulse width -128..128 (Lemon Studio's ranges for the knobs; the
-/// page gives the stored values' meaning).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
-pub enum LfoKnob {
-    On,
-    Mode,
-    Amount,
-    Speed,
-    Tension,
-    Skew,
-    Pulse,
-}
+pub use crate::knob_id::LfoKnob;
 
 impl LfoKnob {
     pub const ALL: [LfoKnob; 7] = [LfoKnob::On, LfoKnob::Mode, LfoKnob::Amount, LfoKnob::Speed, LfoKnob::Tension, LfoKnob::Skew, LfoKnob::Pulse];
@@ -138,9 +90,16 @@ fn eq_pos(field: u8, v: i32) -> f32 {
     }
 }
 
-impl KnobId {
+/// How a knob behaves under the mouse and what it resets to: the interface's side of `KnobId`.
+pub trait KnobUi {
+    fn notch(self) -> f32;
+    fn drag_rate(self) -> f32;
+    fn default_value(self) -> f32;
+}
+
+impl KnobUi for KnobId {
     /// Value change per wheel notch: master pitch steps a semitone.
-    pub fn notch(self) -> f32 {
+    fn notch(self) -> f32 {
         match self {
             KnobId::MasterPitch => 1.0 / 24.0,
             // spec: ui/channel-rack.md §11 (3 % per notch; pan percent spans half the range), §7 (swing 4-5 %).
@@ -155,16 +114,8 @@ impl KnobId {
         }
     }
 
-    /// What the knob is as a target of the value box and of controller links: a container member's level is its own.
-    pub fn target(self) -> crate::typein::Target {
-        match self {
-            KnobId::Member(t, k, id, wet) => crate::typein::Target::Member(t, k, id, wet),
-            k => crate::typein::Target::Knob(k),
-        }
-    }
-
     /// Value change per pixel of vertical drag.
-    pub fn drag_rate(self) -> f32 {
+    fn drag_rate(self) -> f32 {
         match self {
             // spec: ui/channel-rack.md §11 (0.4 % / px volume, 0.8 % / px pan) and §7 (30 px = 17 % swing).
             KnobId::ChanVol(_) | KnobId::ChanPan(_) => 0.004,
@@ -184,7 +135,7 @@ impl KnobId {
     }
 
     /// Value restored by a middle click.
-    pub fn default_value(self) -> f32 {
+    fn default_value(self) -> f32 {
         match self {
             KnobId::MasterVol | KnobId::Send(..) => 0.8,
             KnobId::ChanVol(_) => 0.78125,
@@ -268,7 +219,7 @@ impl State {
             KnobId::Arp(k) => self.arp.set.get(k),
             KnobId::PianoDlg(k) => self.piano_dlg.get(k),
             // What the chain plays while its list is open (`container::shown_level`).
-            KnobId::Member(t, k, id, wet) => crate::container::shown_level(self, t, k, id, wet),
+            KnobId::Member(t, k, id, wet) => crate::container_ui::shown_level(self, t, k, id, wet),
             _ => self.session.knob(id).unwrap_or(0.0),
         }
     }
@@ -288,7 +239,7 @@ impl State {
             KnobId::ChanVol(row) if self.is_clip_row(row) => 1.0,
             KnobId::ChanPan(row) if self.is_clip_row(row) => 0.0,
             // An instrument member's levels as Add starts them: wet and dry (a layer).
-            KnobId::Member(t, k, member, false) if crate::container::is_instrument(&self.session, t, k, member) => 1.0,
+            KnobId::Member(t, k, member, false) if crate::edit::container::is_instrument(&self.session, t, k, member) => 1.0,
             _ => id.default_value(),
         }
     }
@@ -316,7 +267,7 @@ impl State {
                 }
             }
             // No undo step here: a drag's is taken at the press (`history::knob`).
-            KnobId::Member(t, k, member, wet) => crate::container::put_level(self, t, k, member, wet, v),
+            KnobId::Member(t, k, member, wet) => crate::container_ui::put_level(self, t, k, member, wet, v),
             _ => self.session.set_knob(id, v),
         }
     }
@@ -361,7 +312,7 @@ impl State {
             KnobId::ChanVol(row) if self.is_clip_row(row) => format!("Maximum: {:.0}%", n * 100.0),
             KnobId::ChanPan(_) => format!("Channel panning: {}", pan_text(bipolar)),
             KnobId::MixSep(_) => crate::mixer::sep_text(f64::from(bipolar)),
-            KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::mixer::name(&self.session, b)), f64::from(n)),
+            KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::edit::mixer::name(&self.session, b)), f64::from(n)),
             KnobId::SlotMix(..) => format!("Mix level: {:.0}%", n * 100.0),
             // spec: ui/channel-rack.md §11: "Channel volume: 78%  -5.2dB  0.55".
             KnobId::ChanVol(_) => {
@@ -372,7 +323,7 @@ impl State {
             KnobId::Swing => format!("Main swing: {:.0}%", n * 100.0),
             // "Lemon Limiter wet: 60%".
             KnobId::Member(t, k, id, wet) => {
-                let name = crate::container::members(&self.session, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
+                let name = crate::edit::container::members(&self.session, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
                 crate::container::level_text(&name, wet, n)
             }
             // "EQ band 1 (low shelf) level: 0.0dB", "... freq: 90Hz", "... width: 0.27" (spec: ui/mixer.md §8).
@@ -403,7 +354,7 @@ impl crate::app::App {
             Control::Fader(t) => {
                 let v = os_model::MixerTrack::new(t).volume.unwrap_or(0.8);
                 crate::control_ui::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t), |s| {
-                    if let Some(m) = crate::mixer::track_mut(&mut s.session, t) {
+                    if let Some(m) = crate::edit::mixer::track_mut(&mut s.session, t) {
                         m.volume = Some(v);
                         s.session.dirty = true;
                     }
@@ -458,9 +409,9 @@ mod tests {
     #[test]
     fn stereo_separation_moves_in_64ths() {
         let mut app = crate::app::App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.set_knob(KnobId::MixSep(1), 0.5 + 0.01 / 2.0);
-        let sep = |app: &crate::app::App| crate::mixer::track(&app.state.session, 1).unwrap().stereo_separation;
+        let sep = |app: &crate::app::App| crate::edit::mixer::track(&app.state.session, 1).unwrap().stereo_separation;
         assert_eq!(sep(&app), Some(1.0 / 64.0));
         assert_eq!(app.state.knob_text(KnobId::MixSep(1)), "Stereo separation: 2% merged");
         app.state.set_knob(KnobId::MixSep(1), 0.5 - 0.125 / 2.0);
@@ -485,7 +436,7 @@ mod tests {
         s.set_knob(KnobId::MixPan(1), 0.75);
         assert_eq!(s.knob_text(KnobId::MixPan(1)), "Panning: 50% right");
         assert_eq!(s.knob_text(KnobId::Swing), "Main swing: 0%");
-        s.session.project.get_mut().channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
+        s.session.project.get_mut().channels = vec![os_model::Channel { volume: 0.78, ..crate::projects::test_project().channels[0].clone() }];
         assert_eq!(s.knob_text(KnobId::ChanVol(0)), "Channel volume: 78%  -5.2dB  0.55");
     }
 
@@ -495,7 +446,7 @@ mod tests {
         use crate::app::Action;
         use crate::views::settings::SAct;
         let mut app = crate::app::App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         assert_eq!(Control::of(&Action::Knob(KnobId::Swing)), Some(Control::Knob(KnobId::Swing)));
         assert_eq!(Control::of(&Action::Fader(2)), Some(Control::Fader(2)));
         assert_eq!(Control::of(&Action::Settings(SAct::ThemeKnob(3))), Some(Control::Theme(3)));
@@ -509,9 +460,9 @@ mod tests {
         }
         assert!(crate::history_ui::undo(&mut app.state).is_some(), "an undo step");
         assert_ne!(app.state.knob(KnobId::SlotMix(1, 0)), 1.0, "undone");
-        crate::mixer::track_mut(&mut app.state.session, 1).unwrap().volume = Some(0.2);
+        crate::edit::mixer::track_mut(&mut app.state.session, 1).unwrap().volume = Some(0.2);
         app.reset_control(Control::Fader(1));
-        assert_eq!(crate::mixer::track(&app.state.session, 1).unwrap().volume, Some(0.8));
+        assert_eq!(crate::edit::mixer::track(&app.state.session, 1).unwrap().volume, Some(0.8));
         assert_eq!(app.hint, "Volume: 100%  0.0dB  1.00");
         app.state.session.project.get_mut().channels[0].pitch_cents = 250;
         app.reset_control(Control::ChanPitch(0));
@@ -558,7 +509,7 @@ impl crate::session::Session {
                 (0.5 + sep as f32 / 2.0).clamp(0.0, 1.0)
             }
             KnobId::SlotMix(t, k) => self.project.mixer.iter().find(|m| m.index == t).map_or(1.0, |m| m.slot_mix[usize::from(k).min(9)] as f32),
-            KnobId::Send(a, b) => crate::mixer::send(self, a, b).unwrap_or(0.8) as f32,
+            KnobId::Send(a, b) => crate::edit::mixer::send(self, a, b).unwrap_or(0.8) as f32,
             KnobId::ChanVol(i) => self.project.channels.get(i).map_or(0.8, |c| c.volume as f32).clamp(0.0, 1.0),
             KnobId::ChanPan(i) => self.project.channels.get(i).map_or(0.5, |c| 0.5 + c.pan as f32 / 2.0).clamp(0.0, 1.0),
             // Main swing is project data, 0..=128 (spec: flp/events/project-info.md, event 11).
@@ -573,7 +524,7 @@ impl crate::session::Session {
             KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) => return None,
             KnobId::AutoLfo(row, k) => k.pos(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
             KnobId::MidiOut(row, k) => k.pos(&crate::lemon_midi_out::row_settings(&self.project, row).unwrap_or_default()),
-            KnobId::Member(t, k, id, wet) => crate::container::level(self, t, k, id, wet).unwrap_or(0.0),
+            KnobId::Member(t, k, id, wet) => crate::edit::container::level(self, t, k, id, wet).unwrap_or(0.0),
         })
     }
 
@@ -675,7 +626,7 @@ impl crate::session::Session {
                 }
             }
             // No undo step here: a drag's is taken at the press (`history::knob`).
-            KnobId::Member(t, k, id, wet) => crate::container::put_level_in(self, t, k, id, wet, v),
+            KnobId::Member(t, k, id, wet) => crate::edit::container::put_level_in(self, t, k, id, wet, v),
         }
     }
 }

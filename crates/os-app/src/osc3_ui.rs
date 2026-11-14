@@ -56,12 +56,12 @@ mod tests {
     fn osc3_channels_save_and_reopen() {
         let path = std::env::temp_dir().join(format!("openstudio-osc3-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.state.session.plugins.available = crate::plugins::builtin();
         // Added as the picker adds it: a plugin channel storing the file id, shown with the built-in name.
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
         let ch = &a.state.session.project.channels[row];
         assert_eq!((ch.kind, ch.plugin.as_deref()), (ChannelKind::Plugin, Some(FILE_NAME)));
         assert_eq!(crate::project_plugins::plugin_title(ch).as_deref(), Some(LEMON_TRIO));
@@ -102,9 +102,9 @@ mod tests {
     #[test]
     fn an_older_osc3_state_takes_the_channels_voicing() {
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.plugins.available = crate::plugins::builtin();
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
         let mut old = default_state()[..92].to_vec();
         set_field(&mut old, 0, 12);
         set_field(&mut old, op::osc(0) + op::COARSE + 1, 5);
@@ -141,12 +141,12 @@ mod tests {
         let square = wav("Square cycle", &[0.9, 0.9, 0.9, 0.9, -0.9, -0.9, -0.9, -0.9]);
         let saw = wav("Saw cycle", &[-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75]);
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.state.session.plugins.available = crate::plugins::builtin();
         a.state.session.plugins.set_rate(48000);
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
         let mut fl = default_state();
         set_field(&mut fl, op::osc(0) + op::SHAPE + 1, 6); // osc 1: custom
         set_field(&mut fl, op::MIX2 + 1, 0); // osc 2 and 3 silent
@@ -202,7 +202,7 @@ mod tests {
     fn plugin_menus_add_lemon_3x_osc_channels() {
         use crate::plugin_menu::Target;
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.plugins.available = crate::plugins::builtin();
         a.state.plugdb.rebuild(&a.state.session.plugins);
         let index = a.state.session.plugins.index_of(LEMON_TRIO).unwrap();
@@ -235,7 +235,7 @@ mod tests {
     fn replace_puts_another_generator_on_a_channel() {
         use crate::plugin_menu::Target;
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.project.get_mut().channels[2].sample_path = Some("C:/Samples/Kick.wav".into());
         a.state.session.plugins.available = crate::plugins::builtin();
         a.state.plugdb.rebuild(&a.state.session.plugins);

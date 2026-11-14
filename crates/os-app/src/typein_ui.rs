@@ -131,7 +131,7 @@ fn set(s: &mut State, t: Target, v: f64) {
                 crate::rack::toggle_mute(s, r);
             }
         }
-        Target::Member(m, k, id, wet) => crate::container::set_level(s, m, k, id, wet, v.clamp(0.0, 1.0) as f32),
+        Target::Member(m, k, id, wet) => crate::container_ui::set_level(s, m, k, id, wet, v.clamp(0.0, 1.0) as f32),
         Target::MemberParam(..) => match resolved(s, t) {
             Some(p @ Target::Param(..)) => set(s, p, v),
             _ => s.message = Some("This effect is not loaded (its plugin was not found)".into()),

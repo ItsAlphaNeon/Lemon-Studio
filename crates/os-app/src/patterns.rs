@@ -13,8 +13,6 @@ pub use crate::edit::patterns::*;
 
 use crate::app::State;
 
-/// Highest pattern number (§1).
-pub const MAX: u16 = 999;
 /// Pixels of vertical drag per pattern step on the name box (§1, OS: linear).
 pub const DRAG_STEP: f32 = 8.0;
 /// Name box size (§4).
@@ -122,16 +120,11 @@ pub const SWATCHES: [u32; 20] = [
 
 // ---------------------------------------------------------------------------------------------------------
 
-/// A pattern with notes, control points or its own name (listed in menus, §2).
-pub fn used(p: &Pattern) -> bool {
-    !p.notes.is_empty() || !p.controls.is_empty() || p.name.is_some()
-}
-
 /// Numbers of the listed patterns, ascending: the used ones, those placed in the playlist, and the playlist's clip
 /// source (a new pattern, empty until notes are added).
 pub fn listed(s: &State) -> Vec<u16> {
     let mut v: Vec<u16> = s.session.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).collect();
-    v.extend(crate::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }));
+    v.extend(crate::edit::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }));
     if let Some(ClipSource::Pattern(n)) = s.playlist.source {
         v.push(n);
     }
@@ -156,30 +149,6 @@ pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
 /// Swap patterns `a` and `b`.
 fn swap(s: &mut State, a: u16, b: u16) {
     renumber(s, |n| Some(if n == a { b } else if n == b { a } else { n }));
-}
-
-pub(crate) fn random_color(seed: u64) -> Rgb {
-    // A random hue at a muted saturation / lightness like the default pattern colours.
-    let mut x = seed ^ 0x9e37_79b9_7f4a_7c15;
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    x ^= x >> 33;
-    let h = (x % 360) as f32;
-    let (sat, l) = (0.35f32, 0.45f32);
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * sat;
-    let hp = h / 60.0;
-    let xx = c * (1.0 - (hp % 2.0 - 1.0).abs());
-    let (r, g, b) = match hp as u32 {
-        0 => (c, xx, 0.0),
-        1 => (xx, c, 0.0),
-        2 => (0.0, c, xx),
-        3 => (0.0, xx, c),
-        4 => (xx, 0.0, c),
-        _ => (c, 0.0, xx),
-    };
-    let m = l - c / 2.0;
-    let u = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    Rgb::new(u(r), u(g), u(b))
 }
 
 /// Open the name box for pattern `n` at `at`.
@@ -245,7 +214,7 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             s.playlist.source = Some(ClipSource::Pattern(s.pattern()));
         }
         Cmd::SelectInPlaylist => {
-            let sel: Vec<usize> = crate::playlist::clips(&s.session)
+            let sel: Vec<usize> = crate::edit::playlist::clips(&s.session)
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| c.source == ClipSource::Pattern(cur))
@@ -336,7 +305,7 @@ pub fn split_by_channel(s: &mut State) {
         .iter()
         .enumerate()
         .filter(|(_, c)| orig.notes.iter().any(|n| n.channel == c.index))
-        .map(|(r, c)| (c.index, crate::rack::channel_name(&s.session, r)))
+        .map(|(r, c)| (c.index, crate::edit::rack::channel_name(&s.session, r)))
         .collect();
     let Some(((first, name), rest)) = chans.split_first() else { return };
     let k = rest.len() as u16;
@@ -346,7 +315,7 @@ pub fn split_by_channel(s: &mut State) {
         return;
     }
     let undo = crate::history::Snap::Patterns { patterns: s.session.project.patterns.clone(), current: cur };
-    crate::playlist::snapshot_with(&mut s.session, "Split by instrument", undo);
+    crate::edit::playlist::snapshot_with(&mut s.session, "Split by instrument", undo);
     // Notes of a channel no longer in the rack stay with the original.
     let p = pat_mut(&mut s.session, cur);
     p.notes.retain(|n| n.channel == *first || !chans.iter().any(|c| c.0 == n.channel));
@@ -564,7 +533,7 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         let s = &mut app.state;
         s.session.project.get_mut().patterns = vec![
             Pattern { number: 1, name: Some("Kick".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() },
@@ -572,12 +541,12 @@ mod tests {
             Pattern { number: 3, notes: vec![Note::step(1, 0)], ..Pattern::default() },
             Pattern { number: 5, name: Some("Lead".into()), ..Pattern::default() },
         ];
-        crate::playlist::arr_mut(&mut s.session).clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Pattern(3))];
+        crate::edit::playlist::arr_mut(&mut s.session).clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Pattern(3))];
         app
     }
 
     fn clip_pats(s: &State) -> Vec<u16> {
-        crate::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }).collect()
+        crate::edit::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }).collect()
     }
 
     #[test]

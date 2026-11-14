@@ -35,7 +35,7 @@ pub fn apply() {
 
 /// The machine's physical cores, when the system says.
 #[cfg(windows)]
-fn physical_cores() -> Option<usize> {
+pub(crate) fn physical_cores() -> Option<usize> {
     use windows_sys::Win32::System::SystemInformation::{GetLogicalProcessorInformation, RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION};
     let mut len = 0u32;
     // SAFETY: the first call only reports the length the list needs; the second fills a buffer of that length.
@@ -56,7 +56,7 @@ fn physical_cores() -> Option<usize> {
 }
 
 #[cfg(target_os = "macos")]
-fn physical_cores() -> Option<usize> {
+pub(crate) fn physical_cores() -> Option<usize> {
     let mut n: libc::c_int = 0;
     let mut size = std::mem::size_of::<libc::c_int>();
     // SAFETY: reads one int into `n`.
@@ -66,7 +66,7 @@ fn physical_cores() -> Option<usize> {
 
 /// Linux: the distinct (package, core) pairs `/proc/cpuinfo` lists.
 #[cfg(not(any(windows, target_os = "macos")))]
-fn physical_cores() -> Option<usize> {
+pub(crate) fn physical_cores() -> Option<usize> {
     let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
     let mut cores = std::collections::BTreeSet::new();
     let mut package = "";
@@ -83,33 +83,3 @@ fn physical_cores() -> Option<usize> {
     (!cores.is_empty()).then_some(cores.len())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::prefs::set_check;
-
-    /// The machine's physical cores are found, no more than its logical ones.
-    #[test]
-    fn physical_cores_are_found() {
-        let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
-        if let Some(n) = physical_cores() {
-            assert!((1..=logical).contains(&n), "{n} of {logical}");
-        }
-    }
-
-    // spec: audio/multicore.md "Settings"
-    /// The two switches reach the engines: on by default, each turned off on its own by a click on its check.
-    #[test]
-    fn the_switches_reach_the_engines() {
-        apply();
-        assert_eq!((parallel::mixer_on(), parallel::generators_on()), (true, true));
-        let mut app = crate::app::App::new(None);
-        app.pref_toggle(MULTITHREADED_MIXER.label);
-        assert_eq!((parallel::mixer_on(), parallel::generators_on()), (false, true));
-        app.pref_toggle(MULTITHREADED_MIXER.label);
-        app.pref_toggle(MULTITHREADED_GENERATORS.label);
-        assert_eq!((parallel::mixer_on(), parallel::generators_on()), (true, false));
-        set_check(&MULTITHREADED_GENERATORS, true);
-        apply();
-    }
-}

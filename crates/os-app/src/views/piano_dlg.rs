@@ -10,6 +10,7 @@
 // spec: ui/piano-flam.md §1, ui/piano-flip.md §1, ui/piano-level-scaling.md §1, ui/piano-limit.md §1, ui/piano-claw.md §1,
 // ui/piano-lfo.md §1, ui/piano-quantize.md §1, ui/piano-chop.md §1, ui/piano-randomize.md §1
 
+use crate::piano_dlg::DlgKnob;
 use os_ui::kit::{self, Dir, lemon as lk};
 use os_ui::{Font, Glyph, Rect};
 

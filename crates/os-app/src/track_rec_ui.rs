@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn an_armed_track_records_into_the_playlist() {
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         app.state.set_song_mode(true);
         if Opt::Audio.on() {
             Opt::Audio.toggle();

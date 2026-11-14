@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use crate::dialog::{spans, Answer, Kind, Msg, Then};
 
 /// The most names the box lists per kind before "and N more".
 const LISTED: usize = 8;
@@ -49,7 +48,7 @@ pub(crate) fn file_name(p: &str) -> &str {
 }
 
 /// `names` sorted, each once, at most `LISTED` of them, then "and N more".
-fn listed(mut names: Vec<String>) -> String {
+pub(crate) fn listed(mut names: Vec<String>) -> String {
     names.sort_by_key(|n| n.to_lowercase());
     names.dedup();
     let more = names.len().saturating_sub(LISTED);
@@ -58,29 +57,6 @@ fn listed(mut names: Vec<String>) -> String {
         s.push_str(&format!(" and {more} more"));
     }
     s
-}
-
-/// The box: what is missing, that the project keeps it, and Find samples... when samples are missing.
-pub(crate) fn missing_box(samples: &[String], plugins: &[String]) -> Msg {
-    let count = |v: &[String]| v.iter().collect::<HashSet<_>>().len();
-    let mut parts: Vec<String> = vec!["Some files this project uses were not found. The project keeps them: saving it does not remove them.\n".into()];
-    if !samples.is_empty() {
-        parts.push(format!("\nSamples ({}): ", count(samples)));
-        parts.push(listed(samples.to_vec()));
-    }
-    if !plugins.is_empty() {
-        parts.push(format!("\nPlugins ({}): ", count(plugins)));
-        parts.push(listed(plugins.to_vec()));
-    }
-    if !samples.is_empty() {
-        parts.push("\n\nFind samples... looks for the missing samples by name in a folder you choose and its subfolders.".into());
-    }
-    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-    let text = spans(&parts);
-    if samples.is_empty() {
-        return Msg::new(Kind::Warning, "Missing project files", text, &[Answer::Ok], Then::MissingFiles);
-    }
-    Msg::new(Kind::Warning, "Missing project files", text, &[Answer::Yes, Answer::Ok], Then::MissingFiles).labelled(&["Find samples...", "OK"])
 }
 
 /// The folders under `root` (itself included) that hold a file named as one of `wanted` (lower case), in the order

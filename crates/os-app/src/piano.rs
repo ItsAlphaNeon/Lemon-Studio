@@ -1203,7 +1203,7 @@ mod tests {
         for on in [false, true] {
             set_check(&AUTO_ZOOM_PIANO, on);
             let mut app = App::new(None);
-            app.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+            app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
             app.state.selected_channel = 0;
             // A floating window: a grid about 300 px tall.
             let ws = &mut app.state.wins[Win::PianoRoll.slot().expect("a window")];

@@ -22,6 +22,9 @@ pub mod query;
 pub mod rpc;
 pub mod server;
 pub(crate) mod server_ui;
+pub(crate) mod rpc_ui;
+pub(crate) mod host_ui;
+pub(crate) mod query_ui;
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};

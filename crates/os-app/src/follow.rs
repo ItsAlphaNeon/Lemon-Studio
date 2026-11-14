@@ -38,7 +38,7 @@ pub struct Before {
 }
 
 pub fn before(s: &State) -> Before {
-    let clips = crate::playlist::clips(&s.session);
+    let clips = crate::edit::playlist::clips(&s.session);
     Before { clips: s.playlist.sel.iter().filter_map(|&i| clips.get(i).map(|c| c.id.0)).collect(), rack: RackView::now(s) }
 }
 
@@ -56,12 +56,12 @@ pub fn after(s: &mut State, b: Before) -> bool {
         crate::rack::remap_view(s, &map);
     }
     if t.tracks {
-        let tracks = crate::mixer::inserts(&s.session);
+        let tracks = crate::edit::mixer::inserts(&s.session);
         s.selected_mixer = s.selected_mixer.min(tracks);
         s.mixer.sel.retain(|&t| t <= tracks);
     }
     if whole || t.clips {
-        let clips = crate::playlist::clips(&s.session);
+        let clips = crate::edit::playlist::clips(&s.session);
         s.playlist.sel = clips.iter().enumerate().filter(|(_, c)| b.clips.contains(&c.id.0)).map(|(i, _)| i).collect();
         s.playlist.hover_clip = None;
     }
@@ -112,7 +112,7 @@ fn view(s: &mut State, v: crate::session::View) {
             s.piano.select(pattern, channel, Vec::new());
             s.piano.range = range;
         }
-        View::MemberLevel { t, k, id, wet, v } => crate::container::show_level(s, t, k, id, wet, v),
+        View::MemberLevel { t, k, id, wet, v } => crate::container_ui::show_level(s, t, k, id, wet, v),
         View::PatternsRenumbered => {
             s.playlist.sel.clear();
             s.playlist.hover_clip = None;

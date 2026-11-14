@@ -181,12 +181,12 @@ mod tests {
         WRAP_BUILTINS.with(|w| w.set(true));
         let path = std::env::temp_dir().join(format!("openstudio-wrapped-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.state.session.plugins.available = crate::plugins::builtin();
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_SAMPLER);
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), LEMON_SAMPLER);
         a.state.session.plugins.create(row, a.state.session.plugins.index_of(LEMON_SAMPLER).unwrap()).unwrap();
         a.state.session.hosted_rows.push(row);
         assert!(a.state.session.plugins.load_sample(row, "C:/samples/one.wav"));
@@ -244,7 +244,7 @@ mod tests {
         use crate::plugins::LINKED_EFFECTS;
         let path = std::env::temp_dir().join(format!("openstudio-linked-fx-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
@@ -326,7 +326,7 @@ mod tests {
     fn added_mixer_tracks_save_and_reopen() {
         let path = std::env::temp_dir().join(format!("openstudio-tracks-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.save_to(path.clone());
@@ -358,7 +358,7 @@ mod tests {
     fn trimmed_mixer_saves_and_reopens() {
         let path = std::env::temp_dir().join(format!("openstudio-trim-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.save_to(path.clone());
@@ -381,7 +381,7 @@ mod tests {
     fn hosted_native_effects_save_their_state() {
         let path = std::env::temp_dir().join(format!("openstudio-native-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         let desc = Descriptor {
@@ -416,14 +416,14 @@ mod tests {
     fn opened_projects_host_their_native_plugins() {
         let path = std::env::temp_dir().join(format!("openstudio-native-open-{}.flp", std::process::id()));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.file = None;
         a.state.session.path = None;
         a.state.session.plugins.available = vec![native_stand_in("Harmor", os_host::Kind::Instrument, true)];
         a.state.session.plugins.effects = vec![native_stand_in("Fruity Balance", os_host::Kind::Effect, true), native_stand_in("Gross Beat", os_host::Kind::Effect, false)];
-        let harmor = crate::app::add_plugin_channel(a.state.session.project.get_mut(), "Harmor");
+        let harmor = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), "Harmor");
         a.state.session.project.get_mut().channels[harmor].plugin_state = Some(vec![1, 2, 3]);
-        let sytrus = crate::app::add_plugin_channel(a.state.session.project.get_mut(), "Sytrus");
+        let sytrus = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), "Sytrus");
         a.state.session.project.get_mut().channels[sytrus].plugin_state = Some(vec![4]);
         a.state.session.project.get_mut().mixer[2].slots[1] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Balance".into(), state: vec![5, 6] });
         a.state.session.project.get_mut().mixer[3].slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Gross Beat".into(), state: vec![7, 8, 9] });
@@ -470,12 +470,12 @@ mod tests {
         use crate::plugins::EQ_FILE_NAME;
         NATIVE_FIRST.with(|n| n.set(Some(false)));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.plugins.available = crate::plugins::builtin();
         a.state.session.plugins.available.push(native_stand_in(OSC3_FILE, os_host::Kind::Instrument, true));
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
         a.state.session.plugins.effects.push(native_stand_in(EQ_FILE_NAME, os_host::Kind::Effect, true));
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), LEMON_TRIO);
         let osc_file = lemon_3x_osc::params::default_state();
         a.state.session.project.get_mut().channels[row].plugin_state = Some(osc_file.clone());
         let mut eq_file = lemon_parametric_eq_2::params::default_state();
@@ -521,9 +521,9 @@ mod tests {
     #[test]
     fn native_plugins_wait_for_the_scan() {
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.plugins.available = Vec::new();
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), "Harmor");
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), "Harmor");
         a.sweep = Some(crate::plugin_scan::Sweep::idle());
         a.host_native();
         assert!(!a.state.session.hosted_rows.contains(&row) && a.state.session.plugins.native_failed.is_empty());
@@ -542,7 +542,7 @@ mod tests {
     fn copies_in_another_format_start_from_their_defaults() {
         WRAP_BUILTINS.with(|w| w.set(true));
         let mut a = App::new(None);
-        a.state.session.project = crate::locked::Locked::new(crate::app::test_project());
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
         a.state.session.plugins.available = crate::plugins::builtin();
         a.state.session.plugins.effects = crate::plugins::builtin_effects();
         let mut fl = lemon_parametric_eq_2::params::default_state();
@@ -559,7 +559,7 @@ mod tests {
         let slot = |r: &PluginRef| Some(SlotPlugin { id: os_model::Id::NONE, name: WRAPPER.into(), state: wrapper::encode(None, r) });
         a.state.session.project.get_mut().mixer[2].slots[0] = slot(&saved_as("vst2", LEMON_EQ, "Lemon EQ.dll"));
         a.state.session.project.get_mut().mixer[3].slots[0] = slot(&saved_as("clap", LEMON_EQ, "Lemon EQ.clap"));
-        let row = crate::app::add_plugin_channel(a.state.session.project.get_mut(), WRAPPER);
+        let row = crate::projects::add_plugin_channel(a.state.session.project.get_mut(), WRAPPER);
         a.state.session.project.get_mut().channels[row].plugin_state = Some(wrapper::encode(None, &saved_as("vst2", "Nowhere", "Nowhere.dll")));
         a.sync_wrapped();
 

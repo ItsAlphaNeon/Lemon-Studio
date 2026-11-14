@@ -421,7 +421,7 @@ impl App {
         self.state.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default).folder = df::folder_text(&dir);
         let file = f.file();
         self.dialog_done(Then::SaveProject(f.next), Reply::File(Some(file)));
-        df::reread(&self.state);
+        crate::data_folder_ui::reread(&self.state);
     }
 }
 

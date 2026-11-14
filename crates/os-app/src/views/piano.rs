@@ -250,7 +250,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         }
     }
     // Notes still held while recording, growing to the playhead (spec: ui/recording.md §2 "Shown while held").
-    for n in crate::record::held_notes(s, f.tick).iter().filter(|n| f.playing && Some(n.channel) == ch) {
+    for n in crate::record_ui::held_notes(s, f.tick).iter().filter(|n| f.playing && Some(n.channel) == ch) {
         let Some(nr) = g.note_rect(n) else { continue };
         let body = Rect::new(nr.x + 1.0, nr.y + 1.0, (nr.w - 2.0).max(1.0), nr.h - 2.0);
         let rad = if lemon { 3.5f32.min(nr.w / 2.0).min(nr.h / 2.0) } else { 2.0 };
