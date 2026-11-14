@@ -231,6 +231,7 @@ impl Shell {
                 match (state, button) {
                     (ElementState::Released, MouseButton::Left | MouseButton::Right | MouseButton::Middle) => {
                         self.unlock_cursor();
+                        self.app.right_down &= button != MouseButton::Right;
                         self.app.mouse_up_from(Some(win));
                     }
                     (ElementState::Pressed, MouseButton::Left | MouseButton::Right | MouseButton::Middle) => {
