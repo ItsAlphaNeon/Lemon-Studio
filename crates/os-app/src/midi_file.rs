@@ -14,7 +14,7 @@ use std::cell::RefCell;
 
 use os_model::{ControlPoint, Note, Project, TimeMarker};
 use os_smf::{Event, Kind as Ev, Smf, Track};
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, State};
 use crate::dialog::{spans, Answer, Body, Kind, Reply, Then};
@@ -460,7 +460,7 @@ pub fn pattern_file(p: &Project, n: u16, ch: u16, tempo: f64) -> Smf {
 
 /// The user folder's "Clipboard files" (tests: a temporary folder of the test's own thread, so that two tests saving
 /// clipboards never share one).
-pub(crate) fn clipboard_dir() -> Option<PathBuf> {
+pub fn clipboard_dir() -> Option<PathBuf> {
     if cfg!(test) {
         let thread = format!("{:?}", std::thread::current().id()).chars().filter(char::is_ascii_digit).collect::<String>();
         return Some(std::env::temp_dir().join(format!("lemon-clipboard-{}-{thread}", std::process::id())));
@@ -601,7 +601,7 @@ fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
 
 impl App {
     /// FILE ▸ Import ▸ MIDI file... (`piano` = false) and the piano roll's Import MIDI file...: the open dialog (spec §1).
-    pub(crate) fn import_midi_dialog(&mut self, piano: bool) {
+    pub fn import_midi_dialog(&mut self, piano: bool) {
         use crate::filedlg::{FileDlg, Mode};
         let dlg = FileDlg::new(Mode::Open, "Import MIDI file", "midi", Then::MidiImport(piano)).filter("MIDI file", &["mid", "midi"]);
         self.file_dialog(dlg);
@@ -609,7 +609,7 @@ impl App {
 
     /// A MIDI file chosen in the open dialog or dropped on the window: the form, or the import with the last settings
     /// as the MIDI import window setting says (spec §10.5).
-    pub(crate) fn midi_file_chosen(&mut self, path: PathBuf, piano: bool) {
+    pub fn midi_file_chosen(&mut self, path: PathBuf, piano: bool) {
         let smf = match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| os_smf::read(&b).map_err(|e| e.to_string())) {
             Ok(f) => f,
             Err(e) => return self.tell(Kind::Warning, TITLE, spans(&["Could not import ", &file_name(&path), &format!(": {e}.")])),
@@ -645,7 +645,7 @@ impl App {
     }
 
     /// The save-changes question was answered: the import that waited for it (`Next::ImportMidi`).
-    pub(crate) fn import_pending(&mut self, path: PathBuf) {
+    pub fn import_pending(&mut self, path: PathBuf) {
         let Some((p, o)) = PENDING.take().filter(|(p, _)| *p == path) else { return };
         match std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| os_smf::read(&b).map_err(|e| e.to_string())) {
             Ok(f) => self.import_into_project(&p, &f, &o),
@@ -736,7 +736,7 @@ impl App {
     }
 
     /// A click on a part of the MIDI form; `Some` closes it. With a list open, a click picks from it or only closes it.
-    pub(crate) fn midi_form_click(&mut self, h: FHit) -> Option<Reply> {
+    pub fn midi_form_click(&mut self, h: FHit) -> Option<Reply> {
         let f = top(self)?;
         if let Some(k) = f.list.take() {
             if let FHit::Item(i) = h {
@@ -760,7 +760,7 @@ impl App {
     }
 
     /// Keys on the MIDI form: Esc closes an open list, then the form; Enter accepts.
-    pub(crate) fn midi_form_key(&mut self, key: &Key) -> Option<Reply> {
+    pub fn midi_form_key(&mut self, key: &Key) -> Option<Reply> {
         let f = top(self)?;
         if f.list.is_some() {
             if matches!(key, Key::Named(NamedKey::Escape)) {
@@ -777,7 +777,7 @@ impl App {
     }
 
     /// The form closed: Accept imports; Esc and the caption's × import nothing (spec §2).
-    pub(crate) fn midi_form_closed(&mut self, f: MidiForm, reply: Reply) {
+    pub fn midi_form_closed(&mut self, f: MidiForm, reply: Reply) {
         if reply == Reply::Button(Answer::Ok) {
             self.midi_accepted(f.path, f.smf, f.o, f.piano);
         }
@@ -785,7 +785,7 @@ impl App {
 
     /// FILE ▸ Export MIDI... (`piano` = false) and the piano roll's Export as MIDI file...: the save dialog, unless
     /// there is nothing to export (spec §9, §10.8).
-    pub(crate) fn export_midi_dialog(&mut self, piano: bool) {
+    pub fn export_midi_dialog(&mut self, piano: bool) {
         use crate::filedlg::{FileDlg, Mode};
         let s = &self.state;
         let file = if piano { self.piano_midi() } else { self.project_midi() };
@@ -815,7 +815,7 @@ impl App {
     /// is copied): the piano roll's clipboard goes to "MIDI clipboard <n>.mid" in the user folder's "Clipboard files"
     /// (the original's browser has a folder of that name), the next free number; the folder joins the browser and
     /// opens there.
-    pub(crate) fn save_midi_clipboard(&mut self) {
+    pub fn save_midi_clipboard(&mut self) {
         let s = &self.state;
         let Some(dir) = clipboard_dir() else { return };
         let file = clipboard_file(&s.piano.clipboard, s.session.project.ppq, s.tempo());
@@ -831,7 +831,7 @@ impl App {
     }
 
     /// The save dialog's file: written.
-    pub(crate) fn midi_export_chosen(&mut self, path: PathBuf, piano: bool) {
+    pub fn midi_export_chosen(&mut self, path: PathBuf, piano: bool) {
         let path = if path.extension().is_none() { path.with_extension("mid") } else { path };
         let file = if piano { self.piano_midi() } else { self.project_midi() };
         self.state.message = Some(match std::fs::write(&path, os_smf::write(&file)) {

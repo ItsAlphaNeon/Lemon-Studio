@@ -63,7 +63,7 @@ impl App {
     }
 
     /// Move the position to `t` (clamped to the range); `restart` = playback jumps there now (not during a drag).
-    pub(crate) fn set_song_pos(&mut self, t: u32, restart: bool) {
+    pub fn set_song_pos(&mut self, t: u32, restart: bool) {
         let Some(range) = range(&self.state) else { return };
         let t = t.min(range - 1);
         let s = &mut self.state;
@@ -109,7 +109,7 @@ impl App {
 
     /// Left button down on the slider: on the handle it drags, beside it one step toward the pointer (repeated while
     /// held, see `song_pos_tick`).
-    pub(crate) fn song_pos_press(&mut self) {
+    pub fn song_pos_press(&mut self) {
         let Some(range) = range(&self.state) else { return };
         // The slider is laid out in its panel's home px (Toolbars scaling, the toolbar layout).
         let x = self.panel_mouse(crate::toolbar::Panel::SongPos).0;
@@ -135,26 +135,26 @@ impl App {
     }
 
     /// Dragging the handle: the position follows the pointer (minus the grab offset).
-    pub(crate) fn song_pos_drag(&mut self, dx: f32) {
+    pub fn song_pos_drag(&mut self, dx: f32) {
         if let Some(range) = range(&self.state) {
             self.set_song_pos(tick_at(self.panel_mouse(crate::toolbar::Panel::SongPos).0 - dx, range), false);
         }
     }
 
     /// The handle let go: playback follows.
-    pub(crate) fn song_pos_release(&mut self) {
+    pub fn song_pos_release(&mut self) {
         self.song_pos_restart();
     }
 
     /// Right click on the slider: straight to the pointer (§3).
-    pub(crate) fn song_pos_jump(&mut self) {
+    pub fn song_pos_jump(&mut self) {
         if let Some(range) = range(&self.state) {
             self.set_song_pos(tick_at(self.panel_mouse(crate::toolbar::Panel::SongPos).0, range), true);
         }
     }
 
     /// The wheel over the slider: down = later, 3 / 64 of the range per notch (§3).
-    pub(crate) fn song_pos_wheel(&mut self, dy: f32) {
+    pub fn song_pos_wheel(&mut self, dy: f32) {
         let Some(range) = range(&self.state) else { return };
         if dy == 0.0 {
             return;
@@ -167,7 +167,7 @@ impl App {
     }
 
     /// While the button is held on the track: the next step when it is due.
-    pub(crate) fn song_pos_tick(&mut self, now: Instant) {
+    pub fn song_pos_tick(&mut self, now: Instant) {
         let Some(Drag::SongPosHold { next }) = self.drag else { return };
         if now >= next {
             self.song_pos_step();

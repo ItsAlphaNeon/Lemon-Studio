@@ -7,7 +7,7 @@
 #![allow(unused_imports)]
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::borrow::Cow;
-use winit::keyboard::KeyCode;
+use crate::keys::KeyCode;
 use crate::app::{App, State, HINT_RECT};
 use crate::playlist::Snap;
 #[allow(unused_imports)]
@@ -38,12 +38,12 @@ impl App {
     }
 
     /// A note started sounding (typing keyboard or MIDI): collected while step editing takes notes.
-    pub(crate) fn step_edit_down(&mut self, src: Src, key: u16, velocity: u8) {
+    pub fn step_edit_down(&mut self, src: Src, key: u16, velocity: u8) {
         self.step_edit_down_with(src, key, velocity, crate::record::Extra::default());
     }
 
     /// `step_edit_down` for a note with more than a key and velocity (a MIDI note's Mod X / Y, another channel).
-    pub(crate) fn step_edit_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: crate::record::Extra) {
+    pub fn step_edit_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: crate::record::Extra) {
         // While playing, Record takes the note instead (spec: ui/recording.md §2 Taking notes).
         self.record_down_with(src, key, velocity, extra);
         if self.step_edit_live() && extra.channel.is_none() {
@@ -52,12 +52,12 @@ impl App {
     }
 
     /// A note was released: the release of the last held one writes the chord.
-    pub(crate) fn step_edit_up(&mut self, src: Src) {
+    pub fn step_edit_up(&mut self, src: Src) {
         self.step_edit_up_with(src, None);
     }
 
     /// `step_edit_up` with the note's release velocity, when it has one.
-    pub(crate) fn step_edit_up_with(&mut self, src: Src, release: Option<u8>) {
+    pub fn step_edit_up_with(&mut self, src: Src, release: Option<u8>) {
         self.record_up_with(src, release);
         let Some(keys) = self.step_chord.up(src) else { return };
         if self.step_edit_live() && !keys.is_empty() {
@@ -109,7 +109,7 @@ impl App {
 }
 
 /// The session's id for typing-keyboard key `code` (`Src::Typing`): the same key gives the same id.
-pub fn typing(code: winit::keyboard::KeyCode) -> crate::step_edit::Src {
+pub fn typing(code: crate::keys::KeyCode) -> crate::step_edit::Src {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     code.hash(&mut h);
@@ -124,7 +124,7 @@ mod tests {
     use crate::piano;
     use crate::views::menus::{bar_model, item_at, Mark, OPTIONS_MENU};
     use os_ui::{Canvas, Rect};
-    use winit::keyboard::Key;
+    use crate::keys::Key;
 
     /// A new project in PAT mode with the piano roll in front and an empty pattern; the typing keyboard is on and step
     /// edit off, as at start; then Ctrl+E turns step edit on.
@@ -332,7 +332,7 @@ mod tests {
 
 #[cfg(test)]
 mod tests_moved {
-    use winit::keyboard::KeyCode;
+    use crate::keys::KeyCode;
     use super::*;
 
     /// The chord is written on the last release only, with every key pressed since the first (spec "Entering notes").

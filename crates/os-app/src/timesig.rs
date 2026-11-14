@@ -110,7 +110,7 @@ impl App {
 
     /// PATTERNS > Set time signature... on the current pattern: the conflict question when it has a signature at its
     /// start (§3), else the dialog.
-    pub(crate) fn ask_time_signature(&mut self) {
+    pub fn ask_time_signature(&mut self) {
         let n = self.state.pattern().max(1);
         if start_marker(&self.state, n).is_none() {
             return self.open_time_signature(n);
@@ -120,7 +120,7 @@ impl App {
     }
 
     /// Yes to the conflict question: the start marker goes at once, then the dialog opens (§3).
-    pub(crate) fn replace_signature(&mut self, n: u16) {
+    pub fn replace_signature(&mut self, n: u16) {
         remove_start(&mut self.state, n);
         self.open_time_signature(n);
     }
@@ -132,14 +132,14 @@ impl App {
     }
 
     /// The dialog for a song time signature marker, at 4 / 4 (spec: ui/playlist.md §7a).
-    pub(crate) fn open_song_signature(&mut self, at: SongSig) {
+    pub fn open_song_signature(&mut self, at: SongSig) {
         self.state.playlist.popup = None;
         let n = self.state.pattern().max(1);
         self.show_form(Body::TimeSig(SigForm { pattern: n, num: 4, den: 4, song: Some(at) }));
     }
 
     /// A click on a value box: its list, the app's popup, under the box, the current value marked (§1).
-    pub(crate) fn sig_list(&mut self, den: bool) {
+    pub fn sig_list(&mut self, den: bool) {
         let Some(f) = self.sig_form().copied() else { return };
         let Some(r) = self.hits.iter().rev().find(|h| h.action == Action::Dlg(DHit::SigValue(den))).map(|h| h.rect) else { return };
         let (cur, values): (u8, Vec<u8>) = if den { (f.den, DENOMINATORS.to_vec()) } else { (f.num, NUMERATORS.collect()) };
@@ -149,7 +149,7 @@ impl App {
     }
 
     /// A pick in a value list sets its box.
-    pub(crate) fn sig_pick(&mut self, den: bool, v: u8) {
+    pub fn sig_pick(&mut self, den: bool, v: u8) {
         if let Some(f) = self.sig_form() {
             if den {
                 f.den = v;

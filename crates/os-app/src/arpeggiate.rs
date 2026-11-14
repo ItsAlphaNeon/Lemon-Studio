@@ -59,7 +59,7 @@ impl Sync {
 
 /// Time mul's seven values (§1) as (numerator, denominator); index 3 is ×1.
 pub const TIME_MUL: [(u32, u32); 7] = [(1, 8), (1, 4), (1, 2), (1, 1), (2, 1), (3, 1), (4, 1)];
-pub(crate) const TIME_MUL_NAMES: [&str; 7] = ["1/8", "1/4", "1/2", "x1", "x2", "x3", "x4"];
+pub const TIME_MUL_NAMES: [&str; 7] = ["1/8", "1/4", "1/2", "x1", "x2", "x3", "x4"];
 
 pub use crate::knob_id::arpeggiate::RANGE_MAX;
 
@@ -193,7 +193,7 @@ impl Row {
         Row { pos, len, key, colour: 0, slide: false, fine: 120, rel: 64, pan: 64, vel: 100, mod_x: 128, mod_y: 128 }
     }
 
-    pub(crate) fn level(&self, i: usize) -> u8 {
+    pub fn level(&self, i: usize) -> u8 {
         [self.pan, self.vel, self.rel, self.mod_x, self.mod_y, self.fine][i]
     }
 }
@@ -324,7 +324,7 @@ fn natural(a: &str, b: &str) -> Ordering {
 }
 
 /// The pattern files and sub-folders of `dir`, each sorted naturally.
-pub(crate) fn listing(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+pub fn listing(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let (mut files, mut dirs) = (Vec::new(), Vec::new());
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
@@ -716,7 +716,7 @@ pub fn command(s: &mut State, c: ACmd) -> Option<String> {
 mod tests {
     use super::*;
 
-    pub(crate) fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, velocity: 100, ..Note::step(0, pos) }
     }
 
@@ -769,7 +769,7 @@ mod tests {
 
     /// §4: Block and Chord restart the pattern; Time keeps counting from tick 0.
     #[test]
-    pub(crate) fn sync() {
+    pub fn sync() {
         let ns = || vec![note(384, 192, 62), note(384, 192, 65), note(384, 192, 69)];
         assert_eq!(keys(&arp(ns(), |_| {}))[0], 65);
         assert_eq!(keys(&arp(ns(), |s| s.sync = Sync::Block))[..3], [62, 65, 69]);

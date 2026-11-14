@@ -2230,6 +2230,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemonstudio"
+version = "0.0.1"
+dependencies = [
+ "block2 0.6.2",
+ "chrono",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "os-app",
+ "os-clap",
+ "os-engine",
+ "os-host",
+ "os-hostlink",
+ "os-model",
+ "os-native",
+ "os-paths",
+ "os-session",
+ "os-theme",
+ "os-ui",
+ "serde_json",
+ "softbuffer",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+ "winit",
+ "x11rb",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3031,11 +3063,8 @@ dependencies = [
 name = "os-app"
 version = "0.0.1"
 dependencies = [
- "asio-sys",
- "block2 0.6.2",
  "chrono",
  "citrus",
- "cpal",
  "crossbeam-queue",
  "flacenc",
  "jpeg-decoder",
@@ -3065,12 +3094,8 @@ dependencies = [
  "libc",
  "midir",
  "mp3lame-encoder",
- "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-core-graphics",
  "objc2-foundation 0.3.2",
- "objc2-quartz-core 0.3.2",
  "os-clap",
  "os-dsp",
  "os-engine",
@@ -3088,19 +3113,13 @@ dependencies = [
  "os-vst3",
  "press",
  "pulp-filter",
- "pulseaudio",
  "serde",
  "serde_json",
  "smith",
- "softbuffer",
  "tesla",
  "tiny-skia",
  "vorbis_rs",
- "windows 0.62.2",
  "windows-sys 0.61.2",
- "winit",
- "x11rb",
- "zbus",
  "zip",
 ]
 

@@ -360,7 +360,7 @@ pub fn sep_text(sep: f64) -> String {
 /// design): a hosted plugin's own page (`os_host::Plugin::help_url`); for Lemon Studio's own plugins, the effects the
 /// engine plays itself and a container, its page in the wiki. `None`: an empty slot, or a hosted plugin that names no
 /// page.
-pub(crate) fn slot_help(app: &App, slot: u8) -> Option<String> {
+pub fn slot_help(app: &App, slot: u8) -> Option<String> {
     let s = &app.state;
     let t = s.selected_mixer;
     let p = track(&s.session, t)?.slots.get(usize::from(slot))?.as_ref()?;
@@ -619,7 +619,7 @@ pub fn latency_text(ms: f32) -> String {
 
 /// Sets track `t`'s input (`input`) or output latency setting, in ms: one undo step, "Track latency"; playback takes it
 /// at once (delay compensation works it out again).
-pub(crate) fn set_latency(s: &mut State, t: u16, input: bool, ms: f32) {
+pub fn set_latency(s: &mut State, t: u16, input: bool, ms: f32) {
     if track(&s.session, t).is_none_or(|m| (if input { m.latency_in } else { m.latency_out }) == ms) {
         return;
     }
@@ -1031,7 +1031,7 @@ fn move_track(s: &mut State, n: u16, d: i32) -> Option<String> {
 }
 
 /// Deletes track `n`: later tracks move one left, a default track is added at the end (§6.1 Delete).
-pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
+pub fn delete_track(s: &mut State, n: u16) -> Option<String> {
     crate::follow::around(s, |s| delete_track_in(&mut s.session, n))
 }
 
@@ -1050,7 +1050,7 @@ const COLORS: [(&str, u32); 8] = [
 ];
 
 /// Change color... ▸: Default, then the palette.
-pub(crate) fn color_items(cmd: impl Fn(Option<Rgb>) -> Cmd) -> Vec<PItem> {
+pub fn color_items(cmd: impl Fn(Option<Rgb>) -> Cmd) -> Vec<PItem> {
     let mut items = vec![PItem::new("Default", cmd(None))];
     items.extend(COLORS.iter().map(|&(l, c)| PItem::new(l, cmd(Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8))))));
     items
@@ -1802,8 +1802,8 @@ fn rand_seed() -> u32 {
 /// Keys while the mixer is in front (§2): F2 rename, Del delete, Alt+Left / Right move, S solo, Alt+S alt solo,
 /// Ctrl+L / Shift+Ctrl+L route the selected channels, Alt+L / Ctrl+Alt+L / Ctrl+A select (spec:
 /// ui/mixer-track-commands.md).
-pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     let n = app.state.selected_mixer;
     let letter = |c: &str, l: &str| c.eq_ignore_ascii_case(l);
     if ctrl {
@@ -1889,7 +1889,7 @@ pub fn feed_meters(s: &mut State, peaks: &[[f32; 2]]) -> bool {
 
 impl App {
     /// Mixer slot work on the UI thread (`plugin_tick`): create / open / close / drop hosted effect instances.
-    pub(crate) fn mixer_tick(&mut self) {
+    pub fn mixer_tick(&mut self) {
         self.mixer_requests();
         self.sync_containers();
     }
@@ -1918,7 +1918,7 @@ impl App {
     /// plugins/tesla/requests.md #5); the track menu's "Open audio editor" on that track. It shows the track's first
     /// Tesla, adding one when it has none; `new` (the button's right click) always adds one, in the first free slot.
     /// An added Tesla is an "Add effect" step, as FL's Edison is one ("insert effect plugin").
-    pub(crate) fn audio_editor(&mut self, t: u16, new: bool) {
+    pub fn audio_editor(&mut self, t: u16, new: bool) {
         if !new {
             if let Some(k) = first_tesla(&self.state.session, t) {
                 self.state.session.fx_requests.push(FxReq::Show { track: t, slot: k });
@@ -1931,7 +1931,7 @@ impl App {
     /// Open audio editor and record: a Tesla on track `t` set up as an audio logger, as FL's quick load sets Edison
     /// (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"): records on the host's play, for 5
     /// minutes, appended, slaved to the transport, armed.
-    pub(crate) fn audio_logger(&mut self, t: u16) {
+    pub fn audio_logger(&mut self, t: u16) {
         crate::control_ui::edit_app(self, "Add effect", Region::Project, |app| app.tesla_for_recording(t, |s| {
             s.rec.when = tesla::state::WHEN_ON_PLAY;
             s.rec.max = AUDIO_LOG_5_MINUTES;
@@ -1945,7 +1945,7 @@ impl App {
     /// the track's first Tesla when it holds no sample, else a new one in the first free slot, so no audio or undo
     /// history is touched. `set` changes its state (the empty one is reloaded with it, a new one starts from it) and
     /// its window is shown. False when there is no Tesla to use (the message says why).
-    pub(crate) fn tesla_for_recording(&mut self, t: u16, set: impl FnOnce(&mut tesla::state::Saved)) -> bool {
+    pub fn tesla_for_recording(&mut self, t: u16, set: impl FnOnce(&mut tesla::state::Saved)) -> bool {
         use tesla::state::{from_plugin_state, plugin_state, Saved};
         let empty = first_tesla(&self.state.session, t).and_then(|k| {
             let key = crate::plugins::fx_key(t, k);
@@ -2003,7 +2003,7 @@ impl App {
     /// Remove all (audio editor) instances (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"):
     /// asks first, since removed slots can't be brought back yet; with none, says so.
     /// The External input question for track `t` (spec: audio/track-io.md §1.4), unless Remember my choice answered it.
-    pub(crate) fn ask_external(&mut self, t: u16) {
+    pub fn ask_external(&mut self, t: u16) {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
         // Settings ▸ Recording's External input question: Ask, Switch to External input only, Keep the record source.
         match crate::prefs::index(&crate::prefs::EXTERNAL_INPUT) {
@@ -2018,7 +2018,7 @@ impl App {
         }
     }
 
-    pub(crate) fn ask_remove_teslas(&mut self) -> Option<String> {
+    pub fn ask_remove_teslas(&mut self) -> Option<String> {
         let n = teslas(&self.state.session).len();
         if n == 0 {
             return Some("No audio editors in the mixer".into());
@@ -2034,7 +2034,7 @@ impl App {
         None
     }
 
-    pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
+    pub fn open_fx(&mut self, track: u16, slot: u8) {
         let key = crate::plugins::fx_key(track, slot);
         // A container: its list's window.
         if crate::edit::container::members(&self.state.session, track, slot).is_some() {
@@ -2067,7 +2067,7 @@ impl App {
     /// mixer track as clicking that insert would, scrolled into view; a channel on the master selects the master
     /// (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project").
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
-    pub(crate) fn select_window_track(&mut self, key: usize) {
+    pub fn select_window_track(&mut self, key: usize) {
         if !crate::prefs::check(&crate::prefs::AUTO_SELECT_LINKED) {
             return;
         }
@@ -2141,7 +2141,7 @@ pub fn input_items(s: &crate::session::Session, t: u16, marked: bool) -> Option<
 
 /// The input clock's (`input`) or the track latency combo's menu (spec: audio/track-io.md §1.1, §2.6): Reset, Set in
 /// ms / samples / beats; the original's other entries are greyed (its own greyed ones checked as it shows them).
-pub(crate) fn latency_menu(s: &crate::session::Session, t: u16, input: bool, x: f32, y: f32) -> Popup {
+pub fn latency_menu(s: &crate::session::Session, t: u16, input: bool, x: f32, y: f32) -> Popup {
     use crate::typein::LatUnit;
     let now = track(s, t).map_or(0.0, |m| if input { m.latency_in } else { m.latency_out });
     let set = |label: &'static str, u: LatUnit| PItem::new(label, Cmd::Mixer(MCmd::Latency(t, input, Some(u))));
@@ -2170,7 +2170,7 @@ pub(crate) fn latency_menu(s: &crate::session::Session, t: u16, input: bool, x: 
 }
 
 /// Trim unused tracks ▸ (spec: ui/mixer-track-commands.md §6): each choice with the number of tracks it deletes.
-pub(crate) fn trim_items(s: &crate::session::Session) -> Vec<PItem> {
+pub fn trim_items(s: &crate::session::Session) -> Vec<PItem> {
     [(false, "Unlinked tracks only"), (true, "Unlinked and non-empty tracks")]
         .into_iter()
         .map(|(non_empty, label)| {
@@ -2825,7 +2825,7 @@ mod tests {
 
     #[test]
     fn mixer_keys() {
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let mut a = app();
         select(&mut a.state, 10, false);
         a.state.rack.sel = [1].into_iter().collect();
@@ -3266,7 +3266,7 @@ mod tests {
     /// moving until the waveforms are quiet.
     #[test]
     fn view_waveforms_and_extra_properties() {
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let mut a = app();
         let view = |a: &App| {
             let m = options_menu(&a.state, 0.0, 0.0);

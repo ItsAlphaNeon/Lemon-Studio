@@ -262,7 +262,7 @@ fn toward(x: i64, target: f64, k: f32) -> i64 {
 /// A level moved toward the template row's (§6): velocity scales by the row's / 100 (the product truncated), the others
 /// add the row's offset from its centre; the result is clamped to the level's range. Chop weighs its pieces the same
 /// way (piano-chop.md §5).
-pub(crate) fn level(x: u8, row: u8, i: usize, k: f32) -> u8 {
+pub fn level(x: u8, row: u8, i: usize, k: f32) -> u8 {
     let (centre, top) = [(64.0, 128), (100.0, 128), (64.0, 128), (128.0, 255), (128.0, 255), (120.0, 240)][i];
     let x64 = f64::from(x);
     let target = if i == 1 { (x64 * f64::from(row) / 100.0).trunc() } else { x64 + f64::from(row) - centre };
@@ -314,7 +314,7 @@ pub fn quantize(notes: Vec<Note>, tpl: &Pattern, set: &Settings, ppq: u32) -> Ve
 mod tests {
     use super::*;
 
-    pub(crate) fn note(pos: u32, len: u32) -> Note {
+    pub fn note(pos: u32, len: u32) -> Note {
         Note { length: len, ..Note::step(0, pos) }
     }
 

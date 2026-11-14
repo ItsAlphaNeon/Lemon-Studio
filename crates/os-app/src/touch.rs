@@ -86,7 +86,7 @@ impl App {
     /// VIEW > Touch controller, Alt+F7 and the toolbar button: open it (or bring it to the front), centred over the
     /// main window the first time (then where it was left, also in later runs: `layout`); close it when it is in front
     /// (spec §2 Opening).
-    pub(crate) fn toggle_touch(&mut self) {
+    pub fn toggle_touch(&mut self) {
         let s = &mut self.state;
         if s.shown(Win::Touch) && s.in_front(Win::Touch) {
             s.hide(Win::Touch);
@@ -103,7 +103,7 @@ impl App {
     }
 
     /// A control of the window, pressed (notes) or released over (the others).
-    pub(crate) fn touch_act(&mut self, a: TouchAct) {
+    pub fn touch_act(&mut self, a: TouchAct) {
         match a {
             TouchAct::Mode(pads) => {
                 self.touch_hold(None);
@@ -125,7 +125,7 @@ impl App {
     /// The mouse holds note `key` (None: no note): the note held before ends, and the new one plays the selected
     /// channel (or the one locked to the Touch controller), lights on the piano roll's keyboard and goes to step edit,
     /// as a MIDI key does (spec §2 Playing).
-    pub(crate) fn touch_hold(&mut self, key: Option<u8>) {
+    pub fn touch_hold(&mut self, key: Option<u8>) {
         if self.state.touch.held.map(|h| h.0) == key {
             return;
         }
@@ -147,7 +147,7 @@ impl App {
     }
 
     /// While a pad or key is held: the note under the mouse, if any, takes over (a glissando).
-    pub(crate) fn touch_drag(&mut self, x: f32, y: f32) {
+    pub fn touch_drag(&mut self, x: f32, y: f32) {
         let under = self.top_hit(x, y).and_then(|h| match h.action {
             crate::app::Action::Touch(TouchAct::Note(k)) => Some(k),
             _ => None,
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(app.state.touch.keys_low, 60);
 
         // Alt+F7 closes it while it is in front.
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::F7), false, true);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::F7), false, true);
         assert!(!app.state.shown(Win::Touch));
     }
 }

@@ -138,7 +138,7 @@ jobs:
           if [ "$RUNNER_OS" = macOS ]; then
             cargo run --release --locked -p bundle-app
           else
-            cargo build --release --locked -p os-app --bin lemonstudio
+            cargo build --release --locked -p lemonstudio
           fi
 
       - name: Build the plugins

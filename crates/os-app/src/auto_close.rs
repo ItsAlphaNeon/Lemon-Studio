@@ -109,7 +109,7 @@ pub fn lemon_in_front(main_focused: bool) -> bool {
 /// The app's side of Auto close.
 impl App {
     /// Periodic (`App::tick`): Auto close with the window in front now.
-    pub(crate) fn auto_close_tick(&mut self, now: Instant) {
+    pub fn auto_close_tick(&mut self, now: Instant) {
         let on = crate::prefs::check(&crate::prefs::AUTO_CLOSE);
         // Only asked while it matters (the check on, or the output closed by it).
         let ours = (on || self.auto_close.closed()) && lemon_in_front(self.auto_close.main_focused);
@@ -118,7 +118,7 @@ impl App {
 
     /// Auto close at `now` with `ours` = one of Lemon Studio's windows is in front: closes or opens the output, pausing
     /// or resuming the transport (`AutoClose::poll`).
-    pub(crate) fn auto_close_at(&mut self, now: Instant, ours: bool) {
+    pub fn auto_close_at(&mut self, now: Instant, ours: bool) {
         let on = crate::prefs::check(&crate::prefs::AUTO_CLOSE);
         let playing = self.state.session.transport.state() == crate::transport::State::Playing;
         match self.auto_close.poll(now, on, ours, playing) {

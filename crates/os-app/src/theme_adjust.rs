@@ -229,14 +229,14 @@ impl App {
     /// The applied theme's text (`applied_text`) to edit. The Lemon theme's key goes: edited, it is a theme like any
     /// other (on Lemon still Lemon's colours, `os_theme::design::default_text`); the Citrus theme keeps its key, so on
     /// Lemon it stays laid over Lemon even where it is stock Dark.
-    pub(crate) fn theme_text(&self) -> String {
+    pub fn theme_text(&self) -> String {
         let text = applied_text(&self.state, self.design());
         if FlTheme::parse(&text).colors == Some(Design::Lemon) { fl::remove_key(&text, fl::COLORS_KEY) } else { text }
     }
 
     /// Applies an edited theme `text` to the skin in use, live: the window, the skin tiles' previews (the theme tiles
     /// keep showing the themes as shipped) and the chosen tile, which stays the theme it was chosen from.
-    pub(crate) fn theme_edit(&mut self, text: String) {
+    pub fn theme_edit(&mut self, text: String) {
         if self.state.fl_text.as_deref() == Some(text.as_str()) {
             return;
         }
@@ -253,7 +253,7 @@ impl App {
     }
 
     /// Keeps the applied theme for the next start (`current.flstheme` in the user folder).
-    pub(crate) fn theme_store(&self) {
+    pub fn theme_store(&self) {
         if let (Some(d), Some(text)) = (crate::user_dir::theme_dir(), &self.state.fl_text) {
             let _ = std::fs::create_dir_all(&d);
             let _ = std::fs::write(d.join("current.flstheme"), text);
@@ -269,7 +269,7 @@ impl App {
     }
 
     /// Knob `i` was pressed: a drag from here turns it (`Drag::ThemeKnob`).
-    pub(crate) fn theme_knob_press(&mut self, i: usize) {
+    pub fn theme_knob_press(&mut self, i: usize) {
         self.theme_mark(crate::theme_library::Step::Other);
         let th = FlTheme::parse(&self.theme_text());
         let k = &KNOBS[i];
@@ -278,12 +278,12 @@ impl App {
     }
 
     /// The knob drag moved to height `y`: up for more.
-    pub(crate) fn theme_knob_drag(&mut self, i: usize, y0: f32, p0: f32, y: f32) {
+    pub fn theme_knob_drag(&mut self, i: usize, y0: f32, p0: f32, y: f32) {
         self.knob_set(i, KNOBS[i].at(p0 + (y0 - y) * KNOB_PER_PX));
     }
 
     /// Wheel notches over knob `i`: one step each, up for more.
-    pub(crate) fn theme_knob_wheel(&mut self, i: usize, notches: i32) {
+    pub fn theme_knob_wheel(&mut self, i: usize, notches: i32) {
         self.theme_mark(crate::theme_library::Step::Wheel(i));
         let v = knob_value(&FlTheme::parse(&self.theme_text()), i);
         self.knob_set(i, v + notches as f32 * KNOBS[i].notch);
@@ -291,7 +291,7 @@ impl App {
     }
 
     /// A middle click: knob `i` goes back to the value of the theme as it was chosen.
-    pub(crate) fn theme_knob_reset(&mut self, i: usize) {
+    pub fn theme_knob_reset(&mut self, i: usize) {
         self.theme_mark(crate::theme_library::Step::Other);
         let base = self.state.theme_base.clone().unwrap_or_else(|| os_theme::design::default_text(self.design()));
         self.knob_set(i, knob_value(&FlTheme::parse(&base), i));
@@ -299,7 +299,7 @@ impl App {
     }
 
     /// Colour circle `i` (its colour `part`) was clicked: the picker opens under it, or moves to that colour.
-    pub(crate) fn picker_open(&mut self, i: usize, part: usize, at: (f32, f32, f32)) {
+    pub fn picker_open(&mut self, i: usize, part: usize, at: (f32, f32, f32)) {
         let parts = parts(&self.theme_text(), i);
         let part = part.min(parts.len() - 1);
         let before = match &self.state.settings.picker {
@@ -313,7 +313,7 @@ impl App {
     }
 
     /// The picker shows another of its circle's colours.
-    pub(crate) fn picker_part(&mut self, part: usize) {
+    pub fn picker_part(&mut self, part: usize) {
         let text = self.theme_text();
         if let Some(p) = &mut self.state.settings.picker {
             if let Some(c) = parts(&text, p.swatch).get(part) {
@@ -336,7 +336,7 @@ impl App {
 
     /// The saturation / brightness square `r` was pressed or dragged to (`x`, `y`): saturation left to right,
     /// brightness bottom to top.
-    pub(crate) fn picker_sv(&mut self, r: Rect, x: f32, y: f32) {
+    pub fn picker_sv(&mut self, r: Rect, x: f32, y: f32) {
         if let Some(p) = &mut self.state.settings.picker {
             p.hsv[1] = ((x - r.x) / r.w).clamp(0.0, 1.0);
             p.hsv[2] = (1.0 - (y - r.y) / r.h).clamp(0.0, 1.0);
@@ -345,7 +345,7 @@ impl App {
     }
 
     /// The hue strip `r` was pressed or dragged to height `y`: 0° at the top round to 360° at the bottom.
-    pub(crate) fn picker_hue(&mut self, r: Rect, y: f32) {
+    pub fn picker_hue(&mut self, r: Rect, y: f32) {
         if let Some(p) = &mut self.state.settings.picker {
             p.hsv[0] = ((y - r.y) / r.h).clamp(0.0, 1.0) * 360.0;
         }
@@ -353,7 +353,7 @@ impl App {
     }
 
     /// Revert (or a click on the old colour): the theme goes back to how it was when the picker opened.
-    pub(crate) fn picker_revert(&mut self) {
+    pub fn picker_revert(&mut self) {
         let Some(p) = self.state.settings.picker.clone() else { return };
         self.theme_mark(crate::theme_library::Step::Other);
         match p.before.clone() {
@@ -384,7 +384,7 @@ impl App {
     }
 
     /// Closes the colour picker, if open.
-    pub(crate) fn picker_close(&mut self) {
+    pub fn picker_close(&mut self) {
         if self.state.settings.picker.take().is_some() {
             self.invalidate();
         }

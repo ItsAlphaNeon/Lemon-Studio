@@ -13,7 +13,7 @@ use crate::factory_folder::*;
 
 impl App {
     /// The folder button (or the path beside it): a folder picker starting at the folder in use.
-    pub(crate) fn factory_folder_pick(&mut self) {
+    pub fn factory_folder_pick(&mut self) {
         use crate::filedlg::{FileDlg, Mode};
         let start = dir(&self.state.session.settings).filter(|d| d.is_dir());
         let dlg = FileDlg::new(Mode::Folder, PICK_TITLE, "factory content folder", Then::FactoryFolder).start(start.as_deref());
@@ -22,7 +22,7 @@ impl App {
 
     /// The factory content folder becomes `chosen` (`None`: Reset, the install found on this computer): the engines
     /// take the samples behind the placeholders from there, and so do the hosted Lemon Samplers.
-    pub(crate) fn set_factory_folder(&mut self, chosen: Option<PathBuf>) {
+    pub fn set_factory_folder(&mut self, chosen: Option<PathBuf>) {
         crate::settings_file::write(KEY, &chosen.as_deref().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default());
         self.state.session.transport.set_factory(dir(&self.state.session.settings));
         for row in self.state.session.hosted_rows.clone() {

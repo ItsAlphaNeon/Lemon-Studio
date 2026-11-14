@@ -97,7 +97,7 @@ fn space(app: &mut App, presses: &mut Vec<Press>, phase: &'static str) {
     if playing && std::env::var_os("OS_CHECK_PAUSE").is_some() {
         app.state.session.transport.pause();
     } else {
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Space), false, false);
     }
 }
 
@@ -309,7 +309,7 @@ struct Counters {
 }
 
 impl Counters {
-    pub(crate) fn now() -> Counters {
+    pub fn now() -> Counters {
         #[cfg(target_os = "linux")]
         let ((promoted, demoted), refused) = (crate::rt::counts(), crate::rt::refused());
         #[cfg(not(target_os = "linux"))]

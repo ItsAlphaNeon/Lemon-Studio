@@ -788,7 +788,7 @@ fn marker_glyph(ui: &mut Ui, kind: u8, x: f32, cy: f32) {
 }
 
 /// A marker's label: its name; a time signature first shows the signature (spec: ui/pattern-time-signature.md §2).
-pub(crate) fn marker_label(m: &TimeMarker) -> String {
+pub fn marker_label(m: &TimeMarker) -> String {
     if m.kind == TimeMarker::SIGNATURE {
         // FL names a new signature marker after its signature ("3/8", spec: ui/pattern-time-signature.md §4): shown once.
         let sig = format!("{}/{}", m.numerator, m.denominator);

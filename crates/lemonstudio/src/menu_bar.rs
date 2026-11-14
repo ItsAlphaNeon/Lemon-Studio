@@ -20,7 +20,7 @@ use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate, NSMenuItem};
 use objc2_foundation::{ns_string, NSString};
 
-use crate::views::menus::{self, BarMenu, Kind, Mark};
+use os_app::views::menus::{self, BarMenu, Kind, Mark};
 
 thread_local! {
     /// The menus as they should read now (`update`).

@@ -21,7 +21,7 @@ fn headings(c: &Combo) -> &'static [(usize, &'static str)] {
 /// What a declared control does when clicked (`views::settings` draws them).
 impl App {
     /// A declared check was clicked (`SAct::Check`): toggles and keeps it.
-    pub(crate) fn pref_toggle(&mut self, label: &str) {
+    pub fn pref_toggle(&mut self, label: &str) {
         let Some(c) = find_check(label) else { return };
         let on = toggle(c);
         if c.key == MULTITHREADED_MIXER.key || c.key == MULTITHREADED_GENERATORS.key || c.key == MULTITHREADED_AUTO.key {
@@ -37,7 +37,7 @@ impl App {
 
     /// A declared combo was clicked (`SAct::Combo`): the menu of its choices under its box (`x`, `y`), the current one
     /// marked.
-    pub(crate) fn pref_menu(&mut self, label: &str, x: f32, y: f32) {
+    pub fn pref_menu(&mut self, label: &str, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let Some(c) = find_combo(label) else { return };
         let now = index(c);
@@ -52,7 +52,7 @@ impl App {
     }
 
     /// Entry `i` of a declared combo's menu was chosen (`Cmd::Pref`): kept; returns the message.
-    pub(crate) fn pref_choose(&mut self, c: &'static Combo, i: usize) -> Option<String> {
+    pub fn pref_choose(&mut self, c: &'static Combo, i: usize) -> Option<String> {
         let band = crate::views::band_h(&self.state);
         set_choice(c, i);
         // Toolbars scaling: the workspace's top follows the band's new height, the floating windows with it (spec:
@@ -70,13 +70,13 @@ impl App {
 impl App {
     /// A declared slider was pressed (`SAct::Slider`, its track `w` wide from `x`): set from the mouse, then dragged
     /// (`Drag::PrefSlider`).
-    pub(crate) fn pref_slider_press(&mut self, label: &'static str, x: f32, w: f32) {
+    pub fn pref_slider_press(&mut self, label: &'static str, x: f32, w: f32) {
         self.pref_slider_drag(label, x, w);
         self.drag = Some(crate::app::Drag::PrefSlider { label, x, w });
     }
 
     /// Sets the declared slider labelled `label` from the mouse along its track (`w` wide from `x`).
-    pub(crate) fn pref_slider_drag(&mut self, label: &str, x: f32, w: f32) {
+    pub fn pref_slider_drag(&mut self, label: &str, x: f32, w: f32) {
         let Some(s) = find_slider(label) else { return };
         let at = ((self.mouse.0 - x) / w.max(1.0)).clamp(0.0, 1.0);
         set_slider(s, (at * f32::from(s.max)).round() as u16);
@@ -85,7 +85,7 @@ impl App {
 
     /// Wheel notches over the declared slider labelled `label`: up (`notches` > 0) moves it by its step toward its
     /// `max`.
-    pub(crate) fn pref_slider_wheel(&mut self, label: &str, notches: i32) {
+    pub fn pref_slider_wheel(&mut self, label: &str, notches: i32) {
         let Some(s) = find_slider(label) else { return };
         let v = i32::from(slider(s)) + notches * i32::from(s.step);
         set_slider(s, v.clamp(0, i32::from(s.max)) as u16);

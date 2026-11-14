@@ -46,7 +46,7 @@ impl App {
 
 impl App {
     /// Asks the user whether client `who` may save the project to `path`.
-    pub(crate) fn ask_save(&mut self, who: &str, path: std::path::PathBuf) {
+    pub fn ask_save(&mut self, who: &str, path: std::path::PathBuf) {
         use crate::dialog::{Answer, Kind, Msg, Then};
         let text = vec![(who.to_string(), true), (" asks to save the project to ".into(), false), (path.display().to_string(), true), (".".into(), false)];
         let mut msg = Msg::new(Kind::Warning, "Save", text, &[Answer::Yes, Answer::No], Then::ClientSave(path));
@@ -56,7 +56,7 @@ impl App {
 
     /// Asks the user about proposal `n`: what it would change, Apply or Discard (spec: roadmap/control-plane.md
     /// "Proposals").
-    pub(crate) fn ask_proposal(&mut self, n: u64) {
+    pub fn ask_proposal(&mut self, n: u64) {
         use crate::dialog::{Answer, Kind, Msg, Then};
         let Some(p) = self.state.session.control.proposals.iter().find(|p| p.n == n) else { return };
         let who = match &p.by {

@@ -101,7 +101,7 @@ mod tests {
     use crate::icons::Icon;
     use crate::views::browser::Item;
     use crate::views::menus::{bar_model, EDIT_MENU};
-    use winit::keyboard::Key;
+    use crate::keys::Key;
 
     fn note_count(s: &State) -> usize {
         s.session.project.pattern(s.pattern()).map_or(0, |p| p.notes.len())
@@ -1040,7 +1040,7 @@ mod tests {
     #[test]
     fn project_info_edits_are_steps() {
         use crate::views::settings::InfoField;
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let mut app = App::new(None);
         let start = app.state.session.project.info.clone();
         let type_in = |app: &mut App, field: InfoField, text: &str| {

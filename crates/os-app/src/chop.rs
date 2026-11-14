@@ -187,7 +187,7 @@ fn weigh(n: &mut Note, r: &Row, knobs: &[f32; 6]) {
 mod tests {
     use super::*;
 
-    pub(crate) fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, ..Note::step(0, pos) }
     }
 

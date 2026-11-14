@@ -32,7 +32,7 @@ pub fn can_rename(s: &State) -> bool {
 /// project file's folder, whatever 202 said (spec: ui/data-folder.md §2: "the next save wrote that folder into 202").
 /// The folder is the one of the file the project was opened from or last saved as, so Save as writes the folder it
 /// leaves (flp/events/project-info.md, event 202). Other choices keep 202 as it is (`None`).
-pub(crate) fn saved_folder(s: &State) -> Option<String> {
+pub fn saved_folder(s: &State) -> Option<String> {
     if choice(&s.session.project) != DataFolder::RELATIVE {
         return None;
     }
@@ -52,13 +52,13 @@ pub fn adopt(s: &State, path: &str) -> String {
 }
 
 /// Files were made or renamed in the data folder: the browser reads its folders again (`views::browser::list_dir`).
-pub(crate) fn reread(s: &State) {
+pub fn reread(s: &State) {
     s.browser_dirs.borrow_mut().clear();
 }
 
 impl App {
     /// The Data folder combo was clicked: its three choices under its box (`x`, `y`), the project's marked.
-    pub(crate) fn data_folder_menu(&mut self, x: f32, y: f32) {
+    pub fn data_folder_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let now = choice(&self.state.session.project);
         let items = (0..CHOICES.len() as u32).map(|i| PItem::new(CHOICES[i as usize], Cmd::DataFolder(DCmd::Choice(i))).mark(Mark::Radio(i == now))).collect();
@@ -68,7 +68,7 @@ impl App {
 
     /// The program setting Copy used samples to the project folder was clicked: ticking it, with a data folder, asks
     /// what to do with the samples the project uses (spec: ui/data-folder.md §4).
-    pub(crate) fn toggle_copy_samples(&mut self) {
+    pub fn toggle_copy_samples(&mut self) {
         self.pref_toggle(crate::prefs::COPY_USED_SAMPLES.label);
         if crate::prefs::check(&crate::prefs::COPY_USED_SAMPLES) && folder(&self.state).is_some() {
             let m = Msg::new(Kind::Question, ATTENTION, spans(&[COPY_QUESTION]), &[Answer::Yes, Answer::No], Then::DataFolder(DThen::CopySamples));
@@ -78,14 +78,14 @@ impl App {
 
     /// Copies every sample the project uses into `<data folder>/Samples` (spec: ui/data-folder.md §4): the channels use
     /// the copies from now on (Lemon Sampler loads them), which counts as a change of the project. Returns the message.
-    pub(crate) fn copy_used_samples(&mut self) -> Option<String> {
+    pub fn copy_used_samples(&mut self) -> Option<String> {
         let dir = folder(&self.state)?;
         Some(self.copy_used_samples_to(&dir))
     }
 
     /// Copies every sample the project uses into `<dir>/Samples`, as `copy_used_samples` does for the data folder (the
     /// Save as and New project forms copy into the folder they make). Returns the message.
-    pub(crate) fn copy_used_samples_to(&mut self, dir: &Path) -> String {
+    pub fn copy_used_samples_to(&mut self, dir: &Path) -> String {
         let (mut copied, mut failed) = (0, 0);
         for row in 0..self.state.session.project.channels.len() {
             // A hosted Lemon Sampler's own sample is the one it plays; it loads the copy too.
@@ -115,7 +115,7 @@ impl App {
 
     /// The folder button (or the path beside it): a folder picker, then what to do with the project (spec:
     /// ui/data-folder.md §5).
-    pub(crate) fn data_folder_pick(&mut self) {
+    pub fn data_folder_pick(&mut self) {
         use crate::filedlg::{FileDlg, Mode};
         let start = folder(&self.state).filter(|d| d.is_dir());
         let dlg = FileDlg::new(Mode::Folder, PICK_TITLE, "data folder", Then::DataFolder(DThen::Picked)).start(start.as_deref());
@@ -123,7 +123,7 @@ impl App {
     }
 
     /// The data folder becomes `dir`, with the choice "Store data in the specified folder" (a change of the project).
-    pub(crate) fn set_data_folder(&mut self, dir: &Path) {
+    pub fn set_data_folder(&mut self, dir: &Path) {
         let df = self.state.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
         df.choice = DataFolder::SPECIFIED;
         df.folder = folder_text(dir);
@@ -131,7 +131,7 @@ impl App {
     }
 
     /// One of the data folder's dialogs was answered (`Then::DataFolder`).
-    pub(crate) fn data_folder_done(&mut self, then: DThen, reply: Reply) {
+    pub fn data_folder_done(&mut self, then: DThen, reply: Reply) {
         let yes = reply == Reply::Button(Answer::Yes);
         match (then, reply) {
             // Don't copy: nothing is copied, and the check stays ticked (Lemon Studio rule).
@@ -174,7 +174,7 @@ impl App {
     /// file inside it to `<name>.flp`, and the samples inside it are found in the renamed folder; without, only the
     /// project file is renamed, in its folder (Lemon Studio rule). Then the project is saved (the file it replaces goes
     /// to the backups, as on any save). A name that is taken is refused with a message, and nothing changes.
-    pub(crate) fn rename_project(&mut self, name: &str, folder_name: Option<&str>) {
+    pub fn rename_project(&mut self, name: &str, folder_name: Option<&str>) {
         let Some(file) = self.state.session.path.clone() else { return };
         // The folder's rename (old, new), where the project file is after it, and its new name.
         let folder_move = match folder_name.map(str::trim) {
@@ -243,7 +243,7 @@ impl App {
     }
 
     /// A pick in one of the data folder's menus (`Cmd::DataFolder`); returns the message.
-    pub(crate) fn data_folder_cmd(&mut self, c: DCmd) -> Option<String> {
+    pub fn data_folder_cmd(&mut self, c: DCmd) -> Option<String> {
         match c {
             DCmd::Choice(i) => self.set_data_folder_choice(i),
         }
@@ -252,7 +252,7 @@ impl App {
     /// The Data folder combo's choice `i` (spec: ui/data-folder.md §2, §5): Don't use a data folder empties event 202;
     /// relative makes the project file's folder the data folder (none until a project never saved is saved); the
     /// specified folder keeps the folder in use and opens no picker. A change counts as a change of the project.
-    pub(crate) fn set_data_folder_choice(&mut self, i: u32) -> Option<String> {
+    pub fn set_data_folder_choice(&mut self, i: u32) -> Option<String> {
         let s = &mut self.state;
         let Some(&label) = CHOICES.get(i as usize) else { return None };
         if i != choice(&s.session.project) {
@@ -288,7 +288,7 @@ mod tests {
     }
 
     /// A fresh scratch folder for one test (removed again by the caller).
-    pub(crate) fn scratch(tag: &str) -> PathBuf {
+    pub fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("os_datafolder_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn renaming_the_project() {
         use crate::project_forms::{Form, Rename};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let dir = scratch("rename");
         let mut app = saved_with_folder(&dir, "t2spec");
         let kick = dir.join("t2spec").join(SAMPLES_DIR).join("kick.wav");

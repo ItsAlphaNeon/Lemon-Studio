@@ -21,14 +21,14 @@ pub fn armed_file(s: &State, track: u16) -> String {
 
 impl App {
     /// Every tick: the session's `tick_in` with the song position and the playlist's last clip length.
-    pub(crate) fn track_rec_tick(&mut self) {
+    pub fn track_rec_tick(&mut self) {
         let (pos, lock) = (self.state.session.song_pos, self.state.playlist.lock_len);
         self.host(|ses| tick_in(ses, pos, lock));
     }
 
     /// Arm selected track(s) / Disarm selected track(s) (the track menu), and the disk-record button: arming turns
     /// Audio on in Record's filter, so the armed tracks record (spec: audio/track-io.md §2.5).
-    pub(crate) fn arm_tracks(&mut self, tracks: &[u16], on: bool) -> Option<String> {
+    pub fn arm_tracks(&mut self, tracks: &[u16], on: bool) -> Option<String> {
         let mut n = 0;
         for &t in tracks {
             if let Some(m) = crate::mixer::track_mut(&mut self.state.session, t).filter(|m| m.armed != on) {

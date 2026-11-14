@@ -383,9 +383,9 @@ pub fn midi_note(s: &mut State, key: u8, vel: u8, down: bool, now: Option<u32>) 
 /// The typing keyboard's Performance mode layout (§3, the original's as measured): the note a physical key plays, by
 /// the MIDI rule above. The left hand's rows 1–5, Q–T, A–G and Z–B are tracks 1–4, the right hand's 6–0, Y–P, H–; and
 /// N–/ tracks 5–8, a row's five keys columns 1–5.
-pub fn typing_note(code: winit::keyboard::KeyCode) -> Option<u8> {
-    use winit::keyboard::KeyCode::*;
-    const ROWS: [[winit::keyboard::KeyCode; 5]; 8] = [
+pub fn typing_note(code: crate::keys::KeyCode) -> Option<u8> {
+    use crate::keys::KeyCode::*;
+    const ROWS: [[crate::keys::KeyCode; 5]; 8] = [
         [Digit1, Digit2, Digit3, Digit4, Digit5],
         [KeyQ, KeyW, KeyE, KeyR, KeyT],
         [KeyA, KeyS, KeyD, KeyF, KeyG],
@@ -491,13 +491,13 @@ pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
 
 impl App {
     /// Prepare for performance mode (§1): the question first, then Marker settings, then the markers.
-    pub(crate) fn ask_prepare(&mut self) {
+    pub fn ask_prepare(&mut self) {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
         self.show_msg(Msg::new(Kind::Question, "Confirm", spans(&[CONFIRM]), &[Answer::Ok, Answer::Cancel], Then::PerfConfirm));
     }
 
     /// Ok to the question: the Marker settings dialog at its defaults.
-    pub(crate) fn open_marker_settings(&mut self) {
+    pub fn open_marker_settings(&mut self) {
         self.state.playlist.popup = None;
         self.show_form(crate::dialog::Body::Markers(MarkerForm::default()));
     }
@@ -510,7 +510,7 @@ impl App {
     }
 
     /// A click on a Marker settings box: its list under it, the current value marked.
-    pub(crate) fn marker_list(&mut self, spacing: bool) {
+    pub fn marker_list(&mut self, spacing: bool) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let Some(f) = self.marker_form().copied() else { return };
         let act = crate::app::Action::Dlg(crate::dialog::DHit::MarkerValue(spacing));
@@ -522,7 +522,7 @@ impl App {
     }
 
     /// A pick in a Marker settings list sets its box.
-    pub(crate) fn marker_pick(&mut self, spacing: bool, v: u8) {
+    pub fn marker_pick(&mut self, spacing: bool, v: u8) {
         if let Some(f) = self.marker_form() {
             if spacing {
                 f.spacing = v;
@@ -757,7 +757,7 @@ mod tests {
     /// §3: the typing keyboard's Performance mode layout, key by key.
     #[test]
     fn typing_layout() {
-        use winit::keyboard::KeyCode::*;
+        use crate::keys::KeyCode::*;
         let rows = [
             ([Digit1, Digit2, Digit3, Digit4, Digit5], 0),
             ([KeyQ, KeyW, KeyE, KeyR, KeyT], 12),
@@ -782,7 +782,7 @@ mod tests {
     /// grid's scroll, and play no note.
     #[test]
     fn typing_keys_launch_slots() {
-        use winit::keyboard::KeyCode::*;
+        use crate::keys::KeyCode::*;
         let mut app = app();
         assert!(app.typing_on());
         assert!(app.typing_key(Digit2, true, false, false));

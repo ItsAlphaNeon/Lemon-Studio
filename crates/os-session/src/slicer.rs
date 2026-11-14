@@ -203,7 +203,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// `OS_SLICER_FLP=<a.flp>;<b.flp> cargo test -p os-app corpus_slicer -- --ignored`: every Fruity Slicer channel of
+    /// `OS_SLICER_FLP=<a.flp>;<b.flp> cargo test -p os-session corpus_slicer -- --ignored`: every Fruity Slicer channel of
     /// the projects comes back byte for byte through Lemon Slicer, and its loop is found.
     #[test]
     #[ignore]

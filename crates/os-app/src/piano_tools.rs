@@ -85,8 +85,8 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
 
 /// The keys a held key repeats in the piano roll (spec: ui/piano-keys.md §4 rule 1): Shift / Ctrl / Alt + arrows (not
 /// Ctrl+Shift+Up / Down), PgUp / PgDn, Ctrl+B and Ctrl+V.
-pub fn repeats(key: &winit::keyboard::Key, ctrl: bool, alt: bool, shift: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn repeats(key: &crate::keys::Key, ctrl: bool, alt: bool, shift: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     match key {
         Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => (shift || ctrl || alt) && !(ctrl && shift),
         Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => shift || ctrl || alt,
@@ -98,8 +98,8 @@ pub fn repeats(key: &winit::keyboard::Key, ctrl: bool, alt: bool, shift: bool) -
 
 /// The piano roll's keyboard shortcuts (spec: ui/piano-roll.md §3a, §9, §10a, §11; ui/piano-keys.md). Returns true
 /// when the key was taken. Called while the piano roll is shown and the playlist is not in front of it.
-pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     let shift = app.shift;
     let is = |c: &str, l: &str| c.eq_ignore_ascii_case(l);
     let cmd = match key {
@@ -230,7 +230,7 @@ pub fn span_to_range(s: &mut State) {
 }
 
 /// Select the channel `dir` rows away, wrapping; `with_notes` skips channels without notes in the pattern (§11).
-pub(crate) fn cycle_channel(app: &mut App, dir: i32, with_notes: bool) -> bool {
+pub fn cycle_channel(app: &mut App, dir: i32, with_notes: bool) -> bool {
     let s = &mut app.state;
     let n = s.session.project.channels.len();
     if n == 0 {
@@ -407,7 +407,7 @@ fn apply(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<Note>) -> bool 
 }
 
 /// `apply`, its undo step named `step`; none for a tool's preview (spec: ui/piano-strum.md §1).
-pub(crate) fn apply_as(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<Note>, step: Option<&'static str>) -> bool {
+pub fn apply_as(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<Note>, step: Option<&'static str>) -> bool {
     let Some(ch) = piano::channel(s) else { return false };
     let idx = piano::targets(s);
     if idx.is_empty() {
@@ -508,7 +508,7 @@ pub fn glue(mut notes: Vec<Note>) -> Vec<Note> {
 }
 
 /// splitmix64: a small, good-enough generator for humanizing.
-pub(crate) fn next(rng: &mut u64) -> u64 {
+pub fn next(rng: &mut u64) -> u64 {
     *rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *rng;
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -520,7 +520,7 @@ pub(crate) fn next(rng: &mut u64) -> u64 {
 mod tests {
     use super::*;
 
-    pub(crate) fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, ..Note::step(0, pos) }
     }
 

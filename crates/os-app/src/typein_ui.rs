@@ -57,7 +57,7 @@ fn knob_label(s: &State, k: KnobId) -> String {
     text.split_once(':').map_or(text.clone(), |(a, _)| a.to_string())
 }
 
-pub(crate) fn get(s: &State, t: Target) -> Option<f64> {
+pub fn get(s: &State, t: Target) -> Option<f64> {
     match t {
         Target::Knob(k) => Some(f64::from(s.knob(k))),
         Target::Fader(m) => Some(crate::mixer::track(&s.session, m)?.volume.unwrap_or(0.8)),
@@ -122,7 +122,7 @@ fn set(s: &mut State, t: Target, v: f64) {
 
 /// The 0..1 position of a rack row's mixer track box or LED, for Copy value and Paste value (Lemon Studio's design):
 /// the track over the highest insert, the LED 0 (off) or 1 (on). `None` for the other targets, which copy their knob.
-pub(crate) fn position(s: &State, t: Target) -> Option<f64> {
+pub fn position(s: &State, t: Target) -> Option<f64> {
     let v = get(s, t)?;
     match t {
         Target::RackTrack(_) => Some(v / f64::from(crate::mixer::max_insert(&s.session.project).max(1))),
@@ -133,7 +133,7 @@ pub(crate) fn position(s: &State, t: Target) -> Option<f64> {
 
 /// The value (in the box's unit) of a rack row's mixer track box or LED at position `p` (0..1): the nearest track, or
 /// the LED on from one half.
-pub(crate) fn at_position(s: &State, t: Target, p: f64) -> f64 {
+pub fn at_position(s: &State, t: Target, p: f64) -> f64 {
     let p = p.clamp(0.0, 1.0);
     match t {
         Target::RackTrack(_) => (p * f64::from(crate::mixer::max_insert(&s.session.project))).round(),
@@ -142,7 +142,7 @@ pub(crate) fn at_position(s: &State, t: Target, p: f64) -> f64 {
 }
 
 /// Sets a rack row's mixer track box or LED to `v`, in the box's unit (its menu's Paste value and Set...).
-pub(crate) fn set_value(s: &mut State, t: Target, v: f64) {
+pub fn set_value(s: &mut State, t: Target, v: f64) {
     set(s, t, v);
 }
 

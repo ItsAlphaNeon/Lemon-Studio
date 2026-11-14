@@ -187,7 +187,7 @@ pub fn menu_key(label: &str, shortcut: &'static str) -> &'static str {
 impl App {
     /// The Manage shortcuts button: the window, filled with the applied shortcuts. The settings window closes while it
     /// is open.
-    pub(crate) fn open_shortcuts(&mut self) {
+    pub fn open_shortcuts(&mut self) {
         crate::project_info_ui::accept_info(&mut self.state);
         self.state.settings.open = false;
         self.state.dialogs.push(Modal::new(Body::Shortcuts(Form::applied())));
@@ -196,7 +196,7 @@ impl App {
 
     /// The window closed: by Apply (`apply`), which keeps the form, or by its × (or Esc), which drops it. The settings
     /// window comes back.
-    pub(crate) fn shortcuts_closed(&mut self, form: &Form, apply: bool) {
+    pub fn shortcuts_closed(&mut self, form: &Form, apply: bool) {
         if apply {
             form.apply();
             self.state.message = Some("Shortcuts applied".into());
@@ -206,7 +206,7 @@ impl App {
     }
 
     /// F8 with the modifiers held (`ctrl`, `alt`, `App::shift`): the Browser and pickers rows.
-    pub(crate) fn f8_key(&mut self, ctrl: bool, alt: bool) {
+    pub fn f8_key(&mut self, ctrl: bool, alt: bool) {
         match f8(self.shift, ctrl, alt) {
             Some(F8::Browser) => self.act(Action::ToggleWin(Win::Browser)),
             Some(F8::PluginPicker) => self.toggle_plugin_palette(),
@@ -218,7 +218,7 @@ impl App {
 
     /// Show plugin database: VIEW > Plugin database (spec: ui/browser-commands.md §4), the browser shown on its Plugin
     /// database tab as it was left, unless the browser's search field has the keyboard.
-    pub(crate) fn show_plugin_database(&mut self) {
+    pub fn show_plugin_database(&mut self) {
         if !self.state.browser_search_focus {
             self.browser_jump(crate::browser::Jump::PluginDb);
         }
@@ -364,7 +364,7 @@ mod tests {
         app.open_shortcuts();
         app.paint(&mut c, None);
         pick(&mut app, &mut c, 7, 0);
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
         assert!(app.state.dialogs.is_empty() && app.state.settings.open);
         assert_eq!(prefs::choice(&CLIP_PROPERTIES), "Alt");
         app.open_shortcuts();
@@ -388,7 +388,7 @@ mod tests {
     /// does nothing.
     #[test]
     fn f8_keys_follow_the_applied_shortcuts() {
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.paint(&mut c, None);

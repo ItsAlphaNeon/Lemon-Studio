@@ -225,7 +225,7 @@ mod tests {
     /// language's comments, not below other lines, and not without the empty line after it.
     #[test]
     fn header_check() {
-        let own = lines_for("crates/os-app/src/main.rs");
+        let own = lines_for("crates/os-app/src/lib.rs");
         let whole = with_holders(&["Copyright (C) 2026 ItsAlphaNeon"], &own);
         let slash = header(Style::Slash, &whole).join("\n");
         assert!(has_header(&format!("{slash}\n\n//! Docs.\n"), Style::Slash, &own));
@@ -244,7 +244,7 @@ mod tests {
     /// needs its years and a name, and comes before the other lines.
     #[test]
     fn copyright_holders() {
-        let own = lines_for("crates/os-app/src/main.rs");
+        let own = lines_for("crates/os-app/src/lib.rs");
         let check = |style: Style, holders: &[&str]| {
             has_header(&format!("{}\n\n", header(style, &with_holders(holders, &own)).join("\n")), style, &own)
         };
@@ -275,7 +275,7 @@ mod tests {
         let holders = ["Copyright (C) 2026 ItsAlphaNeon"];
         let text = format!("{}\n\n//! Icons.\n", header(Style::Slash, &with_holders(&holders, &shared)).join("\n"));
         assert!(has_header(&text, Style::Slash, &shared));
-        let own = lines_for("crates/os-app/src/main.rs");
+        let own = lines_for("crates/os-app/src/lib.rs");
         assert!(!has_header(&text, Style::Slash, &own));
         assert!(!has_header(&format!("{}\n\n", header(Style::Slash, &with_holders(&holders, &own)).join("\n")), Style::Slash, &shared));
         assert!(!has_header(&text, Style::Slash, &lines_for("crates/os-vst2/src/abi.rs")), "another licence expression");
