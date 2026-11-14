@@ -309,11 +309,11 @@ mod tests {
         assert_eq!(p.current().1.gain, 0);
     }
 
-    /// Every factory preset (`crates/os-app/factory-presets/Lemon Drop/`, spec: plugins/lemon-drop.md "Presets") holds
+    /// Every factory preset (`crates/os-session/factory-presets/Lemon Drop/`, spec: plugins/lemon-drop.md "Presets") holds
     /// the plugin's saved state with a version 9 state that reads and writes back as it is; Default is a new Lemon Drop.
     #[test]
     fn factory_presets_hold_readable_states() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets/Lemon Drop");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-session/factory-presets/Lemon Drop");
         let (mut n, mut walk) = (0, vec![root.clone()]);
         while let Some(d) = walk.pop() {
             for e in std::fs::read_dir(&d).unwrap() {

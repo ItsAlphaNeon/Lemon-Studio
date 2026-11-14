@@ -10,6 +10,7 @@ name = "lemonstudio"
 path = "src/main.rs"
 
 [dependencies]
+os-session.workspace = true
 os-model.workspace = true
 os-dsp.workspace = true
 os-flp.workspace = true
@@ -69,6 +70,9 @@ flacenc = "0.5"
 mp3lame-encoder = "0.2"
 vorbis_rs = "0.5"
 zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+os-session = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 # ASIO output (`device::asio`), built from the ASIO SDK's host files in `asiosdk` (`.cargo/config.toml`).

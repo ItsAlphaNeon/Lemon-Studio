@@ -143,80 +143,31 @@ fn member_ops(s: &State, t: u16, slot: u8, m: &[Member], i: usize) -> Vec<PItem>
     ]
 }
 
-impl Moved {
-    /// The move whose plugin's parameters automation target `tg` names, and the parameter (or container item).
-    fn named(&self, tg: u32) -> Option<(&Move, u16)> {
-        match target::decode(tg) {
-            Auto::SlotParam(t, k, i) => Some((self.moves.iter().find(|m| m.from == (t, k) && k != CHANNEL)?, i)),
-            Auto::ChannelParam(ch, i) if ch == self.index => Some((self.moves.iter().find(|m| m.from.1 == CHANNEL)?, i)),
-            _ => None,
+/// Points the project's automation clips, recorded pattern events, controller links and initial values (and the
+/// event editor's control) on the moved plugins' parameters at the members. Returns how many different targets
+/// could not move (parameters past a member's room), which stay as they are.
+fn retarget(moved: &Moved, s: &mut State) -> usize {
+    let mut stuck = std::collections::BTreeSet::new();
+    let mut f = |t: &mut u32| match moved.target(*t) {
+        Some(Some(n)) => *t = n,
+        Some(None) => {
+            stuck.insert(*t);
         }
+        None => {}
+    };
+    let p = s.session.project.get_mut();
+    p.automations.iter_mut().flat_map(|a| a.targets.iter_mut()).for_each(&mut f);
+    p.patterns.iter_mut().flat_map(|q| q.controls.iter_mut()).for_each(|c| f(&mut c.kind));
+    for l in &mut p.controller_links {
+        let mut t = l.target();
+        f(&mut t);
+        l.set_target(t);
     }
-
-    /// The automation target of item `item` of the container.
-    fn item_target(&self, item: u16) -> u32 {
-        if self.to.1 == CHANNEL {
-            target::channel_param(self.index, item)
-        } else {
-            target::slot_param(self.to.0, self.to.1, item)
-        }
+    p.init_controls.iter_mut().for_each(|c| f(&mut c.target));
+    if let Some(Some(n)) = moved.target(s.events.target) {
+        s.events.target = n;
     }
-
-    /// Where target `tg` goes: `None` when it names nothing moved, `Some(None)` for a moved plugin's parameter with no
-    /// room as a member's (it stays as it is), else its member's target.
-    fn target(&self, tg: u32) -> Option<Option<u32>> {
-        let (m, i) = self.named(tg)?;
-        Some(m.ids.item(i).map(|item| self.item_target(item)))
-    }
-
-    /// Where remote control link target `l` goes (`None`: it stays): a moved plugin's parameter, kept by its hosted key,
-    /// becomes its member's (kept by place and id), and a moved container's member's follows it.
-    pub(crate) fn link(&self, l: crate::typein::Target) -> Option<crate::typein::Target> {
-        use crate::typein::Target as T;
-        let (t, k) = self.to;
-        let key = |m: &Move| if m.from.1 == CHANNEL { usize::from(m.from.0) } else { fx_key(m.from.0, m.from.1) };
-        let new_id = |m: &Move, old: u32| match &m.ids {
-            Ids::Members(ids) => ids.iter().find(|p| p.0 == old).map(|p| p.1),
-            Ids::Plugin(_) => None,
-        };
-        match l {
-            T::Param(at, i) => {
-                let m = self.moves.iter().find(|m| key(m) == at)?;
-                let Ids::Plugin(id) = m.ids else { return None };
-                (i < usize::from(MEMBER_WET)).then_some(T::MemberParam(t, k, id, i))
-            }
-            T::MemberParam(mt, mk, old, i) => Some(T::MemberParam(t, k, new_id(self.moves.iter().find(|m| m.from == (mt, mk))?, old)?, i)),
-            T::Member(mt, mk, old, wet) => Some(T::Member(t, k, new_id(self.moves.iter().find(|m| m.from == (mt, mk))?, old)?, wet)),
-            _ => None,
-        }
-    }
-
-    /// Points the project's automation clips, recorded pattern events, controller links and initial values (and the
-    /// event editor's control) on the moved plugins' parameters at the members. Returns how many different targets
-    /// could not move (parameters past a member's room), which stay as they are.
-    fn retarget(&self, s: &mut State) -> usize {
-        let mut stuck = std::collections::BTreeSet::new();
-        let mut f = |t: &mut u32| match self.target(*t) {
-            Some(Some(n)) => *t = n,
-            Some(None) => {
-                stuck.insert(*t);
-            }
-            None => {}
-        };
-        let p = s.session.project.get_mut();
-        p.automations.iter_mut().flat_map(|a| a.targets.iter_mut()).for_each(&mut f);
-        p.patterns.iter_mut().flat_map(|q| q.controls.iter_mut()).for_each(|c| f(&mut c.kind));
-        for l in &mut p.controller_links {
-            let mut t = l.target();
-            f(&mut t);
-            l.set_target(t);
-        }
-        p.init_controls.iter_mut().for_each(|c| f(&mut c.target));
-        if let Some(Some(n)) = self.target(s.events.target) {
-            s.events.target = n;
-        }
-        stuck.len()
-    }
+    stuck.len()
 }
 
 impl App {
@@ -312,7 +263,7 @@ impl App {
             }
         }
         let moved = Moved { to: (t, slot), index: 0, moves };
-        let stuck = moved.retarget(&mut self.state);
+        let stuck = retarget(&moved, &mut self.state);
         if name.is_some() {
             crate::mixer::set_slot_label(&mut self.state.session, t, slot, name);
         }
@@ -437,7 +388,7 @@ impl App {
         ch.plugin = Some(CONTAINER.into());
         ch.plugin_state = Some(encode(&[member]));
         s.session.dirty = true;
-        let stuck = moved.retarget(s);
+        let stuck = retarget(&moved, s);
         show(s, t, CHANNEL);
         (Some(format!("{name} in a container{}", stuck_text(stuck))), Some(moved))
     }

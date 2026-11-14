@@ -450,12 +450,12 @@ mod tests {
         assert_eq!(p.settings()[0], 0);
     }
 
-    /// The factory presets (`crates/os-app/factory-presets/<name>/`, one level of category folders) list every
+    /// The factory presets (`crates/os-session/factory-presets/<name>/`, one level of category folders) list every
     /// parameter by its name, as its step count from the minimum, and hold FL's presets (spec
     /// plugins/factory-presets.md).
     #[test]
     fn factory_presets_list_every_parameter_and_hold_fls_states() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-session/factory-presets");
         // Every preset of a plugin, as `[category/]name`.
         let all = |spec: &Spec| -> Vec<String> {
             let mut names = Vec::new();

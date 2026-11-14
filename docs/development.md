@@ -108,7 +108,8 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-dsp`](../crates/os-dsp) | DSP building blocks: level curve, pan split, gain glides, mixer matrix and equaliser |
 | [`os-theme`](../crates/os-theme) | Colour palette, skins (Lemon, Citrus), theme files and the HSL adjustment model |
 | [`os-ui`](../crates/os-ui) | CPU canvas, text rendering and the shared widget kit |
-| [`os-app`](../crates/os-app) | The `lemonstudio` application: windows, editors, transport |
+| [`os-session`](../crates/os-session) | The session, with no window: the project, transport, devices, MIDI, plugins, recording, loading and saving, history, settings, the control server |
+| [`os-app`](../crates/os-app) | The `lemonstudio` application: windows, editors, views, on `os-session` (which it re-exports under the module names it had) |
 | [`os-host`](../crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3, VST2) |
 | [`os-clap`](../crates/os-clap) | CLAP plugin host |
 | [`os-vst3`](../crates/os-vst3) | VST3 plugin host |

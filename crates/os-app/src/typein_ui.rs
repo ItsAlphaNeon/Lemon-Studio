@@ -21,25 +21,6 @@ fn resolved(s: &State, t: Target) -> Option<Target> {
     }
 }
 
-impl LatUnit {
-    pub fn name(self) -> &'static str {
-        match self {
-            LatUnit::Ms => "ms",
-            LatUnit::Samples => "samples",
-            LatUnit::Beats => "beats",
-        }
-    }
-
-    /// Milliseconds per unit: a sample at the device's rate (44.1 kHz with none open), a beat at the project's tempo.
-    fn ms(self, s: &State) -> f64 {
-        match self {
-            LatUnit::Ms => 1.0,
-            LatUnit::Samples => 1000.0 / f64::from(crate::device::rate().unwrap_or(44100).max(1)),
-            LatUnit::Beats => 60000.0 / s.tempo().max(1.0),
-        }
-    }
-}
-
 /// The caption under the field (spec §6, §7).
 pub fn caption(s: &State, t: Target) -> String {
     match t {
@@ -113,7 +94,7 @@ fn set(s: &mut State, t: Target, v: f64) {
             }
         }
         // `v` is in the box's unit.
-        Target::Latency(m, input, u) => crate::mixer::set_latency(s, m, input, (v * u.ms(s)).clamp(-LATENCY_MAX_MS, LATENCY_MAX_MS) as f32),
+        Target::Latency(m, input, u) => crate::mixer::set_latency(s, m, input, (v * u.ms(s.tempo())).clamp(-LATENCY_MAX_MS, LATENCY_MAX_MS) as f32),
         // One undo step, as the box's own menu commands.
         Target::RackTrack(r) => {
             let track = v.round().clamp(0.0, f64::from(crate::mixer::max_insert(&s.session.project))) as u16;
@@ -169,7 +150,7 @@ pub(crate) fn set_value(s: &mut State, t: Target, v: f64) {
 pub fn text(s: &State, t: Target, norm: bool) -> String {
     let n = get(s, t).unwrap_or(0.0);
     if let Target::Latency(_, _, u) = t {
-        return short(n / u.ms(s), 4);
+        return short(n / u.ms(s.tempo()), 4);
     }
     if norm {
         return short(n, 4);

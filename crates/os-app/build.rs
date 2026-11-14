@@ -6,7 +6,7 @@
 //! (`LEMON_VERSION`, else the workspace's) as the version resource (Windows). Uses the Windows SDK's `rc.exe` (or `$RC`);
 //! without it the build goes on and the exe just has no icon. Also sets `cfg(plugin_windows)` where plugin windows exist,
 //! `cfg(lemon_updater)` when `LEMON_UPDATER` names the updater to carry (release builds, `crate::update`), and
-//! `cfg(lemon_nightly)` when `LEMON_CHANNEL` is `nightly` (`crate::version`).
+//! `cfg(lemon_nightly)` when `LEMON_CHANNEL` is `nightly` (the icon).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -25,38 +25,6 @@ fn find_rc() -> Option<PathBuf> {
     let mut vers: Vec<PathBuf> = std::fs::read_dir(&bin).ok()?.flatten().map(|e| e.path()).collect();
     vers.sort();
     vers.into_iter().rev().map(|v| v.join(arch).join("rc.exe")).find(|p| p.exists())
-}
-
-/// The factory presets in `factory-presets/<plugin>/[<folder>/]<name>.ospreset`, as a Rust slice expression of (path
-/// under that folder, `/`-separated; bytes) for `presets.rs` to include (spec: plugins/presets.md "Factory presets").
-fn factory_presets() {
-    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("factory-presets");
-    println!("cargo:rerun-if-changed={}", root.display());
-    let mut found: Vec<(String, PathBuf)> = Vec::new();
-    let files = |dir: &std::path::Path| -> Vec<PathBuf> {
-        let mut v: Vec<PathBuf> = std::fs::read_dir(dir).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
-        v.sort();
-        v
-    };
-    let name = |p: &std::path::Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let preset = |p: &std::path::Path| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ospreset"));
-    for plugin in files(&root).into_iter().filter(|p| p.is_dir()) {
-        for p in files(&plugin) {
-            if preset(&p) {
-                found.push((format!("{}/{}", name(&plugin), name(&p)), p));
-            } else if p.is_dir() {
-                for q in files(&p).into_iter().filter(|q| preset(q)) {
-                    found.push((format!("{}/{}/{}", name(&plugin), name(&p), name(&q)), q));
-                }
-            }
-        }
-    }
-    let mut out = String::from("&[\n");
-    for (rel, path) in found {
-        out.push_str(&format!("    ({rel:?}, include_bytes!({:?}) as &[u8]),\n", path.display().to_string()));
-    }
-    out.push(']');
-    std::fs::write(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("factory_presets.rs"), out).unwrap();
 }
 
 /// Release builds: `LEMON_UPDATER` names the `lemonstudio-updater` built just before, which the program carries
@@ -78,7 +46,7 @@ fn version() -> String {
     std::env::var("LEMON_VERSION").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap())
 }
 
-/// Whether this is a nightly build (`crate::version::NIGHTLY`).
+/// Whether this is a nightly build (the icon; `os_session::version::NIGHTLY` has its own).
 fn nightly() -> bool {
     println!("cargo::rustc-check-cfg=cfg(lemon_nightly)");
     println!("cargo:rerun-if-env-changed=LEMON_CHANNEL");
@@ -130,7 +98,6 @@ END
 }
 
 fn main() {
-    factory_presets();
     updater();
     let version = version();
     let nightly = nightly();
