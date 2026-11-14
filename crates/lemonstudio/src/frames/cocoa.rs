@@ -1051,7 +1051,7 @@ fn monitor(e: &NSEvent) -> bool {
         }
         let flags = e.modifierFlags();
         let k = KeyMsg {
-            scancode: u32::from(e.keyCode()),
+            code: crate::winit_keys::scancode(u32::from(e.keyCode())),
             pressed: t == NSEventType::KeyDown,
             ctrl: flags.intersects(NSEventModifierFlags::Control | NSEventModifierFlags::Command),
             alt: flags.contains(NSEventModifierFlags::Option),

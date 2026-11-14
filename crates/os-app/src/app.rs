@@ -2546,7 +2546,7 @@ impl App {
         // Keys pressed while a plugin window has the focus still play the typing keyboard.
         #[cfg(any(windows, target_os = "macos"))]
         for k in self.state.editor_host.frames.take_keys() {
-            let code = crate::winit_keys::scancode(k.scancode);
+            let code = k.code;
             if code != KeyCode::Unidentified {
                 // Space keeps playing / stopping the song (the typing keyboard does not use it).
                 if !self.typing_key(code, k.pressed, k.ctrl, k.alt) && k.pressed && code == crate::keys::KeyCode::Space {
@@ -4689,7 +4689,7 @@ impl App {
 
     /// The mouse pointer's screen position (physical px).
     #[cfg(any(windows, target_os = "macos"))]
-    fn pointer_on_screen() -> Option<(i32, i32)> {
+    fn pointer_on_screen(&self) -> Option<(i32, i32)> {
         #[cfg(windows)]
         {
             use windows_sys::Win32::Foundation::POINT;
@@ -4697,13 +4697,13 @@ impl App {
             (unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt) } != 0).then_some((pt.x, pt.y))
         }
         #[cfg(target_os = "macos")]
-        crate::plugin_window::pointer()
+        self.state.editor_host.frames.pointer()
     }
 
     /// The hosted key whose plugin window is under the mouse pointer (docked or detached).
     #[cfg(any(windows, target_os = "macos"))]
     pub fn plugin_window_under_cursor(&self) -> Option<usize> {
-        let (x, y) = Self::pointer_on_screen()?;
+        let (x, y) = self.pointer_on_screen()?;
         self.state.editor_host.row_at_screen(x, y)
     }
 
@@ -4712,7 +4712,7 @@ impl App {
     /// it, through its state). Returns whether it was one.
     #[cfg(any(windows, target_os = "macos"))]
     pub fn sample_to_plugin_window(&mut self, path: &str) -> bool {
-        let Some((x, y)) = Self::pointer_on_screen() else { return false };
+        let Some((x, y)) = self.pointer_on_screen() else { return false };
         let Some(row) = self.state.editor_host.row_at_screen(x, y) else { return false };
         if self.loop_to_slicer(row, path) {
             return true;

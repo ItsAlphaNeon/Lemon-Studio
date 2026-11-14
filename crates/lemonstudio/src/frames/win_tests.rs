@@ -673,7 +673,7 @@ fn keys_in_a_plugin_window_reach_the_app() {
     pump(&mut host, &mut pl, 100);
     let keys = host.frames.take_keys();
     assert_eq!(keys.len(), 2, "{keys:?}");
-    assert!(keys[0].pressed && !keys[1].pressed && keys[0].scancode == 0x10);
+    assert!(keys[0].pressed && !keys[1].pressed && keys[0].code == os_app::keys::KeyCode::KeyQ);
 }
 
 /// A VST2 plugin's editor in a real plugin window at 100, 150 and 200 % (spec: ui/ui-scaling.md §3): the frame's

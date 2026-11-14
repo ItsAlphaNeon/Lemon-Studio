@@ -28,9 +28,8 @@ use os_ui::{Canvas, Color, Font, Rect};
 /// A key pressed or released while a plugin window has the keyboard focus (the typing keyboard keeps playing).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyMsg {
-    /// The key's scancode as the window system gives it (Windows: hardware scancode, extended keys carry 0xE000;
-    /// macOS: the virtual key code), read back by the program's key translation (`crate::winit_keys::scancode`).
-    pub scancode: u32,
+    /// The physical key (the program translates the window system's scancode).
+    pub code: crate::keys::KeyCode,
     pub pressed: bool,
     /// Control (or Command on macOS).
     pub ctrl: bool,

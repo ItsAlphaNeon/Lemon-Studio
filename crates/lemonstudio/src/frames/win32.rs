@@ -76,7 +76,7 @@ unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
                     }
                     let down = |vk: u16| GetKeyState(i32::from(vk)) < 0;
                     if let Ok(mut k) = KEYS.lock() {
-                        k.push(KeyMsg { scancode: sc, pressed: !up, ctrl: down(VK_CONTROL), alt: down(VK_MENU) });
+                        k.push(KeyMsg { code: crate::winit_keys::scancode(sc), pressed: !up, ctrl: down(VK_CONTROL), alt: down(VK_MENU) });
                     }
                 }
                 if in_frame && !super::editor_keys() {
