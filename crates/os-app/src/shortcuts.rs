@@ -364,7 +364,7 @@ mod tests {
         app.open_shortcuts();
         app.paint(&mut c, None);
         pick(&mut app, &mut c, 7, 0);
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
         assert!(app.state.dialogs.is_empty() && app.state.settings.open);
         assert_eq!(prefs::choice(&CLIP_PROPERTIES), "Alt");
         app.open_shortcuts();
@@ -388,7 +388,7 @@ mod tests {
     /// does nothing.
     #[test]
     fn f8_keys_follow_the_applied_shortcuts() {
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.paint(&mut c, None);

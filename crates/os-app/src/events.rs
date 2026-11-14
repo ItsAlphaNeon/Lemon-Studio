@@ -819,8 +819,8 @@ impl App {
 
     /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I, Ctrl+B, Ctrl+Ins / Del,
     /// Ctrl+Left / Right, PgUp / PgDn, Shift+5.
-    pub(crate) fn events_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-        use winit::keyboard::{Key, NamedKey};
+    pub(crate) fn events_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+        use crate::keys::{Key, NamedKey};
         let shift = self.shift;
         let c = match key {
             Key::Named(NamedKey::ArrowLeft) if ctrl && !alt => EvCmd::SelectPrev,
@@ -1034,7 +1034,7 @@ mod tests {
         app.state.session.project = crate::locked::Locked::new(test_project());
         assert!(open(&mut app.state, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         app.state.z.push(Win::Events);
-        assert!(app.events_key(&winit::keyboard::Key::Character("z".into()), false, false));
+        assert!(app.events_key(&crate::keys::Key::Character("z".into()), false, false));
         assert_eq!(app.state.events.tool, Tool::Zoom);
         let g = crate::views::events::graph(&app.state);
         let ppq = f64::from(app.state.session.project.ppq);
@@ -1111,7 +1111,7 @@ mod tests {
         // The keys.
         s.events.sel = Some((0, 48));
         app.state.z.push(Win::Events);
-        assert!(app.events_key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowRight), true, false));
+        assert!(app.events_key(&crate::keys::Key::Named(crate::keys::NamedKey::ArrowRight), true, false));
         assert_eq!(app.state.events.sel, Some((48, 96)));
         assert_eq!(app.events_cmd(EvCmd::Relocate).as_deref(), Some("Relocate events off"));
     }

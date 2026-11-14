@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(app.state.touch.keys_low, 60);
 
         // Alt+F7 closes it while it is in front.
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::F7), false, true);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::F7), false, true);
         assert!(!app.state.shown(Win::Touch));
     }
 }

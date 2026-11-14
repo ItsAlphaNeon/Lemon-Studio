@@ -190,7 +190,7 @@ mod tests {
     use crate::app::Win;
     use crate::prefs::{set_check, CLICK_AND_HOLD};
     use os_ui::{Canvas, Rect};
-    use winit::keyboard::Key;
+    use crate::keys::Key;
 
     fn at(app: &App, ms: u64) -> Instant {
         app.hold.expect("held").at + Duration::from_millis(ms)

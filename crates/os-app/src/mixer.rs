@@ -1802,8 +1802,8 @@ fn rand_seed() -> u32 {
 /// Keys while the mixer is in front (§2): F2 rename, Del delete, Alt+Left / Right move, S solo, Alt+S alt solo,
 /// Ctrl+L / Shift+Ctrl+L route the selected channels, Alt+L / Ctrl+Alt+L / Ctrl+A select (spec:
 /// ui/mixer-track-commands.md).
-pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     let n = app.state.selected_mixer;
     let letter = |c: &str, l: &str| c.eq_ignore_ascii_case(l);
     if ctrl {
@@ -2825,7 +2825,7 @@ mod tests {
 
     #[test]
     fn mixer_keys() {
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let mut a = app();
         select(&mut a.state, 10, false);
         a.state.rack.sel = [1].into_iter().collect();
@@ -3266,7 +3266,7 @@ mod tests {
     /// moving until the waveforms are quiet.
     #[test]
     fn view_waveforms_and_extra_properties() {
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let mut a = app();
         let view = |a: &App| {
             let m = options_menu(&a.state, 0.0, 0.0);

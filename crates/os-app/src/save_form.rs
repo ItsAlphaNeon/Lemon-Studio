@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use os_model::DataFolder;
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, State};
 use crate::data_folder as df;

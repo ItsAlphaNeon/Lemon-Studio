@@ -1272,7 +1272,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn keymap_bits_follow_x_key_codes() {
-        use winit::keyboard::KeyCode;
+        use crate::keys::KeyCode;
         let mut map = [0u8; 32];
         // Z: evdev 44, X key code 52.
         map[52 / 8] |= 1 << (52 % 8);

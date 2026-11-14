@@ -5,7 +5,7 @@
 //! The plugin manager (Settings > Plugins): search folders, scan options, the format preference and the plugin table.
 // spec: ui/plugin-manager.md §2, §3
 
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::App;
 use crate::plugin_db::{self as db, DirKind, Mode};

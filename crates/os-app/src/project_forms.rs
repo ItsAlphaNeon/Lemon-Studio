@@ -7,7 +7,7 @@
 //! `crate::data_folder`. `views::project_forms` and `views::save_form` paint them.
 // spec: ui/data-folder.md §6, §7
 
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::App;
 use crate::data_folder::{self as df, DThen};

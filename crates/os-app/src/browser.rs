@@ -286,8 +286,8 @@ impl App {
     }
 
     /// Browser keys (spec §4, §5); returns whether the key was used.
-    pub(crate) fn browser_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-        use winit::keyboard::{Key, NamedKey};
+    pub(crate) fn browser_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+        use crate::keys::{Key, NamedKey};
         let shift = self.shift;
         let focus = self.state.browser_search_focus;
         let over = self.over_browser() || focus;
@@ -356,8 +356,8 @@ impl App {
     /// open one and plays a sample again; Left closes an open node, else selects the row's parent. With nothing selected
     /// Up selects the last row, the others the first. A sample the selection lands on plays (§7), as a click does; other
     /// rows are only selected, not acted on (a history step is not gone to, a pattern not made current).
-    fn browser_arrow(&mut self, k: winit::keyboard::NamedKey) {
-        use winit::keyboard::NamedKey::*;
+    fn browser_arrow(&mut self, k: crate::keys::NamedKey) {
+        use crate::keys::NamedKey::*;
         let s = &mut self.state;
         let rows = view::rows(s);
         if rows.is_empty() {
@@ -411,8 +411,8 @@ impl App {
     }
 
     /// Whether a held key repeats in the browser: Up and Down go on walking the rows (`browser_arrow`).
-    pub(crate) fn browser_repeats(&self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-        use winit::keyboard::{Key, NamedKey};
+    pub(crate) fn browser_repeats(&self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+        use crate::keys::{Key, NamedKey};
         matches!(key, Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)) && !ctrl && !alt && !self.shift && (self.over_browser() || self.state.browser_search_focus)
     }
 

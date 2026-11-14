@@ -263,12 +263,12 @@ impl App {
     }
 
     /// Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y while the Theme page is open: theme undo / redo. Returns whether the key was taken.
-    pub(crate) fn theme_undo_key(&mut self, key: &winit::keyboard::Key, ctrl: bool) -> bool {
+    pub(crate) fn theme_undo_key(&mut self, key: &crate::keys::Key, ctrl: bool) -> bool {
         let st = &self.state.settings;
         if !(ctrl && st.open && st.tab == THEME && st.name_edit.is_none()) {
             return false;
         }
-        let winit::keyboard::Key::Character(c) = key else { return false };
+        let crate::keys::Key::Character(c) = key else { return false };
         let redo = if c.eq_ignore_ascii_case("z") {
             self.shift
         } else if c.eq_ignore_ascii_case("y") {
@@ -453,8 +453,8 @@ impl App {
     }
 
     /// Keys while the name panel is open: it takes every key (Enter = OK, Esc = Cancel). False when it is not open.
-    pub(crate) fn name_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-        use winit::keyboard::{Key, NamedKey};
+    pub(crate) fn name_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+        use crate::keys::{Key, NamedKey};
         let st = &mut self.state.settings;
         let Some(e) = st.name_edit.as_mut() else { return false };
         if !(st.open && st.tab == THEME) {

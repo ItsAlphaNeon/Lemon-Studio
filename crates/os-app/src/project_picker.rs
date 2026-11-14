@@ -97,7 +97,7 @@ mod tests {
     use crate::views::menus::{self, VIEW};
     use os_model::Pattern;
     use os_ui::{Canvas, Rect};
-    use winit::keyboard::{Key, NamedKey};
+    use crate::keys::{Key, NamedKey};
 
     fn hit_rect(app: &App, a: &Action) -> Rect {
         app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect).unwrap_or_else(|| panic!("no hit for {a:?}"))

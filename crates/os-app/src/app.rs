@@ -22,7 +22,7 @@ use os_model::{ChannelKind, Note, Project};
 use os_model::Pattern;
 use os_theme::{Design, Palette, Theme};
 use os_ui::{Canvas, Rect};
-use winit::keyboard::KeyCode;
+use crate::keys::KeyCode;
 
 use crate::piano::{self, Geom, Overlay, PianoState, Tool};
 use crate::transport::{State as TransportState, Transport};
@@ -1469,7 +1469,7 @@ pub struct App {
     pub repeat: bool,
     /// The physical key behind the key now passed to [`App::key`], when known: shortcuts named by a digit key (Shift+4,
     /// Shift+5) go by the key, not by the character the layout gives it with Shift.
-    pub code: Option<winit::keyboard::KeyCode>,
+    pub code: Option<crate::keys::KeyCode>,
     /// Playlist regions from the last paint (grid, ruler, marker lane).
     pl_grid: Option<Rect>,
     /// Playlist scrolls since the last paint: how far the content moved (logical px, right and down), see
@@ -2546,11 +2546,11 @@ impl App {
         // Keys pressed while a plugin window has the focus still play the typing keyboard.
         #[cfg(any(windows, target_os = "macos"))]
         for k in crate::plugin_window::take_keys() {
-            use winit::platform::scancode::PhysicalKeyExtScancode;
-            if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
+            let code = crate::winit_keys::scancode(k.scancode);
+            if code != KeyCode::Unidentified {
                 // Space keeps playing / stopping the song (the typing keyboard does not use it).
-                if !self.typing_key(code, k.pressed, k.ctrl, k.alt) && k.pressed && code == winit::keyboard::KeyCode::Space {
-                    self.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), k.ctrl, k.alt);
+                if !self.typing_key(code, k.pressed, k.ctrl, k.alt) && k.pressed && code == crate::keys::KeyCode::Space {
+                    self.key(&crate::keys::Key::Named(crate::keys::NamedKey::Space), k.ctrl, k.alt);
                 }
             }
         }
@@ -3362,8 +3362,8 @@ impl App {
     }
 
     /// Typing into the monitor's Find box. True when the key was taken.
-    fn perf_key(&mut self, key: &winit::keyboard::Key, ctrl: bool) -> bool {
-        use winit::keyboard::{Key, NamedKey};
+    fn perf_key(&mut self, key: &crate::keys::Key, ctrl: bool) -> bool {
+        use crate::keys::{Key, NamedKey};
         let p = &mut self.state.perf;
         match key {
             Key::Named(NamedKey::Escape) => {
@@ -4203,7 +4203,7 @@ impl App {
 
     /// A key pressed while surface `on` has the keyboard focus (`None`: the main window, else that detached window's
     /// native window): it acts on that surface, and a popup or type-in box it opens is drawn there.
-    pub fn key_on(&mut self, on: Option<Win>, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
+    pub fn key_on(&mut self, on: Option<Win>, key: &crate::keys::Key, ctrl: bool, alt: bool) {
         let open = |a: &Self| a.state.playlist.popup.is_some() || a.state.playlist.edit.is_some();
         let before = open(self);
         self.on(on, |a| a.key(key, ctrl, alt));
@@ -7567,7 +7567,7 @@ impl App {
         }
     }
 
-    pub fn key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
+    pub fn key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) {
         self.invalidate();
         // A dialog takes every key.
         if self.modal_open() {
@@ -7582,7 +7582,7 @@ impl App {
         if self.palette_key(key, ctrl, alt) {
             return;
         }
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         // Esc cancels a browser drag (spec: ui/browser.md §3).
         if matches!(key, Key::Named(NamedKey::Escape)) && self.browser_cancel() {
             return;
@@ -7844,9 +7844,9 @@ impl App {
 
     /// Shift with the digit key `d` (the key in the number row, on any layout): the physical key when it is known, else
     /// the character it types on a US layout.
-    pub(crate) fn shift_digit(&self, key: &winit::keyboard::Key, d: u8) -> bool {
-        use winit::keyboard::{Key, KeyCode::*};
-        const ROW: [winit::keyboard::KeyCode; 10] = [Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9];
+    pub(crate) fn shift_digit(&self, key: &crate::keys::Key, d: u8) -> bool {
+        use crate::keys::{Key, KeyCode::*};
+        const ROW: [crate::keys::KeyCode; 10] = [Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9];
         const US: [&str; 10] = [")", "!", "@", "#", "$", "%", "^", "&", "*", "("];
         let d = usize::from(d.min(9));
         match self.code {
@@ -8015,8 +8015,8 @@ impl App {
     /// The arrows in the piano roll (spec: ui/piano-roll.md §11, ui/piano-keys.md §2 "Moving notes", §4 rules 8 and 9):
     /// Shift moves the targets a key or a snap unit, Ctrl an octave, Alt a tick, Ctrl+Shift+Left / Right rotates them;
     /// Left / Right alone scroll a bar.
-    fn piano_arrow(&mut self, k: winit::keyboard::NamedKey, ctrl: bool, alt: bool) {
-        use winit::keyboard::NamedKey::*;
+    fn piano_arrow(&mut self, k: crate::keys::NamedKey, ctrl: bool, alt: bool) {
+        use crate::keys::NamedKey::*;
         let Some(g) = self.piano_geom() else { return };
         let step = i64::from(crate::piano_snap::unit(&self.state).unwrap_or(1));
         let left = k == ArrowLeft;
@@ -9526,9 +9526,9 @@ fn toolbar_right(hit: &Action) -> Option<Action> {
 }
 
 /// PATTERNS menu shortcuts (spec: ui/pattern-menu.md §3).
-fn pattern_shortcut(key: &winit::keyboard::Key, ctrl: bool, shift: bool) -> Option<crate::patterns::Cmd> {
+fn pattern_shortcut(key: &crate::keys::Key, ctrl: bool, shift: bool) -> Option<crate::patterns::Cmd> {
     use crate::patterns::Cmd;
-    use winit::keyboard::{Key, NamedKey};
+    use crate::keys::{Key, NamedKey};
     let k = match key {
         // spec: ui/browser-commands.md §4
         Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("p") => return Some(Cmd::OpenInBrowser),
@@ -10545,7 +10545,7 @@ mod tests {
         assert_eq!((&app.theme.colors, app.state.settings.preset), (&Palette::default(), 1));
         // Ctrl+Shift+D no longer switches the skin (owner, 2026-10-17).
         app.shift = true;
-        app.key(&winit::keyboard::Key::Character("d".into()), true, false);
+        app.key(&crate::keys::Key::Character("d".into()), true, false);
         app.shift = false;
         assert_eq!(app.design(), Design::Citrus);
         // The page draws both lists of tiles with their hits.
@@ -10566,7 +10566,7 @@ mod tests {
     fn user_themes_are_saved_renamed_and_deleted() {
         use crate::playlist::ThemeCmd;
         use crate::views::settings::{SAct, SAVE_PRESET, THEME};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let dir = std::env::temp_dir().join(format!("lemon-theme-library-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -10638,7 +10638,7 @@ mod tests {
     #[test]
     fn theme_changes_undo_and_redo() {
         use crate::views::settings::{SAct, THEME};
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let dir = std::env::temp_dir().join(format!("lemon-theme-undo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -10773,7 +10773,7 @@ mod tests {
         let r = hit_rect(&app, &Action::Settings(SAct::PickRevert));
         click(&mut app, &mut c, r);
         assert!(app.state.fl_theme().same_colours(&FlTheme::parse(base)));
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
         assert!(app.state.settings.picker.is_none() && app.state.settings.open);
         // A click elsewhere on the page closes it too.
         frame(&mut app, &mut c, None);
@@ -11323,7 +11323,7 @@ mod tests {
         app.mouse_down_middle();
         assert_eq!(app.state.session.project.channels[r].sample_path.as_deref(), Some(path.as_str()));
         assert_eq!(app.state.browser_sel.as_ref(), Some(&rows(&app.state)[i].key), "the row is selected");
-        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        app.key(&crate::keys::Key::Character("z".into()), true, false);
         assert_eq!(app.state.session.project.channels[r].sample_path, before, "one undo step");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -12528,7 +12528,7 @@ mod tests {
     fn escape_cancels_a_browser_drag() {
         use crate::anim::Level;
         use crate::views::browser::{rows, Item};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let size = (1600, 900);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
@@ -12819,7 +12819,7 @@ mod tests {
     fn closing_menus_and_the_palette_fade() {
         use crate::anim::Level;
         use crate::playlist::{self as pl, PItem, Popup};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let size = (1280, 800);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
@@ -13456,7 +13456,7 @@ mod tests {
     #[test]
     fn a_scroll_under_a_falling_tag_leaves_nothing_behind() {
         use crate::views::browser::{rows, Item};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let size = (1600, 900);
         let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
         let mut app = App::new(None);
@@ -13780,9 +13780,9 @@ mod tests {
         app.wheel(0.0, -3.0, false, false);
         assert!(app.state.settings.scroll > 0.0);
         frame(&mut app, &mut c, None);
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
         assert!(!app.state.settings.open);
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::F10), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::F10), false, false);
         assert!(app.state.settings.open && app.state.settings.tab == MIDI);
     }
 
@@ -13811,16 +13811,16 @@ mod tests {
     }
 
     /// Press `k` (a character or a named key) with the modifiers given.
-    fn press(app: &mut App, k: winit::keyboard::Key, ctrl: bool, alt: bool) {
+    fn press(app: &mut App, k: crate::keys::Key, ctrl: bool, alt: bool) {
         app.key(&k, ctrl, alt);
     }
 
     fn typed(app: &mut App, s: &str) {
-        press(app, winit::keyboard::Key::Character(s.into()), false, false);
+        press(app, crate::keys::Key::Character(s.into()), false, false);
     }
 
-    fn named(app: &mut App, k: winit::keyboard::NamedKey) {
-        press(app, winit::keyboard::Key::Named(k), false, false);
+    fn named(app: &mut App, k: crate::keys::NamedKey) {
+        press(app, crate::keys::Key::Named(k), false, false);
     }
 
     fn top_file(app: &App) -> &crate::filedlg::FileDlg {
@@ -13841,7 +13841,7 @@ mod tests {
     fn unsaved_changes_are_asked_in_the_window() {
         use crate::dialog::{fake, DHit, Next};
         use crate::views::menus::FILE_NEW;
-        use winit::keyboard::NamedKey;
+        use crate::keys::NamedKey;
         let Ok(mut c) = Canvas::new(1280, 800, 1.0) else { return };
         fake::live(true);
         // Saving a project never saved goes to the file dialog without Lemon Studio's Save as form (`crate::save_form`).
@@ -13921,7 +13921,7 @@ mod tests {
         use crate::dialog::{fake, DHit};
         use crate::filedlg::{Mode, ROW_H};
         use crate::views::menus::FILE_OPEN;
-        use winit::keyboard::NamedKey;
+        use crate::keys::NamedKey;
         let Ok(mut c) = Canvas::new(1280, 800, 1.0) else { return };
         fake::live(true);
         let dir = std::env::temp_dir().join(format!("os_dialog_browse_{}", std::process::id()));
@@ -13961,7 +13961,7 @@ mod tests {
             click(&mut app, &mut c, row);
             click(&mut app, &mut c, row);
             assert_eq!(top_file(&app).dir, dir.join("Beats"));
-            press(&mut app, winit::keyboard::Key::Named(NamedKey::ArrowUp), false, true);
+            press(&mut app, crate::keys::Key::Named(NamedKey::ArrowUp), false, true);
             assert_eq!(top_file(&app).dir, dir);
             assert_eq!(top_file(&app).sel, Some(0));
             // All files lists the text file too.
@@ -14217,7 +14217,7 @@ mod tests {
     #[test]
     fn plugin_palette_with_many_plugins_keeps_its_size() {
         use crate::plugin_palette::{self as pal, PalAct};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1366, 768, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.plugins = crate::plugins::Plugins::builtins();
@@ -14530,7 +14530,7 @@ mod tests {
         use crate::cpu::{CpuCmd, Refresh};
         use crate::perf::{Col, PerfAct};
         use std::time::{Duration, Instant};
-        use winit::keyboard::{Key, NamedKey, SmolStr};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         frame(&mut app, &mut c, None);
@@ -14592,7 +14592,7 @@ mod tests {
         click(&mut app, &mut c, f);
         assert!(app.state.perf.finding);
         for ch in ["z", "z"] {
-            app.key(&Key::Character(SmolStr::new(ch)), false, false);
+            app.key(&Key::Character(String::from(ch)), false, false);
         }
         assert_eq!(app.state.perf.find, "zz");
         assert!(app.state.perf.shown().is_empty());
@@ -14623,7 +14623,7 @@ mod tests {
     fn tempo_tapper_window() {
         use crate::tapper::TapAct;
         use views::menus::{bar_model, Mark, VIEW};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         frame(&mut app, &mut c, None);
@@ -14940,7 +14940,7 @@ mod tests {
     #[ignore]
     fn playing_lemon_3x_osc_keeps_the_audio_going() {
         use std::time::{Duration, Instant};
-        use winit::keyboard::KeyCode;
+        use crate::keys::KeyCode;
         let mut app = App::new(None);
         app.state.session.plugins = crate::plugins::Plugins::default();
         app.state.session.plugins.available = crate::plugins::builtin();
@@ -15833,7 +15833,7 @@ mod tests {
     /// Ctrl+H is TOOLS > Stop sound, the key its menu entry shows; Shift+Ctrl+H stays Realign.
     #[test]
     fn ctrl_h_stops_the_sound() {
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let mut app = App::new(None);
         app.state.message = None;
         app.key(&Key::Character("h".into()), true, false);
@@ -15845,7 +15845,7 @@ mod tests {
     /// Without the key (a synthesized key) the US characters stand in.
     #[test]
     fn shift_digits_go_by_the_key_on_any_layout() {
-        use winit::keyboard::{Key, KeyCode};
+        use crate::keys::{Key, KeyCode};
         let mut app = App::new(None);
         let plus = Key::Character("+".into());
         app.code = Some(KeyCode::Digit4);
@@ -15872,7 +15872,7 @@ mod tests {
     #[test]
     fn shift_ctrl_s_is_save_as() {
         use crate::dialog::fake;
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let dir = std::env::temp_dir().join(format!("os_save_as_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -15904,7 +15904,7 @@ mod tests {
         let export_form = |app: &App| {
             matches!(app.state.dialogs.last().map(|d| &d.body), Some(crate::dialog::Body::Project(crate::project_forms::Form::Export(_))))
         };
-        let escape = |app: &mut App| app.key(&Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        let escape = |app: &mut App| app.key(&Key::Named(crate::keys::NamedKey::Escape), false, false);
         for k in ["O", "N"] {
             key(&mut app, k, true);
         }
@@ -16098,7 +16098,7 @@ mod tests {
     #[test]
     fn browser_arrow_keys_walk_the_tree() {
         use crate::views::browser::{rows, Item};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let dir = std::env::temp_dir().join(format!("os_browser_arrows_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -16320,7 +16320,7 @@ mod tests {
     #[test]
     fn browser_menu_and_search() {
         use crate::views::browser::{rows, Item};
-        use winit::keyboard::{Key, NamedKey, SmolStr};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -16344,7 +16344,7 @@ mod tests {
         click(&mut app, &mut c, r0);
         assert!(app.state.browser_search_focus);
         for ch in ["k", "i", "c", "k"] {
-            app.key(&Key::Character(SmolStr::new(ch)), false, false);
+            app.key(&Key::Character(String::from(ch)), false, false);
         }
         assert_eq!(app.state.browser_search, "kick");
         let r = rows(&app.state);
@@ -16674,7 +16674,7 @@ mod tests {
     #[test]
     #[ignore]
     fn app_deleted_notes_stop_playing() {
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let mut app = App::new(None);
         app.state.z = vec![Win::PianoRoll];
         app.state.selected_channel = 0;
@@ -16779,7 +16779,7 @@ mod tests {
     /// L flips the PAT / SONG switch (FL's key); with the typing keyboard on, L is a note instead.
     #[test]
     fn l_flips_pat_and_song() {
-        use winit::keyboard::{Key, KeyCode};
+        use crate::keys::{Key, KeyCode};
         let mut app = App::new(None);
         if app.typing_on() {
             app.toggle_typing();
@@ -17164,7 +17164,7 @@ mod tests {
     /// Piano-roll tools driven with the mouse and keys (spec: ui/piano-roll.md §9).
     #[test]
     fn piano_tools() {
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.z = vec![Win::PianoRoll];
@@ -17324,7 +17324,7 @@ mod tests {
     /// typing keyboard first, then `App::key` with the repeat flag) to the project those measurements used.
     mod piano_keys {
         use super::*;
-        use winit::keyboard::{Key, KeyCode, NamedKey};
+        use crate::keys::{Key, KeyCode, NamedKey};
 
         const CTRL: u8 = 1;
         const SHIFT: u8 = 2;
@@ -17628,7 +17628,7 @@ mod tests {
         use crate::knobs::KnobId;
         use crate::playlist::EditTarget;
         use crate::typein::{Target, TiAct};
-        use winit::keyboard::{Key, NamedKey, SmolStr};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -17636,7 +17636,7 @@ mod tests {
         frame(&mut app, &mut c, None);
         let typ = |app: &mut App, text: &str| {
             for ch in text.chars() {
-                let k = if ch == ' ' { Key::Named(NamedKey::Space) } else { Key::Character(SmolStr::new(ch.to_string())) };
+                let k = if ch == ' ' { Key::Named(NamedKey::Space) } else { Key::Character(ch.to_string()) };
                 app.key(&k, false, false);
             }
         };
@@ -17736,7 +17736,7 @@ mod tests {
         use crate::knobs::KnobId;
         use crate::playlist::EditTarget;
         use crate::typein::Target;
-        use winit::keyboard::{Key, NamedKey, SmolStr};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -17744,7 +17744,7 @@ mod tests {
         frame(&mut app, &mut c, None);
         let typ = |app: &mut App, text: &str| {
             for ch in text.chars() {
-                let k = if ch == ' ' { Key::Named(NamedKey::Space) } else { Key::Character(SmolStr::new(ch.to_string())) };
+                let k = if ch == ' ' { Key::Named(NamedKey::Space) } else { Key::Character(ch.to_string()) };
                 app.key(&k, false, false);
             }
             app.key(&Key::Named(NamedKey::Enter), false, false);
@@ -17903,7 +17903,7 @@ mod tests {
         use crate::snap::EditorSnap;
         use crate::piano_tools::NCmd;
         use crate::playlist::{Cmd, Mark, Snap};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -18104,7 +18104,7 @@ mod tests {
         use crate::piano_tools::NCmd;
         use crate::playlist::{self as pl, Cmd, Mark, Snap};
         use crate::snap::EditorSnap;
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -18258,7 +18258,7 @@ mod tests {
     fn piano_shortcuts() {
         use crate::piano_tools::NCmd;
         use crate::playlist::Cmd;
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -19115,10 +19115,10 @@ mod tests {
         assert_eq!((sound.stretch[2], sound.stretch_mode()), (0, 0), "multiplier 1, method kept");
         assert!((f64::from(after.length) / f64::from(before.length) - 2.0).abs() < 0.02, "twice as long");
         assert_eq!(after.window, before.window, "the same part of the sample");
-        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        app.key(&crate::keys::Key::Character("z".into()), true, false);
         assert_eq!(app.state.session.project.channels[row].sound.stretch, [0; 4], "undo restores the channel");
         // Saved with a new project's audio clip channel.
-        app.key(&winit::keyboard::Key::Character("y".into()), true, false);
+        app.key(&crate::keys::Key::Character("y".into()), true, false);
         app.state.session.project.get_mut().channels[row].sound.set_stretch_multiplier(2.0);
         let path = std::env::temp_dir().join(format!("os-app-stretch-{}.flp", std::process::id()));
         app.save_to(path.clone());
@@ -19306,7 +19306,7 @@ mod tests {
         assert!(m.contains("moved 2"), "{m}");
         let starts: Vec<u32> = pl::clips(&app.state.session).iter().map(|c| c.position).collect();
         assert_eq!(starts, vec![step, 2 * bar], "nearest steps");
-        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        app.key(&crate::keys::Key::Character("z".into()), true, false);
         assert_eq!(pl::clips(&app.state.session)[0].position, step + 5, "one undo step");
         // Export: two files (tracks 1 and 3), the same length, each with sound only where its clip is.
         app.state.session.path = Some(std::env::temp_dir().join(format!("os-export-{}.flp", std::process::id())));
@@ -19534,9 +19534,9 @@ mod tests {
         let gain = pl::clips(&app.state.session)[ci].gain();
         assert!((20.0 * gain.log10() - 3.0).abs() < 0.01, "gain {gain}");
         // Each drag is one undo step.
-        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        app.key(&crate::keys::Key::Character("z".into()), true, false);
         assert_eq!(pl::clips(&app.state.session)[ci].gain(), 1.0);
-        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        app.key(&crate::keys::Key::Character("z".into()), true, false);
         assert_eq!(pl::clips(&app.state.session)[ci].fade_in().unwrap().1, 0.0);
         let _ = std::fs::remove_file(&wav);
     }
@@ -19694,7 +19694,7 @@ mod tests {
         click(&mut app, &mut c, arrow);
         assert!(!pl::Rows::new(&app.state).strip(1), "the arrow expands the group");
         // Undo brings the collapse back.
-        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        app.key(&crate::keys::Key::Character("z".into()), true, false);
         assert!(pl::Rows::new(&app.state).strip(1));
     }
 
@@ -20310,7 +20310,7 @@ mod tests {
     #[test]
     fn playlist_editing() {
         use crate::playlist::{self as pl, PlTool};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -20433,7 +20433,7 @@ mod tests {
     #[test]
     fn playlist_shift_letters_switch_tools() {
         use crate::playlist::PlTool;
-        use winit::keyboard::{Key, KeyCode};
+        use crate::keys::{Key, KeyCode};
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.playlist.reset();
@@ -20487,7 +20487,7 @@ mod tests {
     #[test]
     fn enable_groups_switch() {
         use crate::playlist as pl;
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -20564,7 +20564,7 @@ mod tests {
     /// click on the empty workspace.
     #[test]
     fn close_all_windows() {
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         let all = vec![Win::Playlist, Win::Mixer, Win::Plugin, Win::ChannelRack, Win::Perf, Win::Tapper, Win::PianoRoll];
@@ -20703,7 +20703,7 @@ mod tests {
     #[test]
     fn playlist_keybinds() {
         use crate::playlist::{self as pl, Snap};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -21112,7 +21112,7 @@ mod tests {
     #[test]
     fn plugin_palette_adds_plugins_where_they_belong() {
         use crate::plugin_palette::{self as pal, PalAct, Row};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -21310,7 +21310,7 @@ mod tests {
     fn browser_commands_jump_into_the_browser() {
         use crate::views::browser::{project_root, rows, section_key, PLUGIN_TAB, PROJECT_TAB};
         use views::menus::{item_at, works, ADD_MENU, MENUS, TOOLS_MENU, VIEW};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -21396,7 +21396,7 @@ mod tests {
         use crate::playlist::{self as pl, Cmd};
         use crate::views::browser::{project_root, rows, section_key, Item, PROJECT_TAB};
         use views::menus::{item_at, works, MENUS, PATTERNS};
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.session.project.get_mut().patterns.push(os_model::Pattern { number: 2, name: Some("Drums".into()), ..Default::default() });
@@ -21782,7 +21782,7 @@ mod tests {
         use crate::playlist::Mark;
         use crate::views::toolbar::{band, hint_bar_rect, Opts};
         use views::menus::{item_at, submenu, toolbar_items, works, MENUS, VIEW};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -22434,7 +22434,7 @@ mod tests {
         pl::run(&mut app, speech.clone());
         let text = "Selected audio clip channels will be set to e2 speech mode. Some channels may need manual time adjustment.";
         assert_eq!(app.top_message(), Some(("Confirm".into(), text.into())));
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Enter), false, false);
         assert!(!app.modal_open());
         assert_eq!(methods(&app), [0, 0, 0, 0, 0, sm::STRETCH_PRO, sm::E2_SPEECH]);
         assert_eq!(sampler(&app, b), sm::E2_SPEECH);
@@ -22470,7 +22470,7 @@ mod tests {
         use crate::timesig::{form_open, list_open, SigForm};
         use os_model::TimeMarker;
         use views::menus::{item_at, works, MENUS, PATTERNS};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
@@ -22584,7 +22584,7 @@ mod tests {
         use crate::playlist::{self as pl, Cmd};
         use os_model::{Clip, ClipSource, TimeMarker};
         use views::playlist::marker_label;
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.set_pattern(1);
@@ -22714,7 +22714,7 @@ mod tests {
     fn playlist_time_markers() {
         use crate::playlist::{self as pl, Cmd, Mark, PlDrag};
         use os_model::{Arrangement, Clip, ClipSource, TimeMarker as M};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.session.project.get_mut().arrangements = vec![Arrangement { clips: (0..5).map(|i| Clip::new(384 * i, 384, 0, ClipSource::Pattern(1))).collect(), ..Default::default() }];
@@ -22948,7 +22948,7 @@ mod tests {
     #[test]
     fn plugin_manager_folders_scan_and_table() {
         use crate::views::settings::{Plug, SAct, COMBINE_CHECK, PLUGINS};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.plugins = crate::plugins::Plugins::builtins();
@@ -23046,7 +23046,7 @@ mod tests {
         use crate::views::settings::{Plug, SAct, PLUGINS};
         use os_host::Format;
         use std::time::Duration;
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Some(dir) = std::env::var_os("OS_VST2_DIR").map(PathBuf::from) else { return };
         let dir32 = std::env::var_os("OS_VST2_DIR32").map(PathBuf::from);
         let shots = std::env::var_os("OS_SHOT_DIR").map(PathBuf::from);
@@ -23627,7 +23627,7 @@ mod tests {
         app.mouse_down_right();
         app.mouse_up();
         save(&mut app, &mut c, "02_toolbars_menu");
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
         // VIEW > Toolbars ▸.
         frame(&mut app, &mut c, None);
         let view = hit_rect(&app, &Action::Menu(VIEW));
@@ -23635,8 +23635,8 @@ mod tests {
         let row = hit_rect(&app, &Action::MenuSub(VIEW, entry(VIEW, "Toolbars")));
         click(&mut app, &mut c, row);
         save(&mut app, &mut c, "03_view_toolbars");
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
         // Flat buttons, no separators, the hint bar, a button hovered.
         app.toolbar_switch(Switch::Flat);
         app.toolbar_switch(Switch::Separators);
@@ -23661,19 +23661,19 @@ mod tests {
         app.mouse_down_right();
         app.mouse_up();
         save(&mut app, &mut c, "07_clock_menu");
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
         app.state.clock = Default::default();
         // ADD and PATTERNS menus.
         frame(&mut app, &mut c, None);
         let add = hit_rect(&app, &Action::Menu(ADD_MENU));
         click(&mut app, &mut c, add);
         save(&mut app, &mut c, "08_add_menu");
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
         frame(&mut app, &mut c, None);
         let pats = hit_rect(&app, &Action::Menu(PATTERNS));
         click(&mut app, &mut c, pats);
         save(&mut app, &mut c, "09_patterns_menu");
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Escape), false, false);
         // The time signature dialog, then 3/8 in the piano roll.
         app.menu_item(PATTERNS, entry(PATTERNS, "Set time signature..."));
         save(&mut app, &mut c, "10_timesig_dialog");
@@ -23984,7 +23984,7 @@ mod detach_tests {
     /// has the keyboard, the box is the main window's.
     #[test]
     fn keyboard_popups_go_to_the_window_with_the_keyboard() {
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let mut app = App::new(None);
         app.state.session.project = crate::locked::Locked::new(test_project());
         app.state.raise(Win::Mixer);

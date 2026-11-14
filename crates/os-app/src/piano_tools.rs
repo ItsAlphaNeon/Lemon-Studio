@@ -85,8 +85,8 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
 
 /// The keys a held key repeats in the piano roll (spec: ui/piano-keys.md §4 rule 1): Shift / Ctrl / Alt + arrows (not
 /// Ctrl+Shift+Up / Down), PgUp / PgDn, Ctrl+B and Ctrl+V.
-pub fn repeats(key: &winit::keyboard::Key, ctrl: bool, alt: bool, shift: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn repeats(key: &crate::keys::Key, ctrl: bool, alt: bool, shift: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     match key {
         Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => (shift || ctrl || alt) && !(ctrl && shift),
         Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => shift || ctrl || alt,
@@ -98,8 +98,8 @@ pub fn repeats(key: &winit::keyboard::Key, ctrl: bool, alt: bool, shift: bool) -
 
 /// The piano roll's keyboard shortcuts (spec: ui/piano-roll.md §3a, §9, §10a, §11; ui/piano-keys.md). Returns true
 /// when the key was taken. Called while the piano roll is shown and the playlist is not in front of it.
-pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     let shift = app.shift;
     let is = |c: &str, l: &str| c.eq_ignore_ascii_case(l);
     let cmd = match key {

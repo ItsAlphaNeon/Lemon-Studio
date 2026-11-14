@@ -9,7 +9,7 @@
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::PathBuf;
 
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::App;
 use crate::dialog::{spans, Answer, Body, Field, Kind, Reply, Then};

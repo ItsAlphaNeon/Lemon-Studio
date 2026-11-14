@@ -2202,8 +2202,8 @@ fn burn(s: &mut State, all: bool) {
 // Keyboard (§20)
 
 /// Keys while the rack is the front window. Returns whether the key was taken.
-pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     let shift = app.shift;
     let s = &mut app.state;
     if s.playlist.popup.is_some() {
@@ -3087,7 +3087,7 @@ mod tests {
     /// is selected; cut copies and clears. Each change is one undo step.
     #[test]
     fn clipboard_keys_copy_cut_and_paste_steps() {
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let mut app = App::new(None);
         app.state.z = vec![Win::ChannelRack];
         assert!(app.state.session.project.channels.len() >= 5);
@@ -3120,7 +3120,7 @@ mod tests {
     /// notes and Ctrl + a digit still solos.
     #[test]
     fn digit_keys_mute_and_solo_with_the_typing_keyboard() {
-        use winit::keyboard::{Key, KeyCode};
+        use crate::keys::{Key, KeyCode};
         let mut app = App::new(None);
         app.state.z = vec![Win::ChannelRack];
         assert!(app.state.session.project.channels.len() >= 3);
@@ -3202,7 +3202,7 @@ mod tests {
     fn select_unused_and_purge_audio_clips() {
         use crate::views::menus::{item_at, works, TOOLS_MENU};
         use os_model::Clip;
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let mut app = App::new(None);
         // Rows: 0 sampler with a note, 1 sampler unused, 2 audio clip with a note only, 3 audio clip with a playlist
         // clip, 4 audio clip unused.
@@ -4335,7 +4335,7 @@ mod tests {
     /// and the lock follows the channel when the rows move.
     #[test]
     fn computer_keyboard_lock_takes_the_typing_notes() {
-        use winit::keyboard::KeyCode;
+        use crate::keys::KeyCode;
         let mut app = lock_app();
         let unlocked = receive(&app, 1);
         assert_eq!(unlocked[0], ("Unlock".to_string(), false, Mark::None), "nothing to unlock yet");

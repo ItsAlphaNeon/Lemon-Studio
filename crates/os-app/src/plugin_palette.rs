@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, State, Win};
 use crate::plugin_db::{self as db, Entry, MenuView};
@@ -627,7 +627,7 @@ mod tests {
         type_text(&mut app, "l");
         assert_eq!(app.state.song_mode(), song);
         assert_eq!(app.state.palette.query, "l");
-        assert!(!app.typing_key(winit::keyboard::KeyCode::KeyZ, true, false, false), "the typing keyboard leaves it alone");
+        assert!(!app.typing_key(crate::keys::KeyCode::KeyZ, true, false, false), "the typing keyboard leaves it alone");
     }
 
     /// Down / Enter picks the highlighted row: a generator goes to a new channel and the palette closes; Shift+Enter on

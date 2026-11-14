@@ -432,7 +432,7 @@ mod tests {
     use crate::app::Action;
     use crate::playlist::{Cmd, Popup};
     use os_ui::{Canvas, Rect};
-    use winit::keyboard::KeyCode;
+    use crate::keys::KeyCode;
 
     /// A new project's pattern 1 emptied, the first channel selected, the main snap at Step (24 ticks at 96 PPQ);
     /// Record arms without asking.
@@ -559,7 +559,7 @@ mod tests {
     /// R arms like a click when the typing keyboard is off; with it on, R is a note.
     #[test]
     fn r_arms_when_the_typing_keyboard_is_off() {
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let mut app = app();
         app.state.toggles.retain(|t| *t != "typing");
         app.key(&Key::Character("r".into()), false, false);
@@ -687,7 +687,7 @@ mod tests {
     /// right-click menus; Ctrl+I / Ctrl+P / Ctrl+B and the OPTIONS entries switch the same settings (spec §3).
     #[test]
     fn option_buttons_menus_and_keys() {
-        use winit::keyboard::{Key, SmolStr};
+        use crate::keys::Key;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = app();
         app.paint(&mut c, None);
@@ -716,7 +716,7 @@ mod tests {
         let Some(Popup { items, .. }) = app.state.playlist.popup.take() else { panic!("no menu") };
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
         assert_eq!(labels, ["Respect recording filter", "Only when recording"]);
-        let ctrl = |app: &mut App, ch: &str| app.key(&Key::Character(SmolStr::new(ch)), true, false);
+        let ctrl = |app: &mut App, ch: &str| app.key(&Key::Character(String::from(ch)), true, false);
         // A focused playlist keeps Ctrl+P (Performance mode) and Ctrl+B (duplicate); elsewhere they switch the options.
         assert!(app.pl_focus());
         ctrl(&mut app, "i");

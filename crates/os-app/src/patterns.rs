@@ -489,8 +489,8 @@ pub fn hit(s: &mut State, h: Hit) {
 }
 
 /// Typing into the name box. Returns whether the key was taken.
-pub fn key(s: &mut State, key: &winit::keyboard::Key, ctrl: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn key(s: &mut State, key: &crate::keys::Key, ctrl: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     if s.pat_ui.confirm {
         match key {
             Key::Named(NamedKey::Enter) => delete_current(s),
@@ -563,7 +563,7 @@ mod tests {
         s.pat_ui.name_box = None;
         assert_eq!(listed(s), vec![1, 2, 3, 5]);
         run(s, Cmd::Rename, (0.0, 0.0));
-        key(s, &winit::keyboard::Key::Character("Probe".into()), false);
+        key(s, &crate::keys::Key::Character("Probe".into()), false);
         accept(s);
         assert_eq!(listed(s), vec![1, 2, 3, 4, 5]);
         assert_eq!(name_of(&s.session, 4), "Probe");
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn delete_confirmation_remembers_ok_only() {
         use crate::messages::{on, set, DELETE_PATTERN};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let mut app = app();
         let s = &mut app.state;
         s.set_pattern(2);
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(s.session.project.patterns.len(), 4);
         // The footer "+" = find first empty, which lists the pattern once it is named.
         run(s, Cmd::FindFirst, (0.0, 0.0));
-        key(s, &winit::keyboard::Key::Character("Bass".into()), false);
+        key(s, &crate::keys::Key::Character("Bass".into()), false);
         accept(s);
         assert_eq!(crate::views::playlist::pick_items(s).len(), before.len() + 1);
     }
@@ -670,8 +670,8 @@ mod tests {
         s.set_pattern(1);
         let k0 = s.session.project.pattern(1).unwrap().notes[0].key;
         run(s, Cmd::Transpose, (0.0, 0.0));
-        key(s, &winit::keyboard::Key::Character("-".into()), false);
-        key(s, &winit::keyboard::Key::Character("3".into()), false);
+        key(s, &crate::keys::Key::Character("-".into()), false);
+        key(s, &crate::keys::Key::Character("3".into()), false);
         accept(s);
         assert_eq!(s.session.project.pattern(1).unwrap().notes[0].key, k0 - 3);
         run(s, Cmd::Rename, (0.0, 0.0));

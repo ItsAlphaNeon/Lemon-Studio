@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 use os_model::{Project, WorkTime};
 use os_ui::{Color, Font, Rect};
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 use crate::app::{Action, App, State, Ui};
 use crate::control::command::{Region, SONG_INFO};
 use crate::dialog::Field;
@@ -458,13 +458,13 @@ mod tests {
         if !app.typing_on() {
             app.toggle_typing();
         }
-        assert!(app.typing_key(winit::keyboard::KeyCode::KeyZ, true, false, false), "Z plays a note");
-        app.typing_key(winit::keyboard::KeyCode::KeyZ, false, false, false);
+        assert!(app.typing_key(crate::keys::KeyCode::KeyZ, true, false, false), "Z plays a note");
+        app.typing_key(crate::keys::KeyCode::KeyZ, false, false, false);
         app.act(Action::Settings(SAct::Info(InfoField::Genre)));
         let shown = app.state.shown(crate::app::Win::Playlist);
         named(&mut app, NamedKey::F5);
         assert_eq!(app.state.shown(crate::app::Win::Playlist), shown);
-        assert!(!app.typing_key(winit::keyboard::KeyCode::KeyZ, true, false, false));
+        assert!(!app.typing_key(crate::keys::KeyCode::KeyZ, true, false, false));
         typed(&mut app, "z");
         named(&mut app, NamedKey::Enter);
         assert_eq!(app.state.session.project.info.genre.as_deref(), Some("z"));

@@ -14,7 +14,7 @@ use std::cell::RefCell;
 
 use os_model::{ControlPoint, Note, Project, TimeMarker};
 use os_smf::{Event, Kind as Ev, Smf, Track};
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, State};
 use crate::dialog::{spans, Answer, Body, Kind, Reply, Then};

@@ -97,7 +97,7 @@ fn space(app: &mut App, presses: &mut Vec<Press>, phase: &'static str) {
     if playing && std::env::var_os("OS_CHECK_PAUSE").is_some() {
         app.state.session.transport.pause();
     } else {
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Space), false, false);
     }
 }
 

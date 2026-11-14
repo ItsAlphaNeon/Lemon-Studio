@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::path::PathBuf;
 
 use os_ui::Rect;
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, Drag};
 use crate::filedlg::{FileDlg, Focus, Outcome, SortBy, ROW_H};

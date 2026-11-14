@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn renaming_the_project() {
         use crate::project_forms::{Form, Rename};
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let dir = scratch("rename");
         let mut app = saved_with_folder(&dir, "t2spec");
         let kick = dir.join("t2spec").join(SAMPLES_DIR).join("kick.wav");

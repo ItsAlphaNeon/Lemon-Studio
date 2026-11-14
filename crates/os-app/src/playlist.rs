@@ -4281,8 +4281,8 @@ pub fn consolidate(app: &mut App) -> String {
 }
 
 /// Keys while the playlist is focused. Returns true when handled.
-pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     let shift = app.shift;
     // Inline text box first.
     if app.state.playlist.edit.is_some() {

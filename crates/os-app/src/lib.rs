@@ -82,7 +82,9 @@ mod icons;
 use os_session::init;
 mod init_ui;
 use os_session::knob_id;
+mod keys;
 mod knobs;
+mod winit_keys;
 mod layout;
 use os_session::lemon_state;
 mod lemon_state_ui;
@@ -1138,7 +1140,7 @@ impl ApplicationHandler for Shell {
                 }
                 // The typing keyboard plays notes by physical key (spec: ui/typing-keyboard.md).
                 if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
-                    if self.app.typing_key(code, pressed, ctrl(self.mods), self.mods.alt_key()) {
+                    if self.app.typing_key(crate::winit_keys::code(code), pressed, ctrl(self.mods), self.mods.alt_key()) {
                         if self.app.has_damage() {
                             window.request_redraw();
                         }
@@ -1184,12 +1186,12 @@ impl ApplicationHandler for Shell {
                     };
                     self.app.repeat = event.repeat;
                     self.app.code = match event.physical_key {
-                        winit::keyboard::PhysicalKey::Code(code) => Some(code),
+                        winit::keyboard::PhysicalKey::Code(code) => Some(crate::winit_keys::code(code)),
                         _ => None,
                     };
                     // The key acts in the window that has the keyboard (the one it came to), and a popup or box it
                     // opens shows there.
-                    let (key, c, alt) = (&event.logical_key, ctrl(self.mods), self.mods.alt_key());
+                    let (key, c, alt) = (&crate::winit_keys::key(&event.logical_key), ctrl(self.mods), self.mods.alt_key());
                     self.app.key_on(self.key_on, key, c, alt);
                     self.app.repeat = false;
                     self.app.code = None;

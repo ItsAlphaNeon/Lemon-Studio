@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(app.state.session.path.as_deref(), Some(files[10].as_path()));
         assert_eq!(label(&list()[0]), "p10.flp", "opened: on top");
         // Alt+3 opens the third: p9 now (p10, p11, p9 ...).
-        app.key(&winit::keyboard::Key::Character("3".into()), false, true);
+        app.key(&crate::keys::Key::Character("3".into()), false, true);
         assert_eq!(app.state.session.path.as_deref().map(|p| label(p)).as_deref(), Some("p9.flp"));
         // More ▸ lists the two after the tenth.
         let more: Vec<String> = more_items(&app.state).iter().map(|i| i.label.to_string()).collect();
