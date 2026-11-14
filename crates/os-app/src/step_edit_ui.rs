@@ -329,3 +329,27 @@ mod tests {
         assert_eq!(app.state.session.history.at(), at);
     }
 }
+
+#[cfg(test)]
+mod tests_moved {
+    use winit::keyboard::KeyCode;
+    use super::*;
+
+    /// The chord is written on the last release only, with every key pressed since the first (spec "Entering notes").
+    #[test]
+    fn the_last_release_gives_the_chord() {
+        let (a, b, m) = (crate::step_edit_ui::typing(KeyCode::KeyZ), crate::step_edit_ui::typing(KeyCode::KeyC), Src::Midi(67));
+        let mut c = Chord::default();
+        c.down(a, 48, 100);
+        c.down(b, 52, 100);
+        assert_eq!(c.up(a), None, "a key is still held");
+        c.down(m, 67, 90);
+        assert_eq!(c.up(b), None);
+        assert_eq!(c.up(m), Some(vec![(48, 100), (52, 100), (67, 90)]));
+        assert_eq!(c.up(a), None, "a note not held gives nothing");
+        c.down(a, 48, 100);
+        c.clear();
+        assert_eq!(c.up(a), None, "cleared: nothing is written");
+    }
+
+}
