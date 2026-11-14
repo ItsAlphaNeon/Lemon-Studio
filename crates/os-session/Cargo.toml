@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg"]
+default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io"]
 # Hosting VST 3 and VST 2 plugins (off: CLAP and the stock plugins only).
 vst3 = ["dep:os-vst3"]
 vst2 = ["dep:os-vst2"]
@@ -14,6 +14,8 @@ vst2 = ["dep:os-vst2"]
 export-flac = ["dep:flacenc"]
 export-mp3 = ["dep:mp3lame-encoder"]
 export-ogg = ["dep:vorbis_rs"]
+# The system's MIDI ports (`midi_ports`; off: none are listed or opened).
+midi-io = ["dep:midir"]
 # The test helpers and test-mode switches (per-thread settings, test folders) for the tests of a crate built on this
 # one (`os-app`'s).
 test-util = []
@@ -60,7 +62,7 @@ lemon-vocoder = { path = "../../plugins/lemon-vocoder", default-features = false
 lemon-drop = { path = "../../plugins/lemon-drop", default-features = false, features = ["linked"] }
 cpal = "0.18"
 crossbeam-queue = "0.3"
-midir = "0.11"
+midir = { version = "0.11", optional = true }
 # JPEG workspace pictures of theme files (`wallpaper`; PNG goes through tiny-skia). Pure Rust, no threads.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde_json = "1"

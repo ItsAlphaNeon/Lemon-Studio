@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg"]
+default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io"]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-session/vst3"]
 vst2 = ["os-session/vst2"]
@@ -14,6 +14,8 @@ vst2 = ["os-session/vst2"]
 export-flac = ["os-session/export-flac"]
 export-mp3 = ["os-session/export-mp3"]
 export-ogg = ["os-session/export-ogg"]
+# The system's MIDI ports.
+midi-io = ["os-session/midi-io", "dep:midir"]
 
 [dependencies]
 os-session = { path = "../os-session", default-features = false }
@@ -60,7 +62,7 @@ lemon-slicer = { path = "../../plugins/lemon-slicer", features = ["linked", "edi
 lemon-vocoder = { path = "../../plugins/lemon-vocoder", features = ["linked", "editor"] }
 lemon-drop = { path = "../../plugins/lemon-drop", features = ["linked", "editor"] }
 crossbeam-queue = "0.3"
-midir = "0.11"
+midir = { version = "0.11", optional = true }
 tiny-skia = "0.11"
 # JPEG workspace pictures of theme files (`wallpaper`; PNG goes through tiny-skia). Pure Rust, no threads.
 jpeg-decoder = { version = "0.3", default-features = false }

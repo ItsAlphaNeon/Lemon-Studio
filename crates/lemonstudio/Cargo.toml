@@ -10,7 +10,7 @@ name = "lemonstudio"
 path = "src/main.rs"
 
 [features]
-default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg"]
+default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io"]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-app/vst3"]
 vst2 = ["os-app/vst2"]
@@ -18,6 +18,8 @@ vst2 = ["os-app/vst2"]
 export-flac = ["os-app/export-flac"]
 export-mp3 = ["os-app/export-mp3"]
 export-ogg = ["os-app/export-ogg"]
+# The system's MIDI ports.
+midi-io = ["os-app/midi-io"]
 
 [dependencies]
 os-app = { path = "../os-app", default-features = false }

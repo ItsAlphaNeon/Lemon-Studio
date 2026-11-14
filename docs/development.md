@@ -131,6 +131,7 @@ Some parts are cargo features, on by default, so a build can leave them out:
 |---|---|---|
 | `vst3`, `vst2` | `os-session` (passed on by `os-app` and `lemonstudio`) | VST 3 and VST 2 hosting: those plugins are not found, and a saved one does not load |
 | `export-flac`, `export-mp3`, `export-ogg` | `os-session` (passed on likewise) | That export format: exporting to it says it is not in this build |
+| `midi-io` | `os-session` (passed on likewise) | The system's MIDI ports: none are listed or opened |
 | `editor` | each built-in plugin | Its editor (the session builds its plugins without them; the interface turns them on) |
 | `gui` | `os-plugkit` | The plugin editors' native windows, popups and type-in boxes |
 

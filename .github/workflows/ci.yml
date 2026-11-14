@@ -50,7 +50,7 @@ jobs:
       - name: Build the session alone
         run: cargo check --locked -p os-session --all-targets
 
-      # The program builds with its optional parts off (the session's features: VST 3 and VST 2 hosting, the export encoders), all at once
+      # The program builds with its optional parts off (the session's features: VST 3 and VST 2 hosting, the export encoders, MIDI ports), all at once
       # and one at a time.
       - name: Build with features off
         run: |
@@ -60,6 +60,7 @@ jobs:
           cargo check --locked -p lemonstudio --no-default-features --features export-flac --all-targets
           cargo check --locked -p lemonstudio --no-default-features --features export-mp3 --all-targets
           cargo check --locked -p lemonstudio --no-default-features --features export-ogg --all-targets
+          cargo check --locked -p lemonstudio --no-default-features --features midi-io --all-targets
 
       # The plugin bundles (VST3 + CLAP): the hosting tests load them, and skip without them.
       - name: Bundle plugins

@@ -46,6 +46,7 @@ pub mod meters;
 pub mod metronome;
 pub mod midi_cfg;
 pub mod midi_in;
+pub mod midi_ports;
 pub mod midi_out;
 pub mod misc;
 pub mod missing;
