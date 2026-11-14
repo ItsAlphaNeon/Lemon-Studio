@@ -429,8 +429,14 @@ pub fn load_file(path: &Path, format: os_host::Format) -> Result<Arc<dyn Library
     let load = || -> Result<Arc<dyn Library>, String> {
         match format {
             os_host::Format::Clap => os_clap::Library::load(path).map(|l| l as Arc<dyn Library>),
+            #[cfg(feature = "vst3")]
             os_host::Format::Vst3 => os_vst3::Module::load(path).map(|l| l as Arc<dyn Library>),
+            #[cfg(not(feature = "vst3"))]
+            os_host::Format::Vst3 => Err(format!("{}: VST 3 is not in this build", path.display())),
+            #[cfg(feature = "vst2")]
             os_host::Format::Vst2 => os_vst2::Module::load(path).map(|l| l as Arc<dyn Library>),
+            #[cfg(not(feature = "vst2"))]
+            os_host::Format::Vst2 => Err(format!("{}: VST 2 is not in this build", path.display())),
             os_host::Format::Native => os_native::NativeLibrary::load(path).map(|l| l as Arc<dyn Library>),
         }
     };

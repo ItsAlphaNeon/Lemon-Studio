@@ -5,9 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["vst3", "vst2"]
+# Hosting VST 3 and VST 2 plugins (the session's features).
+vst3 = ["os-session/vst3"]
+vst2 = ["os-session/vst2"]
 
 [dependencies]
-os-session.workspace = true
+os-session = { path = "../os-session", default-features = false }
 os-model.workspace = true
 os-dsp.workspace = true
 os-flp.workspace = true
@@ -66,7 +71,7 @@ vorbis_rs = "0.5"
 zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-os-session = { workspace = true, features = ["test-util"] }
+os-session = { path = "../os-session", default-features = false, features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 # Clipboard audio, process statistics, known folders, file association, drag and drop (`audio_clipboard`, `cpu`,

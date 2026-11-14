@@ -9,9 +9,15 @@ license.workspace = true
 name = "lemonstudio"
 path = "src/main.rs"
 
+[features]
+default = ["vst3", "vst2"]
+# Hosting VST 3 and VST 2 plugins (the session's features).
+vst3 = ["os-app/vst3"]
+vst2 = ["os-app/vst2"]
+
 [dependencies]
-os-app = { path = "../os-app" }
-os-session.workspace = true
+os-app = { path = "../os-app", default-features = false }
+os-session = { path = "../os-session", default-features = false }
 os-model.workspace = true
 os-engine.workspace = true
 os-host.workspace = true
