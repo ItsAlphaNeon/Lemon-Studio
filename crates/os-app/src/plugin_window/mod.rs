@@ -28,7 +28,7 @@ use os_ui::{Canvas, Color, Font, Rect};
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
-pub use win32::{default_position, first_position, focus_main, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
+pub use win32::{default_position, first_position, focus_main, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow as NativeFrame};
 
 #[cfg(target_os = "linux")]
 mod x11;
@@ -37,13 +37,288 @@ mod hyprland;
 #[cfg(target_os = "linux")]
 pub use x11::{
     busy, default_position, exposed, focus_main, in_keymap, keys_down, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main,
-    set_transient, stack, take_exposed, take_lift_input, unpinned, FrameWindow, Unpinned,
+    set_transient, stack, take_exposed, take_lift_input, unpinned, FrameWindow as NativeFrame,
 };
 
 #[cfg(target_os = "macos")]
 mod cocoa;
 #[cfg(target_os = "macos")]
-pub use cocoa::{default_position, lift_hide, lift_show, pointer, row_window_at, screen_to_main, stack, take_exposed, take_keys, take_lift_input, FrameWindow};
+pub use cocoa::{default_position, lift_hide, lift_show, pointer, row_window_at, screen_to_main, stack, take_exposed, take_keys, take_lift_input, FrameWindow as NativeFrame};
+
+
+/// A key pressed or released while a plugin window has the keyboard focus (the typing keyboard keeps playing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyMsg {
+    /// The key's scancode as the window system gives it (Windows: hardware scancode, extended keys carry 0xE000;
+    /// macOS: the virtual key code), read back by the program's key translation (`crate::winit_keys::scancode`).
+    pub scancode: u32,
+    pub pressed: bool,
+    /// Control (or Command on macOS).
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+/// A plugin editor's frame window as the program's window code makes it (control-plane step 10): the interface keeps
+/// what it shows (`ChannelInfo`, the pages, the hint) and asks it to place, raise and size itself.
+pub trait Frame {
+    fn detached(&self) -> bool;
+    fn set_detached(&self, owner: isize, on: bool);
+    fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]);
+    fn hwnd(&self) -> isize;
+    fn area(&self) -> *mut std::ffi::c_void;
+    fn raise(&self);
+    fn set_info(&self, info: ChannelInfo);
+    fn set_pages(&self, pages: Vec<PageIcon>, active: usize);
+    fn set_resizable(&self, min: Option<(f32, f32)>);
+    fn set_page(&self, page: usize);
+    fn set_hint(&self, hint: String);
+    fn set_preset(&self, name: Option<String>);
+    fn scale(&self) -> f32;
+    fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32);
+    fn set_editor_size(&self, editor: (f32, f32));
+    fn set_strip(&self, on: bool);
+    fn take_events(&self) -> Vec<FrameEvent>;
+    /// Windows and macOS: the frame follows the main window's scale.
+    fn set_scale(&self, _scale: f32) {}
+    /// Windows: back onto the visible desktop, and moved to a screen position.
+    fn move_into_workspace(&self) {}
+    fn move_to(&self, _x: i32, _y: i32) {}
+    /// Windows: where it is on the screen.
+    fn position(&self) -> Option<(i32, i32)> {
+        None
+    }
+}
+
+/// A frame window.
+pub type FrameWindow = Box<dyn Frame>;
+
+/// A guard that holds the frames back while a dialog is open (Linux; dropped, they come back).
+pub type Unpinned = Box<dyn std::any::Any>;
+
+/// The program's window system for plugin editors (control-plane step 10): it makes the frames and tells what the
+/// user did in them. The interface keeps it in `EditorHost::frames`. Each platform supplies what it has; the rest
+/// answers as if nothing happened.
+pub trait Frames {
+    fn open(&self, owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String>;
+    /// Where a new frame goes, and a detached one opening for the first time.
+    fn default_position(&self, owner: isize, scale: f32) -> (i32, i32);
+    fn first_position(&self, owner: isize, scale: f32, _with_main: bool) -> (i32, i32) {
+        self.default_position(owner, scale)
+    }
+    /// Puts the frames above `parent` in this order.
+    fn stack(&self, parent: isize, hwnds: &[isize]);
+    /// A frame was uncovered or resized since the last call (repaint).
+    fn take_exposed(&self) -> bool;
+    /// Lemon plugins' messages from their editors: (editor area, message).
+    fn take_link(&self) -> Vec<(isize, LinkMsg)>;
+    /// Serves the frames' events (Linux: X11 and the editors' run loop).
+    fn pump(&self) {}
+    fn paint_dirty(&self) {}
+    /// A frame is open and its events want the tick.
+    fn busy(&self) -> bool {
+        false
+    }
+    /// Keys pressed in a frame (Windows, macOS).
+    fn take_keys(&self) -> Vec<KeyMsg> {
+        Vec::new()
+    }
+    /// The keys down now (Linux), and whether `code` is one of them.
+    fn keys_down(&self) -> Option<[u8; 32]> {
+        None
+    }
+    fn in_keymap(&self, _keymap: &[u8; 32], _code: crate::keys::KeyCode) -> bool {
+        false
+    }
+    /// The floating copy of the main window's popup over the frames (Linux, macOS), its input, and where screen points
+    /// are in the main window.
+    fn lift_show(&self, _main: isize, _frame: isize, _origin: (i32, i32), _size: (i32, i32), _pixels: Vec<u32>) {}
+    fn lift_hide(&self) {}
+    fn take_lift_input(&self) -> Vec<LiftInput> {
+        Vec::new()
+    }
+    fn screen_to_main(&self, _x: i32, _y: i32) -> Option<(i32, i32)> {
+        None
+    }
+    /// The pointer on the screen, and whether it is over a docked frame.
+    fn pointer(&self) -> Option<(i32, i32)> {
+        None
+    }
+    fn pointer_in_docked(&self) -> bool {
+        false
+    }
+    /// The frame of the rack row under a screen point (macOS).
+    fn row_window_at(&self, _x: i32, _y: i32) -> Option<isize> {
+        None
+    }
+    /// The main window got or lost the focus; the frames step back while a dialog is open (Linux).
+    fn main_focused(&self, _focused: bool) {}
+    fn unpinned(&self) -> Unpinned {
+        Box::new(())
+    }
+    fn set_transient(&self, _win: u32, _owner: isize) {}
+    fn focus_main(&self) {}
+}
+
+/// The frames of this platform's window system (`win32`, `x11`, `cocoa`).
+#[derive(Default)]
+pub struct NativeFrames;
+
+impl Frames for NativeFrames {
+    fn open(&self, owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
+        Ok(Box::new(NativeFrame::new(owner, info, editor, scale, pos, detached)?))
+    }
+    fn default_position(&self, owner: isize, scale: f32) -> (i32, i32) {
+        default_position(owner, scale)
+    }
+    fn first_position(&self, owner: isize, scale: f32, with_main: bool) -> (i32, i32) {
+        first_position(owner, scale, with_main)
+    }
+    fn stack(&self, parent: isize, hwnds: &[isize]) {
+        stack(parent, hwnds)
+    }
+    fn take_exposed(&self) -> bool {
+        take_exposed()
+    }
+    fn take_link(&self) -> Vec<(isize, LinkMsg)> {
+        take_link()
+    }
+    #[cfg(target_os = "linux")]
+    fn pump(&self) {
+        pump()
+    }
+    #[cfg(target_os = "linux")]
+    fn paint_dirty(&self) {
+        paint_dirty()
+    }
+    #[cfg(target_os = "linux")]
+    fn busy(&self) -> bool {
+        busy()
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    fn take_keys(&self) -> Vec<KeyMsg> {
+        take_keys()
+    }
+    #[cfg(target_os = "linux")]
+    fn keys_down(&self) -> Option<[u8; 32]> {
+        keys_down()
+    }
+    #[cfg(target_os = "linux")]
+    fn in_keymap(&self, keymap: &[u8; 32], code: crate::keys::KeyCode) -> bool {
+        in_keymap(keymap, code)
+    }
+    fn lift_show(&self, main: isize, frame: isize, origin: (i32, i32), size: (i32, i32), pixels: Vec<u32>) {
+        lift_show(main, frame, origin, size, pixels)
+    }
+    fn lift_hide(&self) {
+        lift_hide()
+    }
+    #[cfg(not(windows))]
+    fn take_lift_input(&self) -> Vec<LiftInput> {
+        take_lift_input()
+    }
+    #[cfg(not(windows))]
+    fn screen_to_main(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+        screen_to_main(x, y)
+    }
+    #[cfg(not(windows))]
+    fn pointer(&self) -> Option<(i32, i32)> {
+        pointer()
+    }
+    #[cfg(target_os = "linux")]
+    fn pointer_in_docked(&self) -> bool {
+        pointer_in_docked()
+    }
+    #[cfg(target_os = "macos")]
+    fn row_window_at(&self, x: i32, y: i32) -> Option<isize> {
+        row_window_at(x, y)
+    }
+    #[cfg(target_os = "linux")]
+    fn main_focused(&self, focused: bool) {
+        main_focused(focused)
+    }
+    #[cfg(target_os = "linux")]
+    fn unpinned(&self) -> Unpinned {
+        Box::new(unpinned())
+    }
+    #[cfg(target_os = "linux")]
+    fn set_transient(&self, win: u32, owner: isize) {
+        set_transient(win, owner)
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    fn focus_main(&self) {
+        focus_main()
+    }
+}
+
+impl Frame for NativeFrame {
+    fn detached(&self) -> bool {
+        NativeFrame::detached(self)
+    }
+    fn set_detached(&self, owner: isize, on: bool) {
+        NativeFrame::set_detached(self, owner, on)
+    }
+    fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]) {
+        NativeFrame::clip_to(self, work, covers)
+    }
+    fn hwnd(&self) -> isize {
+        NativeFrame::hwnd(self)
+    }
+    fn area(&self) -> *mut std::ffi::c_void {
+        NativeFrame::area(self)
+    }
+    fn raise(&self) {
+        NativeFrame::raise(self)
+    }
+    fn set_info(&self, info: ChannelInfo) {
+        NativeFrame::set_info(self, info)
+    }
+    fn set_pages(&self, pages: Vec<PageIcon>, active: usize) {
+        NativeFrame::set_pages(self, pages, active)
+    }
+    fn set_resizable(&self, min: Option<(f32, f32)>) {
+        NativeFrame::set_resizable(self, min)
+    }
+    fn set_page(&self, page: usize) {
+        NativeFrame::set_page(self, page)
+    }
+    fn set_hint(&self, hint: String) {
+        NativeFrame::set_hint(self, hint)
+    }
+    fn set_preset(&self, name: Option<String>) {
+        NativeFrame::set_preset(self, name)
+    }
+    fn scale(&self) -> f32 {
+        NativeFrame::scale(self)
+    }
+    fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+        NativeFrame::editor_to_screen(self, x, y)
+    }
+    fn set_editor_size(&self, editor: (f32, f32)) {
+        NativeFrame::set_editor_size(self, editor)
+    }
+    fn set_strip(&self, on: bool) {
+        NativeFrame::set_strip(self, on)
+    }
+    fn take_events(&self) -> Vec<FrameEvent> {
+        NativeFrame::take_events(self)
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    fn set_scale(&self, scale: f32) {
+        NativeFrame::set_scale(self, scale)
+    }
+    #[cfg(windows)]
+    fn move_into_workspace(&self) {
+        NativeFrame::move_into_workspace(self)
+    }
+    #[cfg(windows)]
+    fn move_to(&self, x: i32, y: i32) {
+        NativeFrame::move_to(self, x, y)
+    }
+    #[cfg(windows)]
+    fn position(&self) -> Option<(i32, i32)> {
+        NativeFrame::position(self)
+    }
+}
 
 /// TOOLS > Set keyboard focus of all plugins to ▸ (Lemon Studio's design; spec: ui/channel-switches.md §6): whether
 /// plugin editors take the computer keyboard (Enabled, the default) or never get it (Disabled), the keys then going to
@@ -92,7 +367,6 @@ pub enum LinkMsg {
 }
 
 /// Mouse input on the lifted popup (see `lift_show`); positions in the main window (physical px).
-#[cfg(not(windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiftInput {
     Move(i32, i32),

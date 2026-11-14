@@ -2311,7 +2311,7 @@ impl App {
         {
             let open = self.modal_open();
             if open != self.unpinned.is_some() {
-                self.unpinned = open.then(crate::plugin_window::unpinned);
+                self.unpinned = open.then(|| self.state.editor_host.frames.unpinned());
             }
         }
         self.invalidate();
@@ -2545,7 +2545,7 @@ impl App {
         self.state.session.transport.listen(listen);
         // Keys pressed while a plugin window has the focus still play the typing keyboard.
         #[cfg(any(windows, target_os = "macos"))]
-        for k in crate::plugin_window::take_keys() {
+        for k in self.state.editor_host.frames.take_keys() {
             let code = crate::winit_keys::scancode(k.scancode);
             if code != KeyCode::Unidentified {
                 // Space keeps playing / stopping the song (the typing keyboard does not use it).
@@ -2557,8 +2557,10 @@ impl App {
         // X11 gives a key let go of over a docked editor to the editor: its typed note ends once the key is up.
         #[cfg(all(plugin_windows, target_os = "linux"))]
         if !self.typing_held.is_empty() || !self.perf_typed.is_empty() {
-            if let Some(map) = crate::plugin_window::keys_down() {
-                self.release_keys_up(|code| crate::plugin_window::in_keymap(&map, code));
+            if let Some(map) = self.state.editor_host.frames.keys_down() {
+                let frames = &self.state.editor_host.frames;
+                let down: Vec<crate::keys::KeyCode> = self.typing_held.iter().map(|h| h.0).chain(self.perf_typed.iter().map(|h| h.0)).filter(|&c| frames.in_keymap(&map, c)).collect();
+                self.release_keys_up(|code| down.contains(&code));
             }
         }
         // A plugin's menu closed without a pick since the last tick.
@@ -2761,7 +2763,7 @@ impl App {
     /// Screen point -> canvas logical px (an X11 main window: Linux; macOS).
     #[cfg(all(plugin_windows, not(windows)))]
     fn screen_to_canvas(&self, x: i32, y: i32) -> (f32, f32) {
-        let (x, y) = crate::plugin_window::screen_to_main(x, y).unwrap_or((x, y));
+        let (x, y) = self.state.editor_host.frames.screen_to_main(x, y).unwrap_or((x, y));
         let k = self.state.session.plugins.scale;
         ((x - self.canvas_off.0) as f32 / k, (y - self.canvas_off.1) as f32 / k)
     }
@@ -2779,7 +2781,7 @@ impl App {
     /// Linux and macOS: mouse input on a lifted popup (`sync_lift`) goes to the app as if it happened in the main window.
     #[cfg(all(plugin_windows, not(windows)))]
     fn lift_input(&mut self) {
-        let input = crate::plugin_window::take_lift_input();
+        let input = self.state.editor_host.frames.take_lift_input();
         let k = self.state.session.plugins.scale;
         let (ox, oy) = self.canvas_off;
         for i in &input {
@@ -2814,11 +2816,11 @@ impl App {
                     }
                 }
                 let origin = (x as i32 + self.canvas_off.0, y as i32 + self.canvas_off.1);
-                crate::plugin_window::lift_show(self.state.session.plugins.owner, frame, origin, (w as i32, h as i32), buf);
+                self.state.editor_host.frames.lift_show(self.state.session.plugins.owner, frame, origin, (w as i32, h as i32), buf);
             }
             _ => {
                 self.popup_lift = None;
-                crate::plugin_window::lift_hide();
+                self.state.editor_host.frames.lift_hide();
             }
         }
     }
@@ -3873,7 +3875,7 @@ impl App {
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
     fn plugin_windows_busy(&self) -> bool {
         #[cfg(target_os = "linux")]
-        return crate::plugin_window::busy();
+        return self.state.editor_host.frames.busy();
         #[cfg(not(target_os = "linux"))]
         false
     }

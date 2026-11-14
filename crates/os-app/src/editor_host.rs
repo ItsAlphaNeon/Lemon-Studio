@@ -214,12 +214,27 @@ pub type ChannelInfoT = ChannelInfo;
 pub type ChannelInfoT = ();
 
 /// The open editor windows and what is kept of the closed ones, by `hosted` key.
-#[derive(Default)]
 pub struct EditorHost {
     pub editors: BTreeMap<usize, Editor>,
+    /// The program's window system for the editors' frames (control-plane step 10).
+    #[cfg(plugin_windows)]
+    pub frames: Box<dyn crate::plugin_window::Frames>,
     /// Plugin windows opened so far (stamps `Editor::opened`).
     #[cfg(plugin_windows)]
     opens: u64,
+}
+
+impl Default for EditorHost {
+    /// The editors' frames of this platform's window system (`plugin_window::NativeFrames`).
+    fn default() -> Self {
+        EditorHost {
+            editors: BTreeMap::new(),
+            #[cfg(plugin_windows)]
+            frames: Box::new(crate::plugin_window::NativeFrames),
+            #[cfg(plugin_windows)]
+            opens: 0,
+        }
+    }
 }
 
 impl EditorHost {
@@ -330,7 +345,7 @@ impl EditorHost {
     /// The hosted row whose plugin window is at screen point (x, y).
     #[cfg(target_os = "macos")]
     pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
-        let frame = crate::plugin_window::row_window_at(x, y)?;
+        let frame = self.frames.row_window_at(x, y)?;
         self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|f| f.hwnd() == frame)).map(|(&r, _)| r)
     }
 
@@ -376,11 +391,11 @@ impl EditorHost {
         // A detached window reopens where it was; the first time, on a monitor as the settings say (spec: as above).
         let pos = match (e.detached, e.placed) {
             (true, Some(at)) => at,
-            (true, None) => crate::plugin_window::first_position(owner, scale, crate::prefs::check(&crate::prefs::DETACHED_WITH_MAIN)),
-            (false, _) => crate::plugin_window::default_position(owner, scale),
+            (true, None) => self.frames.first_position(owner, scale, crate::prefs::check(&crate::prefs::DETACHED_WITH_MAIN)),
+            (false, _) => self.frames.default_position(owner, scale),
         };
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
-        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, e.detached)?;
+        let w = self.frames.open(owner, info, (560.0, 437.0), scale, pos, e.detached)?;
         // Mixer effects have no channel strip (spec: ui/mixer.md §7).
         if row >= FX_KEY {
             w.set_strip(false);
@@ -522,7 +537,7 @@ impl EditorHost {
     #[cfg(plugin_windows)]
     pub fn stack(&self, pl: &Plugins, rows: &[usize]) {
         let hwnds: Vec<isize> = rows.iter().filter_map(|r| self.window_of(*r)).filter(|w| !w.1).map(|w| w.0).collect();
-        crate::plugin_window::stack(pl.owner, &hwnds);
+        self.frames.stack(pl.owner, &hwnds);
     }
 
     /// VIEW > Into workspace for the docked windows: one partly outside the workspace moves fully back in
@@ -571,7 +586,7 @@ impl EditorHost {
         // Linux: the frames' X11 events, then the editors' descriptors and timers (`os_host::runloop`).
         #[cfg(target_os = "linux")]
         {
-            crate::plugin_window::pump();
+            self.frames.pump();
             os_host::runloop::dispatch();
         }
         let mut out = Vec::new();
@@ -580,7 +595,7 @@ impl EditorHost {
         let mut rescale: Vec<(usize, f32)> = Vec::new();
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
         #[cfg(plugin_windows)]
-        for (area, m) in crate::plugin_window::take_link() {
+        for (area, m) in self.frames.take_link() {
             let row = self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
             match (row, m) {
                 (Some(row), crate::plugin_window::LinkMsg::Note(k, v, on)) => out.push(Request::Note(row, k, v, on)),
@@ -705,7 +720,7 @@ impl EditorHost {
             self.rescale_window(pl, row, pl.scale_for(row, k));
         }
         #[cfg(target_os = "linux")]
-        crate::plugin_window::paint_dirty();
+        self.frames.paint_dirty();
         out
     }
 }

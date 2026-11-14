@@ -26,16 +26,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use super::*;
 
-/// A key pressed or released while a plugin window has the keyboard focus (the typing keyboard keeps playing).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KeyMsg {
-    /// Hardware scancode as winit's `PhysicalKeyExtScancode` expects it (extended keys carry 0xE000).
-    pub scancode: u32,
-    pub pressed: bool,
-    pub ctrl: bool,
-    pub alt: bool,
-}
-
 static KEYS: Mutex<Vec<KeyMsg>> = Mutex::new(Vec::new());
 
 /// (editor area window, message) since the last `take_link`.

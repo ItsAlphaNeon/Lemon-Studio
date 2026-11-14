@@ -664,7 +664,7 @@ mod tests {
             SendMessageW(editor, WM_LBUTTONUP, 0, (300 | (60 << 16)) as isize);
         }
         eprintln!("focus {:?} editor {:?} frame {:?} foreground {:?}", unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() }, editor, frame, unsafe { GetForegroundWindow() });
-        crate::plugin_window::take_keys();
+        host.frames.take_keys();
         let q = 0x10isize; // scancode of Q
         // Real key input (the hook sees what the system queue delivers; posted messages bypass it), only while our
         // frame is in front so the key cannot land in another program.
@@ -675,7 +675,7 @@ mod tests {
             keybd_event(0x51, q as u8, KEYEVENTF_KEYUP, 0);
         }
         pump(&mut host, &mut pl, 100);
-        let keys = crate::plugin_window::take_keys();
+        let keys = host.frames.take_keys();
         assert_eq!(keys.len(), 2, "{keys:?}");
         assert!(keys[0].pressed && !keys[1].pressed && keys[0].scancode == 0x10);
     }

@@ -42,18 +42,6 @@ use objc2_quartz_core::{CAShapeLayer, CATransaction};
 
 use super::*;
 
-/// A key pressed or released while a plugin's editor has the keyboard focus (the typing keyboard keeps playing).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KeyMsg {
-    /// The key's virtual key code (`NSEvent.keyCode`), as winit's `PhysicalKeyExtScancode` expects it on macOS.
-    pub scancode: u32,
-    pub pressed: bool,
-    /// Control or Command.
-    pub ctrl: bool,
-    /// Option.
-    pub alt: bool,
-}
-
 /// Window level of the lifted popup: above the floating plugin panels (`NSPopUpMenuWindowLevel`).
 const LIFT_LEVEL: isize = 101;
 
