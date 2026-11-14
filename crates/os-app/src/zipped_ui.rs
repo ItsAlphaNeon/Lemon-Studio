@@ -110,7 +110,7 @@ pub fn tick(app: &mut App) {
     let result = match z.rx.try_recv() {
         Ok(r) => r,
         Err(TryRecvError::Empty) => {
-            app.damage_rect(crate::loading::panel_rect(app.state.screen).outset(4.0));
+            app.damage_rect(crate::loading_ui::panel_rect(app.state.screen).outset(4.0));
             return;
         }
         Err(TryRecvError::Disconnected) => Err("stopped".into()),

@@ -190,7 +190,8 @@ impl App {
     pub(crate) fn params_tick(&mut self) {
         self.state.session.plugins.editors_open = self.state.editor_host.open_keys();
         let Tick { moved, recorded, automate } = params_in(&mut self.state.session);
-        if moved {
+        if let Some((key, index)) = moved {
+            note(&mut self.state.tweaks, Tweak::Plugin { key, index });
             self.tweak_hint();
         }
         for (key, index, range, v) in recorded {
@@ -216,7 +217,7 @@ impl App {
     /// A press on a host control: it becomes the last tweaked parameter when it has an automation target.
     pub(crate) fn note_host_tweak(&mut self, a: &Action) {
         if self.automation_target(a).is_some() {
-            self.state.session.params.note(Tweak::Host(a.clone()));
+            note(&mut self.state.tweaks, Tweak::Host(a.clone()));
         }
     }
 
@@ -230,7 +231,7 @@ impl App {
 
     /// The hint bar shows the plugin parameter that just moved: "<owner> - <parameter>: <value>" (spec §5).
     fn tweak_hint(&mut self) {
-        let Some(Tweak::Plugin { key, index }) = self.state.session.params.last.first().cloned() else { return };
+        let Some(Tweak::Plugin { key, index }) = self.state.tweaks.first().cloned() else { return };
         let s = &self.state;
         let Some(v) = value_of(s, key, index) else { return };
         let Some(id) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
@@ -242,7 +243,7 @@ impl App {
     /// ADD / TOOLS menu entries for the last tweaked parameters (spec §5); returns a message.
     pub(crate) fn params_menu(&mut self, entry: MenuEntry) -> Option<String> {
         let nth = usize::from(entry == MenuEntry::NextToLast);
-        let tweak = self.state.session.params.last.get(nth).cloned();
+        let tweak = self.state.tweaks.get(nth).cloned();
         let create = tweak.as_ref().and_then(|t| self.tweak_automation(t));
         if entry == MenuEntry::Automation {
             let Some((tgt, name, v)) = create else {
@@ -357,6 +358,25 @@ impl App {
     }
 }
 
+/// Something the user moved last (spec §5).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tweak {
+    /// A plugin parameter changed in the plugin's own editor: hosted key, parameter index.
+    Plugin { key: usize, index: usize },
+    /// A host control with an automation target (knob, fader, tempo).
+    Host(Action),
+}
+
+/// Notes `t` as the last tweaked, newest first: "Most recent", "Second most recent".
+pub(crate) fn note(last: &mut Vec<Tweak>, t: Tweak) {
+    if last.first() == Some(&t) {
+        return;
+    }
+    last.retain(|x| *x != t);
+    last.insert(0, t);
+    last.truncate(2);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,11 +438,11 @@ mod tests {
         s.session.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![cutoff], seen: crate::plugins::Look::never(), values: BTreeMap::new(), open: BTreeMap::new(), read_at: std::time::Instant::now(), reread: false });
         assert_eq!(clip_name(s, 0, 0), "Lead - Cutoff");
         // Last tweaked keeps the two newest, newest first, without repeats.
-        let p = &mut s.session.params;
-        p.note(Tweak::Plugin { key: 0, index: 0 });
-        p.note(Tweak::Host(Action::Tempo));
-        p.note(Tweak::Plugin { key: 0, index: 0 });
-        assert_eq!(p.last, vec![Tweak::Plugin { key: 0, index: 0 }, Tweak::Host(Action::Tempo)]);
+        let p = &mut s.tweaks;
+        note(p, Tweak::Plugin { key: 0, index: 0 });
+        note(p, Tweak::Host(Action::Tempo));
+        note(p, Tweak::Plugin { key: 0, index: 0 });
+        assert_eq!(*p, vec![Tweak::Plugin { key: 0, index: 0 }, Tweak::Host(Action::Tempo)]);
     }
 
     /// The built-in EQ in a mixer slot: "Show all parameters" lists its parameters in the browser, a parameter row makes
@@ -483,7 +503,7 @@ mod tests {
         let menu = a.state.playlist.popup.take().unwrap();
         assert_eq!((menu.items[0].label.as_ref(), menu.items[0].head), ("No parameter", true));
         assert!(menu.items.iter().any(|i| i.label == "Create automation clip" && !i.enabled));
-        a.state.session.params.note(Tweak::Plugin { key, index: 35 });
+        note(&mut a.state.tweaks, Tweak::Plugin { key, index: 35 });
         a.params_menu(MenuEntry::Automation);
         let last = a.state.session.project.channels.last().unwrap();
         assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Main level #2"));

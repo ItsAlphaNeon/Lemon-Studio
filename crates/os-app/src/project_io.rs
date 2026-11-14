@@ -160,7 +160,7 @@ pub(crate) fn open_in(ses: &mut Session, file: os_flp::FlpFile, mut project: os_
     crate::init::apply(ses);
     // One whose file has no start is started now, as a writer creating a project does (spec:
     // flp/events/project-info.md "Writer notes").
-    ses.project.get_mut().work_time.get_or_insert_with(crate::project_info_ui::work_time_now);
+    ses.project.get_mut().work_time.get_or_insert_with(crate::project_info::work_time_now);
     ses.file = Some(file);
     ses.path = Some(path);
     ses.history.reset();
@@ -194,7 +194,7 @@ pub(crate) fn read(path: &Path) -> Result<(os_flp::FlpFile, os_model::Project, b
 /// stock plugins kept in step with the project, the mixer's effects and containers, the commands' plugins, samples into
 /// the samplers, and the instances' housekeeping. What it would show is dropped.
 pub(crate) fn host_tick(ses: &mut Session) {
-    crate::loading_ui::tick(ses, false);
+    crate::loading::tick(ses, false);
     crate::lemon_midi_out::sync_midi_outs(ses);
     let _ = crate::edit::mixer::fx_requests_in(ses);
     let _ = crate::container::sync_containers_in(ses);

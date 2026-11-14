@@ -7,7 +7,6 @@
 // spec: ui/plugin-window.md (Misc tab)
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
-use crate::misc_page::{self as mp, MiscVals, M};
 use os_model::{Channel, ChannelMisc};
 
 fn bi_in(v: f32) -> f32 {
@@ -100,8 +99,8 @@ pub fn get(misc: &ChannelMisc, m: M) -> f32 {
 
 /// Sets one page value in `misc` (clamped to the value's range).
 pub fn put(misc: &mut ChannelMisc, m: M, v: f32) {
-    let (lo, hi) = mp::range_of(m);
-    let v = if v.is_finite() { v.clamp(lo, hi) } else { mp::default_of(m) };
+    let (lo, hi) = range_of(m);
+    let v = if v.is_finite() { v.clamp(lo, hi) } else { default_of(m) };
     let key = |v: f32| v.round().clamp(0.0, 131.0) as u8;
     match m {
         M::LevelPan => misc.levels[0] = bi_in(v),
@@ -161,21 +160,6 @@ pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
     })
 }
 
-/// A Misc tab edit of rack row `row`: the channel model, its hosted Lemon Sampler (root / fine), then playback.
-/// No undo step, as in FL (measured 2026-10-28).
-pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
-    let Some(ch) = app.state.session.project.get_mut().channels.get_mut(row) else { return };
-    put(&mut ch.misc, m, v);
-    sync(&mut app.state.session, row, &[m]);
-    app.state.session.dirty = true;
-    app.invalidate();
-}
-
-/// Rack row `row`'s Lemon Sampler takes the Misc values it plays again (after an undo put them back).
-pub fn follow(app: &mut crate::app::App, row: usize) {
-    app.host(|s| follow_in(s, row));
-}
-
 /// `follow` in the session.
 pub fn follow_in(s: &mut crate::session::Session, row: usize) {
     sync(s, row, &M::ALL);
@@ -183,7 +167,7 @@ pub fn follow_in(s: &mut crate::session::Session, row: usize) {
 }
 
 /// Rack row `row`'s Lemon Sampler takes Misc values `ms` it plays.
-fn sync(s: &mut crate::session::Session, row: usize, ms: &[M]) {
+pub(crate) fn sync(s: &mut crate::session::Session, row: usize, ms: &[M]) {
     let Some(ch) = s.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { return };
     let misc = ch.misc;
     for &m in ms {
@@ -194,56 +178,236 @@ fn sync(s: &mut crate::session::Session, row: usize, ms: &[M]) {
     s.params.reread(row);
 }
 
-/// The list menu of a Misc value (chord list, number boxes) at canvas point (x, y); the current value is ticked. A knob or
-/// slider's menu is "Reset" (spec: ui/knobs.md "Owner decisions").
-#[cfg(plugin_windows)]
-pub fn menu(app: &crate::app::App, row: usize, m: M, x: f32, y: f32) -> crate::playlist::Popup {
-    use crate::playlist::{Cmd, Mark, PItem, Popup};
-    if mp::draggable(m) && !mp::list_on_right(m) {
-        return Popup { x, y, items: vec![PItem::new("Reset", Cmd::Misc(row, m, mp::default_of(m)))], sub: None, scroll: [0; 2] };
-    }
-    let cur = app.state.session.project.channels.get(row).map_or(mp::default_of(m), |ch| get(&ch.misc, m));
-    let items = mp::list_entries(m)
-        .into_iter()
-        .map(|(label, v)| PItem::new(label, Cmd::Misc(row, m, v)).mark(Mark::Radio((v - cur).abs() < 0.5)))
-        .collect();
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
+/// The page's values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum M {
+    LevelPan,
+    LevelVol,
+    LevelModX,
+    LevelModY,
+    PolyMax,
+    PolySlide,
+    Porta,
+    Mono,
+    TimeGate,
+    TimeShift,
+    TimeSwing,
+    FullPorta,
+    /// Tracking, volume page.
+    VolMid,
+    VolPan,
+    VolModX,
+    VolModY,
+    /// Tracking, key page.
+    KeyMid,
+    KeyPan,
+    KeyModX,
+    KeyModY,
+    Cut,
+    CutBy,
+    ArpDir,
+    ArpTime,
+    ArpGate,
+    ArpRange,
+    ArpRepeat,
+    ArpSlide,
+    ArpChord,
+    EchoFeed,
+    EchoPan,
+    EchoModX,
+    EchoModY,
+    EchoPitch,
+    EchoTime,
+    Echoes,
+    PingPong,
+    FatMode,
+    Root,
+    MainPitch,
+    AddKey,
+    Fine,
 }
+
+impl M {
+    pub const COUNT: usize = M::Fine as usize + 1;
+    pub const ALL: [M; M::COUNT] = [
+        M::LevelPan,
+        M::LevelVol,
+        M::LevelModX,
+        M::LevelModY,
+        M::PolyMax,
+        M::PolySlide,
+        M::Porta,
+        M::Mono,
+        M::TimeGate,
+        M::TimeShift,
+        M::TimeSwing,
+        M::FullPorta,
+        M::VolMid,
+        M::VolPan,
+        M::VolModX,
+        M::VolModY,
+        M::KeyMid,
+        M::KeyPan,
+        M::KeyModX,
+        M::KeyModY,
+        M::Cut,
+        M::CutBy,
+        M::ArpDir,
+        M::ArpTime,
+        M::ArpGate,
+        M::ArpRange,
+        M::ArpRepeat,
+        M::ArpSlide,
+        M::ArpChord,
+        M::EchoFeed,
+        M::EchoPan,
+        M::EchoModX,
+        M::EchoModY,
+        M::EchoPitch,
+        M::EchoTime,
+        M::Echoes,
+        M::PingPong,
+        M::FatMode,
+        M::Root,
+        M::MainPitch,
+        M::AddKey,
+        M::Fine,
+    ];
+
+    /// Hint label (Lemon Studio wording).
+    pub fn label(self) -> &'static str {
+        match self {
+            M::LevelPan => "Panning adjustment",
+            M::LevelVol => "Volume adjustment",
+            M::LevelModX => "Mod A adjustment",
+            M::LevelModY => "Mod B adjustment",
+            M::PolyMax => "Maximum polyphony",
+            M::PolySlide => "Slide time",
+            M::Porta => "Portamento",
+            M::Mono => "Mono",
+            M::TimeGate => "Note gate",
+            M::TimeShift => "Note time shift",
+            M::TimeSwing => "Note time swing",
+            M::FullPorta => "Always glide",
+            M::VolMid | M::KeyMid => "Tracking middle point",
+            M::VolPan | M::KeyPan => "Tracking to panning",
+            M::VolModX | M::KeyModX => "Tracking to Mod A",
+            M::VolModY | M::KeyModY => "Tracking to Mod B",
+            M::Cut => "Choke group",
+            M::CutBy => "Choked by group",
+            M::ArpDir => "Arpeggio direction",
+            M::ArpTime => "Arpeggio time",
+            M::ArpGate => "Arpeggio gate",
+            M::ArpRange => "Arpeggio range (octaves)",
+            M::ArpRepeat => "Arpeggio note repeat",
+            M::ArpSlide => "Arpeggio slide",
+            M::ArpChord => "Arpeggio chord",
+            M::EchoFeed => "Echo feedback",
+            M::EchoPan => "Echo panning",
+            M::EchoModX => "Echo Mod A",
+            M::EchoModY => "Echo Mod B",
+            M::EchoPitch => "Echo pitch",
+            M::EchoTime => "Echo time",
+            M::Echoes => "Number of echoes",
+            M::PingPong => "Ping pong echoes",
+            M::FatMode => "Thicken",
+            M::Root => "Root note",
+            M::MainPitch => "Affected by the main pitch",
+            M::AddKey => "Add root note to the key",
+            M::Fine => "Fine tuning",
+        }
+    }
+}
+
+/// Values of the page, indexed by `M`. Knobs are 0..1 (bipolar knobs centred at 0.5), switches 0 / 1, boxes and
+/// lists whole numbers (0 = `---` for boxes that can be off), `Root` a MIDI key (60 = C5), `Fine` cents ±100,
+/// `*Mid` MIDI keys.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MiscVals {
+    pub v: [f32; M::COUNT],
+    /// A sampler channel: "Add to key" reaches the sound (Lemon Sampler plays it; the engine has no such setting).
+    pub sampler: bool,
+}
+
+impl MiscVals {
+    pub fn get(&self, m: M) -> f32 {
+        self.v[m as usize]
+    }
+    pub fn set(&mut self, m: M, v: f32) {
+        self.v[m as usize] = v;
+    }
+}
+
+impl Default for MiscVals {
+    /// A new channel (measured on FL's default Sampler channel).
+    fn default() -> Self {
+        let mut v = [0.0; M::COUNT];
+        for m in M::ALL {
+            v[m as usize] = default_of(m);
+        }
+        MiscVals { v, sampler: true }
+    }
+}
+
+/// The default of one value (middle click resets to it).
+pub fn default_of(m: M) -> f32 {
+    match m {
+        M::LevelPan | M::LevelVol | M::LevelModX | M::LevelModY => 0.5,
+        M::VolPan | M::VolModX | M::VolModY | M::KeyPan | M::KeyModX | M::KeyModY => 0.5,
+        M::EchoPan | M::EchoModX | M::EchoModY | M::EchoPitch => 0.5,
+        M::TimeGate | M::TimeSwing | M::ArpGate => 1.0,
+        M::ArpTime => os_model::Arpeggio::TIME_DEFAULT,
+        M::EchoTime => os_model::Echo::TIME_DEFAULT,
+        M::PolySlide => 500.0 / 1024.0,
+        M::FullPorta | M::MainPitch => 1.0,
+        M::ArpRange | M::ArpRepeat => 1.0,
+        M::ArpChord => -1.0,
+        M::Echoes => 4.0,
+        M::VolMid => 100.0,
+        M::Root | M::KeyMid => 60.0,
+        _ => 0.0,
+    }
+}
+
+/// Smallest and largest value of a box / list / note value.
+pub fn range_of(m: M) -> (f32, f32) {
+    match m {
+        M::PolyMax => (0.0, 999.0),
+        M::Cut | M::CutBy => (0.0, 999.0),
+        // spec: audio/channel-misc.md "Settings" (the echo count's control range was not found; 0 and 10 were exported).
+        M::ArpRange => (0.0, 6.0),
+        M::ArpRepeat => (1.0, 6.0),
+        M::Echoes => (0.0, 10.0),
+        M::ArpDir => (0.0, 5.0),
+        M::ArpChord => (-1.0, CHORD_ENTRIES as f32),
+        M::Root | M::VolMid | M::KeyMid => (0.0, 131.0),
+        M::Fine => (-100.0, 100.0),
+        _ => (0.0, 1.0),
+    }
+}
+
+/// Entries of FL 24.1's chords file, which the stored arpeggio chord `k >= 1` names (spec: audio/channel-misc.md
+/// "Settings", "The chords file").
+pub const CHORD_ENTRIES: i32 = 88;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A Misc knob's or slider's right-click menu is Reset, to the page's default; a list keeps its values.
-    #[cfg(plugin_windows)]
-    #[test]
-    fn knob_and_slider_menus_reset() {
-        use crate::playlist::Cmd;
-        let mut app = crate::app::App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
-        for m in [M::LevelPan, M::TimeGate, M::VolMid, M::Fine] {
-            let menu = menu(&app, 0, m, 0.0, 0.0);
-            assert_eq!(menu.items.len(), 1, "{m:?}");
-            assert_eq!((menu.items[0].label.as_ref(), &menu.items[0].cmd), ("Reset", &Cmd::Misc(0, m, mp::default_of(m))), "{m:?}");
-        }
-        assert!(menu(&app, 0, M::PolyMax, 0.0, 0.0).items.len() > 1, "a number box's list");
-        assert!(menu(&app, 0, M::ArpChord, 0.0, 0.0).items.len() > 1, "the chord list");
-    }
 
     #[test]
     fn every_value_round_trips_through_the_model() {
         let mut misc = ChannelMisc::default();
         // Defaults agree with the page's defaults.
         for m in M::ALL {
-            assert!((get(&misc, m) - mp::default_of(m)).abs() < 1e-6, "{m:?}: {} vs {}", get(&misc, m), mp::default_of(m));
+            assert!((get(&misc, m) - default_of(m)).abs() < 1e-6, "{m:?}: {} vs {}", get(&misc, m), default_of(m));
         }
         for m in M::ALL {
-            let (lo, hi) = mp::range_of(m);
+            let (lo, hi) = range_of(m);
             let mut v = if hi > 1.0 { (lo + 3.0).min(hi) } else { 0.25 };
             put(&mut misc, m, v);
             if (get(&misc, m) - v).abs() > 1e-6 {
                 // A switch: flip it.
-                v = 1.0 - mp::default_of(m);
+                v = 1.0 - default_of(m);
                 put(&mut misc, m, v);
             }
             assert!((get(&misc, m) - v).abs() < 1e-6, "{m:?}");

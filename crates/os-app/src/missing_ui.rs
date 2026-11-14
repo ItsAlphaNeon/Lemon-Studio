@@ -101,7 +101,7 @@ pub fn tick(app: &mut App) {
     let dirs = match s.rx.try_recv() {
         Ok(d) => d,
         Err(TryRecvError::Empty) => {
-            app.damage_rect(crate::loading::panel_rect(app.state.screen).outset(4.0));
+            app.damage_rect(crate::loading_ui::panel_rect(app.state.screen).outset(4.0));
             return;
         }
         Err(TryRecvError::Disconnected) => Vec::new(),
@@ -252,4 +252,27 @@ pub(crate) mod tests {
         os_engine::sample::set_search_folders(Vec::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// The box: what is missing, that the project keeps it, and Find samples... when samples are missing.
+pub(crate) fn missing_box(samples: &[String], plugins: &[String]) -> Msg {
+    let count = |v: &[String]| v.iter().collect::<HashSet<_>>().len();
+    let mut parts: Vec<String> = vec!["Some files this project uses were not found. The project keeps them: saving it does not remove them.\n".into()];
+    if !samples.is_empty() {
+        parts.push(format!("\nSamples ({}): ", count(samples)));
+        parts.push(listed(samples.to_vec()));
+    }
+    if !plugins.is_empty() {
+        parts.push(format!("\nPlugins ({}): ", count(plugins)));
+        parts.push(listed(plugins.to_vec()));
+    }
+    if !samples.is_empty() {
+        parts.push("\n\nFind samples... looks for the missing samples by name in a folder you choose and its subfolders.".into());
+    }
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let text = spans(&parts);
+    if samples.is_empty() {
+        return Msg::new(Kind::Warning, "Missing project files", text, &[Answer::Ok], Then::MissingFiles);
+    }
+    Msg::new(Kind::Warning, "Missing project files", text, &[Answer::Yes, Answer::Ok], Then::MissingFiles).labelled(&["Find samples...", "OK"])
 }

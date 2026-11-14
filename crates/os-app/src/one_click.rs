@@ -9,7 +9,6 @@
 
 use crate::session::{Session, View};
 use crate::capture::{self, capture, Input, InputStream, Recorder};
-use crate::playlist::{Cmd, Mark, PItem};
 
 /// The undo step a take is placed with (as FL's History names it).
 pub const RECORDED: &str = "Recorded items";
@@ -39,44 +38,8 @@ impl AudioRec {
     }
 }
 
-/// A stereo and a mono header per device with its inputs, each recording into the audio editor (`editor`) or the
-/// playlist; the input picked last has a dot.
-pub fn inputs(editor: bool) -> Vec<PItem> {
-    let last = capture::last_input();
-    let mut v = Vec::new();
-    let list = devices();
-    for (device, asio, channels) in &list {
-        if *channels == 0 {
-            v.push(header(device.clone()));
-            v.push(PItem::new("(no audio inputs)", Cmd::Nothing).off());
-            continue;
-        }
-        let inputs = Input::of(device, *asio, *channels);
-        for stereo in [true, false] {
-            let group: Vec<&Input> = inputs.iter().filter(|i| i.stereo == stereo).collect();
-            if group.is_empty() {
-                continue;
-            }
-            v.push(header(format!("{device} - {}", if stereo { "stereo" } else { "mono" })));
-            for i in group {
-                v.push(PItem::new(i.label(), Cmd::OneClick(i.clone(), editor)).mark(Mark::Radio(last.as_ref() == Some(i))));
-            }
-        }
-    }
-    if list.is_empty() {
-        v.push(PItem::new("(no audio inputs)", Cmd::Nothing).off());
-    }
-    v
-}
-
-fn header(label: String) -> PItem {
-    let mut h = PItem::new(label, Cmd::Nothing);
-    h.head = true;
-    h
-}
-
 /// `capture::devices`, listed again at most every few seconds (the menu is drawn on every repaint while open).
-fn devices() -> Vec<(String, bool, u16)> {
+pub(crate) fn devices() -> Vec<(String, bool, u16)> {
     #[cfg(test)]
     {
         vec![("Test ASIO".to_string(), true, 2)]
@@ -213,7 +176,6 @@ fn place_take(s: &mut Session, path: &std::path::Path, frames: u64, rate: u32, s
 
 #[cfg(test)]
 mod tests {
-
     /// The tests that record share the one input capture.
     static RECORDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

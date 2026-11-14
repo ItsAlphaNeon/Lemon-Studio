@@ -18,11 +18,8 @@
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::time::{Duration, Instant};
 
-use os_model::Project;
-use os_ui::Rect;
-use winit::keyboard::NamedKey;
+use os_model::{Project, WorkTime};
 
-use crate::dialog::Field;
 
 /// The time spent working on the project this session. The spec has the time spent count on while the project is open
 /// but does not say what FL counts (spec: flp/events/project-info.md, event 237 and "Open questions"); Lemon Studio's
@@ -155,15 +152,10 @@ pub(crate) const SONG_HOLD: f32 = 5.0;
 pub(crate) const SONG_FADE: f32 = 0.5;
 
 /// The Song info box's size and colours (spec: flp/events/project-info.md "The Song info box").
-const SONG_BOX: (f32, f32) = (502.0, 272.0);
+pub(crate) const SONG_BOX: (f32, f32) = (502.0, 272.0);
 pub(crate) const SONG_BG: u32 = 0xCCD1D5;
 pub(crate) const SONG_BORDER: u32 = 0x8E9397;
 pub(crate) const SONG_INK: u32 = 0x1A1C1E;
-
-/// The Song info box, centred on the main window of size `screen`.
-pub fn song_box_rect(screen: (f32, f32)) -> Rect {
-    Rect::new(((screen.0 - SONG_BOX.0) / 2.0).floor(), ((screen.1 - SONG_BOX.1) / 2.0).floor(), SONG_BOX.0, SONG_BOX.1)
-}
 
 /// FL's genre menu after "(none)", in its order (spec: ui/settings-choices.md "Info").
 pub const GENRES: [&str; 56] = [
@@ -225,30 +217,14 @@ pub const GENRES: [&str; 56] = [
     "Tropical House",
 ];
 
-/// Home / End / Up / Down in Comments go by its lines (between line breaks): Up and Down keep the caret's column, in
-/// characters, and go to the start / end of the text from the first / last line.
-pub(crate) fn line_key(f: &mut Field, key: NamedKey) {
-    let chars: Vec<char> = f.text.chars().collect();
-    let c = f.caret.min(chars.len());
-    let start = |i: usize| chars[..i].iter().rposition(|&ch| ch == '\n').map_or(0, |p| p + 1);
-    let end = |i: usize| chars[i..].iter().position(|&ch| ch == '\n').map_or(chars.len(), |p| i + p);
-    let (s0, e0) = (start(c), end(c));
-    f.caret = match key {
-        NamedKey::Home => s0,
-        NamedKey::End => e0,
-        NamedKey::ArrowUp if s0 == 0 => 0,
-        NamedKey::ArrowUp => {
-            let prev = start(s0 - 1);
-            prev + (c - s0).min(s0 - 1 - prev)
-        }
-        NamedKey::ArrowDown if e0 == chars.len() => chars.len(),
-        NamedKey::ArrowDown => {
-            let next = e0 + 1;
-            next + (c - s0).min(end(next) - next)
-        }
-        _ => c,
-    };
-    f.all = false;
+/// The date and time now, as a project's start (days since 1899-12-30): fixed in a test that runs the motions' clock
+/// (`anim::set_clock_at`, the equivalence harness), so a project made new starts the same on every run.
+pub(crate) fn work_time_now() -> WorkTime {
+    #[cfg(test)]
+    if !crate::time::still() {
+        return WorkTime { started: 46_000.5, spent: 0.0 };
+    }
+    os_flp::project::work_time_now()
 }
 
 #[cfg(test)]

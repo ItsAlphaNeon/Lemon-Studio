@@ -1064,6 +1064,8 @@ pub(crate) use crate::user_dir::THEME_DIR;
 pub struct State {
     /// The open project and what goes with it (`crate::session`).
     pub session: crate::session::Session,
+    /// The parameters tweaked last, newest first ("Most recent", "Second most recent": Tools and Add menus).
+    pub tweaks: Vec<crate::params_ui::Tweak>,
     /// The plugin editor windows (`crate::editor_host`): the interface's, apart from the instances.
     pub editor_host: crate::editor_host::EditorHost,
     /// The rack's view an undo step puts back, by step (`crate::follow`).
@@ -1548,6 +1550,7 @@ impl App {
             state: State {
                 session: crate::session::Session::new(project, transport),
                 editor_host: Default::default(),
+                tweaks: Vec::new(),
                 rack_views: Default::default(),
                 plugdb: Default::default(),
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -1905,7 +1908,7 @@ impl App {
     pub(crate) fn export_tick(&mut self) {
         match crate::export::poll(&mut self.state.session) {
             crate::export::Polled::Idle => {}
-            crate::export::Polled::Running => self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0)),
+            crate::export::Polled::Running => self.damage_rect(crate::loading_ui::panel_rect(self.state.screen).outset(4.0)),
             crate::export::Polled::Done(name, r) => {
                 if let Some(p) = self.state.session.pattern_render.take() {
                     return self.pattern_render_done(p, r);
@@ -2389,7 +2392,7 @@ impl App {
     /// `loading::sync_samplers` with the views following it (tests).
     #[cfg(test)]
     fn sync_samplers(&mut self, deadline: Option<std::time::Instant>) -> bool {
-        self.host(|s| crate::loading_ui::sync_samplers(s, deadline))
+        self.host(|s| crate::loading::sync_samplers(s, deadline))
     }
 
     /// Project loading (spec: ui/project-loading.md): samples decode on worker threads first, then the sampler
@@ -2397,14 +2400,14 @@ impl App {
     /// project, new sampler rows are hosted at once.
     fn loading_tick(&mut self) {
         let scanning = self.sweep.is_some();
-        match self.host(|s| crate::loading_ui::tick(s, scanning)) {
+        match self.host(|s| crate::loading::tick(s, scanning)) {
             None => {}
             // What was not found is listed now (spec: ui/project-loading.md §6).
             Some(true) => {
                 crate::missing_ui::loaded(self);
                 self.invalidate();
             }
-            Some(false) => self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0)),
+            Some(false) => self.damage_rect(crate::loading_ui::panel_rect(self.state.screen).outset(4.0)),
         }
     }
 
@@ -2639,13 +2642,13 @@ impl App {
                         continue;
                     }
                     Request::Misc(row, m, v) => {
-                        crate::misc::set(self, row, m, v);
+                        crate::misc_ui::set(self, row, m, v);
                         continue;
                     }
                     Request::MiscMenu(row, m, x, y) => {
                         let Some((_, detached)) = self.state.editor_host.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
-                        self.state.playlist.popup = Some(crate::misc::menu(self, row, m, lx, ly));
+                        self.state.playlist.popup = Some(crate::misc_ui::menu(self, row, m, lx, ly));
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
                         continue;
@@ -3908,7 +3911,7 @@ impl App {
     /// for the stock Dark theme used without a file) and its note colours.
     /// Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)".
     pub fn clip_colors(&self) -> crate::clip_colors::ClipColors {
-        crate::clip_colors::ClipColors::of(&self.state.fl_theme())
+        crate::clip_colors_ui::of(&self.state.fl_theme())
     }
 
     /// The mixer's cables swing until still: step them and repaint where they were and are.
@@ -4434,7 +4437,7 @@ impl App {
         }
         // In PAT mode the song position slider shows the play-start marker within the pattern's length.
         if !self.state.song_mode() {
-            self.damage_band(crate::song_pos::PANEL);
+            self.damage_band(crate::song_pos_ui::PANEL);
         }
     }
 
@@ -15616,7 +15619,7 @@ mod tests {
             (M::FatMode, 1.0),
         ];
         for (m, v) in first {
-            crate::misc::set(&mut a, row, m, v);
+            crate::misc_ui::set(&mut a, row, m, v);
         }
         let want = a.state.session.project.channels[row].misc;
         assert_ne!(want, untouched);
@@ -15645,7 +15648,7 @@ mod tests {
             (M::FatMode, 0.0),
         ];
         for (m, v) in second {
-            crate::misc::set(&mut b, row, m, v);
+            crate::misc_ui::set(&mut b, row, m, v);
         }
         let want = b.state.session.project.channels[row].misc;
         let c = reopen(&mut b);
@@ -20626,7 +20629,7 @@ mod tests {
     /// play-start marker); an empty playlist disables it in SONG mode.
     #[test]
     fn song_position_slider() {
-        use crate::song_pos::PANEL;
+        use crate::song_pos_ui::PANEL;
         use crate::song_pos_ui::handle_x;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);

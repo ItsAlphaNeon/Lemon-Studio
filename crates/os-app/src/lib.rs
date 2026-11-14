@@ -30,6 +30,7 @@ mod audio_bench;
 mod dropout_log;
 mod editor_host;
 mod effect_ports;
+mod time;
 mod projects;
 mod user_dir;
 #[cfg(test)]
@@ -174,6 +175,7 @@ mod project_plugins_ui;
 mod presets;
 mod presets_ui;
 mod misc;
+mod misc_ui;
 mod misc_page;
 mod note_names;
 mod save_form;

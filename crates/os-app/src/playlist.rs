@@ -3421,7 +3421,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             return None;
         }
         Cmd::Misc(row, m, v) => {
-            crate::misc::set(app, row, m, v);
+            crate::misc_ui::set(app, row, m, v);
             return None;
         }
         Cmd::PluginMenu(key, id, pick) => {

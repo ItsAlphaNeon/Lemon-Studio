@@ -176,6 +176,9 @@ impl App {
     }
 }
 
+/// The panel (input area), main-window coordinates (spec: ui/main-window.md §3).
+pub const PANEL: Rect = Rect::new(381.0, 45.0, 194.0, 32.0);
+
 #[cfg(test)]
 mod tests {
     use super::*;

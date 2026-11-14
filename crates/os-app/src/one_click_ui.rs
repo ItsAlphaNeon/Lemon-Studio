@@ -110,6 +110,42 @@ impl App {
     }
 }
 
+/// A stereo and a mono header per device with its inputs, each recording into the audio editor (`editor`) or the
+/// playlist; the input picked last has a dot.
+pub fn inputs(editor: bool) -> Vec<PItem> {
+    let last = capture::last_input();
+    let mut v = Vec::new();
+    let list = devices();
+    for (device, asio, channels) in &list {
+        if *channels == 0 {
+            v.push(header(device.clone()));
+            v.push(PItem::new("(no audio inputs)", Cmd::Nothing).off());
+            continue;
+        }
+        let inputs = Input::of(device, *asio, *channels);
+        for stereo in [true, false] {
+            let group: Vec<&Input> = inputs.iter().filter(|i| i.stereo == stereo).collect();
+            if group.is_empty() {
+                continue;
+            }
+            v.push(header(format!("{device} - {}", if stereo { "stereo" } else { "mono" })));
+            for i in group {
+                v.push(PItem::new(i.label(), Cmd::OneClick(i.clone(), editor)).mark(Mark::Radio(last.as_ref() == Some(i))));
+            }
+        }
+    }
+    if list.is_empty() {
+        v.push(PItem::new("(no audio inputs)", Cmd::Nothing).off());
+    }
+    v
+}
+
+fn header(label: String) -> PItem {
+    let mut h = PItem::new(label, Cmd::Nothing);
+    h.head = true;
+    h
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

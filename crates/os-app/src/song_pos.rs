@@ -7,11 +7,7 @@
 
 use std::time::Duration;
 
-use os_ui::Rect;
 
-
-/// The panel (input area), main-window coordinates (spec: ui/main-window.md §3).
-pub const PANEL: Rect = Rect::new(381.0, 45.0, 194.0, 32.0);
 /// The handle's centre runs from `X0` (position 0) to `X0 + W` (the end of the range) (§1).
 pub const X0: f32 = 395.0;
 pub const W: f32 = 170.0;

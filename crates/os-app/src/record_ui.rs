@@ -55,7 +55,7 @@ impl App {
     fn record_question(&mut self) {
         use crate::playlist::{Cmd, PItem, Popup};
         let arm = |label: &'static str, notes: bool, automation: bool| PItem::new(label, Cmd::Rec(RecCmd::Arm { notes, automation }));
-        let audio = crate::one_click::inputs(false);
+        let audio = crate::one_click_ui::inputs(false);
         let items = vec![
             PItem::head("What would you like to record?"),
             arm("Notes and automation", true, true),

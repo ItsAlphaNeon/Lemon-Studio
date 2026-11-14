@@ -182,7 +182,7 @@ pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Op
     let mut ses = crate::session::Session::new(crate::projects::default_project(), crate::transport::Transport::new(crate::factory_folder::dir()));
     // The plugins of the last scan, as the window's app has them before its own scan.
     ses.plugins = crate::project_io::last_scan();
-    ses.project.get_mut().work_time = Some(crate::project_info_ui::work_time_now());
+    ses.project.get_mut().work_time = Some(crate::project_info::work_time_now());
     crate::project_io::mark_saved(&mut ses, &crate::lemon_state::Looks::none());
     if let Some(p) = project {
         match crate::project_io::open_headless(&mut ses, &p) {

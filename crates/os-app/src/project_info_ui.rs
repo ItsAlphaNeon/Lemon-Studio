@@ -23,16 +23,6 @@ pub fn spent_days(s: &State, now: Instant) -> f64 {
     s.session.project.work_time.map_or(0.0, |w| w.spent) + s.credits.clock.elapsed(now).as_secs_f64() / 86_400.0
 }
 
-/// The date and time now, as a project's start (days since 1899-12-30): fixed in a test that runs the motions' clock
-/// (`anim::set_clock_at`, the equivalence harness), so a project made new starts the same on every run.
-pub(crate) fn work_time_now() -> WorkTime {
-    #[cfg(test)]
-    if !crate::anim::still() {
-        return WorkTime { started: 46_000.5, spent: 0.0 };
-    }
-    os_flp::project::work_time_now()
-}
-
 /// The time spent on the project as a save writes it (`App::write_project`): the file's start, and what was spent
 /// before plus the session's clock (spec: flp/events/project-info.md "Writer notes": "then adds the time spent").
 pub(crate) fn saved_work_time(s: &State) -> WorkTime {
@@ -273,6 +263,37 @@ pub(crate) fn accept_info(s: &mut State) {
             *value = (!text.is_empty()).then_some(text);
         }
     });
+}
+
+/// The Song info box, centred on the main window of size `screen`.
+pub fn song_box_rect(screen: (f32, f32)) -> Rect {
+    Rect::new(((screen.0 - SONG_BOX.0) / 2.0).floor(), ((screen.1 - SONG_BOX.1) / 2.0).floor(), SONG_BOX.0, SONG_BOX.1)
+}
+
+/// Home / End / Up / Down in Comments go by its lines (between line breaks): Up and Down keep the caret's column, in
+/// characters, and go to the start / end of the text from the first / last line.
+pub(crate) fn line_key(f: &mut Field, key: NamedKey) {
+    let chars: Vec<char> = f.text.chars().collect();
+    let c = f.caret.min(chars.len());
+    let start = |i: usize| chars[..i].iter().rposition(|&ch| ch == '\n').map_or(0, |p| p + 1);
+    let end = |i: usize| chars[i..].iter().position(|&ch| ch == '\n').map_or(chars.len(), |p| i + p);
+    let (s0, e0) = (start(c), end(c));
+    f.caret = match key {
+        NamedKey::Home => s0,
+        NamedKey::End => e0,
+        NamedKey::ArrowUp if s0 == 0 => 0,
+        NamedKey::ArrowUp => {
+            let prev = start(s0 - 1);
+            prev + (c - s0).min(s0 - 1 - prev)
+        }
+        NamedKey::ArrowDown if e0 == chars.len() => chars.len(),
+        NamedKey::ArrowDown => {
+            let next = e0 + 1;
+            next + (c - s0).min(end(next) - next)
+        }
+        _ => c,
+    };
+    f.all = false;
 }
 
 #[cfg(test)]

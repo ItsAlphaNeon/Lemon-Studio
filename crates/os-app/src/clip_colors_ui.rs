@@ -11,6 +11,12 @@ use os_theme::{FlTheme, Palette};
 use crate::clip_colors::*;
 
 /// The face the Classic rack draws for stored colour `c` in its default palette.
+
+/// The rule of the applied `.flstheme` `fl`.
+pub fn of(fl: &FlTheme) -> ClipColors {
+    ClipColors { note_colors: fl.override_clips, list: fl.note_colors.iter().map(|c| Rgb::new(c.r, c.g, c.b)).collect() }
+}
+
 #[cfg(test)]
 pub fn drawn(c: Rgb) -> os_theme::Color {
     crate::views::rgb(c).mix(Palette::default().name_button, NAME_MIX)
@@ -22,6 +28,13 @@ mod tests {
     use crate::app::App;
     use os_model::{ChannelKind, ClipSource};
     use os_theme::Color;
+
+    /// The session's name button face is the stock theme's (`clip_colors::NAME_BUTTON`).
+    #[test]
+    fn the_name_button_face_is_the_themes() {
+        let f = os_theme::Palette::default().name_button;
+        assert_eq!([f.r, f.g, f.b], crate::clip_colors::NAME_BUTTON);
+    }
 
     /// The hue distance between two hues (degrees).
     fn apart(a: f32, b: f32) -> f32 {

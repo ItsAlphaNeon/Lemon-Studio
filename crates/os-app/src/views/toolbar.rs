@@ -755,7 +755,7 @@ fn pitch(ui: &mut Ui, c: &Ctx) {
 fn song_pos(ui: &mut Ui, c: &Ctx) {
     let (t, a, s, f) = (ui.t, c.a, c.s, c.f);
     let lemon = super::lemon(ui);
-    let sp = a.r(crate::song_pos::PANEL);
+    let sp = a.r(crate::song_pos_ui::PANEL);
     let range = crate::song_pos_ui::range(s);
     let pos = crate::song_pos_ui::shown(s, f.playing, f.song, f.tick, f.song_pos_drag);
     ui.live(Live::Clock, sp);

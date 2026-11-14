@@ -17,7 +17,6 @@
 // spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)", ui/flstheme.md §3 (OverrideClips)
 
 use os_model::Rgb;
-use os_theme::{FlTheme, Palette};
 
 /// The Classic name button's face: the channel colour mixed this far toward the theme's neutral face. The rack draws
 /// with it, and new clip channels' colours are stored through it.
@@ -40,11 +39,43 @@ pub struct ClipColors {
     pub list: Vec<Rgb>,
 }
 
-impl ClipColors {
-    /// The rule of the applied `.flstheme` `fl`.
-    pub fn of(fl: &FlTheme) -> ClipColors {
-        ClipColors { note_colors: fl.override_clips, list: fl.note_colors.iter().map(|c| Rgb::new(c.r, c.g, c.b)).collect() }
+/// The seed of every random colour and the piano roll's randomizer: the time, and a fixed one in tests so a test
+/// (and the equivalence harness) gets the same colours on every run.
+pub(crate) fn clock() -> u64 {
+    if cfg!(test) {
+        return 0x5eed;
     }
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+}
+
+/// The seed's bits mixed (as `patterns::random_color` does).
+pub(crate) fn hash(seed: u64) -> u64 {
+    let mut x = seed ^ 0x9e37_79b9_7f4a_7c15;
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    x ^ (x >> 33)
+}
+
+/// Hue (degrees), saturation and lightness as unrounded 0..255 components.
+pub(crate) fn hsl(h: f32, s: f32, l: f32) -> [f32; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h.rem_euclid(360.0) / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    [(r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0]
+}
+
+impl ClipColors {
 
     /// The colour for random `seed`.
     pub fn pick(&self, seed: u64) -> Rgb {
@@ -68,45 +99,13 @@ impl ClipColors {
     }
 }
 
-/// The seed of every random colour and the piano roll's randomizer: the time, and a fixed one in tests so a test
-/// (and the equivalence harness) gets the same colours on every run.
-pub(crate) fn clock() -> u64 {
-    if cfg!(test) {
-        return 0x5eed;
-    }
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
-}
-
-/// The seed's bits mixed (as `patterns::random_color` does).
-fn hash(seed: u64) -> u64 {
-    let mut x = seed ^ 0x9e37_79b9_7f4a_7c15;
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    x ^ (x >> 33)
-}
-
-/// Hue (degrees), saturation and lightness as unrounded 0..255 components.
-fn hsl(h: f32, s: f32, l: f32) -> [f32; 3] {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = h.rem_euclid(360.0) / 60.0;
-    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
-    let (r, g, b) = match hp as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = l - c / 2.0;
-    [(r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0]
-}
+/// The rack's default name button face (the stock theme's `name_button`): stored colours are mixed back from it
+/// (`stored`). The interface's test checks it against the theme.
+pub(crate) const NAME_BUTTON: [u8; 3] = [0x2e, 0x31, 0x32];
 
 /// The colour to store for a button drawn `drawn`: the inverse of the rack's mix with the default name button face.
 pub(crate) fn stored(drawn: [f32; 3]) -> Rgb {
-    let face = Palette::default().name_button;
+    let face = Rgb::new(NAME_BUTTON[0], NAME_BUTTON[1], NAME_BUTTON[2]);
     let k = NAME_MIX;
     let inv = |d: f32, f: u8| ((d - k * f32::from(f)) / (1.0 - k)).round().clamp(0.0, 255.0) as u8;
     Rgb::new(inv(drawn[0], face.r), inv(drawn[1], face.g), inv(drawn[2], face.b))
@@ -114,7 +113,6 @@ pub(crate) fn stored(drawn: [f32; 3]) -> Rgb {
 
 #[cfg(test)]
 mod tests {
-
     /// The hue distance between two hues (degrees).
     fn apart(a: f32, b: f32) -> f32 {
         let d = (a - b).rem_euclid(360.0);

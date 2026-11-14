@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex, Weak};
 
 use os_model::target::{self, Target};
 
-use crate::app::Action;
 use crate::plugins::{fx_key, fx_of, MEMBER_KEY};
 
 /// The values of an instance's parameters, by id.
@@ -62,14 +61,6 @@ pub struct List {
 /// automation clip moving a parameter does on every tick).
 const REREAD_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Something the user moved last (spec §5).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Tweak {
-    /// A plugin parameter changed in the plugin's own editor: hosted key, parameter index.
-    Plugin { key: usize, index: usize },
-    /// A host control with an automation target (knob, fader, tempo).
-    Host(Action),
-}
 
 impl ParamUi {
     /// The host set parameter `id` of instance `key` to `v` (an undo, the value box, Paste): what the plugin's window
@@ -93,8 +84,6 @@ impl ParamUi {
 pub struct ParamUi {
     /// By hosted key (`plugins::Plugins::hosted`).
     pub lists: BTreeMap<usize, List>,
-    /// Newest first: "Most recent", "Second most recent".
-    pub last: Vec<Tweak>,
 }
 
 impl ParamUi {
@@ -107,14 +96,6 @@ impl ParamUi {
         self.visible(key).next().is_some()
     }
 
-    pub(crate) fn note(&mut self, t: Tweak) {
-        if self.last.first() == Some(&t) {
-            return;
-        }
-        self.last.retain(|x| *x != t);
-        self.last.insert(0, t);
-        self.last.truncate(2);
-    }
 
     /// The instance behind `key`, if it is still hosted.
     pub(crate) fn plugin(&self, key: usize) -> Option<Arc<Mutex<dyn os_host::Plugin>>> {
@@ -221,8 +202,8 @@ pub enum MenuEntry {
 
 /// What a plugin tick of the parameters leaves to the app (`App::params_tick`).
 pub(crate) struct Tick {
-    /// A parameter was tweaked in its window: the hint shows it.
-    pub(crate) moved: bool,
+    /// A parameter was tweaked in its window, (key, index): the hint shows it and it is the last tweaked.
+    pub(crate) moved: Option<(usize, usize)>,
     /// Values for automation recording: (key, index, range, value).
     pub(crate) recorded: Vec<(usize, usize, (f64, f64), f64)>,
     /// "Create automation clip" picked in a plugin's own menu: (key, index).
@@ -318,7 +299,7 @@ pub(crate) fn params_in(ses: &mut crate::session::Session) -> Tick {
             let (os_host::ParamEvent::Begin(id) | os_host::ParamEvent::Value(id, _)) = e else { continue };
             edited.push(key);
             if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
-                moved = Some(Tweak::Plugin { key, index });
+                moved = Some((key, index));
                 // What automation recording takes: the value with the parameter's stated range.
                 if let (os_host::ParamEvent::Value(_, v), Some(info)) = (e, p.param_info(index)) {
                     recorded.push((key, index, (info.min, info.max), v));
@@ -366,9 +347,5 @@ pub(crate) fn params_in(ses: &mut crate::session::Session) -> Tick {
             ses.dirty = true;
         }
     }
-    let tweaked = moved.is_some();
-    if let Some(t) = moved {
-        ses.params.note(t);
-    }
-    Tick { moved: tweaked, recorded, automate }
+    Tick { moved, recorded, automate }
 }
