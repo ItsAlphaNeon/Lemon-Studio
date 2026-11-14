@@ -9,7 +9,6 @@ use os_model::{ChannelKind, ClipSource, Project};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-use crate::app::State;
 use crate::control::command::color_text;
 
 fn kind(k: ChannelKind) -> &'static str {
@@ -25,13 +24,6 @@ fn kind(k: ChannelKind) -> &'static str {
 
 fn track_id(p: &Project, n: u16) -> Option<u32> {
     p.mixer.iter().find(|m| m.index == n).map(|m| m.id.0)
-}
-
-/// The project: settings, channels, mixer tracks in use, patterns and the playlist shown. Notes are read per pattern
-/// (`notes`).
-#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
-pub fn project(s: &State) -> Value {
-    project_in(&s.session, s.selected_channel)
 }
 
 /// `project` on the session; `selected` is the channel the interface has selected (0 without one).

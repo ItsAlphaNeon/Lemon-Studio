@@ -17,7 +17,7 @@ use crate::pattern_render::*;
 /// Where the renders go (§2): the data folder's Rendered folder; a project without a data folder uses one-click
 /// recording's fallback (the user folder, else the system's temporary folder).
 pub fn folder(s: &State) -> PathBuf {
-    crate::data_folder::folder(s).or_else(crate::user_dir::theme_dir).unwrap_or_else(std::env::temp_dir).join(FOLDER)
+    crate::data_folder_ui::folder(s).or_else(crate::user_dir::theme_dir).unwrap_or_else(std::env::temp_dir).join(FOLDER)
 }
 
 /// The export of the current pattern (§2): the Export form's defaults for one pass of a pattern (a 32-bit float WAV

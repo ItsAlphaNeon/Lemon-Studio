@@ -938,7 +938,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Edit(InfoField::Url, 0.0),
                 Gap(8.0),
                 // FL's footer (spec: ui/settings-choices.md "Info").
-                InfoFooter(crate::project_info::footer(s, std::time::Instant::now())),
+                InfoFooter(crate::project_info_ui::footer(s, std::time::Instant::now())),
             ])]
         }
         DEBUG => {

@@ -671,7 +671,7 @@ impl App {
             s.session.project = crate::locked::Locked::new(crate::projects::empty_project());
             s.session.project.get_mut().ppq = ppq;
             s.session.project.get_mut().tempo = Some(tempo);
-            crate::project_info::created(s);
+            crate::project_info_ui::created(s);
             s.session.file = None;
             s.session.path = None;
             s.set_tempo(tempo);

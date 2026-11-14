@@ -886,7 +886,7 @@ pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16
     let mixer = mixer.or_else(|| crate::track_links::audio_mixer(s, track));
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
-    let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project)));
+    let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::edit::mixer::max_insert(&s.project)));
     s.project.get_mut().channels.push(Channel {
         id: os_model::Id::NONE,
         index,

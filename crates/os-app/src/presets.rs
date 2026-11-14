@@ -520,7 +520,7 @@ fn auto_name(ses: &mut crate::session::Session, key: usize, path: &Path) {
         Some(_) => {}
         None => {
             if let Some(ch) = ses.project.get_mut().channels.get_mut(key) {
-                crate::rack::auto_name(ch, path);
+                crate::edit::rack::auto_name(ch, path);
             }
         }
     }

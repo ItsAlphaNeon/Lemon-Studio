@@ -737,7 +737,7 @@ impl Command {
                     ch.mixer_track = t;
                 }
                 if let Some(path) = sample.filter(|p| !p.is_empty()) {
-                    crate::rack::auto_name(ch, std::path::Path::new(&path));
+                    crate::edit::rack::auto_name(ch, std::path::Path::new(&path));
                     ch.sample_path = Some(path.clone());
                     s.sample_loads.push((row, path));
                 }
@@ -817,8 +817,8 @@ impl Command {
                 if path.is_empty() {
                     ch.sample_path = None;
                 } else {
-                    crate::rack::auto_name(ch, std::path::Path::new(&path));
-                    crate::rack::read_tags(ch, std::path::Path::new(&path));
+                    crate::edit::rack::auto_name(ch, std::path::Path::new(&path));
+                    crate::edit::rack::read_tags(ch, std::path::Path::new(&path));
                     ch.sample_path = Some(path.clone());
                 }
                 s.sample_loads.push((row, path));

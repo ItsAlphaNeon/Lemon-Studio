@@ -1532,7 +1532,7 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
     // spec: ui/settings-choices.md "Advanced: Initialize controls automatically". Every control here has a target
     // (`App::automation_target`), the swing knob, the mixer box and the LED included (measured 2026-11-02, §19).
     let control = auto.as_ref().map(|a| (a.0, a.2));
-    let [init, delete] = crate::init::items(s, control);
+    let [init, delete] = crate::init_ui::items(s, control);
     // Edit automation in piano roll: the channel volume and panning knobs have a lane there (Lemon Studio's design). The
     // piano roll has no lane for the main swing, a channel's mixer track or its switch, so it stays greyed on the swing
     // knob, the mixer box and the LED.
@@ -1563,7 +1563,7 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
         None => PItem::new("Edit automation clip...", Cmd::Nothing).off(),
     });
     // The mixer box and the LED take a controller too (Lemon Studio's design, ui/remote-control.md §1).
-    v.extend(crate::remote::menu_items(knob.map(crate::typein::Target::Knob).or(other)));
+    v.extend(crate::remote_ui::menu_items(knob.map(crate::typein::Target::Knob).or(other)));
     v.push(PItem::head("Value"));
     match knob {
         Some(k) => {
@@ -1699,7 +1699,7 @@ fn box_at_row(s: &State, r: usize, mouse: (f32, f32)) -> (f32, f32) {
 pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     let s = &mut app.state;
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
-    let path = crate::data_folder::adopt(s, &p.to_string_lossy());
+    let path = crate::data_folder_ui::adopt(s, &p.to_string_lossy());
     if r < s.session.project.channels.len() {
         crate::history::load_sample(&mut s.session, r);
     }
@@ -1744,7 +1744,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
     }
     if let RCmd::AssignInstrument(r) = c {
         let rows = menu_rows(&app.state, r);
-        let m = crate::track_links::assign_instrument(&mut app.state, &rows);
+        let m = crate::track_links_ui::assign_instrument(&mut app.state, &rows);
         app.invalidate();
         return m;
     }
@@ -4146,7 +4146,7 @@ mod tests {
             assert_eq!(app.state.session.project.channels.iter().find(|c| c.index == made).and_then(|c| c.name.clone()), Some(clip.clone()));
             assert_eq!(app.state.session.project.automation(made).map(|x| (x.target(), x.points[0].value)), Some((Some(tgt), v)));
             assert_eq!(crate::init::entry(&app.state.session, tgt).map(|c| c.value), Some(stored), "{clip}");
-            assert_eq!(crate::init::name(&app.state, tgt), clip);
+            assert_eq!(crate::init_ui::name(&app.state, tgt), clip);
             assert_eq!(entry(&app, a, "Edit automation clip...").cmd, Cmd::Param(crate::params::PCmd::EditClip(made)));
         }
         // The values as the playlist shows them.

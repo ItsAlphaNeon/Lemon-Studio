@@ -909,7 +909,7 @@ fn save_favs(favs: &[Fav]) {
 /// The folders the index reads (spec §11): the dropped folders and the project's data folder.
 pub(crate) fn index_roots(s: &crate::app::State) -> Vec<std::path::PathBuf> {
     let mut v = s.browser_folders.clone();
-    v.extend(crate::data_folder::folder(s));
+    v.extend(crate::data_folder_ui::folder(s));
     v
 }
 
@@ -1252,7 +1252,7 @@ fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<Str
         return Some("The selected channel is not a sampler".into());
     }
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
-    let path = crate::data_folder::adopt(s, path);
+    let path = crate::data_folder_ui::adopt(s, path);
     crate::history::load_sample(&mut s.session, row);
     let ch = &mut s.session.project.get_mut().channels[row];
     crate::rack::auto_name(ch, std::path::Path::new(&path));

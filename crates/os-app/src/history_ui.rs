@@ -1048,9 +1048,9 @@ mod tests {
             app.state.settings.info_edit.as_mut().unwrap().text.set(text);
         };
         type_in(&mut app, InfoField::Title, "  Song ");
-        crate::project_info::accept_info(&mut app.state);
+        crate::project_info_ui::accept_info(&mut app.state);
         type_in(&mut app, InfoField::Title, "Song");
-        crate::project_info::accept_info(&mut app.state);
+        crate::project_info_ui::accept_info(&mut app.state);
         type_in(&mut app, InfoField::Author, "Someone");
         app.state.settings.info_edit = None;
         app.info_act(InfoField::Author);

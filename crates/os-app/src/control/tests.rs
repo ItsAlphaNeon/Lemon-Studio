@@ -27,7 +27,7 @@ fn test_client() -> By {
 /// The project and the rack's state of it, ids included (`==` on the model leaves ids out). Not the selection: an
 /// undo leaves it where it is, as before.
 fn reading(a: &App) -> (os_model::Project, Value, f64) {
-    let mut q = query::project(&a.state);
+    let mut q = crate::control::query_ui::project(&a.state);
     q.as_object_mut().unwrap().remove("selected_channel");
     (a.state.session.project.clone(), q, a.state.tempo())
 }
@@ -100,8 +100,8 @@ fn every_command_undoes_and_redoes() {
     round_trip(&mut a, json!({"op": "delete_clip", "clip": clip}));
     let pat2 = ids(&a).2.last().copied().unwrap();
     round_trip(&mut a, json!({"op": "delete_pattern", "pattern": pat2}));
-    let slot = query::project(&a.state)["mixer"].as_array().unwrap().iter().flat_map(|t| t["slots"].as_array().unwrap().clone()).next().unwrap();
-    let track = query::project(&a.state)["mixer"].as_array().unwrap().iter().find(|t| !t["slots"].as_array().unwrap().is_empty()).unwrap()["id"].as_u64().unwrap();
+    let slot = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().flat_map(|t| t["slots"].as_array().unwrap().clone()).next().unwrap();
+    let track = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().find(|t| !t["slots"].as_array().unwrap().is_empty()).unwrap()["id"].as_u64().unwrap();
     round_trip(&mut a, json!({"op": "remove_effect", "track": track, "slot": slot["slot"]}));
 }
 

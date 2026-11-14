@@ -59,7 +59,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
 /// after the highest one in use. Returns its rack row.
 pub(crate) fn add_channel(p: &mut Project) -> usize {
     let index = p.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let track = (p.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(p));
+    let track = (p.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::edit::mixer::max_insert(p));
     p.channels.push(sampler_channel(index, crate::plugins::LEMON_SAMPLER, track));
     p.channels.len() - 1
 }

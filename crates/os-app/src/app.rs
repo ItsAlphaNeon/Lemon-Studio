@@ -1720,7 +1720,7 @@ impl App {
         app.state.global_snap = snap.global;
         app.state.piano.snap = snap.piano;
         app.state.playlist.snap = snap.playlist;
-        crate::project_info::created(&mut app.state);
+        crate::project_info_ui::created(&mut app.state);
         app.mark_saved();
         if let Some(p) = path {
             app.open(p);
@@ -1798,7 +1798,7 @@ impl App {
                 s.rack.reset();
                 s.hide(Win::Plugin);
                 s.mixer_scroll = 0.0;
-                crate::project_info::opened(s);
+                crate::project_info_ui::opened(s);
                 s.message = Some(format!("Opened {}", path.display()));
                 crate::templates::remember(&path);
                 crate::recent::add(&path);
@@ -1811,7 +1811,7 @@ impl App {
                 // A .lemon file's own state (icons, slot names and colours, Performance settings); its channel icons
                 // name channels by position, which the ids given on opening follow.
                 if let Some(f) = self.state.session.file.take() {
-                    crate::lemon_state::apply(&mut self.state, &f);
+                    crate::lemon_state_ui::apply(&mut self.state, &f);
                     // Saved by a version that has features this one does not: those parts do not play.
                     let unknown = crate::lemon_state::unknown_features(&f);
                     if !unknown.is_empty() {
@@ -1962,9 +1962,9 @@ impl App {
         crate::playlist::store_view(s);
         // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`); the time spent on the
         // project and its data folder go into the copy written.
-        let extra = crate::lemon_state::events(s, &s.session.plugins);
-        let work = crate::project_info::saved_work_time(s);
-        let folder = crate::data_folder::saved_folder(s);
+        let extra = crate::lemon_state_ui::events(s, &s.session.plugins);
+        let work = crate::project_info_ui::saved_work_time(s);
+        let folder = crate::data_folder_ui::saved_folder(s);
         let mut stamp = |p: &mut os_model::Project| {
             p.work_time = Some(work);
             if let (Some(dir), Some(df)) = (&folder, p.data_folder.as_mut()) {
@@ -1999,7 +1999,7 @@ impl App {
         // New things get their ids before the copy, so ids alone are no unsaved change.
         let control = &mut self.state.session.control;
         self.state.session.project.write_if(|p| control.settle(p));
-        self.state.session.saved = (self.state.session.project.clone(), self.state.tempo(), crate::lemon_state::saved_form(&self.state, &self.state.session.plugins));
+        self.state.session.saved = (self.state.session.project.clone(), self.state.tempo(), crate::lemon_state_ui::saved_form(&self.state, &self.state.session.plugins));
         self.state.session.plugin_edited = false;
     }
 
@@ -2007,7 +2007,7 @@ impl App {
     pub fn unsaved(&self) -> bool {
         !same_as_saved(&self.state.session.saved.0, &self.state.session.project)
             || self.state.session.saved.1 != self.state.tempo()
-            || self.state.session.saved.2 != crate::lemon_state::saved_form(&self.state, &self.state.session.plugins)
+            || self.state.session.saved.2 != crate::lemon_state_ui::saved_form(&self.state, &self.state.session.plugins)
             || self.state.session.plugin_edited
     }
 
@@ -2329,7 +2329,7 @@ impl App {
         self.reset_hosted();
         let s = &mut self.state;
         s.session.project = crate::locked::Locked::new(default_project());
-        crate::project_info::created(s);
+        crate::project_info_ui::created(s);
         s.session.file = None;
         s.session.path = None;
         s.set_tempo(130.0);
@@ -4521,7 +4521,7 @@ impl App {
             return self.dialog_drop(path);
         }
         // A drop accepts an Info box or a browser folder cell being edited, as a click does.
-        crate::project_info::accept_info(&mut self.state);
+        crate::project_info_ui::accept_info(&mut self.state);
         crate::search_folders::commit(&mut self.state);
         if crate::project_files::is_project(&path) || ext == "zip" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
@@ -4593,7 +4593,7 @@ impl App {
         let s = &mut self.state;
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
         // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
-        let path = crate::data_folder::adopt(s, &path);
+        let path = crate::data_folder_ui::adopt(s, &path);
         let row = match row {
             Some(r) => {
                 crate::history::load_sample(&mut s.session, r);
@@ -4626,7 +4626,7 @@ impl App {
     /// plugin picker's.
     pub(crate) fn sample_to_slicer(&mut self, path: String) {
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let path = crate::data_folder::adopt(&mut self.state, &path);
+        let path = crate::data_folder_ui::adopt(&mut self.state, &path);
         let st = match lemon_slicer::file_state(&path, lemon_slicer::state::State::default()) {
             Ok((st, _)) => st,
             Err(e) => {
@@ -4766,7 +4766,7 @@ impl App {
         }
         let stem = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
-        let path = crate::data_folder::adopt(&mut self.state, path);
+        let path = crate::data_folder_ui::adopt(&mut self.state, path);
         self.state.message = Some(match self.state.session.plugins.load_slicer_loop(row, &path) {
             Some(Ok(n)) => {
                 self.state.session.plugin_edited = true;
@@ -6180,7 +6180,7 @@ impl App {
             return;
         }
         // So is the Remote control settings box; a press on one of its value boxes starts a vertical drag of it.
-        if crate::remote::is_open(&self.state) {
+        if crate::remote_ui::is_open(&self.state) {
             if let Some(Action::Remote(r)) = action {
                 if r.is_value() {
                     self.drag = Some(Drag::LinkBox { part: r, y0: self.mouse.1, steps: 0 });
@@ -6228,7 +6228,7 @@ impl App {
         }
         // A click anywhere but the Info box being edited accepts it (spec: ui/settings.md "Info").
         if self.state.settings.info_edit.as_ref().is_some_and(|e| action != Some(Action::Settings(views::settings::SAct::Info(e.field)))) {
-            crate::project_info::accept_info(&mut self.state);
+            crate::project_info_ui::accept_info(&mut self.state);
         }
         // The same for a cell of File ▸ Browser extra search folders.
         if self.state.settings.folder_edit.as_ref().is_some_and(|e| action != Some(Action::Settings(views::settings::SAct::FolderCell(e.row, e.col)))) {
@@ -6488,7 +6488,7 @@ impl App {
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
         self.close_song_info();
-        if crate::typein_ui::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
+        if crate::typein_ui::is_open(&self.state) || crate::remote_ui::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.smooth.stop();
@@ -6530,7 +6530,7 @@ impl App {
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
         self.close_song_info();
-        if crate::typein_ui::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
+        if crate::typein_ui::is_open(&self.state) || crate::remote_ui::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.smooth.stop();
@@ -7585,7 +7585,7 @@ impl App {
             return;
         }
         // The Remote control settings box takes Esc (drops it) and Enter (accepts).
-        if crate::remote::is_open(&self.state) {
+        if crate::remote_ui::is_open(&self.state) {
             match key {
                 Key::Named(NamedKey::Escape) => self.state.link_box = None,
                 Key::Named(NamedKey::Enter) => self.link_accept(),
@@ -20626,7 +20626,8 @@ mod tests {
     /// play-start marker); an empty playlist disables it in SONG mode.
     #[test]
     fn song_position_slider() {
-        use crate::song_pos::{handle_x, PANEL};
+        use crate::song_pos::PANEL;
+        use crate::song_pos_ui::handle_x;
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
         app.state.session.project.get_mut().arrangements =

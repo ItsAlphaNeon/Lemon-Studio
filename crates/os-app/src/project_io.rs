@@ -92,7 +92,7 @@ pub(crate) fn write_in(ses: &mut Session, target: &Path, before: os_model::Proje
             ses.project.get_mut().arrangements.push(os_flp::project::default_arrangement());
         }
         let mut first = ses.project.clone();
-        crate::rack::as_saved(&mut first);
+        crate::edit::rack::as_saved(&mut first);
         crate::project_plugins::store_hosted(&mut first, &ses.plugins);
         match os_flp::project::create(&first) {
             Ok(f) => f,
@@ -106,7 +106,7 @@ pub(crate) fn write_in(ses: &mut Session, target: &Path, before: os_model::Proje
     let lost = os_flp::project::unsaved_parts(&ses.project, &file);
     // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
     let mut proj = ses.project.clone();
-    crate::rack::as_saved(&mut proj);
+    crate::edit::rack::as_saved(&mut proj);
     crate::project_plugins::store_hosted(&mut proj, &ses.plugins);
     edit(&mut proj);
     // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
@@ -160,7 +160,7 @@ pub(crate) fn open_in(ses: &mut Session, file: os_flp::FlpFile, mut project: os_
     crate::init::apply(ses);
     // One whose file has no start is started now, as a writer creating a project does (spec:
     // flp/events/project-info.md "Writer notes").
-    ses.project.get_mut().work_time.get_or_insert_with(crate::project_info::work_time_now);
+    ses.project.get_mut().work_time.get_or_insert_with(crate::project_info_ui::work_time_now);
     ses.file = Some(file);
     ses.path = Some(path);
     ses.history.reset();
@@ -196,7 +196,7 @@ pub(crate) fn read(path: &Path) -> Result<(os_flp::FlpFile, os_model::Project, b
 pub(crate) fn host_tick(ses: &mut Session) {
     crate::loading_ui::tick(ses, false);
     crate::lemon_midi_out::sync_midi_outs(ses);
-    let _ = crate::mixer::fx_requests_in(ses);
+    let _ = crate::edit::mixer::fx_requests_in(ses);
     let _ = crate::container::sync_containers_in(ses);
     if ses.loading.is_none() {
         crate::project_plugins::sync_effects(ses);

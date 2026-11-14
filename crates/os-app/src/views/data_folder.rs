@@ -51,7 +51,7 @@ pub fn paint_row(ui: &mut Ui, s: &State, row: &Row, g: Rect, x0: f32, y: f32, h:
         Row::DataFolder => {
             // Rename: greyed without a data folder or for a project never saved.
             let b = Rect::new(x0, y + 4.0, 76.0, 24.0);
-            let on = df::can_rename(s);
+            let on = crate::data_folder_ui::can_rename(s);
             let hov = if on {
                 ui.hit(b, Action::Settings(SAct::Button(RENAME)), RENAME_HINT)
             } else {
@@ -66,7 +66,7 @@ pub fn paint_row(ui: &mut Ui, s: &State, row: &Row, g: Rect, x0: f32, y: f32, h:
             }
             // The folder button and the path beside it both pick the folder.
             let fb = Rect::new(b.right() + 8.0, y + 4.0, 26.0, 24.0);
-            let path = df::path_text(s);
+            let path = crate::data_folder_ui::path_text(s);
             let pw = (g.right() - 12.0 - (fb.right() + 8.0)).max(0.0);
             let pr = Rect::new(fb.right() + 8.0, y + 4.0, pw, 24.0);
             let hov_f = ui.hit(fb, Action::Settings(SAct::Button(SET_FOLDER)), SET_FOLDER);
@@ -82,7 +82,7 @@ pub fn paint_row(ui: &mut Ui, s: &State, row: &Row, g: Rect, x0: f32, y: f32, h:
             let x = x0 + 10.0;
             let tw = ui.c.text_width(f, k);
             let hr = Rect::new(x - 8.0, cy - 9.0, tw + 26.0, 18.0);
-            let on = df::folder(s).is_some();
+            let on = crate::data_folder_ui::folder(s).is_some();
             let hov = if on {
                 ui.hit(hr, Action::Settings(SAct::Check(COPY_USED_SAMPLES.label)), COPY_HINT)
             } else {

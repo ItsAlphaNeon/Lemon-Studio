@@ -107,11 +107,11 @@ fn top(app: &mut App) -> Option<&mut Form> {
 impl App {
     /// Settings ▸ Project ▸ Data folder ▸ Rename: the Rename project form (spec: ui/data-folder.md §6).
     pub(crate) fn open_rename(&mut self) {
-        if !df::can_rename(&self.state) {
+        if !crate::data_folder_ui::can_rename(&self.state) {
             return;
         }
         let name = crate::backup::project_name(self.state.session.path.as_deref());
-        let folder = df::folder(&self.state).and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
+        let folder = crate::data_folder_ui::folder(&self.state).and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
         self.show_form(Body::Project(Form::Rename(Rename::new(&name, &folder))));
     }
 

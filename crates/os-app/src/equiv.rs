@@ -159,7 +159,7 @@ impl Fp {
         Fp(vec![
             ("project", project_hash(&s.session.project)),
             ("side", side),
-            ("lemon", hash(&crate::lemon_state::saved_form(s, &app.state.session.plugins))),
+            ("lemon", hash(&crate::lemon_state_ui::saved_form(s, &app.state.session.plugins))),
             ("history", history),
             // Whether the engine holds the project as it is: 0 nothing sent yet, 1 in step, 2 behind. Not the copy
             // itself: what it was last handed while playing starts or pauses follows the audio thread's timing.

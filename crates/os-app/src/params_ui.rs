@@ -108,7 +108,7 @@ pub fn level_items(s: &State, create: Option<(u32, String, f64)>, link: crate::t
 /// "Create automation clip" makes (`None` = disabled); `link` = what Link to controller... and Enter value... take.
 fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32, String, f64)>, link: Option<crate::typein::Target>) -> Vec<PItem> {
     // spec: ui/settings-choices.md "Advanced: Initialize controls automatically"
-    let [init, delete] = crate::init::items(s, create.as_ref().map(|c| (c.0, c.2)));
+    let [init, delete] = crate::init_ui::items(s, create.as_ref().map(|c| (c.0, c.2)));
     // Enabled only while a clip drives the parameter (FL observed); it shows that clip in the playlist (§5.2).
     let driven = create.as_ref().and_then(|c| driving_clip(&s.session, c.0));
     let edit = match driven {
@@ -146,7 +146,7 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
     // spec: ui/remote-control.md §1. Ticked on a parameter an automation clip drives (FL observed) or a controller
     // is linked to.
     let linked = driven.is_some() || link.is_some_and(|t| crate::remote::link_of(t).is_some());
-    let mut remote = crate::remote::menu_items(link);
+    let mut remote = crate::remote_ui::menu_items(link);
     if let Some(link) = remote.iter_mut().find(|i| i.label == "MIDI learn...") {
         link.mark = Mark::Check(linked);
     }

@@ -1606,7 +1606,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::AssignAudio(n) => {
             let tg = targets(s, n);
-            crate::track_links::assign_audio(s, &tg)
+            crate::track_links_ui::assign_audio(s, &tg)
         }
         MCmd::UnassignAudio(n) => {
             let tg = targets(s, n);

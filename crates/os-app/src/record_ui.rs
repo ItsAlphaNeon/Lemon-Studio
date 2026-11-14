@@ -113,7 +113,7 @@ impl App {
     fn dump_score_log(&mut self, minutes: u32, replace: Option<bool>) -> Option<String> {
         use crate::playlist::{Cmd, PItem, Popup};
         let s = &mut self.state;
-        let tps = crate::score_log::ticks_per_second(s);
+        let tps = crate::score_log_ui::ticks_per_second(s);
         let channels: Vec<u16> = s.session.project.channels.iter().map(|c| c.index).collect();
         let mut new = s.session.rec.log.notes(minutes, std::time::Instant::now(), tps);
         new.retain(|n| channels.contains(&n.channel));
@@ -971,7 +971,7 @@ mod tests {
         log.up(src(KeyCode::KeyZ), t0 + Duration::from_millis(300));
         log.down(src(KeyCode::KeyX), 62, 90, 0, t0 + Duration::from_millis(700));
         log.up(src(KeyCode::KeyX), t0 + Duration::from_millis(1000));
-        let tps = crate::score_log::ticks_per_second(&app.state);
+        let tps = crate::score_log_ui::ticks_per_second(&app.state);
         let msg = crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Dump(2)));
         assert_eq!(msg.as_deref(), Some("Captured 2 notes into the pattern"));
         let t = |s: f64| (s * tps).round() as u32;
@@ -1002,7 +1002,7 @@ mod tests {
         app.state.set_tempo(70.0);
         let p = &app.state.session.project;
         let at_70 = f64::from(p.ppq) * p.tick_tempo(70.0) / 60.0;
-        assert!((crate::score_log::ticks_per_second(&app.state) - at_70).abs() < 1e-9);
+        assert!((crate::score_log_ui::ticks_per_second(&app.state) - at_70).abs() < 1e-9);
     }
 
     /// "Disarm on stop" disarms at the stop; step edit never takes a recorded note.

@@ -185,7 +185,7 @@ fn place(s: &mut Session, lock_len: Option<(os_model::ClipSource, u32)>) {
                 let len = (*frames as f64 / f64::from(r.rate) * tempo / 60.0 * ppq).ceil() as u32;
                 // Into the mixer track's audio track when it has one free over the take (spec: ui/playlist.md §6c).
                 let track = crate::track_links::record_track(s, *t, *at, at + len.max(1));
-                if crate::playlist::add_audio_clip_on(s, &path.to_string_lossy(), track, *at, Some(*t), lock_len).is_some() {
+                if crate::edit::playlist::add_audio_clip_on(s, &path.to_string_lossy(), track, *at, Some(*t), lock_len).is_some() {
                     placed += 1;
                 }
             }

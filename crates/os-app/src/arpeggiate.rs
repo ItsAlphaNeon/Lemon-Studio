@@ -769,7 +769,7 @@ mod tests {
 
     /// §4: Block and Chord restart the pattern; Time keeps counting from tick 0.
     #[test]
-    fn sync() {
+    pub(crate) fn sync() {
         let ns = || vec![note(384, 192, 62), note(384, 192, 65), note(384, 192, 69)];
         assert_eq!(keys(&arp(ns(), |_| {}))[0], 65);
         assert_eq!(keys(&arp(ns(), |s| s.sync = Sync::Block))[..3], [62, 65, 69]);

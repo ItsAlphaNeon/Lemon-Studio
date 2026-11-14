@@ -828,7 +828,7 @@ mod tests {
         assert_eq!(crate::typein_ui::get(&a.state, link), crate::params_ui::param_value(&a.state, key, 0));
         crate::playlist::run(&mut a, Cmd::CreateAutomation(t, name.clone(), 0.5));
         assert_eq!(crate::params::driving_clip(&a.state.session, tgt), Some(a.state.session.project.channels.last().unwrap().index));
-        assert_eq!(crate::init::name(&a.state, tgt), name, "the clip's name, from its target");
+        assert_eq!(crate::init_ui::name(&a.state, tgt), name, "the clip's name, from its target");
         // Moved to the front of the list: the same member, the same target.
         crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Member(0, 1, Op::Up)));
         tick(&mut a);
@@ -843,7 +843,7 @@ mod tests {
         assert!(a.remote_cc("Test", 0, 20, 127));
         a.state.session.plugins.hosted[&key].plugin.lock().unwrap().idle();
         assert!((crate::params_ui::param_value(&a.state, key, 0).unwrap() - 1.0).abs() < 1e-6);
-        assert!(crate::remote::label(&a.state, &crate::remote::links()[0]).starts_with(&format!("{second} in ")));
+        assert!(crate::remote_ui::label(&a.state, &crate::remote::links()[0]).starts_with(&format!("{second} in ")));
 
         // The levels: the parameter menu, a clip named as the value box names them, a controller.
         let ops = menu_of(&mut a, 0);
@@ -853,7 +853,7 @@ mod tests {
         let caption = level_name(&a.state.session, 2, 0, 2, true);
         assert_eq!(cmd_of(&wet.children, "Create automation clip"), Cmd::CreateAutomation(level, caption.clone(), 1.0));
         assert_eq!(cmd_of(&wet.children, "MIDI learn..."), Cmd::Remote(RCmd::Link(T::Member(2, 0, 2, true))));
-        assert_eq!(crate::init::name(&a.state, level), caption);
+        assert_eq!(crate::init_ui::name(&a.state, level), caption);
         assert_eq!(level_of(&a.state.session, target::decode(level)), Some((2, 0, 2, true)));
         assert_eq!(crate::params::key_of(&a.state.session, target::decode(level)), None, "not a parameter of the effect");
         crate::remote::add(Link::new(0, 21, T::Member(2, 0, 2, false)), true);
@@ -1064,7 +1064,7 @@ mod tests {
         assert_eq!(level, target::channel_param(index, target::member_item(2, target::MEMBER_DRY).unwrap()));
         assert_eq!(level_of(&a.state.session, target::decode(level)), Some((0, CHANNEL, 2, false)));
         assert_eq!(crate::typein_ui::text(&a.state, T::Member(0, CHANNEL, 2, false), false), "100%");
-        assert!(crate::init::name(&a.state, level).starts_with(&place_name(&a.state.session, 0, CHANNEL)));
+        assert!(crate::init_ui::name(&a.state, level).starts_with(&place_name(&a.state.session, 0, CHANNEL)));
         crate::typein_ui::accept(&mut a.state, T::Member(0, CHANNEL, 2, false), false, "25");
         assert_eq!(a.state.session.history.newest_done(), Some(LEVEL));
         ticks(&mut a);

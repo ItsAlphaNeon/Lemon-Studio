@@ -1980,7 +1980,7 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::head("Track"),
         PItem::new("Rename...", Cmd::TrackRename(t)),
         PItem::sub("Color", colors),
-        PItem::sub("Track mode", crate::track_links::mode_items(s, t, |m| Cmd::TrackMode(t, m))),
+        PItem::sub("Track mode", crate::track_links_ui::mode_items(s, t, |m| Cmd::TrackMode(t, m))),
         PItem::sep(),
         PItem::new("Mute", Cmd::TrackMute(t)).mark(Mark::Check(!on)),
         PItem::new("Solo", Cmd::TrackSolo(t)).mark(Mark::Check(s.playlist.solo.as_ref().is_some_and(|x| x.0 == t))),
@@ -2029,7 +2029,7 @@ pub fn lane_menu(tick: u32, x: f32, y: f32) -> Popup {
 }
 
 /// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Reset" for a knob or fader,
-/// "Create automation clip" (§8) and the initial value's items (`crate::init::items`) when the control can be automated,
+/// "Create automation clip" (§8) and the initial value's items (`crate::init_ui::items`) when the control can be automated,
 /// "Enter value..." when it takes one (spec: ui/type-in-value.md §8).
 pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<crate::typein::Target>, x: f32, y: f32) -> Popup {
     // Reset first, as on the rack's and the mixer's knobs (spec: ui/mixer.md §6.3, ui/channel-rack.md §19).
@@ -2041,7 +2041,7 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
     let mut items: Vec<PItem> = reset.map(|c| PItem::new("Reset", Cmd::Reset(c))).into_iter().collect();
     let events = crate::events::menu_item(auto.as_ref(), None);
     if let Some((tgt, name, value)) = auto {
-        let [init, delete] = crate::init::items(s, Some((tgt, value)));
+        let [init, delete] = crate::init_ui::items(s, Some((tgt, value)));
         items.extend([
             PItem::head("Automation"),
             PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, value)),
@@ -2051,7 +2051,7 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
         ]);
     }
     if typein.is_some() {
-        items.extend(crate::remote::menu_items(typein));
+        items.extend(crate::remote_ui::menu_items(typein));
     }
     if let Some(t) = typein {
         items.extend([PItem::head("Value"), PItem::new("Enter value...", Cmd::TypeIn(t))]);
@@ -3258,7 +3258,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Project(c) => return crate::project_picker::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
-        Cmd::TrackMode(t, crate::track_links::Mode::NewInstrument(i)) => return crate::track_links::new_instrument(app, t, i),
+        Cmd::TrackMode(t, crate::track_links::Mode::NewInstrument(i)) => return crate::track_links_ui::new_instrument(app, t, i),
         Cmd::SlotWin(t, c) => {
             let was = std::mem::replace(&mut app.state.selected_mixer, t);
             let m = run(app, *c);
@@ -3922,7 +3922,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::TrackGroup(_) => None,
         Cmd::TrackMode(t, m) => crate::control_ui::edit(s, crate::track_links::TRACK_MODE, crate::control::command::Region::Project, |s| {
-            crate::track_links::set_mode(s, t, m)
+            crate::track_links_ui::set_mode(s, t, m)
         }),
         Cmd::GroupCollapse(t) => {
             toggle_collapse(&mut s.session, t);

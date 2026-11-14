@@ -198,7 +198,7 @@ fn place_take(s: &mut Session, path: &std::path::Path, frames: u64, rate: u32, s
     let text = path.to_string_lossy();
     let added = s.samples.wave(&text).and_then(|_| {
         crate::edit::playlist::snapshot_as(s, RECORDED);
-        crate::playlist::add_audio_clip_on(s, &text, track, start, None, lock_len)
+        crate::edit::playlist::add_audio_clip_on(s, &text, track, start, None, lock_len)
     });
     match added {
         Some(i) => {

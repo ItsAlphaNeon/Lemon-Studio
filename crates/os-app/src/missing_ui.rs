@@ -20,7 +20,7 @@ use crate::missing::*;
 pub fn search_folders(s: &State, picked: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let project = s.session.path.as_deref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()).map(PathBuf::from);
-    let data = crate::data_folder::folder(s);
+    let data = crate::data_folder_ui::folder(s);
     let samples = data.as_ref().map(|d| d.join(crate::data_folder::SAMPLES_DIR));
     for d in project.into_iter().chain(data).chain(samples).chain(picked.iter().cloned()) {
         if !dirs.contains(&d) {
