@@ -35,6 +35,7 @@ pub struct Server {
 }
 
 /// A token no one can guess: 128 bits from the standard library's random hash keys.
+#[cfg(feature = "rpc")]
 fn new_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let half = || {
@@ -45,7 +46,14 @@ fn new_token() -> String {
     format!("{:016x}{:016x}", half(), half())
 }
 
+/// Without the `rpc` feature nothing listens.
+#[cfg(not(feature = "rpc"))]
+pub fn start(_at: &str, _level: Level, _wake: fn()) -> std::io::Result<Server> {
+    Err(std::io::Error::other("the control socket is not in this build"))
+}
+
 /// Starts listening at `at` (a socket path, or a port number); `wake` wakes the UI thread when a request comes.
+#[cfg(feature = "rpc")]
 pub fn start(at: &str, level: Level, wake: fn()) -> std::io::Result<Server> {
     let (tx, rx) = channel::<Request>();
     let shown;
@@ -81,6 +89,7 @@ pub fn start(at: &str, level: Level, wake: fn()) -> std::io::Result<Server> {
     Ok(Server { rx, level, headless: false, clients: Default::default(), at: shown, token })
 }
 
+#[cfg(feature = "rpc")]
 fn tcp(at: &str, tx: Sender<Request>, wake: fn()) -> std::io::Result<String> {
     let port: u16 = at.parse().map_err(|_| std::io::Error::other(format!("not a port: {at}")))?;
     let l = std::net::TcpListener::bind(("127.0.0.1", port))?;
@@ -96,6 +105,7 @@ fn tcp(at: &str, tx: Sender<Request>, wake: fn()) -> std::io::Result<String> {
 }
 
 /// One connection's thread: each line to the UI thread, each answer back.
+#[cfg(feature = "rpc")]
 fn serve<R: BufRead + Send + 'static, W: Write + Send + 'static>(conn: u64, r: R, mut w: W, tx: Sender<Request>, wake: fn()) {
     let _ = std::thread::Builder::new().name(format!("control {conn}")).spawn(move || {
         for line in r.lines() {

@@ -317,8 +317,10 @@ pub fn load(path: &Path, id: &str) -> Result<(Header, Body), String> {
 pub fn read_any(path: &Path, d: &os_host::Descriptor) -> Result<Vec<(String, Body)>, String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     let stem = shown_name(path);
+    #[cfg_attr(not(any(feature = "vst3", feature = "vst2")), allow(unused_variables))]
     let other = || format!("{stem} belongs to another plugin");
     match ext.as_str() {
+        #[cfg(feature = "vst3")]
         "vstpreset" => {
             if d.format != os_host::Format::Vst3 {
                 return Err(format!("{stem} is a VST 3 preset; {} is not a VST 3 plugin", d.name));
@@ -330,6 +332,7 @@ pub fn read_any(path: &Path, d: &os_host::Descriptor) -> Result<Vec<(String, Bod
             }
             Ok(vec![(stem, Body::State(bytes))])
         }
+        #[cfg(feature = "vst2")]
         "fxp" | "fxb" => {
             if d.format != os_host::Format::Vst2 {
                 return Err(format!("{stem} is a VST 2 preset; {} is not a VST 2 plugin", d.name));
@@ -361,7 +364,9 @@ pub fn uid_of(path: &Path) -> Option<String> {
     let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
     let bytes = read(path).ok()?;
     match ext.as_str() {
+        #[cfg(feature = "vst3")]
         "vstpreset" => Some(format!("vst3:{}", os_vst3::preset::Preset::parse(&bytes)?.class_id)),
+        #[cfg(feature = "vst2")]
         "fxp" | "fxb" => Some(format!("vst2:{}", os_vst2::id_text(os_vst2::fxp::parse(&bytes)?.unique_id))),
         _ => decode(&bytes).map(|(h, _)| h.id).filter(|id| !id.is_empty()),
     }
@@ -694,6 +699,7 @@ mod tests {
     }
 
     // spec: plugins/presets.md "Import": VST 3 and VST 2 files are taken by a plugin of their format and id only.
+    #[cfg(all(feature = "vst3", feature = "vst2"))]
     #[test]
     fn foreign_preset_files() {
         let dir = tmp("foreign");

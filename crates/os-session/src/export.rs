@@ -622,6 +622,12 @@ fn wav_bytes(audio: &[f32], ch: u16, rate: u32, bits: u16, dither: bool, meta: &
 
 /// A FLAC file at `bits`, compression `level` 0..=8 (block size, prediction order and stereo coding go up with it, as
 /// libFLAC's levels do).
+#[cfg(not(feature = "export-flac"))]
+fn flac_bytes(_audio: &[f32], _ch: u16, _rate: u32, _bits: u32, _level: u8, _dither: bool) -> Result<Vec<u8>, String> {
+    Err("FLAC is not in this build".into())
+}
+
+#[cfg(feature = "export-flac")]
 fn flac_bytes(audio: &[f32], ch: u16, rate: u32, bits: u32, level: u8, dither: bool) -> Result<Vec<u8>, String> {
     use flacenc::component::BitRepr;
     use flacenc::error::Verify;
@@ -657,6 +663,12 @@ fn flac_bytes(audio: &[f32], ch: u16, rate: u32, bits: u32, level: u8, dither: b
 
 /// An MP3 file at a constant `kbps`, LAME's best quality; `gapless`: with LAME's Info frame first (the encoder's delay
 /// and padding, for players that trim them).
+#[cfg(not(feature = "export-mp3"))]
+fn mp3_bytes(_audio: &[f32], _ch: u16, _rate: u32, _kbps: u32, _gapless: bool) -> Result<Vec<u8>, String> {
+    Err("MP3 is not in this build".into())
+}
+
+#[cfg(feature = "export-mp3")]
 fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32, gapless: bool) -> Result<Vec<u8>, String> {
     use mp3lame_encoder::{Bitrate, Builder, FlushGap, InterleavedPcm, MonoPcm, Quality};
     let rate_of = |k| match k {
@@ -697,6 +709,12 @@ fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32, gapless: bool) -> Res
 }
 
 /// An Ogg Vorbis file at an average `kbps`.
+#[cfg(not(feature = "export-ogg"))]
+fn ogg_bytes(_audio: &[f32], _ch: u16, _rate: u32, _kbps: u32) -> Result<Vec<u8>, String> {
+    Err("Ogg Vorbis is not in this build".into())
+}
+
+#[cfg(feature = "export-ogg")]
 fn ogg_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32) -> Result<Vec<u8>, String> {
     use std::num::{NonZeroU32, NonZeroU8};
     use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
@@ -777,6 +795,7 @@ mod tests {
     /// Every format is written and read back by the decoder playback uses (symphonia), at the length written.
     /// Gapless on: the first frame is LAME's Info frame, with the encoder's delay and padding filled in (the frame
     /// LAME left empty is overwritten, the stream keeps its length). Off: plain audio frames.
+    #[cfg(feature = "export-mp3")]
     #[test]
     fn gapless_mp3_has_an_info_frame() {
         let audio: Vec<f32> = (0..44100 * 2).map(|i| ((i / 2) as f32 * 0.05).sin() * 0.5).collect();
@@ -800,6 +819,7 @@ mod tests {
         assert!(frames >= 44100 + delay as usize, "{frames} frames");
     }
 
+    #[cfg(all(feature = "export-flac", feature = "export-mp3", feature = "export-ogg"))]
     #[test]
     fn writes_every_format() {
         let dir = std::env::temp_dir().join(format!("lemon-export-test-{}", std::process::id()));

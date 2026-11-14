@@ -375,11 +375,19 @@ impl SearchDir {
 
 /// Every search folder: the VST 3, CLAP and VST 2 standard folders, then the added ones.
 pub fn search_dirs(p: &Prefs) -> Vec<SearchDir> {
-    let standard = os_vst3::standard_dirs()
+    #[cfg(feature = "vst3")]
+    let vst3 = os_vst3::standard_dirs();
+    #[cfg(not(feature = "vst3"))]
+    let vst3: Vec<PathBuf> = Vec::new();
+    #[cfg(feature = "vst2")]
+    let vst2 = os_vst2::standard_dirs();
+    #[cfg(not(feature = "vst2"))]
+    let vst2: Vec<PathBuf> = Vec::new();
+    let standard = vst3
         .into_iter()
         .map(|d| (d, Format::Vst3))
         .chain(os_clap::standard_dirs().into_iter().map(|d| (d, Format::Clap)))
-        .chain(os_vst2::standard_dirs().into_iter().map(|d| (d, Format::Vst2)));
+        .chain(vst2.into_iter().map(|d| (d, Format::Vst2)));
     let mut v: Vec<SearchDir> = Vec::new();
     for (path, f) in standard {
         if !v.iter().any(|d| d.kind == DirKind::Standard(f) && same_path(&d.path, &path)) {
@@ -468,7 +476,8 @@ fn walk(dir: &Path, depth: u32, formats: Formats, walked: &mut HashSet<(PathBuf,
         let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase());
         let format = match ext.as_deref() {
             Some("clap") if formats.clap && os_clap::is_plugin(&p) => Some(Format::Clap),
-            Some("vst3") if formats.vst3 && (p.is_dir() || p.is_file()) => Some(Format::Vst3),
+            Some("vst3") if cfg!(feature = "vst3") && formats.vst3 && (p.is_dir() || p.is_file()) => Some(Format::Vst3),
+            #[cfg(feature = "vst2")]
             Some(x) if x == os_vst2::EXTENSION && formats.vst2 && os_vst2::is_plugin(&p) => Some(Format::Vst2),
             _ => None,
         };
@@ -496,10 +505,12 @@ fn builtin_file(p: &Path) -> bool {
 /// itself.
 pub fn stamp(path: &Path, format: Format) -> (u64, u64) {
     let module = match format {
+        #[cfg(feature = "vst3")]
         Format::Vst3 => os_vst3::module_file(path),
         Format::Clap => os_clap::module_file(path),
+        #[cfg(feature = "vst2")]
         Format::Vst2 => os_vst2::module_file(path),
-        Format::Native => path.to_path_buf(),
+        _ => path.to_path_buf(),
     };
     let file = if module.exists() { module } else { path.to_path_buf() };
     let Ok(md) = std::fs::metadata(&file) else { return (0, 0) };
@@ -1226,6 +1237,7 @@ mod tests {
 
     /// VST2 plugins: `.vst` bundles on macOS; elsewhere libraries with the plugin extension only when they export a VST2
     /// entry point (`os_vst2::is_plugin` reads the export table: an ordinary library gets no scanner).
+    #[cfg(feature = "vst2")]
     #[test]
     fn discovery_finds_vst2_plugins() {
         let d = temp("discover_vst2");

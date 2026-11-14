@@ -752,6 +752,7 @@ mod tests {
     }
     /// Master sync to a real loopback port (loopMIDI's "LemonKeys" here): Start, then clocks at 24 a quarter, then Stop
     /// (needs the port and an audio device): `cargo test -p os-app master_clock_loopback -- --ignored`.
+    #[cfg(feature = "midi-io")]
     #[test]
     #[ignore]
     fn master_clock_loopback() {

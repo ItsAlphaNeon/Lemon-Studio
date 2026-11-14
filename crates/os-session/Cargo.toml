@@ -6,6 +6,18 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "rpc"]
+# Hosting VST 3 and VST 2 plugins (off: CLAP and the stock plugins only).
+vst3 = ["dep:os-vst3"]
+vst2 = ["dep:os-vst2"]
+# The export encoders (off: that format is not written).
+export-flac = ["dep:flacenc"]
+export-mp3 = ["dep:mp3lame-encoder"]
+export-ogg = ["dep:vorbis_rs"]
+# The system's MIDI ports (`midi_ports`; off: none are listed or opened).
+midi-io = ["dep:midir"]
+# Listening for control-plane clients (`control::server`; off: `--control` and `--serve` cannot listen).
+rpc = []
 # The test helpers and test-mode switches (per-thread settings, test folders) for the tests of a crate built on this
 # one (`os-app`'s).
 test-util = []
@@ -19,49 +31,49 @@ os-hostlink.workspace = true
 os-clap = { path = "../os-clap" }
 os-native = { path = "../os-native" }
 os-host.workspace = true
-os-vst3.workspace = true
-os-vst2.workspace = true
+os-vst3 = { workspace = true, optional = true }
+os-vst2 = { workspace = true, optional = true }
 os-paths.workspace = true
-lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked"] }
-lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", features = ["linked"] }
-lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", features = ["linked"] }
-citrus = { path = "../../plugins/citrus", features = ["linked"] }
-smith = { path = "../../plugins/smith", features = ["linked"] }
-lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", features = ["linked"] }
-lemon-limiter = { path = "../../plugins/lemon-limiter", features = ["linked"] }
-lemon-reverb = { path = "../../plugins/lemon-reverb", features = ["linked"] }
-lemon-delay = { path = "../../plugins/lemon-delay", features = ["linked"] }
-lemon-soft-clipper = { path = "../../plugins/lemon-soft-clipper", features = ["linked"] }
-lemon-fast-distortion = { path = "../../plugins/lemon-fast-distortion", features = ["linked"] }
-lemon-balance = { path = "../../plugins/lemon-balance", features = ["linked"] }
-lemon-stereo-enhancer = { path = "../../plugins/lemon-stereo-enhancer", features = ["linked"] }
-lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", features = ["linked"] }
-lemon-chorus = { path = "../../plugins/lemon-chorus", features = ["linked"] }
-lemon-small-fx = { path = "../../plugins/lemon-small-fx" }
-lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", features = ["linked"] }
-lemon-filter = { path = "../../plugins/lemon-filter", features = ["linked"] }
-tesla = { path = "../../plugins/tesla", features = ["linked"] }
-pulp-filter = { path = "../../plugins/pulp-filter", features = ["linked"] }
-press = { path = "../../plugins/press", features = ["linked"] }
-lemon-flanger = { path = "../../plugins/lemon-flanger", features = ["linked"] }
-lemon-phaser = { path = "../../plugins/lemon-phaser", features = ["linked"] }
-lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", features = ["linked"] }
-lemon-formula-controller = { path = "../../plugins/lemon-formula-controller", features = ["linked"] }
-lemon-slicer = { path = "../../plugins/lemon-slicer", features = ["linked"] }
-lemon-vocoder = { path = "../../plugins/lemon-vocoder", features = ["linked"] }
-lemon-drop = { path = "../../plugins/lemon-drop", features = ["linked"] }
+lemon-sampler = { path = "../../plugins/lemon-sampler", default-features = false, features = ["linked"] }
+lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", default-features = false, features = ["linked"] }
+lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", default-features = false, features = ["linked"] }
+citrus = { path = "../../plugins/citrus", default-features = false, features = ["linked"] }
+smith = { path = "../../plugins/smith", default-features = false, features = ["linked"] }
+lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", default-features = false, features = ["linked"] }
+lemon-limiter = { path = "../../plugins/lemon-limiter", default-features = false, features = ["linked"] }
+lemon-reverb = { path = "../../plugins/lemon-reverb", default-features = false, features = ["linked"] }
+lemon-delay = { path = "../../plugins/lemon-delay", default-features = false, features = ["linked"] }
+lemon-soft-clipper = { path = "../../plugins/lemon-soft-clipper", default-features = false, features = ["linked"] }
+lemon-fast-distortion = { path = "../../plugins/lemon-fast-distortion", default-features = false, features = ["linked"] }
+lemon-balance = { path = "../../plugins/lemon-balance", default-features = false, features = ["linked"] }
+lemon-stereo-enhancer = { path = "../../plugins/lemon-stereo-enhancer", default-features = false, features = ["linked"] }
+lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", default-features = false, features = ["linked"] }
+lemon-chorus = { path = "../../plugins/lemon-chorus", default-features = false, features = ["linked"] }
+lemon-small-fx = { path = "../../plugins/lemon-small-fx", default-features = false }
+lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", default-features = false, features = ["linked"] }
+lemon-filter = { path = "../../plugins/lemon-filter", default-features = false, features = ["linked"] }
+tesla = { path = "../../plugins/tesla", default-features = false, features = ["linked"] }
+pulp-filter = { path = "../../plugins/pulp-filter", default-features = false, features = ["linked"] }
+press = { path = "../../plugins/press", default-features = false, features = ["linked"] }
+lemon-flanger = { path = "../../plugins/lemon-flanger", default-features = false, features = ["linked"] }
+lemon-phaser = { path = "../../plugins/lemon-phaser", default-features = false, features = ["linked"] }
+lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", default-features = false, features = ["linked"] }
+lemon-formula-controller = { path = "../../plugins/lemon-formula-controller", default-features = false, features = ["linked"] }
+lemon-slicer = { path = "../../plugins/lemon-slicer", default-features = false, features = ["linked"] }
+lemon-vocoder = { path = "../../plugins/lemon-vocoder", default-features = false, features = ["linked"] }
+lemon-drop = { path = "../../plugins/lemon-drop", default-features = false, features = ["linked"] }
 cpal = "0.18"
 crossbeam-queue = "0.3"
-midir = "0.11"
+midir = { version = "0.11", optional = true }
 # JPEG workspace pictures of theme files (`wallpaper`; PNG goes through tiny-skia). Pure Rust, no threads.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 # Export encoders (`export::encode`): FLAC (pure Rust), MP3 (LAME, built from source) and Ogg Vorbis (libvorbis, built
 # from source).
-flacenc = "0.5"
-mp3lame-encoder = "0.2"
-vorbis_rs = "0.5"
+flacenc = { version = "0.5", optional = true }
+mp3lame-encoder = { version = "0.2", optional = true }
+vorbis_rs = { version = "0.5", optional = true }
 zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]

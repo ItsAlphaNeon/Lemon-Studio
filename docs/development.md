@@ -123,6 +123,22 @@ Each built-in plugin is a crate in [`plugins/`](../plugins), built into Lemon St
 `lemon-small-fx` is what the small Lemon effects share, `lemon-3x-osc` is Lemon Trio and `lemon-parametric-eq-2` is Lemon
 Parametric EQ.
 
+### Optional parts
+
+Some parts are cargo features, on by default, so a build can leave them out:
+
+| Feature | Of | What it leaves out when off |
+|---|---|---|
+| `vst3`, `vst2` | `os-session` (passed on by `os-app` and `lemonstudio`) | VST 3 and VST 2 hosting: those plugins are not found, and a saved one does not load |
+| `export-flac`, `export-mp3`, `export-ogg` | `os-session` (passed on likewise) | That export format: exporting to it says it is not in this build |
+| `midi-io` | `os-session` (passed on likewise) | The system's MIDI ports: none are listed or opened |
+| `rpc` | `os-session` (passed on likewise) | Listening for control-plane clients: `--control` and `--serve` say the socket is not in this build |
+| `editor` | each built-in plugin | Its editor (the session builds its plugins without them; the interface turns them on) |
+| `gui` | `os-plugkit` | The plugin editors' native windows, popups and type-in boxes |
+
+`cargo check -p lemonstudio --no-default-features` builds the program with the session's features off; CI builds that, each
+of them alone, and the session without its plugins' editors (`cargo check -p os-session`).
+
 ## Old plugin names
 
 Lemon Trio and Lemon Parametric EQ were called Lemon 3x Osc and Lemon Parametric EQ 2 before, and earlier all three

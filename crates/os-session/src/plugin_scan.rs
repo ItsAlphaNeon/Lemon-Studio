@@ -154,8 +154,10 @@ fn scan_file(path: &Path, format: Format) -> Scanned {
 }
 
 /// Why plugin file `path` cannot load in this program, when its file tells without loading it (`os_vst2::unsupported`).
+#[cfg_attr(not(feature = "vst2"), allow(unused_variables))]
 fn unsupported(path: &Path, format: Format) -> Option<String> {
     match format {
+        #[cfg(feature = "vst2")]
         Format::Vst2 => os_vst2::unsupported(path),
         _ => None,
     }
@@ -229,6 +231,7 @@ mod tests {
 
     /// A VST2 plugin built for Intel Macs only is listed as not supported on Apple silicon without being tried; a file
     /// that tells nothing is scanned as usual.
+    #[cfg(feature = "vst2")]
     #[test]
     fn plugins_that_cannot_load_here_are_not_tried() {
         let d = std::env::temp_dir().join(format!("os_scan_unsupported_{}", std::process::id()));
