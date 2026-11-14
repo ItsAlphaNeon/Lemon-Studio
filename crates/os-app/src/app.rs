@@ -7902,7 +7902,7 @@ impl App {
             let (_, row, key) = self.typing_held.remove(i);
             self.state.session.live(crate::session::Live::NoteOff { row, key });
             self.typing_lit_changed();
-            self.step_edit_up(crate::step_edit::Src::Typing(code));
+            self.step_edit_up(crate::step_edit_ui::typing(code));
             return true;
         }
         // Ctrl / Alt / Shift combinations stay shortcuts (Shift+D, Shift+Q in the piano roll).
@@ -7945,7 +7945,7 @@ impl App {
         let key = key as u16;
         self.state.session.live(crate::session::Live::NoteOn { row, key, velocity: TYPING_VELOCITY, midi: 0 });
         self.typing_held.push((code, row, key));
-        self.step_edit_down(crate::step_edit::Src::Typing(code), key, TYPING_VELOCITY);
+        self.step_edit_down(crate::step_edit_ui::typing(code), key, TYPING_VELOCITY);
         self.typing_lit_changed();
         self.key_tap(); // spec: ui/tempo-tapper.md §8
         true

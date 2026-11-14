@@ -965,7 +965,7 @@ mod tests {
         let mut app = app();
         let now = Instant::now();
         let t0 = now.checked_sub(Duration::from_secs(10)).expect("a clock");
-        let src = |c| crate::step_edit::Src::Typing(c);
+        let src = |c| crate::step_edit_ui::typing(c);
         let log = &mut app.state.session.rec.log;
         log.down(src(KeyCode::KeyZ), 60, 100, 0, t0);
         log.up(src(KeyCode::KeyZ), t0 + Duration::from_millis(300));

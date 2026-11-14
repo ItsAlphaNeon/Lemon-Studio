@@ -11,7 +11,6 @@
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 
-use winit::keyboard::KeyCode;
 
 
 /// The switch's key in `settings.txt`.
@@ -32,8 +31,8 @@ pub fn toggle() -> bool {
 /// Where a held note comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Src {
-    /// A typing-keyboard key.
-    Typing(KeyCode),
+    /// A typing-keyboard key, by the interface's id for it (`step_edit_ui::typing`).
+    Typing(u64),
     /// A MIDI keyboard's key.
     Midi(u8),
     /// A MIDI key on the Omni preview MIDI channel (spec: ui/midi-settings.md §3).
@@ -78,12 +77,13 @@ impl Chord {
 
 #[cfg(test)]
 mod tests {
+    use winit::keyboard::KeyCode;
     use super::*;
 
     /// The chord is written on the last release only, with every key pressed since the first (spec "Entering notes").
     #[test]
     fn the_last_release_gives_the_chord() {
-        let (a, b, m) = (Src::Typing(KeyCode::KeyZ), Src::Typing(KeyCode::KeyC), Src::Midi(67));
+        let (a, b, m) = (crate::step_edit_ui::typing(KeyCode::KeyZ), crate::step_edit_ui::typing(KeyCode::KeyC), Src::Midi(67));
         let mut c = Chord::default();
         c.down(a, 48, 100);
         c.down(b, 52, 100);

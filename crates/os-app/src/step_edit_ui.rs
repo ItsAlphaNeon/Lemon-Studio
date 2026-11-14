@@ -108,6 +108,14 @@ impl App {
     }
 }
 
+/// The session's id for typing-keyboard key `code` (`Src::Typing`): the same key gives the same id.
+pub fn typing(code: winit::keyboard::KeyCode) -> crate::step_edit::Src {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    code.hash(&mut h);
+    crate::step_edit::Src::Typing(h.finish())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
