@@ -724,3 +724,197 @@ impl EditorHost {
         out
     }
 }
+
+/// Frames that record what the editor host asks of them, for tests without a display (control-plane step 10).
+#[cfg(all(test, plugin_windows))]
+pub mod test_frames {
+    use crate::plugin_window::{ChannelInfo, Frame, FrameEvent, FrameWindow, Frames, LinkMsg};
+    use os_hostlink::PageIcon;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What was asked, one line per call.
+    pub type Log = Rc<RefCell<Vec<String>>>;
+
+    pub struct Recording(pub Log);
+
+    struct Recorded {
+        log: Log,
+        hwnd: isize,
+        editor: RefCell<(f32, f32)>,
+        detached: RefCell<bool>,
+    }
+
+    impl Drop for Recorded {
+        fn drop(&mut self) {
+            self.log.borrow_mut().push(format!("close {}", self.hwnd));
+        }
+    }
+
+    impl Frame for Recorded {
+        fn detached(&self) -> bool {
+            *self.detached.borrow()
+        }
+        fn set_detached(&self, _owner: isize, on: bool) {
+            *self.detached.borrow_mut() = on;
+            self.log.borrow_mut().push(format!("detached {on}"));
+        }
+        fn clip_to(&self, _work: [i32; 4], _covers: &[[i32; 4]]) {}
+        fn hwnd(&self) -> isize {
+            self.hwnd
+        }
+        fn area(&self) -> *mut std::ffi::c_void {
+            std::ptr::null_mut()
+        }
+        fn raise(&self) {
+            self.log.borrow_mut().push(format!("raise {}", self.hwnd));
+        }
+        fn set_info(&self, info: ChannelInfo) {
+            self.log.borrow_mut().push(format!("info {}", info.name));
+        }
+        fn set_pages(&self, _pages: Vec<PageIcon>, _active: usize) {}
+        fn set_resizable(&self, _min: Option<(f32, f32)>) {}
+        fn set_page(&self, _page: usize) {}
+        fn set_hint(&self, _hint: String) {}
+        fn set_preset(&self, _name: Option<String>) {}
+        fn scale(&self) -> f32 {
+            1.0
+        }
+        fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+            (x as i32, y as i32)
+        }
+        fn set_editor_size(&self, editor: (f32, f32)) {
+            *self.editor.borrow_mut() = editor;
+            self.log.borrow_mut().push(format!("editor {}x{}", editor.0, editor.1));
+        }
+        fn set_strip(&self, on: bool) {
+            self.log.borrow_mut().push(format!("strip {on}"));
+        }
+        fn take_events(&self) -> Vec<FrameEvent> {
+            Vec::new()
+        }
+    }
+
+    impl Frames for Recording {
+        fn open(&self, _owner: isize, info: ChannelInfo, editor: (f32, f32), _scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
+            let hwnd = self.0.borrow().iter().filter(|l| l.starts_with("open")).count() as isize + 1;
+            self.0.borrow_mut().push(format!("open {hwnd} {} {}x{} at {},{} detached {detached}", info.name, editor.0, editor.1, pos.0, pos.1));
+            Ok(Box::new(Recorded { log: self.0.clone(), hwnd, editor: RefCell::new(editor), detached: RefCell::new(detached) }))
+        }
+        fn default_position(&self, _owner: isize, _scale: f32) -> (i32, i32) {
+            (40, 30)
+        }
+        fn stack(&self, _parent: isize, hwnds: &[isize]) {
+            self.0.borrow_mut().push(format!("stack {hwnds:?}"));
+        }
+        fn take_exposed(&self) -> bool {
+            false
+        }
+        fn take_link(&self) -> Vec<(isize, LinkMsg)> {
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(all(test, plugin_windows))]
+mod frame_tests {
+    use super::test_frames::{Log, Recording};
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A plugin whose editor opens at 300×200 in whatever area it is given.
+    struct Editing {
+        desc: os_host::Descriptor,
+        open: bool,
+    }
+    impl os_engine::Instrument for Editing {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_engine::HostedEffect for Editing {
+        fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_host::Plugin for Editing {
+        fn desc(&self) -> &os_host::Descriptor {
+            &self.desc
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {}
+        fn has_editor(&self) -> bool {
+            true
+        }
+        fn editor_open(&self) -> bool {
+            self.open
+        }
+        fn open_editor(&mut self, _: *mut std::ffi::c_void, _: f32) -> Result<(u32, u32), String> {
+            self.open = true;
+            Ok((300, 200))
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            self.open.then_some((300, 200))
+        }
+        fn close_editor(&mut self) {
+            self.open = false;
+        }
+        fn save_state(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn load_state(&mut self, _: &[u8]) -> bool {
+            false
+        }
+        fn param_count(&self) -> usize {
+            0
+        }
+        fn param_info(&self, _: usize) -> Option<os_host::ParamInfo> {
+            None
+        }
+    }
+
+    fn info(name: &str) -> ChannelInfo {
+        ChannelInfo { name: name.into(), icon: None, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None }
+    }
+
+    /// The editor host opens a plugin's window through the frames it was given, puts the editor in it at the editor's
+    /// own size, raises it when asked again, and lets go of it when the window closes: all without a display.
+    #[test]
+    fn editor_windows_open_through_the_frames_given() {
+        let log: Log = Default::default();
+        let mut host = EditorHost::default();
+        host.frames = Box::new(Recording(log.clone()));
+        let mut pl = Plugins::default();
+        pl.scale = 1.0;
+        let desc = crate::plugins::builtin()[0].desc.clone();
+        let p = Arc::new(Mutex::new(Editing { desc, open: false }));
+        pl.hosted.insert(0, Hosted::new(p.clone()));
+
+        assert_eq!(host.open_window(&mut pl, 0, info("Keys")), Ok(()));
+        assert!(p.lock().unwrap().open, "the editor opened in the frame");
+        let seen = log.borrow().clone();
+        assert!(seen[0].starts_with("open 1 Keys 560x437 at 40,30 detached false"), "{seen:?}");
+        assert!(seen.iter().any(|l| l == "editor 300x200"), "the frame fits the editor: {seen:?}");
+        assert!(host.editor_open());
+
+        host.open_window(&mut pl, 0, info("Keys")).unwrap();
+        assert_eq!(log.borrow().iter().filter(|l| l.starts_with("open")).count(), 1, "open again raises the same window");
+        assert!(log.borrow().iter().any(|l| l == "raise 1"));
+
+        host.close_window(&mut pl, 0);
+        assert!(!p.lock().unwrap().open, "the editor closed with its window");
+        assert!(log.borrow().iter().any(|l| l == "close 1"), "{:?}", log.borrow());
+        assert!(!host.editor_open());
+    }
+
+    /// Without the program's frames (`NoFrames`) a window does not open, and the host says so.
+    #[test]
+    fn without_frames_no_window_opens() {
+        let mut host = EditorHost::default();
+        let mut pl = Plugins::default();
+        let desc = crate::plugins::builtin()[0].desc.clone();
+        pl.hosted.insert(0, Hosted::new(Arc::new(Mutex::new(Editing { desc, open: false }))));
+        assert!(host.open_window(&mut pl, 0, info("Keys")).is_err());
+        assert!(!host.editor_open());
+    }
+}
