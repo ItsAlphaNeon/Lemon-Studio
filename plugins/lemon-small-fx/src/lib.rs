@@ -20,6 +20,7 @@
 
 pub mod balance;
 pub mod chorus;
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod fast_distortion;
 pub mod filter;
@@ -277,6 +278,7 @@ impl<K: Kind> Plugin for SmallFx<K> {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::FxEditor::new(K::SPEC, self.params.clone(), self.shared.clone())))
     }

@@ -8,6 +8,7 @@
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod dsp;
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod params;
 pub mod view;
@@ -213,6 +214,7 @@ impl Plugin for LemonTrio {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::Osc3Editor::new(self.params.clone(), self.shared.clone())))
     }

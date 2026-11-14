@@ -11,6 +11,7 @@
 
 pub mod ctl;
 pub mod edit;
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod view;
 
@@ -193,6 +194,7 @@ impl Plugin for Press {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::PressEditor::new(self.params.clone())))
     }
