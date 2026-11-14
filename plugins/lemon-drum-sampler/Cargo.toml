@@ -10,6 +10,10 @@ crate-type = ["cdylib", "lib"]
 doctest = false
 
 [features]
+default = ["editor"]
+# The plugin's editor and the windows it opens in (off: a plugin with no editor, as a session with no interface
+# hosts it).
+editor = ["os-plugkit/gui", "lemon-sampler/editor"]
 # Compiled into Lemon Studio: no exported plugin entry points (they would clash with the other built-in plugins).
 linked = ["lemon-sampler/linked"]
 
@@ -18,11 +22,11 @@ nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-featur
 os-engine.workspace = true
 os-dsp.workspace = true
 os-hostlink.workspace = true
-os-plugkit = { path = "../../crates/os-plugkit" }
+os-plugkit = { path = "../../crates/os-plugkit", default-features = false }
 os-ui = { path = "../../crates/os-ui" }
 os-theme = { path = "../../crates/os-theme" }
 # The sampler's voices (its resampler, envelopes and declicks) play the pads.
-lemon-sampler = { path = "../lemon-sampler", features = ["linked"] }
+lemon-sampler = { path = "../lemon-sampler", default-features = false, features = ["linked"] }
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]

@@ -197,7 +197,7 @@ pub struct MidiIn {
     /// Every output device's name.
     pub outputs: Vec<String>,
     /// Open inputs by name; dropping one closes it.
-    conns: Vec<(String, midir::MidiInputConnection<()>)>,
+    conns: Vec<(String, crate::midi_ports::InConn<()>)>,
     clock: Arc<ExtClock>,
     /// Set by the watcher when the device lists changed.
     changed: Arc<AtomicBool>,
@@ -227,13 +227,11 @@ pub fn unique(names: Vec<String>) -> Vec<String> {
 }
 
 fn input_names() -> Vec<String> {
-    let Ok(m) = midir::MidiInput::new(CLIENT) else { return Vec::new() };
-    unique(m.ports().iter().map(|p| m.port_name(p).unwrap_or_default()).collect())
+    unique(crate::midi_ports::input_names())
 }
 
 fn output_names() -> Vec<String> {
-    let Ok(m) = midir::MidiOutput::new(CLIENT) else { return Vec::new() };
-    unique(m.ports().iter().map(|p| m.port_name(p).unwrap_or_default()).collect()).into_iter().filter(|n| !own(n)).collect()
+    unique(crate::midi_ports::output_names()).into_iter().filter(|n| !own(n)).collect()
 }
 
 impl MidiIn {
@@ -309,11 +307,8 @@ impl MidiIn {
     }
 
     /// Opens the `i`-th input (named `name` in `unique`'s list).
-    fn connect(&self, i: usize, name: &str) -> Option<midir::MidiInputConnection<()>> {
-        let mut input = midir::MidiInput::new(CLIENT).ok()?;
+    fn connect(&self, i: usize, name: &str) -> Option<crate::midi_ports::InConn<()>> {
         // SysEx and active sensing never reach the UI; the clock does (External clock sync).
-        input.ignore(midir::Ignore::SysexAndActiveSense);
-        let port = input.ports().into_iter().nth(i)?;
         let (tx, wake, clock): (Sender<Ev>, fn(), Arc<ExtClock>) = (self.tx.clone(), self.wake, self.clock.clone());
         let dev: Arc<str> = Arc::from(name);
         // Runs on the driver's thread: only queues the message and wakes the UI.
@@ -329,7 +324,7 @@ impl MidiIn {
                 }
             }
         };
-        input.connect(&port, CLIENT, take, ()).ok()
+        crate::midi_ports::open_input(i, take)
     }
 
     /// External clock sync follows `device`'s clock (`None`: off).
@@ -405,6 +400,7 @@ mod tests {
     /// Messages sent to a loopback MIDI port (an output that is also an input: a loopMIDI port on Windows, ALSA's
     /// "Midi Through" on Linux) arrive and wake the UI. Needs such a port: `cargo test -p os-session midi_loopback --
     /// --ignored`.
+    #[cfg(feature = "midi-io")]
     #[test]
     #[ignore]
     fn midi_loopback() { // This code is a part of L e m o n S t u d i o.

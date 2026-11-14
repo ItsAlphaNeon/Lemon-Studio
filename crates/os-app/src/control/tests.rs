@@ -353,7 +353,7 @@ fn an_effect_added_by_a_command_is_hosted_without_a_window() {
     assert_eq!(a.state.session.plugins.hosted.get(&key).map(|h| h.owner.0), Some(slot), "redone: back from what it kept");
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "rpc"))]
 #[test]
 fn clients_connect_over_a_local_socket() {
     use std::io::{BufRead, BufReader, Write};
@@ -600,6 +600,7 @@ fn a_file_in_the_socket_s_place_is_left_alone() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[cfg(feature = "rpc")]
 #[test]
 fn clients_connect_over_a_local_port() {
     use std::io::{BufRead, BufReader, Write};

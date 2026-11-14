@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use lemon_small_fx::params::FxParams;
 use lemon_small_fx::peak_controller::{self as pc, SPEC};
-use lemon_small_fx::{editor, Shared, MAX};
+#[cfg(feature = "editor")]
+use lemon_small_fx::editor;
+use lemon_small_fx::{Shared, MAX};
 use nih_plug::prelude::*;
 use os_engine::effects::peak_ctrl::{Core, OUTPUTS};
 
@@ -99,6 +101,7 @@ impl Plugin for LemonPeakController {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::FxEditor::new(SPEC, self.params.clone(), self.shared.clone())))
     }

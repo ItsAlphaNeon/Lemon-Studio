@@ -920,7 +920,8 @@ impl ApplicationHandler for Shell {
                 self.app.mouse_down_middle();
                 self.pending = true;
             }
-            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right | MouseButton::Middle, .. } => {
+            WindowEvent::MouseInput { state: ElementState::Released, button: b @ (MouseButton::Right | MouseButton::Middle), .. } => {
+                self.app.right_down &= b != MouseButton::Right;
                 self.unlock_cursor();
                 self.app.mouse_up_from(None);
                 self.pending = true;
@@ -1031,6 +1032,7 @@ impl ApplicationHandler for Shell {
                 if !focused {
                     self.grab = None;
                     self.unmax = None;
+                    self.app.right_down = false;
                     self.app.typing_release_all();
                     window.request_redraw();
                 }

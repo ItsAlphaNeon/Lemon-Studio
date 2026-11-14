@@ -8,6 +8,7 @@
 // spec: plugins/lemon-reverb.md, plugins/fruity-reeverb-2.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod params;
 pub mod room;
@@ -92,6 +93,7 @@ impl Plugin for LemonReverb {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::ReverbEditor::new(self.params.clone(), self.shared.clone())))
     }

@@ -188,8 +188,99 @@ pub fn ppq(s: &crate::session::Session) -> u32 {
     u32::from(s.project.ppq.max(4))
 }
 
+/// The project's bar in ticks (its time signature: `Project::bar_ticks`).
 pub fn bar(s: &crate::session::Session) -> u32 {
+    s.project.bar_ticks()
+}
+
+/// Four quarter notes: the span the playlist's zoom is counted in (`State::playlist_bar_w` is the width of this many
+/// ticks, whatever the time signature), so the width of a tick does not change with it.
+pub fn ref_bar(s: &crate::session::Session) -> u32 {
     ppq(s) * 4
+}
+
+/// The song's bars. The project's bar from the start; a time-signature marker of the arrangement starts bars of its
+/// own length at its position (the bar it lands in is cut short there), as a pattern's marker sets the pattern's bars
+/// (spec: ui/pattern-time-signature.md). Bar numbers count from 0.
+#[derive(Debug, Clone)]
+pub struct Bars {
+    /// (first tick, bar length in ticks), ascending; the first starts at 0.
+    segs: Vec<(u32, u32)>,
+}
+
+impl Bars {
+    pub fn new(s: &crate::session::Session) -> Bars {
+        let ppq = u32::from(s.project.ppq.max(1));
+        let mut marks: Vec<&TimeMarker> = markers(s).iter().filter(|m| m.kind == TimeMarker::SIGNATURE && m.numerator > 0 && m.denominator > 0).collect();
+        marks.sort_by_key(|m| m.position);
+        let mut segs = vec![(0, s.project.bar_ticks())];
+        for m in marks {
+            let len = (ppq * 4 * u32::from(m.numerator) / u32::from(m.denominator)).max(1);
+            match segs.last_mut() {
+                Some(l) if l.0 == m.position => l.1 = len,
+                _ => segs.push((m.position, len)),
+            }
+        }
+        Bars { segs }
+    }
+
+    fn seg(&self, t: u32) -> usize {
+        self.segs.partition_point(|&(st, _)| st <= t).saturating_sub(1)
+    }
+
+    /// How many bars segment `i` holds (the last one cut short counts), `None` for the open-ended last segment.
+    fn count(&self, i: usize) -> Option<u32> {
+        let (st, len) = self.segs[i];
+        self.segs.get(i + 1).map(|n| (n.0 - st).div_ceil(len))
+    }
+
+    /// The start of the bar `t` is in.
+    pub fn floor(&self, t: u32) -> u32 {
+        let (st, len) = self.segs[self.seg(t)];
+        st + (t - st) / len * len
+    }
+
+    /// The nearest bar line to `t` (halfway goes up).
+    pub fn nearest(&self, t: f32) -> u32 {
+        let t = t.max(0.0);
+        let f = self.floor(t as u32);
+        let i = self.seg(f);
+        let (_, len) = self.segs[i];
+        let next = self.segs.get(i + 1).map_or(f + len, |n| (f + len).min(n.0));
+        if t - f as f32 >= (next - f) as f32 / 2.0 { next } else { f }
+    }
+
+    /// The number of the bar `t` is in.
+    pub fn index(&self, t: u32) -> i32 {
+        let i = self.seg(t);
+        let before: u32 = (0..i).filter_map(|k| self.count(k)).sum();
+        (before + (t - self.segs[i].0) / self.segs[i].1) as i32
+    }
+
+    /// The bars that overlap `t0..t1`: (number, first tick, length).
+    pub fn lines(&self, t0: u32, t1: u32) -> Vec<(i32, u32, u32)> {
+        let mut out = Vec::new();
+        let first = self.seg(t0);
+        let mut before: u32 = (0..first).filter_map(|k| self.count(k)).sum();
+        for i in first..self.segs.len() {
+            let (st, len) = self.segs[i];
+            let end = self.segs.get(i + 1).map(|n| n.0);
+            if st >= t1 {
+                break;
+            }
+            let mut k = if i == first { (t0 - st) / len } else { 0 };
+            loop {
+                let at = st + k * len;
+                if at >= t1 || end.is_some_and(|e| at >= e) {
+                    break;
+                }
+                out.push(((before + k) as i32, at, end.map_or(len, |e| len.min(e - at))));
+                k += 1;
+            }
+            before += self.count(i).unwrap_or(0);
+        }
+        out
+    }
 }
 
 pub fn channel_of(s: &crate::session::Session, ch: u16) -> Option<&Channel> {
@@ -341,7 +432,7 @@ pub fn source_len(s: &crate::session::Session, src: ClipSource) -> u32 {
         ClipSource::Channel(c) => {
             if let Some(a) = s.project.automation(c) {
                 let beats = a.points.last().map_or(0.0, |p| p.beat);
-                return ((beats * f64::from(ppq(s))).round() as u32).max(bar / 4);
+                return ((beats * f64::from(ppq(s))).round() as u32).max(ppq(s));
             }
             // The whole sample at the channel's speed (`fit_audio`).
             let t = channel_of(s, c).map_or(0.0, |ch| audio_ticks(s, ch));
@@ -877,6 +968,47 @@ pub fn follow_audio(s: &mut crate::session::Session) -> bool {
     follow_crossfades(s) || changed
 }
 
+/// An audio clip's channel as one is made: no sample, name or colour yet, on the master, FL's sampler flags.
+pub fn audio_clip_channel() -> Channel {
+    Channel {
+        id: os_model::Id::NONE,
+        index: 0,
+        kind: ChannelKind::AudioClip,
+        name: None,
+        plugin: None,
+        plugin_state: None,
+        color: None,
+        enabled: true,
+        volume: 0.78125,
+        pan: 0.0,
+        pitch_cents: 0,
+        mixer_track: 0,
+        sample_path: None,
+        layer_children: Vec::new(),
+        envelopes: Default::default(),
+        rack: Default::default(),
+        misc: Default::default(),
+        sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
+        lemon_icon: None,
+    }
+}
+
+/// One undo step named `name` for an edit that changes the playlist and adds a channel at the end of the rack.
+pub fn snapshot_new_channel(s: &mut crate::session::Session, name: &'static str) {
+    arr_mut(s);
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    crate::history::record(s, name, crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(capture(s))), rack]));
+}
+
+/// A new channel at the end of the rack: `ch` under the next free index. Returns its index.
+pub fn push_channel(s: &mut crate::session::Session, mut ch: Channel) -> u16 {
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    ch.id = os_model::Id::NONE;
+    ch.index = index;
+    s.project.get_mut().channels.push(ch);
+    index
+}
+
 /// `add_audio_clip_in` on the session (`lock_len` as `place_in` takes it): the playlist's clip source becomes the new
 /// channel and the clip is selected (`View::AudioClipAdded`).
 pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16, tick: u32, mixer: Option<u16>, lock_len: Option<(ClipSource, u32)>) -> Option<usize> {
@@ -888,24 +1020,13 @@ pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
     let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::edit::mixer::max_insert(&s.project)));
     s.project.get_mut().channels.push(Channel {
-        id: os_model::Id::NONE,
         index,
-        kind: ChannelKind::AudioClip,
         name: Some(name),
-        plugin: None,
-        plugin_state: None,
         // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
         color: Some(s.clip_colors.new_channel(index)),
-        enabled: true,
-        volume: 0.78125,
-        pan: 0.0,
-        pitch_cents: 0,
         mixer_track,
         sample_path: Some(path.to_string()),
-        layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
-        sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
-        lemon_icon: None,
+        ..audio_clip_channel()
     });
     let src = track_info(s, track).and_then(|t| t.clip_lock).unwrap_or(ClipSource::Channel(index));
     let i = place_in(s, src, track, tick, lock_len);

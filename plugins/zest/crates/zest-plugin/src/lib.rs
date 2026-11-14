@@ -16,6 +16,7 @@ use zest_core::params::COUNT;
 use zest_core::slop::PresetSlop;
 use zest_core::{Engine, Event, Transport};
 
+#[cfg(feature = "editor")]
 pub mod editor;
 mod params_gen;
 mod scope;
@@ -102,6 +103,7 @@ impl Plugin for Zest {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::ZestEditor::new(self.params.clone(), self.pending.clone(), self.scope.clone())))
     }

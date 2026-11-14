@@ -9,6 +9,7 @@
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod ctl;
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod fft;
 pub mod seed_words;
@@ -312,6 +313,7 @@ impl Plugin for SmithPlugin {
         true
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::SmithEditor::new(self.params.clone())))
     }

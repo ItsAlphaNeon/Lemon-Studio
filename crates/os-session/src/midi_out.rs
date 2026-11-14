@@ -102,19 +102,15 @@ impl MidiOut {
 }
 
 /// Controller 123 on all 16 channels.
-fn all_notes_off(c: &mut midir::MidiOutputConnection) {
+fn all_notes_off(c: &mut crate::midi_ports::OutConn) {
     for ch in 0..16u8 {
         let _ = c.send(&[0xb0 | ch, 123, 0]);
     }
 }
 
 /// Opens output `name` (as `midi_in::unique` lists it).
-fn connect(name: &str) -> Option<midir::MidiOutputConnection> {
-    let out = midir::MidiOutput::new(crate::midi_in::CLIENT).ok()?;
-    let ports = out.ports();
-    let names = crate::midi_in::unique(ports.iter().map(|p| out.port_name(p).unwrap_or_default()).collect());
-    let i = names.iter().position(|n| n == name)?;
-    out.connect(&ports[i], crate::midi_in::CLIENT).ok()
+fn connect(name: &str) -> Option<crate::midi_ports::OutConn> {
+    crate::midi_ports::open_output(name)
 }
 
 /// The clock's timeline from the last start: the position and time it started from, at a tempo.
@@ -153,7 +149,7 @@ struct Dev {
     notes_off: bool,
     sync: bool,
     port: Option<u8>,
-    conn: midir::MidiOutputConnection,
+    conn: crate::midi_ports::OutConn,
 }
 
 fn run(rx: Receiver<Cmd>, watch: Watch) {
