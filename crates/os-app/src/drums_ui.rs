@@ -93,7 +93,7 @@ mod tests {
         assert_eq!(saved.channels[row].plugin_state.as_deref(), Some(lemon_drum_sampler::params::default_state().as_slice()));
 
         let fl = state_for(&path);
-        assert!(a.state.session.plugins.set_state(row, &plugin_state(&fl)));
+        assert!(a.state.session.plugins.set_state(row, &plugin_state(&crate::settings_file::store(), &fl)));
         a.save_to(file.clone());
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&file).unwrap()).unwrap()).unwrap();
         assert_eq!(saved.channels[row].plugin_state.as_deref(), Some(fl.as_slice()));
@@ -129,14 +129,14 @@ mod tests {
             assert!(pads.len() >= 8, "channel {r}: {} pads with samples", pads.len());
             for p in &pads {
                 for (_, l) in p.sounding() {
-                    let file = crate::plugins::resolve_sample(&l.path);
+                    let file = crate::plugins::resolve_sample(&crate::settings_file::store(), &l.path);
                     assert!(std::path::Path::new(&file).is_file(), "channel {r}: {} -> {file}", l.path);
                 }
             }
             // The first pad whose samples open (Lemon Studio reads none of a WavPack file whose first block is empty,
             // like the Breakbeat kick).
             let decodes = |p: &&lemon_drum_sampler::state::Pad| {
-                p.sounding().all(|(_, l)| os_engine::sample::load_shared(std::path::Path::new(&crate::plugins::resolve_sample(&l.path))).is_ok())
+                p.sounding().all(|(_, l)| os_engine::sample::load_shared(std::path::Path::new(&crate::plugins::resolve_sample(&crate::settings_file::store(), &l.path))).is_ok())
             };
             let pad = pads.iter().find(decodes).unwrap_or_else(|| panic!("channel {r}: a pad whose samples open"));
             let inst = a.state.session.plugins.hosted[&r].plugin.clone() as SharedInstrument;

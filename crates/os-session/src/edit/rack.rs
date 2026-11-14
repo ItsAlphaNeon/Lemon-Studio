@@ -821,8 +821,8 @@ pub fn as_saved(p: &mut os_model::Project) {
 /// A sample or channel preset at `path` went into the existing channel `ch`: while "Name channels after their sample or plugin" is on, the
 /// channel takes the file's name without its extension; off, it keeps its name (spec: ui/settings-choices.md
 /// "Miscellaneous: naming, detached plugins and startup"). A channel made new for a file is named after it either way.
-pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
-    if crate::prefs::check(&crate::prefs::AUTO_NAME_CHANNELS) {
+pub fn auto_name(st: &crate::settings_file::SettingsStore, ch: &mut os_model::Channel, path: &std::path::Path) {
+    if st.check(&crate::prefs::AUTO_NAME_CHANNELS) {
         ch.name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
     }
 }
@@ -838,10 +838,10 @@ pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
 ///
 /// Part of the load: it has no undo step of its own. Project loading and previews don't come here; audio clip channels
 /// keep their root note and stretch (not measured).
-pub fn read_tags(ch: &mut os_model::Channel, path: &std::path::Path) {
-    crate::keep_on_disk::keep_long(ch, path);
-    use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
-    let (root, tempo) = (check(&READ_ROOT_NOTE), check(&READ_TEMPO));
+pub fn read_tags(st: &crate::settings_file::SettingsStore, ch: &mut os_model::Channel, path: &std::path::Path) {
+    crate::keep_on_disk::keep_long(st, ch, path);
+    use crate::prefs::{READ_ROOT_NOTE, READ_TEMPO};
+    let (root, tempo) = (st.check(&READ_ROOT_NOTE), st.check(&READ_TEMPO));
     if ch.kind != os_model::ChannelKind::Sampler || !(root || tempo) {
         return;
     }

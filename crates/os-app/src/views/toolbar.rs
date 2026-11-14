@@ -381,7 +381,7 @@ fn transport(ui: &mut Ui, c: &Ctx) {
     // dark dot in the middle; disarmed, a small dimmed dot. The record colour is white under High visibility
     // (`crate::high_visibility`).
     let rec = a.span(486.0, 513.0, 7.0, 33.0);
-    let hov = ui.hit(rec, Action::Record, crate::record::hint());
+    let hov = ui.hit(rec, Action::Record, crate::record::hint(&crate::settings_file::store()));
     let armed = s.session.rec.armed;
     let down = ui.down(rec, &Action::Record);
     let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());
@@ -459,7 +459,7 @@ fn recording(ui: &mut Ui, c: &Ctx) -> bool {
         if r.right() > c.fit {
             return false;
         }
-        tool_button(ui, r, icon, opt.on(), Action::RecOpt(opt), crate::record::option_hint(opt));
+        tool_button(ui, r, icon, opt.on(&crate::settings_file::store()), Action::RecOpt(opt), crate::record::option_hint(opt));
     }
     true
 }
@@ -823,7 +823,7 @@ fn modes(ui: &mut Ui, c: &Ctx) -> bool {
         let (on, action) = match i {
             0 => (s.toggles.contains(&"typing"), Action::Typing),
             1 => (crate::autoscroll::on(), Action::AutoScroll),
-            2 => (crate::step_edit::on(), Action::StepEdit),
+            2 => (crate::step_edit::on(&crate::settings_file::store()), Action::StepEdit),
             3 => (crate::enable_groups::on(), Action::EnableGroups),
             _ => (s.multilink.on, Action::Multilink),
         };

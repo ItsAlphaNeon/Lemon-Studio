@@ -31,7 +31,7 @@ impl crate::app::App {
         let mut changed = false;
         for row in self.state.session.hosted_rows.clone() {
             let plugins = &self.state.session.plugins;
-            changed |= self.state.session.project.write_if(|p| follow_sample(p, plugins, row, false));
+            changed |= self.state.session.project.write_if(|p| follow_sample(&self.state.session.settings, p, plugins, row, false));
         }
         if changed {
             self.invalidate();
@@ -156,7 +156,7 @@ mod tests {
         a.sync_osc3();
         assert!(a.state.session.hosted_rows.contains(&row), "{:?}", a.state.message);
         // The plugin opens the file itself: placeholders resolved.
-        assert_eq!(a.state.session.plugins.osc3_sample(row, true), Some(crate::plugins::resolve_sample(&square)));
+        assert_eq!(a.state.session.plugins.osc3_sample(row, true), Some(crate::plugins::resolve_sample(&crate::settings_file::store(), &square)));
         assert_eq!(a.state.session.plugins.osc3_file_state(row), Some(fl.clone()));
         // It sounds: the square at 880 Hz (key 69), one period per cycle.
         let inst = instance(&a.state.session.plugins, row);
@@ -191,7 +191,7 @@ mod tests {
         b.state.session.plugins.available = crate::plugins::builtin();
         b.open(path.clone());
         b.sync_osc3();
-        assert_eq!(b.state.session.plugins.osc3_sample(row, true), Some(crate::plugins::resolve_sample(&saw)));
+        assert_eq!(b.state.session.plugins.osc3_sample(row, true), Some(crate::plugins::resolve_sample(&crate::settings_file::store(), &saw)));
         drop(b);
         let _ = std::fs::remove_dir_all(&dir);
     }

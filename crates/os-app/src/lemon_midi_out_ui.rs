@@ -187,7 +187,7 @@ mod tests {
         assert!(!a.state.session.hosted_rows.iter().any(|&r| r <= trio), "the instruments went");
         assert_eq!(a.state.session.plugins.midi_outs.len(), 6);
         assert!(a.state.shown(crate::app::Win::Plugin) && a.state.plugin_channel == 0);
-        assert_eq!(a.state.session.history.entries().last().map(|e| e.1), Some(PREP_LABEL));
+        assert_eq!(a.state.session.history.entries(&crate::settings_file::store()).last().map(|e| e.1), Some(PREP_LABEL));
 
         a.undo_key(false);
         for _ in 0..4 {

@@ -180,7 +180,7 @@ pub fn is_instrument(s: &crate::session::Session, t: u16, k: u8, id: u32) -> boo
 pub fn driven(s: &crate::session::Session, tg: u32) -> bool {
     let p = &s.project;
     let linked = match target::decode(tg) {
-        Auto::SlotMix(t, k) => crate::remote::link_of(crate::typein::Target::Knob(KnobId::SlotMix(t, k))).is_some(),
+        Auto::SlotMix(t, k) => crate::remote::link_of(&s.settings, crate::typein::Target::Knob(KnobId::SlotMix(t, k))).is_some(),
         _ => false,
     };
     linked
@@ -192,7 +192,7 @@ pub fn driven(s: &crate::session::Session, tg: u32) -> bool {
 /// After the wrap's undo step `name`: the remote control links on what moved follow it (they are the program's
 /// settings, not the project's), and the step puts them back (`Taken::Links`).
 pub fn relink(s: &mut crate::session::Session, name: &str, moved: &Moved) {
-    let mut all = crate::remote::links();
+    let mut all = crate::remote::links(&s.settings);
     let mut pairs = Vec::new();
     for l in &mut all {
         if let Some(to) = moved.link(l.target) {
@@ -203,7 +203,7 @@ pub fn relink(s: &mut crate::session::Session, name: &str, moved: &Moved) {
     if pairs.is_empty() || s.history.newest_done() != Some(name) {
         return;
     }
-    crate::remote::set_links(&all);
+    crate::remote::set_links(&s.settings, &all);
     let back = pairs.into_iter().map(|(a, b)| (b, a)).collect();
     crate::history::extend_newest(s, |cmds| cmds.push(crate::control::Command::Put(Box::new(crate::control::command::Taken::Links(back)))));
 }

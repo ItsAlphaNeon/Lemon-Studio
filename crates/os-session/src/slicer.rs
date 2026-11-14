@@ -73,10 +73,10 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
 
 /// The plugin state for a channel's Fruity Slicer state: its loop's stored path resolved for the plugin to open
 /// (FL's placeholders made real), the stored path kept in the state.
-pub fn plugin_state(fl: &[u8]) -> Vec<u8> {
+pub fn plugin_state(settings: &crate::settings_file::SettingsStore, fl: &[u8]) -> Vec<u8> {
     let st = lemon_slicer::params::plugin_state_from_fl(fl);
     let stored = lemon_slicer::state::State::parse(fl).map(|s| s.path()).unwrap_or_default();
-    let sample = crate::plugins::resolve_sample(&stored);
+    let sample = crate::plugins::resolve_sample(settings, &stored);
     if sample.is_empty() {
         return st;
     }
@@ -105,7 +105,7 @@ pub fn sync_slicer(s: &mut crate::session::Session) {
             break;
         }
         let fl = s.project.channels[row].plugin_state.clone().unwrap_or_default();
-        match s.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
+        match s.plugins.create_with(row, index, Some(&plugin_state(&s.settings, &fl))) {
             Ok(_) => {
                 s.hosted_rows.push(row);
                 added = true;
@@ -174,6 +174,7 @@ mod tests {
     /// same bytes back.
     #[test]
     fn builtin_slicer_takes_and_gives_the_file_state() {
+        let st = &crate::settings_file::SettingsStore::memory();
         let path = loop_file("plays");
         let mut pl = Plugins::default();
         pl.available = crate::plugins::builtin();
@@ -181,7 +182,7 @@ mod tests {
         let index = pl.index_of(LEMON_SLICER).expect("built-in Lemon Slicer");
         assert!(crate::project_plugins::is_builtin(&pl.available[index].desc));
         let fl = state_for(&path);
-        pl.create_with(1, index, Some(&plugin_state(&fl))).unwrap();
+        pl.create_with(1, index, Some(&plugin_state(st, &fl))).unwrap();
         assert_eq!(pl.slicer_file_state(1), Some(fl.clone()));
         let inst = pl.hosted[&1].plugin.clone() as SharedInstrument;
         let mut i = inst.lock().unwrap();
@@ -207,6 +208,7 @@ mod tests {
     #[test]
     #[ignore]
     fn corpus_slicer_states_round_trip() {
+        let st = &crate::settings_file::SettingsStore::memory();
         let Ok(list) = std::env::var("OS_SLICER_FLP") else { return };
         let mut seen = 0;
         for f in list.split(';').filter(|f| !f.is_empty()) {
@@ -215,8 +217,8 @@ mod tests {
                 let fl = ch.plugin_state.clone().unwrap_or_default();
                 let st = State::parse(&fl).unwrap_or_else(|| panic!("{f}: {:?} does not parse", ch.name));
                 assert_eq!(st.to_bytes(), fl, "{f}: {:?}", ch.name);
-                assert_eq!(lemon_slicer::params::fl_from_plugin_state(&plugin_state(&fl)), Some(fl.clone()));
-                let sample = crate::plugins::resolve_sample(&st.path());
+                assert_eq!(lemon_slicer::params::fl_from_plugin_state(&plugin_state(&crate::settings_file::SettingsStore::memory(), &fl)), Some(fl.clone()));
+                let sample = crate::plugins::resolve_sample(&crate::settings_file::SettingsStore::memory(), &st.path());
                 eprintln!("{f}: {:?} ({}), {} slices, {:.3} beats at {:.3} BPM, {sample} found: {}", ch.name, ch.plugin.as_deref().unwrap_or(""), st.slices.len(), st.beats(), st.bpm(), std::path::Path::new(&sample).exists());
                 seen += 1;
             }

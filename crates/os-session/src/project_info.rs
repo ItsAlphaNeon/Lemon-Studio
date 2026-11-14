@@ -235,8 +235,9 @@ mod tests {
     /// slots holding one; the playlist tracks holding a clip; the notes of all patterns.
     #[test]
     fn footer_counts() {
+        let st = &crate::settings_file::SettingsStore::memory();
         use os_model::{Arrangement, Clip, ClipSource, MixerTrack, Note, Pattern, SlotPlugin};
-        let mut p = crate::projects::default_project();
+        let mut p = crate::projects::default_project(st);
         let ch = p.channels[0].clone();
         p.channels = vec![ch.clone(), ch.clone(), ch];
         p.channels[0].plugin = Some("Lemon Sampler".into());
@@ -272,8 +273,9 @@ mod tests {
     /// routes do not count.
     #[test]
     fn mixer_tracks_count() {
+        let st = &crate::settings_file::SettingsStore::memory();
         use os_model::{MixerTrack, SlotPlugin};
-        let mut p = crate::projects::default_project();
+        let mut p = crate::projects::default_project(st);
         let ch = p.channels[0].clone();
         // Inserts 1-4 route to the master (as FL's do); one channel straight to the master.
         p.mixer = (0..5).map(MixerTrack::new).collect();

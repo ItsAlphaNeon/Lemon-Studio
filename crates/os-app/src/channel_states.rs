@@ -100,10 +100,10 @@ pub fn state_bytes(app: &mut App, row: usize) -> Result<Vec<u8>, String> {
     if ch.kind.is_sampler() {
         let lemon = app.state.session.plugins.descriptor(row).is_some_and(|d| d.name == crate::plugins::LEMON_SAMPLER);
         if let Some(st) = app.state.session.plugins.state(row).filter(|_| lemon) {
-            crate::plugins::store_sampler(&mut ch, &st);
+            crate::plugins::store_sampler(&app.state.session.settings, &mut ch, &st);
         }
         if let Some(p) = app.state.session.plugins.sampler_path(row).filter(|p| !p.is_empty()) {
-            if !ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
+            if !ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(&app.state.session.settings, old) == p) {
                 ch.sample_path = Some(p);
             }
         }

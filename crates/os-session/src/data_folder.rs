@@ -112,7 +112,7 @@ pub fn backup_folder(s: &crate::session::Session, path: Option<&Path>) -> Option
     #[cfg(any(test, feature = "test-util"))]
     let dir = dir.filter(|d| d.starts_with(std::env::temp_dir()));
     match dir {
-        Some(dir) if crate::prefs::index(&crate::prefs::BACKUP_LOCATION) == 1 => Some(dir.join(BACKUP_DIR)),
+        Some(dir) if s.settings.index(&crate::prefs::BACKUP_LOCATION) == 1 => Some(dir.join(BACKUP_DIR)),
         _ => crate::backup::folder(),
     }
 }

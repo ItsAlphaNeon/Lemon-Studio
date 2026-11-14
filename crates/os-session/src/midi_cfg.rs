@@ -7,7 +7,6 @@
 //! checks, combos and channel boxes are declared in `crate::prefs`.
 // spec: ui/midi-settings.md §9
 
-use crate::settings_file::{flag, get, set_flag, write};
 
 /// An input device's options (Settings > MIDI ▸ Input).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,21 +53,21 @@ fn bit(b: bool) -> &'static str {
 }
 
 /// `"1|---"`: enabled, port.
-pub fn input(name: &str) -> InCfg {
-    let Some(v) = get(&key("midi_in", name)) else { return InCfg::default() };
+pub fn input(st: &crate::settings_file::SettingsStore, name: &str) -> InCfg {
+    let Some(v) = st.get(&key("midi_in", name)) else { return InCfg::default() };
     let mut f = v.split('|');
     let enabled = f.next().is_none_or(|s| s.trim() != "0");
     let port = f.next().and_then(|s| s.trim().parse().ok());
     InCfg { enabled, port }
 }
 
-pub fn set_input(name: &str, c: InCfg) {
-    write(&key("midi_in", name), &format!("{}|{}", bit(c.enabled), port_text(c.port)));
+pub fn set_input(st: &crate::settings_file::SettingsStore, name: &str, c: InCfg) {
+    st.write(&key("midi_in", name), &format!("{}|{}", bit(c.enabled), port_text(c.port)));
 }
 
 /// `"---|0|1"`: port, send master sync, send all notes off.
-pub fn output(name: &str) -> OutCfg {
-    let Some(v) = get(&key("midi_out", name)) else { return OutCfg::default() };
+pub fn output(st: &crate::settings_file::SettingsStore, name: &str) -> OutCfg {
+    let Some(v) = st.get(&key("midi_out", name)) else { return OutCfg::default() };
     let d = OutCfg::default();
     let mut f = v.split('|');
     let port = f.next().and_then(|s| s.trim().parse().ok());
@@ -77,8 +76,8 @@ pub fn output(name: &str) -> OutCfg {
     OutCfg { port, sync, notes_off }
 }
 
-pub fn set_output(name: &str, c: OutCfg) {
-    write(&key("midi_out", name), &format!("{}|{}|{}", port_text(c.port), bit(c.sync), bit(c.notes_off)));
+pub fn set_output(st: &crate::settings_file::SettingsStore, name: &str, c: OutCfg) {
+    st.write(&key("midi_out", name), &format!("{}|{}|{}", port_text(c.port), bit(c.sync), bit(c.notes_off)));
 }
 
 /// The OPTIONS menu's MIDI switches (spec §5), with FL's defaults.
@@ -111,12 +110,12 @@ impl Switch {
     }
 
 
-    pub fn on(self) -> bool {
-        flag(self.key(), self != Switch::MasterSync)
+    pub fn on(self, st: &crate::settings_file::SettingsStore) -> bool {
+        st.flag(self.key(), self != Switch::MasterSync)
     }
 
-    pub fn set(self, on: bool) {
-        set_flag(self.key(), on);
+    pub fn set(self, st: &crate::settings_file::SettingsStore, on: bool) {
+        st.set_flag(self.key(), on);
     }
 }
 
@@ -175,12 +174,12 @@ impl CurveOf {
     }
 }
 
-pub fn curve(of: CurveOf) -> Curve {
-    get(of.key()).and_then(|v| Curve::parse(&v)).unwrap_or(Curve::LINE)
+pub fn curve(st: &crate::settings_file::SettingsStore, of: CurveOf) -> Curve {
+    st.get(of.key()).and_then(|v| Curve::parse(&v)).unwrap_or(Curve::LINE)
 }
 
-pub fn set_curve(of: CurveOf, c: Curve) {
-    write(of.key(), &format!("{:.4},{:.4},{:.4}", c.lo, c.hi, c.mid));
+pub fn set_curve(st: &crate::settings_file::SettingsStore, of: CurveOf, c: Curve) {
+    st.write(of.key(), &format!("{:.4},{:.4},{:.4}", c.lo, c.hi, c.mid));
 }
 
 /// The two millisecond offsets (spec §7, §8), −1000..=1000.
@@ -201,21 +200,21 @@ impl Offset {
     }
 }
 
-pub fn offset(o: Offset) -> i32 {
-    get(o.key()).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0).clamp(-OFFSET_RANGE, OFFSET_RANGE)
+pub fn offset(st: &crate::settings_file::SettingsStore, o: Offset) -> i32 {
+    st.get(o.key()).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0).clamp(-OFFSET_RANGE, OFFSET_RANGE)
 }
 
-pub fn set_offset(o: Offset, ms: i32) {
-    write(o.key(), &ms.clamp(-OFFSET_RANGE, OFFSET_RANGE).to_string());
+pub fn set_offset(st: &crate::settings_file::SettingsStore, o: Offset, ms: i32) {
+    st.write(o.key(), &ms.clamp(-OFFSET_RANGE, OFFSET_RANGE).to_string());
 }
 
 /// External clock sync: the input device whose clock drives playback; `None` = Off (spec §8).
-pub fn ext_sync() -> Option<String> {
-    get("midi_ext_sync")
+pub fn ext_sync(st: &crate::settings_file::SettingsStore) -> Option<String> {
+    st.get("midi_ext_sync")
 }
 
-pub fn set_ext_sync(name: Option<&str>) {
-    write("midi_ext_sync", name.unwrap_or(""));
+pub fn set_ext_sync(st: &crate::settings_file::SettingsStore, name: Option<&str>) {
+    st.write("midi_ext_sync", name.unwrap_or(""));
 }
 
 #[cfg(test)]
@@ -224,23 +223,26 @@ mod tests {
 
     #[test]
     fn devices_are_kept_by_name() {
-        assert_eq!(input("Keys"), InCfg { enabled: true, port: None }, "a new input is enabled");
-        set_input("Keys", InCfg { enabled: false, port: Some(12) });
-        assert_eq!(input("Keys"), InCfg { enabled: false, port: Some(12) });
-        assert_eq!(output("Synth=1"), OutCfg { port: None, sync: false, notes_off: true });
-        set_output("Synth=1", OutCfg { port: Some(3), sync: true, notes_off: false });
-        assert_eq!(output("Synth=1"), OutCfg { port: Some(3), sync: true, notes_off: false });
+        let st = &crate::settings_file::SettingsStore::memory();
+        assert_eq!(input(st, "Keys"), InCfg { enabled: true, port: None }, "a new input is enabled");
+        set_input(st, "Keys", InCfg { enabled: false, port: Some(12) });
+        assert_eq!(input(st, "Keys"), InCfg { enabled: false, port: Some(12) });
+        assert_eq!(output(st, "Synth=1"), OutCfg { port: None, sync: false, notes_off: true });
+        set_output(st, "Synth=1", OutCfg { port: Some(3), sync: true, notes_off: false });
+        assert_eq!(output(st, "Synth=1"), OutCfg { port: Some(3), sync: true, notes_off: false });
     }
 
     #[test]
     fn switches_default_as_fl() {
-        assert!(Switch::Remote.on() && Switch::Output.on() && !Switch::MasterSync.on());
-        Switch::MasterSync.set(true);
-        assert!(Switch::MasterSync.on());
+        let st = &crate::settings_file::SettingsStore::memory();
+        assert!(Switch::Remote.on(st) && Switch::Output.on(st) && !Switch::MasterSync.on(st));
+        Switch::MasterSync.set(st, true);
+        assert!(Switch::MasterSync.on(st));
     }
 
     #[test]
     fn curves() {
+        let st = &crate::settings_file::SettingsStore::memory();
         let c = Curve::LINE;
         assert!((c.map(0.25) - 0.25).abs() < 1e-5);
         let soft = Curve { lo: 0.0, hi: 1.0, mid: 0.75 };
@@ -248,15 +250,16 @@ mod tests {
         assert!(soft.map(0.0) == 0.0 && (soft.map(1.0) - 1.0).abs() < 1e-6);
         let raised = Curve { lo: 0.2, hi: 0.8, mid: 0.5 };
         assert!((raised.map(0.0) - 0.2).abs() < 1e-6 && (raised.map(1.0) - 0.8).abs() < 1e-6);
-        set_curve(CurveOf::Velocity, soft);
-        assert!((curve(CurveOf::Velocity).mid - 0.75).abs() < 1e-4);
-        assert_eq!(curve(CurveOf::Release), Curve::LINE);
+        set_curve(st, CurveOf::Velocity, soft);
+        assert!((curve(st, CurveOf::Velocity).mid - 0.75).abs() < 1e-4);
+        assert_eq!(curve(st, CurveOf::Release), Curve::LINE);
     }
 
     #[test]
     fn offsets_are_clamped() {
-        set_offset(Offset::MasterSync, -5000);
-        assert_eq!(offset(Offset::MasterSync), -1000);
-        assert_eq!(offset(Offset::External), 0);
+        let st = &crate::settings_file::SettingsStore::memory();
+        set_offset(st, Offset::MasterSync, -5000);
+        assert_eq!(offset(st, Offset::MasterSync), -1000);
+        assert_eq!(offset(st, Offset::External), 0);
     }
 }

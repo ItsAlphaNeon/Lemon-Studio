@@ -162,7 +162,7 @@ impl Tab {
 
 /// "C5" for key 60, as the settings choose it (`crate::note_names`).
 pub fn key_name(k: u16) -> String {
-    crate::note_names::note_name(i32::from(k))
+    crate::note_names::note_name(&crate::settings_file::store(), i32::from(k))
 }
 
 /// Sort keys of Options > Sort by (§17).
@@ -1704,8 +1704,8 @@ pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
         crate::history::load_sample(&mut s.session, r);
     }
     if let Some(ch) = s.session.project.get_mut().channels.get_mut(r) {
-        auto_name(ch, &p);
-        read_tags(ch, &p);
+        auto_name(&crate::settings_file::store(), ch, &p);
+        read_tags(&crate::settings_file::store(), ch, &p);
         ch.sample_path = Some(path.clone());
     }
     s.session.sample_loads.push((r, path));
@@ -1760,7 +1760,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::Sort(by) => sort(app, by),
         RCmd::LoadSample(r) => {
             // Starts in the folder of the channel's sample, when it has one.
-            let dir = app.state.session.project.channels.get(r).and_then(|c| c.sample_path.as_deref()).map(crate::plugins::resolve_sample).map(std::path::PathBuf::from);
+            let dir = app.state.session.project.channels.get(r).and_then(|c| c.sample_path.as_deref()).map(|p| crate::plugins::resolve_sample(&app.state.session.settings, p)).map(std::path::PathBuf::from);
             let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Load sample", "audio", crate::dialog::Then::RackSample(r))
                 .filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff", "m4a"])
                 .start(dir.as_deref().and_then(std::path::Path::parent));
@@ -3726,7 +3726,7 @@ mod tests {
         assert_eq!(app.state.session.history.len(), steps + 8, "a step per load, none of the read's own");
         // A file that isn't a WAV (or can't be read) has no `smpl` either.
         app.state.session.project.get_mut().channels[r].misc.root = 50;
-        read_tags(&mut app.state.session.project.get_mut().channels[r], std::path::Path::new("Z:/no such folder/loop.mp3"));
+        read_tags(&crate::settings_file::store(), &mut app.state.session.project.get_mut().channels[r], std::path::Path::new("Z:/no such folder/loop.mp3"));
         assert_eq!(app.state.session.project.channels[r].misc.root, 60);
         for p in [fitted, plain] {
             let _ = std::fs::remove_file(p);
@@ -3790,7 +3790,7 @@ mod tests {
         // Not measured for audio clip channels: they keep theirs.
         let mut clip = app.state.session.project.channels[r].clone();
         (clip.kind, clip.misc.root) = (os_model::ChannelKind::AudioClip, 50);
-        read_tags(&mut clip, &new);
+        read_tags(&crate::settings_file::store(), &mut clip, &new);
         assert_eq!((clip.misc.root, clip.sound.stretch), (50, auto(2.0, was)));
         for p in [dropped, new] {
             let _ = std::fs::remove_file(p);
@@ -3890,7 +3890,7 @@ mod tests {
             let after = (Some(path), stem(&file), 67, auto(4.0, was));
             assert_eq!(side(&app), after, "{how}");
             assert_eq!(app.state.session.history.len(), steps + 1, "{how}: one step");
-            assert_eq!(app.state.session.history.entries().last(), Some(&(steps + 1, LOAD_SAMPLE)), "{how}");
+            assert_eq!(app.state.session.history.entries(&crate::settings_file::store()).last(), Some(&(steps + 1, LOAD_SAMPLE)), "{how}");
             assert!(!app.state.session.history.undone(steps + 1));
             assert_eq!(ctrl_z(&mut app.state).as_deref(), Some("Undo: load channel sample(s)"));
             assert_eq!(side(&app), before, "{how}: undone");
@@ -3916,7 +3916,7 @@ mod tests {
         let file = tagged_wav(None, "new-row", 0.5, &[smpl(67), acid(4, 60, 95.0)]);
         app.sample_to_rack(file.to_string_lossy().into_owned(), crate::views::rack::rect(&app.state).bottom() + 40.0);
         assert_eq!(app.state.session.project.channels.len(), n + 1);
-        assert_eq!(app.state.session.history.entries().last().map(|e| e.1), Some(LOAD_SAMPLE));
+        assert_eq!(app.state.session.history.entries(&crate::settings_file::store()).last().map(|e| e.1), Some(LOAD_SAMPLE));
         let made = app.state.session.project.channels[n].clone();
         assert_eq!((made.name.clone(), made.misc.root), (stem(&file), 67));
         ctrl_z(&mut app.state);
@@ -4063,7 +4063,7 @@ mod tests {
         assert!(!crate::init::listed(&app.state.session, target::MAIN_SWING));
 
         // MIDI learn... on the mixer box and the LED: the link box, then the controller drives them.
-        crate::remote::set_links(&[]);
+        crate::remote::set_links(&crate::settings_file::store(), &[]);
         for (which, t) in [(3, Target::RackTrack(1)), (4, Target::RackLed(1))] {
             let learn = entry(&app, which, "MIDI learn...");
             assert!(learn.enabled);
@@ -4071,8 +4071,8 @@ mod tests {
             assert_eq!(app.state.link_box.as_ref().map(|b| b.target), Some(t));
             app.state.link_box = None;
         }
-        crate::remote::add(crate::remote::Link::new(0, 20, Target::RackTrack(1)), true);
-        crate::remote::add(crate::remote::Link::new(0, 21, Target::RackLed(1)), true);
+        crate::remote::add(&crate::settings_file::store(), crate::remote::Link::new(0, 20, Target::RackTrack(1)), true);
+        crate::remote::add(&crate::settings_file::store(), crate::remote::Link::new(0, 21, Target::RackLed(1)), true);
         let last = crate::mixer::max_insert(&app.state.session.project);
         assert!(app.remote_cc("Test", 0, 20, 127));
         assert_eq!(app.state.session.project.channels[1].mixer_track, last);
@@ -4084,7 +4084,7 @@ mod tests {
         assert!(app.state.session.project.channels[1].enabled);
         // Linked: Remove link follows, and the links read back from the settings.
         assert!(menu(&app, 4).items.iter().any(|i| i.label == "Remove link" && i.enabled));
-        assert_eq!(crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>(), [Target::RackTrack(1), Target::RackLed(1)]);
+        assert_eq!(crate::remote::links(&crate::settings_file::store()).iter().map(|l| l.target).collect::<Vec<_>>(), [Target::RackTrack(1), Target::RackLed(1)]);
 
         // What stays greyed whatever the state (§19 lists the reasons): 1 on the volume and panning knobs, 2 on the
         // swing knob, the mixer box and the LED (no piano roll lane for them; one kind of link).
@@ -4294,7 +4294,7 @@ mod tests {
         let p = app.state.session.project.get_mut();
         p.init_controls.push(os_model::InitControl { head: 0, target: target::channel(1, CHANNEL_VOLUME), value: 1 });
         p.controller_links.push(os_model::ControllerLink::new(2, 0, target::channel(1, CHANNEL_VOLUME)));
-        crate::remote::set_links(&[Link::new(0, 20, T::Knob(KnobId::ChanVol(1))), Link::new(0, 21, T::Param(1, 3)), Link::new(0, 22, T::RackLed(2))]);
+        crate::remote::set_links(&crate::settings_file::store(), &[Link::new(0, 20, T::Knob(KnobId::ChanVol(1))), Link::new(0, 21, T::Param(1, 3)), Link::new(0, 22, T::RackLed(2))]);
         app.state.session.history.reset();
         type Places = (Vec<u32>, Vec<u32>, Vec<(u16, u32)>, Vec<T>);
         let places = |app: &App| -> Places {
@@ -4303,7 +4303,7 @@ mod tests {
                 p.automations.last().unwrap().targets.clone(),
                 p.init_controls.iter().map(|c| c.target).collect(),
                 p.controller_links.iter().map(|l| (l.source(), l.target())).collect(),
-                crate::remote::links().iter().map(|l| l.target).collect(),
+                crate::remote::links(&crate::settings_file::store()).iter().map(|l| l.target).collect(),
             )
         };
         // Channel 1 on row `a`, channel 2 on row `b`.
@@ -4327,7 +4327,7 @@ mod tests {
         let (clip, init, ctl, links) = places(&app);
         assert_eq!((clip, init, ctl), (vec![], vec![], vec![]));
         assert_eq!(links, [T::RackLed(1)], "channel 2 is on row 1 now");
-        crate::remote::set_links(&[]);
+        crate::remote::set_links(&crate::settings_file::store(), &[]);
     }
 
     /// Receive notes from ▸ Computer keyboard (§18, measured on the original 2026-10-30): the locked channel takes the

@@ -139,7 +139,7 @@ fn audio_load() {
     eprintln!("loaded in {:.1} s", t0.elapsed().as_secs_f64());
     let rate = crate::transport::Transport::device_rate().unwrap_or(48000);
     let project = crate::rack::play_project(&app.state);
-    let mut library = SampleLibrary::new(crate::factory_folder::dir());
+    let mut library = SampleLibrary::new(crate::factory_folder::dir(&crate::settings_file::store()));
     library.resample_stretches = true;
     let mut e = Engine::new(&project, &mut library, rate, PlayMode::Song);
     let inst = app.state.session.plugins.instruments();

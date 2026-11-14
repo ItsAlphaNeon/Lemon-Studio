@@ -158,7 +158,7 @@ mod plugin_window;
 mod plugins;
 mod plugins_ui;
 mod ppi;
-use os_session::prefs;
+mod prefs;
 mod settings_window;
 pub use os_session::locked;
 pub use os_session::session;
@@ -185,7 +185,7 @@ mod note_names_ui;
 mod save_form;
 mod scroll_speed;
 mod search_folders;
-use os_session::settings_file;
+mod settings_file;
 mod update;
 use os_session::version;
 mod shortcuts;
@@ -1967,7 +1967,7 @@ pub fn run() {
     // From here on a panic is kept in the user folder's Logs (`panic_log`).
     panic_log::install();
     // The mixing threads every engine renders on, from here on (spec: audio/multicore.md).
-    mix_threads::start();
+    mix_threads::start(&crate::settings_file::store());
     // A render without a window (FILE > Export audio from the command line, `render`).
     if args.first().map(String::as_str) == Some("--render") {
         std::process::exit(render::cli(&args[1..]));
@@ -2046,7 +2046,7 @@ pub fn run() {
     app.update_startup();
     // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
     splash::step(&splash, splash::MIDI, "Opening MIDI devices");
-    app.state.session.midi = midi_in::MidiIn::open(wake_ui);
+    app.state.session.midi = midi_in::MidiIn::open(&crate::settings_file::store(), wake_ui);
     app.state.session.midi_out = midi_out::MidiOut::start(app.state.session.transport.watch());
     let message = app.state.message.clone();
     app.midi_refresh(false);

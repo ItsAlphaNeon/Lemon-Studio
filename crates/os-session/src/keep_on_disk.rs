@@ -21,8 +21,8 @@ pub const LONG_SECS: u64 = 30;
 
 /// Sample `path` went into sampler channel `ch`: while the check is on, a file of `LONG_SECS` or more turns Keep on
 /// disk on (the channel's other sampler flags stay; a channel without them gets those of a new channel).
-pub fn keep_long(ch: &mut os_model::Channel, path: &Path) {
-    if !ch.kind.is_sampler() || !crate::prefs::check(&crate::prefs::AUTO_KEEP_ON_DISK) {
+pub fn keep_long(st: &crate::settings_file::SettingsStore, ch: &mut os_model::Channel, path: &Path) {
+    if !ch.kind.is_sampler() || !st.check(&crate::prefs::AUTO_KEEP_ON_DISK) {
         return;
     }
     let Some((frames, rate)) = os_engine::sample::length(path) else { return };

@@ -18,7 +18,7 @@ impl App {
     /// The Autosave timer (spec: ui/settings-choices.md "Backup files"): when it runs out, a project changed since it was
     /// saved and since its last backup is backed up (`write_backup`).
     pub(crate) fn backup_tick(&mut self, now: Instant) {
-        if !due(&mut self.state.session.backup, now) {
+        if !due(&self.state.session.settings, &mut self.state.session.backup, now) {
             return;
         }
         if self.changed_since_backup() {

@@ -2602,7 +2602,7 @@ mod tests {
         p.patterns[0].controls.push(os_model::ControlPoint { position: 0, kind: target::send(4, 5), value: 0 });
         p.init_controls.push(os_model::InitControl { head: 0, target: target::slot(3, 0, SLOT_MIX), value: 1 });
         p.controller_links.push(os_model::ControllerLink::new(0x7000 + 3 * 64 + 1, 0, target::mixer(4, MIXER_PAN)));
-        crate::remote::set_links(&[
+        crate::remote::set_links(&crate::settings_file::store(), &[
             Link::new(0, 20, T::Param(crate::plugins::fx_key(3, 0), 5)),
             Link::new(0, 21, T::Fader(4)),
             Link::new(0, 22, T::Knob(KnobId::SlotMix(3, 1))),
@@ -2618,7 +2618,7 @@ mod tests {
                 p.patterns[0].controls.iter().map(|c| c.kind).collect(),
                 p.init_controls.iter().map(|c| c.target).collect(),
                 p.controller_links.iter().map(|l| (l.source(), l.target())).collect(),
-                crate::remote::links().iter().map(|l| l.target).collect(),
+                crate::remote::links(&crate::settings_file::store()).iter().map(|l| l.target).collect(),
             )
         };
         // Where everything is with tracks 3 and 4 (and 5, the send's destination) at `t3`, `t4`, `t5`, and track 3's
@@ -2672,7 +2672,7 @@ mod tests {
         crate::history_ui::undo(&mut a.state);
         let (clip, events, init, ctl, _) = places(&a);
         assert_eq!((clip, events, init, ctl), (start.0, start.1, start.2, start.3), "the project's come back");
-        crate::remote::set_links(&[]);
+        crate::remote::set_links(&crate::settings_file::store(), &[]);
     }
 
     /// spec: audio/sidechain.md "Hosted plugins' input buses": Sidechain input ▸ lists None and the tracks routed into

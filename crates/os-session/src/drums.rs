@@ -57,8 +57,8 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
 
 /// The plugin state for a channel's FPC state: every layer's stored sample path resolved for the plugin to open (FL's
 /// placeholders made real), the stored paths kept in the state.
-pub fn plugin_state(fl: &[u8]) -> Vec<u8> {
-    let paths: Vec<String> = lemon_drum_sampler::params::stored_paths(fl).iter().map(|p| crate::plugins::resolve_sample(p)).collect();
+pub fn plugin_state(st: &crate::settings_file::SettingsStore, fl: &[u8]) -> Vec<u8> {
+    let paths: Vec<String> = lemon_drum_sampler::params::stored_paths(fl).iter().map(|p| crate::plugins::resolve_sample(st, p)).collect();
     lemon_drum_sampler::params::plugin_state_from_fl(fl, &paths)
 }
 
@@ -84,7 +84,7 @@ pub fn sync_drums(s: &mut crate::session::Session) {
             break;
         }
         let fl = s.project.channels[row].plugin_state.clone().unwrap_or_default();
-        match s.plugins.create_with(row, index, Some(&plugin_state(&fl))) {
+        match s.plugins.create_with(row, index, Some(&plugin_state(&s.settings, &fl))) {
             Ok(_) => {
                 s.hosted_rows.push(row);
                 added = true;
@@ -156,6 +156,7 @@ mod tests {
     /// (and nothing on another key) and gives the same bytes back.
     #[test]
     fn builtin_drums_take_and_give_the_file_state() {
+        let st = &crate::settings_file::SettingsStore::memory();
         let path = wav("plays");
         let mut pl = Plugins::default();
         pl.available = crate::plugins::builtin();
@@ -164,7 +165,7 @@ mod tests {
         assert!(crate::project_plugins::is_builtin(&pl.available[index].desc));
         assert_eq!(crate::plugin_db::category(&pl.available[index].desc), "Sampler");
         let fl = state_for(&path);
-        pl.create_with(1, index, Some(&plugin_state(&fl))).unwrap();
+        pl.create_with(1, index, Some(&plugin_state(st, &fl))).unwrap();
         assert_eq!(pl.drums_file_state(1), Some(fl.clone()));
         let inst = pl.hosted[&1].plugin.clone() as SharedInstrument;
         let mut i = inst.lock().unwrap();

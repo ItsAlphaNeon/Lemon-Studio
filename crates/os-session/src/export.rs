@@ -9,7 +9,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::settings_file as sf;
 
 /// The formats, in the form's order.
 pub const FORMATS: [&str; 4] = ["WAV", "FLAC", "MP3", "OGG"];
@@ -146,9 +145,9 @@ impl Options {
     }
 
     /// The last export's choices (the defaults where none is kept).
-    pub fn load() -> Options {
+    pub fn load(st: &crate::settings_file::SettingsStore) -> Options {
         let mut o = Options::default();
-        let num = |k: &str| sf::get(k).and_then(|v| v.trim().parse::<u32>().ok());
+        let num = |k: &str| st.get(k).and_then(|v| v.trim().parse::<u32>().ok());
         if let Some(m) = num("export_formats").filter(|m| m & 15 != 0) {
             o.formats = std::array::from_fn(|i| m & (1 << i) != 0);
         }
@@ -166,27 +165,27 @@ impl Options {
             _ => Tail::Ring,
         };
         for (k, f) in FLAG_KEYS.iter().zip(o.flags()) {
-            *f = sf::flag(k, *f);
+            *f = st.flag(k, *f);
         }
         o
     }
 
     /// Keeps these choices for the next export.
-    pub fn save(&self) {
+    pub fn save(&self, st: &crate::settings_file::SettingsStore) {
         let mask: u32 = self.formats.iter().enumerate().filter(|(_, on)| **on).map(|(i, _)| 1 << i).sum();
-        sf::write("export_formats", &mask.to_string());
-        sf::write("export_wav_depth", &self.wav_depth.to_string());
-        sf::write("export_flac_depth", &self.flac_depth.to_string());
-        sf::write("export_flac_level", &self.flac_level.to_string());
-        sf::write("export_mp3", &self.mp3_kbps.to_string());
-        sf::write("export_ogg", &self.ogg_kbps.to_string());
-        sf::write("export_rate", &self.rate.to_string());
-        sf::write("export_channels", &self.channels.to_string());
-        sf::write("export_points", &self.points.to_string());
-        sf::write("export_tail", &(self.tail as u8).to_string());
+        st.write("export_formats", &mask.to_string());
+        st.write("export_wav_depth", &self.wav_depth.to_string());
+        st.write("export_flac_depth", &self.flac_depth.to_string());
+        st.write("export_flac_level", &self.flac_level.to_string());
+        st.write("export_mp3", &self.mp3_kbps.to_string());
+        st.write("export_ogg", &self.ogg_kbps.to_string());
+        st.write("export_rate", &self.rate.to_string());
+        st.write("export_channels", &self.channels.to_string());
+        st.write("export_points", &self.points.to_string());
+        st.write("export_tail", &(self.tail as u8).to_string());
         let mut o = self.clone();
         for (k, f) in FLAG_KEYS.iter().zip(o.flags()) {
-            sf::set_flag(k, *f);
+            st.set_flag(k, *f);
         }
     }
 
@@ -880,7 +879,7 @@ pub fn poll(ses: &mut crate::session::Session) -> Polled {
         }
         crate::transport::Export::Done(r) => {
             ses.export = None;
-            if crate::midi_cfg::Switch::Output.on() {
+            if crate::midi_cfg::Switch::Output.on(&ses.settings) {
                 ses.midi_out.notes_off();
             }
             ses.plugins.set_offline(false);

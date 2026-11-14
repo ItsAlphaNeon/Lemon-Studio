@@ -16,21 +16,17 @@ use os_engine::metronome::{Sound, Switch};
 #[cfg_attr(any(test, feature = "test-util"), allow(dead_code))]
 static SWITCH: OnceLock<Arc<Switch>> = OnceLock::new();
 
-/// The switch every playback engine clicks with: read from `metronome.txt` and the Metronome track setting the first
-/// time (tests: off, Tick, one per test thread so that tests running side by side don't see each other's clicks).
+/// The switch every playback engine clicks with: read from `metronome.txt` the first time (tests: off, Tick, one per
+/// test thread so that tests running side by side don't see each other's clicks). Its track is the session's Metronome
+/// track setting, given by `Session::new` and when the setting changes.
 pub fn switch() -> Arc<Switch> {
     #[cfg(any(test, feature = "test-util"))]
     {
-        thread_local!(static TEST: Arc<Switch> = Arc::new(with_track(Switch::default())));
+        thread_local!(static TEST: Arc<Switch> = Arc::new(Switch::default()));
         TEST.with(Arc::clone)
     }
     #[cfg(not(any(test, feature = "test-util")))]
-    SWITCH.get_or_init(|| Arc::new(with_track(load()))).clone()
-}
-
-fn with_track(s: Switch) -> Switch {
-    s.set_track(crate::prefs::number(&crate::prefs::METRONOME_TRACK));
-    s
+    SWITCH.get_or_init(|| Arc::new(load())).clone()
 }
 
 pub fn on() -> bool {

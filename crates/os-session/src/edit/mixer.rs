@@ -567,7 +567,7 @@ pub fn fx_requests_in(ses: &mut crate::session::Session) -> FxDone {
         match r {
             FxReq::Create { track, slot, index, state } => match ses.plugins.create_effect(track, slot, index, state.as_deref()) {
                 Ok(_) => {
-                    ses.plugins.added(crate::plugins::fx_key(track, slot));
+                    ses.plugins.added(&ses.settings, crate::plugins::fx_key(track, slot));
                     relink = true;
                     out.windows.push((track, slot, false));
                 }

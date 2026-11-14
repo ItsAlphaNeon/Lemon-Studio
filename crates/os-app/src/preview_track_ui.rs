@@ -15,7 +15,7 @@ mod tests {
 
     /// The preview of a short sine file (`wav`), routed to `track` of `open`.
     fn preview(open: &Project, track: u16) -> Project {
-        let mut p = preview_project(&wav().to_string_lossy());
+        let mut p = preview_project(&crate::settings_file::store(), &wav().to_string_lossy());
         route(&mut p, open, track);
         p
     }
@@ -48,7 +48,7 @@ mod tests {
         open.mixer[5].volume = Some(0.3);
         open.mixer[5].name = Some("Drums bus".into());
         open.panning_law = Some(2);
-        let before = preview_project("kick.wav");
+        let before = preview_project(&crate::settings_file::store(), "kick.wav");
         let mut p = before.clone();
         route(&mut p, &open, 5);
         assert_eq!(p.mixer, open.mixer, "the open project's mixer");

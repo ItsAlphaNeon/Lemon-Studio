@@ -79,29 +79,29 @@ impl Opt {
         }
     }
 
-    pub fn on(self) -> bool {
-        crate::prefs::check(self.check())
+    pub fn on(self, st: &crate::settings_file::SettingsStore) -> bool {
+        st.check(self.check())
     }
 
-    pub fn toggle(self) -> bool {
-        crate::prefs::toggle(self.check())
+    pub fn toggle(self, st: &crate::settings_file::SettingsStore) -> bool {
+        st.toggle(self.check())
     }
 }
 
 /// The button's hint: what the filter records (spec §2 The button).
-pub fn hint() -> String {
-    let what: Vec<&str> = [(Opt::Notes, "notes"), (Opt::Automation, "automation"), (Opt::Audio, "audio")].into_iter().filter(|(o, _)| o.on()).map(|(_, w)| w).collect();
+pub fn hint(st: &crate::settings_file::SettingsStore) -> String {
+    let what: Vec<&str> = [(Opt::Notes, "notes"), (Opt::Automation, "automation"), (Opt::Audio, "audio")].into_iter().filter(|(o, _)| o.on(st)).map(|(_, w)| w).collect();
     let what = if what.is_empty() { "nothing".to_string() } else { what.join(", ") };
     format!("Record ({what}) (R) - right-click for options")
 }
 
 /// Recording precount's length in bars: 1 or 2 (spec §3), Settings ▸ Recording's Count-in length.
-pub fn precount_bars() -> u32 {
-    crate::prefs::index(&crate::prefs::COUNT_IN_LENGTH) as u32 + 1
+pub fn precount_bars(st: &crate::settings_file::SettingsStore) -> u32 {
+    st.index(&crate::prefs::COUNT_IN_LENGTH) as u32 + 1
 }
 
-pub fn set_precount_bars(bars: u32) {
-    crate::prefs::set_choice(&crate::prefs::COUNT_IN_LENGTH, if bars == 2 { 1 } else { 0 });
+pub fn set_precount_bars(st: &crate::settings_file::SettingsStore, bars: u32) {
+    st.set_choice(&crate::prefs::COUNT_IN_LENGTH, if bars == 2 { 1 } else { 0 });
 }
 
 /// The three option buttons' hints (spec §3).
@@ -217,13 +217,13 @@ pub fn round(t: u32, u: u32) -> u32 {
 }
 
 /// `quantized` on grid `u` (None: as played).
-pub fn quantized_on(u: Option<u32>, start: u32, end: u32) -> (u32, u32) {
+pub fn quantized_on(st: &crate::settings_file::SettingsStore, u: Option<u32>, start: u32, end: u32) -> (u32, u32) {
     let q = |t: u32, on: bool| match u {
         Some(u) if on => round(t, u),
         _ => t,
     };
-    let a = q(start, Opt::QuantizeStart.on());
-    let b = q(end, Opt::QuantizeEnd.on());
+    let a = q(start, Opt::QuantizeStart.on(st));
+    let b = q(end, Opt::QuantizeEnd.on(st));
     let b = if b > a { b } else { a + u.unwrap_or(1) };
     (a, b)
 }
@@ -239,7 +239,7 @@ pub fn point_in(s: &mut Session, kind: u32, value: i32) {
     let last = take.controls.iter().find(|c| c.0 == kind).map(|c| c.1);
     take.controls.retain(|c| c.0 != kind);
     take.controls.push((kind, tick));
-    if let Some(last) = last.filter(|&l| l < tick && !Opt::Blend.on()) {
+    if let Some(last) = last.filter(|&l| l < tick && !Opt::Blend.on(&s.settings)) {
         let p = crate::edit::notes::pattern_mut(s);
         p.controls.retain(|c| !(c.kind == kind && c.position > last && c.position < tick));
     }
@@ -357,7 +357,7 @@ fn write_held_in(s: &mut Session, h: Held, now: Option<f64>) {
         None => start,
     };
     let pattern = take.pattern;
-    let (a, b) = quantized_on(s.rec.unit, start, end);
+    let (a, b) = quantized_on(&s.settings, s.rec.unit, start, end);
     let take = s.rec.take.as_mut().expect("checked");
     let mut note = Note { length: b - a, key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) };
     note.mod_x = h.extra.mod_x.unwrap_or(note.mod_x);
@@ -370,7 +370,7 @@ fn write_held_in(s: &mut Session, h: Held, now: Option<f64>) {
     let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
     take.span = Some((lo, hi));
     // Blend recorded notes: the earlier notes stay (spec §3).
-    let (lo, hi) = if Opt::Blend.on() { (0, 0) } else { (lo, hi) };
+    let (lo, hi) = if Opt::Blend.on(&s.settings) { (0, 0) } else { (lo, hi) };
     let notes: Vec<Note> = take
         .before
         .iter()
@@ -418,7 +418,7 @@ pub fn tick_in(s: &mut Session, sel: Option<(u32, u32)>) -> bool {
         s.rec.waiting = false;
         s.touched.repaint = true;
     }
-    let run_on = s.rec.armed && !Opt::Loop.on();
+    let run_on = s.rec.armed && !Opt::Loop.on(&s.settings);
     crate::transport::run_on_flag().store(run_on, std::sync::atomic::Ordering::Relaxed);
     let live = s.transport.playing() && !s.transport.paused();
     // Punch (spec §5): armed with Loop record off, playback stops at the selection's end; held notes end there.
@@ -489,7 +489,7 @@ pub fn tick_in(s: &mut Session, sel: Option<(u32, u32)>) -> bool {
     let changed = r.take.as_ref().is_some_and(|t| t.pattern != s.pattern());
     if (r.was_live && !live) || changed {
         end_take_in(s);
-        if !s.transport.playing() && s.rec.armed && Opt::DisarmOnStop.on() {
+        if !s.transport.playing() && s.rec.armed && Opt::DisarmOnStop.on(&s.settings) {
             s.rec.armed = false;
             s.touched.repaint = true;
         }

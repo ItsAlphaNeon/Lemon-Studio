@@ -17,14 +17,14 @@
 const KEY: &str = "step_edit";
 
 /// The switch (missing: off).
-pub fn on() -> bool {
-    crate::settings_file::flag(KEY, false)
+pub fn on(st: &crate::settings_file::SettingsStore) -> bool {
+    st.flag(KEY, false)
 }
 
 /// Toggles the switch and keeps it; returns the new state.
-pub fn toggle() -> bool {
-    let on = !on();
-    crate::settings_file::set_flag(KEY, on);
+pub fn toggle(st: &crate::settings_file::SettingsStore) -> bool {
+    let on = !on(st);
+    st.set_flag(KEY, on);
     on
 }
 

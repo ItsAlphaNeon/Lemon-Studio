@@ -68,7 +68,7 @@ fn prepare(app: &mut App, zip: &Path) -> Result<(Vec<u8>, Pack), String> {
     let mut pack = Pack { project, ..Default::default() };
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let temp = std::env::temp_dir().join(format!("lemon-zip-{}-{nanos}.{ext}", std::process::id()));
-    let saved = app.save_copy_with(temp.clone(), &mut |p| pack.gather(p));
+    let saved = app.save_copy_with(temp.clone(), &mut |p| pack.gather(&crate::settings_file::store(), p));
     let bytes = std::fs::read(&temp);
     let _ = std::fs::remove_file(&temp);
     match saved {
@@ -170,7 +170,7 @@ mod tests {
         std::fs::write(d.join("one/Kick.wav"), &wav).unwrap();
         std::fs::write(d.join("two/Kick.wav"), &wav[..wav.len() - 2]).unwrap();
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::projects::default_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::default_project(&crate::settings_file::store()));
         let rows: Vec<usize> = (0..4).map(|_| crate::projects::add_channel(app.state.session.project.get_mut())).collect();
         let one = d.join("one/Kick.wav").to_string_lossy().into_owned();
         let two = d.join("two/Kick.wav").to_string_lossy().into_owned();
@@ -196,7 +196,7 @@ mod tests {
         std::fs::remove_dir_all(d.join("two")).unwrap();
         let project = unzip(&zip, None, &done, &total).unwrap();
         app.open(project);
-        let resolved = |row: usize| crate::plugins::resolve_sample(app.state.session.project.channels[row].sample_path.as_deref().unwrap());
+        let resolved = |row: usize| crate::plugins::resolve_sample(&crate::settings_file::store(), app.state.session.project.channels[row].sample_path.as_deref().unwrap());
         let unzipped = d.join("out").join("Song");
         assert_eq!(resolved(rows[0]), unzipped.join("Kick.wav").to_string_lossy());
         assert_eq!(resolved(rows[1]), unzipped.join("Kick_2.wav").to_string_lossy());

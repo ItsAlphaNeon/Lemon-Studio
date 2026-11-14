@@ -268,7 +268,7 @@ pub fn pending_plugin(ses: &mut crate::session::Session) -> Option<usize> {
     ses.pending_plugin = None;
     let msg = match ses.plugins.create(row, index) {
         Ok(name) => {
-            ses.plugins.added(row);
+            ses.plugins.added(&ses.settings, row);
             ses.hosted_rows.push(row);
             ses.transport.set_instruments(ses.plugins.instruments());
             ses.dirty = true;

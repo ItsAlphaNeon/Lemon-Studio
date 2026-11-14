@@ -53,7 +53,7 @@ fn rows(app: &App, key: usize, list: &[Preset], nested: bool) -> Vec<PItem> {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn items(app: &App, key: usize, nested: bool) -> Vec<PItem> {
     let Some(h) = header(app, key) else { return Vec::new() };
-    let (mine, fac) = (user(&h.plugin), factory(&h.plugin));
+    let (mine, fac) = (user(&h.plugin), factory(&app.state.session.settings, &h.plugin));
     let both = !mine.is_empty() && !fac.is_empty();
     let mut v: Vec<PItem> = Vec::new();
     if both {
@@ -116,7 +116,7 @@ pub fn run(app: &mut App, c: PCmd) -> Option<String> {
         PCmd::Load(key, path) => load_into(app, key, &path),
         PCmd::Step(key, dir) => {
             let h = header(app, key)?;
-            let l = list(&h.plugin);
+            let l = list(&app.state.session.settings, &h.plugin);
             match step(&l, app.state.session.plugins.presets.get(&key).map(PathBuf::as_path), dir) {
                 Some(i) => load_into(app, key, &l[i].path),
                 None => Some(format!("No presets for {} yet (Save preset as... stores one)", h.plugin)),
@@ -387,7 +387,7 @@ mod tests {
         save(&file_for(&dir_for(&h.plugin).unwrap(), "Rim"), &h, &other).unwrap();
         let names: Vec<String> = user(&h.plugin).iter().map(|p| p.name.clone()).collect();
         assert_eq!(names, ["Default", "Rim"]);
-        assert!(run(&mut app, PCmd::Step(0, -1)).unwrap().contains("Rim") || !factory(&h.plugin).is_empty(), "back from no preset = last");
+        assert!(run(&mut app, PCmd::Step(0, -1)).unwrap().contains("Rim") || !factory(&crate::settings_file::store(), &h.plugin).is_empty(), "back from no preset = last");
         run(&mut app, PCmd::Load(0, file_for(&dir_for(&h.plugin).unwrap(), "Rim")));
         assert_eq!(app.state.session.plugins.sampler_path(0).as_deref(), Some("C:/x/rim.wav"));
         assert_eq!(app.state.session.plugins.preset_name(0).as_deref(), Some("Rim"));

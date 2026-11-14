@@ -283,7 +283,7 @@ impl App {
             return self.tell(Kind::Warning, TITLE, spans(&[&text]));
         }
         let song = if song { song_ok } else { !pat_ok };
-        let mut o = Options::load();
+        let mut o = Options::load(&self.state.session.settings);
         if mp3 {
             o.formats = [false, false, true, false];
         }
@@ -420,7 +420,7 @@ impl App {
             let job = self.export_job(&f);
             return self.start_export(job, f.song);
         }
-        f.o.save();
+        f.o.save(&self.state.session.settings);
         crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
         let job = self.export_job(&f);
         self.start_export(job, f.song);

@@ -1536,19 +1536,19 @@ impl App {
         // Each test's app looks for missing samples only in its own project's folders, never another test's.
         #[cfg(test)]
         os_engine::sample::set_thread_search_folders(Vec::new());
-        let transport = Transport::new(crate::factory_folder::dir());
+        let transport = Transport::new(crate::factory_folder::dir(&crate::settings_file::store()));
         // Tests keep the old five-channel template; a new session starts with one Lemon Sampler channel.
         #[cfg(test)]
         let project = test_project();
         #[cfg(not(test))]
-        let project = default_project();
+        let project = default_project(&crate::settings_file::store());
         let mut app = App {
             #[cfg(target_os = "linux")]
             audio_watch: Default::default(),
             #[cfg(target_os = "linux")]
             audio_playing: false,
             state: State {
-                session: crate::session::Session::new(project, transport),
+                session: crate::session::Session::new(project, transport, crate::settings_file::store()),
                 editor_host: Default::default(),
                 tweaks: Vec::new(),
                 rack_views: Default::default(),
@@ -2331,7 +2331,7 @@ impl App {
         self.state.session.transport.silence();
         self.reset_hosted();
         let s = &mut self.state;
-        s.session.project = crate::locked::Locked::new(default_project());
+        s.session.project = crate::locked::Locked::new(default_project(&crate::settings_file::store()));
         crate::project_info_ui::created(s);
         s.session.file = None;
         s.session.path = None;
@@ -3167,7 +3167,7 @@ impl App {
         for v in os_engine::metronome::VOLUMES {
             items.push(PItem::new(os_engine::metronome::volume_label(v), Cmd::MetronomeVolume(v)).mark(Mark::Radio(v == db)));
         }
-        let bars = if Opt::Precount.on() { crate::record::precount_bars() } else { 0 };
+        let bars = if Opt::Precount.on(&self.state.session.settings) { crate::record::precount_bars(&self.state.session.settings) } else { 0 };
         items.push(PItem::head("Count-in"));
         for (label, n) in [("Off", 0), ("1 bar", 1), ("2 bars", 2)] {
             items.push(PItem::new(label, Cmd::Rec(RecCmd::Precount(n))).mark(Mark::Radio(bars == n)));
@@ -3987,7 +3987,7 @@ impl App {
             self.invalidate();
         }
         self.record_tick();
-        self.audio_log.tick();
+        self.audio_log.tick(&self.state.session.settings);
         self.update_tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
@@ -4601,7 +4601,7 @@ impl App {
             Some(r) => {
                 crate::history::load_sample(&mut s.session, r);
                 s.session.sample_loads.push((r, path.clone()));
-                crate::rack::auto_name(&mut s.session.project.get_mut().channels[r], std::path::Path::new(&path));
+                crate::rack::auto_name(&crate::settings_file::store(), &mut s.session.project.get_mut().channels[r], std::path::Path::new(&path));
                 r
             }
             None => {
@@ -4614,7 +4614,7 @@ impl App {
             }
         };
         let ch = &mut s.session.project.get_mut().channels[row];
-        crate::rack::read_tags(ch, std::path::Path::new(&path));
+        crate::rack::read_tags(&crate::settings_file::store(), ch, std::path::Path::new(&path));
         ch.sample_path = Some(path);
         s.selected_channel = row;
         s.rack.select_only(row);
@@ -4671,7 +4671,7 @@ impl App {
         }
         let s = &mut self.state;
         let start = s.session.song_pos;
-        let secs = s.session.samples.wave(&path).map_or(0.0, |w| w.secs());
+        let secs = s.session.samples.wave(&crate::settings_file::store(), &path).map_or(0.0, |w| w.secs());
         let p = &s.session.project;
         let tempo = p.tick_tempo(s.tempo().max(1.0));
         let len = (secs * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
@@ -4729,8 +4729,8 @@ impl App {
                 crate::history::load_sample(&mut self.state.session, row);
             }
             if let Some(ch) = self.state.session.project.get_mut().channels.get_mut(row).filter(|_| sampler) {
-                crate::rack::auto_name(ch, std::path::Path::new(path));
-                crate::rack::read_tags(ch, std::path::Path::new(path));
+                crate::rack::auto_name(&self.state.session.settings, ch, std::path::Path::new(path));
+                crate::rack::read_tags(&self.state.session.settings, ch, std::path::Path::new(path));
                 ch.sample_path = Some(path.to_string());
                 // The plugin loads the file itself: it takes what the load read alongside.
                 let set = crate::plugins::tag_params(ch);
@@ -5944,7 +5944,7 @@ impl App {
         }
         if let (Some(Action::PianoKeys), Some(g)) = (&hover, self.piano_geom()) {
             // The key under the cursor: "C5 / 60" (spec: ui/settings-choices.md "Note names and Black notes").
-            hint = Cow::Owned(crate::note_names::key_hint(g.key_at(y).clamp(0, crate::piano::TOP_KEY)));
+            hint = Cow::Owned(crate::note_names::key_hint(&self.state.session.settings, g.key_at(y).clamp(0, crate::piano::TOP_KEY)));
         }
         if let (Some(Action::Mix(crate::mixer::MHit::EqGraph)), Some(g)) = (&hover, rect) {
             hint = Cow::Owned(crate::mixer::eq_graph_hint(&self.state, g, x));
@@ -9900,7 +9900,7 @@ mod tests {
         assert_eq!(crate::plugins::new_slot(PRESS).name, MAXIMUS_FILE_NAME);
         // A factory preset (a state preset) gives the slot its Maximus state, saved back under the file's name
         // (spec: plugins/factory-presets.md "Press (Maximus) and Pulp Filter").
-        let p = crate::presets::factory(PRESS).into_iter().find(|p| p.name == "Mastering/Max loudness").expect("the preset");
+        let p = crate::presets::factory(&crate::settings_file::store(), PRESS).into_iter().find(|p| p.name == "Mastering/Max loudness").expect("the preset");
         let Ok((_, crate::presets::Body::State(blob))) = crate::presets::load(&p.path, "clap:org.openstudio.press") else { panic!("a state preset") };
         assert!(a.state.session.plugins.set_state(key, &blob));
         let max = press::fl_from_plugin_state(&blob).unwrap();
@@ -10185,12 +10185,12 @@ mod tests {
     /// Writes the toolbar with a live-looking signal to OS_MONITOR_SHOT (a look-and-feel check, not an assertion).
     #[test]
     fn new_project_is_one_empty_lemon_sampler() {
-        let p = default_project();
+        let p = default_project(&crate::settings_file::store());
         assert_eq!(p.channels.len(), 1);
         let c = &p.channels[0];
         assert_eq!((c.kind, c.name.as_deref(), c.sample_path.as_deref(), c.mixer_track), (ChannelKind::Sampler, Some("Lemon Sampler"), None, 1));
         // Its starting Lemon Sampler state names no sample and carries the channel's envelope records.
-        let st = crate::plugins::sampler_state(c);
+        let st = crate::plugins::sampler_state(&crate::settings_file::store(), c);
         let json = String::from_utf8_lossy(&st[8..]).to_string();
         assert!(json.contains("\"envvol_on\":{\"bool\":false}") && json.contains("\"sample-path\":\"\\\"\\\"\""), "{json}");
     }
@@ -10359,7 +10359,7 @@ mod tests {
         assert_eq!(crate::edit::notes::pattern_length(&app.state.session, app.state.pattern()), 432);
         // Play truncated notes: on in a new project, as in FL's default template (spec: flp/engine-events.md "Event
         // 30"), on File > New too; a click switches it.
-        assert!(default_project().play_truncated);
+        assert!(default_project(&crate::settings_file::store()).play_truncated);
         let r = hit_rect(&app, &Action::Settings(SAct::Group("Advanced")));
         click(&mut app, &mut c, r);
         assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(TRUNCATED_CHECK)), "it works");
@@ -11035,7 +11035,7 @@ mod tests {
         use crate::views::settings::{Row, SAct, CROSSFADES_CHECK, PROJECT};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         assert!(prefs::check(&AUTO_CROSSFADES_NEW), "on by default");
-        assert_eq!(default_project().auto_crossfades, Some(true));
+        assert_eq!(default_project(&crate::settings_file::store()).auto_crossfades, Some(true));
         let mut app = App::new(None);
         app.open_settings(PROJECT);
         frame(&mut app, &mut c, None);
@@ -11103,7 +11103,7 @@ mod tests {
         use crate::views::settings::{SAct, AUDIO};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         assert_eq!((prefs::check(&TRUNCATED), prefs::check(&RESET)), (true, false), "the defaults");
-        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false, count_in: 0 });
+        assert_eq!(Starts::from_prefs(&crate::settings_file::store()), Starts { truncated: true, reset: false, count_in: 0 });
         let mut app = App::new(None);
         app.open_settings(AUDIO);
         frame(&mut app, &mut c, None);
@@ -11114,13 +11114,13 @@ mod tests {
             assert_eq!(app.state.message.as_deref(), Some(said));
         }
         assert_eq!((prefs::check(&TRUNCATED), prefs::check(&RESET)), (false, true));
-        assert_eq!(Starts::from_prefs(), Starts { truncated: false, reset: true, count_in: 0 }, "the next start goes by them");
+        assert_eq!(Starts::from_prefs(&crate::settings_file::store()), Starts { truncated: false, reset: true, count_in: 0 }, "the next start goes by them");
         // And back.
         for check in [&TRUNCATED, &RESET] {
             let r = hit_rect(&app, &Action::Settings(SAct::Check(check.label)));
             click(&mut app, &mut c, r);
         }
-        assert_eq!(Starts::from_prefs(), Starts { truncated: true, reset: false, count_in: 0 });
+        assert_eq!(Starts::from_prefs(&crate::settings_file::store()), Starts { truncated: true, reset: false, count_in: 0 });
     }
 
     // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
@@ -15108,7 +15108,7 @@ mod tests {
             wav.extend(&v.to_le_bytes());
         }
         std::fs::write(&path, wav).unwrap();
-        let p = preview_project(&path.to_string_lossy());
+        let p = preview_project(&crate::settings_file::store(), &path.to_string_lossy());
         let mut library = os_engine::SampleLibrary::default();
         let mut e = os_engine::Engine::new(&p, &mut library, 48000, os_engine::PlayMode::Pattern(1));
         let mut buf = vec![0.0f32; 48000];
@@ -15476,9 +15476,9 @@ mod tests {
             crossfade: 3,
             ..Default::default()
         };
-        pl.create_with(0, index, Some(&crate::plugins::sampler_state(&ch))).unwrap();
+        pl.create_with(0, index, Some(&crate::plugins::sampler_state(&crate::settings_file::store(), &ch))).unwrap();
         let mut back = ch.clone();
-        crate::plugins::store_sampler(&mut back, &pl.state(0).unwrap());
+        crate::plugins::store_sampler(&crate::settings_file::store(), &mut back, &pl.state(0).unwrap());
         assert_eq!(back, ch);
     }
 
@@ -15501,20 +15501,20 @@ mod tests {
         };
         for (points, want) in [([-1, i64::MAX], (0.0, 1.0)), ([500, 1500], (0.25, 0.75))] {
             ch.sound.loop_points = Some(points);
-            pl.create_with(0, index, Some(&crate::plugins::sampler_state(&ch))).unwrap();
+            pl.create_with(0, index, Some(&crate::plugins::sampler_state(&crate::settings_file::store(), &ch))).unwrap();
             assert_eq!(knobs(&pl), want);
             let mut back = ch.clone();
-            crate::plugins::store_sampler(&mut back, &pl.state(0).unwrap());
+            crate::plugins::store_sampler(&crate::settings_file::store(), &mut back, &pl.state(0).unwrap());
             assert_eq!(back.sound.loop_points, Some(points), "untouched");
         }
         let st = crate::plugins::with_params(&pl.state(0).unwrap(), &[("loop_start", json!({ "f32": 0.5 }))]).unwrap();
-        crate::plugins::store_sampler(&mut ch, &st);
+        crate::plugins::store_sampler(&crate::settings_file::store(), &mut ch, &st);
         assert_eq!(ch.sound.loop_points, Some([1000, 1500]));
         // A channel without loop points gets them once a knob moves.
         ch.sound.loop_points = None;
-        pl.create_with(0, index, Some(&crate::plugins::sampler_state(&ch))).unwrap();
+        pl.create_with(0, index, Some(&crate::plugins::sampler_state(&crate::settings_file::store(), &ch))).unwrap();
         let st = crate::plugins::with_params(&pl.state(0).unwrap(), &[("loop_end", json!({ "f32": 0.5 }))]).unwrap();
-        crate::plugins::store_sampler(&mut ch, &st);
+        crate::plugins::store_sampler(&crate::settings_file::store(), &mut ch, &st);
         let _ = std::fs::remove_file(&wav);
         assert_eq!(ch.sound.loop_points, Some([0, 1000]));
     }
@@ -21217,7 +21217,7 @@ mod tests {
         app.plugin_tick();
         let mut ch = app.state.session.project.channels[1].clone();
         ch.sound.declick = 0;
-        crate::plugins::store_sampler(&mut ch, &app.state.session.plugins.state(1).unwrap());
+        crate::plugins::store_sampler(&crate::settings_file::store(), &mut ch, &app.state.session.plugins.state(1).unwrap());
         assert_eq!(ch.sound.declick, 3);
         // Without a selection the modes are greyed out and change nothing.
         app.state.rack.sel.clear();
@@ -23571,7 +23571,7 @@ mod tests {
         let out = std::path::PathBuf::from(out);
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.session.midi = crate::midi_in::MidiIn::open(|| {});
+        app.state.session.midi = crate::midi_in::MidiIn::open(&crate::settings_file::store(), || {});
         app.open_settings(MIDI);
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(out.join("01_midi_page.png")).unwrap();

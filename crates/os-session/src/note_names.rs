@@ -33,12 +33,12 @@ pub fn name_in(key: i32, scheme: usize, flats: bool) -> String {
 }
 
 /// `key`'s name as the settings choose it: `C5` for 60, `C#5` for 61 by default.
-pub fn note_name(key: i32) -> String {
-    name_in(key, prefs::index(&prefs::NOTE_NAMES), prefs::index(&prefs::BLACK_NOTES) == 1)
+pub fn note_name(st: &crate::settings_file::SettingsStore, key: i32) -> String {
+    name_in(key, st.index(&prefs::NOTE_NAMES), st.index(&prefs::BLACK_NOTES) == 1)
 }
 
 /// The hint over a key: `<name><octave> / <MIDI number>` (`C5 / 60`), as FL's piano roll keyboard reads.
-pub fn key_hint(key: i32) -> String {
-    format!("{} / {key}", note_name(key))
+pub fn key_hint(st: &crate::settings_file::SettingsStore, key: i32) -> String {
+    format!("{} / {key}", note_name(st, key))
 }
 

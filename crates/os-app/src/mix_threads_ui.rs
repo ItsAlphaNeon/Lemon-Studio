@@ -28,7 +28,7 @@ mod tests {
     /// The two switches reach the engines: on by default, each turned off on its own by a click on its check.
     #[test]
     fn the_switches_reach_the_engines() {
-        apply();
+        apply(&crate::settings_file::store());
         assert_eq!((parallel::mixer_on(), parallel::generators_on()), (true, true));
         let mut app = crate::app::App::new(None);
         app.pref_toggle(MULTITHREADED_MIXER.label);
@@ -37,6 +37,6 @@ mod tests {
         app.pref_toggle(MULTITHREADED_GENERATORS.label);
         assert_eq!((parallel::mixer_on(), parallel::generators_on()), (true, false));
         set_check(&MULTITHREADED_GENERATORS, true);
-        apply();
+        apply(&crate::settings_file::store());
     }
 }

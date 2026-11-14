@@ -53,7 +53,7 @@ pub fn missing_samples(s: &State) -> Vec<(usize, String)> {
         .iter()
         .enumerate()
         .filter_map(|(row, ch)| Some((row, ch.sample_path.clone().filter(|p| !p.trim().is_empty())?)))
-        .filter(|(_, p)| !Path::new(&crate::plugins::resolve_sample(p)).is_file())
+        .filter(|(_, p)| !Path::new(&crate::plugins::resolve_sample(&s.session.settings, p)).is_file())
         .collect()
 }
 
@@ -129,7 +129,7 @@ pub fn tick(app: &mut App) {
 fn relink(app: &mut App, before: &[(usize, String)]) -> usize {
     let mut found = 0;
     for (row, old) in before {
-        let now = crate::plugins::resolve_sample(old);
+        let now = crate::plugins::resolve_sample(&app.state.session.settings, old);
         if !Path::new(&now).is_file() {
             continue;
         }
@@ -216,7 +216,7 @@ pub(crate) mod tests {
         let wav = wav(4410);
         std::fs::write(dir.join("Here.wav"), &wav).unwrap();
         let mut app = App::new(None);
-        app.state.session.project = crate::locked::Locked::new(crate::projects::default_project());
+        app.state.session.project = crate::locked::Locked::new(crate::projects::default_project(&crate::settings_file::store()));
         let a = crate::projects::add_channel(app.state.session.project.get_mut());
         let b = crate::projects::add_channel(app.state.session.project.get_mut());
         app.state.session.project.get_mut().channels[a].sample_path = Some(r"C:\Users\someone\AppData\Local\Temp\Image-Line\x\Here.wav".into());
@@ -228,7 +228,7 @@ pub(crate) mod tests {
         app.open(dir.join("Song.flp"));
         let missing = missing_samples(&app.state);
         assert_eq!(missing.iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![b], "only the sample that is nowhere");
-        assert_eq!(crate::plugins::resolve_sample(app.state.session.project.channels[a].sample_path.as_deref().unwrap()), dir.join("Here.wav").to_string_lossy());
+        assert_eq!(crate::plugins::resolve_sample(&crate::settings_file::store(), app.state.session.project.channels[a].sample_path.as_deref().unwrap()), dir.join("Here.wav").to_string_lossy());
         let t0 = Instant::now();
         while app.loading() && t0.elapsed() < Duration::from_secs(20) {
             app.plugin_tick();

@@ -27,7 +27,7 @@
 //! Sliders ([`Slider`], listed in [`SLIDERS`]) are declared the same way and read with `prefs::slider`.
 // spec: ui/settings.md, ui/options-coverage.md
 
-use crate::settings_file::{read, write, Store}; // This code is a part of L e m o n S t u d i o.
+use crate::settings_file::{SettingsStore, Store}; // This code is a part of L e m o n S t u d i o.
 
 
 /// A check (LED) on a settings page.
@@ -673,21 +673,83 @@ pub fn find_slider(label: &str) -> Option<&'static Slider> {
     SLIDERS.iter().copied().find(|s| s.label == label)
 }
 
-/// Slider `s`'s value, 0 to its `max`.
-pub fn slider(s: &Slider) -> u16 {
-    read(|st| slider_in(st, s))
-}
 
-/// Sets slider `s` (to its `max` at most) and keeps it.
-pub fn set_slider(s: &Slider, v: u16) {
-    write(s.key, &v.min(s.max).to_string());
-}
 
-/// Value box `n` as its box shows it: its number, or "---" for 0 in a box whose range starts at 0 (none).
-pub fn number_text(n: &Number) -> String {
-    match number(n) {
-        0 if n.min == 0 => "---".into(),
-        v => v.to_string(),
+
+/// The declared settings' values in a store (`Session::settings`; the interface reads its own through `crate::prefs`
+/// in `os-app`).
+impl SettingsStore {
+    /// Slider `s`'s value, 0 to its `max`.
+    pub fn slider(&self, s: &Slider) -> u16 {
+        self.read(|st| slider_in(st, s))
+    }
+
+    /// Sets slider `s` (to its `max` at most) and keeps it.
+    pub fn set_slider(&self, s: &Slider, v: u16) {
+        self.write(s.key, &v.min(s.max).to_string());
+    }
+
+    /// Value box `n` as its box shows it: its number, or "---" for 0 in a box whose range starts at 0 (none).
+    pub fn number_text(&self, n: &Number) -> String {
+        match self.number(n) {
+            0 if n.min == 0 => "---".into(),
+            v => v.to_string(),
+        }
+    }
+
+    /// Value box `n`'s value.
+    pub fn number(&self, n: &Number) -> u16 {
+        self.read(|s| number_in(s, n))
+    }
+
+    /// Sets value box `n` (kept within its range) and keeps it.
+    pub fn set_number(&self, n: &Number, v: u16) {
+        self.write(n.key, &v.clamp(n.min, n.max).to_string());
+    }
+
+    /// Whether check `c` is on.
+    pub fn check(&self, c: &Check) -> bool {
+        self.read(|s| check_in(s, c))
+    }
+
+    /// Turns check `c` on or off and keeps it.
+    pub fn set_check(&self, c: &Check, on: bool) {
+        self.write(c.key, if on { "1" } else { "0" });
+    }
+
+    /// Toggles check `c` and keeps it; returns the new state.
+    pub fn toggle(&self, c: &Check) -> bool {
+        let on = !self.check(c);
+        self.set_check(c, on);
+        on
+    }
+
+    /// The position of combo `c`'s choice in its `choices`.
+    pub fn index(&self, c: &Combo) -> usize {
+        self.read(|s| index_in(s, c))
+    }
+
+    /// The text of combo `c`'s choice.
+    pub fn choice(&self, c: &Combo) -> &'static str {
+        c.choices[self.index(c)]
+    }
+
+    /// Chooses entry `i` of combo `c` and keeps it (an index past its choices changes nothing).
+    pub fn set_choice(&self, c: &Combo, i: usize) {
+        if let Some(v) = c.choices.get(i) {
+            self.write(c.key, v);
+        }
+    }
+
+    /// A setting kept as free text under `key`, for values found at run time (a template, a file path; `crate::templates`):
+    /// `None` when it is not set or empty.
+    pub fn text(&self, key: &str) -> Option<String> {
+        self.read(|s| s.get(key).filter(|v| !v.is_empty()).map(String::from))
+    }
+
+    /// Keeps `value` (one line: line breaks become spaces) as `key`'s free text; "" clears it.
+    pub fn set_text(&self, key: &str, value: &str) {
+        self.write(key, &value.replace(['\r', '\n'], " "));
     }
 }
 
@@ -723,60 +785,15 @@ pub fn find_number(label: &str) -> Option<&'static Number> {
     NUMBERS.iter().copied().find(|n| n.label == label)
 }
 
-/// Value box `n`'s value.
-pub fn number(n: &Number) -> u16 {
-    read(|s| number_in(s, n))
-}
 
-/// Sets value box `n` (kept within its range) and keeps it.
-pub fn set_number(n: &Number, v: u16) {
-    write(n.key, &v.clamp(n.min, n.max).to_string());
-}
 
-/// Whether check `c` is on.
-pub fn check(c: &Check) -> bool {
-    read(|s| check_in(s, c))
-}
 
-/// Turns check `c` on or off and keeps it.
-pub fn set_check(c: &Check, on: bool) {
-    write(c.key, if on { "1" } else { "0" });
-}
 
-/// Toggles check `c` and keeps it; returns the new state.
-pub fn toggle(c: &Check) -> bool {
-    let on = !check(c);
-    set_check(c, on);
-    on
-}
 
-/// The position of combo `c`'s choice in its `choices`.
-pub fn index(c: &Combo) -> usize {
-    read(|s| index_in(s, c))
-}
 
-/// The text of combo `c`'s choice.
-pub fn choice(c: &Combo) -> &'static str {
-    c.choices[index(c)]
-}
 
-/// Chooses entry `i` of combo `c` and keeps it (an index past its choices changes nothing).
-pub fn set_choice(c: &Combo, i: usize) {
-    if let Some(v) = c.choices.get(i) {
-        write(c.key, v);
-    }
-}
 
-/// A setting kept as free text under `key`, for values found at run time (a template, a file path; `crate::templates`):
-/// `None` when it is not set or empty.
-pub fn text(key: &str) -> Option<String> {
-    read(|s| s.get(key).filter(|v| !v.is_empty()).map(String::from))
-}
 
-/// Keeps `value` (one line: line breaks become spaces) as `key`'s free text; "" clears it.
-pub fn set_text(key: &str, value: &str) {
-    write(key, &value.replace(['\r', '\n'], " "));
-}
 
 pub fn check_in(s: &Store, c: &Check) -> bool {
     match s.get(c.key) {
@@ -820,14 +837,15 @@ main_gui_scaling = 200%
 
     #[test]
     fn reading_and_changing_settings() {
-        assert_eq!((check(&TEST_CHECK), choice(&MAIN_GUI_SCALING)), (true, "System"));
-        assert!(!toggle(&TEST_CHECK) && !check(&TEST_CHECK));
-        set_check(&TEST_CHECK, true);
-        assert!(check(&TEST_CHECK));
-        set_choice(&MAIN_GUI_SCALING, 2);
-        assert_eq!((index(&MAIN_GUI_SCALING), choice(&MAIN_GUI_SCALING)), (2, "125%"));
-        set_choice(&MAIN_GUI_SCALING, 99);
-        assert_eq!(choice(&MAIN_GUI_SCALING), "125%");
+        let st = SettingsStore::memory();
+        assert_eq!((st.check(&TEST_CHECK), st.choice(&MAIN_GUI_SCALING)), (true, "System"));
+        assert!(!st.toggle(&TEST_CHECK) && !st.check(&TEST_CHECK));
+        st.set_check(&TEST_CHECK, true);
+        assert!(st.check(&TEST_CHECK));
+        st.set_choice(&MAIN_GUI_SCALING, 2);
+        assert_eq!((st.index(&MAIN_GUI_SCALING), st.choice(&MAIN_GUI_SCALING)), (2, "125%"));
+        st.set_choice(&MAIN_GUI_SCALING, 99);
+        assert_eq!(st.choice(&MAIN_GUI_SCALING), "125%");
         assert_eq!(find_combo("Main GUI scaling"), Some(&MAIN_GUI_SCALING));
         assert_eq!(find_check("Use the high-performance power plan"), Some(&TEST_CHECK));
         assert_eq!((find_check("Main GUI scaling"), find_combo("Language"), find_check("")), (None, None, None));
@@ -837,22 +855,23 @@ main_gui_scaling = 200%
     /// starts at 0 shows 0 as "---".
     #[test]
     fn slider_values_and_the_preview_track() {
+        let st = SettingsStore::memory();
         let s = Store::parse("vertical_scrolling_speed=96\nhorizontal_scrolling_speed=fast\n");
         assert_eq!((slider_in(&s, &VERTICAL_SCROLLING_SPEED), slider_in(&s, &HORIZONTAL_SCROLLING_SPEED)), (96, 256));
         assert_eq!(slider_in(&Store::parse("vertical_scrolling_speed=9000"), &VERTICAL_SCROLLING_SPEED), 512);
-        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 256, "unset: the middle");
-        set_slider(&VERTICAL_SCROLLING_SPEED, 600);
-        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 512);
-        set_slider(&VERTICAL_SCROLLING_SPEED, 0);
-        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), 0);
-        set_slider(&VERTICAL_SCROLLING_SPEED, 256);
+        assert_eq!(st.slider(&VERTICAL_SCROLLING_SPEED), 256, "unset: the middle");
+        st.set_slider(&VERTICAL_SCROLLING_SPEED, 600);
+        assert_eq!(st.slider(&VERTICAL_SCROLLING_SPEED), 512);
+        st.set_slider(&VERTICAL_SCROLLING_SPEED, 0);
+        assert_eq!(st.slider(&VERTICAL_SCROLLING_SPEED), 0);
+        st.set_slider(&VERTICAL_SCROLLING_SPEED, 256);
         assert_eq!(find_slider("Vertical scrolling speed"), Some(&VERTICAL_SCROLLING_SPEED));
         assert_eq!((find_slider(""), find_slider("Smoothing")), (None, Some(&SMOOTHING)));
-        assert_eq!((number(&BROWSER_PREVIEW_TRACK), number_text(&BROWSER_PREVIEW_TRACK).as_str()), (0, "---"));
-        set_number(&BROWSER_PREVIEW_TRACK, 5);
-        assert_eq!((number(&BROWSER_PREVIEW_TRACK), number_text(&BROWSER_PREVIEW_TRACK).as_str()), (5, "5"));
-        set_number(&BROWSER_PREVIEW_TRACK, 0);
-        assert_eq!(number_text(&MAX_UNDO_LEVELS), "100", "a box from 1 shows its number");
+        assert_eq!((st.number(&BROWSER_PREVIEW_TRACK), st.number_text(&BROWSER_PREVIEW_TRACK).as_str()), (0, "---"));
+        st.set_number(&BROWSER_PREVIEW_TRACK, 5);
+        assert_eq!((st.number(&BROWSER_PREVIEW_TRACK), st.number_text(&BROWSER_PREVIEW_TRACK).as_str()), (5, "5"));
+        st.set_number(&BROWSER_PREVIEW_TRACK, 0);
+        assert_eq!(st.number_text(&MAX_UNDO_LEVELS), "100", "a box from 1 shows its number");
         assert_eq!(find_number("Browser preview track"), Some(&BROWSER_PREVIEW_TRACK));
     }
 }

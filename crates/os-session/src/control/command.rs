@@ -737,7 +737,7 @@ impl Command {
                     ch.mixer_track = t;
                 }
                 if let Some(path) = sample.filter(|p| !p.is_empty()) {
-                    crate::edit::rack::auto_name(ch, std::path::Path::new(&path));
+                    crate::edit::rack::auto_name(&s.settings, ch, std::path::Path::new(&path));
                     ch.sample_path = Some(path.clone());
                     s.sample_loads.push((row, path));
                 }
@@ -817,8 +817,8 @@ impl Command {
                 if path.is_empty() {
                     ch.sample_path = None;
                 } else {
-                    crate::edit::rack::auto_name(ch, std::path::Path::new(&path));
-                    crate::edit::rack::read_tags(ch, std::path::Path::new(&path));
+                    crate::edit::rack::auto_name(&s.settings, ch, std::path::Path::new(&path));
+                    crate::edit::rack::read_tags(&s.settings, ch, std::path::Path::new(&path));
                     ch.sample_path = Some(path.clone());
                 }
                 s.sample_loads.push((row, path));
@@ -1163,7 +1163,7 @@ fn put(s: &mut crate::session::Session, t: Taken) {
         // `apply` set it already.
         Taken::Param(..) | Taken::Plugin(..) => {}
         Taken::Project(side) => restore(s, *side),
-        Taken::Links(pairs) => crate::remote::retarget(&pairs),
+        Taken::Links(pairs) => crate::remote::retarget(&s.settings, &pairs),
         Taken::Mutes(on) => {
             for (id, v) in on {
                 if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.id.0 == id) {

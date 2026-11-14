@@ -788,13 +788,13 @@ mod tests {
         assert_eq!(crate::params::target_of(&a.state.session, key, 0), Some(tgt));
 
         // A controller on the parameter, kept by place and id.
-        crate::remote::set_links(&[]);
-        crate::remote::add(Link::new(0, 20, link), true);
-        assert_eq!(crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>(), [link]);
+        crate::remote::set_links(&crate::settings_file::store(), &[]);
+        crate::remote::add(&crate::settings_file::store(), Link::new(0, 20, link), true);
+        assert_eq!(crate::remote::links(&crate::settings_file::store()).iter().map(|l| l.target).collect::<Vec<_>>(), [link]);
         assert!(a.remote_cc("Test", 0, 20, 127));
         a.state.session.plugins.hosted[&key].plugin.lock().unwrap().idle();
         assert!((crate::params_ui::param_value(&a.state, key, 0).unwrap() - 1.0).abs() < 1e-6);
-        assert!(crate::remote_ui::label(&a.state, &crate::remote::links()[0]).starts_with(&format!("{second} in ")));
+        assert!(crate::remote_ui::label(&a.state, &crate::remote::links(&crate::settings_file::store())[0]).starts_with(&format!("{second} in ")));
 
         // The levels: the parameter menu, a clip named as the value box names them, a controller.
         let ops = menu_of(&mut a, 0);
@@ -807,13 +807,13 @@ mod tests {
         assert_eq!(crate::init_ui::name(&a.state, level), caption);
         assert_eq!(level_of(&a.state.session, target::decode(level)), Some((2, 0, 2, true)));
         assert_eq!(crate::params::key_of(&a.state.session, target::decode(level)), None, "not a parameter of the effect");
-        crate::remote::add(Link::new(0, 21, T::Member(2, 0, 2, false)), true);
+        crate::remote::add(&crate::settings_file::store(), Link::new(0, 21, T::Member(2, 0, 2, false)), true);
         a.state.session.history.reset();
         assert!(a.remote_cc("Test", 0, 21, 64));
         assert!(a.remote_cc("Test", 0, 21, 127));
         assert_eq!(members(&a.state.session, 2, 0).unwrap()[0].dry, 1.0);
         assert_eq!(a.state.session.history.len(), 1, "one step while it moves");
-        crate::remote::set_links(&[]);
+        crate::remote::set_links(&crate::settings_file::store(), &[]);
     }
 
     /// The container's window (spec plugins/patcher/README.md §4.3): opening the slot shows it; each member has wet and
@@ -1075,7 +1075,7 @@ mod tests {
         p.init_controls.push(os_model::InitControl { head: 0, target: target::slot_param(2, 0, 2), value: 7 });
         p.init_controls.push(os_model::InitControl { head: 0, target: target::slot_param(2, 1, 2046), value: 1 });
         let links = [Link::new(0, 20, T::Param(del, 0)), Link::new(0, 21, T::Param(lim, 5)), Link::new(0, 22, T::Knob(KnobId::SlotMix(2, 1)))];
-        crate::remote::set_links(&links);
+        crate::remote::set_links(&crate::settings_file::store(), &links);
         let before = a.state.session.project.clone();
         let targets = |a: &App| {
             let p = &a.state.session.project;
@@ -1084,7 +1084,7 @@ mod tests {
                 p.patterns[0].controls.iter().map(|c| c.kind).collect::<Vec<_>>(),
                 p.controller_links.iter().map(|l| l.target()).collect::<Vec<_>>(),
                 p.init_controls.iter().map(|c| c.target).collect::<Vec<_>>(),
-                crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>(),
+                crate::remote::links(&crate::settings_file::store()).iter().map(|l| l.target).collect::<Vec<_>>(),
             )
         };
         let was = targets(&a);
@@ -1136,7 +1136,7 @@ mod tests {
         tick(&mut a);
         assert_eq!(targets(&a).0, vec![item(2, 0), mix]);
         assert_eq!(targets(&a).4[0], T::MemberParam(2, 0, 2, 0));
-        crate::remote::set_links(&[]);
+        crate::remote::set_links(&crate::settings_file::store(), &[]);
     }
 
     /// The channel's Wrap in container moves the instrument's clips and links onto member 1 (spec §4.5); the channel's
@@ -1152,9 +1152,9 @@ mod tests {
         let volume = target::channel(index, target::CHANNEL_VOLUME);
         crate::playlist::run(&mut a, Cmd::CreateAutomation(param, "Param".into(), 0.5));
         crate::playlist::run(&mut a, Cmd::CreateAutomation(volume, "Volume".into(), 0.5));
-        crate::remote::set_links(&[Link::new(0, 30, T::Param(0, 3)), Link::new(0, 31, T::Knob(KnobId::ChanVol(0)))]);
+        crate::remote::set_links(&crate::settings_file::store(), &[Link::new(0, 30, T::Param(0, 3)), Link::new(0, 31, T::Knob(KnobId::ChanVol(0)))]);
         let clips = |a: &App| a.state.session.project.automations.iter().flat_map(|x| x.targets.clone()).collect::<Vec<_>>();
-        let links = || crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>();
+        let links = || crate::remote::links(&crate::settings_file::store()).iter().map(|l| l.target).collect::<Vec<_>>();
         let wrap = crate::rack::channel_menu(&a.state, 0, 0.0, 0.0).items.into_iter().find(|i| i.label == WRAP).unwrap().cmd;
         crate::playlist::run(&mut a, wrap);
         ticks(&mut a);
@@ -1169,7 +1169,7 @@ mod tests {
         ticks(&mut a);
         assert_eq!(clips(&a), vec![param, volume]);
         assert_eq!(links(), vec![T::Param(0, 3), T::Knob(KnobId::ChanVol(0))]);
-        crate::remote::set_links(&[]);
+        crate::remote::set_links(&crate::settings_file::store(), &[]);
     }
 
     /// A member's own name, colour, icon and CPU switches (spec §4.5): the member window's entries set them, one undo

@@ -145,7 +145,7 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
     ];
     // spec: ui/remote-control.md §1. Ticked on a parameter an automation clip drives (FL observed) or a controller
     // is linked to.
-    let linked = driven.is_some() || link.is_some_and(|t| crate::remote::link_of(t).is_some());
+    let linked = driven.is_some() || link.is_some_and(|t| crate::remote::link_of(&s.session.settings, t).is_some());
     let mut remote = crate::remote_ui::menu_items(link);
     if let Some(link) = remote.iter_mut().find(|i| i.label == "MIDI learn...") {
         link.mark = Mark::Check(linked);
@@ -549,7 +549,7 @@ mod tests {
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
         idle(&a);
         assert!((value_of(&a.state, key, 35).unwrap() - 1.0).abs() < 1e-6);
-        assert_eq!(a.state.session.history.entries().last().map(|e| e.1), Some(crate::control::command::PLUGIN_PARAMETER));
+        assert_eq!(a.state.session.history.entries(&crate::settings_file::store()).last().map(|e| e.1), Some(crate::control::command::PLUGIN_PARAMETER));
         assert_eq!(crate::history_ui::undo(&mut a.state).as_deref(), Some(crate::control::command::PLUGIN_PARAMETER));
         a.host_commands();
         idle(&a);
@@ -636,9 +636,9 @@ mod tests {
         let m = row_menu(&mut a, key, 0);
         assert!(!entry(&m, "Edit automation clip...").enabled);
         assert_eq!(entry(&m, "MIDI learn...").mark, Mark::Check(false));
-        crate::remote::add(crate::remote::Link::new(0, 7, crate::typein::Target::Param(key, 0)), true);
+        crate::remote::add(&crate::settings_file::store(), crate::remote::Link::new(0, 7, crate::typein::Target::Param(key, 0)), true);
         assert_eq!(entry(&row_menu(&mut a, key, 0), "MIDI learn...").mark, Mark::Check(true));
-        crate::remote::remove(crate::typein::Target::Param(key, 0));
+        crate::remote::remove(&crate::settings_file::store(), crate::typein::Target::Param(key, 0));
 
         // TOOLS ▸ Last tweaked on the tempo (a host control): Edit automation clip... follows a tempo clip too.
         a.note_host_tweak(&Action::Tempo);

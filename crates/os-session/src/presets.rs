@@ -170,10 +170,10 @@ fn factory_in(files: &[(&str, &[u8])], plugin: &str) -> Vec<Preset> {
 }
 
 /// The factory presets of `plugin`: Lemon Studio's, then (for Citrus and Smith) the `.fst` files of an installed copy.
-pub fn factory(plugin: &str) -> Vec<Preset> {
+pub fn factory(st: &crate::settings_file::SettingsStore, plugin: &str) -> Vec<Preset> {
     let mut v = factory_in(FACTORY, plugin);
-    v.extend(crate::citrus::more_presets(plugin));
-    v.extend(crate::smith::more_presets(plugin));
+    v.extend(crate::citrus::more_presets(st, plugin));
+    v.extend(crate::smith::more_presets(st, plugin));
     v
 }
 
@@ -200,9 +200,9 @@ pub fn read(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// The presets of `plugin`: the user's, then the factory ones.
-pub fn list(plugin: &str) -> Vec<Preset> {
+pub fn list(st: &crate::settings_file::SettingsStore, plugin: &str) -> Vec<Preset> {
     let mut v = user(plugin);
-    v.extend(factory(plugin));
+    v.extend(factory(st, plugin));
     v
 }
 
@@ -514,13 +514,13 @@ fn apply(ses: &mut crate::session::Session, key: usize, body: &Body) -> Option<V
 /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
 fn auto_name(ses: &mut crate::session::Session, key: usize, path: &Path) {
     match crate::plugins::fx_of(key) {
-        Some(slot) if crate::prefs::check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS) => {
+        Some(slot) if ses.settings.check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS) => {
             crate::edit::mixer::set_slot_label(ses, slot.0, slot.1, Some(shown_name(path)));
         }
         Some(_) => {}
         None => {
             if let Some(ch) = ses.project.get_mut().channels.get_mut(key) {
-                crate::edit::rack::auto_name(ch, path);
+                crate::edit::rack::auto_name(&ses.settings, ch, path);
             }
         }
     }

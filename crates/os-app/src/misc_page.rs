@@ -69,7 +69,7 @@ pub fn off_name(h: Hit, v: &MiscVals) -> Option<&'static str> {
 
 /// Note name ("C5", "F#4"): FL's naming, C5 = MIDI 60, as the settings choose it (`crate::note_names`).
 pub fn note_name(key: i32) -> String {
-    crate::note_names::note_name(key)
+    crate::note_names::note_name(&crate::settings_file::store(), key)
 }
 
 /// The hint value text.

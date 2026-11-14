@@ -169,7 +169,7 @@ impl App {
         let mut used = Vec::new();
         for (row, ch) in self.state.session.project.channels.iter().enumerate() {
             used.extend(self.state.session.plugins.sampler_path(row).filter(|p| !p.is_empty()).map(PathBuf::from));
-            used.extend(ch.sample_path.as_deref().filter(|p| !p.is_empty()).map(|p| PathBuf::from(crate::plugins::resolve_sample(p))));
+            used.extend(ch.sample_path.as_deref().filter(|p| !p.is_empty()).map(|p| PathBuf::from(crate::plugins::resolve_sample(&self.state.session.settings, p))));
         }
         used
     }

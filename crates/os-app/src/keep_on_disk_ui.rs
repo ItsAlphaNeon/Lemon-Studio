@@ -131,7 +131,7 @@ mod tests {
         sample_chosen(&mut app, r, p.clone());
         assert_eq!(flags(&app, r), KEPT);
         assert_eq!(app.state.session.history.len(), steps + 1, "one step");
-        assert_eq!(app.state.session.history.entries().last(), Some(&(steps + 1, LOAD_SAMPLE)));
+        assert_eq!(app.state.session.history.entries(&crate::settings_file::store()).last(), Some(&(steps + 1, LOAD_SAMPLE)));
         ctrl_z(&mut app.state);
         assert_eq!(flags(&app, r), None, "undone");
         ctrl_alt_z(&mut app.state);

@@ -130,7 +130,7 @@ pub fn replace_clips(s: &mut State, pattern: u16, ch: u16) -> usize {
 /// one undo step. Returns the hint bar's message.
 pub fn place(s: &mut State, p: &Pending, path: &Path) -> String {
     let text = path.to_string_lossy().into_owned();
-    if s.session.samples.wave(&text).is_none() {
+    if s.session.samples.wave(&s.session.settings, &text).is_none() {
         return format!("{text} could not be read");
     }
     let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(path, d.join("Rendered").join("Verse.wav"));
         assert!(std::fs::metadata(&path).unwrap().len() > 44);
         assert!(crate::playlist::clips(&app.state.session).is_empty(), "nothing placed");
-        assert!(app.state.session.history.entries().iter().any(|e| e.1 == QUICK));
+        assert!(app.state.session.history.entries(&crate::settings_file::store()).iter().any(|e| e.1 == QUICK));
         crate::history_ui::undo(&mut app.state);
         assert_eq!(app.state.session.project.channels.len(), channels, "one undo step");
         // A pattern with no notes: a warning, no render.
@@ -411,7 +411,7 @@ mod tests {
         let c = crate::playlist::clips(&app.state.session).to_vec();
         assert_eq!(c.len(), 2);
         assert!(c[0].muted && c[1].source == ClipSource::Channel(ch) && (c[1].position, c[1].track) == (ppq * 4, 1));
-        assert!(app.state.session.history.entries().iter().any(|e| e.1 == REPLACE));
+        assert!(app.state.session.history.entries(&crate::settings_file::store()).iter().any(|e| e.1 == REPLACE));
         crate::history_ui::undo(&mut app.state);
         let c = crate::playlist::clips(&app.state.session);
         assert!(c.len() == 1 && !c[0].muted && app.state.session.project.channels.len() == channels, "one undo step");

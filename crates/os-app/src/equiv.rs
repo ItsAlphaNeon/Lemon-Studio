@@ -155,7 +155,7 @@ impl Fp {
     fn of(app: &App) -> Fp {
         let s = &app.state;
         let side = hash(&side(app));
-        let history = hash(&(s.session.history.entries(), s.session.history.at()));
+        let history = hash(&(s.session.history.entries(&app.state.session.settings), s.session.history.at()));
         Fp(vec![
             ("project", project_hash(&s.session.project)),
             ("side", side),
@@ -552,7 +552,7 @@ impl Rig {
 
     /// With no steps in the history (just opened, or a project opened or made by a step), undo starts from here.
     fn undo_start(&self, start: &mut os_model::Project) {
-        if self.app.state.session.history.entries().len() <= 1 {
+        if self.app.state.session.history.entries(&crate::settings_file::store()).len() <= 1 {
             start.clone_from(&self.app.state.session.project);
         }
     }

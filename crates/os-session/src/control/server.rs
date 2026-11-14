@@ -179,7 +179,9 @@ impl Server {
 /// `--serve`: the app without a window, `project` opened, answering clients until the process is ended.
 pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Option<std::path::PathBuf>) -> ! {
     // A session of its own: no window, no `App` (control-plane step 8).
-    let mut ses = crate::session::Session::new(crate::projects::default_project(), crate::transport::Transport::new(crate::factory_folder::dir()));
+    // The user folder's settings, as the window's app reads them.
+    let settings = crate::settings_file::SettingsStore::user();
+    let mut ses = crate::session::Session::new(crate::projects::default_project(&settings), crate::transport::Transport::new(crate::factory_folder::dir(&settings)), settings);
     // The plugins of the last scan, as the window's app has them before its own scan.
     ses.plugins = crate::project_io::last_scan();
     ses.project.get_mut().work_time = Some(crate::project_info::work_time_now());

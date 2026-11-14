@@ -163,10 +163,10 @@ pub struct Pack {
 impl Pack {
     /// Takes the samples of the project being written; a sample renamed in the zip (two files of one name) gets that
     /// name in the project file too, so it is found by name once unzipped.
-    pub fn gather(&mut self, p: &mut os_model::Project) {
+    pub fn gather(&mut self, st: &crate::settings_file::SettingsStore, p: &mut os_model::Project) {
         for ch in &mut p.channels {
             let Some(stored) = ch.sample_path.clone().filter(|s| !s.trim().is_empty()) else { continue };
-            let real = PathBuf::from(crate::plugins::resolve_sample(&stored));
+            let real = PathBuf::from(crate::plugins::resolve_sample(st, &stored));
             if !real.is_file() {
                 self.missing.push(file_name(&stored).to_string());
                 continue;

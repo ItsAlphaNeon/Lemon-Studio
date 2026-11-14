@@ -19,7 +19,7 @@ pub use crate::piano::{ROW, TOP_KEY};
 
 /// Key name in FL's naming (key 60 = C5) (§3), as the settings choose it (`crate::note_names`).
 pub fn key_name(key: i32) -> String {
-    crate::note_names::note_name(key)
+    crate::note_names::note_name(&crate::settings_file::store(), key)
 }
 
 pub fn is_black(key: i32) -> bool {
