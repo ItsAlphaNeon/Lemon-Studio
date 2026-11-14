@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn window_keys() {
         use crate::app::Action::ToggleWin;
-        use winit::keyboard::{Key, NamedKey};
+        use crate::keys::{Key, NamedKey};
         let Ok(mut c) = os_ui::Canvas::new(1536, 864, 1.0) else { return };
         let mut app = lemon();
         app.state.hide(Win::ChannelRack);

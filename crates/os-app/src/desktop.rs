@@ -8,7 +8,7 @@
 //!
 //! Wayland has a standard for this (xdg-shell's `wm_capabilities` and the `tiled_*` states of a configure), which
 //! winit 0.30 does not pass on; until it does, the desktop's name (`XDG_CURRENT_DESKTOP`) says whether it tiles, and on
-//! Hyprland its socket says whether the window floats.
+//! Hyprland the program asks its socket whether the window floats (`set_floating`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -49,16 +49,10 @@ pub fn captions() -> bool {
     !tiling() || floating
 }
 
-/// The main window was resized or moved (made floating or tiled again comes with one): asks Hyprland whether it floats.
-/// Whether that changed.
-pub fn window_changed() -> bool {
-    #[cfg(all(target_os = "linux", not(test)))]
-    if crate::plugin_window::hyprland::running() {
-        if let Some(f) = crate::plugin_window::hyprland::main_floats() {
-            return FLOATING.swap(f, Ordering::Relaxed) != f;
-        }
-    }
-    false
+/// The main window was resized or moved (made floating or tiled again comes with one): the program asks the window
+/// manager whether it floats (Hyprland) and tells it here. Whether that changed.
+pub fn set_floating(floating: bool) -> bool {
+    FLOATING.swap(floating, Ordering::Relaxed) != floating
 }
 
 #[cfg(test)]

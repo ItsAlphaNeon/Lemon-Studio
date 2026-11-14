@@ -355,7 +355,7 @@ mod tests {
     /// Shift+F, once for a held key; F alone stays the tiling layout's.
     #[test]
     fn shift_f_presses_the_layer() {
-        use winit::keyboard::Key;
+        use crate::keys::Key;
         let mut a = app();
         a.shift = true;
         a.key(&Key::Character("F".into()), false, false);

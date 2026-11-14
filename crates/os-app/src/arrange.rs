@@ -78,7 +78,7 @@ fn saved() -> Option<([WinState; 3], Rect)> {
 
 impl App {
     /// Runs an entry of Arrange windows ▸.
-    pub(crate) fn arrange(&mut self, l: Layout) {
+    pub fn arrange(&mut self, l: Layout) {
         let s = &mut self.state;
         match l {
             Layout::Realign | Layout::Default => {
@@ -126,7 +126,7 @@ impl App {
     /// the channel window goes back to where it first opens, right of the Channel rack, and the docked plugin windows
     /// of rack channels cascade from there, back to front, each a title bar lower and to the right so every title
     /// shows. Mixer slot windows and detached windows stay where they are.
-    pub(crate) fn align_channel_editors(&mut self) {
+    pub fn align_channel_editors(&mut self) {
         let s = &mut self.state;
         let (x, y) = channel_home(s);
         s.plugin_pos = (x, y);

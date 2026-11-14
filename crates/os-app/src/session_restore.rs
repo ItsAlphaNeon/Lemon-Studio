@@ -96,7 +96,7 @@ pub fn kept(app: &App) -> Option<Vec<Token>> {
 
 impl App {
     /// After the start's project opened: its windows as they were (`kept`); the plugin windows wait for their plugins.
-    pub(crate) fn restore_session(&mut self) {
+    pub fn restore_session(&mut self) {
         let Some(tokens) = kept(self) else { return };
         let rows = self.state.session.project.channels.len();
         for t in tokens {
@@ -112,7 +112,7 @@ impl App {
     }
 
     /// The kept plugin windows whose plugins have loaded open, in the order kept; the rest wait (`WAIT` at most).
-    pub(crate) fn session_tick(&mut self) {
+    pub fn session_tick(&mut self) {
         let Some(since) = self.session_since else { return };
         if since.elapsed() > WAIT {
             self.session_plugins.clear();

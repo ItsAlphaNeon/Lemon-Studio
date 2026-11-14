@@ -1152,7 +1152,7 @@ mod tests {
     /// tool letters, shift octaves, and every note is released.
     #[test]
     fn typing_keyboard_keys() {
-        use winit::keyboard::KeyCode;
+        use crate::keys::KeyCode;
         let mut a = app();
         assert!(a.typing_on(), "on by default");
         assert!(a.typing_key(KeyCode::KeyZ, true, false, false));

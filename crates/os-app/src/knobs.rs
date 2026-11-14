@@ -280,7 +280,7 @@ impl State {
 impl crate::app::App {
     /// Control `c` back to its default (a middle click, "Reset" in its menu, Alt+click on a mixer fader, pan or stereo
     /// separation knob); the hint bar shows the new value.
-    pub(crate) fn reset_control(&mut self, c: Control) {
+    pub fn reset_control(&mut self, c: Control) {
         use std::borrow::Cow;
         let s = &mut self.state;
         match c {

@@ -439,7 +439,7 @@ fn plugin_texts(s: &State, pt: &PluginTarget, meter: Option<&os_host::Meter>) ->
 impl App {
     /// The control port: opened when a recognised keyboard is listed, closed (the keyboard taken out of DAW mode first)
     /// when it goes. From `midi_refresh`.
-    pub(crate) fn surface_refresh(&mut self) {
+    pub fn surface_refresh(&mut self) {
         if self.surface.as_ref().is_some_and(|d| !d.port.listed(&self.state.session.midi.inputs)) {
             self.surface = None;
         }
@@ -473,21 +473,21 @@ impl App {
     }
 
     /// The keyboard back to its own mode: Lemon Studio quits.
-    pub(crate) fn surface_exit(&mut self) {
+    pub fn surface_exit(&mut self) {
         if let Some(d) = &mut self.surface {
             d.stop();
         }
     }
 
     /// A project opened: the keyboard starts over (banks, pages, button mode).
-    pub(crate) fn surface_reload(&mut self) {
+    pub fn surface_reload(&mut self) {
         if let Some(d) = &mut self.surface {
             d.project_changed();
         }
     }
 
     /// The port's messages, the held buttons' repeats, then the lights and displays. From `midi_tick`.
-    pub(crate) fn surface_tick(&mut self) {
+    pub fn surface_tick(&mut self) {
         let Some(d) = &mut self.surface else { return };
         if d.intro.as_ref().is_some_and(Intro::done) {
             d.intro = None;
@@ -506,7 +506,7 @@ impl App {
     }
 
     /// Something to do soon: a held arrow's repeat, the master fader's second display.
-    pub(crate) fn surface_busy(&self) -> bool {
+    pub fn surface_busy(&self) -> bool {
         self.surface.as_ref().is_some_and(|d| !d.held.is_empty() || d.master_again.is_some())
     }
 

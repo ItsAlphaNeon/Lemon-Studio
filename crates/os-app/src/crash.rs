@@ -82,7 +82,7 @@ fn clock(ms: u64) -> String {
 
 impl App {
     /// At startup, after the first project opened: the run before this one, when it ended with unsaved changes.
-    pub(crate) fn crash_notice(&mut self) {
+    pub fn crash_notice(&mut self) {
         let Some(prev) = self.journal.previous.clone() else { return };
         let entries = read(&prev);
         let pid = entries.iter().find(|e| e["kind"] == "session").and_then(|e| e["pid"].as_u64());
@@ -115,7 +115,7 @@ impl App {
     }
 
     /// The crash notice's Yes: backup `b` opened as `project` (None: as itself, for a project never saved).
-    pub(crate) fn open_crash_backup(&mut self, project: Option<PathBuf>, b: PathBuf) {
+    pub fn open_crash_backup(&mut self, project: Option<PathBuf>, b: PathBuf) {
         match project.filter(|p| p.is_file()) {
             Some(p) => {
                 if self.state.session.path.as_deref() != Some(p.as_path()) {

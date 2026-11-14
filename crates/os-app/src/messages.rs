@@ -154,7 +154,7 @@ pub fn size_warning(bytes: u64, choice: usize) -> Option<String> {
 impl App {
     /// The Manage messages button was clicked: its menu under the button (at the mouse when the button was not
     /// painted).
-    pub(crate) fn messages_menu(&mut self) {
+    pub fn messages_menu(&mut self) {
         let button = Action::Settings(SAct::Button("Manage messages"));
         let (x, y) = self.hits.iter().rev().find(|h| h.action == button).map_or(self.mouse, |h| (h.rect.x, h.rect.bottom()));
         self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items: menu(), sub: None, scroll: [0; 2] });
@@ -163,7 +163,7 @@ impl App {
 
     /// A save wrote a project file of `bytes`: the Project data size warning when the file is over its limit and its
     /// entry is on. The box's Remember my choice, ticked when Ok is pressed, turns the entry off.
-    pub(crate) fn size_notice(&mut self, bytes: u64) {
+    pub fn size_notice(&mut self, bytes: u64) {
         use crate::dialog::{spans, Answer, Msg, Then};
         if !on(&PROJECT_DATA_SIZE) {
             return;

@@ -1803,7 +1803,7 @@ const ASIO_LOGO_H: f32 = 40.0;
 
 /// The ASIO Compatible Logo from the ASIO SDK (`asiosdk/logo`, unchanged), decoded once.
 #[cfg(windows)]
-pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+pub fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
     static LOGO: std::sync::OnceLock<Option<(usize, usize, Vec<u32>)>> = std::sync::OnceLock::new();
     LOGO.get_or_init(|| os_ui::Canvas::decode_png(include_bytes!("../../asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png")))
         .as_ref()
@@ -1811,7 +1811,7 @@ pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
 
 /// Builds without ASIO show no logo.
 #[cfg(not(windows))]
-pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+pub fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
     None
 }
 
@@ -1886,7 +1886,7 @@ fn byte_at(s: &str, i: usize) -> usize {
 
 /// The lines `text` shows in `w` px: (first character, characters) of each, in characters. A line longer than `w`
 /// breaks after its last space that fits, else where it is full; the line break itself belongs to no line.
-pub(crate) fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
+pub fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut base = 0;
     for para in text.split('\n') {

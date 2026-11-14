@@ -19,7 +19,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{CursorIcon, ResizeDirection, Window};
 
-use crate::app::{self, App, Native, Win, EDGE_B, EDGE_L, EDGE_R, EDGE_T};
+use os_app::app::{self, App, Native, Win, EDGE_B, EDGE_L, EDGE_R, EDGE_T};
 use crate::{ctrl, frame_of, place_k, ui_scale, Shell};
 use os_ui::Canvas;
 
@@ -127,7 +127,7 @@ fn open(el: &ActiveEventLoop, main: &Window, app: &App, w: Win) -> Option<DetWin
             Ok(RawWindowHandle::Xcb(h)) => h.window.get(),
             _ => 0,
         };
-        crate::plugin_window::set_transient(id, app.state.session.plugins.owner);
+        crate::frames::set_transient(id, app.state.session.plugins.owner);
         window.set_visible(true);
     }
     let context = softbuffer::Context::new(window.clone()).ok()?;

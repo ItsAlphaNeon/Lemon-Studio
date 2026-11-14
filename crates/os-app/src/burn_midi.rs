@@ -92,7 +92,7 @@ impl Play {
     }
 
     /// The note written for it; the velocity, pan and mods of a note whose levels did not change stay its bytes.
-    pub(crate) fn note(&self) -> Note {
+    pub fn note(&self) -> Note {
         let n = &self.src;
         let key = (self.pitch / 100.0).round();
         let rest = self.pitch - key * 100.0;
@@ -680,7 +680,7 @@ pub fn can_burn(s: &State, row: usize) -> bool {
 
 impl App {
     /// Burn MIDI to ▸ Current pattern (`new` false) or New pattern on rack row `row`. Returns the hint bar's message.
-    pub(crate) fn burn_midi(&mut self, row: usize, new: bool) -> Option<String> {
+    pub fn burn_midi(&mut self, row: usize, new: bool) -> Option<String> {
         if !can_burn(&self.state, row) {
             return None;
         }
@@ -740,7 +740,7 @@ mod tests {
     use os_model::Arpeggio;
 
     /// A note of channel 0 at `pos`, `len` ticks long, on `key`.
-    pub(crate) fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, ..Note::step(0, pos) }
     }
 

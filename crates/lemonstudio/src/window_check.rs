@@ -24,7 +24,7 @@ use winit::platform::pump_events::EventLoopExtPumpEvents;
 use winit::window::WindowId;
 
 use super::{load_file, Available, Plugins};
-use crate::plugin_window::ChannelInfo;
+use os_app::plugin_window::ChannelInfo;
 
 /// Nothing to handle: the frames are not winit windows.
 struct Idle;
@@ -35,7 +35,7 @@ impl ApplicationHandler for Idle {
 }
 
 /// Runs the windows and the plugins' idle calls for `ms`.
-fn pump(el: &mut EventLoop<()>, host: &mut crate::editor_host::EditorHost, pl: &mut Plugins, ms: u64) {
+fn pump(el: &mut EventLoop<()>, host: &mut os_app::editor_host::EditorHost, pl: &mut Plugins, ms: u64) {
     let end = Instant::now() + Duration::from_millis(ms);
     while Instant::now() < end {
         el.pump_app_events(Some(Duration::from_millis(10)), &mut Idle);
@@ -63,7 +63,7 @@ struct Look {
     window: Option<isize>,
 }
 
-fn look(host: &crate::editor_host::EditorHost) -> Option<Look> {
+fn look(host: &os_app::editor_host::EditorHost) -> Option<Look> {
     let w = host.editors.get(&0)?.window.as_ref()?;
     // SAFETY: the frame's views live as long as its window, which `pl` holds.
     let (frame, area) = unsafe { (&*(w.hwnd() as *const NSView), &*(w.area() as *const NSView)) };
@@ -109,7 +109,7 @@ pub fn run(args: &[String]) -> i32 {
         let Some(desc) = lib.plugins().first().cloned() else { continue };
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 2.0, ..Plugins::default() };
-        let mut host = crate::editor_host::EditorHost::default();
+        let mut host = os_app::editor_host::EditorHost::default();
         if let Err(e) = pl.create(0, 0) {
             println!("{name}: {e}");
             failed = true;

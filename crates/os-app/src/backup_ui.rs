@@ -17,7 +17,7 @@ use crate::backup::*;
 impl App {
     /// The Autosave timer (spec: ui/settings-choices.md "Backup files"): when it runs out, a project changed since it was
     /// saved and since its last backup is backed up (`write_backup`).
-    pub(crate) fn backup_tick(&mut self, now: Instant) {
+    pub fn backup_tick(&mut self, now: Instant) {
         if !due(&self.state.session.settings, &mut self.state.session.backup, now) {
             return;
         }
@@ -36,14 +36,14 @@ impl App {
     }
 
     /// Whether the project changed since it was last backed up, and since it was last saved (or opened, or created).
-    pub(crate) fn changed_since_backup(&self) -> bool {
+    pub fn changed_since_backup(&self) -> bool {
         changed_since(&self.state.session, self.unsaved())
     }
 
     /// Writes a backup of the project as it is now, named for local time `t`, then deletes its oldest autosaves beyond
     /// Maximum (`prefs::BACKUP_MAXIMUM`). Returns the file (one already written in the same minute is not
     /// overwritten); None while the project cannot be written now.
-    pub(crate) fn write_backup(&mut self, t: NaiveDateTime) -> Option<Result<PathBuf, String>> {
+    pub fn write_backup(&mut self, t: NaiveDateTime) -> Option<Result<PathBuf, String>> {
         let (target, snap) = match place(&self.state.session, t) {
             Ok(Place::Write(target, snap)) => (target, snap),
             Ok(Place::Done(target)) => return Some(Ok(target)),

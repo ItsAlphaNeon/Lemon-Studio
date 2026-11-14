@@ -57,7 +57,7 @@ pub enum Target {
 }
 
 /// What picking plugin `index` (a generator, or an effect with `effect`) runs for `target`.
-pub(crate) fn pick(target: Target, effect: bool, index: usize) -> Cmd {
+pub fn pick(target: Target, effect: bool, index: usize) -> Cmd {
     use crate::mixer::MCmd;
     match target {
         Target::Container(slot) if effect => return Cmd::Mixer(MCmd::MemberAdd(slot, index)),
@@ -204,7 +204,7 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
     crate::control_ui::edit_app(app, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| add_generator_now(app, index, after))
 }
 
-pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
+pub fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
     let d = app.state.session.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);

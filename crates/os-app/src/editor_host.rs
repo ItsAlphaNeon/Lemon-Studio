@@ -137,7 +137,7 @@ pub enum Request {
 /// Of the open windows (`hosted` key, when it opened), the one to close before another opens, so that no more than
 /// `max` are open: the one opened earliest, while `max` or more are open.
 #[cfg_attr(not(plugin_windows), allow(dead_code))]
-pub(crate) fn earliest_over(open: impl Iterator<Item = (usize, u64)>, max: usize) -> Option<usize> {
+pub fn earliest_over(open: impl Iterator<Item = (usize, u64)>, max: usize) -> Option<usize> {
     let open: Vec<(usize, u64)> = open.collect();
     open.iter().min_by_key(|o| o.1).filter(|_| open.len() >= max).map(|o| o.0)
 }
@@ -145,7 +145,7 @@ pub(crate) fn earliest_over(open: impl Iterator<Item = (usize, u64)>, max: usize
 /// Sizes window `w` to its freshly opened editor (`size` in device px at `scale`). A Lemon plugin answers the host
 /// link's hello: its page tabs go into the strip row and its editor shrinks to what is below them.
 #[cfg(plugin_windows)]
-pub(crate) fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_hostlink::Link> {
+pub fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_hostlink::Link> {
     let link = os_hostlink::Link::connect(w.area() as isize);
     match &link {
         Some(l) => {
@@ -162,7 +162,7 @@ pub(crate) fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> O
 /// (`DragAcceptFiles`). The drop handle is ours: the receiver's `DragFinish` frees it. Same process only.
 #[cfg(windows)]
 /// `frame` bounds the search: a docked frame's parent is the main window, which takes files itself.
-pub(crate) fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
+pub fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::Foundation::GlobalFree;
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
@@ -245,12 +245,27 @@ fn follow_resize(w: &FrameWindow, plugin: &std::sync::Mutex<dyn os_host::Plugin>
 }
 
 /// The open editor windows and what is kept of the closed ones, by `hosted` key.
-#[derive(Default)]
 pub struct EditorHost {
     pub editors: BTreeMap<usize, Editor>,
+    /// The program's window system for the editors' frames (control-plane step 10).
+    #[cfg(plugin_windows)]
+    pub frames: Box<dyn crate::plugin_window::Frames>,
     /// Plugin windows opened so far (stamps `Editor::opened`).
     #[cfg(plugin_windows)]
     opens: u64,
+}
+
+impl Default for EditorHost {
+    /// No frames until the program gives its window system's (`plugin_window::NoFrames`).
+    fn default() -> Self {
+        EditorHost {
+            editors: BTreeMap::new(),
+            #[cfg(plugin_windows)]
+            frames: Box::new(crate::plugin_window::NoFrames),
+            #[cfg(plugin_windows)]
+            opens: 0,
+        }
+    }
 }
 
 impl EditorHost {
@@ -366,7 +381,7 @@ impl EditorHost {
     /// The hosted row whose plugin window is at screen point (x, y).
     #[cfg(target_os = "macos")]
     pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
-        let frame = crate::plugin_window::row_window_at(x, y)?;
+        let frame = self.frames.row_window_at(x, y)?;
         self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|f| f.hwnd() == frame)).map(|(&r, _)| r)
     }
 
@@ -412,19 +427,19 @@ impl EditorHost {
         // A detached window reopens where it was; the first time, on a monitor as the settings say (spec: as above).
         let pos = match (e.detached, e.placed) {
             (true, Some(at)) => at,
-            (true, None) => crate::plugin_window::first_position(owner, scale, crate::prefs::check(&crate::prefs::DETACHED_WITH_MAIN)),
-            (false, _) => crate::plugin_window::default_position(owner, scale),
+            (true, None) => self.frames.first_position(owner, scale, crate::prefs::check(&crate::prefs::DETACHED_WITH_MAIN)),
+            (false, _) => self.frames.default_position(owner, scale),
         };
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size. On
         // Linux a plugin compiled into Lemon Studio draws its editor in the app's own window (`EmbedFrame`).
         #[cfg(target_os = "linux")]
-        let w = if embeds(&h.plugin) {
-            FrameWindow::embedded(info, (560.0, 437.0), scale, e.embed_at)?
+        let w: FrameWindow = if embeds(&h.plugin) {
+            Box::new(crate::plugin_window::EmbedFrame::new(info, (560.0, 437.0), scale, e.embed_at, self.frames.main_to_screen())?)
         } else {
-            FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, e.detached)?
+            self.frames.open(owner, info, (560.0, 437.0), scale, pos, e.detached)?
         };
         #[cfg(not(target_os = "linux"))]
-        let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, e.detached)?;
+        let w = self.frames.open(owner, info, (560.0, 437.0), scale, pos, e.detached)?;
         // Mixer effects have no channel strip (spec: ui/mixer.md §7).
         if row >= FX_KEY {
             w.set_strip(false);
@@ -512,7 +527,7 @@ impl EditorHost {
     }
 
     #[cfg(plugin_windows)]
-    pub(crate) fn close_window(&mut self, pl: &mut Plugins, row: usize) {
+    pub fn close_window(&mut self, pl: &mut Plugins, row: usize) {
         self.sync(pl);
         if let Some(e) = self.editors.get_mut(&row) {
             // The mode and place it reopens in (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins
@@ -595,7 +610,7 @@ impl EditorHost {
     #[cfg(plugin_windows)]
     pub fn stack(&self, pl: &Plugins, rows: &[usize]) {
         let hwnds: Vec<isize> = rows.iter().filter_map(|r| self.window_of(*r)).filter(|w| !w.1).map(|w| w.0).collect();
-        crate::plugin_window::stack(pl.owner, &hwnds);
+        self.frames.stack(pl.owner, &hwnds);
     }
 
     /// VIEW > Into workspace for the docked windows: one partly outside the workspace moves fully back in
@@ -644,7 +659,7 @@ impl EditorHost {
         // Linux: the frames' X11 events, then the editors' descriptors and timers (`os_host::runloop`).
         #[cfg(target_os = "linux")]
         {
-            crate::plugin_window::pump();
+            self.frames.pump();
             os_host::runloop::dispatch();
         }
         let mut out = Vec::new();
@@ -653,7 +668,7 @@ impl EditorHost {
         let mut rescale: Vec<(usize, f32)> = Vec::new();
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
         #[cfg(plugin_windows)]
-        for (area, m) in crate::plugin_window::take_link() {
+        for (area, m) in self.frames.take_link() {
             let row = self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|w| w.area() as isize == area)).map(|(&r, _)| r);
             match (row, m) {
                 (Some(row), crate::plugin_window::LinkMsg::Note(k, v, on)) => out.push(Request::Note(row, k, v, on)),
@@ -784,7 +799,201 @@ impl EditorHost {
             self.rescale_window(pl, row, pl.scale_for(row, k));
         }
         #[cfg(target_os = "linux")]
-        crate::plugin_window::paint_dirty();
+        self.frames.paint_dirty();
         out
+    }
+}
+
+/// Frames that record what the editor host asks of them, for tests without a display (control-plane step 10).
+#[cfg(all(test, plugin_windows))]
+pub mod test_frames {
+    use crate::plugin_window::{ChannelInfo, Frame, FrameEvent, FrameWindow, Frames, LinkMsg};
+    use os_hostlink::PageIcon;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What was asked, one line per call.
+    pub type Log = Rc<RefCell<Vec<String>>>;
+
+    pub struct Recording(pub Log);
+
+    struct Recorded {
+        log: Log,
+        hwnd: isize,
+        editor: RefCell<(f32, f32)>,
+        detached: RefCell<bool>,
+    }
+
+    impl Drop for Recorded {
+        fn drop(&mut self) {
+            self.log.borrow_mut().push(format!("close {}", self.hwnd));
+        }
+    }
+
+    impl Frame for Recorded {
+        fn detached(&self) -> bool {
+            *self.detached.borrow()
+        }
+        fn set_detached(&self, _owner: isize, on: bool) {
+            *self.detached.borrow_mut() = on;
+            self.log.borrow_mut().push(format!("detached {on}"));
+        }
+        fn clip_to(&self, _work: [i32; 4], _covers: &[[i32; 4]]) {}
+        fn hwnd(&self) -> isize {
+            self.hwnd
+        }
+        fn area(&self) -> *mut std::ffi::c_void {
+            std::ptr::null_mut()
+        }
+        fn raise(&self) {
+            self.log.borrow_mut().push(format!("raise {}", self.hwnd));
+        }
+        fn set_info(&self, info: ChannelInfo) {
+            self.log.borrow_mut().push(format!("info {}", info.name));
+        }
+        fn set_pages(&self, _pages: Vec<PageIcon>, _active: usize) {}
+        fn set_resizable(&self, _min: Option<(f32, f32)>) {}
+        fn set_page(&self, _page: usize) {}
+        fn set_hint(&self, _hint: String) {}
+        fn set_preset(&self, _name: Option<String>) {}
+        fn scale(&self) -> f32 {
+            1.0
+        }
+        fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+            (x as i32, y as i32)
+        }
+        fn set_editor_size(&self, editor: (f32, f32)) {
+            *self.editor.borrow_mut() = editor;
+            self.log.borrow_mut().push(format!("editor {}x{}", editor.0, editor.1));
+        }
+        fn set_strip(&self, on: bool) {
+            self.log.borrow_mut().push(format!("strip {on}"));
+        }
+        fn take_events(&self) -> Vec<FrameEvent> {
+            Vec::new()
+        }
+    }
+
+    impl Frames for Recording {
+        fn open(&self, _owner: isize, info: ChannelInfo, editor: (f32, f32), _scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
+            let hwnd = self.0.borrow().iter().filter(|l| l.starts_with("open")).count() as isize + 1;
+            self.0.borrow_mut().push(format!("open {hwnd} {} {}x{} at {},{} detached {detached}", info.name, editor.0, editor.1, pos.0, pos.1));
+            Ok(Box::new(Recorded { log: self.0.clone(), hwnd, editor: RefCell::new(editor), detached: RefCell::new(detached) }))
+        }
+        fn default_position(&self, _owner: isize, _scale: f32) -> (i32, i32) {
+            (40, 30)
+        }
+        fn stack(&self, _parent: isize, hwnds: &[isize]) {
+            self.0.borrow_mut().push(format!("stack {hwnds:?}"));
+        }
+        fn take_exposed(&self) -> bool {
+            false
+        }
+        fn take_link(&self) -> Vec<(isize, LinkMsg)> {
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(all(test, plugin_windows))]
+mod frame_tests {
+    use super::test_frames::{Log, Recording};
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A plugin whose editor opens at 300×200 in whatever area it is given.
+    struct Editing {
+        desc: os_host::Descriptor,
+        open: bool,
+    }
+    impl os_engine::Instrument for Editing {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_engine::HostedEffect for Editing {
+        fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_host::Plugin for Editing {
+        fn desc(&self) -> &os_host::Descriptor {
+            &self.desc
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {}
+        fn has_editor(&self) -> bool {
+            true
+        }
+        fn editor_open(&self) -> bool {
+            self.open
+        }
+        fn open_editor(&mut self, _: *mut std::ffi::c_void, _: f32) -> Result<(u32, u32), String> {
+            self.open = true;
+            Ok((300, 200))
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            self.open.then_some((300, 200))
+        }
+        fn close_editor(&mut self) {
+            self.open = false;
+        }
+        fn save_state(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn load_state(&mut self, _: &[u8]) -> bool {
+            false
+        }
+        fn param_count(&self) -> usize {
+            0
+        }
+        fn param_info(&self, _: usize) -> Option<os_host::ParamInfo> {
+            None
+        }
+    }
+
+    fn info(name: &str) -> ChannelInfo {
+        ChannelInfo { name: name.into(), icon: None, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None }
+    }
+
+    /// The editor host opens a plugin's window through the frames it was given, puts the editor in it at the editor's
+    /// own size, raises it when asked again, and lets go of it when the window closes: all without a display.
+    #[test]
+    fn editor_windows_open_through_the_frames_given() {
+        let log: Log = Default::default();
+        let mut host = EditorHost::default();
+        host.frames = Box::new(Recording(log.clone()));
+        let mut pl = Plugins::default();
+        pl.scale = 1.0;
+        let desc = crate::plugins::builtin()[0].desc.clone();
+        let p = Arc::new(Mutex::new(Editing { desc, open: false }));
+        pl.hosted.insert(0, Hosted::new(p.clone()));
+
+        assert_eq!(host.open_window(&mut pl, 0, info("Keys")), Ok(()));
+        assert!(p.lock().unwrap().open, "the editor opened in the frame");
+        let seen = log.borrow().clone();
+        assert!(seen[0].starts_with("open 1 Keys 560x437 at 40,30 detached false"), "{seen:?}");
+        assert!(seen.iter().any(|l| l == "editor 300x200"), "the frame fits the editor: {seen:?}");
+        assert!(host.editor_open());
+
+        host.open_window(&mut pl, 0, info("Keys")).unwrap();
+        assert_eq!(log.borrow().iter().filter(|l| l.starts_with("open")).count(), 1, "open again raises the same window");
+        assert!(log.borrow().iter().any(|l| l == "raise 1"));
+
+        host.close_window(&mut pl, 0);
+        assert!(!p.lock().unwrap().open, "the editor closed with its window");
+        assert!(log.borrow().iter().any(|l| l == "close 1"), "{:?}", log.borrow());
+        assert!(!host.editor_open());
+    }
+
+    /// Without the program's frames (`NoFrames`) a window does not open, and the host says so.
+    #[test]
+    fn without_frames_no_window_opens() {
+        let mut host = EditorHost::default();
+        let mut pl = Plugins::default();
+        let desc = crate::plugins::builtin()[0].desc.clone();
+        pl.hosted.insert(0, Hosted::new(Arc::new(Mutex::new(Editing { desc, open: false }))));
+        assert!(host.open_window(&mut pl, 0, info("Keys")).is_err());
+        assert!(!host.editor_open());
     }
 }

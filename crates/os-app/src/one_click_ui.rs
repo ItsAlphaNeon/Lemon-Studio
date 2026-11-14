@@ -22,7 +22,7 @@ pub fn items(_: &State) -> Vec<PItem> {
 
 impl App {
     /// The microphone: stops a recording, else opens the menu under the button.
-    pub(crate) fn one_click_button(&mut self) {
+    pub fn one_click_button(&mut self) {
         if self.state.session.audio_rec.as_ref().is_some_and(|r| !r.ending) {
             return self.act(Action::Stop);
         }
@@ -33,7 +33,7 @@ impl App {
     }
 
     /// Into the audio editor: the inputs, at the cursor.
-    pub(crate) fn one_click_editor_prompt(&mut self) {
+    pub fn one_click_editor_prompt(&mut self) {
         let (x, y) = self.mouse;
         self.state.playlist.popup = Some(Popup { x, y, items: inputs(true), sub: None, scroll: [0; 2] });
         self.invalidate();
@@ -41,7 +41,7 @@ impl App {
 
     /// An input picked: records it from the song position, as Play from stopped with Record armed (spec §2); the take
     /// goes into the audio editor (`editor`) or the playlist.
-    pub(crate) fn one_click_start(&mut self, input: Input, editor: bool) {
+    pub fn one_click_start(&mut self, input: Input, editor: bool) {
         if self.state.session.audio_rec.is_some() {
             self.state.message = Some("Already recording audio".into());
             return self.invalidate();
@@ -75,13 +75,13 @@ impl App {
     }
 
     /// Starts taking in `input` into a new file (no playback: `one_click_start` plays).
-    pub(crate) fn one_click_begin(&mut self, input: Input, stream: Option<InputStream>, editor: bool) -> Result<(), String> {
+    pub fn one_click_begin(&mut self, input: Input, stream: Option<InputStream>, editor: bool) -> Result<(), String> {
         let pos = self.state.session.song_pos;
         begin_in(&mut self.state.session, input, stream, editor, pos)
     }
 
     /// Every tick: the session's `tick_in`; a take for the audio editor goes there.
-    pub(crate) fn one_click_tick(&mut self) {
+    pub fn one_click_tick(&mut self) {
         let lock = self.state.playlist.lock_len;
         let Some(path) = self.host(|ses| tick_in(ses, lock)) else { return };
         let placed = self.take_to_editor(&path);
@@ -91,7 +91,7 @@ impl App {
 
     /// The take into Tesla on the master track: its first Tesla if that holds no sample, else a new one (spec:
     /// plugins/tesla/README.md "Recording into Tesla from Lemon Studio"). The file stays in `Recorded` either way.
-    pub(crate) fn take_to_editor(&mut self, path: &std::path::Path) -> String {
+    pub fn take_to_editor(&mut self, path: &std::path::Path) -> String {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let sample = match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| tesla::wav::read(&b)) {
             Ok(s) => s,

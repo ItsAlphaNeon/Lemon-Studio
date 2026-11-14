@@ -16,13 +16,13 @@ impl crate::app::App {
     /// Hosts Lemon Trio on every 3x Osc channel without an instance, started from the channel's saved state (a new
     /// instance's state when the channel has none). A row waiting for the picker's own instance is left to it; a row
     /// whose instance failed is not tried again.
-    pub(crate) fn sync_osc3(&mut self) {
+    pub fn sync_osc3(&mut self) {
         self.host(sync_osc3);
     }
 
     /// Every half second: a sample a hosted Lemon Trio loaded for its custom shape (its own file dialog) becomes its
     /// channel's (`follow_sample`). The instances the audio thread is rendering are looked at next time.
-    pub(crate) fn follow_osc3_samples(&mut self) {
+    pub fn follow_osc3_samples(&mut self) {
         let now = Instant::now();
         if self.osc3_look.is_some_and(|t| now.duration_since(t) < LOOK_EVERY) {
             return;

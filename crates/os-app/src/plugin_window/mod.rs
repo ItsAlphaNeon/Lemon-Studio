@@ -25,20 +25,17 @@ use os_hostlink::PageIcon;
 use os_ui::tabler as tb;
 use os_ui::{Canvas, Color, Font, Rect};
 
-#[cfg(windows)]
-mod win32;
-#[cfg(windows)]
-pub use win32::{default_position, first_position, focus_main, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
+/// A key pressed or released while a plugin window has the keyboard focus (the typing keyboard keeps playing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyMsg {
+    /// The physical key (the program translates the window system's scancode).
+    pub code: crate::keys::KeyCode,
+    pub pressed: bool,
+    /// Control (or Command on macOS).
+    pub ctrl: bool,
+    pub alt: bool,
+}
 
-#[cfg(target_os = "linux")]
-pub(crate) mod hyprland;
-#[cfg(target_os = "linux")]
-mod x11;
-#[cfg(target_os = "linux")]
-pub use x11::{
-    busy, default_position, exposed, focus_main, in_keymap, keys_down, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main,
-    set_transient, stack, take_exposed, take_lift_input, unpinned, Unpinned,
-};
 #[cfg(target_os = "linux")]
 mod embed;
 #[cfg(target_os = "linux")]
@@ -48,143 +45,154 @@ pub use embed::EmbedFrame;
 /// editors drawn in the app's window take the theme's colours (`embed`).
 pub const TINT_KEY: &str = "theme_stock_plugins";
 
-/// Linux: a plugin window of its own (an X11 window, `x11`), or drawn in Lemon Studio's window (`embed`: the plugins
-/// compiled into the app). The app makes the same calls either way.
-#[cfg(target_os = "linux")]
-pub enum FrameWindow {
-    X11(x11::FrameWindow),
-    Embedded(EmbedFrame),
-}
-
-#[cfg(target_os = "linux")]
-macro_rules! frame_call {
-    ($self:ident, $f:ident => $e:expr) => {
-        match $self {
-            FrameWindow::X11($f) => $e,
-            FrameWindow::Embedded($f) => $e,
-        }
-    };
-}
-
-#[cfg(target_os = "linux")]
-impl FrameWindow {
-    /// A window of its own (`x11::FrameWindow::new`).
-    pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
-        x11::FrameWindow::new(owner, info, editor, scale, pos, detached).map(FrameWindow::X11)
+/// A plugin editor's frame window as the program's window code makes it (control-plane step 10): the interface keeps
+/// what it shows (`ChannelInfo`, the pages, the hint) and asks it to place, raise and size itself.
+pub trait Frame {
+    fn detached(&self) -> bool;
+    fn set_detached(&self, owner: isize, on: bool);
+    fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]);
+    fn hwnd(&self) -> isize;
+    fn area(&self) -> *mut std::ffi::c_void;
+    fn raise(&self);
+    fn set_info(&self, info: ChannelInfo);
+    fn set_pages(&self, pages: Vec<PageIcon>, active: usize);
+    fn set_resizable(&self, min: Option<(f32, f32)>);
+    fn set_page(&self, page: usize);
+    fn set_hint(&self, hint: String);
+    fn set_preset(&self, name: Option<String>);
+    fn scale(&self) -> f32;
+    fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32);
+    fn set_editor_size(&self, editor: (f32, f32));
+    fn set_strip(&self, on: bool);
+    fn take_events(&self) -> Vec<FrameEvent>;
+    /// Windows and macOS: the frame follows the main window's scale.
+    fn set_scale(&self, _scale: f32) {}
+    /// Windows: back onto the visible desktop, and moved to a screen position.
+    fn move_into_workspace(&self) {}
+    fn move_to(&self, _x: i32, _y: i32) {}
+    /// Windows: where it is on the screen.
+    fn position(&self) -> Option<(i32, i32)> {
+        None
     }
-
-    /// A window drawn in the app's, at canvas point `pos` (logical px), at the canvas's `scale`.
-    pub fn embedded(info: ChannelInfo, editor: (f32, f32), scale: f32, pos: Option<(f32, f32)>) -> Result<FrameWindow, String> {
-        EmbedFrame::new(info, editor, scale, pos).map(FrameWindow::Embedded)
+    /// The floating windows slide (`crate::float_layer`): `at` of the screen's height below where it rests (0: back
+    /// there). A frame drawn in the app's window slides as it is painted.
+    fn slide(&self, _at: f32) {}
+    /// The size (logical px) of the work area of the monitor the frame opens on, when it is known.
+    fn work_size(&self) -> Option<(f32, f32)> {
+        None
     }
-
-    /// The window drawn in the app's, if this is one.
-    pub fn embed(&self) -> Option<&EmbedFrame> {
-        match self {
-            FrameWindow::Embedded(e) => Some(e),
-            FrameWindow::X11(_) => None,
-        }
+    /// The frame's chrome: what it adds to the editor (logical px).
+    fn chrome(&self) -> (f32, f32) {
+        (0.0, 0.0)
     }
-
-    pub fn detached(&self) -> bool {
-        frame_call!(self, w => w.detached())
-    }
-
-    /// The floating windows slide (`crate::float_layer`): a window of its own moves; one drawn in the app's slides as it
-    /// is painted.
-    pub fn slide(&self, at: f32) {
-        if let FrameWindow::X11(w) = self {
-            w.slide(at);
-        }
-    }
-
-    pub fn set_detached(&self, owner: isize, on: bool) {
-        frame_call!(self, w => w.set_detached(owner, on))
-    }
-
-    pub fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]) {
-        frame_call!(self, w => w.clip_to(work, covers))
-    }
-
-    pub fn hwnd(&self) -> isize {
-        frame_call!(self, w => w.hwnd())
-    }
-
-    pub fn area(&self) -> *mut std::ffi::c_void {
-        frame_call!(self, w => w.area())
-    }
-
-    pub fn raise(&self) {
-        frame_call!(self, w => w.raise())
-    }
-
-    pub fn set_info(&self, info: ChannelInfo) {
-        frame_call!(self, w => w.set_info(info))
-    }
-
-    pub fn set_pages(&self, pages: Vec<PageIcon>, active: usize) {
-        frame_call!(self, w => w.set_pages(pages, active))
-    }
-
-    pub fn set_resizable(&self, min: Option<(f32, f32)>) {
-        frame_call!(self, w => w.set_resizable(min))
-    }
-
-    pub fn work_size(&self) -> Option<(f32, f32)> {
-        frame_call!(self, w => w.work_size())
-    }
-
-    pub fn chrome(&self) -> (f32, f32) {
-        frame_call!(self, w => w.chrome())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn push_event(&self, e: FrameEvent) {
-        frame_call!(self, w => w.push_event(e))
-    }
-
-    pub fn set_page(&self, page: usize) {
-        frame_call!(self, w => w.set_page(page))
-    }
-
-    pub fn set_hint(&self, hint: String) {
-        frame_call!(self, w => w.set_hint(hint))
-    }
-
-    pub fn set_preset(&self, name: Option<String>) {
-        frame_call!(self, w => w.set_preset(name))
-    }
-
-    pub fn scale(&self) -> f32 {
-        frame_call!(self, w => w.scale())
-    }
-
-    pub fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
-        frame_call!(self, w => w.editor_to_screen(x, y))
-    }
-
-    pub fn set_editor_size(&self, editor: (f32, f32)) {
-        frame_call!(self, w => w.set_editor_size(editor))
-    }
-
-    pub fn set_strip(&self, on: bool) {
-        frame_call!(self, w => w.set_strip(on))
-    }
-
-    pub fn take_events(&self) -> Vec<FrameEvent> {
-        frame_call!(self, w => w.take_events())
+    /// An event as if the frame had made it (tests: a drag of its edges).
+    fn push_event(&self, _e: FrameEvent) {}
+    /// The frame drawn in the app's window, if this is one.
+    #[cfg(target_os = "linux")]
+    fn embed(&self) -> Option<&EmbedFrame> {
+        None
     }
 }
 
-#[cfg(target_os = "macos")]
-mod cocoa;
-#[cfg(target_os = "macos")]
-pub use cocoa::{default_position, lift_hide, lift_show, pointer, row_window_at, screen_to_main, stack, take_exposed, take_keys, take_lift_input, FrameWindow};
+/// A frame window.
+pub type FrameWindow = Box<dyn Frame>;
+
+/// A guard that holds the frames back while a dialog is open (Linux; dropped, they come back).
+pub type Unpinned = Box<dyn std::any::Any>;
+
+/// The program's window system for plugin editors (control-plane step 10): it makes the frames and tells what the
+/// user did in them. The interface keeps it in `EditorHost::frames`. Each platform supplies what it has; the rest
+/// answers as if nothing happened.
+pub trait Frames {
+    fn open(&self, owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String>;
+    /// Where a new frame goes, and a detached one opening for the first time.
+    fn default_position(&self, owner: isize, scale: f32) -> (i32, i32);
+    fn first_position(&self, owner: isize, scale: f32, _with_main: bool) -> (i32, i32) {
+        self.default_position(owner, scale)
+    }
+    /// Puts the frames above `parent` in this order.
+    fn stack(&self, parent: isize, hwnds: &[isize]);
+    /// A frame was uncovered or resized since the last call (repaint).
+    fn take_exposed(&self) -> bool;
+    /// Lemon plugins' messages from their editors: (editor area, message).
+    fn take_link(&self) -> Vec<(isize, LinkMsg)>;
+    /// Serves the frames' events (Linux: X11 and the editors' run loop).
+    fn pump(&self) {}
+    fn paint_dirty(&self) {}
+    /// A frame is open and its events want the tick.
+    fn busy(&self) -> bool {
+        false
+    }
+    /// Keys pressed in a frame (Windows, macOS).
+    fn take_keys(&self) -> Vec<KeyMsg> {
+        Vec::new()
+    }
+    /// The keys down now (Linux), and whether `code` is one of them.
+    fn keys_down(&self) -> Option<[u8; 32]> {
+        None
+    }
+    fn in_keymap(&self, _keymap: &[u8; 32], _code: crate::keys::KeyCode) -> bool {
+        false
+    }
+    /// The floating copy of the main window's popup over the frames (Linux, macOS), its input, and where screen points
+    /// are in the main window.
+    fn lift_show(&self, _main: isize, _frame: isize, _origin: (i32, i32), _size: (i32, i32), _pixels: Vec<u32>) {}
+    fn lift_hide(&self) {}
+    fn take_lift_input(&self) -> Vec<LiftInput> {
+        Vec::new()
+    }
+    fn screen_to_main(&self, _x: i32, _y: i32) -> Option<(i32, i32)> {
+        None
+    }
+    /// The pointer on the screen, and whether it is over a docked frame.
+    fn pointer(&self) -> Option<(i32, i32)> {
+        None
+    }
+    fn pointer_in_docked(&self) -> bool {
+        false
+    }
+    /// The frame of the rack row under a screen point (macOS).
+    fn row_window_at(&self, _x: i32, _y: i32) -> Option<isize> {
+        None
+    }
+    /// The main window got or lost the focus; the frames step back while a dialog is open (Linux).
+    fn main_focused(&self, _focused: bool) {}
+    fn unpinned(&self) -> Unpinned {
+        Box::new(())
+    }
+    fn set_transient(&self, _win: u32, _owner: isize) {}
+    fn focus_main(&self) {}
+    /// How a main-window point (physical px) is found on the screen, for the frames drawn in the app's window
+    /// (`EmbedFrame`): through the window system's translation where the main window is its window.
+    fn main_to_screen(&self) -> fn((i32, i32)) -> (i32, i32) {
+        |p| p
+    }
+}
+
+/// No window system: frames do not open (a session or a test without the program's windows).
+#[derive(Default)]
+pub struct NoFrames;
+
+impl Frames for NoFrames {
+    fn open(&self, _owner: isize, _info: ChannelInfo, _editor: (f32, f32), _scale: f32, _pos: (i32, i32), _detached: bool) -> Result<FrameWindow, String> {
+        Err("no window system for plugin windows".into())
+    }
+    fn default_position(&self, _owner: isize, _scale: f32) -> (i32, i32) {
+        (0, 0)
+    }
+    fn stack(&self, _parent: isize, _hwnds: &[isize]) {}
+    fn take_exposed(&self) -> bool {
+        false
+    }
+    fn take_link(&self) -> Vec<(isize, LinkMsg)> {
+        Vec::new()
+    }
+}
 
 /// TOOLS > Set keyboard focus of all plugins to ▸ (Lemon Studio's design; spec: ui/channel-switches.md §6): whether
 /// plugin editors take the computer keyboard (Enabled, the default) or never get it (Disabled), the keys then going to
 /// Lemon Studio as those pressed in an editor already do (`take_keys`: the typing keyboard, Space). Saved in `.lemon` files (`lemon_state`).
-static EDITOR_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub static EDITOR_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Whether plugin editors take the keyboard.
 pub fn editor_keys() -> bool {
@@ -193,14 +201,6 @@ pub fn editor_keys() -> bool {
 
 pub fn set_editor_keys(on: bool) {
     EDITOR_KEYS.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Where a detached window opening for the first time goes: where a new window opens. Only Windows places it by
-/// monitor (Settings "Open detached plugins with the main window"; spec: ui/settings-choices.md "Miscellaneous:
-/// naming, detached plugins and startup").
-#[cfg(not(windows))]
-pub fn first_position(owner: isize, scale: f32, _with_main: bool) -> (i32, i32) {
-    default_position(owner, scale)
 }
 
 /// Point `p` on a monitor whose work area is `from` ([left, top, right, bottom], screen px) moved to the same place in
@@ -228,7 +228,6 @@ pub enum LinkMsg {
 }
 
 /// Mouse input on the lifted popup (see `lift_show`); positions in the main window (physical px).
-#[cfg(not(windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiftInput {
     Move(i32, i32),
@@ -266,17 +265,17 @@ pub const STRIP_H: f32 = 46.0;
 /// Left / right / bottom inset of the editor: 1 px outline, 5 px frame, 1 px editor outline.
 pub const BORDER: f32 = 7.0;
 /// Width of the Presets box in the title bar (its right edge is 49 px from the window's).
-const PRESETS_W: f32 = 80.0;
+pub const PRESETS_W: f32 = 80.0;
 /// The Lemon card's title row (`State::card`): its height, the card's top outline included.
 pub const CARD_TITLE_H: f32 = 30.0;
 /// The card's title-row buttons and toggles (close, maximize, page tabs): square, this wide.
-const CARD_BTN: f32 = 19.0;
+pub const CARD_BTN: f32 = 19.0;
 /// A resizable card's edges: how far into the editor they take the mouse (the card has no frame around it).
-const CARD_EDGE: f32 = 5.0;
+pub const CARD_EDGE: f32 = 5.0;
 /// The smallest editor the frame's edges leave a resizable plugin that names no smallest size of its own (logical px):
 /// the title bar still shows its controls.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) const MIN_EDITOR: (f32, f32) = (240.0, 80.0);
+pub const MIN_EDITOR: (f32, f32) = (240.0, 80.0);
 
 /// An editor of `editor` in a frame adding `chrome` does not fit in `room` (all logical px): the editor size that fits
 /// (a side shrinks only where it is too large, and not below [`MIN_EDITOR`]). `None` when it fits.
@@ -287,49 +286,49 @@ pub fn fit_in(editor: (f32, f32), chrome: (f32, f32), room: (f32, f32)) -> Optio
     (fitted != editor).then_some(fitted)
 }
 
-fn c_frame() -> Color {
+pub fn c_frame() -> Color {
     os_theme::current().s(0x25292b)
 }
-fn c_outline() -> Color {
+pub fn c_outline() -> Color {
     os_theme::current().s(0x191d1f)
 }
-fn c_top_light() -> Color {
+pub fn c_top_light() -> Color {
     os_theme::current().s(0x2b2f31)
 }
-fn c_editor_line() -> Color {
+pub fn c_editor_line() -> Color {
     os_theme::current().s(0x13191d)
 }
-fn c_presets() -> Color {
+pub fn c_presets() -> Color {
     os_theme::current().s(0x1d2123)
 }
-fn c_arrow() -> Color {
+pub fn c_arrow() -> Color {
     os_theme::current().tx(0xc2c8cc)
 }
-fn c_gear_on() -> Color {
+pub fn c_gear_on() -> Color {
     os_theme::current().a(0x8eff7e)
 }
-fn c_strip() -> Color {
+pub fn c_strip() -> Color {
     os_theme::current().s(0x1b1d1e)
 }
-fn c_strip_line() -> Color {
+pub fn c_strip_line() -> Color {
     os_theme::current().s(0x151718)
 }
-fn c_body() -> Color {
+pub fn c_body() -> Color {
     os_theme::current().s(0x202324)
 }
-fn c_text() -> Color {
+pub fn c_text() -> Color {
     os_theme::current().tx(0xd4dade)
 }
-fn c_grey() -> Color {
+pub fn c_grey() -> Color {
     os_theme::current().tx(0x8c9296)
 }
-fn c_icon() -> Color {
+pub fn c_icon() -> Color {
     os_theme::current().tx(0xd4dade)
 }
-fn c_green() -> Color {
+pub fn c_green() -> Color {
     os_theme::current().a(0x47f49a)
 }
-fn c_caption() -> Color {
+pub fn c_caption() -> Color {
     os_theme::current().tx(0x9fb4c8)
 }
 
@@ -406,14 +405,14 @@ pub enum FrameEvent {
 
 /// A frame edge being dragged: which edges, the press (window coordinates, logical px) and the editor size then.
 #[derive(Clone, Copy, PartialEq, Debug)]
-struct Sizing {
-    right: bool,
-    bottom: bool,
-    x: f32,
-    y: f32,
-    editor: (f32, f32),
+pub struct Sizing {
+    pub right: bool,
+    pub bottom: bool,
+    pub x: f32,
+    pub y: f32,
+    pub editor: (f32, f32),
     /// The size last asked of the plugin.
-    asked: (u32, u32),
+    pub asked: (u32, u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -427,84 +426,84 @@ pub enum Knob {
 }
 
 impl Knob {
-    fn stepped(self) -> bool {
+    pub fn stepped(self) -> bool {
         matches!(self, Knob::Range | Knob::Track)
     }
 }
 
 /// Drag length of one RANGE / TRACK step (the channel rack's mixer box: 10 px, spec: ui/channel-rack.md §12).
-const BOX_DRAG: f32 = 10.0;
+pub const BOX_DRAG: f32 = 10.0;
 /// The RANGE box's limit, semitones.
-const RANGE_MAX: i32 = 48;
+pub const RANGE_MAX: i32 = 48;
 
 /// The height of the row of tabs above the frame (`State::tabs`).
-pub(crate) const TABS_H: f32 = 26.0;
+pub const TABS_H: f32 = 26.0;
 /// How far the row of tabs lies over the frame's top edge (its 1 px border).
-pub(crate) const TAB_OVERLAP: f32 = 1.0;
+pub const TAB_OVERLAP: f32 = 1.0;
 
-struct State {
-    info: ChannelInfo,
+pub struct State {
+    pub info: ChannelInfo,
     /// Drawn as a Lemon card (an editor drawn in the app's window, Lemon design; owner, 2026-10-27): one rounded panel
     /// as the channel rack's, a title row (menu arrow, name, hint, page tabs, Presets, close) over the editor, which
     /// fills the rest. No strip, gear or minimize: the channel's settings window has those controls.
-    card: bool,
+    pub card: bool,
     /// The card's title-row control under the mouse (lit as hovered).
-    hover: Option<Part>,
+    pub hover: Option<Part>,
     /// The theme a card paints with: the app's (`EmbedFrame::sync`), which the process-wide one may lag behind.
-    look: Option<os_theme::Palette>,
-    strip: bool,
+    pub look: Option<os_theme::Palette>,
+    pub strip: bool,
     /// A row of tabs on top of the frame, above its title (`crate::plugin_tabs`): the frame and its editor stay where
     /// they are.
-    tabs: bool,
+    pub tabs: bool,
     /// The plugin's page tabs, left to right (a plain plugin: the plug).
-    pages: Vec<PageIcon>,
+    pub pages: Vec<PageIcon>,
     /// The plugin's active page.
-    page: usize,
+    pub page: usize,
     /// The Misc tab (right of the page tabs) is showing instead of the plugin.
-    misc: bool,
+    pub misc: bool,
     /// The plugin's hint line (parameter under the mouse), shown in the title bar.
-    hint: String,
+    pub hint: String,
     /// A greyed-out frame control under the mouse: its "not available yet" hint replaces the plugin's.
-    off_hint: Option<&'static str>,
+    pub off_hint: Option<&'static str>,
     /// The strip's RANGE / TRACK box under the mouse (or being dragged): its value replaces the plugin's hint.
-    box_hint: Option<Knob>,
+    pub box_hint: Option<Knob>,
     /// The loaded preset's name, shown in the Presets box ("Presets" without one).
-    preset: Option<String>,
+    pub preset: Option<String>,
     /// Misc tab page state (tracking page, keyboard scroll, drag, hover).
-    misc_ui: crate::misc_page::MiscUi,
+    pub misc_ui: crate::misc_page::MiscUi,
     /// Plugin editor size (logical px).
-    editor: (f32, f32),
+    pub editor: (f32, f32),
     /// The editor's smallest size when the frame's edges may resize it (a resizable Lemon plugin, as Tesla).
-    resize_min: Option<(f32, f32)>,
+    pub resize_min: Option<(f32, f32)>,
     /// An edge drag in progress.
-    sizing: Option<Sizing>,
+    pub sizing: Option<Sizing>,
     /// Maximized (the button, or a double-click on the title bar): where the frame was (screen px) and the editor's
     /// size then, for the restore.
-    maxed: Option<((i32, i32), (f32, f32))>,
+    pub maxed: Option<((i32, i32), (f32, f32))>,
     /// `maxed` before the title bar's last single press, which unmaximizes (a move may follow): the second press of a
     /// double-click restores from it.
-    maxed_at_press: Option<((i32, i32), (f32, f32))>,
-    events: Vec<FrameEvent>,
-    drag: Option<(Knob, f32, f32)>,
+    pub maxed_at_press: Option<((i32, i32), (f32, f32))>,
+    pub events: Vec<FrameEvent>,
+    pub drag: Option<(Knob, f32, f32)>,
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
     /// move loop (HTCAPTION) blocks the UI thread, which would freeze all drawing while a window moves.
-    moving: Option<(i32, i32, i32, i32)>,
+    pub moving: Option<(i32, i32, i32, i32)>,
     /// A title-bar button (close, minimize) pressed and not released yet: it acts on the release over it (owner,
     /// 2026-10-15: acting on the press made accidental closes easy).
-    armed: Option<Part>,
+    pub armed: Option<Part>,
     /// A top-level window (menu arrow > Detached) instead of a child of the main window (always when the main window is
     /// a native Wayland one).
-    detached: bool,
+    pub detached: bool,
     /// Docked: the workspace and the rects covering it (the app's windows and popups above this one), in the main
     /// window's client area (physical px). Kept so a move re-clips at once instead of at the app's next tick.
-    clip: Option<([i32; 4], Vec<[i32; 4]>)>,
+    pub clip: Option<([i32; 4], Vec<[i32; 4]>)>,
     /// The clip last applied (window rect, workspace, covering rects), so unchanged clips are not reset.
-    clip_key: Option<Vec<i32>>,
+    pub clip_key: Option<Vec<i32>>,
 }
 
 impl State {
     /// A new frame's state: strip shown, the plug tab, no hint or preset, the Classic frame (not a card).
-    fn new(info: ChannelInfo, editor: (f32, f32), detached: bool) -> State {
+    pub fn new(info: ChannelInfo, editor: (f32, f32), detached: bool) -> State {
         State {
             info,
             card: false,
@@ -536,7 +535,7 @@ impl State {
     }
 
 
-    fn knob_value(&self, k: Knob) -> f32 {
+    pub fn knob_value(&self, k: Knob) -> f32 {
         let i = &self.info;
         match k {
             Knob::Pan => (i.pan as f32 + 1.0) / 2.0,
@@ -547,7 +546,7 @@ impl State {
         }
     }
     /// Sets a knob (0..1) or a value box (its whole number) and tells the app; an unchanged box says nothing.
-    fn set_knob(&mut self, k: Knob, v: f32) {
+    pub fn set_knob(&mut self, k: Knob, v: f32) {
         let e = match k {
             Knob::Pan => FrameEvent::Pan(f64::from(v.clamp(0.0, 1.0)) * 2.0 - 1.0),
             Knob::Vol => FrameEvent::Volume(f64::from(v.clamp(0.0, 1.0))),
@@ -576,40 +575,40 @@ impl State {
         os_clap::wake();
     }
     /// The title bar's hint for a strip value box.
-    fn box_text(&self, k: Knob) -> String {
+    pub fn box_text(&self, k: Knob) -> String {
         match k {
             Knob::Range => format!("Pitch range: \u{b1}{} semitones", self.info.range),
             _ => format!("Target mixer track: {}  (double-click)", track_name(self.info.track)),
         }
     }
-    fn size(&self) -> (f32, f32) {
+    pub fn size(&self) -> (f32, f32) {
         let (w, h) = self.shown();
         let (cw, ch) = self.chrome();
         (w + cw, h + ch)
     }
     /// The frame around the editor: what the window adds to the editor's width and height (logical px).
-    fn chrome(&self) -> (f32, f32) {
+    pub fn chrome(&self) -> (f32, f32) {
         (2.0 * self.border(), self.area_y() + self.border())
     }
     /// Left / right / bottom inset of the editor: the card's outline only, the Classic frame otherwise.
-    fn border(&self) -> f32 {
+    pub fn border(&self) -> f32 {
         if self.card { 1.0 } else { BORDER }
     }
     /// The gear's strip shows (a card has none).
-    fn strip_shown(&self) -> bool {
+    pub fn strip_shown(&self) -> bool {
         self.strip && !self.card
     }
     /// The size of what the editor area shows: the Misc page's own while that tab is open (the frame fits it), the
     /// plugin's editor otherwise.
-    fn shown(&self) -> (f32, f32) {
+    pub fn shown(&self) -> (f32, f32) {
         if self.misc && self.info.misc.is_some() { (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H) } else { self.editor }
     }
     /// The frame's edges and its maximize button resize the editor: a resizable plugin, its editor showing.
-    fn resizable(&self) -> bool {
+    pub fn resizable(&self) -> bool {
         self.resize_min.is_some() && !self.misc
     }
     /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
-    fn area_y(&self) -> f32 {
+    pub fn area_y(&self) -> f32 {
         if self.card {
             return CARD_TITLE_H;
         }
@@ -619,7 +618,7 @@ impl State {
 
 /// Hit regions of the frame (window coordinates, logical px).
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Part {
+pub enum Part {
     Close,
     Minimize,
     /// Maximize / restore (resizable editors).
@@ -647,36 +646,36 @@ enum Part {
 
 impl State {
     /// The window belongs to a channel (not a mixer effect): ON, PAN and VOL act on it.
-    fn channel(&self) -> bool {
+    pub fn channel(&self) -> bool {
         self.info.misc.is_some()
     }
 }
 
 /// "Bus 3" / "Master", as the title bar names the target.
-fn track_name(t: u16) -> String {
+pub fn track_name(t: u16) -> String {
     if t == 0 { "Master".into() } else { format!("Bus {t}") }
 }
 
 /// The RANGE box's live part and the TRACK box (window coordinates). Classic: the reference's places, the PITCH
 /// knob covering the RANGE box's left end. Lemon: RANGE gets its own place right of the knob, both boxes centred over
 /// their captions (spec: ui/plugin-window.md "OpenStudio").
-fn range_rect(dx: f32) -> Rect {
+pub fn range_rect(dx: f32) -> Rect {
     if lemon_look() { Rect::new(474.0 + dx, 35.0, 34.0, 23.0) } else { Rect::new(470.0 + dx, 35.0, 28.0, 23.0) }
 }
-fn track_rect(dx: f32) -> Rect {
+pub fn track_rect(dx: f32) -> Rect {
     if lemon_look() { Rect::new(516.0 + dx, 35.0, 42.0, 23.0) } else { Rect::new(517.0 + dx, 35.0, 41.0, 23.0) }
 }
 /// The whole RANGE box as drawn (classic: it runs on under the PITCH knob).
-fn range_box(dx: f32) -> Rect {
+pub fn range_box(dx: f32) -> Rect {
     if lemon_look() { range_rect(dx) } else { Rect::new(455.0 + dx, 35.0, 43.0, 23.0) }
 }
-fn lemon_look() -> bool {
+pub fn lemon_look() -> bool {
     os_ui::kit::lemon::on(&os_theme::current())
 }
 
 /// Strip controls that do nothing, with their rects: in an effect's window (there is no channel) ON, PAN, VOL, PITCH,
 /// RANGE and TRACK.
-fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
+pub fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
     let dx = w - STRIP_RIGHT;
     let mut v = Vec::new();
     if !st.channel() {
@@ -691,9 +690,9 @@ fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
 }
 
 /// How far into a resizable frame's bottom-right corner it resizes both ways (logical px).
-const CORNER: f32 = 16.0;
+pub const CORNER: f32 = 16.0;
 
-fn parts(st: &State) -> Vec<(Rect, Part)> {
+pub fn parts(st: &State) -> Vec<(Rect, Part)> {
     if st.card {
         return card_parts(st);
     }
@@ -737,13 +736,13 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
     v
 }
 
-fn part_at(st: &State, x: f32, y: f32) -> Option<Part> {
+pub fn part_at(st: &State, x: f32, y: f32) -> Option<Part> {
     parts(st).into_iter().find(|(r, _)| r.contains(x, y)).map(|(_, p)| p)
 }
 
 /// A resizable frame's edges (right, bottom) and where they are, for the resize cursors.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn edge_rects(st: &State) -> Vec<(Rect, bool, bool)> {
+pub fn edge_rects(st: &State) -> Vec<(Rect, bool, bool)> {
     parts(st)
         .into_iter()
         .filter_map(|(r, p)| match p {
@@ -753,22 +752,22 @@ fn edge_rects(st: &State) -> Vec<(Rect, bool, bool)> {
         .collect()
 }
 
-const KNOBS: [Knob; 3] = [Knob::Pan, Knob::Vol, Knob::Pitch];
+pub const KNOBS: [Knob; 3] = [Knob::Pan, Knob::Vol, Knob::Pitch];
 
 /// Cell of strip tab `i` (45 px wide from x 7, inside the strip's outline; the Misc tab is the one after the pages).
-fn tab_rect(i: usize) -> Rect {
+pub fn tab_rect(i: usize) -> Rect {
     Rect::new(7.0 + 45.0 * i as f32, TITLE_H + 1.0, 45.0, STRIP_H - 1.0)
 }
 
 /// The strip's right-hand controls (ON ... TRACK) are placed for a window this wide and move with its right edge.
-const STRIP_RIGHT: f32 = 570.0;
+pub const STRIP_RIGHT: f32 = 570.0;
 
 /// The title bar's menu arrow and gear (always in the title bar, whether the strip is shown or not).
-const MENU_RECT: Rect = Rect { x: 8.0, y: 5.0, w: 14.0, h: 21.0 };
-const GEAR_RECT: Rect = Rect { x: 24.0, y: 5.0, w: 21.0, h: 21.0 };
+pub const MENU_RECT: Rect = Rect { x: 8.0, y: 5.0, w: 14.0, h: 21.0 };
+pub const GEAR_RECT: Rect = Rect { x: 24.0, y: 5.0, w: 21.0, h: 21.0 };
 
 /// The Presets box: right side of the title bar, left of minimize (a card's: left of its buttons).
-fn presets_rect(st: &State) -> Rect {
+pub fn presets_rect(st: &State) -> Rect {
     if st.card {
         let right = card_slot(st.size().0, card_buttons(st) - 1).x - 8.0;
         return Rect::new(right - PRESETS_W - 16.0, 5.0, PRESETS_W + 16.0, 20.0);
@@ -840,11 +839,11 @@ fn card_parts(st: &State) -> Vec<(Rect, Part)> {
 }
 
 /// The room the maximize button takes in the title bar: a resizable editor's frame has one.
-fn max_w(st: &State) -> f32 {
+pub fn max_w(st: &State) -> f32 {
     if st.resizable() { 19.0 } else { 0.0 }
 }
 
-fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
+pub fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
     match p {
         PageIcon::Plugin => &tb::PLUG,
         PageIcon::Sample => &tb::WAVE_SINE,
@@ -852,16 +851,16 @@ fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
     }
 }
 
-fn icon_at(c: &mut Canvas, t: &tb::TablerIcon, cx: f32, cy: f32, size: f32, col: Color) {
+pub fn icon_at(c: &mut Canvas, t: &tb::TablerIcon, cx: f32, cy: f32, size: f32, col: Color) {
     c.icon(t, Rect::new(cx - size / 2.0, cy - size / 2.0, size, size), col);
 }
 
 /// The title bar's text font (8 px cap height, baseline under row 18).
-fn title_font() -> Font {
+pub fn title_font() -> Font {
     Font::new(13)
 }
 
-fn paint(c: &mut Canvas, st: &State) {
+pub fn paint(c: &mut Canvas, st: &State) {
     if st.card {
         return paint_card(c, st);
     }
@@ -970,7 +969,7 @@ fn paint_card(c: &mut Canvas, st: &State) {
 
 /// Title bar, left to right: menu arrow, gear (boxed while the strip is shown), channel name, "(mixer target)", the
 /// plugin's hint; right side: Presets box with previous / next arrows, minimize, close.
-fn title_bar(c: &mut Canvas, st: &State, w: f32) {
+pub fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     icon_at(c, &tb::CARET_RIGHT, 14.4, 15.5, 15.4, c_arrow());
     let g = GEAR_RECT;
     let lemon = os_ui::kit::lemon::on(&os_theme::current());
@@ -1027,7 +1026,7 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     c.icon_stroke(&tb::X, Rect::new(w - 22.25, 7.75, 15.5, 15.5), c_icon(), 1.6);
 }
 
-fn strip(c: &mut Canvas, st: &State, w: f32) {
+pub fn strip(c: &mut Canvas, st: &State, w: f32) {
     // Strip box with a 1 px outline (its bottom edge is the editor's outline).
     let (dx, dy) = (w - STRIP_RIGHT, TITLE_H - 24.0);
     c.fill_rect(Rect::new(BORDER - 1.0, TITLE_H, w - 2.0 * BORDER + 2.0, STRIP_H), c_strip_line());
@@ -1069,13 +1068,13 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
     }
 }
 
-fn caption(c: &mut Canvas, cx: f32, s: &str) {
+pub fn caption(c: &mut Canvas, cx: f32, s: &str) {
     let f = Font::condensed(9, 4).bold();
     let w = c.text_width(f, s);
     c.text(f, (cx - w / 2.0).round(), TITLE_H + 33.0, c_caption(), s);
 }
 
-fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool, dot: Color) {
+pub fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool, dot: Color) {
     let r = 11.0;
     let p = os_theme::current();
     if os_ui::kit::lemon::on(&p) {
@@ -1097,7 +1096,7 @@ fn knob(c: &mut Canvas, cx: f32, cy: f32, v: f32, bipolar: bool, dot: Color) {
     c.fill_circle(cx + (r - 5.0) * a.sin(), cy - (r - 5.0) * a.cos(), 1.4, dot);
 }
 
-fn value_box(c: &mut Canvas, r: Rect, s: &str) {
+pub fn value_box(c: &mut Canvas, r: Rect, s: &str) {
     let p = os_theme::current();
     let lemon = os_ui::kit::lemon::on(&p);
     if lemon {
@@ -1119,7 +1118,7 @@ fn value_box(c: &mut Canvas, r: Rect, s: &str) {
 
 /// `rect` minus `cut`: up to four rects (left, right, top, bottom of the hole), each [left, top, right, bottom].
 #[cfg(not(windows))]
-fn subtract(rect: [i32; 4], cut: [i32; 4]) -> Vec<[i32; 4]> {
+pub fn subtract(rect: [i32; 4], cut: [i32; 4]) -> Vec<[i32; 4]> {
     let [l, t, r, b] = rect;
     let [cl, ct, cr, cb] = [cut[0].max(l), cut[1].max(t), cut[2].min(r), cut[3].min(b)];
     if cl >= cr || ct >= cb {
@@ -1130,7 +1129,7 @@ fn subtract(rect: [i32; 4], cut: [i32; 4]) -> Vec<[i32; 4]> {
 
 /// The parts of window rect `me` inside `work` and outside every cover (a docked frame's clip, off Windows).
 #[cfg(not(windows))]
-fn visible(me: [i32; 4], work: [i32; 4], covers: &[[i32; 4]]) -> Vec<[i32; 4]> {
+pub fn visible(me: [i32; 4], work: [i32; 4], covers: &[[i32; 4]]) -> Vec<[i32; 4]> {
     let start = [me[0].max(work[0]), me[1].max(work[1]), me[2].min(work[2]), me[3].min(work[3])];
     if start[0] >= start[2] || start[1] >= start[3] {
         return Vec::new();
@@ -1144,7 +1143,7 @@ fn visible(me: [i32; 4], work: [i32; 4], covers: &[[i32; 4]]) -> Vec<[i32; 4]> {
 
 /// What the native window does after an input event.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Reply {
+pub enum Reply {
     /// Nothing.
     None,
     /// Repaint the frame.
@@ -1166,20 +1165,20 @@ enum Reply {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Btn {
+pub enum Btn {
     Left,
     Right,
     Middle,
 }
 
 /// Window point (logical px) to screen point (physical px), for the app's popups.
-type ToScreen<'a> = &'a dyn Fn(f32, f32) -> (i32, i32);
+pub type ToScreen<'a> = &'a dyn Fn(f32, f32) -> (i32, i32);
 
 impl State {
     /// Maximize or restore. Maximized, the frame goes back to where it was (`top_left`'s answer then) at the editor's
     /// size then. Otherwise it fills `target` (top-left in screen px, size in logical px), its editor as large as that
     /// leaves; `None` when there is no target (or a fixed size). The answer: where the frame's top-left goes.
-    fn maximize(&mut self, top_left: (i32, i32), target: Option<((i32, i32), (f32, f32))>) -> Option<(i32, i32)> {
+    pub fn maximize(&mut self, top_left: (i32, i32), target: Option<((i32, i32), (f32, f32))>) -> Option<(i32, i32)> {
         if let Some((at, editor)) = self.maxed.take() {
             self.events.push(FrameEvent::Resize(editor.0.round() as u32, editor.1.round() as u32));
             os_clap::wake();
@@ -1195,7 +1194,7 @@ impl State {
 
     /// The editor size (logical px) that makes the frame `size`, at least the editor's smallest; `None` for a fixed
     /// size.
-    fn fill(&self, size: (f32, f32)) -> Option<(u32, u32)> {
+    pub fn fill(&self, size: (f32, f32)) -> Option<(u32, u32)> {
         let (min_w, min_h) = self.resize_min?;
         let b = self.border();
         let w = (size.0 - 2.0 * b).max(min_w);
@@ -1204,7 +1203,7 @@ impl State {
     }
 
     /// Left button down at (x, y); `double` for the second press of a double click.
-    fn left_down(&mut self, x: f32, y: f32, double: bool, screen: ToScreen) -> Reply {
+    pub fn left_down(&mut self, x: f32, y: f32, double: bool, screen: ToScreen) -> Reply {
         let part = part_at(self, x, y);
         match part {
             Some(Part::Menu) => {
@@ -1309,7 +1308,7 @@ impl State {
     }
 
     /// Right button down: the Misc page's lists, knob menus and root note; a strip knob's menu.
-    fn right_down(&mut self, x: f32, y: f32, screen: ToScreen) -> Reply {
+    pub fn right_down(&mut self, x: f32, y: f32, screen: ToScreen) -> Reply {
         if let Some(r) = self.misc_button(x, y, Btn::Right, screen) {
             return r;
         }
@@ -1323,7 +1322,7 @@ impl State {
     }
 
     /// Middle button down resets a knob (spec: ui/knobs.md, owner decision).
-    fn middle_down(&mut self, x: f32, y: f32, screen: ToScreen) -> Reply {
+    pub fn middle_down(&mut self, x: f32, y: f32, screen: ToScreen) -> Reply {
         if let Some(r) = self.misc_button(x, y, Btn::Middle, screen) {
             return r;
         }
@@ -1343,7 +1342,7 @@ impl State {
     }
 
     /// The mouse moved to (x, y) (a window move by the title bar is the native window's). `fine`: Ctrl is held.
-    fn motion(&mut self, x: f32, y: f32, fine: bool) -> Reply {
+    pub fn motion(&mut self, x: f32, y: f32, fine: bool) -> Reply {
         if let Some(mut s) = self.sizing {
             // The frame's top-left stays put, so window coordinates stay comparable while it grows.
             let (min_w, min_h) = self.resize_min.unwrap_or(s.editor);
@@ -1433,7 +1432,7 @@ impl State {
 
     /// The left button was released at (x, y): an armed title-bar button acts if the mouse is still over it, then
     /// everything a release ends ends (`release`).
-    fn left_up(&mut self, x: f32, y: f32) -> Reply {
+    pub fn left_up(&mut self, x: f32, y: f32) -> Reply {
         let armed = self.armed.take();
         let over = armed.is_some() && part_at(self, x, y) == armed;
         self.release();
@@ -1451,7 +1450,7 @@ impl State {
 
     /// The button was released (or the mouse lost otherwise): drags end, a held Misc key is let go, an armed title-bar
     /// button is let go without acting.
-    fn release(&mut self) {
+    pub fn release(&mut self) {
         self.armed = None;
         self.drag = None;
         self.sizing = None;
@@ -1465,7 +1464,7 @@ impl State {
     }
 
     /// The wheel turned `notches` (up positive) over (x, y).
-    fn wheel(&mut self, x: f32, y: f32, notches: f32) -> Reply {
+    pub fn wheel(&mut self, x: f32, y: f32, notches: f32) -> Reply {
         let part = part_at(self, x, y);
         if part.is_none() {
             if let Some(r) = self.misc_wheel(x, y, notches) {
@@ -1495,7 +1494,7 @@ impl State {
     }
 
     /// A button press over the Misc page; `None` when the page does not take it.
-    fn misc_button(&mut self, x: f32, y: f32, b: Btn, screen: ToScreen) -> Option<Reply> {
+    pub fn misc_button(&mut self, x: f32, y: f32, b: Btn, screen: ToScreen) -> Option<Reply> {
         use crate::misc_page::{self as mp, Hit, M};
         let h = misc_hit(self, x, y)?;
         let vals = self.info.misc?;
@@ -1562,7 +1561,7 @@ impl State {
     }
 
     /// The wheel over the Misc page; `None` when the page does not take it.
-    fn misc_wheel(&mut self, x: f32, y: f32, notches: f32) -> Option<Reply> {
+    pub fn misc_wheel(&mut self, x: f32, y: f32, notches: f32) -> Option<Reply> {
         use crate::misc_page::{self as mp, Hit};
         let h = misc_hit(self, x, y)?;
         if self.info.misc.is_some_and(|v| mp::off_name(h, &v).is_some()) {
@@ -1584,7 +1583,7 @@ impl State {
 }
 
 /// The Misc page hit under frame point (x, y), when the Misc tab shows.
-fn misc_hit(st: &State, x: f32, y: f32) -> Option<crate::misc_page::Hit> {
+pub fn misc_hit(st: &State, x: f32, y: f32) -> Option<crate::misc_page::Hit> {
     if !st.misc || st.info.misc.is_none() {
         return None;
     }
@@ -1593,7 +1592,7 @@ fn misc_hit(st: &State, x: f32, y: f32) -> Option<crate::misc_page::Hit> {
 }
 
 /// Sets a Misc value on the page at once and tells the app.
-fn misc_set(st: &mut State, m: crate::misc_page::M, v: f32) {
+pub fn misc_set(st: &mut State, m: crate::misc_page::M, v: f32) {
     if let Some(vals) = st.info.misc.as_mut() {
         vals.set(m, v);
     }
@@ -1601,7 +1600,7 @@ fn misc_set(st: &mut State, m: crate::misc_page::M, v: f32) {
     misc_hint(st, Some(crate::misc_page::Hit::Value(m)));
 }
 
-fn misc_hint(st: &mut State, h: Option<crate::misc_page::Hit>) {
+pub fn misc_hint(st: &mut State, h: Option<crate::misc_page::Hit>) {
     use crate::misc_page::{note_name, off_name, value_text, Hit, M};
     if let Some(name) = h.zip(st.info.misc).and_then(|(h, v)| off_name(h, &v)) {
         st.misc_ui.hint = crate::app::off_text(name);
@@ -1621,19 +1620,6 @@ fn misc_hint(st: &mut State, h: Option<crate::misc_page::Hit>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The X server's keymap has a bit per X key code, the evdev scancode winit reads plus 8 (issue #274).
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn keymap_bits_follow_x_key_codes() {
-        use winit::keyboard::KeyCode;
-        let mut map = [0u8; 32];
-        // Z: evdev 44, X key code 52.
-        map[52 / 8] |= 1 << (52 % 8);
-        assert!(in_keymap(&map, KeyCode::KeyZ));
-        assert!(!in_keymap(&map, KeyCode::KeyX));
-        assert!(!in_keymap(&[0; 32], KeyCode::KeyZ));
-    }
 
     fn state(strip: bool, target: &str) -> State {
         let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()), icon: None };

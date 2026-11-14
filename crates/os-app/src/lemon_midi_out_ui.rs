@@ -17,13 +17,13 @@ use crate::lemon_midi_out::*;
 impl crate::app::App {
     /// Every MIDI Out channel has its instrument, with the channel's settings and levels; rows that are no longer MIDI
     /// Out channels lose theirs. Runs every tick.
-    pub(crate) fn sync_midi_outs(&mut self) {
+    pub fn sync_midi_outs(&mut self) {
         self.host(sync_midi_outs);
     }
 
     /// ADD ▸ MIDI Out (spec §6.2): a MIDI Out channel on the master track, its window open. One undo step, "Add
     /// channel".
-    pub(crate) fn add_midi_out(&mut self) -> Option<String> {
+    pub fn add_midi_out(&mut self) -> Option<String> {
         crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
             let s = &mut app.state;
             let row = crate::projects::add_plugin_channel(s.session.project.get_mut(), LEMON_MIDI_OUT);
@@ -38,7 +38,7 @@ impl crate::app::App {
     }
 
     /// TOOLS ▸ Set up for MIDI export: the question first (spec: ui/menus.md "Prepare for MIDI export").
-    pub(crate) fn ask_midi_export(&mut self) {
+    pub fn ask_midi_export(&mut self) {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
         self.show_msg(Msg::new(Kind::Question, "Confirm", spans(&[PREP_CONFIRM]), &[Answer::Ok, Answer::Cancel], Then::MidiExportConfirm));
     }
@@ -47,7 +47,7 @@ impl crate::app::App {
     /// channel 1, 2, 3 … in rack order (the 17th is 1 again), port 0, patch 1, on the master track, each with a cut
     /// group of its own (§4); names, places and notes stay. One undo step: the channels take new ids, so their old
     /// instruments, kept by the old ones (`Plugins::keep`), come back with an undo (`control::host`).
-    pub(crate) fn prepare_midi_export(&mut self) -> String {
+    pub fn prepare_midi_export(&mut self) -> String {
         let rows: Vec<usize> = self.state.session.project.channels.iter().enumerate().filter(|(_, c)| matches!(c.kind, ChannelKind::Sampler | ChannelKind::Plugin)).map(|(r, _)| r).collect();
         if rows.is_empty() {
             return "No channels to set up for MIDI export".into();

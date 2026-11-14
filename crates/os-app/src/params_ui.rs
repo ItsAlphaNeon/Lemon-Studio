@@ -32,15 +32,15 @@ fn value_of(s: &State, key: usize, index: usize) -> Option<f64> {
 
 /// Parameter `index` of instance `key`: its name, its normalized value, and setting it (the value box, spec:
 /// ui/type-in-value.md).
-pub(crate) fn param_name(s: &State, key: usize, index: usize) -> Option<String> {
+pub fn param_name(s: &State, key: usize, index: usize) -> Option<String> {
     Some(s.session.params.lists.get(&key)?.params.get(index)?.name.clone())
 }
 
-pub(crate) fn param_value(s: &State, key: usize, index: usize) -> Option<f64> {
+pub fn param_value(s: &State, key: usize, index: usize) -> Option<f64> {
     value_of(s, key, index)
 }
 
-pub(crate) fn set_param_value(s: &mut State, key: usize, index: usize, v: f64) -> bool {
+pub fn set_param_value(s: &mut State, key: usize, index: usize, v: f64) -> bool {
     let Some(id) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return false };
     let set = s.session.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)));
     if set {
@@ -187,7 +187,7 @@ pub fn node_key(s: &State, key: usize) -> Option<String> {
 
 impl App {
     /// Every plugin tick: keeps the parameter lists of hosted instances and records the parameters their editors moved.
-    pub(crate) fn params_tick(&mut self) {
+    pub fn params_tick(&mut self) {
         self.state.session.plugins.editors_open = self.state.editor_host.open_keys();
         let Tick { moved, recorded, automate } = params_in(&mut self.state.session);
         if let Some((key, index)) = moved {
@@ -206,7 +206,7 @@ impl App {
     }
 
     /// A plugin parameter set from outside its window (a remote control) to `level`, for automation recording.
-    pub(crate) fn record_plugin_param(&mut self, key: usize, index: usize, level: f64) {
+    pub fn record_plugin_param(&mut self, key: usize, index: usize, level: f64) {
         let Some(target) = target_of(&self.state.session, key, index) else { return };
         let range = self.state.session.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index)).map(|i| (i.min, i.max));
         if let Some(range) = range {
@@ -215,7 +215,7 @@ impl App {
     }
 
     /// A press on a host control: it becomes the last tweaked parameter when it has an automation target.
-    pub(crate) fn note_host_tweak(&mut self, a: &Action) {
+    pub fn note_host_tweak(&mut self, a: &Action) {
         if self.automation_target(a).is_some() {
             note(&mut self.state.tweaks, Tweak::Host(a.clone()));
         }
@@ -241,7 +241,7 @@ impl App {
     }
 
     /// ADD / TOOLS menu entries for the last tweaked parameters (spec §5); returns a message.
-    pub(crate) fn params_menu(&mut self, entry: MenuEntry) -> Option<String> {
+    pub fn params_menu(&mut self, entry: MenuEntry) -> Option<String> {
         let nth = usize::from(entry == MenuEntry::NextToLast);
         let tweak = self.state.tweaks.get(nth).cloned();
         let create = tweak.as_ref().and_then(|t| self.tweak_automation(t));
@@ -270,7 +270,7 @@ impl App {
 
     /// "Create automation clip" from a plugin's own parameter menu (host link, spec §6): parameter `index` of instance
     /// `key`. Returns a message.
-    pub(crate) fn params_automate(&mut self, key: usize, index: usize) -> Option<String> {
+    pub fn params_automate(&mut self, key: usize, index: usize) -> Option<String> {
         self.params_tick();
         let Some((tgt, name, v)) = automation(&self.state, key, index) else {
             return Some("This parameter cannot be automated".into());
@@ -279,7 +279,7 @@ impl App {
     }
 
     /// Parameter commands (popup menus).
-    pub(crate) fn params_cmd(&mut self, c: PCmd) -> Option<String> {
+    pub fn params_cmd(&mut self, c: PCmd) -> Option<String> {
         match c {
             PCmd::Browse(key) => self.browse_params(key),
             PCmd::Copy(key, index) => {
@@ -314,7 +314,7 @@ impl App {
     }
 
     /// "Show all parameters" (spec §6): the browser shows the instance's parameters in the Current project tab.
-    pub(crate) fn browse_params(&mut self, key: usize) -> Option<String> {
+    pub fn browse_params(&mut self, key: usize) -> Option<String> {
         self.params_tick();
         let s = &mut self.state;
         if !s.session.params.has_params(key) {
@@ -335,7 +335,7 @@ impl App {
     }
 
     /// Right-click on a browser row: a parameter row opens its automation menu (spec §6). True when handled.
-    pub(crate) fn params_browser_right(&mut self, row: usize, x: f32, y: f32) -> bool {
+    pub fn params_browser_right(&mut self, row: usize, x: f32, y: f32) -> bool {
         let rows = crate::views::browser::rows(&self.state);
         let Some(crate::views::browser::Item::Param(key, index)) = rows.get(row).map(|r| r.item.clone()) else { return false };
         self.state.playlist.popup = param_menu(&self.state, key, index, x, y);
@@ -344,7 +344,7 @@ impl App {
     }
 
     /// A parameter row dropped on the playlist at (`track`, `tick`): an automation clip there (spec §6).
-    pub(crate) fn params_drop(&mut self, key: usize, index: usize, track: u16, tick: u32) -> Option<String> {
+    pub fn params_drop(&mut self, key: usize, index: usize, track: u16, tick: u32) -> Option<String> {
         let (tgt, name, v) = automation(&self.state, key, index)?;
         let s = &mut self.state;
         crate::playlist::create_automation(s, tgt, &name, v);
@@ -368,7 +368,7 @@ pub enum Tweak {
 }
 
 /// Notes `t` as the last tweaked, newest first: "Most recent", "Second most recent".
-pub(crate) fn note(last: &mut Vec<Tweak>, t: Tweak) {
+pub fn note(last: &mut Vec<Tweak>, t: Tweak) {
     if last.first() == Some(&t) {
         return;
     }

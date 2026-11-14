@@ -403,7 +403,7 @@ mod tests {
     }
 
     /// Messages sent to a loopback MIDI port (an output that is also an input: a loopMIDI port on Windows, ALSA's
-    /// "Midi Through" on Linux) arrive and wake the UI. Needs such a port: `cargo test -p os-app midi_loopback --
+    /// "Midi Through" on Linux) arrive and wake the UI. Needs such a port: `cargo test -p os-session midi_loopback --
     /// --ignored`.
     #[test]
     #[ignore]

@@ -1802,7 +1802,7 @@ const JUMP_UNITS: [&str; 6] = ["Off", "Beats", "Bars", "2 bars", "4 bars", "8 ba
 
 /// The unit a song position move waits for while the song plays (Quantize song jumps), in ticks; `None` = Off. Bars
 /// are the project's (time signature markers do not change them).
-pub(crate) fn jump_unit(s: &State) -> Option<u32> {
+pub fn jump_unit(s: &State) -> Option<u32> {
     let bar = s.session.project.bar_ticks();
     match s.playlist.jump_quantize {
         1 => Some(u32::from(s.session.project.ppq.max(1))),
@@ -1816,7 +1816,7 @@ pub(crate) fn jump_unit(s: &State) -> Option<u32> {
 
 /// Add key marker ▸ (§7a), two columns: "Root note" with C … B (radio), then "Scale" with Default, Black notes
 /// and the scale list; the scale last added is checked.
-pub(crate) fn key_items(s: &State) -> Vec<PItem> {
+pub fn key_items(s: &State) -> Vec<PItem> {
     let pl = &s.playlist;
     let mut items = vec![PItem::head("Root note")];
     items.extend(os_model::NOTE_NAMES.iter().enumerate().map(|(k, n)| PItem::new(*n, Cmd::KeyRoot(k as u8)).mark(Mark::Radio(pl.key_root == k as u8))));
@@ -2020,7 +2020,7 @@ pub const MARKER_ACTIONS: [(&str, u8); 9] = [
 ];
 
 /// The marker row's own items (§7a), acting at `tick`: away from the markers they are its whole menu.
-pub(crate) fn lane_items(tick: u32) -> Vec<PItem> {
+pub fn lane_items(tick: u32) -> Vec<PItem> {
     vec![
         PItem::new("Add marker...", Cmd::MarkerAddAt(tick)),
         PItem::new("Add time signature...", Cmd::MarkerSigAt(tick)),
@@ -4117,7 +4117,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
 }
 
 /// An RGB colour from hue (degrees), saturation and lightness (0..1).
-pub(crate) fn hsl_rgb(h: f32, s: f32, l: f32) -> Rgb {
+pub fn hsl_rgb(h: f32, s: f32, l: f32) -> Rgb {
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
     let hp = (h.rem_euclid(360.0)) / 60.0;
     let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
@@ -4291,8 +4291,8 @@ pub fn consolidate(app: &mut App) -> String {
 }
 
 /// Keys while the playlist is focused. Returns true when handled.
-pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-    use winit::keyboard::{Key, NamedKey};
+pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+    use crate::keys::{Key, NamedKey};
     let shift = app.shift;
     // Inline text box first.
     if app.state.playlist.edit.is_some() {
@@ -4738,7 +4738,7 @@ pub fn pick_menu(s: &crate::session::Session, ch: u16, x: f32, y: f32) -> Popup 
 
 /// A track's Performance settings ▸ (spec: ui/performance-mode.md §4): Press, Motion, Trigger sync with Queue and
 /// Tolerant, Position sync, a column each.
-pub(crate) fn perf_items(s: &crate::session::Session, t: u16) -> Vec<PItem> {
+pub fn perf_items(s: &crate::session::Session, t: u16) -> Vec<PItem> {
     use os_model::PerfSettings as P;
     let p = track_info(s, t).map(|x| x.perf).unwrap_or_default();
     let list = |head: &'static str, which: u8, labels: &[&'static str], on: u8, col: bool| {
@@ -4808,7 +4808,7 @@ pub fn crossfade(s: &crate::session::Session, g: &PGeom, b: usize) -> Option<Xfa
 
 /// The window menu's CPU entries, ticked from the plugin's switches; greyed (with the defaults' ticks) for a channel
 /// hosting no plugin, as in the original.
-pub(crate) fn fill_cpu(s: &crate::session::Session, key: usize, menu: &mut Popup) {
+pub fn fill_cpu(s: &crate::session::Session, key: usize, menu: &mut Popup) {
     let Some(c) = plugin_cpu(s, key) else { return };
     for it in menu.items.iter_mut() {
         let (on, smart) = match &*it.label {

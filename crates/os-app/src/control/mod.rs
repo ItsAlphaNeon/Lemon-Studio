@@ -6,9 +6,9 @@
 
 pub use os_session::control::*;
 
-pub(crate) mod server_ui;
-pub(crate) mod rpc_ui;
-pub(crate) mod host_ui;
-pub(crate) mod query_ui;
+pub mod server_ui;
+pub mod rpc_ui;
+pub mod host_ui;
+pub mod query_ui;
 #[cfg(test)]
 mod tests;

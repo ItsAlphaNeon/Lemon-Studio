@@ -167,14 +167,14 @@ fn browse(app: &mut App) -> Option<String> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
 
     thread_local! {
         /// This test thread's Channel presets folder. One per thread, not a process-wide setting (it was an
         /// environment variable): the browser lists this folder, and a folder set by one test showed in the browser
         /// of the tests painting beside it.
-        pub(crate) static ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+        pub static ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     }
 
     /// A channel state round trip (Lemon Studio's design): Save writes the channel, Add brings it back as the last row,

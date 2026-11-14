@@ -66,7 +66,7 @@ impl App {
 
     /// A controller message from device `dev` (spec §2-§5): the open box detects it, Multilink links it, the links it
     /// drives take it. Returns whether something took it (otherwise it goes to the instrument).
-    pub(crate) fn remote_cc(&mut self, dev: &str, ch: u8, cc: u8, v: u8) -> bool {
+    pub fn remote_cc(&mut self, dev: &str, ch: u8, cc: u8, v: u8) -> bool {
         let port = crate::midi_cfg::input(&self.state.session.settings, dev).port;
         if let Some(b) = self.state.link_box.as_mut().filter(|b| b.auto) {
             b.port = port;
@@ -153,7 +153,7 @@ impl App {
     }
 
     /// The glides move on (spec §3 Smoothing).
-    pub(crate) fn remote_tick(&mut self) {
+    pub fn remote_tick(&mut self) {
         if !self.remote.busy() {
             return;
         }
@@ -217,7 +217,7 @@ impl App {
     }
 
     /// A menu's Remote control command.
-    pub(crate) fn remote_cmd(&mut self, c: RCmd) {
+    pub fn remote_cmd(&mut self, c: RCmd) {
         match c {
             RCmd::Link(t) => {
                 let (w, h) = crate::views::remote_box::SIZE;
@@ -261,7 +261,7 @@ impl App {
     }
 
     /// Accept: makes the link and closes the box (spec §3).
-    pub(crate) fn link_accept(&mut self) {
+    pub fn link_accept(&mut self) {
         let Some(b) = self.state.link_box.take() else { return };
         if !b.all.is_empty() {
             let made = b.links();
@@ -293,7 +293,7 @@ impl App {
     }
 
     /// A click on the box.
-    pub(crate) fn link_box_act(&mut self, a: RAct) {
+    pub fn link_box_act(&mut self, a: RAct) {
         let Some(b) = self.state.link_box.as_mut() else { return };
         match a {
             RAct::Body | RAct::Port | RAct::Channel | RAct::Ctrl | RAct::Time => {}
@@ -317,7 +317,7 @@ impl App {
     }
 
     /// The wheel (or a drag) on one of the box's value boxes: `steps` up or down.
-    pub(crate) fn link_box_step(&mut self, a: RAct, steps: i32) {
+    pub fn link_box_step(&mut self, a: RAct, steps: i32) {
         let Some(b) = self.state.link_box.as_mut() else { return };
         let step = |v: Option<u8>, max: i32| -> Option<u8> {
             // "---" sits below 0.
@@ -335,7 +335,7 @@ impl App {
     }
 
     /// Multilink to controllers switched (OPTIONS, Ctrl+J, the toolbar; spec §4).
-    pub(crate) fn toggle_multilink(&mut self) {
+    pub fn toggle_multilink(&mut self) {
         let m = &mut self.state.multilink;
         m.on = !m.on;
         m.queue.clear();
@@ -348,7 +348,7 @@ impl App {
     }
 
     /// A knob changed with the mouse: Multilink queues it (once).
-    pub(crate) fn multilink_knob(&mut self, t: Target) {
+    pub fn multilink_knob(&mut self, t: Target) {
         let m = &mut self.state.multilink;
         if m.on && !m.queue.contains(&t) {
             m.queue.push_back(t);

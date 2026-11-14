@@ -126,7 +126,7 @@ impl Journal {
 
 impl App {
     /// The project was opened from `path` (None: made new): the journal says so and reads it afresh.
-    pub(crate) fn journal_opened(&mut self, path: Option<&std::path::Path>) {
+    pub fn journal_opened(&mut self, path: Option<&std::path::Path>) {
         let j = &mut self.journal;
         match path {
             Some(p) => j.write("opened", json!({ "path": p.display().to_string() })),
@@ -141,7 +141,7 @@ impl App {
     }
 
     /// Before a save: the project's last changes and every hosted plugin's state as saved, into the journal.
-    pub(crate) fn journal_saving(&mut self) {
+    pub fn journal_saving(&mut self) {
         self.journal_tick_project();
         let keys: Vec<usize> = self.state.session.plugins.hosted.keys().copied().collect();
         for key in keys {
@@ -152,22 +152,22 @@ impl App {
     }
 
     /// The project was saved to `path`.
-    pub(crate) fn journal_saved(&mut self, path: &std::path::Path) {
+    pub fn journal_saved(&mut self, path: &std::path::Path) {
         self.journal.write("saved", json!({ "path": path.display().to_string() }));
     }
 
     /// The app closes normally (`crate::crash` reads a run without this as one that ended otherwise).
-    pub(crate) fn journal_closed(&mut self) {
+    pub fn journal_closed(&mut self) {
         self.journal.write("closed", json!({}));
     }
 
     /// A copy of the project was written to `path` (`App::save_copy`: a backup, a zipped project...).
-    pub(crate) fn journal_copied(&mut self, path: &std::path::Path) {
+    pub fn journal_copied(&mut self, path: &std::path::Path) {
         self.journal.write("copied", json!({ "path": path.display().to_string() }));
     }
 
     /// Each tick: undo steps, the project's changes and the edited plugins' states into the journal.
-    pub(crate) fn journal_tick(&mut self) {
+    pub fn journal_tick(&mut self) {
         let h = &self.state.session.history;
         let now = (h.steps(), h.done());
         let was = self.journal.history;
@@ -261,7 +261,7 @@ impl App {
 
     /// The state of the instance under `key`, into the journal when it differs from the last written. False when the
     /// audio thread had the instance: not read.
-    pub(crate) fn journal_plugin(&mut self, key: usize) -> bool {
+    pub fn journal_plugin(&mut self, key: usize) -> bool {
         let Some(owner) = crate::control::command::key_owner(&self.state.session, key) else { return true };
         let Ok(state) = self.state.session.plugins.state_if_free(key) else { return false };
         let Some(state) = state else { return true };
@@ -351,7 +351,7 @@ impl Journal {
 impl App {
     /// Puts back the state written as entry `seq` of journal `file` into the instance under `key` (Recover from
     /// journal). Returns the status message.
-    pub(crate) fn recover_state(&mut self, key: usize, file: &std::path::Path, seq: u64) -> String {
+    pub fn recover_state(&mut self, key: usize, file: &std::path::Path, seq: u64) -> String {
         let Some(name) = self.state.session.plugins.descriptor(key).map(|d| d.name) else { return "No plugin there".into() };
         let Some(state) = self.journal.state_at(file, seq) else { return format!("That {name} state is no longer in the journal") };
         if !self.state.session.plugins.set_state(key, &state) {

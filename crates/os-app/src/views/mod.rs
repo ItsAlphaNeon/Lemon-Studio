@@ -620,10 +620,10 @@ fn paint_rest(ui: &mut Ui, s: &State, f: &FrameInfo, w: f32) -> usize {
 }
 
 /// The cutting-edge branch's mark colour (the workspace watermark, the version string, the status bar's mark).
-pub(crate) const CUTTING_EDGE_RED: Color = Color::rgb(0xe5483b);
+pub const CUTTING_EDGE_RED: Color = Color::rgb(0xe5483b);
 
 /// The tiling layout's backdrop around the workspace card: a shade darker than the workspace.
-pub(crate) fn backdrop(ui: &Ui) -> Color {
+pub fn backdrop(ui: &Ui) -> Color {
     ui.t.workspace.shade(-0.35)
 }
 

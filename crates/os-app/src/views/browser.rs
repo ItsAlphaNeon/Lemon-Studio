@@ -1000,7 +1000,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
 }
 
 /// The splitter's width right of the browser panel.
-pub(crate) const SPLITTER: f32 = 8.0;
+pub const SPLITTER: f32 = 8.0;
 
 /// A long disk name shortened in the middle with ".." to fit `w` (spec §6).
 fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {

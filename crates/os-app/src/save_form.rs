@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use os_model::DataFolder;
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, State};
 use crate::data_folder as df;
@@ -256,13 +256,13 @@ fn top(app: &mut App) -> Option<&mut SaveForm> {
 impl App {
     /// Save as on a project never saved, while Ask for data folder says so: the Save as form; `next` goes on once the
     /// project is saved (spec §7).
-    pub(crate) fn open_save_form(&mut self, next: Option<Next>) {
+    pub fn open_save_form(&mut self, next: Option<Next>) {
         let f = SaveForm::new(false, &self.state, next);
         self.show_form(Body::Project(Form::Save(Box::new(f))));
     }
 
     /// FILE ▸ New made a new project: the New project form over it, while Ask for data folder says so (spec §7).
-    pub(crate) fn offer_new_form(&mut self) {
+    pub fn offer_new_form(&mut self) {
         if asks_on_new() {
             self.open_new_form();
         }
@@ -283,7 +283,7 @@ impl App {
 
     /// A click on a part of the form; `Some` closes it with that answer. With a list open, a click picks from it or
     /// only closes it.
-    pub(crate) fn save_form_click(&mut self, h: FHit) -> Option<Reply> {
+    pub fn save_form_click(&mut self, h: FHit) -> Option<Reply> {
         let f = top(self)?;
         if let Some(k) = f.list.take() {
             if let FHit::Item(i) = h {
@@ -334,7 +334,7 @@ impl App {
 
     /// Keys while the form is on top; `Some` closes it with that answer. Esc closes an open list first, then the form
     /// (as Cancel); Enter is the main button; Tab goes to the next field (the Information fields while unfolded).
-    pub(crate) fn save_form_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> Option<Reply> {
+    pub fn save_form_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> Option<Reply> {
         let f = top(self)?;
         if f.list.is_some() {
             if matches!(key, Key::Named(NamedKey::Escape)) {
@@ -367,7 +367,7 @@ impl App {
     }
 
     /// The picker chose `dir`: the form's root folder.
-    pub(crate) fn form_root_chosen(&mut self, dir: PathBuf) {
+    pub fn form_root_chosen(&mut self, dir: PathBuf) {
         if let Some(f) = top(self) {
             f.root = dir;
         }
@@ -377,7 +377,7 @@ impl App {
     /// The form closed with `reply`. Don't show this in the future, ticked, sets Ask for data folder to Don't ask
     /// whatever the answer. Save / Create saves; Skip opens the file dialog; Cancel saves nothing (the work waiting for
     /// the save is called off; New project's new project stays open, unsaved).
-    pub(crate) fn save_form_closed(&mut self, f: SaveForm, reply: Reply) {
+    pub fn save_form_closed(&mut self, f: SaveForm, reply: Reply) {
         if f.dont_show {
             prefs::set_choice(&prefs::ASK_DATA_FOLDER, DONT_ASK);
         }

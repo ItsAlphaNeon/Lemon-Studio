@@ -21,13 +21,13 @@ impl crate::app::App {
     /// format is found (the hint bar names those; a save keeps the file's wrapper for them until they are changed,
     /// `Hosted::stand_in`). A plugin that is not found keeps its saved data (written back unchanged) and is not looked
     /// for again.
-    pub(crate) fn sync_wrapped(&mut self) {
+    pub fn sync_wrapped(&mut self) {
         self.host(sync_wrapped);
     }
 
     /// With the experimental native host on (Settings > Plugins), the native plugins an opened project names are
     /// hosted by the installed plugins themselves (spec: plugins/fruity-abi.md "Opened projects"): see `host_native`.
-    pub(crate) fn sync_native(&mut self) {
+    pub fn sync_native(&mut self) {
         if os_native::enabled() {
             self.host_native();
         }
@@ -39,7 +39,7 @@ impl crate::app::App {
     /// still waiting for its first-load check is tried again on a later tick; one that is not installed is reported
     /// once the scan is over and kept in the project; one that does not start is reported and kept too. An instance
     /// that does not give the file's state back byte for byte keeps the file's bytes on a save (`Hosted::keep_file_state`).
-    pub(crate) fn host_native(&mut self) {
+    pub fn host_native(&mut self) {
         let scanning = self.sweep.is_some();
         self.host(|s| host_native(s, scanning));
     }
@@ -49,7 +49,7 @@ impl crate::app::App {
     /// writes its settings into the project as the file's own state, its instance is closed, and the next tick hosts
     /// it again from that state (`sync_osc3` / `sync_effects`, or `host_native`). A row the plugin menus are just
     /// creating is left alone. Returns how many channels and slots were switched.
-    pub(crate) fn swap_builtin_overrides(&mut self) -> usize {
+    pub fn swap_builtin_overrides(&mut self) -> usize {
         let native = native_first();
         let pending = self.state.session.pending_plugin.map(|(r, _)| r);
         let swap: Vec<usize> = self

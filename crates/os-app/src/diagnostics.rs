@@ -23,7 +23,7 @@ fn report_path() -> Option<PathBuf> {
 
 impl App {
     /// The report's text.
-    pub(crate) fn diagnostics(&self) -> String {
+    pub fn diagnostics(&self) -> String {
         let s = &self.state;
         let p = &s.session.project;
         let cfg = crate::audio_cfg::AudioCfg::current();
@@ -53,7 +53,7 @@ impl App {
     }
 
     /// HELP ▸ Diagnostics: the report written and opened.
-    pub(crate) fn save_diagnostics(&mut self) {
+    pub fn save_diagnostics(&mut self) {
         let Some(path) = report_path() else { return };
         let text = self.diagnostics();
         let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, text));

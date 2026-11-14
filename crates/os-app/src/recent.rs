@@ -37,7 +37,7 @@ pub fn list() -> Vec<PathBuf> {
 }
 
 /// Keeps `paths` as the list: one write of the settings file.
-pub(crate) fn restore(paths: &[PathBuf]) {
+pub fn restore(paths: &[PathBuf]) {
     let pairs: Vec<(String, String)> = (0..KEEP).map(|n| (key(n), paths.get(n).map_or_else(String::new, |p| p.to_string_lossy().into_owned()))).collect();
     crate::settings_file::write_all(&pairs);
 }
@@ -48,7 +48,7 @@ fn same(a: &Path, b: &Path) -> bool {
 }
 
 /// `path` was opened or saved: it heads the list, once; the oldest past fifty drop off.
-pub(crate) fn add(path: &Path) {
+pub fn add(path: &Path) {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let mut paths = list();
     paths.retain(|p| !same(p, &path));
@@ -70,7 +70,7 @@ pub fn label(path: &Path) -> String {
 }
 
 /// More ▸: the projects after the tenth, by name, without keys.
-pub(crate) fn more_items(_: &State) -> Vec<PItem> {
+pub fn more_items(_: &State) -> Vec<PItem> {
     list().iter().enumerate().skip(SHOWN).map(|(n, p)| PItem::new(label(p), Cmd::OpenRecent(n))).collect()
 }
 
@@ -87,7 +87,7 @@ pub fn alt_digit(c: &str) -> Option<usize> {
 impl App {
     /// Recent project `n` (FILE's row, its Alt key, More ▸): opened once unsaved changes are dealt with, as Open does. A
     /// file that has gone is said and taken off the list.
-    pub(crate) fn open_recent(&mut self, n: usize) {
+    pub fn open_recent(&mut self, n: usize) {
         let Some(path) = list().into_iter().nth(n) else { return };
         if !path.is_file() {
             remove(&path);
@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(app.state.session.path.as_deref(), Some(files[10].as_path()));
         assert_eq!(label(&list()[0]), "p10.flp", "opened: on top");
         // Alt+3 opens the third: p9 now (p10, p11, p9 ...).
-        app.key(&winit::keyboard::Key::Character("3".into()), false, true);
+        app.key(&crate::keys::Key::Character("3".into()), false, true);
         assert_eq!(app.state.session.path.as_deref().map(|p| label(p)).as_deref(), Some("p9.flp"));
         // More ▸ lists the two after the tenth.
         let more: Vec<String> = more_items(&app.state).iter().map(|i| i.label.to_string()).collect();

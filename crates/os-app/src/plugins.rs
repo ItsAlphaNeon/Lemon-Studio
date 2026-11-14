@@ -6,5 +6,3 @@
 
 pub use os_session::plugins::*;
 
-#[cfg(target_os = "macos")]
-pub mod window_check;

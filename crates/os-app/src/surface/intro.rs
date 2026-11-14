@@ -65,7 +65,7 @@ pub struct Intro {
 
 impl Intro {
     /// Starts it on `output`.
-    pub fn start(mut follow: Follow, output: Arc<Mutex<midir::MidiOutputConnection>>, model: Model, wake: fn()) -> Option<Intro> {
+    pub fn start(mut follow: Box<dyn Follow>, output: Arc<Mutex<midir::MidiOutputConnection>>, model: Model, wake: fn()) -> Option<Intro> {
         let (stop, done) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let (s, d) = (stop.clone(), done.clone());
         let thread = std::thread::Builder::new()

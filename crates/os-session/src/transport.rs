@@ -3512,7 +3512,7 @@ mod tests {
         assert!(wrapped, "the tick wrapped at the loop point");
     }
 
-    /// Needs an audio device: `cargo test -p os-app -- --ignored deleted_notes`.
+    /// Needs an audio device: `cargo test -p os-session -- --ignored deleted_notes`.
     #[test]
     #[ignore]
     fn deleted_notes_stop_playing() {
@@ -3588,7 +3588,7 @@ mod tests {
     }
 
     /// Linux: while a project plays, the feeder and the device callback run at real-time priority (`crate::rt`; needs an
-    /// audio device and rtkit or an rtprio limit): `hidden-tests cargo test -p os-app --lib
+    /// audio device and rtkit or an rtprio limit): `hidden-tests cargo test -p os-session --lib
     /// transport::tests::audio_threads_run_realtime -- --ignored --exact --nocapture`.
     #[cfg(target_os = "linux")]
     #[test]
@@ -4258,7 +4258,7 @@ mod tests {
         assert!(r.over(0.5, at(30_000)), "an endless feedback stops after {RING_MAX:?}");
     }
 
-    /// The same through the audio thread (needs an audio device: `cargo test -p os-app -- --ignored a_jump_resets`):
+    /// The same through the audio thread (needs an audio device: `cargo test -p os-session -- --ignored a_jump_resets`):
     /// Play and a jump while playing (a Stop and a Play, as the playlist ruler and the song position slider make it,
     /// or a Play while playing, as the piano roll's marker does) reset a hosted effect with "Reset plugins on
     /// transport" on, not with it off; pause and resume never do; Stop does either way.
@@ -4319,7 +4319,7 @@ mod tests {
 
     /// A delay-like effect whose tail rings on after its input: Stop lets it ring (it is processed, its output heard
     /// on the monitor), Play with "Reset plugins on transport" off carries it on, and it is reset once quiet (needs an
-    /// audio device: `cargo test -p os-app -- --ignored stop_lets`).
+    /// audio device: `cargo test -p os-session -- --ignored stop_lets`).
     #[test]
     #[ignore]
     fn stop_lets_effect_tails_ring() {

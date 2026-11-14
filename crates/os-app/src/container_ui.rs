@@ -173,7 +173,7 @@ fn retarget(moved: &Moved, s: &mut State) -> usize {
 impl App {
     /// Wrap in container and Wrap all in container (`all`) on slot `slot` of the current track as one undo step, then
     /// the remote control links of what moved follow it, in the same step (`relink`).
-    pub(crate) fn wrap_slot(&mut self, slot: u8, all: bool) -> Option<String> {
+    pub fn wrap_slot(&mut self, slot: u8, all: bool) -> Option<String> {
         let name = if all { WRAP_ALL } else { WRAP };
         let mut moved = None;
         let msg = crate::control_ui::edit_app(self, name, crate::control::command::Region::Project, |app| {
@@ -197,7 +197,7 @@ impl App {
     /// are pointed at the members (`Moved`), which are returned for the remote control links. Wrap in container on a slot
     /// whose own switch or mix a clip or link drives keeps the slot's switch and mix, its effect starting at wet 100 %,
     /// dry 0 %, so the clip blends it as before. Run inside the undo step (`wrap_slot`).
-    pub(crate) fn wrap_in_container(&mut self, slot: u8, all: bool) -> (Option<String>, Option<Moved>) {
+    pub fn wrap_in_container(&mut self, slot: u8, all: bool) -> (Option<String>, Option<Moved>) {
         let t = self.state.selected_mixer;
         let Some(track) = crate::mixer::track(&self.state.session, t) else { return (None, None) };
         let slots: Vec<u8> = if all { (0..10u8).filter(|&k| track.slots[usize::from(k)].is_some()).collect() } else { vec![slot] };
@@ -285,7 +285,7 @@ impl App {
 
     /// The container list's entries on member `i` of the container in slot `slot` of the current track: Open editor, or
     /// (inside the undo step, `mixer::run`) Move up, Move down, Remove. The chain follows on the next tick.
-    pub(crate) fn edit_member(&mut self, slot: u8, i: usize, op: Op) -> Option<String> {
+    pub fn edit_member(&mut self, slot: u8, i: usize, op: Op) -> Option<String> {
         let t = self.state.selected_mixer;
         let mut list = members(&self.state.session, t, slot)?;
         if i >= list.len() {
@@ -309,7 +309,7 @@ impl App {
     /// `Plugins::available` for `instrument`, a channel's container only) at the end of the container in slot `slot` of
     /// the current track (the row in the track's place for a channel's), from the plugin's defaults: an effect wet
     /// only, an instrument at [`INSTRUMENT_LEVELS`]. Inside the undo step (`mixer::run`).
-    pub(crate) fn add_member(&mut self, slot: u8, index: usize, instrument: bool) -> Option<String> {
+    pub fn add_member(&mut self, slot: u8, index: usize, instrument: bool) -> Option<String> {
         let t = self.state.selected_mixer;
         let mut list = members(&self.state.session, t, slot)?;
         if instrument && slot != CHANNEL {
@@ -329,7 +329,7 @@ impl App {
     /// `instrument`) in place of member `i` of the container in slot `slot` of the current track, from the plugin's
     /// defaults; the member keeps its place, id and levels, so its level's clips and links stay on it (as a slot's do
     /// when its effect is replaced). Inside the undo step (`mixer::run`).
-    pub(crate) fn replace_member(&mut self, slot: u8, i: usize, index: usize, instrument: bool) -> Option<String> {
+    pub fn replace_member(&mut self, slot: u8, i: usize, index: usize, instrument: bool) -> Option<String> {
         let t = self.state.selected_mixer;
         let mut list = members(&self.state.session, t, slot)?;
         let a = if instrument { self.state.session.plugins.available.get(index)? } else { self.state.session.plugins.effects.get(index)? };
@@ -348,7 +348,7 @@ impl App {
     /// which act on the container's output. One undo step: the channel takes a new id, so the instrument kept under the
     /// old one (`Plugins::keep`) comes back with an undo, as Replace's does. The clips, recorded pattern events and links
     /// on the instrument's parameters follow it onto its member (spec §4.5); those on the channel's own settings stay.
-    pub(crate) fn wrap_channel(&mut self, row: usize) -> Option<String> {
+    pub fn wrap_channel(&mut self, row: usize) -> Option<String> {
         let mut moved = None;
         let msg = crate::control_ui::edit_app(self, WRAP, crate::control::command::Region::Project, |app| {
             let (msg, m) = app.wrap_channel_now(row);
@@ -398,7 +398,7 @@ impl App {
     /// slot menu's; else an empty container in that slot (replacing its plugin, as an effect dropped there does) or in
     /// the track's first free slot, one step "Add effect". Lemon Studio's own: a Shift+drop on an empty slot or beside
     /// the slots is a plain drop, as there is no plugin to wrap.
-    pub(crate) fn drop_container_on_slot(&mut self, slot: Option<u8>, shift: bool) -> Option<String> {
+    pub fn drop_container_on_slot(&mut self, slot: Option<u8>, shift: bool) -> Option<String> {
         let t = self.state.selected_mixer;
         let filled = |k: u8| crate::mixer::track(&self.state.session, t).is_some_and(|m| m.slots[usize::from(k)].is_some());
         if let Some(k) = slot.filter(|&k| shift && filled(k)) {
@@ -416,7 +416,7 @@ impl App {
     /// plugin cannot be wrapped says so and stays as it is); else a new channel at the bottom of the rack holding an
     /// empty container, as a generator dropped on the rack adds one, one step "Add channel". Lemon Studio's own: a
     /// Shift+drop beside the rows is a plain drop.
-    pub(crate) fn drop_container_on_rack(&mut self, row: Option<usize>, shift: bool) -> Option<String> {
+    pub fn drop_container_on_rack(&mut self, row: Option<usize>, shift: bool) -> Option<String> {
         if let Some(r) = row.filter(|_| shift) {
             return self.wrap_channel(r);
         }
@@ -434,7 +434,7 @@ impl App {
     }
 
     /// The container window's controls (`CAct`).
-    pub(crate) fn container_act(&mut self, a: CAct) {
+    pub fn container_act(&mut self, a: CAct) {
         let (t, k) = self.state.container.at;
         let Some(list) = members(&self.state.session, t, k) else { return };
         let (x, y) = self.mouse;
@@ -462,7 +462,7 @@ impl App {
 
     /// A right click in the container's window: a member's name opens its menu, a level knob its parameter menu.
     /// Returns whether `a` was one.
-    pub(crate) fn container_right(&mut self, a: &crate::app::Action) -> bool {
+    pub fn container_right(&mut self, a: &crate::app::Action) -> bool {
         use crate::app::Action;
         let (x, y) = self.mouse;
         match *a {
@@ -496,7 +496,7 @@ impl App {
     }
 
     /// Opens the window of member `id` of the container at place (`t`, `slot`).
-    pub(crate) fn open_member(&mut self, t: u16, slot: u8, id: u32) -> Option<String> {
+    pub fn open_member(&mut self, t: u16, slot: u8, id: u32) -> Option<String> {
         let live = self.state.session.plugins.containers.get(&place_key(t, slot))?;
         let Some(key) = live.shape.iter().position(|s| s.0 == id).and_then(|at| live.keys[at]) else {
             return Some("This plugin is not loaded (it was not found)".into());
@@ -505,7 +505,7 @@ impl App {
     }
 
     /// Opens the window of the member hosted under `key`.
-    pub(crate) fn open_member_key(&mut self, key: usize) -> Option<String> {
+    pub fn open_member_key(&mut self, key: usize) -> Option<String> {
         #[cfg(not(plugin_windows))]
         {
             let _ = key;
@@ -527,7 +527,7 @@ impl App {
     /// The plugin frame's title of every member hosted, by key: the member's name (the one typed for it, else its
     /// plugin's) over its container's slot's title, with the member's own icon.
     #[cfg(plugin_windows)]
-    pub(crate) fn member_infos(&self) -> std::collections::HashMap<usize, crate::plugin_window::ChannelInfo> {
+    pub fn member_infos(&self) -> std::collections::HashMap<usize, crate::plugin_window::ChannelInfo> {
         let mut v = std::collections::HashMap::new();
         for (&slot_key, live) in &self.state.session.plugins.containers {
             let info = match fx_of(slot_key) {
@@ -548,7 +548,7 @@ impl App {
     }
 
     /// Where member `key` plays, for the performance monitor: "Bus 2, slot 1, container", "Lemon Trio, container".
-    pub(crate) fn member_place(&self, key: usize) -> Option<String> {
+    pub fn member_place(&self, key: usize) -> Option<String> {
         let slot_key = self.state.session.plugins.containers.iter().find(|(_, l)| l.keys.contains(&Some(key)))?.0;
         Some(match key_place(*slot_key)? {
             (r, CHANNEL) => format!("{}, container", place_name(&self.state.session, r, CHANNEL)),
@@ -562,7 +562,7 @@ impl App {
     /// it: a member still there (by its id and plugin) keeps its instance and window; a new one is an instance of its
     /// plugin started from its saved state, or left out of the chain when its plugin is not found (the list keeps it). A
     /// list whose levels or Auto-bypass switches alone changed sets them on the chain.
-    pub(crate) fn sync_containers(&mut self) {
+    pub fn sync_containers(&mut self) {
         if let Some(note) = self.host(sync_containers_in) {
             // After the hint of an opened project's Patcher slots (`open_patchers`), which it completes.
             self.state.message = Some(match self.state.message.take() {
@@ -576,7 +576,7 @@ impl App {
 
 /// The commands of the window's menus run with their container's track selected (as a slot window's do); a channel's
 /// container's run with its row in the track's place, which is how they find it.
-pub(crate) fn on_track(t: u16, items: &mut [PItem]) {
+pub fn on_track(t: u16, items: &mut [PItem]) {
     for it in items.iter_mut() {
         if let Cmd::Mixer(_) = it.cmd {
             it.cmd = Cmd::SlotWin(t, Box::new(std::mem::replace(&mut it.cmd, Cmd::Nothing)));

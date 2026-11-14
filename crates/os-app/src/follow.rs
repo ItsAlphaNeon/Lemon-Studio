@@ -21,11 +21,11 @@ pub struct RackView {
 }
 
 impl RackView {
-    pub(crate) fn now(s: &State) -> RackView {
+    pub fn now(s: &State) -> RackView {
         RackView { sel: s.rack.sel.clone(), selected: s.selected_channel, source: s.playlist.source, picker: s.playlist.picker }
     }
 
-    pub(crate) fn put(self, s: &mut State) {
+    pub fn put(self, s: &mut State) {
         (s.rack.sel, s.selected_channel) = (self.sel, self.selected);
         (s.playlist.source, s.playlist.picker) = (self.source, self.picker);
     }

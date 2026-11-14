@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 use os_model::{Project, WorkTime};
 use os_ui::{Color, Font, Rect};
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 use crate::app::{Action, App, State, Ui};
 use crate::control::command::{Region, SONG_INFO};
 use crate::dialog::Field;
@@ -25,21 +25,21 @@ pub fn spent_days(s: &State, now: Instant) -> f64 {
 
 /// The time spent on the project as a save writes it (`App::write_project`): the file's start, and what was spent
 /// before plus the session's clock (spec: flp/events/project-info.md "Writer notes": "then adds the time spent").
-pub(crate) fn saved_work_time(s: &State) -> WorkTime {
+pub fn saved_work_time(s: &State) -> WorkTime {
     let started = s.session.project.work_time.map_or_else(|| work_time_now().started, |w| w.started);
     WorkTime { started, spent: spent_days(s, crate::anim::now()) }
 }
 
 /// A project was opened (`App::open`; its start, `project_io::open_in`): the clock starts again; the Song info box shows
 /// when the project asks for it (event 10).
-pub(crate) fn opened(s: &mut State) {
+pub fn opened(s: &mut State) {
     s.credits.clock.restart(crate::anim::now());
     s.credits.song_box = s.session.project.show_info == Some(true);
     (s.credits.song_since, s.credits.song_alpha) = (None, 1.0);
 }
 
 /// A new project: started now, nothing spent (spec: ui/settings-choices.md "Info": "A new project starts now").
-pub(crate) fn created(s: &mut State) {
+pub fn created(s: &mut State) {
     s.session.project.get_mut().work_time = Some(work_time_now());
     s.credits.clock.restart(crate::anim::now());
     s.credits.song_box = false;
@@ -68,7 +68,7 @@ pub fn footer(s: &State, now: Instant) -> Vec<String> {
 /// grey with a 1 px darker frame; "<author> - <title>" in large dark text at the top left, the genre at the top right,
 /// the comments with their line breaks, the web link at the bottom right. A click on it closes it (`Action::SongInfo`), as
 /// does a click anywhere else (`App::mouse_down`). It is painted see-through while it fades. The app's own fonts.
-pub(crate) fn paint_song_info(ui: &mut Ui, s: &State) {
+pub fn paint_song_info(ui: &mut Ui, s: &State) {
     if !s.credits.song_box {
         return;
     }
@@ -108,7 +108,7 @@ pub(crate) fn paint_song_info(ui: &mut Ui, s: &State) {
 impl App {
     /// A click on an Info box: it takes the keyboard with the caret at the end of its text. Another box being edited is
     /// accepted first; a click on the box being edited changes nothing.
-    pub(crate) fn info_act(&mut self, field: InfoField) {
+    pub fn info_act(&mut self, field: InfoField) {
         let s = &mut self.state;
         if s.settings.info_edit.as_ref().is_some_and(|e| e.field == field) {
             return;
@@ -122,7 +122,7 @@ impl App {
 
     /// Keys while an Info box has the keyboard. It takes every key, so none reaches the typing keyboard or a shortcut;
     /// false when no box has it.
-    pub(crate) fn info_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
+    pub fn info_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
         let s = &mut self.state;
         if s.settings.info_edit.is_none() {
             return false;
@@ -153,7 +153,7 @@ impl App {
 
     /// The genre button was clicked: the genre menu under its left edge (`x`, `y`: the button's bottom left), "(none)"
     /// then `GENRES`, the project's genre marked (spec: ui/settings-choices.md "Info").
-    pub(crate) fn genre_menu(&mut self, x: f32, y: f32) {
+    pub fn genre_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let now = self.state.session.project.info.genre.as_deref().unwrap_or("");
         let items = std::iter::once(PItem::new("(none)", Cmd::Genre(None)).mark(Mark::Radio(now.is_empty())))
@@ -165,7 +165,7 @@ impl App {
 
     /// A genre menu row was picked (`Cmd::Genre`): its name goes into the Genre box as if typed there, "(none)" (None)
     /// empties it. A box being edited is accepted first. Returns the message.
-    pub(crate) fn set_genre(&mut self, genre: Option<&'static str>) -> Option<String> {
+    pub fn set_genre(&mut self, genre: Option<&'static str>) -> Option<String> {
         let s = &mut self.state;
         accept_info(s);
         crate::control_ui::edit(s, SONG_INFO, Region::Settings, |s| {
@@ -185,7 +185,7 @@ impl App {
     }
 
     /// Periodic (`App::tick`): the Info page shows the time spent by the minute; it repaints when that changes.
-    pub(crate) fn work_tick(&mut self, now: Instant) {
+    pub fn work_tick(&mut self, now: Instant) {
         let minutes = (spent_days(&self.state, now) * 1440.0) as u64;
         if minutes != self.state.credits.minutes {
             self.state.credits.minutes = minutes;
@@ -198,7 +198,7 @@ impl App {
     /// Info ▸ Reset working time: the time spent goes to zero at once, without a question, and the start stays (spec:
     /// ui/settings-choices.md "Info"). It is a change to the project, also when the project held no time spent yet
     /// (the session's time is not in it, `WorkClock`): the saved copy then forgets its time so the two differ.
-    pub(crate) fn reset_work_time(&mut self) {
+    pub fn reset_work_time(&mut self) {
         let s = &mut self.state;
         s.session.project.get_mut().work_time.get_or_insert_with(os_flp::project::work_time_now).spent = 0.0;
         s.credits.clock.restart(crate::anim::now());
@@ -210,7 +210,7 @@ impl App {
     }
 
     /// Info ▸ Show info on opening (event 10): switched for the project and saved with it.
-    pub(crate) fn toggle_show_info(&mut self) {
+    pub fn toggle_show_info(&mut self) {
         let p = self.state.session.project.get_mut();
         let on = !p.show_info.unwrap_or(false);
         p.show_info = Some(on);
@@ -218,7 +218,7 @@ impl App {
     }
 
     /// A click on the Song info box closes it, as does a click anywhere else in the main window or in a plugin window.
-    pub(crate) fn close_song_info(&mut self) {
+    pub fn close_song_info(&mut self) {
         if self.state.credits.song_box {
             self.state.credits.song_box = false;
             self.damage_rect(song_box_rect(self.state.screen));
@@ -226,13 +226,13 @@ impl App {
     }
 
     /// The Song info box is fading out: the shell ticks at animation rate.
-    pub(crate) fn song_info_fading(&self) -> bool {
+    pub fn song_info_fading(&self) -> bool {
         self.state.credits.song_box && self.state.credits.song_alpha < 1.0
     }
 
     /// Periodic (`App::tick`): the Song info box stays for `SONG_HOLD` from the first tick after opening, then fades out
     /// over `SONG_FADE` and goes.
-    pub(crate) fn song_info_tick(&mut self, now: Instant) {
+    pub fn song_info_tick(&mut self, now: Instant) {
         let c = &mut self.state.credits;
         if !c.song_box {
             return;
@@ -254,7 +254,7 @@ impl App {
 /// Writes the Info box being edited into the project. One-line boxes drop leading and trailing blanks; an emptied box
 /// clears its field (a file that has the field keeps it, empty, apart from the web link; os-flp `apply`). Unchanged
 /// text changes nothing.
-pub(crate) fn accept_info(s: &mut State) {
+pub fn accept_info(s: &mut State) {
     let Some(e) = s.settings.info_edit.take() else { return };
     let text = if e.field.multiline() { e.text.text } else { e.text.text.trim().to_string() };
     crate::control_ui::edit(s, SONG_INFO, Region::Settings, |s| {
@@ -272,7 +272,7 @@ pub fn song_box_rect(screen: (f32, f32)) -> Rect {
 
 /// Home / End / Up / Down in Comments go by its lines (between line breaks): Up and Down keep the caret's column, in
 /// characters, and go to the start / end of the text from the first / last line.
-pub(crate) fn line_key(f: &mut Field, key: NamedKey) {
+pub fn line_key(f: &mut Field, key: NamedKey) {
     let chars: Vec<char> = f.text.chars().collect();
     let c = f.caret.min(chars.len());
     let start = |i: usize| chars[..i].iter().rposition(|&ch| ch == '\n').map_or(0, |p| p + 1);
@@ -458,13 +458,13 @@ mod tests {
         if !app.typing_on() {
             app.toggle_typing();
         }
-        assert!(app.typing_key(winit::keyboard::KeyCode::KeyZ, true, false, false), "Z plays a note");
-        app.typing_key(winit::keyboard::KeyCode::KeyZ, false, false, false);
+        assert!(app.typing_key(crate::keys::KeyCode::KeyZ, true, false, false), "Z plays a note");
+        app.typing_key(crate::keys::KeyCode::KeyZ, false, false, false);
         app.act(Action::Settings(SAct::Info(InfoField::Genre)));
         let shown = app.state.shown(crate::app::Win::Playlist);
         named(&mut app, NamedKey::F5);
         assert_eq!(app.state.shown(crate::app::Win::Playlist), shown);
-        assert!(!app.typing_key(winit::keyboard::KeyCode::KeyZ, true, false, false));
+        assert!(!app.typing_key(crate::keys::KeyCode::KeyZ, true, false, false));
         typed(&mut app, "z");
         named(&mut app, NamedKey::Enter);
         assert_eq!(app.state.session.project.info.genre.as_deref(), Some("z"));

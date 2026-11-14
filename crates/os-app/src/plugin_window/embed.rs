@@ -56,6 +56,8 @@ struct Inner {
     work: Rect,
     /// The canvas's top-left in the main window (device px), for the screen points the app is handed.
     canvas_off: (i32, i32),
+    /// A main-window point (device px) on the screen (`Frames::main_to_screen`).
+    main_to_screen: fn((i32, i32)) -> (i32, i32),
     /// Placed in the workspace yet (it opens centred in it, `sync`).
     placed: bool,
     /// The editor's size as `sync` last saw it (device px): a change is the editor resizing itself.
@@ -215,7 +217,7 @@ impl Inner {
     /// A frame point (logical px from its top-left) as a screen point (device px): the main window's, for an X11 one.
     fn to_screen(&self, x: f32, y: f32) -> (i32, i32) {
         let p = (dev(self.pos.0 + x, self.k) + self.canvas_off.0, dev(self.pos.1 + y, self.k) + self.canvas_off.1);
-        super::x11::main_to_screen(p)
+        (self.main_to_screen)(p)
     }
 
     /// Top-left `p` kept as the app's floating windows are (`win_clamp::keep`): its title bar never above the
@@ -273,7 +275,7 @@ impl Inner {
 impl EmbedFrame {
     /// A frame for an editor of `editor` (logical px) at canvas point `pos` (`None`: centred in the workspace), drawn at
     /// `scale`.
-    pub fn new(info: ChannelInfo, editor: (f32, f32), scale: f32, pos: Option<(f32, f32)>) -> Result<EmbedFrame, String> {
+    pub fn new(info: ChannelInfo, editor: (f32, f32), scale: f32, pos: Option<(f32, f32)>, main_to_screen: fn((i32, i32)) -> (i32, i32)) -> Result<EmbedFrame, String> {
         let k = if scale > 0.0 { scale } else { 1.0 };
         let st = State::new(info, editor, false);
         let size = ((editor.0 * k).round() as u32, (editor.1 * k).round() as u32);
@@ -293,6 +295,7 @@ impl EmbedFrame {
             last_press: None,
             work: Rect::new(0.0, 0.0, 0.0, 0.0),
             canvas_off: (0, 0),
+            main_to_screen,
             placed: pos.is_some(),
             seen_size: None,
             tinted: None,
@@ -301,7 +304,7 @@ impl EmbedFrame {
     }
 
     // ---------------------------------------------------------------------------------------------------------------
-    // What every plugin window answers (as `x11::FrameWindow`).
+    // What every plugin window answers (`Frame`).
 
     pub fn detached(&self) -> bool {
         false
@@ -361,8 +364,7 @@ impl EmbedFrame {
         self.0.borrow().st.chrome()
     }
 
-    #[cfg(test)]
-    pub(crate) fn push_event(&self, e: FrameEvent) {
+    pub fn push_event(&self, e: FrameEvent) {
         self.0.borrow_mut().st.events.push(e);
     }
 
@@ -659,8 +661,8 @@ impl EmbedFrame {
         }
         let (fx, fy) = (x - i.pos.0, y - i.pos.1);
         let inner = &mut *i;
-        let (pos, k, off) = (inner.pos, inner.k, inner.canvas_off);
-        let to_screen = move |x: f32, y: f32| super::x11::main_to_screen((dev(pos.0 + x, k) + off.0, dev(pos.1 + y, k) + off.1));
+        let (pos, k, off, main_to_screen) = (inner.pos, inner.k, inner.canvas_off, inner.main_to_screen);
+        let to_screen = move |x: f32, y: f32| main_to_screen((dev(pos.0 + x, k) + off.0, dev(pos.1 + y, k) + off.1));
         let r = match btn {
             Button::Left => {
                 let now = std::time::Instant::now();
@@ -811,6 +813,73 @@ impl EmbedFrame {
     /// A press or drag is under way in the window.
     pub fn grabbed(&self) -> bool {
         self.0.borrow().grab.is_some()
+    }
+}
+
+/// The frame the app draws itself goes where every frame does (`Frame`); the app reaches its own calls through `embed`.
+impl Frame for EmbedFrame {
+    fn detached(&self) -> bool {
+        EmbedFrame::detached(self)
+    }
+    fn set_detached(&self, owner: isize, on: bool) {
+        EmbedFrame::set_detached(self, owner, on)
+    }
+    fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]) {
+        EmbedFrame::clip_to(self, work, covers)
+    }
+    fn hwnd(&self) -> isize {
+        EmbedFrame::hwnd(self)
+    }
+    fn area(&self) -> *mut c_void {
+        EmbedFrame::area(self)
+    }
+    fn raise(&self) {
+        EmbedFrame::raise(self)
+    }
+    fn set_info(&self, info: ChannelInfo) {
+        EmbedFrame::set_info(self, info)
+    }
+    fn set_pages(&self, pages: Vec<PageIcon>, active: usize) {
+        EmbedFrame::set_pages(self, pages, active)
+    }
+    fn set_resizable(&self, min: Option<(f32, f32)>) {
+        EmbedFrame::set_resizable(self, min)
+    }
+    fn set_page(&self, page: usize) {
+        EmbedFrame::set_page(self, page)
+    }
+    fn set_hint(&self, hint: String) {
+        EmbedFrame::set_hint(self, hint)
+    }
+    fn set_preset(&self, name: Option<String>) {
+        EmbedFrame::set_preset(self, name)
+    }
+    fn scale(&self) -> f32 {
+        EmbedFrame::scale(self)
+    }
+    fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+        EmbedFrame::editor_to_screen(self, x, y)
+    }
+    fn set_editor_size(&self, editor: (f32, f32)) {
+        EmbedFrame::set_editor_size(self, editor)
+    }
+    fn set_strip(&self, on: bool) {
+        EmbedFrame::set_strip(self, on)
+    }
+    fn take_events(&self) -> Vec<FrameEvent> {
+        EmbedFrame::take_events(self)
+    }
+    fn work_size(&self) -> Option<(f32, f32)> {
+        EmbedFrame::work_size(self)
+    }
+    fn chrome(&self) -> (f32, f32) {
+        EmbedFrame::chrome(self)
+    }
+    fn push_event(&self, e: FrameEvent) {
+        EmbedFrame::push_event(self, e)
+    }
+    fn embed(&self) -> Option<&EmbedFrame> {
+        Some(self)
     }
 }
 

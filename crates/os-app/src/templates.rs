@@ -49,7 +49,7 @@ pub struct Category {
 
 /// Template `name`'s file in category `cat`: `<name>.lemon`, else an existing `<name>.flp` (spec: flp/lemon-format.md
 /// "Templates").
-pub(crate) fn file_in(root: &Path, cat: &str, name: &str) -> PathBuf {
+pub fn file_in(root: &Path, cat: &str, name: &str) -> PathBuf {
     let dir = root.join(cat).join(name);
     let lemon = dir.join(format!("{name}.{}", crate::project_files::EXT));
     let flp = dir.join(format!("{name}.flp"));
@@ -104,24 +104,24 @@ pub fn last_project() -> Option<PathBuf> {
 }
 
 /// `path` was opened or saved: it is the last used project.
-pub(crate) fn remember(path: &Path) {
+pub fn remember(path: &Path) {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     prefs::set_text(LAST_KEY, &path.to_string_lossy());
 }
 
 /// The last used project as kept, to put back with `restore_last` after writing a copy or opening a template.
-pub(crate) fn last_kept() -> Option<String> {
+pub fn last_kept() -> Option<String> {
     prefs::text(LAST_KEY)
 }
 
-pub(crate) fn restore_last(kept: Option<String>) {
+pub fn restore_last(kept: Option<String>) {
     prefs::set_text(LAST_KEY, kept.as_deref().unwrap_or(""));
 }
 
 impl App {
     /// The Default template combo was clicked: its tree under the box (`x`, `y`: the box's bottom left), "Empty" then a
     /// submenu per category, the current pick marked.
-    pub(crate) fn template_menu(&mut self, x: f32, y: f32) {
+    pub fn template_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let now = if file().is_some() { picked() } else { EMPTY.into() };
         let mut items = vec![PItem::new(EMPTY, Cmd::Template(EMPTY.into())).mark(Mark::Radio(now == EMPTY))];
@@ -142,7 +142,7 @@ impl App {
     }
 
     /// A row of the Default template tree was picked (`Cmd::Template`): kept. Returns the message.
-    pub(crate) fn set_template(&mut self, pick: &str) -> Option<String> {
+    pub fn set_template(&mut self, pick: &str) -> Option<String> {
         prefs::set_text(TEMPLATE_KEY, pick);
         self.invalidate();
         Some(format!("Default template: {}", name()))
@@ -150,14 +150,14 @@ impl App {
 
     /// FILE ▸ New with a template picked: the template opened as an untitled project (Save asks where), started now.
     /// False for Empty and when the template does not load: the caller makes the built-in project then.
-    pub(crate) fn new_from_template(&mut self) -> bool {
+    pub fn new_from_template(&mut self) -> bool {
         let Some(path) = file() else { return false };
         self.new_from_file(&path, &name())
     }
 
     /// The template file `path` (named `name`) opened as an untitled project (FILE ▸ New, New from template ▸). False
     /// when it does not load.
-    pub(crate) fn new_from_file(&mut self, path: &Path, name: &str) -> bool {
+    pub fn new_from_file(&mut self, path: &Path, name: &str) -> bool {
         let path = path.to_path_buf();
         // A template is not a recent project either (spec: ui/recent-projects.md §2).
         let (kept, recent) = (last_kept(), crate::recent::list());

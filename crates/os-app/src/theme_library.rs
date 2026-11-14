@@ -195,7 +195,7 @@ impl App {
 
     /// Before a theme change: the state now goes on the undo list (one step for a run of wheel notches on one knob) and
     /// the redo list empties.
-    pub(crate) fn theme_mark(&mut self, step: Step) {
+    pub fn theme_mark(&mut self, step: Step) {
         let now = Instant::now();
         let snap = self.snap();
         let h = &mut self.state.settings.history;
@@ -212,7 +212,7 @@ impl App {
     }
 
     /// Theme undo (`redo` = redo): goes back to the last state that differs from now. Returns the message.
-    pub(crate) fn theme_undo(&mut self, redo: bool) -> String {
+    pub fn theme_undo(&mut self, redo: bool) -> String {
         self.picker_close();
         let now = self.snap();
         let h = &mut self.state.settings.history;
@@ -242,7 +242,7 @@ impl App {
     }
 
     /// Applies a theme state: the window, the skin and theme tiles, and `current.flstheme` (removed for none).
-    pub(crate) fn theme_restore(&mut self, s: Snap) {
+    pub fn theme_restore(&mut self, s: Snap) {
         self.theme = crate::app::skin_theme(self.design(), &self.theme.name.clone(), s.text.as_deref());
         os_theme::set_current(&self.theme.colors);
         if let Some(d) = crate::user_dir::theme_dir() {
@@ -263,12 +263,12 @@ impl App {
     }
 
     /// Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y while the Theme page is open: theme undo / redo. Returns whether the key was taken.
-    pub(crate) fn theme_undo_key(&mut self, key: &winit::keyboard::Key, ctrl: bool) -> bool {
+    pub fn theme_undo_key(&mut self, key: &crate::keys::Key, ctrl: bool) -> bool {
         let st = &self.state.settings;
         if !(ctrl && st.open && st.tab == THEME && st.name_edit.is_none()) {
             return false;
         }
-        let winit::keyboard::Key::Character(c) = key else { return false };
+        let crate::keys::Key::Character(c) = key else { return false };
         let redo = if c.eq_ignore_ascii_case("z") {
             self.shift
         } else if c.eq_ignore_ascii_case("y") {
@@ -284,13 +284,13 @@ impl App {
     // ---- Readability ----
 
     /// Updates the Theme page's readability warning from the applied colours.
-    pub(crate) fn check_readable(&mut self) {
+    pub fn check_readable(&mut self) {
         let r = readability(&self.theme.colors);
         self.state.settings.unreadable = (r < READABLE).then_some(r);
     }
 
     /// Fix text: the applied theme's text colour moved until its text reads (`fix_text`).
-    pub(crate) fn theme_fix_text(&mut self) {
+    pub fn theme_fix_text(&mut self) {
         let text = self.theme_text();
         match fix_text(&text, self.design()) {
             Some(t) => {
@@ -306,7 +306,7 @@ impl App {
     // ---- Saved themes ----
 
     /// Save preset...: the name panel above the button, with a free name.
-    pub(crate) fn theme_save_open(&mut self) {
+    pub fn theme_save_open(&mut self) {
         let st = &self.state.settings;
         let base = st.themes.get(st.preset).map_or("My theme".to_string(), |(n, _)| format!("{n} custom"));
         let taken: Vec<String> = st.themes.iter().map(|(n, _)| n.to_lowercase()).collect();
@@ -317,7 +317,7 @@ impl App {
 
     /// The right-click menu of Themes tile `i`: Duplicate for any theme; Rename..., Delete... and Show in folder for the
     /// user's own.
-    pub(crate) fn theme_menu(&mut self, i: usize, x: f32, y: f32) {
+    pub fn theme_menu(&mut self, i: usize, x: f32, y: f32) {
         use crate::playlist::{Cmd, PItem, Popup, ThemeCmd};
         if i >= self.state.settings.themes.len() {
             return;
@@ -333,7 +333,7 @@ impl App {
     }
 
     /// A pick in a tile's menu. Returns the message.
-    pub(crate) fn theme_cmd(&mut self, c: crate::playlist::ThemeCmd) -> Option<String> {
+    pub fn theme_cmd(&mut self, c: crate::playlist::ThemeCmd) -> Option<String> {
         use crate::playlist::ThemeCmd;
         let at = |app: &App, i: usize| {
             app.hits.iter().rev().find(|h| h.action == crate::app::Action::Settings(SAct::Preset(i))).map_or(app.mouse, |h| (h.rect.x, h.rect.bottom() + 4.0))
@@ -383,7 +383,7 @@ impl App {
     }
 
     /// The panel's OK: save, rename or delete. Keeps the panel open with a message when the name will not do.
-    pub(crate) fn name_ok(&mut self) {
+    pub fn name_ok(&mut self) {
         let Some(e) = self.state.settings.name_edit.clone() else { return };
         let themes = self.state.settings.themes.clone();
         let user_from = self.state.settings.user_from;
@@ -447,14 +447,14 @@ impl App {
         self.invalidate();
     }
 
-    pub(crate) fn name_close(&mut self) {
+    pub fn name_close(&mut self) {
         self.state.settings.name_edit = None;
         self.invalidate();
     }
 
     /// Keys while the name panel is open: it takes every key (Enter = OK, Esc = Cancel). False when it is not open.
-    pub(crate) fn name_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-        use winit::keyboard::{Key, NamedKey};
+    pub fn name_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+        use crate::keys::{Key, NamedKey};
         let st = &mut self.state.settings;
         let Some(e) = st.name_edit.as_mut() else { return false };
         if !(st.open && st.tab == THEME) {
@@ -485,14 +485,14 @@ impl App {
     }
 
     /// The Themes list again (the user's themes may have changed), with the chosen tile and previews.
-    pub(crate) fn reload_themes(&mut self) {
+    pub fn reload_themes(&mut self) {
         self.theme_list();
         self.sync_preset();
         self.invalidate();
     }
 
     /// The Themes tiles: the Lemon and Citrus themes, the built-in themes, then the user's (`user_dir`).
-    pub(crate) fn theme_list(&mut self) {
+    pub fn theme_list(&mut self) {
         let st = &mut self.state.settings;
         st.themes = os_theme::Design::ALL
             .iter()
@@ -510,7 +510,7 @@ impl App {
 }
 
 /// Opens the system file browser at `path`, selected.
-pub(crate) fn show_in_folder(path: &std::path::Path) {
+pub fn show_in_folder(path: &std::path::Path) {
     #[cfg(windows)]
     let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
     #[cfg(target_os = "macos")]
