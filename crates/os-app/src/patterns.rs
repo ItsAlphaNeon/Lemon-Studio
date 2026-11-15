@@ -177,8 +177,8 @@ pub fn pat_mut(s: &mut State, n: u16) -> &mut Pattern {
     &mut ps[i]
 }
 
-/// Renumber patterns (`None` removes one): playlist clips follow (clips of removed patterns go). Numbers that
-/// end up without a pattern keep an empty entry so saving clears their blocks.
+/// Renumber patterns (`None` removes one): playlist clips follow, in every arrangement (clips of removed patterns go).
+/// Numbers that end up without a pattern keep an empty entry so saving clears their blocks.
 pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
     let old: Vec<u16> = s.project.patterns.iter().map(|p| p.number).collect();
     let mut pats: Vec<Pattern> = std::mem::take(&mut s.project.patterns)
@@ -196,7 +196,7 @@ pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
     }
     pats.sort_by_key(|p| p.number);
     s.project.patterns = pats;
-    if let Some(a) = s.project.arrangement_mut() {
+    for a in s.project.arrangements.iter_mut() {
         a.clips.retain_mut(|c| match c.source {
             ClipSource::Pattern(n) => match map(n) {
                 Some(m) => {
@@ -208,6 +208,13 @@ pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
             _ => true,
         });
     }
+    // The playlist's Draw source and its locked clip length follow their pattern; a pattern that goes takes them.
+    let follow = |c: ClipSource| match c {
+        ClipSource::Pattern(n) => map(n).map(ClipSource::Pattern),
+        c => Some(c),
+    };
+    s.playlist.source = s.playlist.source.and_then(follow);
+    s.playlist.lock_len = s.playlist.lock_len.and_then(|(c, len)| Some((follow(c)?, len)));
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
     s.piano.clear_selection();
@@ -660,6 +667,39 @@ mod tests {
 
     fn clip_pats(s: &State) -> Vec<u16> {
         crate::playlist::clips(s).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }).collect()
+    }
+
+    /// Patterns are the project's, not one arrangement's: moving or deleting one renumbers the clips of every
+    /// arrangement, not only the one shown.
+    #[test]
+    fn clips_of_every_arrangement_follow_their_pattern() {
+        let mut app = app();
+        let s = &mut app.state;
+        let mut other = s.project.arrangement().cloned().expect("an arrangement");
+        other.number += 1;
+        other.clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(2)), Clip::new(384, 384, 0, ClipSource::Pattern(3))];
+        s.project.arrangements.push(other);
+        let others = |s: &State| -> Vec<ClipSource> { s.project.arrangements[1].clips.iter().map(|c| c.source).collect() };
+        s.pattern = 2;
+        run(s, Cmd::MoveUp, (0.0, 0.0));
+        assert_eq!(others(s), vec![ClipSource::Pattern(1), ClipSource::Pattern(3)], "pattern 2 moved to 1");
+        s.pattern = 3;
+        delete_current(s);
+        assert_eq!(others(s), vec![ClipSource::Pattern(1)], "the deleted pattern's clip goes");
+    }
+
+    /// The playlist's Draw source and its locked clip length follow their pattern when it moves, and go with it.
+    #[test]
+    fn the_draw_source_follows_its_pattern() {
+        let mut app = app();
+        let s = &mut app.state;
+        s.playlist.source = Some(ClipSource::Pattern(2));
+        s.playlist.lock_len = Some((ClipSource::Pattern(2), 96));
+        s.pattern = 2;
+        run(s, Cmd::MoveDown, (0.0, 0.0));
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (Some(ClipSource::Pattern(3)), Some((ClipSource::Pattern(3), 96))));
+        delete_current(s);
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (None, None), "the source went with its pattern");
     }
 
     #[test]

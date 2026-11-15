@@ -1247,6 +1247,13 @@ pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
     s.sample_loads = std::mem::take(&mut s.sample_loads).into_iter().filter_map(|(r, p)| m(r).map(|r| (r, p))).collect();
     s.pending_open = s.pending_open.and_then(m);
     s.pending_plugin = s.pending_plugin.and_then(|(r, i)| m(r).map(|r| (r, i)));
+    // The playlist's Draw source and its locked clip length follow their channel; a channel that goes takes them.
+    let follow = |c: ClipSource| match c {
+        ClipSource::Channel(ch) => m(usize::from(ch)).map(|r| ClipSource::Channel(r as u16)),
+        c => Some(c),
+    };
+    s.playlist.source = s.playlist.source.and_then(follow);
+    s.playlist.lock_len = s.playlist.lock_len.and_then(|(c, len)| Some((follow(c)?, len)));
     s.piano.clear_selection();
     s.piano.dirty = true;
     s.playlist.sel.clear();
@@ -3740,6 +3747,23 @@ mod tests {
     }
 
     /// Clone, move and delete renumber the channels' notes so each note keeps its channel (§17-18).
+    /// The playlist's Draw source and its locked clip length, an audio or automation channel's, follow it when it moves
+    /// and go when it is deleted.
+    #[test]
+    fn the_draw_source_follows_its_channel() {
+        let mut app = App::new(None);
+        assert!(app.state.project.channels.len() >= 3);
+        app.state.playlist.source = Some(ClipSource::Channel(2));
+        app.state.playlist.lock_len = Some((ClipSource::Channel(2), 96));
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        let s = &app.state;
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (Some(ClipSource::Channel(1)), Some((ClipSource::Channel(1), 96))));
+        delete_rows(&mut app, &[1]);
+        let s = &app.state;
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (None, None), "the source went with its channel");
+    }
+
     #[test]
     fn restructuring_keeps_notes_with_their_channel() {
         let mut app = App::new(None);
