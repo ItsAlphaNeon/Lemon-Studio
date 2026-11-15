@@ -10,7 +10,14 @@ name = "lemonstudio"
 path = "src/main.rs"
 
 [features]
-default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "rpc"]
+default = [
+    "vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc", "plugin-windows",
+    "stock-soft-clipper", "stock-fast-distortion", "stock-balance", "stock-stereo-enhancer",
+    "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
+    "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder", "stock-limiter",
+    "stock-reverb", "stock-delay", "stock-pulp-filter", "stock-press", "stock-parametric-eq-2", "stock-drop",
+    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler", "stock-zest",
+]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-app/vst3"]
 vst2 = ["os-app/vst2"]
@@ -20,8 +27,42 @@ export-mp3 = ["os-app/export-mp3"]
 export-ogg = ["os-app/export-ogg"]
 # The system's MIDI ports.
 midi-io = ["os-app/midi-io"]
+# The system's audio devices.
+device = ["os-app/device"]
+# FL Studio's native plugins (and the child process that tries one before its first load).
+fl-native = ["os-app/fl-native", "dep:os-native"]
 # Listening for control-plane clients.
 rpc = ["os-app/rpc"]
+# Plugin editors in Lemon Studio's own frame windows.
+plugin-windows = ["os-app/plugin-windows"]
+# Stock plugins (on by default: every build offers them; leaving one out is for forks). Off: it is not listed, and
+# a project's slot holding it opens as a missing plugin.
+stock-soft-clipper = ["os-app/stock-soft-clipper"]
+stock-fast-distortion = ["os-app/stock-fast-distortion"]
+stock-balance = ["os-app/stock-balance"]
+stock-stereo-enhancer = ["os-app/stock-stereo-enhancer"]
+stock-transient-processor = ["os-app/stock-transient-processor"]
+stock-chorus = ["os-app/stock-chorus"]
+stock-stereo-shaper = ["os-app/stock-stereo-shaper"]
+stock-filter = ["os-app/stock-filter"]
+stock-flanger = ["os-app/stock-flanger"]
+stock-phaser = ["os-app/stock-phaser"]
+stock-peak-controller = ["os-app/stock-peak-controller"]
+stock-formula-controller = ["os-app/stock-formula-controller"]
+stock-vocoder = ["os-app/stock-vocoder"]
+stock-limiter = ["os-app/stock-limiter"]
+stock-reverb = ["os-app/stock-reverb"]
+stock-delay = ["os-app/stock-delay"]
+stock-pulp-filter = ["os-app/stock-pulp-filter"]
+stock-press = ["os-app/stock-press"]
+stock-parametric-eq-2 = ["os-app/stock-parametric-eq-2"]
+stock-drop = ["os-app/stock-drop"]
+stock-trio = ["os-app/stock-trio"]
+stock-citrus = ["os-app/stock-citrus"]
+stock-smith = ["os-app/stock-smith"]
+stock-slicer = ["os-app/stock-slicer"]
+stock-drum-sampler = ["os-app/stock-drum-sampler"]
+stock-zest = ["os-app/stock-zest"]
 
 [dependencies]
 os-app = { path = "../os-app", default-features = false }
@@ -30,7 +71,7 @@ os-model.workspace = true
 os-engine.workspace = true
 os-host.workspace = true
 os-hostlink.workspace = true
-os-native = { path = "../os-native" }
+os-native = { path = "../os-native", optional = true }
 os-clap = { path = "../os-clap" }
 os-paths.workspace = true
 os-ui = { path = "../os-ui" }

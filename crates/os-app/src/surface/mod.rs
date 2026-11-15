@@ -14,12 +14,27 @@ pub mod intro;
 pub mod launchkey;
 
 use std::ops::Range;
-use std::sync::mpsc::{channel, Receiver};
+#[cfg(feature = "midi-io")]
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use launchkey::Model;
 
+
+/// The connection the keyboard's lights and screens are sent on.
+#[cfg(feature = "midi-io")]
+pub type Output = midir::MidiOutputConnection;
+/// Without the system's MIDI ports (`midi-io`) no port opens, so nothing is sent.
+#[cfg(not(feature = "midi-io"))]
+pub struct Output;
+#[cfg(not(feature = "midi-io"))]
+impl Output {
+    pub fn send(&mut self, _: &[u8]) -> Result<(), ()> {
+        Ok(())
+    }
+}
 
 /// An open control port.
 pub struct Port {
@@ -27,13 +42,21 @@ pub struct Port {
     /// The input's name, as `midi_in::unique` lists it.
     pub name: String,
     rx: Receiver<Vec<u8>>,
+    #[cfg(feature = "midi-io")]
     _input: midir::MidiInputConnection<()>,
-    pub(super) output: Arc<Mutex<midir::MidiOutputConnection>>,
+    pub(super) output: Arc<Mutex<Output>>,
 }
 
 impl Port {
+    /// Without the system's MIDI ports (`midi-io`): no control port opens.
+    #[cfg(not(feature = "midi-io"))]
+    pub fn open(_wake: fn()) -> Option<Port> {
+        None
+    }
+
     /// Opens the first recognised control port, both ways. `wake` is called from the driver's thread after each
     /// message.
+    #[cfg(feature = "midi-io")]
     pub fn open(wake: fn()) -> Option<Port> {
         let mut input = midir::MidiInput::new(crate::midi_in::CLIENT).ok()?;
         input.ignore(midir::Ignore::All);

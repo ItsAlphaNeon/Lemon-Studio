@@ -1025,14 +1025,17 @@ impl App {
 
     /// The plugin's window shows the parameter being turned: the tab of its window, the page it is on, and what changes.
     fn reveal_param(&mut self, key: usize, index: usize) {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         if self.state.plugin_tabs.hidden(key) {
             self.state.raise(Win::Hosted(key));
         }
         let id = self.state.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id);
+        #[cfg(plugin_windows)]
         if let (Some(id), Some(l)) = (id, self.state.editor_host.editors.get(&key).and_then(|e| e.link.as_ref())) {
             l.reveal(id);
         }
+        #[cfg(not(plugin_windows))]
+        let _ = id;
         // Any plugin: the app's own hint says what changes.
         self.hint = std::borrow::Cow::Owned(crate::params_ui::row_hint(&self.state, key, index));
         self.damage_band(crate::app::HINT_RECT);
@@ -1042,7 +1045,7 @@ impl App {
     fn open_target_window(&mut self, key: usize) {
         if crate::plugins::fx_of(key).is_none() {
             let row = key;
-            let open = self.state.editor_host.window_of(row).is_some();
+            let open = self.state.editor_host.editors.get(&row).is_some_and(|e| e.open());
             if !open {
                 if self.state.session.hosted_rows.contains(&row) {
                     self.state.session.pending_open = Some(row);

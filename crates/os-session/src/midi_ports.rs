@@ -5,9 +5,8 @@
 //! The system's MIDI ports (`midir`), for `midi_in` and `midi_out`. Without the `midi-io` feature there are none: the
 //! lists are empty and nothing opens.
 
-use crate::midi_in::CLIENT;
 #[cfg(feature = "midi-io")]
-use crate::midi_in::unique;
+use crate::midi_in::{unique, CLIENT};
 
 #[cfg(feature = "midi-io")]
 pub use midir::{MidiInputConnection as InConn, MidiOutputConnection as OutConn};

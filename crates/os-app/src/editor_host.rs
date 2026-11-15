@@ -219,7 +219,7 @@ pub type ChannelInfoT = ();
 /// Lets the user resize window `w` by its edges when its freshly opened editor (`size` in device px at `scale`) can be
 /// resized by the host, and shrinks an editor whose window would not fit the monitor's work area to fit it. An editor
 /// that cannot be resized is left as it is.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", plugin_windows))]
 fn fit_resizable(w: &FrameWindow, plugin: &std::sync::Mutex<dyn os_host::Plugin>, size: (u32, u32), scale: f32) {
     let Ok(can) = plugin.lock().map(|p| p.can_resize_editor()) else { return };
     w.set_resizable(can.then_some(crate::plugin_window::MIN_EDITOR));
@@ -234,7 +234,7 @@ fn fit_resizable(w: &FrameWindow, plugin: &std::sync::Mutex<dyn os_host::Plugin>
 
 /// The frame's edges asked for an editor of `size` (logical px): the plugin's editor is asked for it, and the frame
 /// takes the size it took (an editor that keeps its own size keeps the frame's).
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", plugin_windows))]
 fn follow_resize(w: &FrameWindow, plugin: &std::sync::Mutex<dyn os_host::Plugin>, size: (u32, u32)) {
     let k = w.scale();
     let px = |v: u32| (v as f32 * k).round().max(1.0) as u32;
@@ -580,13 +580,13 @@ impl EditorHost {
     }
 
     /// Linux: the open plugin windows of their own, by key (`crate::float_layer`).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     pub fn native_rows(&self) -> Vec<usize> {
         self.editors.iter().filter(|(_, e)| e.window.as_ref().is_some_and(|w| w.embed().is_none())).map(|(&r, _)| r).collect()
     }
 
     /// Linux: the plugin windows of their own at `at` of their slide (`crate::float_layer`).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     pub fn slide_native(&self, at: f32) {
         for w in self.editors.values().filter_map(|e| e.window.as_ref()) {
             w.slide(at);
@@ -594,7 +594,7 @@ impl EditorHost {
     }
 
     /// Linux: the open plugin windows drawn in the app's, by key.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     pub fn embeds(&self) -> BTreeMap<usize, crate::plugin_window::EmbedFrame> {
         self.editors.iter().filter_map(|(&r, e)| Some((r, e.window.as_ref()?.embed()?.clone()))).collect()
     }
@@ -657,7 +657,7 @@ impl EditorHost {
         sweep_retired();
         os_host::guard::watch_windows(false);
         // Linux: the frames' X11 events, then the editors' descriptors and timers (`os_host::runloop`).
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         {
             self.frames.pump();
             os_host::runloop::dispatch();
@@ -798,7 +798,7 @@ impl EditorHost {
         for (row, k) in rescale {
             self.rescale_window(pl, row, pl.scale_for(row, k));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         self.frames.paint_dirty();
         out
     }

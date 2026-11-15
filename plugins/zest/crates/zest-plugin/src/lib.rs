@@ -18,6 +18,7 @@ use zest_core::{Engine, Event, Transport};
 
 #[cfg(feature = "editor")]
 pub mod editor;
+pub mod memo;
 mod params_gen;
 mod scope;
 use params_gen::ZestParams;

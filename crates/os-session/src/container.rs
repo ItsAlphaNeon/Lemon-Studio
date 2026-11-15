@@ -453,9 +453,9 @@ fn member_of(n: &os_flp::patcher::Node, effects: &[crate::plugins::Available]) -
         found(i, fl.to_vec())
     } else if let Some((i, lemon)) = lemon.and_then(|l| Some((effects.iter().position(|a| a.desc.name == l)?, l))) {
         let state = match file {
-            EQ_FILE_NAME => Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl)),
-            LOVE_PHILTER_FILE_NAME => Some(pulp_filter::plugin_state_from_fl(fl)),
-            MAXIMUS_FILE_NAME => Some(press::plugin_state_from_fl(fl)),
+            EQ_FILE_NAME => crate::plugins::eq_state_from_fl(fl),
+            LOVE_PHILTER_FILE_NAME => crate::plugins::pulp_filter_state_from_fl(fl),
+            MAXIMUS_FILE_NAME => crate::plugins::press_state_from_fl(fl),
             EDISON_FILE_NAME => tesla::plugin_state_from_edison(fl),
             _ => recreation_state_from_fl(lemon, fl),
         };

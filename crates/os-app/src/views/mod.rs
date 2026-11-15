@@ -418,7 +418,7 @@ pub fn paint_float_layer(ui: &mut Ui, s: &State, f: &FrameInfo) {
 
 /// The row of tabs of plugin window `row`, when it is one of several (`crate::plugin_tabs`): on top of its frame, the
 /// tabs alone, with nothing drawn between or past them.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", plugin_windows))]
 fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_window::EmbedFrame) {
     // A window held over another shows the group it would make (`plugin_tabs::Preview`).
     // Its own tab is then only outlined, dashed, and no tab is lit: the group is not made yet.
@@ -537,7 +537,7 @@ fn paint_window(ui: &mut Ui, s: &State, win: Win, r: Rect, a: Rect, f: &FrameInf
             Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
             // A plugin window drawn in the app's (Linux): its frame and editor; every click on it goes to it.
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", plugin_windows))]
             Win::Hosted(row) => {
                 if let Some(e) = s.embeds.get(&row) {
                     ui.part(Seg::Win(win), a, |ui| {

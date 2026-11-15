@@ -45,7 +45,7 @@ impl crate::app::App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stock-slicer"))]
 mod tests {
     use super::*;
     use crate::app::App;

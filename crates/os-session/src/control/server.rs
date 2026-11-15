@@ -7,8 +7,11 @@
 //! thread that reads it; requests go to the UI thread, which answers them on its tick (`App::control_tick`), so they
 //! see and change the project as the interface does. Only this machine can connect.
 
+#[cfg(feature = "rpc")]
 use std::io::{BufRead, BufReader, Write};
-use std::sync::mpsc::{channel, Receiver, Sender};
+#[cfg(feature = "rpc")]
+use std::sync::mpsc::channel;
+use std::sync::mpsc::{Receiver, Sender};
 
 use super::rpc::Client;
 use super::Level;

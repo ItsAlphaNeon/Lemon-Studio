@@ -6,7 +6,14 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "rpc"]
+default = [
+    "vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc",
+    "stock-soft-clipper", "stock-fast-distortion", "stock-balance", "stock-stereo-enhancer",
+    "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
+    "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder", "stock-limiter",
+    "stock-reverb", "stock-delay", "stock-pulp-filter", "stock-press", "stock-parametric-eq-2", "stock-drop",
+    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler", "stock-zest",
+]
 # Hosting VST 3 and VST 2 plugins (off: CLAP and the stock plugins only).
 vst3 = ["dep:os-vst3"]
 vst2 = ["dep:os-vst2"]
@@ -16,11 +23,45 @@ export-mp3 = ["dep:mp3lame-encoder"]
 export-ogg = ["dep:vorbis_rs"]
 # The system's MIDI ports (`midi_ports`; off: none are listed or opened).
 midi-io = ["dep:midir"]
+# The system's audio devices (cpal; ASIO and WASAPI on Windows, the sound server on Linux). Off: playback runs on the
+# simulated device (`device::sim`), silent, and no devices are listed or recorded from.
+device = ["dep:cpal", "dep:asio-sys", "dep:windows", "dep:pulseaudio"]
+# FL Studio's native plugins (`os-native`; off: none are listed, and a project's play through Lemon's recreations or
+# stay silent).
+fl-native = ["dep:os-native"]
 # Listening for control-plane clients (`control::server`; off: `--control` and `--serve` cannot listen).
 rpc = []
 # The test helpers and test-mode switches (per-thread settings, test folders) for the tests of a crate built on this
 # one (`os-app`'s).
 test-util = []
+# Stock plugins (on by default: every build offers them; leaving one out is for forks). Off: it is not listed, and
+# a project's slot holding it opens as a missing plugin.
+stock-soft-clipper = ["dep:lemon-soft-clipper"]
+stock-fast-distortion = ["dep:lemon-fast-distortion"]
+stock-balance = ["dep:lemon-balance"]
+stock-stereo-enhancer = ["dep:lemon-stereo-enhancer"]
+stock-transient-processor = ["dep:lemon-transient-processor"]
+stock-chorus = ["dep:lemon-chorus"]
+stock-stereo-shaper = ["dep:lemon-stereo-shaper"]
+stock-filter = ["dep:lemon-filter"]
+stock-flanger = ["dep:lemon-flanger"]
+stock-phaser = ["dep:lemon-phaser"]
+stock-peak-controller = ["dep:lemon-peak-controller"]
+stock-formula-controller = ["dep:lemon-formula-controller"]
+stock-vocoder = ["dep:lemon-vocoder"]
+stock-limiter = ["dep:lemon-limiter"]
+stock-reverb = ["dep:lemon-reverb"]
+stock-delay = ["dep:lemon-delay"]
+stock-pulp-filter = ["dep:pulp-filter"]
+stock-press = ["dep:press"]
+stock-parametric-eq-2 = ["dep:lemon-parametric-eq-2"]
+stock-drop = ["dep:lemon-drop"]
+stock-trio = ["dep:lemon-3x-osc"]
+stock-citrus = ["dep:citrus"]
+stock-smith = ["dep:smith"]
+stock-slicer = ["dep:lemon-slicer"]
+stock-drum-sampler = ["dep:lemon-drum-sampler"]
+stock-zest = ["dep:zest-plugin"]
 
 [dependencies]
 os-model.workspace = true
@@ -29,41 +70,41 @@ os-flp.workspace = true
 os-engine.workspace = true
 os-hostlink.workspace = true
 os-clap = { path = "../os-clap" }
-os-native = { path = "../os-native" }
+os-native = { path = "../os-native", optional = true }
 os-host.workspace = true
 os-vst3 = { workspace = true, optional = true }
 os-vst2 = { workspace = true, optional = true }
 os-paths.workspace = true
 lemon-sampler = { path = "../../plugins/lemon-sampler", default-features = false, features = ["linked"] }
-lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", default-features = false, features = ["linked"] }
-lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", default-features = false, features = ["linked"] }
-citrus = { path = "../../plugins/citrus", default-features = false, features = ["linked"] }
-smith = { path = "../../plugins/smith", default-features = false, features = ["linked"] }
-lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", default-features = false, features = ["linked"] }
-lemon-limiter = { path = "../../plugins/lemon-limiter", default-features = false, features = ["linked"] }
-lemon-reverb = { path = "../../plugins/lemon-reverb", default-features = false, features = ["linked"] }
-lemon-delay = { path = "../../plugins/lemon-delay", default-features = false, features = ["linked"] }
-lemon-soft-clipper = { path = "../../plugins/lemon-soft-clipper", default-features = false, features = ["linked"] }
-lemon-fast-distortion = { path = "../../plugins/lemon-fast-distortion", default-features = false, features = ["linked"] }
-lemon-balance = { path = "../../plugins/lemon-balance", default-features = false, features = ["linked"] }
-lemon-stereo-enhancer = { path = "../../plugins/lemon-stereo-enhancer", default-features = false, features = ["linked"] }
-lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", default-features = false, features = ["linked"] }
-lemon-chorus = { path = "../../plugins/lemon-chorus", default-features = false, features = ["linked"] }
+lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", optional = true, default-features = false, features = ["linked"] }
+lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", optional = true, default-features = false, features = ["linked"] }
+citrus = { path = "../../plugins/citrus", optional = true, default-features = false, features = ["linked"] }
+smith = { path = "../../plugins/smith", optional = true, default-features = false, features = ["linked"] }
+lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", optional = true, default-features = false, features = ["linked"] }
+lemon-limiter = { path = "../../plugins/lemon-limiter", optional = true, default-features = false, features = ["linked"] }
+lemon-reverb = { path = "../../plugins/lemon-reverb", optional = true, default-features = false, features = ["linked"] }
+lemon-delay = { path = "../../plugins/lemon-delay", optional = true, default-features = false, features = ["linked"] }
+lemon-soft-clipper = { path = "../../plugins/lemon-soft-clipper", optional = true, default-features = false, features = ["linked"] }
+lemon-fast-distortion = { path = "../../plugins/lemon-fast-distortion", optional = true, default-features = false, features = ["linked"] }
+lemon-balance = { path = "../../plugins/lemon-balance", optional = true, default-features = false, features = ["linked"] }
+lemon-stereo-enhancer = { path = "../../plugins/lemon-stereo-enhancer", optional = true, default-features = false, features = ["linked"] }
+lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", optional = true, default-features = false, features = ["linked"] }
+lemon-chorus = { path = "../../plugins/lemon-chorus", optional = true, default-features = false, features = ["linked"] }
 lemon-small-fx = { path = "../../plugins/lemon-small-fx", default-features = false }
-lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", default-features = false, features = ["linked"] }
-lemon-filter = { path = "../../plugins/lemon-filter", default-features = false, features = ["linked"] }
+lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", optional = true, default-features = false, features = ["linked"] }
+lemon-filter = { path = "../../plugins/lemon-filter", optional = true, default-features = false, features = ["linked"] }
 tesla = { path = "../../plugins/tesla", default-features = false, features = ["linked"] }
-pulp-filter = { path = "../../plugins/pulp-filter", default-features = false, features = ["linked"] }
-press = { path = "../../plugins/press", default-features = false, features = ["linked"] }
-lemon-flanger = { path = "../../plugins/lemon-flanger", default-features = false, features = ["linked"] }
-lemon-phaser = { path = "../../plugins/lemon-phaser", default-features = false, features = ["linked"] }
-lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", default-features = false, features = ["linked"] }
-lemon-formula-controller = { path = "../../plugins/lemon-formula-controller", default-features = false, features = ["linked"] }
-lemon-slicer = { path = "../../plugins/lemon-slicer", default-features = false, features = ["linked"] }
-lemon-vocoder = { path = "../../plugins/lemon-vocoder", default-features = false, features = ["linked"] }
-lemon-drop = { path = "../../plugins/lemon-drop", default-features = false, features = ["linked"] }
-zest-plugin = { path = "../../plugins/zest/crates/zest-plugin", default-features = false, features = ["linked"] }
-cpal = "0.18"
+pulp-filter = { path = "../../plugins/pulp-filter", optional = true, default-features = false, features = ["linked"] }
+press = { path = "../../plugins/press", optional = true, default-features = false, features = ["linked"] }
+lemon-flanger = { path = "../../plugins/lemon-flanger", optional = true, default-features = false, features = ["linked"] }
+lemon-phaser = { path = "../../plugins/lemon-phaser", optional = true, default-features = false, features = ["linked"] }
+lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", optional = true, default-features = false, features = ["linked"] }
+lemon-formula-controller = { path = "../../plugins/lemon-formula-controller", optional = true, default-features = false, features = ["linked"] }
+lemon-slicer = { path = "../../plugins/lemon-slicer", optional = true, default-features = false, features = ["linked"] }
+lemon-vocoder = { path = "../../plugins/lemon-vocoder", optional = true, default-features = false, features = ["linked"] }
+lemon-drop = { path = "../../plugins/lemon-drop", optional = true, default-features = false, features = ["linked"] }
+zest-plugin = { path = "../../plugins/zest/crates/zest-plugin", optional = true, default-features = false, features = ["linked"] }
+cpal = { version = "0.18", optional = true }
 crossbeam-queue = "0.3"
 midir = { version = "0.11", optional = true }
 # JPEG workspace pictures of theme files (`wallpaper`; PNG goes through tiny-skia). Pure Rust, no threads.
@@ -79,18 +120,18 @@ zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 # ASIO output (`device::asio`), built from the ASIO SDK's host files in `asiosdk` (`.cargo/config.toml`).
-asio-sys = "0.4"
+asio-sys = { version = "0.4", optional = true }
 # WASAPI exclusive and low-latency shared output (`device::wasapi`): the version cpal is built with.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_Devices_Properties", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem"] }
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_Devices_Properties", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_System_DataExchange", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Shared mode plays through the sound server (PulseAudio, or PipeWire's pipewire-pulse) as other programs do; the
 # PulseAudio host speaks the protocol in Rust, so no system library is linked. Exclusive mode opens ALSA directly.
-cpal = { version = "0.18", features = ["pulseaudio", "jack"] }
+cpal = { version = "0.18", optional = true, features = ["pulseaudio", "jack"] }
 # The cards the sound server gave up on while Lemon Studio had them through ALSA (`device::sound_server`): the
 # protocol crate cpal's PulseAudio host is built on.
-pulseaudio = "0.3"
+pulseaudio = { version = "0.3", optional = true }
 # Real-time priority for the audio threads (`rt`): rtkit on the system bus, through the zbus the file dialogs
 # already bring.
 libc = "0.2"

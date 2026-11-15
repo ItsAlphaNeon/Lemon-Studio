@@ -938,6 +938,17 @@ pub fn off_text(name: &str) -> String {
 #[cfg(not(plugin_windows))]
 pub const PLUGIN_WINDOWS: &str = "Plugin windows on this system";
 
+/// What opening a plugin's window says without plugin windows: on a system that has them, the build left them out
+/// (the `plugin-windows` feature).
+#[cfg(not(plugin_windows))]
+pub fn plugin_windows_off() -> String {
+    if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
+        "Plugin windows are not in this build".into()
+    } else {
+        off_text(PLUGIN_WINDOWS)
+    }
+}
+
 /// The plugin window's menus, preset list and Misc lists are app popups painted in the main window: off Windows a
 /// detached window would cover them (Windows lifts them above it).
 #[cfg(all(plugin_windows, not(windows)))]
@@ -1261,9 +1272,10 @@ pub struct State {
     #[cfg(target_os = "linux")]
     pub embeds: std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>,
     /// Those of one plugin as tabs of one window.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     pub plugin_tabs: crate::plugin_tabs::Tabs,
     /// A plugin window held over another's title shows what letting go gives.
+    #[cfg(all(target_os = "linux", plugin_windows))]
     pub tab_preview: Option<crate::plugin_tabs::Preview>,
     /// Each layout's windows while the other is in use (classic, Lemon): the playlist, mixer and piano roll's states
     /// and the ones open, back to front (`App::set_tiling_layout`).
@@ -1563,7 +1575,7 @@ pub struct App {
     #[cfg(target_os = "linux")]
     tab_press: Option<(usize, (f32, f32), Option<(f32, f32)>)>,
     /// Linux: the window being dragged rests over another of its plugin (`plugin_tabs::Held`).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     tab_held: Option<crate::plugin_tabs::Held>,
     /// Linux: a tab's little x pressed.
     tab_close_press: Option<usize>,
@@ -1789,7 +1801,7 @@ impl App {
                 menu_open: None,
                 menu_sub: None,
                 lane_menu: false,
-                settings: views::settings::SettingsUi { native: os_native::settings_shown(), ..Default::default() },
+                settings: views::settings::SettingsUi { native: os_session::native::settings_shown(), ..Default::default() },
                 fl_text: saved_fl_text(),
                 theme_base: saved_fl_text(),
                 playlist_scroll: (0.0, 0.0),
@@ -1858,8 +1870,9 @@ impl App {
                 veil: [0.0; 3],
                 #[cfg(target_os = "linux")]
                 embeds: Default::default(),
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", plugin_windows))]
                 plugin_tabs: Default::default(),
+                #[cfg(all(target_os = "linux", plugin_windows))]
                 tab_preview: None,
                 layout_wins: Default::default(),
                 pat_ui: Default::default(),
@@ -1897,7 +1910,7 @@ impl App {
             embed_virt: None,
             #[cfg(target_os = "linux")]
             tab_press: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", plugin_windows))]
             tab_held: None,
             tab_close_press: None,
             popup_lift: None,
@@ -2362,13 +2375,16 @@ impl App {
         match w {
             // All its tabs, as its × closes them.
             Win::Hosted(row) => {
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", plugin_windows))]
                 let rows = self.state.plugin_tabs.group_of(row).map_or(vec![row], |g| g.rows.clone());
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(all(not(target_os = "linux"), plugin_windows))]
                 let rows = vec![row];
+                #[cfg(plugin_windows)]
                 for r in rows {
                     self.state.editor_host.close_window(&mut self.state.session.plugins, r);
                 }
+                #[cfg(not(plugin_windows))]
+                let _ = row;
             }
             w => self.act(Action::CloseWin(w)),
         }
@@ -2857,7 +2873,7 @@ impl App {
         // Without plugin windows opening one says so.
         #[cfg(not(plugin_windows))]
         if self.state.session.pending_open.take().is_some_and(|r| self.state.session.hosted_rows.contains(&r)) {
-            self.state.message = Some(off_text(PLUGIN_WINDOWS));
+            self.state.message = Some(plugin_windows_off());
             self.invalidate();
         }
         #[cfg(plugin_windows)]
@@ -3126,7 +3142,7 @@ impl App {
     }
 
     /// Linux: the windows of one plugin as tabs of one window: each has its row of tabs and the group's place.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn sync_plugin_tabs(&mut self, frames: &std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>) {
         let open: Vec<(usize, String)> = frames.keys().map(|&r| (r, self.state.session.plugins.descriptor(r).map_or(String::new(), |d| d.name.clone()))).collect();
         let tabs = &mut self.state.plugin_tabs;
@@ -3150,7 +3166,7 @@ impl App {
 
     /// Linux: the plugin windows drawn in the app's (`plugin_window::EmbedFrame`) go into `State::embeds` to be painted,
     /// follow the canvas and the workspace, and are repainted where they or their editors changed.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn sync_embeds(&mut self) {
         let k = self.state.ui_scale.max(0.1);
         let canvas = ((self.state.screen.0 * k).round() as u32, (self.state.screen.1 * k).round() as u32);
@@ -4354,12 +4370,12 @@ impl App {
     }
 
     /// A dragged plugin window is waiting out its hold over another (`plugin_tabs::Held`).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn tab_holding(&self) -> bool {
         self.tab_held.is_some_and(|h| !h.ripe)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", plugin_windows)))]
     fn tab_holding(&self) -> bool {
         false
     }
@@ -4405,7 +4421,7 @@ impl App {
         }
         self.veils_tick(now);
         self.float_layer_tick(now);
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         self.tab_hold_tick(now);
     }
 
@@ -4413,9 +4429,9 @@ impl App {
     /// (`crate::float_layer`). Plugin windows of their own move with it, on their own screen's height.
     fn float_layer_tick(&mut self, now: std::time::Instant) {
         use crate::float_layer as layer;
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         let native = self.state.editor_host.native_rows();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", plugin_windows)))]
         let native: Vec<usize> = Vec::new();
         let motion = !cfg!(test) && crate::anim::level() >= crate::anim::Level::Polished;
         let pressed = std::mem::take(&mut self.state.float_layer.pressed);
@@ -4430,7 +4446,7 @@ impl App {
             false
         };
         if layer::step(&mut self.state, now) || moved {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", plugin_windows))]
             self.state.editor_host.slide_native(self.state.float_layer.at());
             self.invalidate();
         }
@@ -4483,9 +4499,9 @@ impl App {
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
     fn plugin_windows_busy(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         return self.state.editor_host.frames.busy();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", plugin_windows)))]
         false
     }
 
@@ -5311,30 +5327,39 @@ impl App {
     /// Load does (spec: plugins/tesla/README.md "Sending slices to Lemon Slicer"). One undo step, "Add channel", as the
     /// plugin picker's.
     pub fn sample_to_slicer(&mut self, path: String) {
-        let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let path = crate::data_folder_ui::adopt(&mut self.state, &path);
-        let st = match lemon_slicer::file_state(&path, lemon_slicer::state::State::default()) {
-            Ok((st, _)) => st,
-            Err(e) => {
-                self.state.message = Some(format!("{}: {e}", crate::slicer::LEMON_SLICER));
-                return self.invalidate();
-            }
-        };
-        let n = st.slices.len();
-        crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
-            let s = &mut app.state;
-            let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
-            let ch = &mut s.session.project.get_mut().channels[row];
-            ch.name = Some(stem.clone());
-            ch.plugin_state = Some(st.to_bytes());
-            s.selected_channel = row;
-            s.rack.select_only(row);
-            crate::rack::autosize(s);
-            s.session.dirty = true;
-        });
-        self.state.message = Some(format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER));
-        self.sync_slicer();
-        self.invalidate();
+        #[cfg(feature = "stock-slicer")]
+        {
+            let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let path = crate::data_folder_ui::adopt(&mut self.state, &path);
+            let st = match lemon_slicer::file_state(&path, lemon_slicer::state::State::default()) {
+                Ok((st, _)) => st,
+                Err(e) => {
+                    self.state.message = Some(format!("{}: {e}", crate::slicer::LEMON_SLICER));
+                    return self.invalidate();
+                }
+            };
+            let n = st.slices.len();
+            crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
+                let s = &mut app.state;
+                let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
+                let ch = &mut s.session.project.get_mut().channels[row];
+                ch.name = Some(stem.clone());
+                ch.plugin_state = Some(st.to_bytes());
+                s.selected_channel = row;
+                s.rack.select_only(row);
+                crate::rack::autosize(s);
+                s.session.dirty = true;
+            });
+            self.state.message = Some(format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER));
+            self.sync_slicer();
+            self.invalidate();
+        }
+        #[cfg(not(feature = "stock-slicer"))]
+        {
+            let _ = path;
+            self.state.message = Some(format!("{} is not in this build", crate::slicer::LEMON_SLICER));
+            self.invalidate()
+        }
     }
 
     /// A sample a Lemon plugin sent (Tesla's "Send to arranger as audio clip" / "Send to selected channel" / "Send to
@@ -6134,21 +6159,21 @@ impl App {
                 }
             }
             // Opt in / out of the experimental native host and scan again so the effect lists follow (spec
-            // plugins/fruity-abi.md). Its displayed state comes straight from `os_native::enabled()`.
+            // plugins/fruity-abi.md). Its displayed state comes straight from `os_session::native::enabled()`.
             SAct::Check(k) if k == views::settings::NATIVE_HOST_CHECK => {
-                let on = !os_native::enabled();
-                os_native::set_enabled(on);
+                let on = !os_session::native::enabled();
+                os_session::native::set_enabled(on);
                 self.start_scan(crate::plugin_db::Mode::Changed);
                 self.state.message = Some(if on { "Experimental native plugin host on".into() } else { "Experimental native plugin host off".into() });
                 // The hidden preference applies again (or stops applying) with the host.
-                if os_native::prefer_native_set() {
+                if os_session::native::prefer_native_set() {
                     self.swap_builtin_overrides();
                 }
             }
             // Real native plugins in place of the Lemon recreations (spec plugins/fruity-abi.md "Opened projects").
             SAct::Check(k) if k == views::settings::NATIVE_FIRST_CHECK => {
-                let on = !os_native::prefer_native();
-                os_native::set_prefer_native(on);
+                let on = !os_session::native::prefer_native();
+                os_session::native::set_prefer_native(on);
                 let n = self.swap_builtin_overrides();
                 self.state.message = Some(match (on, n) {
                     (true, 0) => "Opened projects play their own native plugins".into(),
@@ -6315,7 +6340,7 @@ impl App {
     /// Mouse moved; returns whether a repaint is needed.
     pub fn mouse_move(&mut self, x: f32, y: f32) -> bool {
         self.mouse = (x, y);
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         if self.embed_move(x, y) {
             return true;
         }
@@ -6819,7 +6844,7 @@ impl App {
             for (a, r) in [(&self.hover, self.hover_rect), (&hover, rect)] {
                 if let (Some(a), Some(r)) = (a, r) {
                     // A plugin tab's hit is one thin band of it, and its neighbours lie over each other: the whole row.
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", plugin_windows))]
                     if let Action::PluginTab(t) | Action::PluginTabClose(t) = a
                         && let Some(e) = self.state.plugin_tabs.group_of(*t).and_then(|g| self.state.embeds.get(&g.active))
                     {
@@ -6961,7 +6986,7 @@ impl App {
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
         self.invalidate();
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         if self.embed_down(os_plugkit::input::Button::Left) {
             return;
         }
@@ -7195,7 +7220,7 @@ impl App {
 
     /// Linux: a press on a plugin window drawn in the app's (or anywhere while its editor's menu is open) goes to it,
     /// and brings it to the front. Whether it took the press.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn embed_down(&mut self, btn: os_plugkit::input::Button) -> bool {
         if self.modal_open() || self.state.menu_open.is_some() {
             return false;
@@ -7236,7 +7261,7 @@ impl App {
 
     /// Linux: the mouse moved: to the plugin window drawn in the app's that was pressed on (as the distance moved while
     /// its editor holds the cursor), whose menu is open, or that it is over. Whether that window took it alone.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn embed_move(&mut self, x: f32, y: f32) -> bool {
         if let Some((row, from, apart)) = self.tab_press {
             let Some(e) = self.state.embeds.get(&row).cloned() else {
@@ -7301,7 +7326,7 @@ impl App {
     }
 
     /// Linux: the button went up: to the plugin window drawn in the app's that had the press (or the open menu).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn embed_up(&mut self) -> bool {
         if self.tab_press.take().is_some() {
             self.tab_hold_finish();
@@ -7339,7 +7364,7 @@ impl App {
 
     /// Linux: the window of another of `row`'s plugin whose title the mouse is near (`plugin_tabs::join_zone`), with
     /// nothing lying over it there.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn tab_target(&self, row: usize, x: f32, y: f32) -> Option<usize> {
         if !crate::prefs::check(&crate::prefs::PLUGIN_TABS) {
             return None;
@@ -7370,7 +7395,7 @@ impl App {
     }
 
     /// Linux: a window dragged to (`x`, `y`): the hold over another window starts, goes on or ends.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn tab_hold_track(&mut self, row: usize, x: f32, y: f32) {
         let now = std::time::Instant::now();
         match (self.tab_target(row, x, y), &mut self.tab_held) {
@@ -7386,7 +7411,7 @@ impl App {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn tab_preview_off(&mut self) {
         if self.state.tab_preview.take().is_some() {
             self.invalidate();
@@ -7394,7 +7419,7 @@ impl App {
     }
 
     /// Linux: the hold's time is up: the held window shows the group it would make.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn tab_hold_tick(&mut self, now: std::time::Instant) {
         let Some(mut h) = self.tab_held else { return };
         if !self.state.embeds.contains_key(&h.row) || !self.state.embeds.contains_key(&h.into) {
@@ -7412,7 +7437,7 @@ impl App {
 
     /// Linux: the button came up: a held window that was showing the group makes it, where it was let go (the other
     /// window comes to it).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", plugin_windows))]
     fn tab_hold_finish(&mut self) {
         let held = self.tab_held.take();
         self.tab_preview_off();
@@ -7673,7 +7698,7 @@ impl App {
     pub fn mouse_down_middle(&mut self) {
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         if self.embed_down(os_plugkit::input::Button::Middle) {
             self.invalidate();
             return;
@@ -7721,7 +7746,7 @@ impl App {
         self.right_down = true;
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         if self.embed_down(os_plugkit::input::Button::Right) {
             self.invalidate();
             return;
@@ -7956,7 +7981,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         if self.embed_up() {
             return;
         }
@@ -11303,6 +11328,7 @@ mod tests {
     /// Slots holding the file's parametric EQ get a Lemon Parametric EQ instance and show its name; adding the EQ
     /// stores the file's EQ (spec: plugins/lemon-parametric-eq-2.md §8).
     #[test]
+    #[cfg(feature = "stock-parametric-eq-2")]
     fn parametric_eq_slots_are_hosted() {
         use crate::plugins::{fx_key, EQ_FILE_NAME, LEMON_EQ};
         let mut a = App::new(None);
@@ -11401,6 +11427,7 @@ mod tests {
     /// A project's Maximus slots are opened as Press with their state, show Press's name and keep the file's Maximus,
     /// whose state Press writes back (spec: plugins/lemon-press.md §6).
     #[test]
+    #[cfg(feature = "stock-press")]
     fn maximus_slots_open_as_press() {
         use crate::plugins::{MAXIMUS_FILE_NAME, PRESS, fx_key};
         use os_engine::effects::maximus::state::{P_LMH_MIX, State};
@@ -11438,6 +11465,7 @@ mod tests {
     /// engine's (its difference output is the slot's alone).
     // spec: plugins/lemon-small-effects.md "Opened projects' slots"
     #[test]
+    #[cfg(all(feature = "stock-reverb", feature = "stock-balance", feature = "stock-chorus"))]
     fn fl_effect_slots_open_as_their_lemon_recreations() {
         use crate::plugins::fx_key;
         let mut reverb = lemon_reverb::params::default_state();
@@ -11483,6 +11511,7 @@ mod tests {
     /// Candy with the same bytes.
     // spec: plugins/lemon-drop.md "Projects"
     #[test]
+    #[cfg(feature = "stock-drop")]
     fn wave_candy_slots_open_as_lemon_drop() {
         use crate::plugins::fx_key;
         let mut st = lemon_drop::state::State::new_default();
@@ -15944,7 +15973,7 @@ mod tests {
             app.state.settings.native = native;
             click(&mut app, &mut c, r);
             assert_eq!(shown(&app, NATIVE_HOST_CHECK), native, "native host toggle shown: {native}");
-            if !os_native::enabled() {
+            if !os_session::native::enabled() {
                 assert!(!shown(&app, crate::views::settings::NATIVE_FIRST_CHECK), "hidden");
             }
         }

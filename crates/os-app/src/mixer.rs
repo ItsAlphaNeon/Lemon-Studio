@@ -2070,7 +2070,7 @@ impl App {
         }
         #[cfg(not(plugin_windows))]
         {
-            self.state.message = Some(crate::app::off_text(crate::app::PLUGIN_WINDOWS));
+            self.state.message = Some(crate::app::plugin_windows_off());
         }
         #[cfg(plugin_windows)]
         {

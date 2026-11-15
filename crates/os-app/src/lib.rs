@@ -157,10 +157,8 @@ pub mod plugin_palette;
 pub mod plugin_popup;
 pub use os_session::plugin_scan;
 pub mod plugin_scan_ui;
-#[cfg(plugin_windows)]
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", plugin_windows))]
 pub mod plugin_tabs;
-#[cfg(plugin_windows)]
 pub mod plugin_window;
 pub mod plugins;
 pub mod plugins_ui;

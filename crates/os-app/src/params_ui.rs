@@ -449,6 +449,7 @@ mod tests {
     /// an automation clip (menu or drop on the playlist) aimed at the slot parameter and named after it, clip values read
     /// as the plugin's text, and the last tweaked parameter feeds the ADD / TOOLS entries.
     #[test]
+    #[cfg(feature = "stock-parametric-eq-2")]
     fn slot_plugin_parameters_browse_and_automate() {
         use crate::views::browser::{rows, Item};
         let mut a = App::new(None);
@@ -518,6 +519,7 @@ mod tests {
         assert!(menu.items.iter().any(|i| matches!(&i.cmd, Cmd::CreateAutomation(t, _, _) if *t == tgt)));
     }
 
+    #[cfg(feature = "stock-parametric-eq-2")]
     /// The app with the built-in EQ hosted in mixer track 2's slot 2, its parameters listed in the browser.
     fn eq_app() -> (App, usize) {
         let mut a = App::new(None);
@@ -541,6 +543,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "stock-parametric-eq-2")]
     fn parameter_set_is_an_undo_step() {
         let (mut a, key) = eq_app();
         let idle = |a: &App| a.state.session.plugins.hosted[&key].plugin.lock().unwrap().idle();
@@ -563,6 +566,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "stock-parametric-eq-2")]
     fn parameter_menu_set_edit_clip_and_link() {
         let (mut a, key) = eq_app();
         let m = row_menu(&mut a, key, 35);
@@ -740,6 +744,7 @@ mod tests {
     /// A plugin parameter set from the app makes the project unsaved, as its state is saved with it; a copy written (an
     /// autosave) leaves it so, saving clears it.
     #[test]
+    #[cfg(feature = "stock-parametric-eq-2")]
     fn a_plugin_parameter_change_is_unsaved() {
         let (mut a, key) = eq_app();
         a.mark_saved();
