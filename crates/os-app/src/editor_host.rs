@@ -584,7 +584,7 @@ impl EditorHost {
         sweep_retired();
         os_host::guard::watch_windows(false);
         // Linux: the frames' X11 events, then the editors' descriptors and timers (`os_host::runloop`).
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         {
             self.frames.pump();
             os_host::runloop::dispatch();
@@ -719,7 +719,7 @@ impl EditorHost {
         for (row, k) in rescale {
             self.rescale_window(pl, row, pl.scale_for(row, k));
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         self.frames.paint_dirty();
         out
     }

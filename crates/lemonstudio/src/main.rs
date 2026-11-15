@@ -1811,7 +1811,10 @@ pub fn run() {
     splash::step(&splash, splash::SETTINGS, if start { "Reading settings" } else { "Opening project" });
     let mut app = App::new(path);
     // The plugin editors open in this window system's frames.
-    app.state.editor_host.frames = Box::new(frames::NativeFrames);
+    #[cfg(plugin_windows)]
+    {
+        app.state.editor_host.frames = Box::new(frames::NativeFrames);
+    }
     // Without a project file: the Startup project (spec: ui/settings-choices.md "Miscellaneous: seven more checks,
     // Default template and Startup project").
     if start {

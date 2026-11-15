@@ -901,6 +901,17 @@ pub fn off_text(name: &str) -> String {
 #[cfg(not(plugin_windows))]
 pub const PLUGIN_WINDOWS: &str = "Plugin windows on this system";
 
+/// What opening a plugin's window says without plugin windows: on a system that has them, the build left them out
+/// (the `plugin-windows` feature).
+#[cfg(not(plugin_windows))]
+pub fn plugin_windows_off() -> String {
+    if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
+        "Plugin windows are not in this build".into()
+    } else {
+        off_text(PLUGIN_WINDOWS)
+    }
+}
+
 /// The plugin window's menus, preset list and Misc lists are app popups painted in the main window: off Windows a
 /// detached window would cover them (Windows lifts them above it).
 #[cfg(all(plugin_windows, not(windows)))]
@@ -2525,7 +2536,7 @@ impl App {
         // Without plugin windows opening one says so.
         #[cfg(not(plugin_windows))]
         if self.state.session.pending_open.take().is_some_and(|r| self.state.session.hosted_rows.contains(&r)) {
-            self.state.message = Some(off_text(PLUGIN_WINDOWS));
+            self.state.message = Some(plugin_windows_off());
             self.invalidate();
         }
         #[cfg(plugin_windows)]
@@ -3906,9 +3917,9 @@ impl App {
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
     fn plugin_windows_busy(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         return self.state.editor_host.frames.busy();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", plugin_windows)))]
         false
     }
 

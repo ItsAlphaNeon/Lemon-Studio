@@ -50,7 +50,7 @@ jobs:
       - name: Build the session alone
         run: cargo check --locked -p os-session --all-targets
 
-      # The program builds with its optional parts off (the session's features: VST 3 and VST 2 hosting, the export encoders, MIDI ports, the audio devices, FL Studio's native plugins, the control socket), all at once
+      # The program builds with its optional parts off (the session's features: VST 3 and VST 2 hosting, the export encoders, MIDI ports, the audio devices, FL Studio's native plugins, the control socket, the plugin windows, each stock plugin), all at once
       # and one at a time.
       - name: Build with features off
         run: |
@@ -64,6 +64,7 @@ jobs:
           cargo check --locked -p lemonstudio --no-default-features --features device --all-targets
           cargo check --locked -p lemonstudio --no-default-features --features fl-native --all-targets
           cargo check --locked -p lemonstudio --no-default-features --features rpc --all-targets
+          cargo check --locked -p lemonstudio --no-default-features --features plugin-windows --all-targets
 
       # The plugin bundles (VST3 + CLAP): the hosting tests load them, and skip without them.
       - name: Bundle plugins

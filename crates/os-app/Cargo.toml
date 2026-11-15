@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = [
-    "vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc",
+    "vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc", "plugin-windows",
     "stock-soft-clipper", "stock-fast-distortion", "stock-balance", "stock-stereo-enhancer",
     "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
     "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder", "stock-limiter",
@@ -29,6 +29,8 @@ device = ["os-session/device"]
 fl-native = ["os-session/fl-native"]
 # Listening for control-plane clients.
 rpc = ["os-session/rpc"]
+# Plugin editors in Lemon Studio's own frame windows (off: a plugin's editor does not open; `cfg(plugin_windows)`).
+plugin-windows = []
 # Stock plugins (on by default: every build offers them; leaving one out is for forks). Off: it is not listed, and
 # a project's slot holding it opens as a missing plugin.
 stock-soft-clipper = ["os-session/stock-soft-clipper", "dep:lemon-soft-clipper"]

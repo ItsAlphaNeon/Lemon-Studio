@@ -87,9 +87,10 @@ fn main() {
     let version = version();
     let nightly = nightly();
     // `plugin_windows`: plugin editors open in Lemon Studio's frame windows (Win32 on Windows, X11 on Linux, AppKit on
-    // macOS).
+    // macOS), with the `plugin-windows` feature.
     println!("cargo::rustc-check-cfg=cfg(plugin_windows)");
-    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows" | "linux" | "macos")) {
+    let os = matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows" | "linux" | "macos"));
+    if os && std::env::var_os("CARGO_FEATURE_PLUGIN_WINDOWS").is_some() {
         println!("cargo::rustc-cfg=plugin_windows");
     }
     println!("cargo:rerun-if-changed=../os-app/assets/lemonstudio.rc");

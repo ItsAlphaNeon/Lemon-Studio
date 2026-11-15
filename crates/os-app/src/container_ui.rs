@@ -509,7 +509,7 @@ impl App {
         #[cfg(not(plugin_windows))]
         {
             let _ = key;
-            Some(crate::app::off_text(crate::app::PLUGIN_WINDOWS))
+            Some(crate::app::plugin_windows_off())
         }
         #[cfg(plugin_windows)]
         {
