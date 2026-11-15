@@ -640,6 +640,13 @@ pub fn solo(s: &mut State, r: usize) {
 /// tweaks" off).
 pub const MUTE_SOLO: &str = "Channel mute / solo";
 
+/// The ON switch of a channel's plugin window: the channel on or off, a mute and solo step.
+pub fn toggle_on(s: &mut State, row: usize) {
+    crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
+        s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled)
+    })
+}
+
 fn solo_now(s: &mut State, r: usize) {
     let locked: BTreeSet<usize> = locked_rows(&s.session.project);
     let soloed_now = solo_of(&s.session, r);
@@ -1722,7 +1729,6 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::MoveSel(_) | RCmd::Sort(_) => Some("Move channel"),
         RCmd::MixerReset(_) | RCmd::AssignFree(_) | RCmd::AssignFreeSel => Some("Channel mixer track"),
         RCmd::DeclickSel(_) | RCmd::SwingSel(Some(_)) | RCmd::TruncSel(_) | RCmd::CutItself(_) => Some("Channel settings"),
-        RCmd::AddGroup | RCmd::DeleteGroup | RCmd::GroupSel => Some("Channel group"),
         RCmd::Burn(_) => Some("Burn loops"),
         RCmd::AssignInstrument(_) => Some(crate::track_links::ASSIGN_INSTRUMENT),
         _ => None,

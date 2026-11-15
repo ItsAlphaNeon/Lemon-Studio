@@ -281,9 +281,37 @@ pub enum Taken {
     Project(Box<Side>),
     /// Which channels are on, by id (a channel muted or soloed).
     Mutes(Vec<(u32, bool)>),
+    /// Which mixer tracks are on, by id (a client's `set_track` switching one on or off: the step's own undo).
+    TracksOn(Vec<(u32, bool)>),
     /// Remote control links re-pointed (a wrap moving plugins into a container, `crate::container`): each link on the
     /// first target of a pair goes onto the second. They are the program's settings, so this puts back only those links.
     Links(Vec<(crate::typein::Target, crate::typein::Target)>),
+    /// What a command added, by id: putting it back removes it (the undo of an add). Its other side is `Back`.
+    Gone(Thing),
+    /// What `Gone` removed, put back as it was (the redo of an add): a channel on its row, a mixer track at its
+    /// number, a pattern at its number. Its other side is `Gone`.
+    Back(Box<Back>),
+    /// Where a channel was, by id: putting it back moves the channel to that row again (the undo of a move).
+    Row(u32, usize),
+}
+
+/// Something a command added (`Taken::Gone`), by id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Thing {
+    Channel(u32),
+    Track(u32),
+    Pattern(u32),
+}
+
+/// A thing as it was where it was (`Taken::Back`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Back {
+    /// The channel and its row.
+    Channel(usize, os_model::Channel),
+    /// The track, at its number (`MixerTrack::index`).
+    Track(MixerTrack),
+    /// The pattern, at its number.
+    Pattern(Pattern),
 }
 
 /// What a preset load changes of a plugin (`Taken::Plugin`): its state in its format's own bytes, the preset its
@@ -435,12 +463,14 @@ pub fn channel_row(p: &Project, id: u32) -> Result<usize, Error> {
 }
 
 /// A mixer track's number (0 = the master) by its id.
+/// A mixer track by id: one the `project` query lists, so not the hidden last track (`mixer::inserts`).
 pub fn track_number(p: &Project, id: u32) -> Result<u16, Error> {
-    p.mixer.iter().find(|m| m.id.0 == id).map(|m| m.index).ok_or_else(|| format!("no mixer track {id}"))
+    track_place(p, id).map(|i| p.mixer[i].index)
 }
 
 fn track_place(p: &Project, id: u32) -> Result<usize, Error> {
-    p.mixer.iter().position(|m| m.id.0 == id).ok_or_else(|| format!("no mixer track {id}"))
+    let hidden = p.mixer.len().saturating_sub(1) as u16;
+    p.mixer.iter().position(|m| m.id.0 == id && (m.index < hidden || p.mixer.len() < 2)).ok_or_else(|| format!("no mixer track {id}"))
 }
 
 pub fn pattern_place(p: &Project, id: u32) -> Result<usize, Error> {
@@ -620,13 +650,10 @@ impl Command {
             Command::SetParam { owner, param, from, .. } => {
                 Taken::Param(*owner, *param, from.ok_or("the parameter's value before is not known (the app fills it in)")?)
             }
-            Command::AddChannel { .. }
-            | Command::DeleteChannel { .. }
-            | Command::MoveChannel { .. }
-            | Command::AddTrack { .. }
-            | Command::DeleteTrack { .. }
-            | Command::AddPattern { .. }
-            | Command::DeletePattern { .. } => Taken::Project(Box::new(Side::of(s))),
+            Command::MoveChannel { channel, .. } => Taken::Row(*channel, channel_row(p, *channel)?),
+            // What an add made is known once it is made (`apply`); this is not used.
+            Command::AddChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } => Taken::Gone(Thing::Channel(0)),
+            Command::DeleteChannel { .. } | Command::DeleteTrack { .. } | Command::DeletePattern { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::Put(t) => match &**t {
                 Taken::Settings(_) => Taken::Settings(Box::new(Settings::of(s))),
                 Taken::Channel(c) => Taken::Channel(Box::new(p.channels[channel_row(p, c.id.0)?].clone())),
@@ -640,8 +667,32 @@ impl Command {
                 Taken::Plugin(..) => return Err("a plugin state's undo is taken by `apply`".into()),
                 Taken::Project(_) => Taken::Project(Box::new(Side::of(s))),
                 Taken::Mutes(_) => mutes(p),
+                Taken::TracksOn(_) => tracks_on(p),
                 // The other way: the links back onto what they were on.
                 Taken::Links(pairs) => Taken::Links(pairs.iter().map(|&(a, b)| (b, a)).collect()),
+                Taken::Gone(thing) => Taken::Back(Box::new(match *thing {
+                    Thing::Channel(id) => {
+                        let row = channel_row(p, id)?;
+                        if p.channels.len() < 2 {
+                            return Err("a project keeps at least one channel".into());
+                        }
+                        Back::Channel(row, p.channels[row].clone())
+                    }
+                    Thing::Track(id) => {
+                        let m = &p.mixer[track_place(p, id)?];
+                        if m.index == 0 {
+                            return Err("the master track can't be deleted".into());
+                        }
+                        Back::Track(m.clone())
+                    }
+                    Thing::Pattern(id) => Back::Pattern(p.patterns[pattern_place(p, id)?].clone()),
+                })),
+                Taken::Back(back) => Taken::Gone(match &**back {
+                    Back::Channel(_, c) => Thing::Channel(c.id.0),
+                    Back::Track(m) => Thing::Track(m.id.0),
+                    Back::Pattern(q) => Thing::Pattern(q.id.0),
+                }),
+                Taken::Row(id, _) => Taken::Row(*id, channel_row(p, *id)?),
             },
         })
     }
@@ -661,7 +712,23 @@ impl Command {
                 a.markers.iter_mut().for_each(|m| m.rescale(from, to));
             }
             Taken::Project(side) => side.project.set_ppq(to),
-            Taken::Settings(_) | Taken::Channel(_) | Taken::Track(_) | Taken::Param(..) | Taken::Plugin(..) | Taken::Mutes(_) | Taken::Links(_) => {}
+            Taken::Back(b) => {
+                if let Back::Pattern(p) = &mut **b {
+                    let mut one = Project { ppq: from, patterns: vec![std::mem::take(p)], ..Project::default() };
+                    one.set_ppq(to);
+                    *p = one.patterns.pop().unwrap_or_default();
+                }
+            }
+            Taken::Settings(_)
+            | Taken::Channel(_)
+            | Taken::Track(_)
+            | Taken::Param(..)
+            | Taken::Plugin(..)
+            | Taken::Mutes(_)
+            | Taken::TracksOn(_)
+            | Taken::Links(_)
+            | Taken::Gone(_)
+            | Taken::Row(..) => {}
         }
     }
 
@@ -694,8 +761,22 @@ impl Command {
             },
             _ => self.take(s)?,
         };
+        let added = match &self {
+            Command::AddChannel { .. } => Some(Thing::Channel as fn(u32) -> Thing),
+            Command::AddTrack { .. } => Some(Thing::Track as fn(u32) -> Thing),
+            Command::AddPattern { .. } => Some(Thing::Pattern as fn(u32) -> Thing),
+            _ => None,
+        };
         let result = self.change(s)?;
         s.dirty = true;
+        // An add's undo removes what it made, by the id its result names.
+        let taken = match added {
+            Some(thing) => {
+                let id = result.as_object().and_then(|o| o.values().next()).and_then(serde_json::Value::as_u64).ok_or("an add names no id")?;
+                Taken::Gone(thing(id as u32))
+            }
+            None => taken,
+        };
         Ok(Done { undo: Command::Put(Box::new(taken)), result })
     }
 
@@ -1159,10 +1240,11 @@ fn put(s: &mut crate::session::Session, t: Taken) {
                 if ch.misc != c.misc && c.kind.is_sampler() {
                     s.control.misc.push(row);
                 }
-                // Muting is a step of its own, a lock and a zip none: the channel stays as it is in those (`Mutes`).
-                let (on, locked, zipped) = (ch.enabled, ch.rack.locked, ch.rack.zipped);
+                // Muting is a step of its own, a lock, a zip and a filter group none: the channel stays as it is in
+                // those (`Mutes`).
+                let (on, locked, zipped, group) = (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group);
                 *ch = *c;
-                (ch.enabled, ch.rack.locked, ch.rack.zipped) = (on, locked, zipped);
+                (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group) = (on, locked, zipped, group);
             }
         }
         Taken::Track(m) => {
@@ -1187,6 +1269,31 @@ fn put(s: &mut crate::session::Session, t: Taken) {
         Taken::Param(..) | Taken::Plugin(..) => {}
         Taken::Project(side) => restore(s, *side),
         Taken::Links(pairs) => crate::remote::retarget(&s.settings, &pairs),
+        Taken::Row(id, row) => {
+            let _ = Command::MoveChannel { channel: id, row }.change(s);
+        }
+        Taken::Gone(thing) => {
+            let _ = match thing {
+                Thing::Channel(id) => Command::DeleteChannel { channel: id }.change(s),
+                // The other way from `add_track_in`: the track goes, and the mixer is one shorter again (a delete
+                // keeps its length), the hidden last track moving back with what it holds.
+                Thing::Track(id) => track_number(&s.project, id).map(|n| {
+                    crate::edit::mixer::delete_track_in(s, n);
+                    let hidden = s.project.mixer.len() as u16 - 1;
+                    crate::edit::mixer::shift_tracks(s, hidden, hidden + 1, -1);
+                    s.project.get_mut().mixer.retain(|m| m.index != hidden);
+                    serde_json::Value::Null
+                }),
+                Thing::Pattern(id) => {
+                    if let Ok(place) = pattern_place(&s.project, id) {
+                        s.project.get_mut().patterns.remove(place);
+                        s.touched.views.push(crate::session::View::PatternsRenumbered);
+                    }
+                    Ok(serde_json::Value::Null)
+                }
+            };
+        }
+        Taken::Back(back) => put_back(s, *back),
         Taken::Mutes(on) => {
             for (id, v) in on {
                 if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.id.0 == id) {
@@ -1195,12 +1302,70 @@ fn put(s: &mut crate::session::Session, t: Taken) {
             }
             s.dirty = true;
         }
+        Taken::TracksOn(on) => {
+            for (id, v) in on {
+                if let Some(m) = s.project.get_mut().mixer.iter_mut().find(|m| m.id.0 == id) {
+                    m.enabled = v;
+                }
+            }
+            s.dirty = true;
+        }
+    }
+}
+
+/// A thing an add made, put back where it was with its id (`Taken::Back`).
+fn put_back(s: &mut crate::session::Session, back: Back) {
+    match back {
+        Back::Channel(row, c) => {
+            let old: Vec<u32> = s.project.channels.iter().map(|c| c.id.0).collect();
+            let n = old.len();
+            let row = row.min(n);
+            s.project.get_mut().channels.push(c);
+            // The new last channel goes to its row, the ones from there one down.
+            let map: Vec<Option<usize>> = (0..=n).map(|r| Some(if r == n { row } else if r < row { r } else { r + 1 })).collect();
+            crate::edit::rack::remap_project(s.project.get_mut(), &map);
+            crate::edit::rack::remap_session(s, &map);
+            // The views follow by id, as after the project put back whole.
+            s.touched.rows.get_or_insert(old);
+            s.touched.views.push(crate::session::View::RackAutosize);
+        }
+        Back::Track(m) => {
+            let n = crate::edit::mixer::add_track_in(s, Some(m.index));
+            if let Some(t) = s.project.get_mut().mixer.iter_mut().find(|t| t.index == n) {
+                *t = MixerTrack { index: n, ..m };
+            }
+            s.touched.tracks = true;
+        }
+        Back::Pattern(q) => {
+            let pats = &mut s.project.get_mut().patterns;
+            let at = pats.iter().position(|p| p.number > q.number).unwrap_or(pats.len());
+            pats.insert(at, q);
+            s.touched.views.push(crate::session::View::PatternsRenumbered);
+        }
     }
 }
 
 /// Which channels are on now (`Taken::Mutes`).
 fn mutes(p: &Project) -> Taken {
     Taken::Mutes(p.channels.iter().map(|c| (c.id.0, c.enabled)).collect())
+}
+
+/// Which mixer tracks are on now (`Taken::TracksOn`).
+fn tracks_on(p: &Project) -> Taken {
+    Taken::TracksOn(p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect())
+}
+
+impl Command {
+    /// The undo of what a command switches on or off, beside its own (`Taken::Channel` and `Taken::Track` keep a
+    /// channel or track on or off as it is, since an undo of another step leaves muting alone): `set_channel` and
+    /// `set_track` with `enabled`, taken before they apply.
+    pub fn on_off_undo(&self, s: &crate::session::Session) -> Option<Command> {
+        match self {
+            Command::SetChannel { enabled: Some(_), .. } => Some(Command::Put(Box::new(mutes(&s.project)))),
+            Command::SetTrack { enabled: Some(_), .. } => Some(Command::Put(Box::new(tracks_on(&s.project)))),
+            _ => None,
+        }
+    }
 }
 
 /// The whole project back (an undo of adding or deleting channels, tracks or patterns): the rack's own state with it,
@@ -1233,12 +1398,14 @@ fn restore(s: &mut crate::session::Session, side: Side) {
 /// Muting and soloing are steps of their own (a channel's, `Taken::Mutes`) or none (a mixer track's, as in FL), and
 /// locking a channel's mute state is none (`ui/undo-steps.md`): an undo or redo of another step leaves every channel
 /// and mixer track that is still there muted, and every channel locked and zipped (no step either), or not as it is now,
-/// and the song mode as it is. The states by id.
+/// and the song mode and performance mode as they are (none either). The states by id. The filter groups are put back
+/// with the project: a step that made one (a MIDI file imported) takes it away.
 struct Mutes {
     channels: std::collections::HashMap<u32, (bool, bool, bool)>,
     tracks: std::collections::HashMap<u32, bool>,
-    /// The song mode: no step either.
+    /// The song mode and performance mode: no step either.
     song_mode: Option<bool>,
+    performance: Option<bool>,
 }
 
 impl Mutes {
@@ -1247,11 +1414,12 @@ impl Mutes {
             channels: p.channels.iter().map(|c| (c.id.0, (c.enabled, c.rack.locked, c.rack.zipped))).collect(),
             tracks: p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect(),
             song_mode: p.song_mode,
+            performance: p.performance,
         }
     }
 
     fn keep(&self, p: &mut Project) {
-        p.song_mode = self.song_mode;
+        (p.song_mode, p.performance) = (self.song_mode, self.performance);
         for c in &mut p.channels {
             if let Some(&(on, locked, zipped)) = self.channels.get(&c.id.0) {
                 (c.enabled, c.rack.locked, c.rack.zipped) = (on, locked, zipped);

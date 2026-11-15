@@ -629,6 +629,9 @@ pub struct PlaylistState {
     pub hover_handle: Option<Handle>,
     /// Where the arrangement name sits in the title bar (its rename box opens there).
     pub arr_anchor: (f32, f32),
+    /// The step of the arrangement just added or cloned, whose name box is open: the name typed joins that step, one
+    /// step as in FL (spec: ui/undo-steps.md).
+    pub arr_added: Option<u64>,
     /// Stretch mode (Shift+M, §9b): resizing an audio clip stretches it; while a resize runs, how many beats each
     /// audio clip's channel's whole sample lasted when it started.
     pub stretch: bool,
@@ -740,6 +743,7 @@ impl Default for PlaylistState {
             hover_clip: None,
             hover_handle: None,
             arr_anchor: (300.0, 90.0),
+            arr_added: None,
             stretch: false,
             stretch_base: Vec::new(),
             lock_len: None,
@@ -3368,6 +3372,18 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
 /// Enter in the text box.
 pub fn commit_edit(s: &mut State) {
     let Some(e) = s.playlist.edit.take() else { return };
+    // The name of an arrangement just added or cloned joins that step (`PlaylistState::arr_added`).
+    let added = s.playlist.arr_added.take();
+    if e.target == EditTarget::ArrangementName {
+        let h = &s.session.history;
+        if added.is_some() && added == h.newest_id() && h.done() == h.steps.len() {
+            if !e.text.trim().is_empty() {
+                arr_mut(&mut s.session).name = Some(e.text.trim().to_string());
+                s.session.dirty = true;
+            }
+            return;
+        }
+    }
     snapshot(&mut s.session);
     let text = e.text.trim().to_string();
     match e.target {
@@ -4140,7 +4156,8 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             show_arrangement(s, n);
             None
         }
-        Cmd::ArrAdd | Cmd::ArrClone => crate::control_ui::edit(s, "Add arrangement", crate::control::command::Region::Project, |s| {
+        Cmd::ArrAdd | Cmd::ArrClone => {
+            crate::control_ui::edit(s, "Add arrangement", crate::control::command::Region::Project, |s| {
             let n = s.session.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
             let mut a = if cmd_is_clone(&cmd) { arr_mut(&mut s.session).clone() } else { os_flp::project::default_arrangement() };
             a.number = n;
@@ -4153,9 +4170,12 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             show_arrangement(s, n);
             // FL's "Add one..." / "Clone..." ask for the name.
             start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
+            });
+            s.playlist.arr_added = s.session.history.newest_id();
             None
-        }),
+        }
         Cmd::ArrRename => {
+            s.playlist.arr_added = None;
             start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
             None
         }
@@ -4246,10 +4266,8 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             *flag = !*flag;
             Some(format!("{name}: {}", if *flag { "on" } else { "off" }))
         }
-        Cmd::PerfToggle => {
-            snapshot_as(&mut s.session, "Performance mode");
-            Some(crate::perform_ui::toggle(s))
-        }
+        // No undo step, as in FL (spec: ui/undo-steps.md).
+        Cmd::PerfToggle => Some(crate::perform_ui::toggle(s)),
         Cmd::PerfSet(t, which, v) => {
             snapshot_as(&mut s.session, "Performance settings");
             let p = &mut arr_mut(&mut s.session).tracks[usize::from(t)].perf;

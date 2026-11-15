@@ -1145,3 +1145,310 @@ fn a_session_without_a_window_serves_clients() {
     crate::control::server::serve_tick(&mut ses);
     assert_eq!(ses.touched, Default::default());
 }
+
+/// An add's undo removes what it made, and a move's moves it back, by id (control-plane step 13): what else changed
+/// meanwhile without a step of its own stays, which putting back the whole project would have undone.
+#[test]
+fn adds_and_moves_undo_by_their_inverse() {
+    let mut a = app();
+    let kick = ids(&a).0[0];
+    let length = |a: &App| a.state.session.project.patterns[0].length;
+    for c in [
+        json!({"op": "add_channel", "name": "Bass"}),
+        json!({"op": "add_track", "at": 2}),
+        json!({"op": "add_pattern", "name": "Fill"}),
+        json!({"op": "move_channel", "channel": kick, "row": 2}),
+    ] {
+        let what = c.to_string();
+        let before = ids(&a);
+        let r = apply(&mut a.state, &test_client(), None, vec![cmd(c)]).unwrap();
+        a.state.session.control.settle(a.state.session.project.get_mut());
+        let after = ids(&a);
+        // The pattern length box makes no step (`ui/undo-steps.md`).
+        let l = Some(length(&a).unwrap_or(0) + 96);
+        a.state.session.project.get_mut().patterns[0].length = l;
+        crate::history_ui::undo(&mut a.state).unwrap();
+        assert_eq!(ids(&a), before, "{what} undone");
+        assert_eq!(length(&a), l, "{what}: its undo leaves the pattern's length");
+        crate::history_ui::redo(&mut a.state).unwrap();
+        assert_eq!(ids(&a), after, "{what} redone with the same ids");
+        if let Some(id) = r[0].as_object().and_then(|o| o.values().next()).and_then(Value::as_u64) {
+            assert!(after.0.contains(&(id as u32)) || after.1.contains(&(id as u32)) || after.2.contains(&(id as u32)), "{what}: its id is back");
+        }
+    }
+}
+
+/// An added channel's instrument goes with its undo and is hosted again with its redo.
+#[test]
+fn an_added_channel_s_instrument_follows_its_undo_and_redo() {
+    let mut a = app();
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.available = crate::plugins::builtin();
+    a.plugin_tick();
+    a.plugin_tick();
+    let rows = |a: &App| a.state.session.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, h)| (r, h.owner.0)).collect::<Vec<_>>();
+    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false, token: None };
+    let before = rows(&a);
+    a.rpc(&mut c, "apply", &json!({"command": {"op": "add_channel", "name": "Bass"}})).ok().unwrap();
+    a.plugin_tick();
+    a.plugin_tick();
+    let added = rows(&a);
+    assert_eq!(added.len(), before.len() + 1, "the new sampler is hosted");
+    a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
+    a.plugin_tick();
+    assert_eq!(rows(&a), before, "its instance goes with the undo");
+    a.rpc(&mut c, "redo", &Value::Null).ok().unwrap();
+    a.plugin_tick();
+    a.plugin_tick();
+    assert_eq!(rows(&a), added, "and is hosted again for its channel");
+}
+
+/// A client's gesture (control-plane step 13): the commands applied between `begin` and `end` are one step that puts
+/// back what was there before the gesture; a step in between starts a new one; an ended gesture takes no more.
+#[test]
+fn a_gesture_is_one_step() {
+    let mut a = app();
+    let kick = ids(&a).0[0];
+    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false, token: None };
+    let volume = |a: &App| a.state.session.project.channels[0].volume;
+    let (v0, t0) = (volume(&a), a.state.tempo());
+    let steps = a.state.session.history.at();
+    let g = a.rpc(&mut c, "begin", &json!({"name": "Fader drag"})).ok().unwrap()["gesture"].as_u64().unwrap();
+    for v in [0.3, 0.4, 0.5] {
+        a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_channel", "channel": kick, "volume": v}})).ok().unwrap();
+    }
+    assert_eq!(a.state.session.history.at(), steps + 1, "one step for the gesture");
+    assert_eq!(a.state.session.history.newest_done(), Some("Test: fader drag"));
+    a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
+    assert_eq!(volume(&a), v0, "the undo puts back the value before the gesture");
+    a.rpc(&mut c, "redo", &Value::Null).ok().unwrap();
+    assert_eq!(volume(&a), 0.5, "the redo gives the last");
+    // After the undo and redo the gesture goes on in a step of its own.
+    a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_channel", "channel": kick, "volume": 0.6}})).ok().unwrap();
+    a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_tempo", "bpm": 99.0}})).ok().unwrap();
+    assert_eq!(a.state.session.history.at(), steps + 2);
+    a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
+    assert_eq!((volume(&a), a.state.tempo()), (0.5, t0), "both regions back as they were before the step");
+    a.rpc(&mut c, "end", &json!({"gesture": g})).ok().unwrap();
+    assert!(a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_tempo", "bpm": 98.0}})).is_err(), "an ended gesture is gone");
+    assert!(a.rpc(&mut c, "end", &json!({"gesture": g})).is_err());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// FL's measured undo history (spec: ui/undo-steps.md), the rows control-plane step 13 found the app differing on.
+
+/// Wheel notches about 120 ms apart are one step; after a pause of 2.5 s the next notch starts another.
+#[test]
+fn a_pause_in_the_wheel_starts_a_new_step() {
+    let mut a = app();
+    let id = crate::knob_id::KnobId::ChanVol(0);
+    let t0 = std::time::Instant::now();
+    let steps = a.state.session.history.at();
+    let mut notch = |a: &mut App, ms: u64| {
+        a.wheel_pause(t0 + std::time::Duration::from_millis(ms));
+        crate::history::knob(&mut a.state.session, id, true);
+        let v = a.state.knob(id) - 0.03;
+        a.state.set_knob(id, v);
+    };
+    for ms in [0, 120, 240] {
+        notch(&mut a, ms);
+    }
+    assert_eq!(a.state.session.history.at(), steps + 1, "notches 120 ms apart");
+    notch(&mut a, 2740);
+    notch(&mut a, 2860);
+    assert_eq!(a.state.session.history.at(), steps + 2, "2.5 s later, a step of its own");
+}
+
+/// Two drags of one control are two steps (the rack's mixer track box, a plugin window's strip knob), one drag one.
+#[test]
+fn each_drag_of_a_control_is_a_step() {
+    use crate::history::ChannelControl;
+    let mut a = app();
+    let steps = a.state.session.history.at();
+    for t in [3, 4] {
+        a.channel_control(0, ChannelControl::Track, |c| c.mixer_track = t);
+    }
+    a.mouse_up();
+    assert_eq!(a.state.session.history.at(), steps + 1, "one drag");
+    a.channel_control(0, ChannelControl::Track, |c| c.mixer_track = 5);
+    assert_eq!(a.state.session.history.at(), steps + 2, "the next drag");
+    // A strip knob's release in a plugin window ends its run the same way (`FrameEvent::RunEnd`).
+    for v in [0.3, 0.4] {
+        a.channel_control(0, ChannelControl::Volume, |c| c.volume = v);
+    }
+    a.state.session.history.end_gesture_run();
+    a.channel_control(0, ChannelControl::Volume, |c| c.volume = 0.5);
+    assert_eq!(a.state.session.history.at(), steps + 4);
+}
+
+/// Undo knob tweaks covers every "Knob tweak" step, the mixer track box's and the tempo's drag too.
+#[test]
+fn undo_knob_tweaks_off_covers_the_mixer_track_box_and_the_tempo() {
+    let mut a = app();
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, false);
+    let steps = a.state.session.history.at();
+    a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 3);
+    let mut press = App::new(None);
+    press.act(crate::app::Action::Tempo);
+    let none = press.state.session.history.len() == 0;
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, true);
+    assert_eq!(a.state.session.project.channels[0].mixer_track, 3);
+    assert_eq!(a.state.session.history.at(), steps, "the mixer track box");
+    assert!(none, "the tempo's press records no step");
+}
+
+/// Group selected (Alt+G, a name typed, Enter) and performance mode switched on are no undo step.
+#[test]
+fn a_filter_group_and_performance_mode_are_no_step() {
+    let mut a = app();
+    let steps = a.state.session.history.at();
+    a.state.rack.sel = [0, 1].into();
+    crate::rack::run(&mut a, crate::rack::RCmd::GroupSel);
+    a.state.pat_ui.name_box.as_mut().expect("the name box").text = "Drums".into();
+    crate::patterns::accept(&mut a.state);
+    assert_eq!(crate::rack::groups(&a.state.session.project).len(), 1, "the group is made");
+    crate::playlist::run(&mut a, crate::playlist::Cmd::PerfToggle);
+    assert!(crate::perform_ui::on(&a.state));
+    assert_eq!(a.state.session.history.at(), steps);
+}
+
+/// An effect slot's colour, random or chosen, is one step ("Name/color/icon effect").
+#[test]
+fn an_effect_slot_colour_is_a_step() {
+    let mut a = app();
+    a.state.selected_mixer = 2;
+    let red = os_model::Rgb::new(0xc8, 0x50, 0x4a);
+    ui_round_trip(&mut a, "Effect slot color", |a| {
+        crate::mixer::run(a, crate::mixer::MCmd::SlotColor(0, Some(red)));
+    });
+    ui_round_trip(&mut a, "Effect slot color", |a| {
+        crate::mixer::run(a, crate::mixer::MCmd::SlotRandomColor(1));
+    });
+}
+
+/// Loop type ▸ Advanced looping turns loop mode on, one step ("Set pattern loop mode").
+#[test]
+fn advanced_looping_turns_loop_mode_on() {
+    let mut a = app();
+    assert!(!crate::edit::rack::loop_mode(&a.state.session));
+    let steps = a.state.session.history.at();
+    crate::rack::run(&mut a, crate::rack::RCmd::LoopType(2));
+    a.mouse_up();
+    assert!(crate::edit::rack::loop_mode(&a.state.session), "loop mode on");
+    assert_eq!(crate::edit::rack::loop_type(&a.state.session), 2);
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    crate::history_ui::undo(&mut a.state).unwrap();
+    assert!(!crate::edit::rack::loop_mode(&a.state.session), "undone");
+}
+
+/// Arrangement ▸ Add one… with a name typed is one step, as Clone…; a rename is one of its own.
+#[test]
+fn an_arrangement_added_and_named_is_one_step() {
+    let mut a = app();
+    for cmd in [crate::playlist::Cmd::ArrAdd, crate::playlist::Cmd::ArrClone] {
+        let steps = a.state.session.history.at();
+        let count = a.state.session.project.arrangements.len();
+        crate::playlist::run(&mut a, cmd.clone());
+        a.state.playlist.edit.as_mut().expect("the name box").text = "Verse".into();
+        crate::playlist::commit_edit(&mut a.state);
+        assert_eq!(a.state.session.history.at(), steps + 1, "{cmd:?}");
+        assert_eq!(crate::edit::playlist::arrangement_name(&a.state.session), "Verse");
+        crate::history_ui::undo(&mut a.state).unwrap();
+        assert_eq!(a.state.session.project.arrangements.len(), count, "{cmd:?} undone, name and all");
+        crate::history_ui::redo(&mut a.state).unwrap();
+        assert_eq!(crate::edit::playlist::arrangement_name(&a.state.session), "Verse", "{cmd:?} redone with its name");
+    }
+    let steps = a.state.session.history.at();
+    crate::playlist::run(&mut a, crate::playlist::Cmd::ArrRename);
+    a.state.playlist.edit.as_mut().unwrap().text = "Chorus".into();
+    crate::playlist::commit_edit(&mut a.state);
+    assert_eq!(a.state.session.history.at(), steps + 1, "a rename");
+}
+
+/// The newest step's name.
+fn newest(a: &App) -> String {
+    let e = a.state.session.history.entries(&crate::settings_file::SettingsStore::memory());
+    e.last().map(|e| e.1.to_string()).unwrap_or_default()
+}
+
+/// A LED's right click ▸ Solo and a plugin window's ON switch: one mute and solo step each, which undo takes back.
+#[test]
+fn the_led_menu_s_solo_and_the_on_switch_are_one_step_each() {
+    let mut a = app();
+    let steps = a.state.session.history.at();
+    crate::rack::run(&mut a, crate::rack::RCmd::Solo(0));
+    assert_eq!(a.state.session.history.at(), steps + 1, "Solo");
+    assert_eq!(newest(&a), crate::rack::MUTE_SOLO);
+    assert!(!a.state.session.project.channels[1].enabled, "the others muted");
+    crate::history_ui::undo(&mut a.state);
+    assert!(a.state.session.project.channels.iter().all(|c| c.enabled), "undone");
+    crate::rack::toggle_on(&mut a.state, 1);
+    assert_eq!(a.state.session.history.at(), steps + 1, "ON switch");
+    assert_eq!(newest(&a), crate::rack::MUTE_SOLO);
+    assert!(!a.state.session.project.channels[1].enabled);
+    crate::history_ui::undo(&mut a.state);
+    assert!(a.state.session.project.channels[1].enabled, "undone");
+}
+
+/// A playlist track's LED: a click (mute) and a Ctrl+click (solo) are one step each, whatever Undo knob tweaks says,
+/// and undo takes them back.
+#[test]
+fn a_playlist_track_s_mute_and_solo_are_one_step_each() {
+    let mut a = app();
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, false);
+    let steps = a.state.session.history.at();
+    let on = |a: &App| a.state.session.project.arrangement().expect("an arrangement").tracks.iter().take(3).map(|t| t.enabled).collect::<Vec<_>>();
+    crate::playlist::press_led(&mut a, 1, false);
+    let muted = on(&a);
+    a.ctrl = true;
+    crate::playlist::press_led(&mut a, 2, false);
+    a.ctrl = false;
+    let soloed = on(&a);
+    let at = a.state.session.history.at();
+    crate::history_ui::undo(&mut a.state);
+    let after_one = on(&a);
+    crate::history_ui::undo(&mut a.state);
+    let after_two = on(&a);
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, true);
+    assert_eq!(muted, [true, false, true]);
+    assert_eq!(soloed, [false, false, true]);
+    assert_eq!(at, steps + 2);
+    assert_eq!(after_one, muted, "the solo undone");
+    assert_eq!(after_two, [true, true, true], "the mute undone");
+}
+
+/// A note added with a click in the piano roll is one step, "Piano roll add note".
+#[test]
+fn a_note_added_in_the_piano_roll_is_one_step() {
+    let mut a = app();
+    let mut c = os_ui::Canvas::new(1600, 1000, 1.0).expect("a canvas");
+    a.state.z = vec![crate::app::Win::PianoRoll];
+    a.paint(&mut c, None);
+    let g = a.piano_geom().expect("piano roll shown").grid;
+    a.mouse_move(g.x + g.w / 3.0, g.y + g.h / 2.0);
+    let notes = crate::piano::notes(&a.state.session).len();
+    let steps = a.state.session.history.at();
+    a.mouse_down();
+    a.mouse_up();
+    assert_eq!(crate::piano::notes(&a.state.session).len(), notes + 1);
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    assert_eq!(newest(&a), "Piano roll add note");
+}
+
+/// A clip placed with one click in the playlist is one step.
+#[test]
+fn a_clip_painted_with_one_click_is_one_step() {
+    let mut a = app();
+    let mut c = os_ui::Canvas::new(1600, 1000, 1.0).expect("a canvas");
+    a.state.z = vec![crate::app::Win::Playlist];
+    a.paint(&mut c, None);
+    let g = a.pl_grid().expect("the arranger");
+    a.mouse_move(g.x + g.w / 2.0, g.y + 30.0);
+    let clips = crate::playlist::clips(&a.state.session).len();
+    let steps = a.state.session.history.at();
+    a.mouse_down();
+    a.mouse_up();
+    assert_eq!(crate::playlist::clips(&a.state.session).len(), clips + 1, "a clip placed");
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    assert_eq!(newest(&a), "Arranger fill paint clip");
+}

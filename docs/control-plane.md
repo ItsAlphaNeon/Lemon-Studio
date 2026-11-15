@@ -35,7 +35,7 @@ lemonstudio --serve 7777 --control-level propose song.flp
 |---|---|
 | `read` | `hello`, `state`, `notes`, `plugins`, `params`, `history`, `events`, `proposals` |
 | `propose` | the above, and `propose`: the app asks the user to Apply or Discard each proposal |
-| `edit` | everything, including `apply`, `accept`, `discard`, `undo`, `redo` and `save` |
+| `edit` | everything, including `apply`, `begin`, `end`, `accept`, `discard`, `undo`, `redo` and `save` |
 
 `save` writes a file, an effect outside the project: with a window the user is asked first, and the answer only
 says that they were. Without a window (`--serve`) the client saves directly.
@@ -51,7 +51,9 @@ says that they were. Without a window (`--serve`) the client saves directly.
 | `params` | `owner` | The parameters of the plugin playing a channel or a mixer slot: id, name, group, unit, value 0..1, value text, range, default, steps |
 | `history` | | The undo history (`steps` with `name`, `undone`) and `at`, where the project is in it |
 | `events` | `since` | What changed after event `since` (0: all kept), and `last`, the newest event's number |
-| `apply` | `commands` (or `command`), `name` | Each command's `results`. The list is one undo step named `name` (else the command's own name), applied whole or not at all |
+| `apply` | `commands` (or `command`), `name`, `gesture` | Each command's `results`. The list is one undo step named `name` (else the command's own name), applied whole or not at all. With `gesture`, it joins that gesture's step |
+| `begin` | `name` | `gesture` (its number): the lists applied with it until `end` make one undo step named `name`, as a fader drag does |
+| `end` | `gesture` | Nothing. The next list is a step of its own |
 | `propose` | `commands`, `name` | `proposal` (its number) and `changes` (what it would change). The project is not changed |
 | `proposals` | | The proposals waiting |
 | `accept`, `discard` | `proposal` | The commands' `results`; nothing |
@@ -116,20 +118,30 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
 
 - Every `apply` is one step in the project's undo history, named after the client ("Beat bot: build a beat"). The
   user can undo it like any other step, and Ctrl+Z after it works as usual.
+- A gesture (`begin`, `apply` with `gesture`, `end`) is one step however many lists it applies: its undo puts back
+  what each thing was before the gesture. After another step, an undo or a redo, the gesture goes on in a new step.
+- An add's undo removes what it added (a channel, mixer track or pattern) by its id, and its redo puts it back with
+  the same id; a move's undo moves the channel back. Nothing else changes with them. A delete's undo puts the
+  project back as it was.
 - The interface's own edits use the same path: mixer edits (faders dragged or typed, polarity, routing,
   colours, names, effect slots and their sidechain input, adding, moving and deleting tracks), channels added (the
   plugin picker, F8, ADD, a browser drop), coloured, named, cloned, moved and deleted, FILE ▸ Import ▸ MIDI file into
   the open project, and pattern colours, names, inserting, cloning, moving and deleting are undo steps too, as are the
   tempo, the project settings and plugin parameters, whether Lemon Studio sets them (Type in value, Set..., Paste
-  value) or they change in the plugin's own window. Faders and parameters follow "Undo knob tweaks". A change has the
+  value) or they change in the plugin's own window. Faders, parameters, the tempo and the channel's own controls follow
+  "Undo knob tweaks". A change has the
   same step name whichever made it ("Tempo", "Time signature", "Song info", "Plugin parameter").
 - So are the channel's own controls in a plugin window (volume, panning, pitch, pitch range, mixer track), the
   channel rack's mixer-track box, a pattern's time signature, arrangements added, cloned and deleted, arrangement,
-  pattern and effect-slot names, a clip's random colour and "Remove all audio editors". A drag or a run of wheel
-  notches on one box or knob is one step. The pattern length box and the Misc tab make none, as in FL.
+  pattern and effect-slot names, effect-slot colours, a clip's random colour and "Remove all audio editors". Each drag
+  of a box or knob is one step, and so is a run of wheel notches on one: a click, or a pause of a second, starts a
+  new one. An arrangement added and named at once is one step. The pattern length box, the Misc tab, channel
+  groups and Performance mode make none, as in FL. Advanced looping switched on turns loop mode on with it.
 - A channel muted, soloed or switched on or off is one step of its own ("Channel mute / solo") that follows "Undo knob
   tweaks", and a mixer track's mute and solo make none, as in FL. An undo or redo of any other step leaves every
-  channel and track muted or not as it is (a client's `enabled` too).
+  channel and track muted or not as it is (a client's `enabled` too); the undo of the step that set a client's
+  `enabled` takes it back.
+- The mixer tracks commands name are the ones `project` lists: not the mixer's hidden last track.
 - An undone channel or effect keeps its plugin instance's state: a redo hosts it again from that state.
 - A proposal is applied to see what it changes and taken back at once; with a window the app asks the user to Apply
   or Discard it. Accepted, it is one undo step named after its client.

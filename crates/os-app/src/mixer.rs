@@ -1360,6 +1360,11 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         crate::container::store_members(app.state.session.project.get_mut(), &app.state.session.plugins);
         return app.wrap_slot(slot, all);
     }
+    // An effect slot's colour: one step on its track, as FL's "Name/color/icon effect" (spec: ui/undo-steps.md).
+    if let MCmd::SlotColor(..) | MCmd::SlotRandomColor(_) = c {
+        let t = app.state.selected_mixer;
+        return crate::control_ui::edit_app(app, "Effect slot color", Region::Track(t), |app| run_now(app, c));
+    }
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
     let step = match &c {
         MCmd::Color(..) | MCmd::RandomColor(_) | MCmd::GradientColor | MCmd::AutoColorGroup(_) => Some("Mixer track color"),

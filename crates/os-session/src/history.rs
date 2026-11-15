@@ -248,6 +248,8 @@ pub enum Run {
     Channel(usize, ChannelControl),
     /// A controller moving the wet (`.3`) or dry level of member `.2` of the container in slot `.1` of track `.0`.
     Member(u16, u8, u32, bool),
+    /// A client's gesture (`control::begin_in`).
+    Gesture(u64),
 }
 
 /// A channel control a run of changes goes to (`Run::Channel`).
@@ -273,6 +275,22 @@ impl History {
     /// The run ends: the next change is a step of its own.
     pub fn end_run(&mut self) {
         self.run = None;
+    }
+
+    /// A drag was let go or the wheel paused (`WHEEL_PAUSE`): the run of a knob, fader, box or the mixer track box
+    /// ends, so the next drag or run of notches is a step of its own, as in FL (spec: ui/undo-steps.md). The tempo
+    /// tapper's taps, a plugin's own values, a controller's and a client's gesture run on.
+    pub fn end_gesture_run(&mut self) {
+        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..))) {
+            self.run = None;
+        }
+    }
+
+    /// Run `r` ends, if it is the newest step's.
+    pub fn end_run_of(&mut self, r: Run) {
+        if self.run == Some(r) {
+            self.run = None;
+        }
     }
 
     /// How many steps there are ("Last reset" not counted).
@@ -428,7 +446,12 @@ pub fn settle(s: &mut crate::session::Session) {
         unrecord(s);
     }
     s.history.fresh = false;
+    s.history.end_gesture_run();
 }
+
+/// How long the wheel may rest between notches that make one step. FL joined notches about 120 ms apart and made a
+/// step of each 2.5 s apart (spec: ui/undo-steps.md); the time between was not measured.
+pub const WHEEL_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Before a sample loads into channel `row` (the file dialog, a drop, the browser's send): one step, "Load channel
 /// sample(s)", holding what the load changes. `row` past the last channel: the load makes that channel.

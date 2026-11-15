@@ -92,6 +92,8 @@ pub enum Request {
     PitchRange(usize, i32),
     Track(usize, u16),
     ShowTrack(usize),
+    /// A strip knob or box was let go, or the wheel over it paused: its run of changes ends (`FrameEvent::RunEnd`).
+    RunEnd,
     /// A preview note from a Lemon plugin's own keyboard (host link): row, key, velocity, on.
     Note(usize, u8, u8, bool),
     /// "Create automation clip" from a Lemon plugin's own parameter menu (host link): row, parameter index.
@@ -674,6 +676,7 @@ impl EditorHost {
                         FrameEvent::PitchRange(r) => Request::PitchRange(row, r),
                         FrameEvent::Track(t) => Request::Track(row, t),
                         FrameEvent::ShowTrack => Request::ShowTrack(row),
+                        FrameEvent::RunEnd => Request::RunEnd,
                         FrameEvent::Raise => Request::Raise(row),
                         FrameEvent::Menu(x, y) => Request::Menu(row, x, y),
                         FrameEvent::Presets(x, y) => Request::Presets(row, x, y),

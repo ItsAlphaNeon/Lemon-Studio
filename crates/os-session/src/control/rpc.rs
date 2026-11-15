@@ -154,9 +154,21 @@ pub fn rpc_in(ses: &mut Session, c: &mut Client, m: &str, params: &Value, select
             need(c, Level::Edit)?;
             let mut cmds = commands(params)?;
             fill_params(ses, &mut cmds).map_err(failed)?;
-            let name = params.get("name").and_then(Value::as_str);
-            let results = super::apply_in(ses, &by, name, cmds).map_err(failed)?;
+            let results = match params.get("gesture").and_then(Value::as_u64) {
+                Some(g) => super::apply_run_in(ses, &by, g, cmds),
+                None => super::apply_in(ses, &by, params.get("name").and_then(Value::as_str), cmds),
+            }
+            .map_err(failed)?;
             Ok(json!({ "results": results }))
+        }
+        "begin" => {
+            need(c, Level::Edit)?;
+            Ok(json!({ "gesture": super::begin_in(ses, params.get("name").and_then(Value::as_str)) }))
+        }
+        "end" => {
+            need(c, Level::Edit)?;
+            super::end_in(ses, uint(params, "gesture")?).map_err(failed)?;
+            Ok(Value::Null)
         }
         "propose" => {
             need(c, Level::Propose)?;
