@@ -130,10 +130,15 @@ pub struct Control {
     /// A client may be connected (the app listens, `--control` / `--serve`): edits in the interface become events.
     pub watched: bool,
     /// How many things the project had at the last `settle` (`settle_tick`).
-    counted: [usize; 6],
+    counted: [usize; 11],
 }
 
 impl Control {
+    /// A new id for a thing a command makes (it names it in its result).
+    pub fn fresh(&mut self) -> os_model::Id {
+        self.ids.fresh()
+    }
+
     /// Gives ids to new things (`ids::settle`).
     pub fn settle(&mut self, p: &mut os_model::Project) -> bool {
         self.counted = count(p);
@@ -214,10 +219,23 @@ impl Control {
 }
 
 /// The things `settle` gives ids to, counted.
-fn count(p: &os_model::Project) -> [usize; 6] {
-    let clips = p.arrangements.iter().map(|a| a.clips.len()).sum();
+fn count(p: &os_model::Project) -> [usize; 11] {
+    let arr = |f: fn(&os_model::Arrangement) -> usize| p.arrangements.iter().map(f).sum();
+    let pat = |f: fn(&os_model::Pattern) -> usize| p.patterns.iter().map(f).sum();
     let slots = p.mixer.iter().map(|m| m.slots.iter().flatten().count()).sum();
-    [p.channels.len(), p.patterns.len(), p.mixer.len(), p.arrangements.len(), clips, slots]
+    [
+        p.channels.len(),
+        p.patterns.len(),
+        p.mixer.len(),
+        p.arrangements.len(),
+        arr(|a| a.clips.len()),
+        slots,
+        pat(|q| q.notes.len()),
+        pat(|q| q.controls.len()),
+        arr(|a| a.markers.len()),
+        arr(|a| a.tracks.len()),
+        p.automations.iter().map(|a| a.points.len()).sum(),
+    ]
 }
 
 fn op(c: &Command) -> &'static str {

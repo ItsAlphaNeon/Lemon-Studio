@@ -6251,7 +6251,7 @@ mod tests {
     #[test]
     fn points_set_mixer_values_and_the_tempo() {
         use os_model::target;
-        let point = |position: u32, kind: u32, value: i32| ControlPoint { position, kind, value };
+        let point = |position: u32, kind: u32, value: i32| ControlPoint { id: os_model::Id::NONE, position, kind, value };
         let mut p = project(vec![long_note(0, 384, 0)], vec![]);
         p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
         p.patterns[0].controls = vec![

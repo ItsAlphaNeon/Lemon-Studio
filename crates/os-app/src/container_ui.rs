@@ -1070,7 +1070,7 @@ mod tests {
         let mix = target::slot(2, 1, target::SLOT_MIX);
         crate::playlist::run(&mut a, Cmd::CreateAutomation(mix, "Mix".into(), 0.5));
         let p = a.state.session.project.get_mut();
-        p.patterns[0].controls.push(os_model::ControlPoint { position: 0, kind: target::slot_param(2, 1, 3), value: 9 });
+        p.patterns[0].controls.push(os_model::ControlPoint { id: os_model::Id::NONE, position: 0, kind: target::slot_param(2, 1, 3), value: 9 });
         p.controller_links.push(os_model::ControllerLink::new(0x7000 + 3 * 64, 0, target::slot_param(2, 0, 1)));
         p.init_controls.push(os_model::InitControl { head: 0, target: target::slot_param(2, 0, 2), value: 7 });
         p.init_controls.push(os_model::InitControl { head: 0, target: target::slot_param(2, 1, 2046), value: 1 });

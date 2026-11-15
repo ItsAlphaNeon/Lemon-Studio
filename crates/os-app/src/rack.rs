@@ -2643,7 +2643,7 @@ mod tests {
         a.state.session.path = None;
         // A pattern with nothing in it is not saved: pattern 2 gets a note.
         let ch = a.state.session.project.channels[0].index;
-        let note = os_model::Note { position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
+        let note = os_model::Note { id: os_model::Id::NONE, position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
         crate::edit::patterns::pat_mut(&mut a.state.session, 2).notes.push(note);
         a.state.set_pattern(2);
         put_loop(&mut a.state.session, 0, Some(8));

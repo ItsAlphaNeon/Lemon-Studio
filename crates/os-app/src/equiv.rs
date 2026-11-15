@@ -709,8 +709,9 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
     p
 }
 
-/// Whether every channel, pattern, mixer track, slot plugin, arrangement and clip has an id and no two share one (the
-/// session gives them out from one counter, `control::ids`): what is wrong, if anything.
+/// Whether every channel, pattern, mixer track, slot plugin, arrangement, clip, note, control point, time marker,
+/// playlist track and automation point has an id and no two share one (the session gives them out from one counter,
+/// `control::ids`): what is wrong, if anything.
 fn ids_fault(p: &os_model::Project) -> Option<String> {
     let mut all: Vec<(&str, os_model::Id)> = Vec::new();
     all.extend(p.channels.iter().map(|c| ("channel", c.id)));
@@ -719,6 +720,11 @@ fn ids_fault(p: &os_model::Project) -> Option<String> {
     all.extend(p.mixer.iter().flat_map(|m| m.slots.iter().flatten()).map(|x| ("slot", x.id)));
     all.extend(p.arrangements.iter().map(|a| ("arrangement", a.id)));
     all.extend(p.arrangements.iter().flat_map(|a| &a.clips).map(|c| ("clip", c.id)));
+    all.extend(p.patterns.iter().flat_map(|q| &q.notes).map(|n| ("note", n.id)));
+    all.extend(p.patterns.iter().flat_map(|q| &q.controls).map(|c| ("control point", c.id)));
+    all.extend(p.arrangements.iter().flat_map(|a| &a.markers).map(|m| ("time marker", m.id)));
+    all.extend(p.arrangements.iter().flat_map(|a| &a.tracks).map(|t| ("playlist track", t.id)));
+    all.extend(p.automations.iter().flat_map(|a| &a.points).map(|q| ("automation point", q.id)));
     if let Some((kind, _)) = all.iter().find(|(_, id)| id.is_none()) {
         return Some(format!("a {kind} without an id"));
     }

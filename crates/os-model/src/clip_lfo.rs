@@ -266,7 +266,7 @@ pub fn handed_on(out: f32) -> i64 {
 
 /// The envelope point form `ClipLfo::envelope` holds (a mode the page's walk shapes like the curve's).
 pub fn envelope_point(beat: f64, value: f64) -> AutoPoint {
-    AutoPoint { beat, value, tension: 0.0, mode: AutoMode::Single, flag: 0 }
+    AutoPoint { id: crate::Id::NONE, beat, value, tension: 0.0, mode: AutoMode::Single, flag: 0 }
 }
 
 #[cfg(test)]
