@@ -199,6 +199,12 @@ pub struct Rec {
 }
 
 impl Rec {
+    /// Another project opens: its take, held notes, count-in and Cancel recording's step go without being written.
+    /// Record stays armed.
+    pub fn forget(&mut self) {
+        *self = Rec { armed: self.armed, audio: self.audio, unit: self.unit, log: std::mem::take(&mut self.log), ..Rec::default() };
+    }
+
     /// A take is open (for tests and the hint).
     pub fn recording(&self) -> bool {
         self.take.is_some()

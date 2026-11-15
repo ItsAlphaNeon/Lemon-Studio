@@ -489,6 +489,32 @@ mod tests {
         assert_eq!(notes(&app), [(24, 72, 0), (48, 24, 1), (192, 24, 0), (600, 24, 0)]);
     }
 
+    /// New forgets what the session and the interface remembered of the old project: a take and its held note go
+    /// unwritten, what performance mode launched, the selected channel and track, the mixer's solo memory and the
+    /// windows showing the old project's things.
+    #[test]
+    fn new_forgets_the_old_project() {
+        let mut app = app();
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 30.0, false);
+        assert!(app.state.session.rec.holding());
+        app.state.session.perform.origin = (2, 3);
+        app.state.session.perform.held = Some(1);
+        app.state.selected_channel = 3;
+        app.state.selected_mixer = 7;
+        app.state.mixer.solo = Some((vec![7], vec![(1, true)]));
+        app.state.raise(crate::app::Win::Events);
+        assert!(app.state.z.contains(&crate::app::Win::Events));
+        app.empty_project();
+        app.record_tick();
+        assert!(!app.state.session.rec.recording() && app.state.session.rec.armed);
+        assert!(app.state.session.project.patterns.iter().all(|p| p.notes.is_empty()), "the held note was not written into the new project");
+        assert_eq!(app.state.session.perform, crate::perform::Perform::default());
+        assert_eq!((app.state.selected_channel, app.state.selected_mixer), (0, 1));
+        assert!(app.state.mixer.solo.is_none());
+        assert!(!app.state.z.contains(&crate::app::Win::Events));
+    }
+
     /// MIDI channel through (spec: ui/channel-rack.md §18): a note recorded from a MIDI device takes the MIDI channel it
     /// came on as its colour group; with the entry unticked it keeps the first.
     #[test]

@@ -1807,24 +1807,12 @@ impl App {
         match result {
             Ok((file, project)) => {
                 crate::project_io::open_in(&mut self.state.session, file, project, path.clone());
+                self.forget_project_ui();
                 let s = &mut self.state;
-                s.selected_channel = 0;
-                s.selected_mixer = 1;
-                s.mixer = Default::default();
-                s.playlist_scroll = (0.0, 0.0);
-                s.rack_scroll = 0.0;
-                s.rack_scroll_x = 0.0;
-                s.rack.reset();
-                s.hide(Win::Plugin);
-                s.mixer_scroll = 0.0;
                 crate::project_info_ui::opened(s);
                 s.message = Some(format!("Opened {}", path.display()));
                 crate::templates::remember(&path);
                 crate::recent::add(&path);
-                s.piano.reset();
-                s.session.pat_pos = 0;
-                s.playlist.reset();
-                s.session.song_pos = 0;
                 crate::playlist::load_view(s);
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 // A .lemon file's own state (icons, slot names and colours, Performance settings); its channel icons
@@ -2350,10 +2338,37 @@ impl App {
         self.empty_project();
     }
 
+    /// What the interface remembers of the old project goes when another replaces it, so none of it points into the
+    /// new one: the selection, the mixer's solo memory, the scrolls, and the windows showing the old project's things.
+    pub(crate) fn forget_project_ui(&mut self) {
+        let s = &mut self.state;
+        s.selected_channel = 0;
+        s.selected_mixer = 1;
+        s.mixer = Default::default();
+        s.playlist_scroll = (0.0, 0.0);
+        s.rack_scroll = 0.0;
+        s.rack_scroll_x = 0.0;
+        s.mixer_scroll = 0.0;
+        s.rack.reset();
+        for w in [Win::Plugin, Win::Events, Win::Container, Win::PluginPalette] {
+            s.hide(w);
+        }
+        s.events_back = None;
+        s.piano.reset();
+        s.playlist.reset();
+    }
+
+    /// Another project replaces this one (New, a MIDI file opened as a project; opening goes through
+    /// `project_io::open_in`): the session's memory of it and the interface's go (`project_io::leave_in`,
+    /// `forget_project_ui`).
+    pub(crate) fn leave_project(&mut self) {
+        crate::project_io::leave_in(&mut self.state.session);
+        self.forget_project_ui();
+    }
+
     /// The built-in new project (FILE ▸ New with Empty, New from template ▸ Empty).
     pub fn empty_project(&mut self) {
-        self.state.session.transport.silence();
-        self.reset_hosted();
+        self.leave_project();
         let s = &mut self.state;
         s.session.project = crate::locked::Locked::new(default_project(&crate::settings_file::store()));
         crate::project_info_ui::created(s);
@@ -2363,15 +2378,8 @@ impl App {
         s.set_pattern(1);
         // FL's default template is saved in pattern mode.
         s.set_song_mode(false);
-        s.piano.reset();
-        s.session.pat_pos = 0;
-        s.playlist.reset();
-        s.session.song_pos = 0;
-        s.session.history.reset();
-        s.session.control.reset();
         s.session.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
         crate::playlist::load_view(s);
-        s.rack.reset();
         s.session.dirty = true;
         s.message = Some("New project".into());
         self.mark_saved();
