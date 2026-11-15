@@ -268,6 +268,8 @@ pub fn follow(s: &mut State, f: impl Fn(Target) -> Option<Target>) {
         set_links(&all);
     }
     s.link_moves = moves;
+    // Multilink's controls waiting for their controller move with them, and go with what they drove.
+    s.multilink.queue.retain_mut(|t| f(*t).map(|n| *t = n).is_some());
 }
 
 pub fn remove(t: Target) {

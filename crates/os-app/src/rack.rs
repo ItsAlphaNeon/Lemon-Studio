@@ -3778,6 +3778,18 @@ mod tests {
         assert!(!app.state.shown(Win::Container) && !app.state.shown(Win::PluginPalette), "their row went");
     }
 
+    /// Multilink's controls waiting for their controller follow their channel or mixer track when it moves.
+    #[test]
+    fn multilink_waiting_controls_follow_their_place() {
+        use crate::typein::Target as T;
+        let mut app = App::new(None);
+        app.state.multilink.queue = [T::Knob(KnobId::ChanVol(2)), T::Fader(3)].into();
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        crate::mixer::run(&mut app, crate::mixer::MCmd::MoveLeft(3));
+        assert_eq!(app.state.multilink.queue, [T::Knob(KnobId::ChanVol(1)), T::Fader(2)]);
+    }
+
     /// The event editor shows its channel's events after the channel moves, and closes when the channel is deleted.
     #[test]
     fn the_event_editor_follows_its_channel() {
