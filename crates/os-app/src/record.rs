@@ -224,6 +224,12 @@ impl Rec {
     pub fn holding(&self) -> bool {
         self.take.is_some() && !self.held.is_empty()
     }
+
+    /// Another project opens: its take, held notes, count-in and Cancel recording's step go without being written.
+    /// Record stays armed.
+    pub fn forget(&mut self) {
+        *self = Rec { armed: self.armed, audio: self.audio, log: std::mem::take(&mut self.log), ..Rec::default() };
+    }
 }
 
 /// The main snap step that quantizing rounds to; None for Line, Cell and (none), which leave times as played.
@@ -1077,6 +1083,28 @@ mod tests {
         app.record_tick();
         stop(&mut app);
         assert!(notes(&app).contains(&(301, 32, 0)), "{:?}", notes(&app));
+    }
+
+    /// New forgets what the interface remembered of the old project: a take and its held note go unwritten, the
+    /// selected channel and track, the mixer's solo memory and the windows showing the old project's things.
+    #[test]
+    fn new_forgets_the_old_project() {
+        let mut app = app();
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 30.0, false);
+        assert!(app.state.rec.holding());
+        app.state.selected_channel = 3;
+        app.state.selected_mixer = 7;
+        app.state.mixer.solo = Some((vec![7], vec![(1, true)]));
+        app.state.raise(crate::app::Win::Events);
+        assert!(app.state.z.contains(&crate::app::Win::Events));
+        app.empty_project();
+        app.record_tick();
+        assert!(!app.state.rec.recording() && app.state.rec.armed);
+        assert!(app.state.project.patterns.iter().all(|p| p.notes.is_empty()), "the held note was not written into the new project");
+        assert_eq!((app.state.selected_channel, app.state.selected_mixer), (0, 1));
+        assert!(app.state.mixer.solo.is_none());
+        assert!(!app.state.z.contains(&crate::app::Win::Events));
     }
 
     /// MIDI channel through (spec: ui/channel-rack.md §18): a note recorded from a MIDI device takes the MIDI channel it
