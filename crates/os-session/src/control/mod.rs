@@ -286,9 +286,11 @@ pub fn run_in(s: &mut crate::session::Session, commands: Vec<Command>) -> Result
     let mut undo = Vec::with_capacity(commands.len());
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
+        let on_off = c.on_off_undo(s);
         match c.apply(s) {
             Ok(done) => {
                 undo.push(done.undo);
+                undo.extend(on_off);
                 results.push(done.result);
                 s.control.settle(s.project.get_mut());
             }
@@ -408,6 +410,7 @@ fn region_key(c: &Command) -> Option<(u8, u32, u32)> {
         Taken::Param(owner, param, _) => (5, *owner, *param),
         Taken::Plugin(owner, _) => (6, *owner, 0),
         Taken::Mutes(_) => (7, 0, 0),
+        Taken::TracksOn(_) => (9, 0, 0),
         Taken::Row(id, _) => (8, *id, 0),
         Taken::Project(_) | Taken::Links(_) | Taken::Gone(_) | Taken::Back(_) => return None,
     })

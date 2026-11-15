@@ -281,6 +281,8 @@ pub enum Taken {
     Project(Box<Side>),
     /// Which channels are on, by id (a channel muted or soloed).
     Mutes(Vec<(u32, bool)>),
+    /// Which mixer tracks are on, by id (a client's `set_track` switching one on or off: the step's own undo).
+    TracksOn(Vec<(u32, bool)>),
     /// Remote control links re-pointed (a wrap moving plugins into a container, `crate::container`): each link on the
     /// first target of a pair goes onto the second. They are the program's settings, so this puts back only those links.
     Links(Vec<(crate::typein::Target, crate::typein::Target)>),
@@ -461,12 +463,14 @@ pub fn channel_row(p: &Project, id: u32) -> Result<usize, Error> {
 }
 
 /// A mixer track's number (0 = the master) by its id.
+/// A mixer track by id: one the `project` query lists, so not the hidden last track (`mixer::inserts`).
 pub fn track_number(p: &Project, id: u32) -> Result<u16, Error> {
-    p.mixer.iter().find(|m| m.id.0 == id).map(|m| m.index).ok_or_else(|| format!("no mixer track {id}"))
+    track_place(p, id).map(|i| p.mixer[i].index)
 }
 
 fn track_place(p: &Project, id: u32) -> Result<usize, Error> {
-    p.mixer.iter().position(|m| m.id.0 == id).ok_or_else(|| format!("no mixer track {id}"))
+    let hidden = p.mixer.len().saturating_sub(1) as u16;
+    p.mixer.iter().position(|m| m.id.0 == id && (m.index < hidden || p.mixer.len() < 2)).ok_or_else(|| format!("no mixer track {id}"))
 }
 
 pub fn pattern_place(p: &Project, id: u32) -> Result<usize, Error> {
@@ -663,6 +667,7 @@ impl Command {
                 Taken::Plugin(..) => return Err("a plugin state's undo is taken by `apply`".into()),
                 Taken::Project(_) => Taken::Project(Box::new(Side::of(s))),
                 Taken::Mutes(_) => mutes(p),
+                Taken::TracksOn(_) => tracks_on(p),
                 // The other way: the links back onto what they were on.
                 Taken::Links(pairs) => Taken::Links(pairs.iter().map(|&(a, b)| (b, a)).collect()),
                 Taken::Gone(thing) => Taken::Back(Box::new(match *thing {
@@ -720,6 +725,7 @@ impl Command {
             | Taken::Param(..)
             | Taken::Plugin(..)
             | Taken::Mutes(_)
+            | Taken::TracksOn(_)
             | Taken::Links(_)
             | Taken::Gone(_)
             | Taken::Row(..) => {}
@@ -1296,6 +1302,14 @@ fn put(s: &mut crate::session::Session, t: Taken) {
             }
             s.dirty = true;
         }
+        Taken::TracksOn(on) => {
+            for (id, v) in on {
+                if let Some(m) = s.project.get_mut().mixer.iter_mut().find(|m| m.id.0 == id) {
+                    m.enabled = v;
+                }
+            }
+            s.dirty = true;
+        }
     }
 }
 
@@ -1334,6 +1348,24 @@ fn put_back(s: &mut crate::session::Session, back: Back) {
 /// Which channels are on now (`Taken::Mutes`).
 fn mutes(p: &Project) -> Taken {
     Taken::Mutes(p.channels.iter().map(|c| (c.id.0, c.enabled)).collect())
+}
+
+/// Which mixer tracks are on now (`Taken::TracksOn`).
+fn tracks_on(p: &Project) -> Taken {
+    Taken::TracksOn(p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect())
+}
+
+impl Command {
+    /// The undo of what a command switches on or off, beside its own (`Taken::Channel` and `Taken::Track` keep a
+    /// channel or track on or off as it is, since an undo of another step leaves muting alone): `set_channel` and
+    /// `set_track` with `enabled`, taken before they apply.
+    pub fn on_off_undo(&self, s: &crate::session::Session) -> Option<Command> {
+        match self {
+            Command::SetChannel { enabled: Some(_), .. } => Some(Command::Put(Box::new(mutes(&s.project)))),
+            Command::SetTrack { enabled: Some(_), .. } => Some(Command::Put(Box::new(tracks_on(&s.project)))),
+            _ => None,
+        }
+    }
 }
 
 /// The whole project back (an undo of adding or deleting channels, tracks or patterns): the rack's own state with it,
