@@ -177,6 +177,7 @@ mod tests {
     /// and the reopened project hosts them again with that state; a second save keeps working on the saved file
     /// (spec: flp/events/plugins.md). The built-in Lemon plugins stand in for third-party plugins.
     #[test]
+    #[cfg(feature = "stock-parametric-eq-2")]
     fn hosted_plugins_save_and_reopen() {
         WRAP_BUILTINS.with(|w| w.set(true));
         let path = std::env::temp_dir().join(format!("openstudio-wrapped-{}.flp", std::process::id()));
@@ -240,6 +241,7 @@ mod tests {
     /// slot hosting one is saved wrapped with its state, and the reopened project hosts the built-in copy again with
     /// that state (Tesla's is its sample: its parameters are only its transport; Lemon Drop's is its display state).
     #[test]
+    #[cfg(feature = "stock-drop")]
     fn linked_effects_save_wrapped_and_reopen() {
         use crate::plugins::LINKED_EFFECTS;
         let path = std::env::temp_dir().join(format!("openstudio-linked-fx-{}.flp", std::process::id()));
@@ -465,6 +467,7 @@ mod tests {
     /// recreations move to the installed plugins, started from the file's state, and back again; the settings stay
     /// in the project across each move (spec: plugins/fruity-abi.md "Opened projects").
     #[test]
+    #[cfg(all(feature = "stock-parametric-eq-2", feature = "stock-trio"))]
     fn real_native_plugins_replace_the_open_recreations_and_back() {
         use crate::osc3::{FILE_NAME as OSC3_FILE, LEMON_TRIO};
         use crate::plugins::EQ_FILE_NAME;
@@ -539,6 +542,7 @@ mod tests {
     /// (playback, an automation clip) changed its state; once edited, it is saved as what it is, and from then on as any
     /// hosted plugin. The built-in Lemon Parametric EQ (a CLAP plugin) stands in.
     #[test]
+    #[cfg(feature = "stock-parametric-eq-2")]
     fn copies_in_another_format_start_from_their_defaults() {
         WRAP_BUILTINS.with(|w| w.set(true));
         let mut a = App::new(None);

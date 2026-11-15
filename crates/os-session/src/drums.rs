@@ -32,12 +32,20 @@ pub fn is_fpc(ch: &Channel) -> bool {
 impl Plugins {
     /// The FPC state the Lemon Drum Sampler on rack row `row` plays, `None` when the row hosts something else.
     pub fn drums_file_state(&self, row: usize) -> Option<Vec<u8>> {
-        let h = self.hosted.get(&row)?;
-        let p = h.lock_for_state()?;
-        if p.desc().name != LEMON_DRUMS || !crate::project_plugins::is_builtin(p.desc()) {
-            return None;
+        #[cfg(feature = "stock-drum-sampler")]
+        {
+            let h = self.hosted.get(&row)?;
+            let p = h.lock_for_state()?;
+            if p.desc().name != LEMON_DRUMS || !crate::project_plugins::is_builtin(p.desc()) {
+                return None;
+            }
+            lemon_drum_sampler::params::fl_from_plugin_state(&p.save_state()?)
         }
-        lemon_drum_sampler::params::fl_from_plugin_state(&p.save_state()?)
+        #[cfg(not(feature = "stock-drum-sampler"))]
+        {
+            let _ = (self, row);
+            None
+        }
     }
 }
 
@@ -58,8 +66,16 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
 /// The plugin state for a channel's FPC state: every layer's stored sample path resolved for the plugin to open (FL's
 /// placeholders made real), the stored paths kept in the state.
 pub fn plugin_state(st: &crate::settings_file::SettingsStore, fl: &[u8]) -> Vec<u8> {
-    let paths: Vec<String> = lemon_drum_sampler::params::stored_paths(fl).iter().map(|p| crate::plugins::resolve_sample(st, p)).collect();
-    lemon_drum_sampler::params::plugin_state_from_fl(fl, &paths)
+    #[cfg(feature = "stock-drum-sampler")]
+    {
+        let paths: Vec<String> = lemon_drum_sampler::params::stored_paths(fl).iter().map(|p| crate::plugins::resolve_sample(st, p)).collect();
+        lemon_drum_sampler::params::plugin_state_from_fl(fl, &paths)
+    }
+    #[cfg(not(feature = "stock-drum-sampler"))]
+    {
+        let _ = st;
+        fl.to_vec()
+    }
 }
 
 /// Hosts Lemon Drum Sampler on every FPC channel without an instance, started from the channel's saved state (a new
@@ -102,7 +118,7 @@ pub fn sync_drums(s: &mut crate::session::Session) {
     s.touched.repaint = true;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stock-drum-sampler"))]
 mod tests {
     use super::*;
     use lemon_drum_sampler::state::State;

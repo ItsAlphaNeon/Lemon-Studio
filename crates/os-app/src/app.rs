@@ -4662,30 +4662,39 @@ impl App {
     /// Load does (spec: plugins/tesla/README.md "Sending slices to Lemon Slicer"). One undo step, "Add channel", as the
     /// plugin picker's.
     pub fn sample_to_slicer(&mut self, path: String) {
-        let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let path = crate::data_folder_ui::adopt(&mut self.state, &path);
-        let st = match lemon_slicer::file_state(&path, lemon_slicer::state::State::default()) {
-            Ok((st, _)) => st,
-            Err(e) => {
-                self.state.message = Some(format!("{}: {e}", crate::slicer::LEMON_SLICER));
-                return self.invalidate();
-            }
-        };
-        let n = st.slices.len();
-        crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
-            let s = &mut app.state;
-            let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
-            let ch = &mut s.session.project.get_mut().channels[row];
-            ch.name = Some(stem.clone());
-            ch.plugin_state = Some(st.to_bytes());
-            s.selected_channel = row;
-            s.rack.select_only(row);
-            crate::rack::autosize(s);
-            s.session.dirty = true;
-        });
-        self.state.message = Some(format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER));
-        self.sync_slicer();
-        self.invalidate();
+        #[cfg(feature = "stock-slicer")]
+        {
+            let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let path = crate::data_folder_ui::adopt(&mut self.state, &path);
+            let st = match lemon_slicer::file_state(&path, lemon_slicer::state::State::default()) {
+                Ok((st, _)) => st,
+                Err(e) => {
+                    self.state.message = Some(format!("{}: {e}", crate::slicer::LEMON_SLICER));
+                    return self.invalidate();
+                }
+            };
+            let n = st.slices.len();
+            crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
+                let s = &mut app.state;
+                let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
+                let ch = &mut s.session.project.get_mut().channels[row];
+                ch.name = Some(stem.clone());
+                ch.plugin_state = Some(st.to_bytes());
+                s.selected_channel = row;
+                s.rack.select_only(row);
+                crate::rack::autosize(s);
+                s.session.dirty = true;
+            });
+            self.state.message = Some(format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER));
+            self.sync_slicer();
+            self.invalidate();
+        }
+        #[cfg(not(feature = "stock-slicer"))]
+        {
+            let _ = path;
+            self.state.message = Some(format!("{} is not in this build", crate::slicer::LEMON_SLICER));
+            self.invalidate()
+        }
     }
 
     /// A sample a Lemon plugin sent (Tesla's "Send to arranger as audio clip" / "Send to selected channel" / "Send to
@@ -9907,6 +9916,7 @@ mod tests {
     /// Slots holding the file's parametric EQ get a Lemon Parametric EQ instance and show its name; adding the EQ
     /// stores the file's EQ (spec: plugins/lemon-parametric-eq-2.md §8).
     #[test]
+    #[cfg(feature = "stock-parametric-eq-2")]
     fn parametric_eq_slots_are_hosted() {
         use crate::plugins::{fx_key, EQ_FILE_NAME, LEMON_EQ};
         let mut a = App::new(None);
@@ -10005,6 +10015,7 @@ mod tests {
     /// A project's Maximus slots are opened as Press with their state, show Press's name and keep the file's Maximus,
     /// whose state Press writes back (spec: plugins/lemon-press.md §6).
     #[test]
+    #[cfg(feature = "stock-press")]
     fn maximus_slots_open_as_press() {
         use crate::plugins::{MAXIMUS_FILE_NAME, PRESS, fx_key};
         use os_engine::effects::maximus::state::{P_LMH_MIX, State};
@@ -10042,6 +10053,7 @@ mod tests {
     /// engine's (its difference output is the slot's alone).
     // spec: plugins/lemon-small-effects.md "Opened projects' slots"
     #[test]
+    #[cfg(all(feature = "stock-reverb", feature = "stock-balance", feature = "stock-chorus"))]
     fn fl_effect_slots_open_as_their_lemon_recreations() {
         use crate::plugins::fx_key;
         let mut reverb = lemon_reverb::params::default_state();
@@ -10087,6 +10099,7 @@ mod tests {
     /// Candy with the same bytes.
     // spec: plugins/lemon-drop.md "Projects"
     #[test]
+    #[cfg(feature = "stock-drop")]
     fn wave_candy_slots_open_as_lemon_drop() {
         use crate::plugins::fx_key;
         let mut st = lemon_drop::state::State::new_default();

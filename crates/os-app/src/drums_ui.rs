@@ -20,7 +20,7 @@ impl crate::app::App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stock-drum-sampler"))]
 mod tests {
     use super::*;
     use crate::app::App;

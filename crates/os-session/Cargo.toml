@@ -10,7 +10,9 @@ default = [
     "vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc",
     "stock-soft-clipper", "stock-fast-distortion", "stock-balance", "stock-stereo-enhancer",
     "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
-    "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder",
+    "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder", "stock-limiter",
+    "stock-reverb", "stock-delay", "stock-pulp-filter", "stock-press", "stock-parametric-eq-2", "stock-drop",
+    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler",
 ]
 # Hosting VST 3 and VST 2 plugins (off: CLAP and the stock plugins only).
 vst3 = ["dep:os-vst3"]
@@ -47,6 +49,18 @@ stock-phaser = ["dep:lemon-phaser"]
 stock-peak-controller = ["dep:lemon-peak-controller"]
 stock-formula-controller = ["dep:lemon-formula-controller"]
 stock-vocoder = ["dep:lemon-vocoder"]
+stock-limiter = ["dep:lemon-limiter"]
+stock-reverb = ["dep:lemon-reverb"]
+stock-delay = ["dep:lemon-delay"]
+stock-pulp-filter = ["dep:pulp-filter"]
+stock-press = ["dep:press"]
+stock-parametric-eq-2 = ["dep:lemon-parametric-eq-2"]
+stock-drop = ["dep:lemon-drop"]
+stock-trio = ["dep:lemon-3x-osc"]
+stock-citrus = ["dep:citrus"]
+stock-smith = ["dep:smith"]
+stock-slicer = ["dep:lemon-slicer"]
+stock-drum-sampler = ["dep:lemon-drum-sampler"]
 
 [dependencies]
 os-model.workspace = true
@@ -61,14 +75,14 @@ os-vst3 = { workspace = true, optional = true }
 os-vst2 = { workspace = true, optional = true }
 os-paths.workspace = true
 lemon-sampler = { path = "../../plugins/lemon-sampler", default-features = false, features = ["linked"] }
-lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", default-features = false, features = ["linked"] }
-lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", default-features = false, features = ["linked"] }
-citrus = { path = "../../plugins/citrus", default-features = false, features = ["linked"] }
-smith = { path = "../../plugins/smith", default-features = false, features = ["linked"] }
-lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", default-features = false, features = ["linked"] }
-lemon-limiter = { path = "../../plugins/lemon-limiter", default-features = false, features = ["linked"] }
-lemon-reverb = { path = "../../plugins/lemon-reverb", default-features = false, features = ["linked"] }
-lemon-delay = { path = "../../plugins/lemon-delay", default-features = false, features = ["linked"] }
+lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", optional = true, default-features = false, features = ["linked"] }
+lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", optional = true, default-features = false, features = ["linked"] }
+citrus = { path = "../../plugins/citrus", optional = true, default-features = false, features = ["linked"] }
+smith = { path = "../../plugins/smith", optional = true, default-features = false, features = ["linked"] }
+lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", optional = true, default-features = false, features = ["linked"] }
+lemon-limiter = { path = "../../plugins/lemon-limiter", optional = true, default-features = false, features = ["linked"] }
+lemon-reverb = { path = "../../plugins/lemon-reverb", optional = true, default-features = false, features = ["linked"] }
+lemon-delay = { path = "../../plugins/lemon-delay", optional = true, default-features = false, features = ["linked"] }
 lemon-soft-clipper = { path = "../../plugins/lemon-soft-clipper", optional = true, default-features = false, features = ["linked"] }
 lemon-fast-distortion = { path = "../../plugins/lemon-fast-distortion", optional = true, default-features = false, features = ["linked"] }
 lemon-balance = { path = "../../plugins/lemon-balance", optional = true, default-features = false, features = ["linked"] }
@@ -79,15 +93,15 @@ lemon-small-fx = { path = "../../plugins/lemon-small-fx", default-features = fal
 lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", optional = true, default-features = false, features = ["linked"] }
 lemon-filter = { path = "../../plugins/lemon-filter", optional = true, default-features = false, features = ["linked"] }
 tesla = { path = "../../plugins/tesla", default-features = false, features = ["linked"] }
-pulp-filter = { path = "../../plugins/pulp-filter", default-features = false, features = ["linked"] }
-press = { path = "../../plugins/press", default-features = false, features = ["linked"] }
+pulp-filter = { path = "../../plugins/pulp-filter", optional = true, default-features = false, features = ["linked"] }
+press = { path = "../../plugins/press", optional = true, default-features = false, features = ["linked"] }
 lemon-flanger = { path = "../../plugins/lemon-flanger", optional = true, default-features = false, features = ["linked"] }
 lemon-phaser = { path = "../../plugins/lemon-phaser", optional = true, default-features = false, features = ["linked"] }
 lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", optional = true, default-features = false, features = ["linked"] }
 lemon-formula-controller = { path = "../../plugins/lemon-formula-controller", optional = true, default-features = false, features = ["linked"] }
-lemon-slicer = { path = "../../plugins/lemon-slicer", default-features = false, features = ["linked"] }
+lemon-slicer = { path = "../../plugins/lemon-slicer", optional = true, default-features = false, features = ["linked"] }
 lemon-vocoder = { path = "../../plugins/lemon-vocoder", optional = true, default-features = false, features = ["linked"] }
-lemon-drop = { path = "../../plugins/lemon-drop", default-features = false, features = ["linked"] }
+lemon-drop = { path = "../../plugins/lemon-drop", optional = true, default-features = false, features = ["linked"] }
 cpal = { version = "0.18", optional = true }
 crossbeam-queue = "0.3"
 midir = { version = "0.11", optional = true }

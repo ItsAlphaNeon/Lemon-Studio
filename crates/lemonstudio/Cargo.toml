@@ -14,7 +14,9 @@ default = [
     "vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc",
     "stock-soft-clipper", "stock-fast-distortion", "stock-balance", "stock-stereo-enhancer",
     "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
-    "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder",
+    "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder", "stock-limiter",
+    "stock-reverb", "stock-delay", "stock-pulp-filter", "stock-press", "stock-parametric-eq-2", "stock-drop",
+    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler",
 ]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-app/vst3"]
@@ -46,6 +48,18 @@ stock-phaser = ["os-app/stock-phaser"]
 stock-peak-controller = ["os-app/stock-peak-controller"]
 stock-formula-controller = ["os-app/stock-formula-controller"]
 stock-vocoder = ["os-app/stock-vocoder"]
+stock-limiter = ["os-app/stock-limiter"]
+stock-reverb = ["os-app/stock-reverb"]
+stock-delay = ["os-app/stock-delay"]
+stock-pulp-filter = ["os-app/stock-pulp-filter"]
+stock-press = ["os-app/stock-press"]
+stock-parametric-eq-2 = ["os-app/stock-parametric-eq-2"]
+stock-drop = ["os-app/stock-drop"]
+stock-trio = ["os-app/stock-trio"]
+stock-citrus = ["os-app/stock-citrus"]
+stock-smith = ["os-app/stock-smith"]
+stock-slicer = ["os-app/stock-slicer"]
+stock-drum-sampler = ["os-app/stock-drum-sampler"]
 
 [dependencies]
 os-app = { path = "../os-app", default-features = false }
