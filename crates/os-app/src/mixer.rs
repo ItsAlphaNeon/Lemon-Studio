@@ -404,6 +404,21 @@ fn follow_places(s: &mut State, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn F
         s.events.target = t;
     }
     crate::remote::follow(s, |l| moved_link(l, track, slot));
+    // The container window follows its slot, and the palette the track a container's pick goes to; a place that goes
+    // closes them.
+    let (t, k) = s.container.at;
+    if k != crate::container::CHANNEL {
+        match slot(t, k) {
+            Some(at) => s.container.at = at,
+            None => s.hide(crate::app::Win::Container),
+        }
+    }
+    if let Some(t) = s.palette.track {
+        match track(t) {
+            Some(n) => s.palette.track = Some(n),
+            None => s.hide(crate::app::Win::PluginPalette),
+        }
+    }
 }
 
 /// Where remote control link target `l` goes as mixer places move (`follow_places`); `None`: its place went.
@@ -3425,6 +3440,19 @@ mod tests {
         assert_eq!(on(&a).len(), a.state.project.mixer.len());
         run(&mut a, MCmd::Solo(5));
         assert_eq!(on(&a), vec![0, 3, 5], "Solo keeps where 5 sends");
+    }
+
+    /// The container window follows its slot when its track moves, and so does the palette picking for it.
+    #[test]
+    fn the_container_window_follows_its_track() {
+        let mut a = app();
+        a.state.container.at = (3, 1);
+        a.state.raise(crate::app::Win::Container);
+        a.state.palette.track = Some(3);
+        a.state.raise(crate::app::Win::PluginPalette);
+        run(&mut a, MCmd::MoveLeft(3));
+        assert_eq!((a.state.container.at, a.state.palette.track), ((2, 1), Some(2)));
+        assert!(a.state.shown(crate::app::Win::Container) && a.state.shown(crate::app::Win::PluginPalette));
     }
 
     /// "Most recent" follows its effect's parameter when the effect's track moves.

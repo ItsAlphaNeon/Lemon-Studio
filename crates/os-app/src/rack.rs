@@ -1247,6 +1247,23 @@ pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
     };
     s.playlist.source = s.playlist.source.and_then(follow);
     s.playlist.lock_len = s.playlist.lock_len.and_then(|(c, len)| Some((follow(c)?, len)));
+    // The container window of a channel's container follows its channel, and the palette's row its row; a row that
+    // goes closes them.
+    let (r, k) = s.container.at;
+    if k == crate::container::CHANNEL {
+        match m(usize::from(r)) {
+            Some(n) => s.container.at = (n as u16, k),
+            None => s.hide(Win::Container),
+        }
+    }
+    use crate::plugin_menu::Target as Pick;
+    match s.palette.target {
+        Pick::Gen(Some(r)) | Pick::Replace(r) => match m(r) {
+            Some(n) => s.palette.target = if matches!(s.palette.target, Pick::Replace(_)) { Pick::Replace(n) } else { Pick::Gen(Some(n)) },
+            None => s.hide(Win::PluginPalette),
+        },
+        _ => {}
+    }
     // The event editor's target follows its channel; a channel that goes closes it.
     match target::moved_channel(s.events.target, |c| m(usize::from(c)).map(|r| r as u16)) {
         Some(t) => s.events.target = t,
@@ -3745,6 +3762,22 @@ mod tests {
     }
 
     /// Clone, move and delete renumber the channels' notes so each note keeps its channel (§17-18).
+    /// The container window of a channel's container follows the channel when it moves, and so does the palette
+    /// replacing a row's generator; both close when the row is deleted.
+    #[test]
+    fn the_container_window_follows_its_channel() {
+        let mut app = App::new(None);
+        app.state.container.at = (2, crate::container::CHANNEL);
+        app.state.raise(Win::Container);
+        app.state.palette.target = crate::plugin_menu::Target::Replace(2);
+        app.state.raise(Win::PluginPalette);
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        assert_eq!((app.state.container.at, app.state.palette.target), ((1, crate::container::CHANNEL), crate::plugin_menu::Target::Replace(1)));
+        delete_rows(&mut app, &[1]);
+        assert!(!app.state.shown(Win::Container) && !app.state.shown(Win::PluginPalette), "their row went");
+    }
+
     /// The event editor shows its channel's events after the channel moves, and closes when the channel is deleted.
     #[test]
     fn the_event_editor_follows_its_channel() {
