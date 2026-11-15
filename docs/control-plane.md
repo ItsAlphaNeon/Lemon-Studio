@@ -128,12 +128,15 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
   plugin picker, F8, ADD, a browser drop), coloured, named, cloned, moved and deleted, FILE ▸ Import ▸ MIDI file into
   the open project, and pattern colours, names, inserting, cloning, moving and deleting are undo steps too, as are the
   tempo, the project settings and plugin parameters, whether Lemon Studio sets them (Type in value, Set..., Paste
-  value) or they change in the plugin's own window. Faders and parameters follow "Undo knob tweaks". A change has the
+  value) or they change in the plugin's own window. Faders, parameters, the tempo and the channel's own controls follow
+  "Undo knob tweaks". A change has the
   same step name whichever made it ("Tempo", "Time signature", "Song info", "Plugin parameter").
 - So are the channel's own controls in a plugin window (volume, panning, pitch, pitch range, mixer track), the
   channel rack's mixer-track box, a pattern's time signature, arrangements added, cloned and deleted, arrangement,
-  pattern and effect-slot names, a clip's random colour and "Remove all audio editors". A drag or a run of wheel
-  notches on one box or knob is one step. The pattern length box and the Misc tab make none, as in FL.
+  pattern and effect-slot names, effect-slot colours, a clip's random colour and "Remove all audio editors". Each drag
+  of a box or knob is one step, and so is a run of wheel notches on one: a click, or a pause of a second, starts a
+  new one. An arrangement added and named at once is one step. The pattern length box, the Misc tab, channel
+  groups and Performance mode make none, as in FL. Advanced looping switched on turns loop mode on with it.
 - A channel muted, soloed or switched on or off is one step of its own ("Channel mute / solo") that follows "Undo knob
   tweaks", and a mixer track's mute and solo make none, as in FL. An undo or redo of any other step leaves every
   channel and track muted or not as it is (a client's `enabled` too).
