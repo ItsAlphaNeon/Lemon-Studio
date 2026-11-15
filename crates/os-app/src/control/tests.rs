@@ -1145,3 +1145,91 @@ fn a_session_without_a_window_serves_clients() {
     crate::control::server::serve_tick(&mut ses);
     assert_eq!(ses.touched, Default::default());
 }
+
+/// An add's undo removes what it made, and a move's moves it back, by id (control-plane step 13): what else changed
+/// meanwhile without a step of its own stays, which putting back the whole project would have undone.
+#[test]
+fn adds_and_moves_undo_by_their_inverse() {
+    let mut a = app();
+    let kick = ids(&a).0[0];
+    let length = |a: &App| a.state.session.project.patterns[0].length;
+    for c in [
+        json!({"op": "add_channel", "name": "Bass"}),
+        json!({"op": "add_track", "at": 2}),
+        json!({"op": "add_pattern", "name": "Fill"}),
+        json!({"op": "move_channel", "channel": kick, "row": 2}),
+    ] {
+        let what = c.to_string();
+        let before = ids(&a);
+        let r = apply(&mut a.state, &test_client(), None, vec![cmd(c)]).unwrap();
+        a.state.session.control.settle(a.state.session.project.get_mut());
+        let after = ids(&a);
+        // The pattern length box makes no step (`ui/undo-steps.md`).
+        let l = Some(length(&a).unwrap_or(0) + 96);
+        a.state.session.project.get_mut().patterns[0].length = l;
+        crate::history_ui::undo(&mut a.state).unwrap();
+        assert_eq!(ids(&a), before, "{what} undone");
+        assert_eq!(length(&a), l, "{what}: its undo leaves the pattern's length");
+        crate::history_ui::redo(&mut a.state).unwrap();
+        assert_eq!(ids(&a), after, "{what} redone with the same ids");
+        if let Some(id) = r[0].as_object().and_then(|o| o.values().next()).and_then(Value::as_u64) {
+            assert!(after.0.contains(&(id as u32)) || after.1.contains(&(id as u32)) || after.2.contains(&(id as u32)), "{what}: its id is back");
+        }
+    }
+}
+
+/// An added channel's instrument goes with its undo and is hosted again with its redo.
+#[test]
+fn an_added_channel_s_instrument_follows_its_undo_and_redo() {
+    let mut a = app();
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.available = crate::plugins::builtin();
+    a.plugin_tick();
+    a.plugin_tick();
+    let rows = |a: &App| a.state.session.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, h)| (r, h.owner.0)).collect::<Vec<_>>();
+    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false, token: None };
+    let before = rows(&a);
+    a.rpc(&mut c, "apply", &json!({"command": {"op": "add_channel", "name": "Bass"}})).ok().unwrap();
+    a.plugin_tick();
+    a.plugin_tick();
+    let added = rows(&a);
+    assert_eq!(added.len(), before.len() + 1, "the new sampler is hosted");
+    a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
+    a.plugin_tick();
+    assert_eq!(rows(&a), before, "its instance goes with the undo");
+    a.rpc(&mut c, "redo", &Value::Null).ok().unwrap();
+    a.plugin_tick();
+    a.plugin_tick();
+    assert_eq!(rows(&a), added, "and is hosted again for its channel");
+}
+
+/// A client's gesture (control-plane step 13): the commands applied between `begin` and `end` are one step that puts
+/// back what was there before the gesture; a step in between starts a new one; an ended gesture takes no more.
+#[test]
+fn a_gesture_is_one_step() {
+    let mut a = app();
+    let kick = ids(&a).0[0];
+    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false, token: None };
+    let volume = |a: &App| a.state.session.project.channels[0].volume;
+    let (v0, t0) = (volume(&a), a.state.tempo());
+    let steps = a.state.session.history.at();
+    let g = a.rpc(&mut c, "begin", &json!({"name": "Fader drag"})).ok().unwrap()["gesture"].as_u64().unwrap();
+    for v in [0.3, 0.4, 0.5] {
+        a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_channel", "channel": kick, "volume": v}})).ok().unwrap();
+    }
+    assert_eq!(a.state.session.history.at(), steps + 1, "one step for the gesture");
+    assert_eq!(a.state.session.history.newest_done(), Some("Test: fader drag"));
+    a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
+    assert_eq!(volume(&a), v0, "the undo puts back the value before the gesture");
+    a.rpc(&mut c, "redo", &Value::Null).ok().unwrap();
+    assert_eq!(volume(&a), 0.5, "the redo gives the last");
+    // After the undo and redo the gesture goes on in a step of its own.
+    a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_channel", "channel": kick, "volume": 0.6}})).ok().unwrap();
+    a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_tempo", "bpm": 99.0}})).ok().unwrap();
+    assert_eq!(a.state.session.history.at(), steps + 2);
+    a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
+    assert_eq!((volume(&a), a.state.tempo()), (0.5, t0), "both regions back as they were before the step");
+    a.rpc(&mut c, "end", &json!({"gesture": g})).ok().unwrap();
+    assert!(a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_tempo", "bpm": 98.0}})).is_err(), "an ended gesture is gone");
+    assert!(a.rpc(&mut c, "end", &json!({"gesture": g})).is_err());
+}

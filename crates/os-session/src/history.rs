@@ -248,6 +248,8 @@ pub enum Run {
     Channel(usize, ChannelControl),
     /// A controller moving the wet (`.3`) or dry level of member `.2` of the container in slot `.1` of track `.0`.
     Member(u16, u8, u32, bool),
+    /// A client's gesture (`control::begin_in`).
+    Gesture(u64),
 }
 
 /// A channel control a run of changes goes to (`Run::Channel`).
@@ -273,6 +275,13 @@ impl History {
     /// The run ends: the next change is a step of its own.
     pub fn end_run(&mut self) {
         self.run = None;
+    }
+
+    /// Run `r` ends, if it is the newest step's.
+    pub fn end_run_of(&mut self, r: Run) {
+        if self.run == Some(r) {
+            self.run = None;
+        }
     }
 
     /// How many steps there are ("Last reset" not counted).

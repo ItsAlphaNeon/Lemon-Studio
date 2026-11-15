@@ -131,6 +131,9 @@ pub struct Control {
     pub watched: bool,
     /// How many things the project had at the last `settle` (`settle_tick`).
     counted: [usize; 11],
+    /// Clients' gestures under way (`begin_in`): their number and the name of their step.
+    gestures: std::collections::BTreeMap<u64, Option<String>>,
+    gesture_seq: u64,
 }
 
 impl Control {
@@ -214,6 +217,7 @@ impl Control {
         self.states.clear();
         self.known.clear();
         self.proposals.clear();
+        self.gestures.clear();
         self.seen = None;
     }
 }
@@ -338,6 +342,75 @@ pub fn apply_in(s: &mut crate::session::Session, by: &By, name: Option<&str>, co
     s.control.saw(&s.project, tempo);
     s.control.event(by, "apply", step, ops);
     Ok(results)
+}
+
+/// Starts a gesture: a change a client streams as it is made (a fader dragged), commands applied in it
+/// (`apply_run_in`) making one undo step, named `name` (by default its first commands' name), until `end_in`. Returns
+/// its number.
+pub fn begin_in(s: &mut crate::session::Session, name: Option<&str>) -> u64 {
+    let c = &mut s.control;
+    c.gesture_seq += 1;
+    c.gestures.insert(c.gesture_seq, name.map(str::to_string));
+    c.gesture_seq
+}
+
+/// Applies `commands` in gesture `n` (`begin_in`): they join the gesture's step while it is the newest, keeping what
+/// each region was before the gesture; after any other step (or an undo) they make a new step that the gesture goes on
+/// in.
+pub fn apply_run_in(s: &mut crate::session::Session, by: &By, n: u64, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    let name = s.control.gestures.get(&n).ok_or_else(|| format!("no gesture {n}"))?.clone();
+    if commands.is_empty() {
+        return Ok(Vec::new());
+    }
+    let r = crate::history::Run::Gesture(n);
+    if !s.history.joins(r) {
+        let results = apply_in(s, by, name.as_deref(), commands)?;
+        s.history.set_run(r);
+        return Ok(results);
+    }
+    let ops: Vec<&'static str> = commands.iter().map(op).collect();
+    let (results, undo) = run_in(s, commands)?;
+    crate::history::extend_newest(s, |held| join_undo(held, undo));
+    let tempo = s.tempo();
+    s.control.saw(&s.project, tempo);
+    let step = s.history.newest_done().unwrap_or_default().to_string();
+    s.control.event(by, "apply", step, ops);
+    Ok(results)
+}
+
+/// Ends gesture `n`: the next command is a step of its own.
+pub fn end_in(s: &mut crate::session::Session, n: u64) -> Result<(), String> {
+    s.control.gestures.remove(&n).ok_or_else(|| format!("no gesture {n}"))?;
+    s.history.end_run_of(crate::history::Run::Gesture(n));
+    Ok(())
+}
+
+/// A gesture step's undo commands `held` with the newer `undo` before them: a region the step already puts back is
+/// not taken again (the step puts it back as it was before the gesture), so a long drag keeps one of each.
+fn join_undo(held: &mut Vec<Command>, undo: Vec<Command>) {
+    let keys: std::collections::HashSet<_> = held.iter().filter_map(region_key).collect();
+    let mut v: Vec<Command> = undo.into_iter().filter(|c| region_key(c).is_none_or(|k| !keys.contains(&k))).collect();
+    v.append(held);
+    *held = v;
+}
+
+/// What an undo command puts back, for `join_undo`: two with the same key put back the same thing. `None`: one that
+/// is kept whatever else the step holds (a whole project, links, an add's undo).
+fn region_key(c: &Command) -> Option<(u8, u32, u32)> {
+    use command::Taken;
+    let Command::Put(t) = c else { return None };
+    Some(match &**t {
+        Taken::Settings(_) => (0, 0, 0),
+        Taken::Channel(c) => (1, c.id.0, 0),
+        Taken::Track(m) => (2, m.id.0, 0),
+        Taken::Pattern(p) => (3, p.id.0, 0),
+        Taken::Arrangement(a) => (4, a.id.0, 0),
+        Taken::Param(owner, param, _) => (5, *owner, *param),
+        Taken::Plugin(owner, _) => (6, *owner, 0),
+        Taken::Mutes(_) => (7, 0, 0),
+        Taken::Row(id, _) => (8, *id, 0),
+        Taken::Project(_) | Taken::Links(_) | Taken::Gone(_) | Taken::Back(_) => return None,
+    })
 }
 
 /// Records an interface edit's step. A step of the same press that changed nothing goes first (a text box's playlist
