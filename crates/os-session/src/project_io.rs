@@ -158,8 +158,8 @@ pub fn leave_in(ses: &mut Session) {
     ses.control.reset();
 }
 
-/// `project`, read from `file` at `path`, becomes the session's, after `leave_in`. The interface then sets its views (`App::open`) and starts the loading
-/// (`start_loading`).
+/// `project`, read from `file` at `path`, becomes the session's, after `leave_in`. The interface then sets its views
+/// (`App::open`) and starts the loading (`start_loading`).
 pub fn open_in(ses: &mut Session, file: os_flp::FlpFile, mut project: os_model::Project, path: std::path::PathBuf) {
     leave_in(ses);
     // As saved (event 9); a file without it opens in song mode, as in FL 26 (spec: flp/engine-events.md "Project").
