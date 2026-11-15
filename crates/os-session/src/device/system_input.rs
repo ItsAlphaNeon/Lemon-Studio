@@ -17,10 +17,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "device")]
 use cpal::traits::{DeviceTrait, StreamTrait};
+#[cfg(feature = "device")]
 use cpal::{BufferSize, FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize};
 
+#[cfg_attr(not(feature = "device"), allow(unused_imports))]
 use super::{input_ring, INPUT_CHANNELS};
+#[cfg_attr(not(feature = "device"), allow(unused_imports))]
 use crate::audio_cfg::{self, AudioCfg};
 
 /// The input device as the mixer offers it.
@@ -85,7 +89,15 @@ pub fn info() -> Option<Info> {
     c.found.clone()
 }
 
+/// No input device: the system's are not in this build.
+#[cfg(not(feature = "device"))]
+fn ask(cfg: &AudioCfg) -> Option<Info> {
+    let _ = cfg;
+    None
+}
+
 /// Asks the host `cfg` plays on for the input device `cfg` records from.
+#[cfg(feature = "device")]
 fn ask(cfg: &AudioCfg) -> Option<Info> {
     let device = audio_cfg::input_device(cfg)?;
     let channels = usize::from(input_config(&device).ok()?.channels()).min(INPUT_CHANNELS);
@@ -94,6 +106,7 @@ fn ask(cfg: &AudioCfg) -> Option<Info> {
 
 /// The format an input device records in: its default, else the first it lists at its highest rate (a device that
 /// reports no default format is still offered and opened, rather than left out).
+#[cfg(feature = "device")]
 pub fn input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
     device.default_input_config().or_else(|e| {
         let listed = device.supported_input_configs().ok().and_then(|mut cs| cs.next()).map(|c| c.with_max_sample_rate());
@@ -103,6 +116,7 @@ pub fn input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig
 
 /// The open input stream. Dropped, it stops and the ring has no inputs again.
 pub struct SystemInput {
+    #[cfg(feature = "device")]
     stream: Option<cpal::Stream>,
     /// The device it opened (`audio_cfg::device_name`): another one chosen, or another default, opens anew.
     pub name: String,
@@ -113,6 +127,7 @@ pub struct SystemInput {
 
 impl Drop for SystemInput {
     fn drop(&mut self) {
+        #[cfg(feature = "device")]
         drop(self.stream.take());
         input_ring().open(0, 0);
         if self.alsa {
@@ -128,8 +143,16 @@ impl SystemInput {
     }
 }
 
+/// Audio input is not in this build: opening the input device fails.
+#[cfg(not(feature = "device"))]
+pub fn open(cfg: &AudioCfg, rate: u32, block: Option<u32>) -> Result<SystemInput, String> {
+    let _ = (cfg, rate, block);
+    Err("audio input is not in this build".into())
+}
+
 /// Opens the input device of `cfg` (`audio_cfg::input_device`) at `rate` (the output's), with blocks of about `block`
 /// frames.
+#[cfg(feature = "device")]
 pub fn open(cfg: &AudioCfg, rate: u32, block: Option<u32>) -> Result<SystemInput, String> {
     let host = audio_cfg::host(cfg);
     let device = audio_cfg::input_device(cfg).ok_or("no audio input device")?;
@@ -170,6 +193,7 @@ pub fn open(cfg: &AudioCfg, rate: u32, block: Option<u32>) -> Result<SystemInput
     Ok(SystemInput { stream: Some(stream), name, failed, alsa: host.id().name() == "ALSA" })
 }
 
+#[cfg(feature = "device")]
 fn build_any(device: &cpal::Device, format: SampleFormat, config: &StreamConfig, rate: u32, failed: Arc<AtomicBool>) -> Result<cpal::Stream, String> {
     match format {
         SampleFormat::F32 => build::<f32>(device, config, rate, failed),
@@ -182,6 +206,7 @@ fn build_any(device: &cpal::Device, format: SampleFormat, config: &StreamConfig,
     }
 }
 
+#[cfg(feature = "device")]
 fn build<T>(device: &cpal::Device, config: &StreamConfig, rate: u32, failed: Arc<AtomicBool>) -> Result<cpal::Stream, String>
 where
     T: SizedSample,
@@ -220,6 +245,7 @@ where
 }
 
 /// Linear resampling from the device's rate to the output's, block by block (`None` when they are the same).
+#[cfg_attr(not(feature = "device"), allow(dead_code))]
 struct Resampler {
     /// Input frames per output frame.
     step: f64,
@@ -231,6 +257,7 @@ struct Resampler {
     out: Vec<f32>,
 }
 
+#[cfg_attr(not(feature = "device"), allow(dead_code))]
 impl Resampler {
     fn new(from: u32, to: u32, ch: usize) -> Option<Resampler> {
         (from != to && from > 0 && to > 0).then(|| Resampler {

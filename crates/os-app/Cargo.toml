@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "rpc"]
+default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "rpc"]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-session/vst3"]
 vst2 = ["os-session/vst2"]
@@ -16,6 +16,8 @@ export-mp3 = ["os-session/export-mp3"]
 export-ogg = ["os-session/export-ogg"]
 # The system's MIDI ports.
 midi-io = ["os-session/midi-io", "dep:midir"]
+# The system's audio devices (the session's feature).
+device = ["os-session/device"]
 # Listening for control-plane clients.
 rpc = ["os-session/rpc"]
 

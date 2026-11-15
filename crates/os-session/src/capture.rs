@@ -197,12 +197,16 @@ pub fn devices() -> Vec<(String, bool, u16)> {
         let opened = crate::device::last().filter(|d| d.host == crate::device::ASIO && d.name == name).map(|d| d.inputs);
         return vec![(name.to_string(), true, opened.unwrap_or(2))];
     }
-    system_inputs()
+    #[cfg(feature = "device")]
+    return system_inputs();
+    #[cfg(not(feature = "device"))]
+    Vec::new()
 }
 
 /// The system's input devices and their channels (on Linux the sound server's, or ALSA's in exclusive mode, as the
 /// output): the one Settings > Audio records from (else the system's default) first, asked for on its own so that it
 /// is there even when the list leaves it out, then the others. A device that reports no format is listed with none.
+#[cfg(feature = "device")]
 fn system_inputs() -> Vec<(String, bool, u16)> {
     use cpal::traits::HostTrait;
     use crate::device::system_input::input_config;
@@ -223,6 +227,7 @@ fn system_inputs() -> Vec<(String, bool, u16)> {
 /// A system input device's stream, recording while it is held.
 pub struct InputStream {
     /// Taken when dropped: an ALSA device is let go of before the sound server is given it back.
+    #[cfg(feature = "device")]
     stream: Option<cpal::Stream>,
     alsa: bool,
     pub rate: u32,
@@ -230,6 +235,7 @@ pub struct InputStream {
 
 impl Drop for InputStream {
     fn drop(&mut self) {
+        #[cfg(feature = "device")]
         drop(self.stream.take());
         if self.alsa {
             crate::device::heal_sound_server();
@@ -237,7 +243,14 @@ impl Drop for InputStream {
     }
 }
 
+/// Audio input is not in this build: opening a device fails.
+#[cfg(not(feature = "device"))]
+pub fn open_input(name: &str) -> Result<InputStream, String> {
+    Err(format!("{name}: audio input is not in this build"))
+}
+
 /// Opens system input device `name` in shared mode at its own rate, pushing into `capture`.
+#[cfg(feature = "device")]
 pub fn open_input(name: &str) -> Result<InputStream, String> {
     use cpal::traits::StreamTrait;
     use cpal::SampleFormat;
@@ -260,6 +273,7 @@ pub fn open_input(name: &str) -> Result<InputStream, String> {
     Ok(InputStream { stream: Some(stream), alsa, rate: config.sample_rate })
 }
 
+#[cfg(feature = "device")]
 fn build<T>(device: &cpal::Device, config: &cpal::StreamConfig) -> Result<cpal::Stream, String>
 where
     T: cpal::SizedSample,

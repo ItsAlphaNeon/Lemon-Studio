@@ -33,6 +33,10 @@ pub struct Config {
     pub rate: u32,
 }
 
+/// The device a build without the system's devices (feature `device` off) plays on when none is set.
+#[cfg_attr(feature = "device", allow(dead_code))]
+pub const STANDARD: Config = Config { block: 512, rate: 48000 };
+
 /// `None`: not set yet (`OS_SIM_DEVICE` is read on first use).
 static CONFIG: Mutex<Option<Option<Config>>> = Mutex::new(None);
 
