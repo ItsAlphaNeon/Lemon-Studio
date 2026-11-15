@@ -233,8 +233,8 @@ pub struct MixerUi {
     /// When the meters last advanced.
     pub meter_at: Option<std::time::Instant>,
     /// The last solo: the tracks it kept on and the states (track, enabled) from before the first solo, put back by
-    /// unsolo when "Restore previous state after solo" is on.
-    pub solo: Option<(Vec<u16>, Vec<(u16, bool)>)>,
+    /// unsolo when "Restore previous state after solo" is on. By track id: a track keeps them when it moves.
+    pub solo: Option<(Vec<u32>, Vec<(u32, bool)>)>,
     /// The track and effect slot the wheel last moved, and where the mouse was then (`slot_wheel`).
     pub wheel_grab: Option<(u16, u8, (f32, f32))>,
     /// View ▸ Waveforms (Lemon Studio's design, saved in `.lemon` files, `lemon_state`): each strip's meter shows its recent peaks as a waveform
@@ -1169,19 +1169,21 @@ pub fn solo_with(s: &mut State, n: u16, alt: bool) {
         keep.extend(reach(s, n, false));
     }
     keep.push(0);
+    s.control.settle(&mut s.project);
+    let keep: Vec<u32> = keep.iter().filter_map(|&t| track(s, t)).map(|m| m.id.0).collect();
     let soloed = audible_set(s, &keep);
     // A solo still in effect (the last solo's set, untouched since) keeps the states saved when it started.
     let in_solo = s.mixer.solo.as_ref().is_some_and(|(k, _)| audible_set(s, k));
     let before = match s.mixer.solo.take() {
         Some((_, b)) if in_solo => b,
-        _ => s.project.mixer.iter().map(|m| (m.index, m.enabled)).collect(),
+        _ => s.project.mixer.iter().map(|m| (m.id.0, m.enabled)).collect(),
     };
     let back = soloed && in_solo && crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO);
     for m in s.project.mixer.iter_mut() {
         m.enabled = if back {
-            before.iter().find(|b| b.0 == m.index).is_none_or(|b| b.1)
+            before.iter().find(|b| b.0 == m.id.0).is_none_or(|b| b.1)
         } else {
-            soloed || keep.contains(&m.index)
+            soloed || keep.contains(&m.id.0)
         };
     }
     if !soloed {
@@ -1190,9 +1192,9 @@ pub fn solo_with(s: &mut State, n: u16, alt: bool) {
     changed(s);
 }
 
-/// The tracks on besides the master are exactly `keep`.
-fn audible_set(s: &State, keep: &[u16]) -> bool {
-    s.project.mixer.iter().all(|m| m.index == 0 || keep.contains(&m.index) == m.enabled)
+/// The tracks on besides the master are exactly `keep` (track ids).
+fn audible_set(s: &State, keep: &[u32]) -> bool {
+    s.project.mixer.iter().all(|m| m.index == 0 || keep.contains(&m.id.0) == m.enabled)
 }
 
 /// `n` and every track it reaches through sends (`down`), or every track reaching it (`!down`).
@@ -3418,6 +3420,21 @@ mod tests {
         assert_eq!(on(&a).len(), a.state.project.mixer.len());
         run(&mut a, MCmd::Solo(5));
         assert_eq!(on(&a), vec![0, 3, 5], "Solo keeps where 5 sends");
+    }
+
+    /// A soloed track that moves keeps its solo: unsolo there puts back the states from before it ("Restore previous
+    /// state after solo"), not all tracks on.
+    #[test]
+    fn a_moved_solo_restores_the_states_from_before() {
+        crate::prefs::set_check(&crate::prefs::RESTORE_AFTER_SOLO, true);
+        let mut a = app();
+        track_mut(&mut a.state, 4).unwrap().enabled = false;
+        let off = |a: &App| a.state.project.mixer.iter().filter(|m| !m.enabled).map(|m| m.index).collect::<Vec<_>>();
+        run(&mut a, MCmd::Solo(3));
+        run(&mut a, MCmd::MoveLeft(3));
+        assert!(track(&a.state, 2).unwrap().enabled && !track(&a.state, 3).unwrap().enabled, "the soloed track moved to 2");
+        run(&mut a, MCmd::Solo(2));
+        assert_eq!(off(&a), vec![4], "the states from before the solo");
     }
 
     #[test]
