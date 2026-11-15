@@ -375,6 +375,17 @@ pub fn builtin() -> Vec<Available> {
     v
 }
 
+/// A stock plugin's CLAP entry table when its feature is on (`None`: not in this build).
+macro_rules! stock {
+    ($feature:literal, $krate:ident) => {{
+        #[cfg(feature = $feature)]
+        let e = Some(&$krate::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void);
+        #[cfg(not(feature = $feature))]
+        let e = None;
+        e
+    }};
+}
+
 /// Lemon Parametric EQ, Pulp Filter and Press, compiled in the same way (`FILE_MAPPED`): offered for every mixer slot,
 /// and they play the slots a project saved with the original EQ, Love Philter and Maximus (spec:
 /// plugins/lemon-parametric-eq-2.md §8, plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6). Then Lemon Studio's other effects (`LINKED_EFFECTS`), compiled in too, so
@@ -382,31 +393,31 @@ pub fn builtin() -> Vec<Available> {
 pub fn builtin_effects() -> Vec<Available> {
     const N: usize = FILE_MAPPED.len() + LINKED_EFFECTS.len();
     static LIBS: [OnceLock<Option<Arc<os_clap::Library>>>; N] = [const { OnceLock::new() }; N];
-    let entries: [*const std::ffi::c_void; N] = [
-        &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &pulp_filter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &press::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_limiter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_reverb::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_delay::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_soft_clipper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_fast_distortion::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_balance::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_stereo_enhancer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_transient_processor::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_chorus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_stereo_shaper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_filter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &tesla::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_flanger::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_phaser::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_peak_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_formula_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_vocoder::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_drop::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+    let entries: [Option<*const std::ffi::c_void>; N] = [
+        Some(&lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void),
+        Some(&pulp_filter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void),
+        Some(&press::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void),
+        Some(&lemon_limiter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void),
+        Some(&lemon_reverb::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void),
+        Some(&lemon_delay::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void),
+        stock!("stock-soft-clipper", lemon_soft_clipper),
+        stock!("stock-fast-distortion", lemon_fast_distortion),
+        stock!("stock-balance", lemon_balance),
+        stock!("stock-stereo-enhancer", lemon_stereo_enhancer),
+        stock!("stock-transient-processor", lemon_transient_processor),
+        stock!("stock-chorus", lemon_chorus),
+        stock!("stock-stereo-shaper", lemon_stereo_shaper),
+        stock!("stock-filter", lemon_filter),
+        Some(&tesla::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void),
+        stock!("stock-flanger", lemon_flanger),
+        stock!("stock-phaser", lemon_phaser),
+        stock!("stock-peak-controller", lemon_peak_controller),
+        stock!("stock-formula-controller", lemon_formula_controller),
+        stock!("stock-vocoder", lemon_vocoder),
+        Some(&lemon_drop::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void),
     ];
     let names = FILE_MAPPED.into_iter().chain(LINKED_EFFECTS);
-    LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
+    LIBS.iter().zip(entries).zip(names).filter_map(|((lib, entry), name)| Some(linked(lib, entry?, name))).flatten().collect()
 }
 
 /// The plugins of a CLAP entry table linked into this program.

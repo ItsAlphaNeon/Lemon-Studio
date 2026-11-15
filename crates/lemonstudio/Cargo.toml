@@ -10,7 +10,12 @@ name = "lemonstudio"
 path = "src/main.rs"
 
 [features]
-default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc"]
+default = [
+    "vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc",
+    "stock-soft-clipper", "stock-fast-distortion", "stock-balance", "stock-stereo-enhancer",
+    "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
+    "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder",
+]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-app/vst3"]
 vst2 = ["os-app/vst2"]
@@ -26,6 +31,21 @@ device = ["os-app/device"]
 fl-native = ["os-app/fl-native", "dep:os-native"]
 # Listening for control-plane clients.
 rpc = ["os-app/rpc"]
+# Stock plugins (on by default: every build offers them; leaving one out is for forks). Off: it is not listed, and
+# a project's slot holding it opens as a missing plugin.
+stock-soft-clipper = ["os-app/stock-soft-clipper"]
+stock-fast-distortion = ["os-app/stock-fast-distortion"]
+stock-balance = ["os-app/stock-balance"]
+stock-stereo-enhancer = ["os-app/stock-stereo-enhancer"]
+stock-transient-processor = ["os-app/stock-transient-processor"]
+stock-chorus = ["os-app/stock-chorus"]
+stock-stereo-shaper = ["os-app/stock-stereo-shaper"]
+stock-filter = ["os-app/stock-filter"]
+stock-flanger = ["os-app/stock-flanger"]
+stock-phaser = ["os-app/stock-phaser"]
+stock-peak-controller = ["os-app/stock-peak-controller"]
+stock-formula-controller = ["os-app/stock-formula-controller"]
+stock-vocoder = ["os-app/stock-vocoder"]
 
 [dependencies]
 os-app = { path = "../os-app", default-features = false }
