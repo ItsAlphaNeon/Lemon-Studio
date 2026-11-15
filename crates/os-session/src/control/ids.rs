@@ -17,6 +17,9 @@ use os_model::{Id, Project};
 #[derive(Debug)]
 pub struct Ids {
     next: u32,
+    /// The next id for a note, control point, time marker, playlist track or automation point: those count from
+    /// `PARTS` up, so the other things keep small numbers however many notes are made.
+    next_part: u32,
     channels: HashMap<u32, usize>,
     patterns: HashMap<u32, usize>,
     tracks: HashMap<u32, usize>,
@@ -39,6 +42,7 @@ impl Default for Ids {
     fn default() -> Self {
         Ids {
             next: 1,
+            next_part: PARTS,
             channels: HashMap::new(),
             patterns: HashMap::new(),
             tracks: HashMap::new(),
@@ -54,11 +58,22 @@ impl Default for Ids {
     }
 }
 
+/// Where the ids of notes, control points, time markers, playlist tracks and automation points start (`Ids::part`).
+pub const PARTS: u32 = 1 << 31;
+
 impl Ids {
-    /// A new id, never given out before in this session.
+    /// A new id for a channel, pattern, mixer track, arrangement, clip or slot plugin, never given out before in this
+    /// session.
     pub fn fresh(&mut self) -> Id {
         let id = Id(self.next);
         self.next += 1;
+        id
+    }
+
+    /// A new id for a note, control point, time marker, playlist track or automation point (from `PARTS` up).
+    pub fn part(&mut self) -> Id {
+        let id = Id(self.next_part);
+        self.next_part += 1;
         id
     }
 }
@@ -67,6 +82,11 @@ impl Ids {
 /// two holding the same id the one at the id's place from the last settle keeps it (else the first). Returns whether
 /// an id changed, and records the places.
 fn settle_kind<K: Copy + Eq + std::hash::Hash>(next: &mut Ids, ids: Vec<(K, &mut Id)>, which: fn(&mut Ids) -> &mut HashMap<u32, K>) -> bool {
+    settle_with(next, ids, which, Ids::fresh)
+}
+
+/// `settle_kind` with the ids `fresh` gives.
+fn settle_with<K: Copy + Eq + std::hash::Hash>(next: &mut Ids, ids: Vec<(K, &mut Id)>, which: fn(&mut Ids) -> &mut HashMap<u32, K>, fresh: fn(&mut Ids) -> Id) -> bool {
     let mut owner: HashMap<u32, K> = HashMap::new();
     {
         let prev = which(next);
@@ -89,7 +109,7 @@ fn settle_kind<K: Copy + Eq + std::hash::Hash>(next: &mut Ids, ids: Vec<(K, &mut
     let mut places = HashMap::with_capacity(ids.len());
     for (at, id) in ids {
         if id.is_none() || owner.get(&id.0) != Some(&at) {
-            *id = next.fresh();
+            *id = fresh(next);
             changed = true;
         }
         places.insert(id.0, at);
@@ -115,22 +135,22 @@ pub fn settle(ids: &mut Ids, p: &mut Project) -> bool {
         .collect();
     changed |= settle_kind(ids, slots, |x| &mut x.slots);
     let notes = p.patterns.iter_mut().enumerate().flat_map(|(i, q)| q.notes.iter_mut().enumerate().map(move |(k, n)| ((i, k), &mut n.id))).collect();
-    changed |= settle_kind(ids, notes, |x| &mut x.notes);
+    changed |= settle_with(ids, notes, |x| &mut x.notes, Ids::part);
     let controls = p.patterns.iter_mut().enumerate().flat_map(|(i, q)| q.controls.iter_mut().enumerate().map(move |(k, c)| ((i, k), &mut c.id))).collect();
-    changed |= settle_kind(ids, controls, |x| &mut x.controls);
+    changed |= settle_with(ids, controls, |x| &mut x.controls, Ids::part);
     let markers = p.arrangements.iter_mut().enumerate().flat_map(|(a, arr)| arr.markers.iter_mut().enumerate().map(move |(k, m)| ((a, k), &mut m.id))).collect();
-    changed |= settle_kind(ids, markers, |x| &mut x.markers);
+    changed |= settle_with(ids, markers, |x| &mut x.markers, Ids::part);
     let tracks = p.arrangements.iter_mut().enumerate().flat_map(|(a, arr)| arr.tracks.iter_mut().enumerate().map(move |(k, t)| ((a, k), &mut t.id))).collect();
-    changed |= settle_kind(ids, tracks, |x| &mut x.playlist_tracks);
+    changed |= settle_with(ids, tracks, |x| &mut x.playlist_tracks, Ids::part);
     let points = p.automations.iter_mut().enumerate().flat_map(|(a, au)| au.points.iter_mut().enumerate().map(move |(k, q)| ((a, k), &mut q.id))).collect();
-    changed |= settle_kind(ids, points, |x| &mut x.points);
+    changed |= settle_with(ids, points, |x| &mut x.points, Ids::part);
     changed
 }
 
 /// Forgets where things were: the project was replaced (opened, made). Ids already given out are not given again.
 pub fn forget(ids: &mut Ids) {
-    let next = ids.next;
-    *ids = Ids { next, ..Ids::default() };
+    let (next, next_part) = (ids.next, ids.next_part);
+    *ids = Ids { next, next_part, ..Ids::default() };
 }
 
 #[cfg(test)]
@@ -202,6 +222,7 @@ mod tests {
         let all = [q.notes[0].id, q.notes[1].id, q.controls[0].id, p.arrangements[0].markers[0].id, p.arrangements[0].tracks[0].id, p.arrangements[0].tracks[1].id, p.automations[0].points[0].id, p.automations[0].points[1].id];
         assert!(all.iter().all(|i| !i.is_none()));
         assert_eq!(all.iter().map(|i| i.0).collect::<std::collections::HashSet<_>>().len(), all.len(), "no two share one");
+        assert!(all.iter().all(|i| i.0 >= PARTS), "they count from PARTS up, apart from the channels' and patterns'");
         assert!(!settle(&mut ids, &mut p), "a settled project keeps its ids");
         let late = p.patterns[0].notes[0].id.0;
         p.patterns[0].notes.sort_by_key(|n| n.position);

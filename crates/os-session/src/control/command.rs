@@ -543,12 +543,12 @@ fn id_result(key: &str, id: Id) -> serde_json::Value {
 }
 
 /// `notes` with their ids: one of `held` (the pattern's before the command) given once is kept, any other note gets a new
-/// one (`Control::fresh`); and the result naming them in the order given.
+/// one (`Control::fresh_note`); and the result naming them in the order given.
 fn with_ids(s: &mut crate::session::Session, mut notes: Vec<os_model::Note>, held: &std::collections::HashSet<u32>) -> (Vec<os_model::Note>, serde_json::Value) {
     let mut kept = std::collections::HashSet::new();
     for n in &mut notes {
         if !(held.contains(&n.id.0) && kept.insert(n.id.0)) {
-            n.id = s.control.fresh();
+            n.id = s.control.fresh_note();
         }
     }
     let ids: Vec<u32> = notes.iter().map(|n| n.id.0).collect();

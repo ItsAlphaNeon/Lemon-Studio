@@ -134,9 +134,9 @@ pub struct Control {
 }
 
 impl Control {
-    /// A new id for a thing a command makes (it names it in its result).
-    pub fn fresh(&mut self) -> os_model::Id {
-        self.ids.fresh()
+    /// A new id for a note a command makes (it names it in its result; `ids::Ids::part`).
+    pub fn fresh_note(&mut self) -> os_model::Id {
+        self.ids.part()
     }
 
     /// Gives ids to new things (`ids::settle`).

@@ -63,8 +63,29 @@ impl fmt::Write for Fnv {
 
 fn hash(v: &impl fmt::Debug) -> u64 {
     let mut h = Fnv::new();
-    let _ = write!(h, "{v:?}");
+    let _ = write!(h, "{}", without_new_ids(&format!("{v:?}")));
     h.0
+}
+
+/// `text` without the ids step 12 gave notes, control points, time markers, playlist tracks and automation points (their
+/// last field, `, id: Id(n) }`): a build without them, a baseline's, has no such field. No other kind's id comes last.
+fn without_new_ids(text: &str) -> String {
+    const KEY: &str = ", id: Id(";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(KEY) {
+        let after = &rest[i + KEY.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && after[digits..].starts_with(") }") {
+            out.push_str(&rest[..i]);
+            rest = &after[digits + 1..];
+        } else {
+            out.push_str(&rest[..i + KEY.len()]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The project without what `side` holds (the tempo, the pattern shown, the song mode, the rack's groups, locks, zips
@@ -114,7 +135,7 @@ fn project_hash(p: &os_model::Project) -> u64 {
     // Step 5 renamed a pattern's `loop_off` (cleared above) to `loop_mode`: the text keeps the name it was recorded with.
     let out = out.replace(", loop_mode: None, ", ", loop_off: None, ");
     let mut h = Fnv::new();
-    let _ = write!(h, "{out}");
+    let _ = write!(h, "{}", without_new_ids(&out));
     h.0
 }
 
