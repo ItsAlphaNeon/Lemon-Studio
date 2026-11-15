@@ -2562,11 +2562,16 @@ impl App {
                         // Kept for an undo that brings the slot back (`control::host`).
                         self.plugins.keep(key);
                         self.plugins.drop_key(key);
+                        self.state.params.remap(|k| (k != key).then_some(k));
                         relink = true;
                     }
                 }
                 FxReq::Remap(map) => {
                     self.plugins.remap_fx(&|t, k| Some(map.iter().find(|(a, _)| *a == (t, k)).map_or((t, k), |&(_, b)| b)));
+                    self.state.params.remap(|key| match crate::plugins::fx_of(key) {
+                        Some(at) => Some(map.iter().find(|(a, _)| *a == at).map_or(at, |&(_, b)| b)).map(|(t, k)| crate::plugins::fx_key(t, k)),
+                        None => Some(key),
+                    });
                     relink = true;
                 }
             }
@@ -3420,6 +3425,17 @@ mod tests {
         assert_eq!(on(&a).len(), a.state.project.mixer.len());
         run(&mut a, MCmd::Solo(5));
         assert_eq!(on(&a), vec![0, 3, 5], "Solo keeps where 5 sends");
+    }
+
+    /// "Most recent" follows its effect's parameter when the effect's track moves.
+    #[test]
+    fn the_most_recent_parameter_follows_its_track() {
+        use crate::params::Tweak;
+        let mut a = app();
+        a.state.params.last = vec![Tweak::Plugin { key: crate::plugins::fx_key(3, 1), index: 2 }];
+        run(&mut a, MCmd::MoveLeft(3));
+        a.mixer_requests();
+        assert_eq!(a.state.params.last, vec![Tweak::Plugin { key: crate::plugins::fx_key(2, 1), index: 2 }]);
     }
 
     /// A soloed track that moves keeps its solo: unsolo there puts back the states from before it ("Restore previous

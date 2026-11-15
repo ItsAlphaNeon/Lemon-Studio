@@ -9581,6 +9581,7 @@ impl App {
     pub(crate) fn remap_rows(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
         self.typing_release_all();
         self.plugins.remap(m);
+        self.state.params.remap(|k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) });
         // The rows hosted are the instances' rows.
         self.state.hosted_rows = self.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
         self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();
