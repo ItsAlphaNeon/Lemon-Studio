@@ -46,7 +46,7 @@ pub fn native_first() -> bool {
     if let Some(v) = NATIVE_FIRST.with(|n| n.get()) {
         return v;
     }
-    os_native::prefer_native()
+    crate::native::prefer_native()
 }
 
 /// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, Ogun, Fruity Slicer, the

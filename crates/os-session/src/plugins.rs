@@ -252,6 +252,7 @@ pub struct Plugins {
     rate: u32,
     /// Verdicts of the one-time child-process check a native plugin passes before its first load here (spec:
     /// plugins/fruity-abi.md "Crash containment"). `None`: no check (tests, where this program is the test harness).
+    #[cfg(feature = "fl-native")]
     native_checks: Option<os_native::check::Checks>,
     /// Instances that went with their channel or slot, by its id: (an effect, the plugin's uid, its saved state).
     /// Only those whose channel or slot went (`keep`); an undo that brings it back hosts it again from here
@@ -437,18 +438,25 @@ pub fn load_file(path: &Path, format: os_host::Format) -> Result<Arc<dyn Library
             os_host::Format::Vst2 => os_vst2::Module::load(path).map(|l| l as Arc<dyn Library>),
             #[cfg(not(feature = "vst2"))]
             os_host::Format::Vst2 => Err(format!("{}: VST 2 is not in this build", path.display())),
+            #[cfg(feature = "fl-native")]
             os_host::Format::Native => os_native::NativeLibrary::load(path).map(|l| l as Arc<dyn Library>),
+            #[cfg(not(feature = "fl-native"))]
+            os_host::Format::Native => Err(format!("{}: native plugins are not in this build", path.display())),
         }
     };
     os_host::guard::catch(load).unwrap_or_else(|c| Err(format!("{}: crashed while loading ({})", path.display(), os_host::guard::describe(c))))
 }
 
 /// The installed native plugin files (generators and effects), when the experimental native host is opted into
-/// (`os_native::enabled()`, Settings > Plugins or `OPENSTUDIO_NATIVE=1`): they are loaded through an unverified
+/// (`native::enabled()`, Settings > Plugins or `OPENSTUDIO_NATIVE=1`): they are loaded through an unverified
 /// interop path (spec plugins/fruity-abi.md), so they stay off by default. Each is tried in a child process before
 /// its first load here (`Plugins::native_check`).
 pub fn native_files() -> Vec<PathBuf> {
-    if os_native::enabled() { os_native::dll_files() } else { Vec::new() }
+    #[cfg(feature = "fl-native")]
+    if crate::native::enabled() {
+        return os_native::dll_files();
+    }
+    Vec::new()
 }
 
 /// A plugin file known from the scan cache: lists the cached plugins without loading the file, and loads it the first
@@ -491,8 +499,14 @@ pub fn format_name(f: os_host::Format) -> &'static str {
 impl Plugins {
     /// The built-in plugins only (what the app knows before the scan cache is read).
     pub fn builtins() -> Plugins {
-        let native_checks = (!cfg!(any(test, feature = "test-util"))).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS)));
-        Plugins { available: builtin(), effects: builtin_effects(), scale: 1.0, native_checks, ..Plugins::default() }
+        Plugins {
+            available: builtin(),
+            effects: builtin_effects(),
+            scale: 1.0,
+            #[cfg(feature = "fl-native")]
+            native_checks: (!cfg!(any(test, feature = "test-util"))).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS))),
+            ..Plugins::default()
+        }
     }
 
     /// Takes a scan's results (spec: ui/plugin-manager.md §4, "Results"): plugins new to this run are appended, so the
@@ -538,10 +552,15 @@ impl Plugins {
         if desc.format != os_host::Format::Native {
             return Ok(());
         }
-        let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return Ok(()) };
-        match checks.verdict(&program, &desc.path) {
-            os_native::check::Verdict::Works => Ok(()),
-            os_native::check::Verdict::Fails(why) => Err(format!("{} can't load ({why})", desc.name)),
+        #[cfg(not(feature = "fl-native"))]
+        return Err(format!("{}: native plugins are not in this build", desc.name));
+        #[cfg(feature = "fl-native")]
+        {
+            let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return Ok(()) };
+            match checks.verdict(&program, &desc.path) {
+                os_native::check::Verdict::Works => Ok(()),
+                os_native::check::Verdict::Fails(why) => Err(format!("{} can't load ({why})", desc.name)),
+            }
         }
     }
 
@@ -559,8 +578,16 @@ impl Plugins {
     }
 
     fn native_ready(&mut self, dll: &std::path::Path) -> bool {
-        let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return true };
-        checks.ready(&program, dll)
+        #[cfg(not(feature = "fl-native"))]
+        return {
+            let _ = dll;
+            true
+        };
+        #[cfg(feature = "fl-native")]
+        {
+            let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return true };
+            checks.ready(&program, dll)
+        }
     }
 
     /// The built-in plugins plus every plugin file in the standard folders, scanned in this process at once (tests).
@@ -1283,6 +1310,7 @@ pub fn new_slot(name: &str) -> os_model::SlotPlugin {
     }
 }
 /// File (in the user folder) remembering which native plugins passed the child-process check.
+#[cfg(feature = "fl-native")]
 const NATIVE_CHECKS: &str = "native-checks.txt";
 /// The sampler parameter a note's sample start modulates per note (Lemon Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";

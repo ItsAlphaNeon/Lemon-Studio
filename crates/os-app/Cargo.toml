@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "rpc"]
+default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc"]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-session/vst3"]
 vst2 = ["os-session/vst2"]
@@ -18,6 +18,8 @@ export-ogg = ["os-session/export-ogg"]
 midi-io = ["os-session/midi-io", "dep:midir"]
 # The system's audio devices (the session's feature).
 device = ["os-session/device"]
+# FL Studio's native plugins (the session's feature).
+fl-native = ["os-session/fl-native"]
 # Listening for control-plane clients.
 rpc = ["os-session/rpc"]
 
@@ -31,7 +33,6 @@ os-hostlink.workspace = true
 os-theme = { path = "../os-theme" }
 os-ui = { path = "../os-ui" }
 os-clap = { path = "../os-clap" }
-os-native = { path = "../os-native" }
 os-host.workspace = true
 os-vst3.workspace = true
 os-vst2.workspace = true

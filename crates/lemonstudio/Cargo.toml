@@ -10,7 +10,7 @@ name = "lemonstudio"
 path = "src/main.rs"
 
 [features]
-default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "rpc"]
+default = ["vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc"]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-app/vst3"]
 vst2 = ["os-app/vst2"]
@@ -22,6 +22,8 @@ export-ogg = ["os-app/export-ogg"]
 midi-io = ["os-app/midi-io"]
 # The system's audio devices.
 device = ["os-app/device"]
+# FL Studio's native plugins (and the child process that tries one before its first load).
+fl-native = ["os-app/fl-native", "dep:os-native"]
 # Listening for control-plane clients.
 rpc = ["os-app/rpc"]
 
@@ -32,7 +34,7 @@ os-model.workspace = true
 os-engine.workspace = true
 os-host.workspace = true
 os-hostlink.workspace = true
-os-native = { path = "../os-native" }
+os-native = { path = "../os-native", optional = true }
 os-clap = { path = "../os-clap" }
 os-paths.workspace = true
 os-ui = { path = "../os-ui" }

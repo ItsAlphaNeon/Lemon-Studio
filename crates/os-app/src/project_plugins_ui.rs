@@ -28,7 +28,7 @@ impl crate::app::App {
     /// With the experimental native host on (Settings > Plugins), the native plugins an opened project names are
     /// hosted by the installed plugins themselves (spec: plugins/fruity-abi.md "Opened projects"): see `host_native`.
     pub fn sync_native(&mut self) {
-        if os_native::enabled() {
+        if os_session::native::enabled() {
             self.host_native();
         }
     }

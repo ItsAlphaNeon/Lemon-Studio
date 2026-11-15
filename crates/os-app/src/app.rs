@@ -1582,7 +1582,7 @@ impl App {
                 menu_open: None,
                 menu_sub: None,
                 lane_menu: false,
-                settings: views::settings::SettingsUi { native: os_native::settings_shown(), ..Default::default() },
+                settings: views::settings::SettingsUi { native: os_session::native::settings_shown(), ..Default::default() },
                 fl_text: saved_fl_text(),
                 theme_base: saved_fl_text(),
                 playlist_scroll: (0.0, 0.0),
@@ -5392,21 +5392,21 @@ impl App {
                 }
             }
             // Opt in / out of the experimental native host and scan again so the effect lists follow (spec
-            // plugins/fruity-abi.md). Its displayed state comes straight from `os_native::enabled()`.
+            // plugins/fruity-abi.md). Its displayed state comes straight from `os_session::native::enabled()`.
             SAct::Check(k) if k == views::settings::NATIVE_HOST_CHECK => {
-                let on = !os_native::enabled();
-                os_native::set_enabled(on);
+                let on = !os_session::native::enabled();
+                os_session::native::set_enabled(on);
                 self.start_scan(crate::plugin_db::Mode::Changed);
                 self.state.message = Some(if on { "Experimental native plugin host on: looking for native plugins".into() } else { "Experimental native plugin host off".into() });
                 // The hidden preference applies again (or stops applying) with the host.
-                if os_native::prefer_native_set() {
+                if os_session::native::prefer_native_set() {
                     self.swap_builtin_overrides();
                 }
             }
             // Real native plugins in place of the Lemon recreations (spec plugins/fruity-abi.md "Opened projects").
             SAct::Check(k) if k == views::settings::NATIVE_FIRST_CHECK => {
-                let on = !os_native::prefer_native();
-                os_native::set_prefer_native(on);
+                let on = !os_session::native::prefer_native();
+                os_session::native::set_prefer_native(on);
                 let n = self.swap_builtin_overrides();
                 self.state.message = Some(match (on, n) {
                     (true, 0) => "Opened projects play their own native plugins, not the Lemon recreations".into(),
@@ -13923,7 +13923,7 @@ mod tests {
             app.state.settings.native = native;
             click(&mut app, &mut c, r);
             assert_eq!(shown(&app, NATIVE_HOST_CHECK), native, "native host toggle shown: {native}");
-            if !os_native::enabled() {
+            if !os_session::native::enabled() {
                 assert!(!shown(&app, crate::views::settings::NATIVE_FIRST_CHECK), "hidden");
             }
         }
