@@ -1438,6 +1438,8 @@ pub struct App {
     pub title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
     rack_click: Option<(Action, std::time::Instant)>,
+    /// When the wheel last turned (`wheel_pause`).
+    wheel_at: Option<std::time::Instant>,
     /// Last press on the CPU panel, for its double click (the Plugin performance monitor).
     cpu_click: Option<std::time::Instant>,
     pub hint: Cow<'static, str>,
@@ -1699,6 +1701,7 @@ impl App {
             step_chord: crate::step_edit::Chord::default(),
             title_click: None,
             rack_click: None,
+            wheel_at: None,
             cpu_click: None,
             hint: Cow::Borrowed(""),
             mouse: (-1.0, -1.0),
@@ -2737,6 +2740,7 @@ impl App {
                         let max = crate::mixer::max_insert(&self.state.session.project);
                         self.channel_control(row, ChannelControl::Track, |c| c.mixer_track = t.min(max));
                     }
+                    Request::RunEnd => self.state.session.history.end_gesture_run(),
                     Request::ShowTrack(row) => {
                         // As a double click on the channel rack's mixer box (spec: ui/channel-rack.md §12).
                         if let Some(t) = chans.get(row).map(|c| c.mixer_track) {
@@ -2785,18 +2789,27 @@ impl App {
         }
     }
 
+    /// A wheel notch at `now`: after a pause (`history::WHEEL_PAUSE`) the run of notches before ends, so this one starts
+    /// a step of its own (spec: ui/undo-steps.md).
+    pub(crate) fn wheel_pause(&mut self, now: std::time::Instant) {
+        if self.wheel_at.is_some_and(|t| now.duration_since(t) >= crate::history::WHEEL_PAUSE) {
+            self.state.session.history.end_gesture_run();
+        }
+        self.wheel_at = Some(now);
+    }
+
     /// Control `which` of the channel on row `row` changed by `f` (a plugin window's strip or card, the rack's mixer
-    /// box): an undo step, a run of changes of one control one step; volume, pan and pitch as knobs (none with Undo knob
-    /// tweaks off).
+    /// box): an undo step, a run of changes of one control one step, none with Undo knob tweaks off (FL's "Knob tweak
+    /// (channel volume)" ... "(target mixer track)", spec: ui/undo-steps.md).
     pub fn channel_control(&mut self, row: usize, which: ChannelControl, f: impl FnOnce(&mut os_model::Channel)) {
-        let (name, knob) = match which {
-            ChannelControl::Volume => ("Channel volume", true),
-            ChannelControl::Pan => ("Channel panning", true),
-            ChannelControl::Pitch => ("Channel pitch", true),
-            ChannelControl::Track => ("Channel mixer track", false),
+        let name = match which {
+            ChannelControl::Volume => "Channel volume",
+            ChannelControl::Pan => "Channel panning",
+            ChannelControl::Pitch => "Channel pitch",
+            ChannelControl::Track => "Channel mixer track",
         };
         let run = crate::history::Run::Channel(row, which);
-        crate::control_ui::run_edit(&mut self.state, name, Region::Channel(row), run, knob, |s| {
+        crate::control_ui::run_edit(&mut self.state, name, Region::Channel(row), run, true, |s| {
             if let Some(c) = s.session.project.get_mut().channels.get_mut(row) {
                 f(c);
             }
@@ -7282,6 +7295,7 @@ impl App {
     }
 
     pub fn wheel(&mut self, dx: f32, dy: f32, shift: bool, ctrl: bool) {
+        self.wheel_pause(std::time::Instant::now());
         if self.modal_open() {
             return self.dialog_wheel(dy);
         }
@@ -8651,8 +8665,11 @@ impl App {
                 let x = self.mouse.0 / views::band_k(s); // the tempo box is laid out in band px
                 let n = s.tempo_digits.get().iter().filter(|&&d| x >= d).count();
                 let step = [1.0, 0.1, 0.01, 0.001][n];
-                // One undo step for the drag (none when it doesn't change the tempo).
-                crate::control::edit_press(&mut s.session, crate::control::command::TEMPO, crate::control::command::Region::Settings);
+                // One undo step for the drag (none when it doesn't change the tempo, or with Undo knob tweaks off: FL's
+                // "Knob tweak (tempo)", spec: ui/undo-steps.md).
+                if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
+                    crate::control::edit_press(&mut s.session, crate::control::command::TEMPO, crate::control::command::Region::Settings);
+                }
                 self.drag = Some(Drag::Tempo { y0: self.mouse.1, t0: s.tempo(), step });
             }
             Action::SongPos => self.song_pos_press(),

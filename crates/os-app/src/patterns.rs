@@ -374,6 +374,10 @@ fn delete_pattern(s: &mut State) {
 /// Accept the name box.
 pub fn accept(s: &mut State) {
     let Some(b) = s.pat_ui.name_box.as_ref() else { return };
+    // Filter groups (Group selected, Add and Rename filter group) are no undo step, as in FL (spec: ui/undo-steps.md).
+    if matches!(b.target, BoxTarget::Rack(crate::rack::RBox::GroupSel | crate::rack::RBox::NewGroup | crate::rack::RBox::RenameGroup(_))) {
+        return accept_now(s);
+    }
     let name = match b.target {
         BoxTarget::Name(_) => "Pattern name",
         BoxTarget::Transpose(_) | BoxTarget::Rack(crate::rack::RBox::Transpose) => "Transpose",

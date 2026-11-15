@@ -1722,7 +1722,6 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::MoveSel(_) | RCmd::Sort(_) => Some("Move channel"),
         RCmd::MixerReset(_) | RCmd::AssignFree(_) | RCmd::AssignFreeSel => Some("Channel mixer track"),
         RCmd::DeclickSel(_) | RCmd::SwingSel(Some(_)) | RCmd::TruncSel(_) | RCmd::CutItself(_) => Some("Channel settings"),
-        RCmd::AddGroup | RCmd::DeleteGroup | RCmd::GroupSel => Some("Channel group"),
         RCmd::Burn(_) => Some("Burn loops"),
         RCmd::AssignInstrument(_) => Some(crate::track_links::ASSIGN_INSTRUMENT),
         _ => None,

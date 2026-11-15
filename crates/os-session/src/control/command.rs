@@ -1234,10 +1234,11 @@ fn put(s: &mut crate::session::Session, t: Taken) {
                 if ch.misc != c.misc && c.kind.is_sampler() {
                     s.control.misc.push(row);
                 }
-                // Muting is a step of its own, a lock and a zip none: the channel stays as it is in those (`Mutes`).
-                let (on, locked, zipped) = (ch.enabled, ch.rack.locked, ch.rack.zipped);
+                // Muting is a step of its own, a lock, a zip and a filter group none: the channel stays as it is in
+                // those (`Mutes`).
+                let (on, locked, zipped, group) = (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group);
                 *ch = *c;
-                (ch.enabled, ch.rack.locked, ch.rack.zipped) = (on, locked, zipped);
+                (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group) = (on, locked, zipped, group);
             }
         }
         Taken::Track(m) => {
@@ -1365,12 +1366,14 @@ fn restore(s: &mut crate::session::Session, side: Side) {
 /// Muting and soloing are steps of their own (a channel's, `Taken::Mutes`) or none (a mixer track's, as in FL), and
 /// locking a channel's mute state is none (`ui/undo-steps.md`): an undo or redo of another step leaves every channel
 /// and mixer track that is still there muted, and every channel locked and zipped (no step either), or not as it is now,
-/// and the song mode as it is. The states by id.
+/// and the song mode and performance mode as they are (none either). The states by id. The filter groups are put back
+/// with the project: a step that made one (a MIDI file imported) takes it away.
 struct Mutes {
     channels: std::collections::HashMap<u32, (bool, bool, bool)>,
     tracks: std::collections::HashMap<u32, bool>,
-    /// The song mode: no step either.
+    /// The song mode and performance mode: no step either.
     song_mode: Option<bool>,
+    performance: Option<bool>,
 }
 
 impl Mutes {
@@ -1379,11 +1382,12 @@ impl Mutes {
             channels: p.channels.iter().map(|c| (c.id.0, (c.enabled, c.rack.locked, c.rack.zipped))).collect(),
             tracks: p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect(),
             song_mode: p.song_mode,
+            performance: p.performance,
         }
     }
 
     fn keep(&self, p: &mut Project) {
-        p.song_mode = self.song_mode;
+        (p.song_mode, p.performance) = (self.song_mode, self.performance);
         for c in &mut p.channels {
             if let Some(&(on, locked, zipped)) = self.channels.get(&c.id.0) {
                 (c.enabled, c.rack.locked, c.rack.zipped) = (on, locked, zipped);

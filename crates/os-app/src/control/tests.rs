@@ -1233,3 +1233,134 @@ fn a_gesture_is_one_step() {
     assert!(a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_tempo", "bpm": 98.0}})).is_err(), "an ended gesture is gone");
     assert!(a.rpc(&mut c, "end", &json!({"gesture": g})).is_err());
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// FL's measured undo history (spec: ui/undo-steps.md), the rows control-plane step 13 found the app differing on.
+
+/// Wheel notches about 120 ms apart are one step; after a pause of 2.5 s the next notch starts another.
+#[test]
+fn a_pause_in_the_wheel_starts_a_new_step() {
+    let mut a = app();
+    let id = crate::knob_id::KnobId::ChanVol(0);
+    let t0 = std::time::Instant::now();
+    let steps = a.state.session.history.at();
+    let mut notch = |a: &mut App, ms: u64| {
+        a.wheel_pause(t0 + std::time::Duration::from_millis(ms));
+        crate::history::knob(&mut a.state.session, id, true);
+        let v = a.state.knob(id) - 0.03;
+        a.state.set_knob(id, v);
+    };
+    for ms in [0, 120, 240] {
+        notch(&mut a, ms);
+    }
+    assert_eq!(a.state.session.history.at(), steps + 1, "notches 120 ms apart");
+    notch(&mut a, 2740);
+    notch(&mut a, 2860);
+    assert_eq!(a.state.session.history.at(), steps + 2, "2.5 s later, a step of its own");
+}
+
+/// Two drags of one control are two steps (the rack's mixer track box, a plugin window's strip knob), one drag one.
+#[test]
+fn each_drag_of_a_control_is_a_step() {
+    use crate::history::ChannelControl;
+    let mut a = app();
+    let steps = a.state.session.history.at();
+    for t in [3, 4] {
+        a.channel_control(0, ChannelControl::Track, |c| c.mixer_track = t);
+    }
+    a.mouse_up();
+    assert_eq!(a.state.session.history.at(), steps + 1, "one drag");
+    a.channel_control(0, ChannelControl::Track, |c| c.mixer_track = 5);
+    assert_eq!(a.state.session.history.at(), steps + 2, "the next drag");
+    // A strip knob's release in a plugin window ends its run the same way (`FrameEvent::RunEnd`).
+    for v in [0.3, 0.4] {
+        a.channel_control(0, ChannelControl::Volume, |c| c.volume = v);
+    }
+    a.state.session.history.end_gesture_run();
+    a.channel_control(0, ChannelControl::Volume, |c| c.volume = 0.5);
+    assert_eq!(a.state.session.history.at(), steps + 4);
+}
+
+/// Undo knob tweaks covers every "Knob tweak" step, the mixer track box's and the tempo's drag too.
+#[test]
+fn undo_knob_tweaks_off_covers_the_mixer_track_box_and_the_tempo() {
+    let mut a = app();
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, false);
+    let steps = a.state.session.history.at();
+    a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 3);
+    let mut press = App::new(None);
+    press.act(crate::app::Action::Tempo);
+    let none = press.state.session.history.len() == 0;
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, true);
+    assert_eq!(a.state.session.project.channels[0].mixer_track, 3);
+    assert_eq!(a.state.session.history.at(), steps, "the mixer track box");
+    assert!(none, "the tempo's press records no step");
+}
+
+/// Group selected (Alt+G, a name typed, Enter) and performance mode switched on are no undo step.
+#[test]
+fn a_filter_group_and_performance_mode_are_no_step() {
+    let mut a = app();
+    let steps = a.state.session.history.at();
+    a.state.rack.sel = [0, 1].into();
+    crate::rack::run(&mut a, crate::rack::RCmd::GroupSel);
+    a.state.pat_ui.name_box.as_mut().expect("the name box").text = "Drums".into();
+    crate::patterns::accept(&mut a.state);
+    assert_eq!(crate::rack::groups(&a.state.session.project).len(), 1, "the group is made");
+    crate::playlist::run(&mut a, crate::playlist::Cmd::PerfToggle);
+    assert!(crate::perform_ui::on(&a.state));
+    assert_eq!(a.state.session.history.at(), steps);
+}
+
+/// An effect slot's colour, random or chosen, is one step ("Name/color/icon effect").
+#[test]
+fn an_effect_slot_colour_is_a_step() {
+    let mut a = app();
+    a.state.selected_mixer = 2;
+    let red = os_model::Rgb::new(0xc8, 0x50, 0x4a);
+    ui_round_trip(&mut a, "Effect slot color", |a| {
+        crate::mixer::run(a, crate::mixer::MCmd::SlotColor(0, Some(red)));
+    });
+    ui_round_trip(&mut a, "Effect slot color", |a| {
+        crate::mixer::run(a, crate::mixer::MCmd::SlotRandomColor(1));
+    });
+}
+
+/// Loop type ▸ Advanced looping turns loop mode on, one step ("Set pattern loop mode").
+#[test]
+fn advanced_looping_turns_loop_mode_on() {
+    let mut a = app();
+    assert!(!crate::edit::rack::loop_mode(&a.state.session));
+    let steps = a.state.session.history.at();
+    crate::rack::run(&mut a, crate::rack::RCmd::LoopType(2));
+    a.mouse_up();
+    assert!(crate::edit::rack::loop_mode(&a.state.session), "loop mode on");
+    assert_eq!(crate::edit::rack::loop_type(&a.state.session), 2);
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    crate::history_ui::undo(&mut a.state).unwrap();
+    assert!(!crate::edit::rack::loop_mode(&a.state.session), "undone");
+}
+
+/// Arrangement ▸ Add one… with a name typed is one step, as Clone…; a rename is one of its own.
+#[test]
+fn an_arrangement_added_and_named_is_one_step() {
+    let mut a = app();
+    for cmd in [crate::playlist::Cmd::ArrAdd, crate::playlist::Cmd::ArrClone] {
+        let steps = a.state.session.history.at();
+        let count = a.state.session.project.arrangements.len();
+        crate::playlist::run(&mut a, cmd.clone());
+        a.state.playlist.edit.as_mut().expect("the name box").text = "Verse".into();
+        crate::playlist::commit_edit(&mut a.state);
+        assert_eq!(a.state.session.history.at(), steps + 1, "{cmd:?}");
+        assert_eq!(crate::edit::playlist::arrangement_name(&a.state.session), "Verse");
+        crate::history_ui::undo(&mut a.state).unwrap();
+        assert_eq!(a.state.session.project.arrangements.len(), count, "{cmd:?} undone, name and all");
+        crate::history_ui::redo(&mut a.state).unwrap();
+        assert_eq!(crate::edit::playlist::arrangement_name(&a.state.session), "Verse", "{cmd:?} redone with its name");
+    }
+    let steps = a.state.session.history.at();
+    crate::playlist::run(&mut a, crate::playlist::Cmd::ArrRename);
+    a.state.playlist.edit.as_mut().unwrap().text = "Chorus".into();
+    crate::playlist::commit_edit(&mut a.state);
+    assert_eq!(a.state.session.history.at(), steps + 1, "a rename");
+}

@@ -523,10 +523,12 @@ pub fn set_loop_mode(s: &mut crate::session::Session, on: bool) {
     }
 }
 
-/// The loop menu's Loop type (§7).
+/// The loop menu's Loop type (§7). Advanced looping also turns loop mode on, as in FL (spec: ui/undo-steps.md).
 pub fn set_loop_type(s: &mut crate::session::Session, t: u8) {
     (s.loop_type, s.loop_type_of) = (t, s.pattern());
-    if loop_mode(s) {
+    if t == 2 && !loop_mode(s) {
+        set_loop_mode(s, true);
+    } else if loop_mode(s) {
         let n = s.pattern();
         crate::edit::patterns::pat_mut(s, n).loop_mode = Some(LOOP_TYPE_CODES[usize::from(t.min(2))]);
         if t == 1 {

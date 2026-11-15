@@ -95,11 +95,11 @@ fn set(s: &mut State, t: Target, v: f64) {
         }
         // `v` is in the box's unit.
         Target::Latency(m, input, u) => crate::mixer::set_latency(s, m, input, (v * u.ms(s.tempo())).clamp(-LATENCY_MAX_MS, LATENCY_MAX_MS) as f32),
-        // One undo step, as the box's own menu commands.
+        // One undo step, as the box's own menu commands; none with Undo knob tweaks off, as the box's drag.
         Target::RackTrack(r) => {
             let track = v.round().clamp(0.0, f64::from(crate::mixer::max_insert(&s.session.project))) as u16;
             if s.session.project.channels.get(r).is_some_and(|c| c.mixer_track != track) {
-                crate::control_ui::edit(s, "Channel mixer track", crate::control::command::Region::Channel(r), |s| {
+                crate::control_ui::knob_edit(s, "Channel mixer track", crate::control::command::Region::Channel(r), |s| {
                     if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
                         c.mixer_track = track;
                     }
