@@ -7295,7 +7295,7 @@ impl App {
     }
 
     pub fn wheel(&mut self, dx: f32, dy: f32, shift: bool, ctrl: bool) {
-        self.wheel_pause(std::time::Instant::now());
+        self.wheel_pause(crate::time::now());
         if self.modal_open() {
             return self.dialog_wheel(dy);
         }

@@ -1237,7 +1237,7 @@ impl State {
             return Reply::None;
         }
         if matches!(part, Some(Part::Knob(_) | Part::Range | Part::Track)) && notches != 0.0 {
-            self.wheel_pause(std::time::Instant::now());
+            self.wheel_pause(crate::time::now());
         }
         if let Some(Part::Knob(i)) = part {
             let k = KNOBS[usize::from(i)];
