@@ -1364,3 +1364,91 @@ fn an_arrangement_added_and_named_is_one_step() {
     crate::playlist::commit_edit(&mut a.state);
     assert_eq!(a.state.session.history.at(), steps + 1, "a rename");
 }
+
+/// The newest step's name.
+fn newest(a: &App) -> String {
+    let e = a.state.session.history.entries(&crate::settings_file::SettingsStore::memory());
+    e.last().map(|e| e.1.to_string()).unwrap_or_default()
+}
+
+/// A LED's right click ▸ Solo and a plugin window's ON switch: one mute and solo step each, which undo takes back.
+#[test]
+fn the_led_menu_s_solo_and_the_on_switch_are_one_step_each() {
+    let mut a = app();
+    let steps = a.state.session.history.at();
+    crate::rack::run(&mut a, crate::rack::RCmd::Solo(0));
+    assert_eq!(a.state.session.history.at(), steps + 1, "Solo");
+    assert_eq!(newest(&a), crate::rack::MUTE_SOLO);
+    assert!(!a.state.session.project.channels[1].enabled, "the others muted");
+    crate::history_ui::undo(&mut a.state);
+    assert!(a.state.session.project.channels.iter().all(|c| c.enabled), "undone");
+    crate::rack::toggle_on(&mut a.state, 1);
+    assert_eq!(a.state.session.history.at(), steps + 1, "ON switch");
+    assert_eq!(newest(&a), crate::rack::MUTE_SOLO);
+    assert!(!a.state.session.project.channels[1].enabled);
+    crate::history_ui::undo(&mut a.state);
+    assert!(a.state.session.project.channels[1].enabled, "undone");
+}
+
+/// A playlist track's LED: a click (mute) and a Ctrl+click (solo) are one step each, whatever Undo knob tweaks says,
+/// and undo takes them back.
+#[test]
+fn a_playlist_track_s_mute_and_solo_are_one_step_each() {
+    let mut a = app();
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, false);
+    let steps = a.state.session.history.at();
+    let on = |a: &App| a.state.session.project.arrangement().expect("an arrangement").tracks.iter().take(3).map(|t| t.enabled).collect::<Vec<_>>();
+    crate::playlist::press_led(&mut a, 1, false);
+    let muted = on(&a);
+    a.ctrl = true;
+    crate::playlist::press_led(&mut a, 2, false);
+    a.ctrl = false;
+    let soloed = on(&a);
+    let at = a.state.session.history.at();
+    crate::history_ui::undo(&mut a.state);
+    let after_one = on(&a);
+    crate::history_ui::undo(&mut a.state);
+    let after_two = on(&a);
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, true);
+    assert_eq!(muted, [true, false, true]);
+    assert_eq!(soloed, [false, false, true]);
+    assert_eq!(at, steps + 2);
+    assert_eq!(after_one, muted, "the solo undone");
+    assert_eq!(after_two, [true, true, true], "the mute undone");
+}
+
+/// A note added with a click in the piano roll is one step, "Piano roll add note".
+#[test]
+fn a_note_added_in_the_piano_roll_is_one_step() {
+    let mut a = app();
+    let mut c = os_ui::Canvas::new(1600, 1000, 1.0).expect("a canvas");
+    a.state.z = vec![crate::app::Win::PianoRoll];
+    a.paint(&mut c, None);
+    let g = a.piano_geom().expect("piano roll shown").grid;
+    a.mouse_move(g.x + g.w / 3.0, g.y + g.h / 2.0);
+    let notes = crate::piano::notes(&a.state.session).len();
+    let steps = a.state.session.history.at();
+    a.mouse_down();
+    a.mouse_up();
+    assert_eq!(crate::piano::notes(&a.state.session).len(), notes + 1);
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    assert_eq!(newest(&a), "Piano roll add note");
+}
+
+/// A clip placed with one click in the playlist is one step.
+#[test]
+fn a_clip_painted_with_one_click_is_one_step() {
+    let mut a = app();
+    let mut c = os_ui::Canvas::new(1600, 1000, 1.0).expect("a canvas");
+    a.state.z = vec![crate::app::Win::Playlist];
+    a.paint(&mut c, None);
+    let g = a.pl_grid().expect("the arranger");
+    a.mouse_move(g.x + g.w / 2.0, g.y + 30.0);
+    let clips = crate::playlist::clips(&a.state.session).len();
+    let steps = a.state.session.history.at();
+    a.mouse_down();
+    a.mouse_up();
+    assert_eq!(crate::playlist::clips(&a.state.session).len(), clips + 1, "a clip placed");
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    assert_eq!(newest(&a), "Arranger fill paint clip");
+}

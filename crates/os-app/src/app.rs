@@ -2717,9 +2717,7 @@ impl App {
                     // notches of one knob one step (`control::run_edit`).
                     Request::ToggleOn(row) => {
                         let _ = chans;
-                        crate::control_ui::knob_edit(&mut self.state, crate::rack::MUTE_SOLO, Region::Mutes, |s| {
-                            s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled)
-                        })
+                        crate::rack::toggle_on(&mut self.state, row)
                     }
                     Request::Volume(row, v) => self.channel_control(row, ChannelControl::Volume, |c| c.volume = v),
                     Request::Pan(row, v) => self.channel_control(row, ChannelControl::Pan, |c| c.pan = v),
