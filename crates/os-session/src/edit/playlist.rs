@@ -710,7 +710,7 @@ pub fn add_point(s: &mut crate::session::Session, ch: u16, beat: f64, value: f64
     // A new point takes the mode / tension of the segment it splits ("new segments use the last tension").
     let (mode, tension) = a.points.get(i).map_or((AutoMode::Single, 0.0), |q| (q.mode, q.tension));
     let flag = if mode.has_tension() { 2 } else { 0 };
-    a.points.insert(i, AutoPoint { beat: beat.max(0.0), value: value.clamp(0.0, 1.0), tension, mode, flag });
+    a.points.insert(i, AutoPoint { id: os_model::Id::NONE, beat: beat.max(0.0), value: value.clamp(0.0, 1.0), tension, mode, flag });
     s.dirty = true;
     Some(i)
 }

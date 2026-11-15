@@ -291,7 +291,33 @@ fn rpc_requests_and_errors() {
     let pat = a.state.session.project.patterns[0].id.0;
     call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 11, "method": "apply", "params": {"command": {"op": "set_notes", "pattern": pat, "notes": [{"channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64}]}}}));
     let n = call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 12, "method": "notes", "params": {"pattern": pat}}));
-    assert_eq!(n["result"]["notes"], json!([{"channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64}]));
+    let id = n["result"]["notes"][0]["id"].clone();
+    assert!(id.as_u64().is_some_and(|i| i > 0), "the note has an id");
+    assert_eq!(n["result"]["notes"], json!([{"id": id, "channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64}]));
+}
+
+/// Notes a command makes name their ids in its result, the notes query shows them, and writing the notes back keeps
+/// them; `add_notes` takes no id.
+#[test]
+fn notes_name_their_ids() {
+    let mut a = app();
+    let (ch, _, pa) = ids(&a);
+    let s = &mut a.state.session;
+    s.control.settle(s.project.get_mut());
+    let r = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_notes", "pattern": pa[0], "notes": [{"channel": ch[0], "position": 0}, {"channel": ch[1], "position": 96}]}))]).unwrap();
+    let made: Vec<u32> = r[0]["notes"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+    assert_eq!(made.len(), 2);
+    assert!(made.iter().all(|&i| i != 0) && made[0] != made[1]);
+    let q = |a: &App| crate::control::query::notes(&a.state.session, pa[0]).unwrap()["notes"].clone();
+    let listed: Vec<u32> = q(&a).as_array().unwrap().iter().map(|n| n["id"].as_u64().unwrap() as u32).collect();
+    assert!(made.iter().all(|i| listed.contains(i)), "the query names them");
+    // Read back and written again (one velocity changed): the same ids.
+    let mut notes = q(&a);
+    notes[0]["velocity"] = json!(50);
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_notes", "pattern": pa[0], "notes": notes}))]).unwrap();
+    let again: Vec<u32> = q(&a).as_array().unwrap().iter().map(|n| n["id"].as_u64().unwrap() as u32).collect();
+    assert_eq!(again, listed);
+    assert!(apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_notes", "pattern": pa[0], "notes": [{"channel": ch[0], "position": 0, "id": made[0]}]}))]).is_err());
 }
 
 #[test]

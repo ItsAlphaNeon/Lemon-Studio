@@ -46,7 +46,7 @@ says that they were. Without a window (`--serve`) the client saves directly.
 |---|---|---|
 | `hello` | `name`, `token` (on a port) | `app`, `version`, `protocol` (1), `name`, `level`. The name labels the client's undo steps and events. |
 | `state` | | The project: settings, `channels`, `mixer` (the tracks in use), `patterns`, `playlist` |
-| `notes` | `pattern` | That pattern's notes |
+| `notes` | `pattern` | That pattern's notes, with their ids |
 | `plugins` | | The `instruments` and `effects` that `add_channel` and `add_effect` take, by name |
 | `params` | `owner` | The parameters of the plugin playing a channel or a mixer slot: id, name, group, unit, value 0..1, value text, range, default, steps |
 | `history` | | The undo history (`steps` with `name`, `undone`) and `at`, where the project is in it |
@@ -67,8 +67,9 @@ and gets no answer.
 
 Channels, patterns, mixer tracks, playlist clips, arrangements and mixer-slot plugins have ids: numbers that stay
 with them when other things are added, moved or deleted. `state` shows them; commands take them. A deleted thing's id
-names nothing, until an undo brings the thing back with its id. Ids are not saved in project files, so an opened
-project gets new ones.
+names nothing, until an undo brings the thing back with its id. Notes, control points, time markers, playlist tracks
+and automation points have ids too, numbered from 2147483648 up so the others stay small; `notes` shows a pattern's.
+No two things share an id. Ids are not saved in project files, so an opened project gets new ones.
 
 ## Commands
 
@@ -100,8 +101,8 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `add_pattern` | `name`, `color` (optional) | Result: `pattern` |
 | `delete_pattern` | `pattern` | Its clips go; later patterns move down a number |
 | `set_pattern` | `pattern`; `name`, `color`, `length` (0 = Auto) (optional) | |
-| `set_notes` | `pattern`, `notes`, `channel` (optional) | The notes of `channel` (or all notes) become `notes` |
-| `add_notes` | `pattern`, `notes` | |
+| `set_notes` | `pattern`, `notes`, `channel` (optional) | The notes of `channel` (or all notes) become `notes`. A note keeps its `id` (as `notes` lists it) when the pattern had it; others get new ones. Result: `notes` (their ids, in order) |
+| `add_notes` | `pattern`, `notes` (without `id`) | Result: `notes` (their ids, in order) |
 | `add_clip` | `track` (1-based), `position`; `length`, and `pattern` or `channel` | A pattern clip, or an audio or automation channel's clip, in the arrangement shown. Result: `clip` |
 | `delete_clip` | `clip` | |
 | `set_clip` | `clip`; `position`, `track`, `length`, `muted` (optional) | |

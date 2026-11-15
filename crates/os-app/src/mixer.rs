@@ -2621,7 +2621,7 @@ mod tests {
         crate::playlist::automation_channel(&mut a.state, target::slot_param(3, 0, 5), "FX", Vec::new());
         let p = a.state.session.project.get_mut();
         p.automations.last_mut().unwrap().targets.push(target::mixer(4, MIXER_VOLUME));
-        p.patterns[0].controls.push(os_model::ControlPoint { position: 0, kind: target::send(4, 5), value: 0 });
+        p.patterns[0].controls.push(os_model::ControlPoint { id: os_model::Id::NONE, position: 0, kind: target::send(4, 5), value: 0 });
         p.init_controls.push(os_model::InitControl { head: 0, target: target::slot(3, 0, SLOT_MIX), value: 1 });
         p.controller_links.push(os_model::ControllerLink::new(0x7000 + 3 * 64 + 1, 0, target::mixer(4, MIXER_PAN)));
         crate::remote::set_links(&crate::settings_file::store(), &[

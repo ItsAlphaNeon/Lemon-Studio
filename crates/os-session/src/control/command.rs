@@ -250,6 +250,10 @@ pub struct NoteIn {
     pub velocity: Option<u8>,
     #[serde(default)]
     pub pan: Option<u8>,
+    /// `set_notes`: the note's id as the notes query names it, kept when the pattern held a note with it; a note
+    /// without one, or with another, gets a new id. `add_notes` takes none: its notes are new.
+    #[serde(default)]
+    pub id: Option<u32>,
 }
 
 fn middle_c() -> u16 {
@@ -536,6 +540,19 @@ fn ticks(name: &str, v: u32) -> Result<u32, Error> {
 
 fn id_result(key: &str, id: Id) -> serde_json::Value {
     serde_json::json!({ key: id.0 })
+}
+
+/// `notes` with their ids: one of `held` (the pattern's before the command) given once is kept, any other note gets a new
+/// one (`Control::fresh_note`); and the result naming them in the order given.
+fn with_ids(s: &mut crate::session::Session, mut notes: Vec<os_model::Note>, held: &std::collections::HashSet<u32>) -> (Vec<os_model::Note>, serde_json::Value) {
+    let mut kept = std::collections::HashSet::new();
+    for n in &mut notes {
+        if !(held.contains(&n.id.0) && kept.insert(n.id.0)) {
+            n.id = s.control.fresh_note();
+        }
+    }
+    let ids: Vec<u32> = notes.iter().map(|n| n.id.0).collect();
+    (notes, serde_json::json!({ "notes": ids }))
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1008,19 +1025,25 @@ impl Command {
                 let notes = notes_of(&s.project, &notes)?;
                 let only = channel.map(|c| channel_row(&s.project, c).map(|r| s.project.channels[r].index)).transpose()?;
                 let place = pattern_place(&s.project, pattern)?;
+                let held: std::collections::HashSet<u32> = s.project.patterns[place].notes.iter().map(|n| n.id.0).filter(|&i| i != 0).collect();
+                let (notes, ids) = with_ids(s, notes, &held);
                 let p = &mut s.project.get_mut().patterns[place];
                 p.notes.retain(|n| only.is_some_and(|c| n.channel != c));
                 p.notes.extend(notes);
                 p.notes.sort_by_key(|n| n.position);
-                none
+                Ok(ids)
             }
             Command::AddNotes { pattern, notes } => {
+                if notes.iter().any(|n| n.id.is_some()) {
+                    return Err("add_notes makes new notes: give them no id (set_notes keeps a note's)".into());
+                }
                 let notes = notes_of(&s.project, &notes)?;
                 let place = pattern_place(&s.project, pattern)?;
+                let (notes, ids) = with_ids(s, notes, &Default::default());
                 let p = &mut s.project.get_mut().patterns[place];
                 p.notes.extend(notes);
                 p.notes.sort_by_key(|n| n.position);
-                none
+                Ok(ids)
             }
 
             Command::AddClip { track, position, length, pattern, channel } => {
@@ -1258,6 +1281,7 @@ fn notes_of(p: &Project, notes: &[NoteIn]) -> Result<Vec<Note>, Error> {
                 key: n.key,
                 velocity: n.velocity.unwrap_or(100).min(128),
                 pan: n.pan.unwrap_or(64).min(128),
+                id: Id(n.id.unwrap_or(0)),
                 ..Note::step(ch, n.position)
             })
         })

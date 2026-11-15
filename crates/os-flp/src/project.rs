@@ -1441,7 +1441,7 @@ fn decode_envelopes(block: &[Event]) -> [Envelope; 5] {
 fn decode_note(r: &[u8]) -> Note {
     let u16_at = |o: usize| u16::from_le_bytes([r[o], r[o + 1]]);
     let u32_at = |o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
-    Note {
+    Note { id: os_model::Id::NONE,
         position: u32_at(0),
         channel: u16_at(6),
         length: u32_at(8),
@@ -1467,7 +1467,7 @@ const CONTROL_LEN: usize = 12;
 
 fn decode_controls(data: &[u8]) -> Vec<ControlPoint> {
     data.chunks_exact(CONTROL_LEN)
-        .map(|r| ControlPoint {
+        .map(|r| ControlPoint { id: os_model::Id::NONE,
             position: u32::from_le_bytes(r[0..4].try_into().unwrap()),
             kind: u32::from_le_bytes(r[4..8].try_into().unwrap()),
             value: i32::from_le_bytes(r[8..12].try_into().unwrap()),
@@ -1697,7 +1697,7 @@ fn decode_points(d: &[u8]) -> Vec<AutoPoint> {
     d.chunks_exact(AUTO_POINT_LEN)
         .map(|r| {
             beat += f64::from_le_bytes(r[0..8].try_into().unwrap());
-            AutoPoint {
+            AutoPoint { id: os_model::Id::NONE,
                 beat,
                 value: f64::from_le_bytes(r[8..16].try_into().unwrap()),
                 tension: f32::from_le_bytes(r[16..20].try_into().unwrap()),
@@ -1813,7 +1813,7 @@ fn link_event(channel: u16, target: u32) -> Event {
 fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrack {
     let r = events[t.record].data().unwrap_or(&[]);
     let custom = t.color_flag.is_some_and(|i| int(&events[i]) != 0);
-    PlaylistTrack {
+    PlaylistTrack { id: os_model::Id::NONE,
         number: r.get(0..4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap())),
         name: t.name.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)),
         color: r
@@ -6317,7 +6317,7 @@ mod tests {
         auto_ch.kind = ChannelKind::Automation;
         p.channels.push(auto_ch);
         let mut a = new_automation(2, os_model::target::channel(0, 0), 0.78125, 4.0);
-        a.points.insert(1, AutoPoint { beat: 2.0, value: 0.25, tension: -0.5, mode: AutoMode::Stairs, flag: 0 });
+        a.points.insert(1, AutoPoint { id: os_model::Id::NONE, beat: 2.0, value: 0.25, tension: -0.5, mode: AutoMode::Stairs, flag: 0 });
         p.automations.push(a);
         p.arrangements[0].clips.push(Clip::new(0, 384, 1, ClipSource::Channel(2)));
         let file = create(&p).unwrap();

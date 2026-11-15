@@ -322,7 +322,7 @@ mod tests {
     use super::*;
 
     fn pt(beat: f64, value: f64, mode: AutoMode, tension: f32) -> AutoPoint {
-        AutoPoint { beat, value, tension, mode, flag: 2 }
+        AutoPoint { id: crate::Id::NONE, beat, value, tension, mode, flag: 2 }
     }
 
     /// Every shape starts at 0 and arrives at 1, at several tensions (pulse and wave end where their count puts them;
