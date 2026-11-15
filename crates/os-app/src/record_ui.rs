@@ -471,6 +471,24 @@ mod tests {
         app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect).unwrap_or_else(|| panic!("no hit for {a:?}"))
     }
 
+    /// An edit made to the pattern during a take stays when the take writes its next note.
+    #[test]
+    fn an_edit_during_a_take_stays() {
+        let mut app = app();
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 30.0, false);
+        key(&mut app, KeyCode::KeyZ, false, 100.0, false);
+        // Drawn while recording, outside the take's span and on another channel.
+        if let Some(p) = app.state.session.project.get_mut().patterns.iter_mut().find(|p| p.number == 1) {
+            p.notes.push(Note { length: 24, ..Note::step(0, 600) });
+            p.notes.push(Note { length: 24, ..Note::step(1, 48) });
+        }
+        key(&mut app, KeyCode::KeyX, true, 190.0, false);
+        key(&mut app, KeyCode::KeyX, false, 205.0, false);
+        stop(&mut app);
+        assert_eq!(notes(&app), [(24, 72, 0), (48, 24, 1), (192, 24, 0), (600, 24, 0)]);
+    }
+
     /// MIDI channel through (spec: ui/channel-rack.md §18): a note recorded from a MIDI device takes the MIDI channel it
     /// came on as its colour group; with the entry unticked it keeps the first.
     #[test]
