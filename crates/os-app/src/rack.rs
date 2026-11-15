@@ -1134,14 +1134,7 @@ pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
     p.automations.retain_mut(|a| {
         let Some(&m) = idx.get(&a.channel) else { return false };
         a.channel = m;
-        // Channel targets keep the channel in the high half (spec: flp/events/automation.md "Targets").
-        a.targets.retain_mut(|t| {
-            let hi = (*t >> 16) as u16;
-            if *t == target::TEMPO || hi >= 0x4000 {
-                return true;
-            }
-            idx.get(&hi).map(|&n| *t = target::channel(n, *t as u16)).is_some()
-        });
+        a.targets.retain_mut(|t| target::moved_channel(*t, |c| idx.get(&c).copied()).map(|n| *t = n).is_some());
         true
     });
     for arr in &mut p.arrangements {
@@ -1254,6 +1247,11 @@ pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
     };
     s.playlist.source = s.playlist.source.and_then(follow);
     s.playlist.lock_len = s.playlist.lock_len.and_then(|(c, len)| Some((follow(c)?, len)));
+    // The event editor's target follows its channel; a channel that goes closes it.
+    match target::moved_channel(s.events.target, |c| m(usize::from(c)).map(|r| r as u16)) {
+        Some(t) => s.events.target = t,
+        None => s.hide(Win::Events),
+    }
     s.piano.clear_selection();
     s.piano.dirty = true;
     s.playlist.sel.clear();
@@ -3747,6 +3745,20 @@ mod tests {
     }
 
     /// Clone, move and delete renumber the channels' notes so each note keeps its channel (§17-18).
+    /// The event editor shows its channel's events after the channel moves, and closes when the channel is deleted.
+    #[test]
+    fn the_event_editor_follows_its_channel() {
+        use os_model::target::{channel, CHANNEL_VOLUME};
+        let mut app = App::new(None);
+        app.state.events.target = channel(2, CHANNEL_VOLUME);
+        app.state.raise(Win::Events);
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        assert_eq!(app.state.events.target, channel(1, CHANNEL_VOLUME));
+        delete_rows(&mut app, &[1]);
+        assert!(!app.state.shown(Win::Events), "its channel went");
+    }
+
     /// The playlist's Draw source and its locked clip length, an audio or automation channel's, follow it when it moves
     /// and go when it is deleted.
     #[test]
