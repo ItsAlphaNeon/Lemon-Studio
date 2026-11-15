@@ -156,12 +156,10 @@ pub struct Extra {
     pub group: Option<u8>,
 }
 
-/// The take being recorded: the pattern's notes as they were before it, the channels it recorded, the span from its
-/// first start to its last end, and its notes.
+/// The take being recorded: the channels it recorded, the span from its first start to its last end, and its notes.
 #[derive(Debug, Clone)]
 pub struct Take {
     pub pattern: u16,
-    before: Vec<Note>,
     channels: Vec<u16>,
     span: Option<(u32, u32)>,
     new: Vec<Note>,
@@ -201,6 +199,12 @@ pub struct Rec {
 }
 
 impl Rec {
+    /// Another project opens: its take, held notes, count-in and Cancel recording's step go without being written.
+    /// Record stays armed.
+    pub fn forget(&mut self) {
+        *self = Rec { armed: self.armed, audio: self.audio, unit: self.unit, log: std::mem::take(&mut self.log), ..Rec::default() };
+    }
+
     /// A take is open (for tests and the hint).
     pub fn recording(&self) -> bool {
         self.take.is_some()
@@ -289,8 +293,7 @@ fn open_take_in(s: &mut Session, song: bool) {
         snap
     };
     crate::history::record(s, RECORDED, snap);
-    let before = s.project.pattern(pattern).map(|p| p.notes.clone()).unwrap_or_default();
-    s.rec.take = Some(Take { pattern, before, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new(), clip: None });
+    s.rec.take = Some(Take { pattern, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new(), clip: None });
 }
 
 /// The current pattern's tick at playback tick `t`: the tick itself in PAT mode; in SONG mode where a clip of the
@@ -366,23 +369,24 @@ fn write_held_in(s: &mut Session, h: Held, now: Option<f64>) {
         note.group = note.group & !0x0F | g & 0x0F;
     }
     note.release = h.release.unwrap_or(note.release);
-    take.new.push(note);
     let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
     take.span = Some((lo, hi));
     // Blend recorded notes: the earlier notes stay (spec §3).
     let (lo, hi) = if Opt::Blend.on(&s.settings) { (0, 0) } else { (lo, hi) };
-    let notes: Vec<Note> = take
-        .before
-        .iter()
-        .filter(|n| !(take.channels.contains(&n.channel) && n.position >= lo && n.position < hi))
-        .chain(take.new.iter())
-        .cloned()
-        .collect();
-    if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
-        p.notes = notes;
-    } else {
-        s.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
-    }
+    // The pattern as it is now, so edits made during the take stay: the take's span replaces the other notes on its
+    // channels, and the new note joins.
+    let patterns = &mut s.project.get_mut().patterns;
+    let i = match patterns.iter().position(|p| p.number == pattern) {
+        Some(i) => i,
+        None => {
+            patterns.push(os_model::Pattern { number: pattern, ..os_model::Pattern::default() });
+            patterns.len() - 1
+        }
+    };
+    let p = &mut patterns[i];
+    p.notes.retain(|n| take.new.contains(n) || !(take.channels.contains(&n.channel) && n.position >= lo && n.position < hi));
+    p.notes.push(note);
+    take.new.push(note);
     s.touched.views.push(View::Recorded { pattern, channel: h.channel });
     s.dirty = true;
     s.touched.repaint = true;

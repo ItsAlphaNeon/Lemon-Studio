@@ -144,12 +144,24 @@ pub fn reset_hosted(ses: &mut Session) {
     ses.transport.set_effects(Vec::new());
 }
 
-/// `project`, read from `file` at `path`, becomes the session's: playback stops, the plugins go, the history and the
-/// control plane start again. The interface then sets its views (`App::open`) and starts the loading
-/// (`start_loading`).
-pub fn open_in(ses: &mut Session, file: os_flp::FlpFile, mut project: os_model::Project, path: std::path::PathBuf) {
+/// Another project replaces the session's (open, New, a MIDI file opened as a project): playback and the hosted
+/// plugins stop, and what the session remembers of the old project goes: a recording take (unwritten), what
+/// performance mode launched, the playback positions, the history and the control plane.
+pub fn leave_in(ses: &mut Session) {
     ses.transport.silence();
     reset_hosted(ses);
+    ses.rec.forget();
+    ses.perform = crate::perform::Perform::default();
+    ses.pat_pos = 0;
+    ses.song_pos = 0;
+    ses.history.reset();
+    ses.control.reset();
+}
+
+/// `project`, read from `file` at `path`, becomes the session's, after `leave_in`. The interface then sets its views
+/// (`App::open`) and starts the loading (`start_loading`).
+pub fn open_in(ses: &mut Session, file: os_flp::FlpFile, mut project: os_model::Project, path: std::path::PathBuf) {
+    leave_in(ses);
     // As saved (event 9); a file without it opens in song mode (spec: flp/engine-events.md "Project").
     project.song_mode = Some(project.song_mode.unwrap_or(true));
     project.current_pattern = Some(project.current_pattern.unwrap_or(1).max(1));
@@ -163,8 +175,6 @@ pub fn open_in(ses: &mut Session, file: os_flp::FlpFile, mut project: os_model::
     ses.project.get_mut().work_time.get_or_insert_with(crate::project_info::work_time_now);
     ses.file = Some(file);
     ses.path = Some(path);
-    ses.history.reset();
-    ses.control.reset();
     ses.control.event(&crate::control::By::User, "opened", ses.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
     // Live notes use the new project.
     ses.dirty = true;
