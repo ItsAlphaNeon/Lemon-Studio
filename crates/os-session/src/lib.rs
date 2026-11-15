@@ -51,6 +51,7 @@ pub mod midi_out;
 pub mod misc;
 pub mod missing;
 pub mod mix_threads;
+pub mod native;
 pub mod mixer_state;
 pub mod monitor;
 pub mod note_names;

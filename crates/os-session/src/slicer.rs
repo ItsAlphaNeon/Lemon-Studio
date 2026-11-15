@@ -33,27 +33,43 @@ pub fn is_slicer(ch: &Channel) -> bool {
 impl Plugins {
     /// The Fruity Slicer state the Lemon Slicer on rack row `row` plays, `None` when the row hosts something else.
     pub fn slicer_file_state(&self, row: usize) -> Option<Vec<u8>> {
-        let h = self.hosted.get(&row)?;
-        let p = h.lock_for_state()?;
-        if p.desc().name != LEMON_SLICER || !crate::project_plugins::is_builtin(p.desc()) {
-            return None;
+        #[cfg(feature = "stock-slicer")]
+        {
+            let h = self.hosted.get(&row)?;
+            let p = h.lock_for_state()?;
+            if p.desc().name != LEMON_SLICER || !crate::project_plugins::is_builtin(p.desc()) {
+                return None;
+            }
+            lemon_slicer::params::fl_from_plugin_state(&p.save_state()?)
         }
-        lemon_slicer::params::fl_from_plugin_state(&p.save_state()?)
+        #[cfg(not(feature = "stock-slicer"))]
+        {
+            let _ = (self, row);
+            None
+        }
     }
 
     /// Loads loop file `path` into the Lemon Slicer on rack row `row` as its own Load does (a file dropped on its
     /// window): the file's beats, tempo and slices, the settings kept. The number of slices, or why the file was not
     /// taken; `None` when the row hosts no Lemon Slicer.
     pub fn load_slicer_loop(&mut self, row: usize, path: &str) -> Option<Result<usize, String>> {
-        let st = lemon_slicer::state::State::parse(&self.slicer_file_state(row)?)?;
-        let st = match lemon_slicer::file_state(path, st) {
-            Ok((st, _)) => st,
-            Err(e) => return Some(Err(e)),
-        };
-        let state = lemon_slicer::params::plugin_state_from_fl(&st.to_bytes());
-        let state = crate::plugins::with_sample_path(&state, path).unwrap_or(state);
-        let loaded = self.hosted.get(&row).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.load_state(&state));
-        Some(if loaded { Ok(st.slices.len()) } else { Err(format!("{path}: the plugin did not take it")) })
+        #[cfg(feature = "stock-slicer")]
+        {
+            let st = lemon_slicer::state::State::parse(&self.slicer_file_state(row)?)?;
+            let st = match lemon_slicer::file_state(path, st) {
+                Ok((st, _)) => st,
+                Err(e) => return Some(Err(e)),
+            };
+            let state = lemon_slicer::params::plugin_state_from_fl(&st.to_bytes());
+            let state = crate::plugins::with_sample_path(&state, path).unwrap_or(state);
+            let loaded = self.hosted.get(&row).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.load_state(&state));
+            Some(if loaded { Ok(st.slices.len()) } else { Err(format!("{path}: the plugin did not take it")) })
+        }
+        #[cfg(not(feature = "stock-slicer"))]
+        {
+            let _ = (self, row, path);
+            None
+        }
     }
 }
 
@@ -74,13 +90,21 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
 /// The plugin state for a channel's Fruity Slicer state: its loop's stored path resolved for the plugin to open
 /// (FL's placeholders made real), the stored path kept in the state.
 pub fn plugin_state(settings: &crate::settings_file::SettingsStore, fl: &[u8]) -> Vec<u8> {
-    let st = lemon_slicer::params::plugin_state_from_fl(fl);
-    let stored = lemon_slicer::state::State::parse(fl).map(|s| s.path()).unwrap_or_default();
-    let sample = crate::plugins::resolve_sample(settings, &stored);
-    if sample.is_empty() {
-        return st;
+    #[cfg(feature = "stock-slicer")]
+    {
+        let st = lemon_slicer::params::plugin_state_from_fl(fl);
+        let stored = lemon_slicer::state::State::parse(fl).map(|s| s.path()).unwrap_or_default();
+        let sample = crate::plugins::resolve_sample(settings, &stored);
+        if sample.is_empty() {
+            return st;
+        }
+        crate::plugins::with_sample_path(&st, &sample).unwrap_or(st)
     }
-    crate::plugins::with_sample_path(&st, &sample).unwrap_or(st)
+    #[cfg(not(feature = "stock-slicer"))]
+    {
+        let _ = settings;
+        fl.to_vec()
+    }
 }
 
 /// Hosts Lemon Slicer on every Fruity Slicer channel without an instance, started from the channel's saved state
@@ -123,7 +147,7 @@ pub fn sync_slicer(s: &mut crate::session::Session) {
     s.touched.repaint = true;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stock-slicer"))]
 mod tests {
     use super::*;
     use lemon_slicer::state::{Slice, State, H_BEATS, H_BPM};

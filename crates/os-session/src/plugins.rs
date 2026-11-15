@@ -252,6 +252,7 @@ pub struct Plugins {
     rate: u32,
     /// Verdicts of the one-time child-process check a native plugin passes before its first load here (spec:
     /// plugins/fruity-abi.md "Crash containment"). `None`: no check (tests, where this program is the test harness).
+    #[cfg(feature = "fl-native")]
     native_checks: Option<os_native::check::Checks>,
     /// Instances that went with their channel or slot, by its id: (an effect, the plugin's uid, its saved state).
     /// Only those whose channel or slot went (`keep`); an undo that brings it back hosts it again from here
@@ -354,6 +355,17 @@ impl Plugins {
 /// How many gone instances `Plugins::stash` keeps.
 const STASH_MAX: usize = 64;
 
+/// A stock plugin's CLAP entry table when its feature is on (`None`: not in this build).
+macro_rules! stock {
+    ($feature:literal, $krate:ident) => {{
+        #[cfg(feature = $feature)]
+        let e = Some(&$krate::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void);
+        #[cfg(not(feature = $feature))]
+        let e = None;
+        e
+    }};
+}
+
 /// Lemon Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
 /// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio, Citrus, Smith, Lemon Slicer and Lemon Drum
 /// Sampler likewise (spec: plugins/lemon-3x-osc.md §6, plugins/citrus.md, plugins/smith.md, plugins/lemon-slicer.md §6,
@@ -366,11 +378,11 @@ pub fn builtin() -> Vec<Available> {
     static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static DRUMS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
-    v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
-    v.extend(linked(&CITRUS, &citrus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::citrus::CITRUS));
-    v.extend(linked(&SMITH, &smith::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::smith::SMITH));
-    v.extend(linked(&SLICER, &lemon_slicer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::slicer::LEMON_SLICER));
-    v.extend(linked(&DRUMS, &lemon_drum_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::drums::LEMON_DRUMS));
+    v.extend(stock!("stock-trio", lemon_3x_osc).map(|e| linked(&OSC3, e, crate::osc3::LEMON_TRIO)).unwrap_or_default());
+    v.extend(stock!("stock-citrus", citrus).map(|e| linked(&CITRUS, e, crate::citrus::CITRUS)).unwrap_or_default());
+    v.extend(stock!("stock-smith", smith).map(|e| linked(&SMITH, e, crate::smith::SMITH)).unwrap_or_default());
+    v.extend(stock!("stock-slicer", lemon_slicer).map(|e| linked(&SLICER, e, crate::slicer::LEMON_SLICER)).unwrap_or_default());
+    v.extend(stock!("stock-drum-sampler", lemon_drum_sampler).map(|e| linked(&DRUMS, e, crate::drums::LEMON_DRUMS)).unwrap_or_default());
     v
 }
 
@@ -381,31 +393,31 @@ pub fn builtin() -> Vec<Available> {
 pub fn builtin_effects() -> Vec<Available> {
     const N: usize = FILE_MAPPED.len() + LINKED_EFFECTS.len();
     static LIBS: [OnceLock<Option<Arc<os_clap::Library>>>; N] = [const { OnceLock::new() }; N];
-    let entries: [*const std::ffi::c_void; N] = [
-        &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &pulp_filter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &press::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_limiter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_reverb::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_delay::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_soft_clipper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_fast_distortion::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_balance::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_stereo_enhancer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_transient_processor::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_chorus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_stereo_shaper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_filter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &tesla::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_flanger::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_phaser::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_peak_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_formula_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_vocoder::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
-        &lemon_drop::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+    let entries: [Option<*const std::ffi::c_void>; N] = [
+        stock!("stock-parametric-eq-2", lemon_parametric_eq_2),
+        stock!("stock-pulp-filter", pulp_filter),
+        stock!("stock-press", press),
+        stock!("stock-limiter", lemon_limiter),
+        stock!("stock-reverb", lemon_reverb),
+        stock!("stock-delay", lemon_delay),
+        stock!("stock-soft-clipper", lemon_soft_clipper),
+        stock!("stock-fast-distortion", lemon_fast_distortion),
+        stock!("stock-balance", lemon_balance),
+        stock!("stock-stereo-enhancer", lemon_stereo_enhancer),
+        stock!("stock-transient-processor", lemon_transient_processor),
+        stock!("stock-chorus", lemon_chorus),
+        stock!("stock-stereo-shaper", lemon_stereo_shaper),
+        stock!("stock-filter", lemon_filter),
+        Some(&tesla::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void),
+        stock!("stock-flanger", lemon_flanger),
+        stock!("stock-phaser", lemon_phaser),
+        stock!("stock-peak-controller", lemon_peak_controller),
+        stock!("stock-formula-controller", lemon_formula_controller),
+        stock!("stock-vocoder", lemon_vocoder),
+        stock!("stock-drop", lemon_drop),
     ];
     let names = FILE_MAPPED.into_iter().chain(LINKED_EFFECTS);
-    LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
+    LIBS.iter().zip(entries).zip(names).filter_map(|((lib, entry), name)| Some(linked(lib, entry?, name))).flatten().collect()
 }
 
 /// The plugins of a CLAP entry table linked into this program.
@@ -437,18 +449,25 @@ pub fn load_file(path: &Path, format: os_host::Format) -> Result<Arc<dyn Library
             os_host::Format::Vst2 => os_vst2::Module::load(path).map(|l| l as Arc<dyn Library>),
             #[cfg(not(feature = "vst2"))]
             os_host::Format::Vst2 => Err(format!("{}: VST 2 is not in this build", path.display())),
+            #[cfg(feature = "fl-native")]
             os_host::Format::Native => os_native::NativeLibrary::load(path).map(|l| l as Arc<dyn Library>),
+            #[cfg(not(feature = "fl-native"))]
+            os_host::Format::Native => Err(format!("{}: native plugins are not in this build", path.display())),
         }
     };
     os_host::guard::catch(load).unwrap_or_else(|c| Err(format!("{}: crashed while loading ({})", path.display(), os_host::guard::describe(c))))
 }
 
 /// The installed native plugin files (generators and effects), when the experimental native host is opted into
-/// (`os_native::enabled()`, Settings > Plugins or `OPENSTUDIO_NATIVE=1`): they are loaded through an unverified
+/// (`native::enabled()`, Settings > Plugins or `OPENSTUDIO_NATIVE=1`): they are loaded through an unverified
 /// interop path (spec plugins/fruity-abi.md), so they stay off by default. Each is tried in a child process before
 /// its first load here (`Plugins::native_check`).
 pub fn native_files() -> Vec<PathBuf> {
-    if os_native::enabled() { os_native::dll_files() } else { Vec::new() }
+    #[cfg(feature = "fl-native")]
+    if crate::native::enabled() {
+        return os_native::dll_files();
+    }
+    Vec::new()
 }
 
 /// A plugin file known from the scan cache: lists the cached plugins without loading the file, and loads it the first
@@ -491,8 +510,14 @@ pub fn format_name(f: os_host::Format) -> &'static str {
 impl Plugins {
     /// The built-in plugins only (what the app knows before the scan cache is read).
     pub fn builtins() -> Plugins {
-        let native_checks = (!cfg!(any(test, feature = "test-util"))).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS)));
-        Plugins { available: builtin(), effects: builtin_effects(), scale: 1.0, native_checks, ..Plugins::default() }
+        Plugins {
+            available: builtin(),
+            effects: builtin_effects(),
+            scale: 1.0,
+            #[cfg(feature = "fl-native")]
+            native_checks: (!cfg!(any(test, feature = "test-util"))).then(|| os_native::check::Checks::load(os_paths::user_file(NATIVE_CHECKS))),
+            ..Plugins::default()
+        }
     }
 
     /// Takes a scan's results (spec: ui/plugin-manager.md §4, "Results"): plugins new to this run are appended, so the
@@ -538,10 +563,15 @@ impl Plugins {
         if desc.format != os_host::Format::Native {
             return Ok(());
         }
-        let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return Ok(()) };
-        match checks.verdict(&program, &desc.path) {
-            os_native::check::Verdict::Works => Ok(()),
-            os_native::check::Verdict::Fails(why) => Err(format!("{} can't load ({why})", desc.name)),
+        #[cfg(not(feature = "fl-native"))]
+        return Err(format!("{}: native plugins are not in this build", desc.name));
+        #[cfg(feature = "fl-native")]
+        {
+            let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return Ok(()) };
+            match checks.verdict(&program, &desc.path) {
+                os_native::check::Verdict::Works => Ok(()),
+                os_native::check::Verdict::Fails(why) => Err(format!("{} can't load ({why})", desc.name)),
+            }
         }
     }
 
@@ -559,8 +589,16 @@ impl Plugins {
     }
 
     fn native_ready(&mut self, dll: &std::path::Path) -> bool {
-        let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return true };
-        checks.ready(&program, dll)
+        #[cfg(not(feature = "fl-native"))]
+        return {
+            let _ = dll;
+            true
+        };
+        #[cfg(feature = "fl-native")]
+        {
+            let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return true };
+            checks.ready(&program, dll)
+        }
     }
 
     /// The built-in plugins plus every plugin file in the standard folders, scanned in this process at once (tests).
@@ -883,6 +921,9 @@ impl Plugins {
         if p.desc().name != LEMON_EQ {
             return None;
         }
+        #[cfg(not(feature = "stock-parametric-eq-2"))]
+        return None;
+        #[cfg(feature = "stock-parametric-eq-2")]
         lemon_parametric_eq_2::params::fl_from_plugin_state(&p.save_state()?)
     }
 
@@ -904,6 +945,9 @@ impl Plugins {
         if p.desc().name != PULP_FILTER {
             return None;
         }
+        #[cfg(not(feature = "stock-pulp-filter"))]
+        return None;
+        #[cfg(feature = "stock-pulp-filter")]
         pulp_filter::fl_from_plugin_state(&p.save_state()?).filter(|b| !b.is_empty())
     }
 
@@ -915,6 +959,9 @@ impl Plugins {
         if p.desc().name != PRESS {
             return None;
         }
+        #[cfg(not(feature = "stock-press"))]
+        return None;
+        #[cfg(feature = "stock-press")]
         press::fl_from_plugin_state(&p.save_state()?).filter(|b| !b.is_empty())
     }
 
@@ -1144,7 +1191,7 @@ pub const LEMON_VOCODER: &str = "Lemon Vocoder";
 /// played and edited by Lemon Vocoder (spec: plugins/lemon-vocoder.md §6).
 pub use crate::effect_ports::VOCODEX_FILE_NAME;
 /// Name of Lemon Drop, Lemon Studio's audio visualizer (spec: plugins/lemon-drop.md).
-pub const LEMON_DROP: &str = lemon_drop::NAME;
+pub const LEMON_DROP: &str = "Lemon Drop";
 /// The plugin name a project file stores for Wave Candy (file-format identifier, kept for interop): slots with it are
 /// shown by Lemon Drop (spec: plugins/lemon-drop.md "Projects").
 pub const WAVE_CANDY_FILE_NAME: &str = "Wave Candy";
@@ -1202,6 +1249,41 @@ pub const FL_RECREATIONS: [(&str, &str); 16] = [
     (WAVE_CANDY_FILE_NAME, LEMON_DROP),
 ];
 
+/// Lemon Parametric EQ's plugin state for an EQ slot state; `None` when the EQ is not in this build.
+pub fn eq_state_from_fl(fl: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(feature = "stock-parametric-eq-2")]
+    return Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl));
+    #[cfg(not(feature = "stock-parametric-eq-2"))]
+    {
+        let _ = fl;
+        None
+    }
+}
+
+/// Pulp Filter's plugin state for a Love Philter slot state (bytes that are not one: its starting state); `None` when
+/// Pulp Filter is not in this build.
+pub fn pulp_filter_state_from_fl(fl: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(feature = "stock-pulp-filter")]
+    return Some(pulp_filter::plugin_state_from_fl(fl));
+    #[cfg(not(feature = "stock-pulp-filter"))]
+    {
+        let _ = fl;
+        None
+    }
+}
+
+/// Press's plugin state for a Maximus slot state (bytes that are not one: its starting state); `None` when Press is
+/// not in this build.
+pub fn press_state_from_fl(fl: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(feature = "stock-press")]
+    return Some(press::plugin_state_from_fl(fl));
+    #[cfg(not(feature = "stock-press"))]
+    {
+        let _ = fl;
+        None
+    }
+}
+
 /// The Lemon effect of `FL_RECREATIONS` that plays slots stored as `file` (any case: files may spell the id
 /// differently).
 pub fn recreation_of(file: &str) -> Option<&'static str> {
@@ -1212,8 +1294,11 @@ pub fn recreation_of(file: &str) -> Option<&'static str> {
 pub fn recreation_state_from_fl(lemon: &str, fl: &[u8]) -> Option<Vec<u8>> {
     use lemon_small_fx::params::plugin_state_from_fl as small;
     Some(match lemon {
+        #[cfg(feature = "stock-limiter")]
         "Lemon Limiter" => lemon_limiter::params::plugin_state_from_fl(fl),
+        #[cfg(feature = "stock-reverb")]
         "Lemon Reverb" => lemon_reverb::params::plugin_state_from_fl(fl),
+        #[cfg(feature = "stock-delay")]
         "Lemon Delay" => lemon_delay::params::plugin_state_from_fl(fl),
         "Lemon Soft Clipper" => small(lemon_small_fx::soft_clipper::SPEC, fl),
         "Lemon Fast Distortion" => small(lemon_small_fx::fast_distortion::SPEC, fl),
@@ -1227,6 +1312,7 @@ pub fn recreation_state_from_fl(lemon: &str, fl: &[u8]) -> Option<Vec<u8>> {
         LEMON_PEAK_CONTROLLER => small(lemon_small_fx::peak_controller::SPEC, fl),
         LEMON_FORMULA_CONTROLLER => small(lemon_small_fx::formula_controller::SPEC, fl),
         LEMON_VOCODER => small(lemon_small_fx::vocoder::SPEC, fl),
+        #[cfg(feature = "stock-drop")]
         LEMON_DROP => lemon_drop::plugin_state_from_fl(fl),
         _ => return None,
     })
@@ -1237,8 +1323,11 @@ pub fn recreation_state_from_fl(lemon: &str, fl: &[u8]) -> Option<Vec<u8>> {
 pub fn fl_from_recreation_state(lemon: &str, blob: &[u8]) -> Option<Vec<u8>> {
     use lemon_small_fx::params::fl_from_plugin_state as small;
     match lemon {
+        #[cfg(feature = "stock-limiter")]
         "Lemon Limiter" => lemon_limiter::params::fl_from_plugin_state(blob),
+        #[cfg(feature = "stock-reverb")]
         "Lemon Reverb" => lemon_reverb::params::fl_from_plugin_state(blob),
+        #[cfg(feature = "stock-delay")]
         "Lemon Delay" => lemon_delay::params::fl_from_plugin_state(blob),
         "Lemon Soft Clipper" => small(lemon_small_fx::soft_clipper::SPEC, blob),
         "Lemon Fast Distortion" => small(lemon_small_fx::fast_distortion::SPEC, blob),
@@ -1252,6 +1341,7 @@ pub fn fl_from_recreation_state(lemon: &str, blob: &[u8]) -> Option<Vec<u8>> {
         LEMON_PEAK_CONTROLLER => small(lemon_small_fx::peak_controller::SPEC, blob),
         LEMON_FORMULA_CONTROLLER => small(lemon_small_fx::formula_controller::SPEC, blob),
         LEMON_VOCODER => small(lemon_small_fx::vocoder::SPEC, blob),
+        #[cfg(feature = "stock-drop")]
         LEMON_DROP => lemon_drop::fl_from_plugin_state(blob),
         _ => None,
     }
@@ -1272,9 +1362,11 @@ pub fn slot_label(name: &str) -> &str {
 /// state, Pulp Filter as the file's Love Philter and Press as the file's Maximus with their starting states, so the file
 /// opens elsewhere; other effects by name).
 pub fn new_slot(name: &str) -> os_model::SlotPlugin {
+    #[cfg(feature = "stock-parametric-eq-2")]
     if name == LEMON_EQ {
-        os_model::SlotPlugin { id: os_model::Id::NONE, name: EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() }
-    } else if name == PULP_FILTER {
+        return os_model::SlotPlugin { id: os_model::Id::NONE, name: EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
+    }
+    if name == PULP_FILTER {
         os_model::SlotPlugin { id: os_model::Id::NONE, name: LOVE_PHILTER_FILE_NAME.into(), state: os_engine::effects::love_philter::state::State::new_default().to_bytes() }
     } else if name == PRESS {
         os_model::SlotPlugin { id: os_model::Id::NONE, name: MAXIMUS_FILE_NAME.into(), state: os_engine::effects::maximus::state::State::new_default().to_bytes() }
@@ -1283,6 +1375,7 @@ pub fn new_slot(name: &str) -> os_model::SlotPlugin {
     }
 }
 /// File (in the user folder) remembering which native plugins passed the child-process check.
+#[cfg(feature = "fl-native")]
 const NATIVE_CHECKS: &str = "native-checks.txt";
 /// The sampler parameter a note's sample start modulates per note (Lemon Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";

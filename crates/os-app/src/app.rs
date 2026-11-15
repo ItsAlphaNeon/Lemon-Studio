@@ -901,6 +901,17 @@ pub fn off_text(name: &str) -> String {
 #[cfg(not(plugin_windows))]
 pub const PLUGIN_WINDOWS: &str = "Plugin windows on this system";
 
+/// What opening a plugin's window says without plugin windows: on a system that has them, the build left them out
+/// (the `plugin-windows` feature).
+#[cfg(not(plugin_windows))]
+pub fn plugin_windows_off() -> String {
+    if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
+        "Plugin windows are not in this build".into()
+    } else {
+        off_text(PLUGIN_WINDOWS)
+    }
+}
+
 /// The plugin window's menus, preset list and Misc lists are app popups painted in the main window: off Windows a
 /// detached window would cover them (Windows lifts them above it).
 #[cfg(all(plugin_windows, not(windows)))]
@@ -1582,7 +1593,7 @@ impl App {
                 menu_open: None,
                 menu_sub: None,
                 lane_menu: false,
-                settings: views::settings::SettingsUi { native: os_native::settings_shown(), ..Default::default() },
+                settings: views::settings::SettingsUi { native: os_session::native::settings_shown(), ..Default::default() },
                 fl_text: saved_fl_text(),
                 theme_base: saved_fl_text(),
                 playlist_scroll: (0.0, 0.0),
@@ -1807,24 +1818,12 @@ impl App {
         match result {
             Ok((file, project)) => {
                 crate::project_io::open_in(&mut self.state.session, file, project, path.clone());
+                self.forget_project_ui();
                 let s = &mut self.state;
-                s.selected_channel = 0;
-                s.selected_mixer = 1;
-                s.mixer = Default::default();
-                s.playlist_scroll = (0.0, 0.0);
-                s.rack_scroll = 0.0;
-                s.rack_scroll_x = 0.0;
-                s.rack.reset();
-                s.hide(Win::Plugin);
-                s.mixer_scroll = 0.0;
                 crate::project_info_ui::opened(s);
                 s.message = Some(format!("Opened {}", path.display()));
                 crate::templates::remember(&path);
                 crate::recent::add(&path);
-                s.piano.reset();
-                s.session.pat_pos = 0;
-                s.playlist.reset();
-                s.session.song_pos = 0;
                 crate::playlist::load_view(s);
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 // A .lemon file's own state (icons, slot names and colours, Performance settings); its channel icons
@@ -2350,10 +2349,37 @@ impl App {
         self.empty_project();
     }
 
+    /// What the interface remembers of the old project goes when another replaces it, so none of it points into the
+    /// new one: the selection, the mixer's solo memory, the scrolls, and the windows showing the old project's things.
+    pub(crate) fn forget_project_ui(&mut self) {
+        let s = &mut self.state;
+        s.selected_channel = 0;
+        s.selected_mixer = 1;
+        s.mixer = Default::default();
+        s.playlist_scroll = (0.0, 0.0);
+        s.rack_scroll = 0.0;
+        s.rack_scroll_x = 0.0;
+        s.mixer_scroll = 0.0;
+        s.rack.reset();
+        for w in [Win::Plugin, Win::Events, Win::Container, Win::PluginPalette] {
+            s.hide(w);
+        }
+        s.events_back = None;
+        s.piano.reset();
+        s.playlist.reset();
+    }
+
+    /// Another project replaces this one (New, a MIDI file opened as a project; opening goes through
+    /// `project_io::open_in`): the session's memory of it and the interface's go (`project_io::leave_in`,
+    /// `forget_project_ui`).
+    pub(crate) fn leave_project(&mut self) {
+        crate::project_io::leave_in(&mut self.state.session);
+        self.forget_project_ui();
+    }
+
     /// The built-in new project (FILE ▸ New with Empty, New from template ▸ Empty).
     pub fn empty_project(&mut self) {
-        self.state.session.transport.silence();
-        self.reset_hosted();
+        self.leave_project();
         let s = &mut self.state;
         s.session.project = crate::locked::Locked::new(default_project(&crate::settings_file::store()));
         crate::project_info_ui::created(s);
@@ -2363,15 +2389,8 @@ impl App {
         s.set_pattern(1);
         // FL's default template is saved in pattern mode.
         s.set_song_mode(false);
-        s.piano.reset();
-        s.session.pat_pos = 0;
-        s.playlist.reset();
-        s.session.song_pos = 0;
-        s.session.history.reset();
-        s.session.control.reset();
         s.session.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
         crate::playlist::load_view(s);
-        s.rack.reset();
         s.session.dirty = true;
         s.message = Some("New project".into());
         self.mark_saved();
@@ -2517,7 +2536,7 @@ impl App {
         // Without plugin windows opening one says so.
         #[cfg(not(plugin_windows))]
         if self.state.session.pending_open.take().is_some_and(|r| self.state.session.hosted_rows.contains(&r)) {
-            self.state.message = Some(off_text(PLUGIN_WINDOWS));
+            self.state.message = Some(plugin_windows_off());
             self.invalidate();
         }
         #[cfg(plugin_windows)]
@@ -3898,9 +3917,9 @@ impl App {
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
     fn plugin_windows_busy(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", plugin_windows))]
         return self.state.editor_host.frames.busy();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", plugin_windows)))]
         false
     }
 
@@ -4654,30 +4673,39 @@ impl App {
     /// Load does (spec: plugins/tesla/README.md "Sending slices to Lemon Slicer"). One undo step, "Add channel", as the
     /// plugin picker's.
     pub fn sample_to_slicer(&mut self, path: String) {
-        let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let path = crate::data_folder_ui::adopt(&mut self.state, &path);
-        let st = match lemon_slicer::file_state(&path, lemon_slicer::state::State::default()) {
-            Ok((st, _)) => st,
-            Err(e) => {
-                self.state.message = Some(format!("{}: {e}", crate::slicer::LEMON_SLICER));
-                return self.invalidate();
-            }
-        };
-        let n = st.slices.len();
-        crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
-            let s = &mut app.state;
-            let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
-            let ch = &mut s.session.project.get_mut().channels[row];
-            ch.name = Some(stem.clone());
-            ch.plugin_state = Some(st.to_bytes());
-            s.selected_channel = row;
-            s.rack.select_only(row);
-            crate::rack::autosize(s);
-            s.session.dirty = true;
-        });
-        self.state.message = Some(format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER));
-        self.sync_slicer();
-        self.invalidate();
+        #[cfg(feature = "stock-slicer")]
+        {
+            let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let path = crate::data_folder_ui::adopt(&mut self.state, &path);
+            let st = match lemon_slicer::file_state(&path, lemon_slicer::state::State::default()) {
+                Ok((st, _)) => st,
+                Err(e) => {
+                    self.state.message = Some(format!("{}: {e}", crate::slicer::LEMON_SLICER));
+                    return self.invalidate();
+                }
+            };
+            let n = st.slices.len();
+            crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
+                let s = &mut app.state;
+                let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
+                let ch = &mut s.session.project.get_mut().channels[row];
+                ch.name = Some(stem.clone());
+                ch.plugin_state = Some(st.to_bytes());
+                s.selected_channel = row;
+                s.rack.select_only(row);
+                crate::rack::autosize(s);
+                s.session.dirty = true;
+            });
+            self.state.message = Some(format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER));
+            self.sync_slicer();
+            self.invalidate();
+        }
+        #[cfg(not(feature = "stock-slicer"))]
+        {
+            let _ = path;
+            self.state.message = Some(format!("{} is not in this build", crate::slicer::LEMON_SLICER));
+            self.invalidate()
+        }
     }
 
     /// A sample a Lemon plugin sent (Tesla's "Send to arranger as audio clip" / "Send to selected channel" / "Send to
@@ -5384,21 +5412,21 @@ impl App {
                 }
             }
             // Opt in / out of the experimental native host and scan again so the effect lists follow (spec
-            // plugins/fruity-abi.md). Its displayed state comes straight from `os_native::enabled()`.
+            // plugins/fruity-abi.md). Its displayed state comes straight from `os_session::native::enabled()`.
             SAct::Check(k) if k == views::settings::NATIVE_HOST_CHECK => {
-                let on = !os_native::enabled();
-                os_native::set_enabled(on);
+                let on = !os_session::native::enabled();
+                os_session::native::set_enabled(on);
                 self.start_scan(crate::plugin_db::Mode::Changed);
                 self.state.message = Some(if on { "Experimental native plugin host on: looking for native plugins".into() } else { "Experimental native plugin host off".into() });
                 // The hidden preference applies again (or stops applying) with the host.
-                if os_native::prefer_native_set() {
+                if os_session::native::prefer_native_set() {
                     self.swap_builtin_overrides();
                 }
             }
             // Real native plugins in place of the Lemon recreations (spec plugins/fruity-abi.md "Opened projects").
             SAct::Check(k) if k == views::settings::NATIVE_FIRST_CHECK => {
-                let on = !os_native::prefer_native();
-                os_native::set_prefer_native(on);
+                let on = !os_session::native::prefer_native();
+                os_session::native::set_prefer_native(on);
                 let n = self.swap_builtin_overrides();
                 self.state.message = Some(match (on, n) {
                     (true, 0) => "Opened projects play their own native plugins, not the Lemon recreations".into(),
@@ -9899,6 +9927,7 @@ mod tests {
     /// Slots holding the file's parametric EQ get a Lemon Parametric EQ instance and show its name; adding the EQ
     /// stores the file's EQ (spec: plugins/lemon-parametric-eq-2.md §8).
     #[test]
+    #[cfg(feature = "stock-parametric-eq-2")]
     fn parametric_eq_slots_are_hosted() {
         use crate::plugins::{fx_key, EQ_FILE_NAME, LEMON_EQ};
         let mut a = App::new(None);
@@ -9997,6 +10026,7 @@ mod tests {
     /// A project's Maximus slots are opened as Press with their state, show Press's name and keep the file's Maximus,
     /// whose state Press writes back (spec: plugins/lemon-press.md §6).
     #[test]
+    #[cfg(feature = "stock-press")]
     fn maximus_slots_open_as_press() {
         use crate::plugins::{MAXIMUS_FILE_NAME, PRESS, fx_key};
         use os_engine::effects::maximus::state::{P_LMH_MIX, State};
@@ -10034,6 +10064,7 @@ mod tests {
     /// engine's (its difference output is the slot's alone).
     // spec: plugins/lemon-small-effects.md "Opened projects' slots"
     #[test]
+    #[cfg(all(feature = "stock-reverb", feature = "stock-balance", feature = "stock-chorus"))]
     fn fl_effect_slots_open_as_their_lemon_recreations() {
         use crate::plugins::fx_key;
         let mut reverb = lemon_reverb::params::default_state();
@@ -10079,6 +10110,7 @@ mod tests {
     /// Candy with the same bytes.
     // spec: plugins/lemon-drop.md "Projects"
     #[test]
+    #[cfg(feature = "stock-drop")]
     fn wave_candy_slots_open_as_lemon_drop() {
         use crate::plugins::fx_key;
         let mut st = lemon_drop::state::State::new_default();
@@ -13915,7 +13947,7 @@ mod tests {
             app.state.settings.native = native;
             click(&mut app, &mut c, r);
             assert_eq!(shown(&app, NATIVE_HOST_CHECK), native, "native host toggle shown: {native}");
-            if !os_native::enabled() {
+            if !os_session::native::enabled() {
                 assert!(!shown(&app, crate::views::settings::NATIVE_FIRST_CHECK), "hidden");
             }
         }

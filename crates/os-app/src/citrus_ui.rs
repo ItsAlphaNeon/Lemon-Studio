@@ -21,7 +21,7 @@ impl crate::app::App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stock-citrus"))]
 mod tests {
     use super::*;
     use crate::app::App;

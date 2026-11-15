@@ -166,6 +166,7 @@ fn eq_window_shots() {
 /// Lemon Trio in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
 /// plugins/lemon-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --lib osc3_window_redraws -- --ignored`
 #[test]
+#[cfg(feature = "stock-trio")]
 #[ignore]
 fn osc3_window_redraws() {
     let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
@@ -219,6 +220,7 @@ fn osc3_window_redraws() {
 /// Sytrus state the channel saves (spec: plugins/citrus.md §6).
 /// `OS_SHOT_DIR=.. cargo test -p os-app --lib citrus_window_edits -- --ignored`
 #[test]
+#[cfg(feature = "stock-citrus")]
 #[ignore]
 fn citrus_window_edits() {
     let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
@@ -260,6 +262,7 @@ fn citrus_window_edits() {
 /// the channel saves (spec: plugins/smith.md).
 /// `OS_SHOT_DIR=.. cargo test -p os-app --lib smith_window_edits -- --ignored`
 #[test]
+#[cfg(feature = "stock-smith")]
 #[ignore]
 fn smith_window_edits() {
     let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
@@ -1191,6 +1194,7 @@ fn lemon_sampler_stretch_parameters_give_the_channel_settings() {
 /// The built-in Lemon Parametric EQ starts from a project file's EQ state, plays it, and gives the state back
 /// (spec: plugins/lemon-parametric-eq-2.md §8).
 #[test]
+#[cfg(feature = "stock-parametric-eq-2")]
 fn builtin_parametric_eq_takes_and_gives_the_file_state() {
     use lemon_parametric_eq_2::params::{default_state, field, plugin_state_from_fl, set_field};
     let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
@@ -1455,6 +1459,7 @@ fn vst3_window_shots() {
 /// native_window_shots -- --ignored` (shots only when OS_SHOT_DIR is set). Skips without FL.
 #[test]
 #[ignore]
+#[cfg(feature = "fl-native")]
 fn native_window_shots() {
     let fl = os_paths::default_fl_dir();
     let dir = std::env::var_os("OS_SHOT_DIR").map(std::path::PathBuf::from);
@@ -1498,6 +1503,7 @@ fn native_window_shots() {
 /// `OS_NATIVE_ONE="Fruity Balance" cargo test -p os-app --lib native_effect_lifecycle -- --ignored`.
 #[test]
 #[ignore]
+#[cfg(feature = "fl-native")]
 fn native_effect_lifecycle() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
@@ -1562,6 +1568,7 @@ fn native_effect_lifecycle() {
 /// `OS_NATIVE_FLP="x.flp" cargo test -p os-app --lib native_plugins_of_an_opened_project -- --ignored --nocapture`.
 #[test]
 #[ignore]
+#[cfg(feature = "fl-native")]
 fn native_plugins_of_an_opened_project() {
     let Some(flp) = std::env::var_os("OS_NATIVE_FLP").map(PathBuf::from) else { return };
     os_native::set_enabled(true);
@@ -1621,6 +1628,7 @@ fn native_plugins_of_an_opened_project() {
 #[test]
 #[ignore]
 #[allow(deprecated)]
+#[cfg(feature = "fl-native")]
 fn native_generator_from_the_rack_menu_plays_in_an_export() {
     let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
     // SAFETY: test-only, run alone; `OPENSTUDIO_NATIVE` is read only by the scan.
@@ -1688,6 +1696,7 @@ fn native_generator_from_the_rack_menu_plays_in_an_export() {
 /// `OS_NATIVE_ONE="3x Osc" cargo test -p os-app --lib native_generator_lifecycle -- --ignored`.
 #[test]
 #[ignore]
+#[cfg(feature = "fl-native")]
 fn native_generator_lifecycle() {
     let Some(name) = std::env::var_os("OS_NATIVE_ONE").map(|s| s.to_string_lossy().into_owned()) else { return };
     let fl = os_paths::default_fl_dir();
@@ -1757,6 +1766,7 @@ fn native_generator_lifecycle() {
 /// `cargo test -p os-app native_plugins_listed_when_opted_in -- --ignored`.
 #[test]
 #[ignore]
+#[cfg(feature = "fl-native")]
 fn native_plugins_listed_when_opted_in() {
     let fl = os_paths::default_fl_dir();
     if !fl.join("Plugins").join("Fruity").join("Effects").is_dir() {

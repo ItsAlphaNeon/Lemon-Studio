@@ -31,12 +31,20 @@ pub fn is_osc3(ch: &Channel) -> bool {
 /// exactly as the model fills a record the file does not have keeps the plugin's default one, as `ChannelVoicing::of`
 /// does for the channel.
 pub fn channel_voicing(ch: &Channel, fl: &[u8]) -> Vec<u8> {
-    let records = std::array::from_fn(|k| {
-        let e = &ch.envelopes[k];
-        (k != os_model::Envelope::VOLUME || *e != os_model::Envelope::default()).then(|| e.fields())
-    });
-    let s = &ch.sound;
-    lemon_3x_osc::params::with_channel_voicing(fl, &records, [s.cutoff, s.resonance, s.filter_type])
+    #[cfg(feature = "stock-trio")]
+    {
+        let records = std::array::from_fn(|k| {
+            let e = &ch.envelopes[k];
+            (k != os_model::Envelope::VOLUME || *e != os_model::Envelope::default()).then(|| e.fields())
+        });
+        let s = &ch.sound;
+        lemon_3x_osc::params::with_channel_voicing(fl, &records, [s.cutoff, s.resonance, s.filter_type])
+    }
+    #[cfg(not(feature = "stock-trio"))]
+    {
+        let _ = ch;
+        fl.to_vec()
+    }
 }
 
 /// The plugin id a new channel of picker plugin `name` stores (the built-in recreations store the original's id).
@@ -68,12 +76,20 @@ impl Plugins {
     /// The project-file state of the Lemon Trio on rack row `row` (its plugin state converted back), `None` when the
     /// row hosts something else.
     pub fn osc3_file_state(&self, row: usize) -> Option<Vec<u8>> {
-        let h = self.hosted.get(&row)?;
-        let p = h.lock_for_state()?;
-        if p.desc().name != LEMON_TRIO || !crate::project_plugins::is_builtin(p.desc()) {
-            return None;
+        #[cfg(feature = "stock-trio")]
+        {
+            let h = self.hosted.get(&row)?;
+            let p = h.lock_for_state()?;
+            if p.desc().name != LEMON_TRIO || !crate::project_plugins::is_builtin(p.desc()) {
+                return None;
+            }
+            lemon_3x_osc::params::fl_from_plugin_state(&p.save_state()?)
         }
-        lemon_3x_osc::params::fl_from_plugin_state(&p.save_state()?)
+        #[cfg(not(feature = "stock-trio"))]
+        {
+            let _ = (self, row);
+            None
+        }
     }
 
     /// The custom shape's sample file of the Lemon Trio on rack row `row` ("" = none); `None` when the row hosts
@@ -126,54 +142,61 @@ pub fn follow_sample(st: &crate::settings_file::SettingsStore, proj: &mut Projec
 /// instance's state when the channel has none). A row waiting for the picker's own instance is left to it; a row
 /// whose instance failed is not tried again.
 pub fn sync_osc3(s: &mut crate::session::Session) {
-    // The installed 3x Osc plays these channels instead (`host_native`).
-    if crate::project_plugins::native_first() {
-        return;
-    }
-    let Some(index) = s.plugins.index_of(LEMON_TRIO) else { return };
-    let pending = s.pending_plugin.map(|(r, _)| r);
-    let rows: Vec<usize> = (0..s.project.channels.len())
-        .filter(|&r| is_osc3(&s.project.channels[r]))
-        .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
-        .collect();
-    if rows.is_empty() {
-        return;
-    }
-    let mut added = false;
-    for row in rows {
-        if s.plugins.past_deadline() {
-            break;
+    #[cfg(feature = "stock-trio")]
+    {
+        // The installed 3x Osc plays these channels instead (`host_native`).
+        if crate::project_plugins::native_first() {
+            return;
         }
-        let ch = &s.project.channels[row];
-        let fl = ch.plugin_state.clone().unwrap_or_else(lemon_3x_osc::params::default_state);
-        let mut st = lemon_3x_osc::params::plugin_state_from_fl(&channel_voicing(ch, &fl));
-        // The channel's sample is the custom shape's (spec: plugins/3x-osc.md §1); the plugin opens the file
-        // directly, so factory placeholders become real paths.
-        let sample = crate::plugins::resolve_sample(&s.settings, ch.sample_path.as_deref().unwrap_or(""));
-        if !sample.is_empty()
-            && let Some(b) = crate::plugins::with_sample_path(&st, &sample)
-        {
-            st = b;
+        let Some(index) = s.plugins.index_of(LEMON_TRIO) else { return };
+        let pending = s.pending_plugin.map(|(r, _)| r);
+        let rows: Vec<usize> = (0..s.project.channels.len())
+            .filter(|&r| is_osc3(&s.project.channels[r]))
+            .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
+            .collect();
+        if rows.is_empty() {
+            return;
         }
-        match s.plugins.create_with(row, index, Some(&st)) {
-            Ok(_) => {
-                s.hosted_rows.push(row);
-                added = true;
+        let mut added = false;
+        for row in rows {
+            if s.plugins.past_deadline() {
+                break;
             }
-            Err(e) => {
-                s.plugins.wrap_failed.push(row);
-                s.touched.views.push(crate::session::View::Message(format!("{LEMON_TRIO}: {e}")));
+            let ch = &s.project.channels[row];
+            let fl = ch.plugin_state.clone().unwrap_or_else(lemon_3x_osc::params::default_state);
+            let mut st = lemon_3x_osc::params::plugin_state_from_fl(&channel_voicing(ch, &fl));
+            // The channel's sample is the custom shape's (spec: plugins/3x-osc.md §1); the plugin opens the file
+            // directly, so factory placeholders become real paths.
+            let sample = crate::plugins::resolve_sample(&s.settings, ch.sample_path.as_deref().unwrap_or(""));
+            if !sample.is_empty()
+                && let Some(b) = crate::plugins::with_sample_path(&st, &sample)
+            {
+                st = b;
+            }
+            match s.plugins.create_with(row, index, Some(&st)) {
+                Ok(_) => {
+                    s.hosted_rows.push(row);
+                    added = true;
+                }
+                Err(e) => {
+                    s.plugins.wrap_failed.push(row);
+                    s.touched.views.push(crate::session::View::Message(format!("{LEMON_TRIO}: {e}")));
+                }
             }
         }
+        if added {
+            s.transport.set_instruments(s.plugins.instruments());
+            s.dirty = true;
+        }
+        s.touched.repaint = true;
     }
-    if added {
-        s.transport.set_instruments(s.plugins.instruments());
-        s.dirty = true;
+    #[cfg(not(feature = "stock-trio"))]
+    {
+        let _ = s;
     }
-    s.touched.repaint = true;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stock-trio"))]
 mod tests {
     use super::*;
     use lemon_3x_osc::params::{self as op, default_state, set_field};

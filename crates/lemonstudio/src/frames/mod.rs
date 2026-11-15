@@ -6,6 +6,9 @@
 //! (`os_app::plugin_window`) and asks them through `Frames`; these are the windows themselves.
 
 #![allow(unused_imports)]
+// Without the `plugin-windows` feature no editor opens in these frames; the window system code stays for the main
+// window (focus, transient detached windows).
+#![cfg_attr(not(plugin_windows), allow(dead_code))]
 pub use os_app::plugin_window::*;
 pub use std::f32::consts::PI;
 pub use os_hostlink::PageIcon;

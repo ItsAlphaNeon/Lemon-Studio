@@ -30,12 +30,20 @@ impl Plugins {
     /// The Ogun state the Smith on rack row `row` plays (empty while it plays its default patch), `None` when the row
     /// hosts something else.
     pub fn ogun_file_state(&self, row: usize) -> Option<Vec<u8>> {
-        let h = self.hosted.get(&row)?;
-        let p = h.lock_for_state()?;
-        if p.desc().name != SMITH || !crate::project_plugins::is_builtin(p.desc()) {
-            return None;
+        #[cfg(feature = "stock-smith")]
+        {
+            let h = self.hosted.get(&row)?;
+            let p = h.lock_for_state()?;
+            if p.desc().name != SMITH || !crate::project_plugins::is_builtin(p.desc()) {
+                return None;
+            }
+            smith::fl_from_plugin_state(&p.save_state()?)
         }
-        smith::fl_from_plugin_state(&p.save_state()?)
+        #[cfg(not(feature = "stock-smith"))]
+        {
+            let _ = (self, row);
+            None
+        }
     }
 }
 
@@ -65,64 +73,79 @@ pub fn more_presets(st: &crate::settings_file::SettingsStore, plugin: &str) -> V
 /// The plugin state of an FL preset file for Smith; `None` when `plugin` is not Smith or `path` is not an `.fst` file,
 /// an error text when it holds no Ogun state.
 pub fn fst_state(path: &Path, plugin: &str) -> Option<Result<Vec<u8>, String>> {
-    if plugin != SMITH || !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fst")) {
-        return None;
+    #[cfg(feature = "stock-smith")]
+    {
+        if plugin != SMITH || !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fst")) {
+            return None;
+        }
+        Some(
+            std::fs::read(path)
+                .map_err(|e| format!("{}: {e}", path.display()))
+                .and_then(|b| {
+                    smith::state_from_fst(&b)
+                        .filter(|fl| smith::state::State::from_bytes(fl).is_some())
+                        .ok_or_else(|| format!("{} holds no patch Smith can read", path.display()))
+                })
+                .map(|fl| smith::plugin_state_from_fl(&fl)),
+        )
     }
-    Some(
-        std::fs::read(path)
-            .map_err(|e| format!("{}: {e}", path.display()))
-            .and_then(|b| {
-                smith::state_from_fst(&b)
-                    .filter(|fl| smith::state::State::from_bytes(fl).is_some())
-                    .ok_or_else(|| format!("{} holds no patch Smith can read", path.display()))
-            })
-            .map(|fl| smith::plugin_state_from_fl(&fl)),
-    )
+    #[cfg(not(feature = "stock-smith"))]
+    {
+        let _ = (path, plugin);
+        None
+    }
 }
 
 /// Hosts Smith on every Ogun channel without an instance, started from the channel's saved state (the default patch
 /// when the channel has none). A row waiting for the picker's own instance is left to it; a row whose instance
 /// failed is not tried again.
 pub fn sync_smith(s: &mut crate::session::Session) {
-    // The installed Ogun plays these channels instead (`host_native`).
-    if crate::project_plugins::native_first() {
-        return;
-    }
-    let Some(index) = s.plugins.index_of(SMITH) else { return };
-    let pending = s.pending_plugin.map(|(r, _)| r);
-    let rows: Vec<usize> = (0..s.project.channels.len())
-        .filter(|&r| is_ogun(&s.project.channels[r]))
-        .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
-        .collect();
-    if rows.is_empty() {
-        return;
-    }
-    let mut added = false;
-    for row in rows {
-        if s.plugins.past_deadline() {
-            break;
+    #[cfg(feature = "stock-smith")]
+    {
+        // The installed Ogun plays these channels instead (`host_native`).
+        if crate::project_plugins::native_first() {
+            return;
         }
-        let fl = s.project.channels[row].plugin_state.clone().unwrap_or_default();
-        let st = smith::plugin_state_from_fl(&fl);
-        match s.plugins.create_with(row, index, Some(&st)) {
-            Ok(_) => {
-                s.hosted_rows.push(row);
-                added = true;
+        let Some(index) = s.plugins.index_of(SMITH) else { return };
+        let pending = s.pending_plugin.map(|(r, _)| r);
+        let rows: Vec<usize> = (0..s.project.channels.len())
+            .filter(|&r| is_ogun(&s.project.channels[r]))
+            .filter(|&r| !s.hosted_rows.contains(&r) && !s.plugins.wrap_failed.contains(&r) && Some(r) != pending)
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+        let mut added = false;
+        for row in rows {
+            if s.plugins.past_deadline() {
+                break;
             }
-            Err(e) => {
-                s.plugins.wrap_failed.push(row);
-                s.touched.views.push(crate::session::View::Message(format!("{SMITH}: {e}")));
+            let fl = s.project.channels[row].plugin_state.clone().unwrap_or_default();
+            let st = smith::plugin_state_from_fl(&fl);
+            match s.plugins.create_with(row, index, Some(&st)) {
+                Ok(_) => {
+                    s.hosted_rows.push(row);
+                    added = true;
+                }
+                Err(e) => {
+                    s.plugins.wrap_failed.push(row);
+                    s.touched.views.push(crate::session::View::Message(format!("{SMITH}: {e}")));
+                }
             }
         }
+        if added {
+            s.transport.set_instruments(s.plugins.instruments());
+            s.dirty = true;
+        }
+        s.touched.repaint = true;
     }
-    if added {
-        s.transport.set_instruments(s.plugins.instruments());
-        s.dirty = true;
+    #[cfg(not(feature = "stock-smith"))]
+    {
+        let _ = s;
     }
-    s.touched.repaint = true;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stock-smith", feature = "stock-citrus"))]
 mod tests {
     use super::*;
     use os_engine::SharedInstrument;

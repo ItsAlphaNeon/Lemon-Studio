@@ -46,7 +46,7 @@ pub fn native_first() -> bool {
     if let Some(v) = NATIVE_FIRST.with(|n| n.get()) {
         return v;
     }
-    os_native::prefer_native()
+    crate::native::prefer_native()
 }
 
 /// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, Ogun, Fruity Slicer, the
@@ -549,13 +549,13 @@ pub fn sync_effects(ses: &mut crate::session::Session) {
         let track = ses.project.mixer.iter().find(|m| m.index == t);
         let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
         let st = if file == EQ_FILE_NAME {
-            Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
+            crate::plugins::eq_state_from_fl(fl)
         } else if file == LOVE_PHILTER_FILE_NAME {
             // Bytes that are not a Love Philter state open Pulp Filter's starting state.
-            Some(pulp_filter::plugin_state_from_fl(fl))
+            crate::plugins::pulp_filter_state_from_fl(fl)
         } else if file == MAXIMUS_FILE_NAME {
             // Bytes that are not a Maximus state open Press's starting state.
-            Some(press::plugin_state_from_fl(fl))
+            crate::plugins::press_state_from_fl(fl)
         } else if let Some(lemon) = recreation {
             // A state shorter than the original's, or of a later version, opens the defaults (spec:
             // plugins/lemon-small-effects.md §5).

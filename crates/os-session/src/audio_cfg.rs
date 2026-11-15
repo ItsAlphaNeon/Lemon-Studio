@@ -17,7 +17,9 @@
 
 use std::sync::Mutex;
 
+#[cfg(feature = "device")]
 use cpal::traits::{DeviceTrait, HostTrait};
+#[cfg(feature = "device")]
 use cpal::{BufferSize, SampleFormat, StreamConfig, SupportedBufferSize};
 
 /// The chosen output; `None` = the device's (or the system's) own.
@@ -205,6 +207,7 @@ fn save(c: &AudioCfg) {
 /// The audio system `cfg` plays on. Linux: in JACK mode the JACK server while one runs (cpal's JACK host, which loads
 /// libjack when it starts), in shared mode the sound server (cpal's PulseAudio host, which PipeWire serves too), else
 /// ALSA (also when no sound server is running); elsewhere the system's own.
+#[cfg(feature = "device")]
 pub fn host(cfg: &AudioCfg) -> cpal::Host {
     #[cfg(target_os = "linux")]
     {
@@ -228,14 +231,19 @@ pub fn host(cfg: &AudioCfg) -> cpal::Host {
 }
 
 /// Linux, shared mode, with a sound server to play through (it is not asked: only whether its socket is there).
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "device"))]
 fn server(cfg: &AudioCfg) -> bool {
     !cfg.exclusive() && cpal::available_hosts().contains(&cpal::HostId::PulseAudio)
 }
 
 /// The name of `host(cfg)`, without connecting to it.
 pub fn host_name(cfg: &AudioCfg) -> &'static str {
-    #[cfg(target_os = "linux")]
+    #[cfg(not(feature = "device"))]
+    {
+        let _ = cfg;
+        crate::device::sim::HOST
+    }
+    #[cfg(all(target_os = "linux", feature = "device"))]
     return if cfg.jack() {
         cpal::HostId::Jack.name()
     } else if server(cfg) {
@@ -243,7 +251,7 @@ pub fn host_name(cfg: &AudioCfg) -> &'static str {
     } else {
         cpal::HostId::Alsa.name()
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "linux"), feature = "device"))]
     {
         let _ = cfg;
         cpal::default_host().id().name()
@@ -252,6 +260,7 @@ pub fn host_name(cfg: &AudioCfg) -> &'static str {
 
 /// A device's name as the settings show and keep it. ALSA names one card's many PCMs alike (`default:`, `front:`,
 /// `hw:`, `plughw:`, ...): there the PCM follows, "HDA Intel PCH, ALC257 Analog (hw:CARD=0,DEV=0)".
+#[cfg(feature = "device")]
 pub fn device_name(d: &cpal::Device) -> String {
     let name = plain_name(d);
     match alsa_pcm(d) {
@@ -262,15 +271,18 @@ pub fn device_name(d: &cpal::Device) -> String {
 
 /// The device's own description, as names were kept before ALSA's had their PCM (a name saved then still finds its
 /// device: `find`).
+#[cfg(feature = "device")]
 fn plain_name(d: &cpal::Device) -> String {
     d.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "(unknown device)".into())
 }
 
+#[cfg(feature = "device")]
 fn named(name: &str, pcm: &str) -> String {
     format!("{name} ({pcm})")
 }
 
 /// An ALSA device's PCM name ("hw:CARD=0,DEV=0"); `None` on another host.
+#[cfg(feature = "device")]
 fn alsa_pcm(d: &cpal::Device) -> Option<String> {
     let id = d.id().ok()?;
     (id.host().name() == "ALSA").then(|| id.id().to_string())
@@ -278,15 +290,18 @@ fn alsa_pcm(d: &cpal::Device) -> Option<String> {
 
 /// ALSA PCMs that are no device to play on or record from: plugins that only convert (rates, channels, Speex's
 /// processing), throw the sound away (`null`) or stream raw USB (`usbstream`).
+#[cfg(feature = "device")]
 const NOT_DEVICES: [&str; 9] = ["null", "lavrate", "samplerate", "speexrate", "speex", "upmix", "vdownmix", "usbstream", "a52"];
 
 /// A device the settings list (every one off ALSA).
+#[cfg(feature = "device")]
 pub fn listed(d: &cpal::Device) -> bool {
     alsa_pcm(d).is_none_or(|pcm| !NOT_DEVICES.contains(&pcm.split(':').next().unwrap_or("")))
 }
 
 /// The device named `want` among `devices`: by its name, else (a name saved before ALSA's had their PCM) the first
 /// whose own description it is.
+#[cfg(feature = "device")]
 pub fn find(devices: impl Iterator<Item = cpal::Device>, want: &str) -> Option<cpal::Device> {
     let devices: Vec<cpal::Device> = devices.collect();
     let i = devices.iter().position(|d| device_name(d) == want).or_else(|| devices.iter().position(|d| plain_name(d) == want))?;
@@ -297,6 +312,7 @@ pub fn find(devices: impl Iterator<Item = cpal::Device>, want: &str) -> Option<c
 /// name that one is listed under. The default is listed by its own name ("Default Audio Device"), which ALSA's list of
 /// inputs gives none of its entries: there the `default` PCM has its own description ("Default ALSA Output (currently
 /// PipeWire Media Server)").
+#[cfg(feature = "device")]
 pub fn find_input(host: &cpal::Host, want: &str) -> Option<cpal::Device> {
     use cpal::traits::HostTrait;
     host.input_devices().ok().and_then(|ds| find(ds, want)).or_else(|| host.default_input_device().filter(|d| device_name(d) == want))
@@ -304,19 +320,37 @@ pub fn find_input(host: &cpal::Host, want: &str) -> Option<cpal::Device> {
 
 /// The output devices' names for `cfg` (on Linux the sound server's or ALSA's, by mode), and the default's.
 pub fn devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
-    let host = host(cfg);
-    let list = host.output_devices().map(|ds| ds.filter(listed).map(|d| device_name(&d)).collect()).unwrap_or_default();
-    (list, host.default_output_device().map(|d| device_name(&d)))
+    #[cfg(not(feature = "device"))]
+    return no_devices(cfg);
+    #[cfg(feature = "device")]
+    {
+        let host = host(cfg);
+        let list = host.output_devices().map(|ds| ds.filter(listed).map(|d| device_name(&d)).collect()).unwrap_or_default();
+        (list, host.default_output_device().map(|d| device_name(&d)))
+    }
 }
 
 /// `cfg`'s host's input devices by name, and the default one's name.
 pub fn input_devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
-    let host = host(cfg);
-    let list = host.input_devices().map(|ds| ds.filter(listed).map(|d| device_name(&d)).collect()).unwrap_or_default();
-    (list, host.default_input_device().map(|d| device_name(&d)))
+    #[cfg(not(feature = "device"))]
+    return no_devices(cfg);
+    #[cfg(feature = "device")]
+    {
+        let host = host(cfg);
+        let list = host.input_devices().map(|ds| ds.filter(listed).map(|d| device_name(&d)).collect()).unwrap_or_default();
+        (list, host.default_input_device().map(|d| device_name(&d)))
+    }
+}
+
+/// No devices: the system's are not in this build.
+#[cfg(not(feature = "device"))]
+fn no_devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
+    let _ = cfg;
+    (Vec::new(), None)
 }
 
 /// The input device `cfg` records from: the one chosen, else (none chosen, or it is gone) the system's default.
+#[cfg(feature = "device")]
 pub fn input_device(cfg: &AudioCfg) -> Option<cpal::Device> {
     let host = host(cfg);
     let chosen = cfg.input.as_ref().and_then(|want| find(host.input_devices().ok()?, want));
@@ -324,6 +358,7 @@ pub fn input_device(cfg: &AudioCfg) -> Option<cpal::Device> {
 }
 
 /// What a stream opens.
+#[cfg(feature = "device")]
 pub struct Output {
     /// The audio system the device is on (cpal's name for it).
     pub host: &'static str,
@@ -337,6 +372,7 @@ pub struct Output {
 
 /// The output for `cfg`: its device (else the system default), its rate when the device offers it (else the
 /// device's own) and its buffer length when the device takes it (else the device's default).
+#[cfg(feature = "device")]
 pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
     let host = host(cfg);
     let chosen = cfg.device.as_ref().and_then(|want| find(host.output_devices().ok()?, want));
@@ -384,6 +420,7 @@ pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
 /// device's own, as is no length. Through the sound server (Linux shared mode) a stream always asks for one: asking
 /// for none gets the server's default buffering, about two seconds (PulseAudio's default target length, which
 /// pipewire-pulse keeps), so the device's own is `DEFAULT_BUFFER` there.
+#[cfg(feature = "device")]
 fn wanted_buffer(chosen: Option<u32>, through_server: bool) -> Option<u32> {
     chosen.filter(|&b| b != SMALLEST).or(if through_server { DEFAULT_BUFFER.or(Some(512)) } else { None })
 }
@@ -392,17 +429,22 @@ fn wanted_buffer(chosen: Option<u32>, through_server: bool) -> Option<u32> {
 /// opened). An ASIO driver is not asked (that would load it): the rate chosen, else unknown until it opens. A Windows
 /// device in exclusive mode runs at the rate chosen when it takes it, else (and until one is chosen) at its own.
 pub fn rate() -> Option<u32> {
-    let cfg = AudioCfg::current();
-    if cfg.asio_driver().is_some() {
-        return cfg.rate;
+    #[cfg(not(feature = "device"))]
+    return None;
+    #[cfg(feature = "device")]
+    {
+        let cfg = AudioCfg::current();
+        if cfg.asio_driver().is_some() {
+            return cfg.rate;
+        }
+        if let Some(r) = cfg.rate.filter(|_| cfg!(windows) && cfg.exclusive()) {
+            return Some(r);
+        }
+        output(&cfg).ok().map(|o| o.config.sample_rate)
     }
-    if let Some(r) = cfg.rate.filter(|_| cfg!(windows) && cfg.exclusive()) {
-        return Some(r);
-    }
-    output(&cfg).ok().map(|o| o.config.sample_rate)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "device"))]
 mod tests {
     use super::*;
 

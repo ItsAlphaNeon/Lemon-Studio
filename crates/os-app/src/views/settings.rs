@@ -205,7 +205,7 @@ pub struct SettingsUi {
     pub info_edit: Option<InfoEdit>,
     /// The File page's Browser extra search folders cell being typed into.
     pub folder_edit: Option<crate::search_folders::CellEdit>,
-    /// The Plugins page shows the experimental native host toggles: `os_native::settings_shown()` at startup.
+    /// The Plugins page shows the experimental native host toggles: `os_session::native::settings_shown()` at startup.
     pub native: bool,
     /// Project ▸ Time settings: the last bar (beats per bar, steps per beat) of each "Set as" mode, indexed by
     /// `signature as usize` (0 = time division), kept while the program runs; `None` = 4/4 (spec:
@@ -844,9 +844,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // The native host toggle appears only with `OPENSTUDIO_NATIVE_SETTINGS`, the second one only while the
             // native host is on too.
             if st.native {
-                scanning.push(Check(NATIVE_HOST_CHECK, os_native::enabled()));
-                if os_native::enabled() {
-                    scanning.push(Check(NATIVE_FIRST_CHECK, os_native::prefer_native()));
+                scanning.push(Check(NATIVE_HOST_CHECK, os_session::native::enabled()));
+                if os_session::native::enabled() {
+                    scanning.push(Check(NATIVE_FIRST_CHECK, os_session::native::prefer_native()));
                 }
             }
             scanning.push(Buttons(vec![("Scan for new plugins", 130.0), ("Rescan all", 100.0)]));

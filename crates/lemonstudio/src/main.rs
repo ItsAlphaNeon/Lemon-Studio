@@ -1740,6 +1740,7 @@ pub fn run() {
         plugin_scan::child_main(&args[1..]);
     }
     // A child the app starts to try a native plugin before its first load (spec: plugins/fruity-abi.md).
+    #[cfg(feature = "fl-native")]
     if args.first().map(String::as_str) == Some(os_native::check::CHECK_ARG) {
         os_host::guard::exit(os_native::check::run(&args[1..]));
     }
@@ -1810,7 +1811,10 @@ pub fn run() {
     splash::step(&splash, splash::SETTINGS, if start { "Reading settings" } else { "Opening project" });
     let mut app = App::new(path);
     // The plugin editors open in this window system's frames.
-    app.state.editor_host.frames = Box::new(frames::NativeFrames);
+    #[cfg(plugin_windows)]
+    {
+        app.state.editor_host.frames = Box::new(frames::NativeFrames);
+    }
     // Without a project file: the Startup project (spec: ui/settings-choices.md "Miscellaneous: seven more checks,
     // Default template and Startup project").
     if start {
