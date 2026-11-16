@@ -10,7 +10,8 @@
 //! - dropouts, at most one line a second: how many of each kind (an empty block: the feeder was late; a plugin late
 //!   for its tick; the device's own underruns) and whether the feeder and the device callback were real-time then;
 //! - a hosted plugin held by the UI thread long enough to make the audio thread wait for it (`held`), at most one line
-//!   a second.
+//!   a second, with how much of the hold the UI thread was running: the rest it waited for a CPU, preempted while it
+//!   held the lock.
 //!
 //! Small by design: events only, never per block; at `CAP` bytes the file becomes `audio.log.1` (the one before is
 //! dropped), so the log never takes more than twice that.
@@ -60,15 +61,52 @@ pub fn write(line: &str) {
     }
 }
 
-/// The UI thread held hosted plugin `plugin` for `held` doing `what`. The audio thread waits for that lock and misses
+/// When the UI thread took a hosted plugin's lock (`held`): the time, and the thread's own running time then.
+#[derive(Clone, Copy)]
+pub struct Hold {
+    at: Instant,
+    cpu: Option<Duration>,
+}
+
+impl Hold {
+    pub fn start() -> Hold {
+        Hold { at: Instant::now(), cpu: thread_cpu() }
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.at.elapsed()
+    }
+
+    /// How long the thread ran since it began.
+    fn ran(&self) -> Option<Duration> {
+        Some(thread_cpu()?.saturating_sub(self.cpu?))
+    }
+}
+
+/// The calling thread's own running time.
+#[cfg(unix)]
+fn thread_cpu() -> Option<Duration> {
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime fills the struct given.
+    (unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) } == 0).then(|| Duration::new(t.tv_sec as u64, t.tv_nsec as u32))
+}
+
+#[cfg(not(unix))]
+fn thread_cpu() -> Option<Duration> {
+    None
+}
+
+/// The UI thread held hosted plugin `plugin` since `hold` doing `what`. The audio thread waits for that lock and misses
 /// the plugin's tick past its wait: a long hold is written.
-pub fn held(plugin: &str, what: &str, held: Duration) {
+pub fn held(plugin: &str, what: &str, hold: Hold) {
+    let held = hold.elapsed();
     if held < HELD_MIN {
         return;
     }
+    let ran = hold.ran();
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     let line = match LAST.lock() {
-        Ok(mut last) => held_line(&mut last, Instant::now(), plugin, what, held),
+        Ok(mut last) => held_line(&mut last, Instant::now(), plugin, what, held, ran),
         Err(_) => None,
     };
     if let Some(l) = line {
@@ -77,12 +115,16 @@ pub fn held(plugin: &str, what: &str, held: Duration) {
 }
 
 /// `held`'s line, unless a hold under `HELD_MIN`, or one was written less than a second before `now`.
-fn held_line(last: &mut Option<Instant>, now: Instant, plugin: &str, what: &str, held: Duration) -> Option<String> {
+fn held_line(last: &mut Option<Instant>, now: Instant, plugin: &str, what: &str, held: Duration, ran: Option<Duration>) -> Option<String> {
     if held < HELD_MIN || last.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1)) {
         return None;
     }
     *last = Some(now);
-    Some(format!("{plugin}: held {:.1} ms by {what}", held.as_secs_f64() * 1000.0))
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    Some(match ran {
+        Some(r) => format!("{plugin}: held {:.1} ms by {what}, running {:.1} ms of it", ms(held), ms(r.min(held))),
+        None => format!("{plugin}: held {:.1} ms by {what}", ms(held)),
+    })
 }
 
 /// The local time, `YYYY-MM-DD HH:MM:SS`.
@@ -175,10 +217,29 @@ mod tests {
     #[test]
     fn a_long_hold_is_written_at_most_once_a_second() {
         let (mut last, t0) = (None, Instant::now());
-        assert_eq!(held_line(&mut last, t0, "Zest", "the UI's tick", Duration::from_micros(1500)), None, "short");
-        assert_eq!(held_line(&mut last, t0, "Zest", "the UI's tick", Duration::from_micros(4250)).as_deref(), Some("Zest: held 4.2 ms by the UI's tick"));
-        assert_eq!(held_line(&mut last, t0 + Duration::from_millis(500), "Zest", "x", Duration::from_millis(9)), None, "within the second");
-        assert!(held_line(&mut last, t0 + Duration::from_secs(1), "Zest", "x", Duration::from_millis(9)).is_some());
+        let ran = Some(Duration::from_micros(300));
+        assert_eq!(held_line(&mut last, t0, "Zest", "the UI's tick", Duration::from_micros(1500), ran), None, "short");
+        assert_eq!(
+            held_line(&mut last, t0, "Zest", "the UI's tick", Duration::from_micros(4250), ran).as_deref(),
+            Some("Zest: held 4.2 ms by the UI's tick, running 0.3 ms of it")
+        );
+        assert_eq!(held_line(&mut last, t0 + Duration::from_millis(500), "Zest", "x", Duration::from_millis(9), ran), None, "within the second");
+        let l = held_line(&mut last, t0 + Duration::from_secs(1), "Zest", "x", Duration::from_millis(9), None);
+        assert_eq!(l.as_deref(), Some("Zest: held 9.0 ms by x"), "no running time where the system gives none");
+    }
+
+    /// A thread that sleeps holds without running; one that works runs the whole time.
+    #[cfg(unix)]
+    #[test]
+    fn a_hold_tells_running_from_waiting() {
+        let h = Hold::start();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(h.ran().unwrap() < Duration::from_millis(5), "asleep: {:?}", h.ran());
+        let h = Hold::start();
+        while h.elapsed() < Duration::from_millis(20) {
+            std::hint::black_box(0u64);
+        }
+        assert!(h.ran().unwrap() >= Duration::from_millis(10), "working: {:?}", h.ran());
     }
 
     #[test]
