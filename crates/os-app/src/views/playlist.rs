@@ -918,10 +918,10 @@ fn ripples(ui: &mut Ui, s: &State, g: &PGeom) {
 /// One clip (§2): a near-black outline with rounded top corners, the title strip (pattern clips neutral, audio and
 /// automation clips in their channel's colour), the body in the track's colour, then the content.
 /// Clips of one track at once (a copy laid on another, or two overlapping in part): each lies on the ones before it,
-/// whose edges show as a stack above it over the time they share, a 2 px layer for each clip under it, three at most,
-/// as the piano roll's notes. The clips keep their places; only the layers tell that more lie there.
+/// whose edges show as a stack above it over the time they share, a 3 px layer for each clip under it, three at most
+/// (the piano roll's notes have 2 px ones). The clips keep their places; only the layers tell that more lie there.
 fn stack_edges(ui: &mut Ui, s: &State, g: &PGeom, grid: Rect) {
-    const LAYER: f32 = 2.0;
+    const LAYER: f32 = 3.0;
     const MOST: usize = 3;
     let t = ui.t;
     // Clips in view, by track, in painting order (a collapsed group's strip shows none).
