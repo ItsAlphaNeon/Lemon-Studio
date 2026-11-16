@@ -554,14 +554,14 @@ fn set_color_now(s: &mut State, i: usize) {
             Some(BoxTarget::Name(n)) => pat_mut(s, n).color = col,
             Some(BoxTarget::Rack(crate::rack::RBox::Channel(r))) => {
                 if let Some(ch) = s.project.channels.get_mut(r) {
-                    ch.color = col;
+                    ch.color = col.map(Rgb::for_channel);
                 }
             }
             // Color selected ▸ All...: every selected channel, and the box closes.
             Some(BoxTarget::Rack(crate::rack::RBox::ColorSel)) => {
                 for r in s.rack.sel.clone() {
                     if let Some(ch) = s.project.channels.get_mut(r) {
-                        ch.color = col;
+                        ch.color = col.map(Rgb::for_channel);
                     }
                 }
                 s.pat_ui.name_box = None;

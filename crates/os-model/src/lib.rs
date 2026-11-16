@@ -52,6 +52,13 @@ impl Rgb {
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Rgb { r, g, b }
     }
+
+    /// As a channel's colour is kept: no component under 0x14, as FL saves channel colours, so a colour set darker
+    /// shows as it will come back.
+    pub const fn for_channel(self) -> Rgb {
+        const MIN: u8 = 0x14;
+        Rgb { r: if self.r < MIN { MIN } else { self.r }, g: if self.g < MIN { MIN } else { self.g }, b: if self.b < MIN { MIN } else { self.b } }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
