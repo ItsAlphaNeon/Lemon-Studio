@@ -228,7 +228,7 @@ pub fn params_in(ses: &mut crate::session::Session) -> Tick {
         let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen), editor) else { continue };
         // A plugin's parameters can take a few ms to read (`lock_for_tick`).
         let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };
-        let t0 = std::time::Instant::now();
+        let t0 = crate::dropout_log::Hold::start();
         let weak = Arc::downgrade(&h.plugin);
         let count = p.param_count();
         let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));
@@ -316,7 +316,7 @@ pub fn params_in(ses: &mut crate::session::Session) -> Tick {
             m.note_hold(t0.elapsed());
         }
         #[cfg(target_os = "linux")]
-        crate::dropout_log::held(&p.desc().name, "reading its parameters", t0.elapsed());
+        crate::dropout_log::held(&p.desc().name, "reading its parameters", t0);
     }
     // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
     // begin to its end, values sent without one joined while they come in a row.

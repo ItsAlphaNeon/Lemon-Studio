@@ -295,7 +295,7 @@ impl Plugins {
         let mut stopped = None;
         let mut menu = None;
         if let Some(mut p) = look.and_then(|_| lock_for_tick(&h.plugin, h.meter.as_deref())) {
-            let t0 = Instant::now();
+            let t0 = crate::dropout_log::Hold::start();
             h.seen = look.unwrap_or(h.seen);
             // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
             if let (Some(code), false) = (p.stopped(), h.stop_told) {
@@ -318,7 +318,7 @@ impl Plugins {
                 m.note_hold(t0.elapsed());
             }
             #[cfg(target_os = "linux")]
-            crate::dropout_log::held(&p.desc().name, "the UI's tick", t0.elapsed());
+            crate::dropout_log::held(&p.desc().name, "the UI's tick", t0);
         }
         (stopped, menu)
     }
