@@ -887,7 +887,7 @@ impl Command {
                     ch.name = text(&n);
                 }
                 if let Some(c) = color {
-                    ch.color = c;
+                    ch.color = c.map(os_model::Rgb::for_channel);
                 }
                 if let Some(v) = volume {
                     ch.volume = v;

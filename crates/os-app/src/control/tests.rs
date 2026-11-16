@@ -1452,3 +1452,14 @@ fn a_clip_painted_with_one_click_is_one_step() {
     assert_eq!(a.state.session.history.at(), steps + 1);
     assert_eq!(newest(&a), "Arranger fill paint clip");
 }
+
+/// A channel colour darker than FL keeps (a component under 0x14) is kept as the save will write it, so it does not
+/// change after a save and reopen.
+#[test]
+fn a_dark_channel_colour_shows_as_it_is_saved() {
+    let mut a = app();
+    let r = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_channel", "name": "Dark"}))]).unwrap();
+    let ch = r[0]["channel"].as_u64().unwrap() as u32;
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": ch, "color": "#000a40"}))]).unwrap();
+    assert_eq!(a.state.session.project.channels.last().unwrap().color, Some(os_model::Rgb::new(0x14, 0x14, 0x40)));
+}

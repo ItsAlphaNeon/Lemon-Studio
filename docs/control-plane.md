@@ -90,7 +90,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `add_channel` | `name`, `plugin`, `sample`, `track` (all optional) | A Lemon Sampler channel (with `sample` loaded), or one played by generator `plugin`, on mixer track `track`. Result: `channel` |
 | `delete_channel` | `channel` | Its notes, clips and automation go too |
 | `move_channel` | `channel`, `row` | 0 = top |
-| `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track` (optional) | |
+| `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track` (optional) | A colour's parts are kept at least `14` (hex), as projects save them |
 | `load_sample` | `channel`, `path` | A sampler channel; an empty path clears it |
 | `add_track` | `at` (optional) | A mixer insert, at number `at` or after the last. Result: `track` |
 | `delete_track` | `track` | Later tracks move left; its channels go to the master |
