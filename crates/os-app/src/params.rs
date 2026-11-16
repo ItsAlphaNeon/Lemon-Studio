@@ -21,7 +21,8 @@ use crate::plugins::{fx_key, fx_of, MEMBER_KEY};
 
 /// The values of an instance's parameters, by id.
 fn read_values(p: &dyn os_host::Plugin, params: &[Entry]) -> BTreeMap<u32, f64> {
-    params.iter().filter_map(|e| Some((e.id, p.param_value(e.id)?))).collect()
+    let ids: Vec<u32> = params.iter().map(|e| e.id).collect();
+    ids.iter().zip(p.param_values(&ids)).filter_map(|(&id, v)| Some((id, v?))).collect()
 }
 
 /// Browser tab of the project tree, and the sections plugin nodes live in (spec: ui/browser.md §2).

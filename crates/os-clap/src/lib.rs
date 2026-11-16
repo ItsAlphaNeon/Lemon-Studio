@@ -735,6 +735,8 @@ pub struct Plugin {
     /// Parameter ranges in list order (id, min, max, stepped), read after init and on a rescan (values cross the
     /// hosting layer normalized).
     ranges: Vec<params::Range>,
+    /// `ranges`' places by parameter id (`params::by_id`).
+    range_of: Vec<(u32, usize)>,
     /// Host parameter changes (id, plain value) for the next process call or flush.
     param_queue: Vec<(u32, f64)>,
     /// Automation values (frame offset, id, plain value) for the next process call (`params.rs`).
@@ -1016,6 +1018,7 @@ impl Plugin {
                 voice_info,
                 ledger: VoiceLedger::new(),
                 bend,
+                range_of: params::by_id(&ranges),
                 ranges,
                 param_queue: Vec::new(),
                 auto: Vec::with_capacity(params::MAX_AUTO),
@@ -1236,7 +1239,7 @@ impl Plugin {
 
     /// (min, max) of parameter `id`.
     fn range(&self, id: u32) -> Option<(f64, f64)> {
-        self.ranges.iter().find(|r| r.0 == id).map(|&(_, lo, hi, _)| (lo, hi))
+        params::place(&self.range_of, id).map(|i| (self.ranges[i].1, self.ranges[i].2))
     }
 
     fn normalize(&self, id: u32, plain: f64) -> f64 {

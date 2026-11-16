@@ -520,6 +520,8 @@ pub struct Plugin {
     /// (id, step count) of each parameter in list order: the position is the automation index. A parameter whose
     /// info could not be read keeps its place with id `u32::MAX` (VST 3's "no parameter").
     param_ids: Vec<(u32, i32)>,
+    /// The ids of `param_ids`, sorted: `known` searches them (a plugin can have thousands of parameters).
+    known_ids: Vec<u32>,
     /// The parameter the controller maps each MIDI controller to (IMidiMapping, MIDI channel 1): controllers 0..127,
     /// then channel pressure (128) and pitch bend (129); `u32::MAX` = none (spec: ui/midi-settings.md §4).
     midi_map: Vec<u32>,
@@ -628,6 +630,7 @@ impl Plugin {
                 from_processor: Vec::with_capacity(256),
                 pending_since: None,
                 param_ids: Vec::new(),
+                known_ids: Vec::new(),
                 midi_map: Vec::new(),
                 bend: None,
                 bend_range: os_engine::instrument::DEFAULT_BEND_RANGE,
@@ -762,7 +765,7 @@ impl Plugin {
     }
 
     fn known(&self, id: u32) -> bool {
-        id != u32::MAX && self.param_ids.iter().any(|p| p.0 == id)
+        id != u32::MAX && self.known_ids.binary_search(&id).is_ok()
     }
 
     fn refresh_param_ids(&mut self) {
@@ -780,6 +783,9 @@ impl Plugin {
                 }
             }
         }
+        self.known_ids = self.param_ids.iter().map(|p| p.0).collect();
+        self.known_ids.sort_unstable();
+        self.known_ids.dedup();
         if let Ok(mut a) = self.shared.automatable.lock() {
             *a = automatable;
         }
