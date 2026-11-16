@@ -525,7 +525,19 @@ fn grow_take_clip(s: &mut Session, t: f64) -> Option<(f64, bool)> {
     let grow = ti >= at + c.length;
     if grow {
         c.length = (ti / bar + 1) * bar - at;
+        let end = at + c.length;
         s.dirty = true;
+        // Grown into another clip on its track: it moves to the first track free over its whole length.
+        let own = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none() && c.track == track && c.position == at;
+        if crate::edit::playlist::clips(s).iter().any(|o| o.track == track && o.position < end && o.end() > at && !own(o)) {
+            let free = crate::edit::playlist::free_track(s, 0, at, end);
+            if let Some(c) = crate::edit::playlist::arr_mut(s).clips.iter_mut().find(|c| own(c)) {
+                c.track = free;
+            }
+            if let Some(k) = s.rec.take.as_mut() {
+                k.clip = Some((free, at));
+            }
+        }
     }
     Some((t - f64::from(at), grow))
 }
