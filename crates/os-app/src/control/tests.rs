@@ -1463,3 +1463,71 @@ fn a_dark_channel_colour_shows_as_it_is_saved() {
     apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": ch, "color": "#000a40"}))]).unwrap();
     assert_eq!(a.state.session.project.channels.last().unwrap().color, Some(os_model::Rgb::new(0x14, 0x14, 0x40)));
 }
+
+/// The undo of a delete puts back what the delete took, where it was and with its ids: a channel's notes in each
+/// pattern, its clips and its place among another channel's layer children; a pattern's clips. Redoing a pattern's
+/// delete gives the patterns it makes to fill the numbers the ids they had.
+#[test]
+fn a_delete_s_undo_puts_back_what_it_took_with_its_ids() {
+    let mut a = app();
+    for name in ["Two", "Three"] {
+        apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_pattern", "name": name}))]).unwrap();
+    }
+    let (ch, _, pa) = ids(&a);
+    assert!(pa.len() >= 3);
+    let s = &mut a.state.session;
+    s.control.settle(s.project.get_mut());
+    s.project.get_mut().channels[0].layer_children = vec![1, 2];
+    for &p in &pa[..2] {
+        let notes = json!([{"channel": ch[0], "position": 0}, {"channel": ch[1], "position": 48}, {"channel": ch[2], "position": 96}, {"channel": ch[1], "position": 144}]);
+        apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_notes", "pattern": p, "notes": notes}))]).unwrap();
+    }
+    for (track, pattern) in [(1, pa[0]), (2, pa[1]), (3, pa[1])] {
+        apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_clip", "track": track, "position": 0, "pattern": pattern}))]).unwrap();
+    }
+    let notes = |a: &App| -> Vec<Vec<(u32, u16, u32)>> {
+        a.state.session.project.patterns.iter().map(|q| q.notes.iter().map(|n| (n.id.0, n.channel, n.position)).collect()).collect()
+    };
+    let clips = |a: &App| -> Vec<(u32, u16, os_model::ClipSource)> { crate::edit::playlist::clips(&a.state.session).iter().map(|c| (c.id.0, c.track, c.source)).collect() };
+    let whole = |a: &App| (notes(a), clips(a), ids(a), a.state.session.project.channels[0].layer_children.clone());
+    let before = whole(&a);
+
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "delete_channel", "channel": ch[1]}))]).unwrap();
+    assert_eq!(a.state.session.project.channels[0].layer_children, vec![1], "the layer's other child moved up");
+    assert!(notes(&a).iter().flatten().all(|&(_, c, _)| c != 2), "its notes went");
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!(whole(&a), before, "a channel's delete undone");
+
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "delete_pattern", "pattern": pa[1]}))]).unwrap();
+    let deleted = whole(&a);
+    assert_eq!(clips(&a).len(), 1, "its clips went");
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!(whole(&a), before, "a pattern's delete undone");
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!(whole(&a), deleted, "and redone");
+    crate::history_ui::undo(&mut a.state);
+
+    // A mixer track with a send into it and a channel going to it; the tracks after it move down.
+    let tr = ids(&a).1;
+    let to = |a: &App, i: usize| a.state.session.project.mixer[i].clone();
+    apply(&mut a.state, &test_client(), None, vec![
+        cmd(json!({"op": "set_send", "from": tr[1], "to": tr[3], "level": 0.5})),
+        cmd(json!({"op": "set_send", "from": tr[4], "to": tr[3]})),
+        cmd(json!({"op": "set_channel", "channel": ch[2], "track": tr[3]})),
+        cmd(json!({"op": "set_channel", "channel": ch[0], "track": tr[4]})),
+    ])
+    .unwrap();
+    let mixer = |a: &App| -> Vec<(u32, u16, Vec<u16>, Vec<(u16, f64)>)> {
+        a.state.session.project.mixer.iter().map(|m| (m.id.0, m.index, m.routes.clone(), m.send_levels.clone())).collect()
+    };
+    let outs = |a: &App| -> Vec<u16> { a.state.session.project.channels.iter().map(|c| c.mixer_track).collect() };
+    let before = (mixer(&a), outs(&a), to(&a, 3));
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "delete_track", "track": tr[3]}))]).unwrap();
+    let deleted = (mixer(&a), outs(&a));
+    assert_eq!(a.state.session.project.channels[0].mixer_track, 3, "the channel on the next track follows it down");
+    assert_eq!(a.state.session.project.channels[2].mixer_track, 0, "the deleted track's channel goes to the master");
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!((mixer(&a), outs(&a), to(&a, 3)), before, "a mixer track's delete undone");
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!((mixer(&a), outs(&a)), deleted, "and redone, the empty track it makes with the id it had");
+}
