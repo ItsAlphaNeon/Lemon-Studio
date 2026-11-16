@@ -299,23 +299,42 @@ pub fn listed(d: &cpal::Device) -> bool {
     alsa_pcm(d).is_none_or(|pcm| !NOT_DEVICES.contains(&pcm.split(':').next().unwrap_or("")))
 }
 
-/// The device named `want` among `devices`: by its name, else (a name saved before ALSA's had their PCM) the first
-/// whose own description it is.
+/// The device named `want` among `devices` and the host's `default` one: by its name, else (a name saved before
+/// ALSA's had their PCM) the first whose own description it is. ALSA's default is not always among its devices, and
+/// another card's `sysdefault:` has its description ("Default Audio Device"): the default's own name must win.
 #[cfg(feature = "device")]
-pub fn find(devices: impl Iterator<Item = cpal::Device>, want: &str) -> Option<cpal::Device> {
-    let devices: Vec<cpal::Device> = devices.collect();
-    let i = devices.iter().position(|d| device_name(d) == want).or_else(|| devices.iter().position(|d| plain_name(d) == want))?;
+pub fn find(devices: impl Iterator<Item = cpal::Device>, default: Option<cpal::Device>, want: &str) -> Option<cpal::Device> {
+    let devices: Vec<cpal::Device> = devices.chain(default).collect();
+    let names: Vec<(String, String)> = devices.iter().map(|d| (device_name(d), plain_name(d))).collect();
+    let i = named_index(&names, want)?;
     devices.into_iter().nth(i)
 }
 
-/// The input device named `want` on `host`: among its inputs (`find`), else its default input when `want` is the
-/// name that one is listed under. The default is listed by its own name ("Default Audio Device"), which ALSA's list of
-/// inputs gives none of its entries: there the `default` PCM has its own description ("Default ALSA Output (currently
-/// PipeWire Media Server)").
+/// Where `want` is among devices' (name, own description): a name first, a description only when no name is it.
+#[cfg_attr(not(feature = "device"), allow(dead_code))]
+fn named_index(names: &[(String, String)], want: &str) -> Option<usize> {
+    names.iter().position(|(n, _)| n == want).or_else(|| names.iter().position(|(_, p)| p == want))
+}
+
+/// The input device named `want` on `host`: among its inputs and its default input (`find`). The default is listed
+/// by its own name ("Default Audio Device"), which ALSA's list of inputs gives none of its entries.
 #[cfg(feature = "device")]
 pub fn find_input(host: &cpal::Host, want: &str) -> Option<cpal::Device> {
     use cpal::traits::HostTrait;
-    host.input_devices().ok().and_then(|ds| find(ds, want)).or_else(|| host.default_input_device().filter(|d| device_name(d) == want))
+    find(host.input_devices().ok()?, host.default_input_device(), want)
+}
+
+/// An input device to record from (the recording inputs and Settings > Audio's input list): off ALSA every one; on
+/// ALSA the default and one `plughw:` per card's input, which takes any format. The rest are other ways to the same
+/// inputs (`hw:`, which refuses most formats; `sysdefault:`, `front:`, `dsnoop:`) or the sound servers and OSS.
+#[cfg(feature = "device")]
+pub fn recordable(d: &cpal::Device) -> bool {
+    alsa_pcm(d).is_none_or(|pcm| recordable_pcm(&pcm))
+}
+
+#[cfg_attr(not(feature = "device"), allow(dead_code))]
+fn recordable_pcm(pcm: &str) -> bool {
+    pcm == "default" || pcm.starts_with("plughw:")
 }
 
 /// The output devices' names for `cfg` (on Linux the sound server's or ALSA's, by mode), and the default's.
@@ -337,7 +356,7 @@ pub fn input_devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
     #[cfg(feature = "device")]
     {
         let host = host(cfg);
-        let list = host.input_devices().map(|ds| ds.filter(listed).map(|d| device_name(&d)).collect()).unwrap_or_default();
+        let list = host.input_devices().map(|ds| ds.filter(recordable).map(|d| device_name(&d)).collect()).unwrap_or_default();
         (list, host.default_input_device().map(|d| device_name(&d)))
     }
 }
@@ -353,7 +372,7 @@ fn no_devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
 #[cfg(feature = "device")]
 pub fn input_device(cfg: &AudioCfg) -> Option<cpal::Device> {
     let host = host(cfg);
-    let chosen = cfg.input.as_ref().and_then(|want| find(host.input_devices().ok()?, want));
+    let chosen = cfg.input.as_ref().and_then(|want| find(host.input_devices().ok()?, host.default_input_device(), want));
     chosen.or_else(|| host.default_input_device())
 }
 
@@ -375,7 +394,7 @@ pub struct Output {
 #[cfg(feature = "device")]
 pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
     let host = host(cfg);
-    let chosen = cfg.device.as_ref().and_then(|want| find(host.output_devices().ok()?, want));
+    let chosen = cfg.device.as_ref().and_then(|want| find(host.output_devices().ok()?, host.default_output_device(), want));
     let device = match chosen {
         Some(d) => d,
         None => host.default_output_device().ok_or("no audio output device")?,
@@ -458,6 +477,31 @@ mod tests {
         let name = device_name(&d);
         let found = find_input(&host, &name).expect("the listed name finds a device");
         assert_eq!(device_name(&found), name);
+    }
+
+    /// ALSA's default input ("Default Audio Device") came after a USB keyboard's `sysdefault:`, whose description is
+    /// the same: a pick of the default opened the keyboard, which has no audio input. Its name wins now.
+    #[test]
+    fn the_default_device_is_found_by_its_own_name() {
+        let n = |a: &str, b: &str| (a.to_string(), b.to_string());
+        let names = [
+            n("Default Audio Device (sysdefault:CARD=L61)", "Default Audio Device"),
+            n("Yeti Nano, USB Audio (plughw:CARD=3,DEV=0)", "Yeti Nano, USB Audio"),
+            n("Default Audio Device", "Default Audio Device"),
+        ];
+        assert_eq!(named_index(&names, "Default Audio Device"), Some(2));
+        assert_eq!(named_index(&names, "Yeti Nano, USB Audio"), Some(1), "an old name still finds its device");
+        assert_eq!(named_index(&names[..2], "Default Audio Device"), Some(0));
+    }
+
+    /// The recording inputs on ALSA: the default and one way to each card's input.
+    #[test]
+    fn only_one_way_to_each_input_is_listed() {
+        assert!(recordable_pcm("default"));
+        assert!(recordable_pcm("plughw:CARD=3,DEV=0"));
+        for pcm in ["hw:CARD=3,DEV=0", "sysdefault:CARD=Nano", "front:CARD=PCH,DEV=0", "dsnoop:CARD=PCH,DEV=0", "oss", "pulse", "pipewire", "jack"] {
+            assert!(!recordable_pcm(pcm), "{pcm}");
+        }
     }
 
     /// A stream through the sound server never asks for no length (the server would buffer about two seconds); elsewhere
@@ -564,9 +608,9 @@ mod tests {
         assert_eq!(unique.len(), names.len(), "no two alike");
         assert!(!names.iter().any(|n| n.ends_with("(null)") || n.contains("(samplerate)")), "no converting plugins");
         let card = devices.iter().find(|d| alsa_pcm(d).is_some_and(|p| p.starts_with("hw:"))).expect("a card");
-        let found = find(alsa.output_devices().expect("devices"), &plain_name(card)).expect("an old name finds a device");
+        let found = find(alsa.output_devices().expect("devices"), None, &plain_name(card)).expect("an old name finds a device");
         assert_eq!(plain_name(&found), plain_name(card));
-        let exact = find(alsa.output_devices().expect("devices"), &device_name(card)).expect("its name finds it");
+        let exact = find(alsa.output_devices().expect("devices"), None, &device_name(card)).expect("its name finds it");
         assert_eq!(alsa_pcm(&exact), alsa_pcm(card));
     }
 

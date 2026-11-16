@@ -289,6 +289,11 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         let _ = id;
         None
     }
+    /// [`Plugin::param_value`] of each of `ids`, in one call (a wrapper such as the crash guard enters the plugin
+    /// once for them all).
+    fn param_values(&self, ids: &[u32]) -> Vec<Option<f64>> {
+        ids.iter().map(|&id| self.param_value(id)).collect()
+    }
     /// The plugin's text for normalized `value` of parameter `id` ("-6.0 dB").
     fn param_text(&self, id: u32, value: f64) -> Option<String> {
         let _ = (id, value);

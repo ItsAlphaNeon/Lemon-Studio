@@ -606,8 +606,8 @@ pub fn gradient(s: &mut State) {
     }
     let (a, b) = (s.session.project.channels[rows[0]].color, s.session.project.channels[*rows.last().expect("len >= 2")].color);
     for (c, &r) in gradient_colors(a, b, rows.len()).into_iter().zip(&rows) {
-        s.session.project.get_mut().channels[r].color = Some(c);
-        s.session.project.get_mut().channels[r].rack.stored_color = Some(c);
+        s.session.project.get_mut().channels[r].color = Some(c.for_channel());
+        s.session.project.get_mut().channels[r].rack.stored_color = Some(c.for_channel());
     }
 }
 

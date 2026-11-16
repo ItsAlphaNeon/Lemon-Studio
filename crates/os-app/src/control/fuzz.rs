@@ -126,12 +126,6 @@ fn as_saved(q: &Value) -> Value {
     o.insert("current_pattern".into(), named(&patterns, &o["current_pattern"]));
     for c in o["channels"].as_array_mut().into_iter().flatten() {
         c["track"] = named(&tracks, &c["track"]);
-        // A channel's colour is saved with each part raised to at least 0x14, as FL saves it (os-flp
-        // `clamp_channel_color`).
-        if let Some(t) = c["color"].as_str().and_then(|t| u32::from_str_radix(t.trim_start_matches('#'), 16).ok()) {
-            let part = |k: u32| ((t >> k) & 0xff).max(0x14);
-            c["color"] = json!(format!("#{:02x}{:02x}{:02x}", part(16), part(8), part(0)));
-        }
     }
     for m in o["mixer"].as_array_mut().into_iter().flatten() {
         for d in m["sends"].as_array_mut().into_iter().flatten() {

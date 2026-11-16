@@ -333,7 +333,7 @@ pub fn clone_name(s: &crate::session::Session, r: usize) -> String {
 
 pub fn random_color(s: &mut crate::session::Session, r: usize, salt: u64) {
     if let Some(c) = s.project.get_mut().channels.get_mut(r) {
-        c.color = Some(crate::edit::patterns::random_color(seed() ^ salt.wrapping_mul(0x9e37_79b9)));
+        c.color = Some(crate::edit::patterns::random_color(seed() ^ salt.wrapping_mul(0x9e37_79b9)).for_channel());
     }
 }
 

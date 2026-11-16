@@ -293,6 +293,12 @@ pub enum Taken {
     Back(Box<Back>),
     /// Where a channel was, by id: putting it back moves the channel to that row again (the undo of a move).
     Row(u32, usize),
+    /// What a delete took out, each piece where it was (the undo of a delete, `control::removal`). Its other side is
+    /// `Deleted`.
+    Removed(Box<super::removal::Removed>),
+    /// A thing to delete again (the redo of a delete), with the ids the things the delete makes had. Its other side is
+    /// `Removed`.
+    Deleted(Thing, Vec<u32>),
 }
 
 /// Something a command added (`Taken::Gone`), by id.
@@ -653,7 +659,9 @@ impl Command {
             Command::MoveChannel { channel, .. } => Taken::Row(*channel, channel_row(p, *channel)?),
             // What an add made is known once it is made (`apply`); this is not used.
             Command::AddChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } => Taken::Gone(Thing::Channel(0)),
-            Command::DeleteChannel { .. } | Command::DeleteTrack { .. } | Command::DeletePattern { .. } => Taken::Project(Box::new(Side::of(s))),
+            Command::DeleteChannel { channel } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Channel(*channel))?)),
+            Command::DeletePattern { pattern } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Pattern(*pattern))?)),
+            Command::DeleteTrack { track } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Track(*track))?)),
             Command::Put(t) => match &**t {
                 Taken::Settings(_) => Taken::Settings(Box::new(Settings::of(s))),
                 Taken::Channel(c) => Taken::Channel(Box::new(p.channels[channel_row(p, c.id.0)?].clone())),
@@ -693,6 +701,8 @@ impl Command {
                     Back::Pattern(q) => Thing::Pattern(q.id.0),
                 }),
                 Taken::Row(id, _) => Taken::Row(*id, channel_row(p, *id)?),
+                Taken::Removed(r) => Taken::Deleted(r.thing(), r.made(p)),
+                Taken::Deleted(thing, _) => Taken::Removed(Box::new(super::removal::Removed::of(s, *thing)?)),
             },
         })
     }
@@ -714,11 +724,10 @@ impl Command {
             Taken::Project(side) => side.project.set_ppq(to),
             Taken::Back(b) => {
                 if let Back::Pattern(p) = &mut **b {
-                    let mut one = Project { ppq: from, patterns: vec![std::mem::take(p)], ..Project::default() };
-                    one.set_ppq(to);
-                    *p = one.patterns.pop().unwrap_or_default();
+                    rescale_pattern(p, from, to);
                 }
             }
+            Taken::Removed(r) => r.rescale(from, to),
             Taken::Settings(_)
             | Taken::Channel(_)
             | Taken::Track(_)
@@ -728,6 +737,7 @@ impl Command {
             | Taken::TracksOn(_)
             | Taken::Links(_)
             | Taken::Gone(_)
+            | Taken::Deleted(..)
             | Taken::Row(..) => {}
         }
     }
@@ -778,6 +788,11 @@ impl Command {
             None => taken,
         };
         Ok(Done { undo: Command::Put(Box::new(taken)), result })
+    }
+
+    /// `change` for a delete's redo (`control::removal`).
+    pub(super) fn run_change(self, s: &mut crate::session::Session) -> Result<(), Error> {
+        self.change(s).map(|_| ())
     }
 
     /// The change itself (`apply` took what it changes first).
@@ -887,7 +902,7 @@ impl Command {
                     ch.name = text(&n);
                 }
                 if let Some(c) = color {
-                    ch.color = c;
+                    ch.color = c.map(os_model::Rgb::for_channel);
                 }
                 if let Some(v) = volume {
                     ch.volume = v;
@@ -1294,6 +1309,10 @@ fn put(s: &mut crate::session::Session, t: Taken) {
             };
         }
         Taken::Back(back) => put_back(s, *back),
+        Taken::Removed(r) => r.put(s),
+        Taken::Deleted(thing, made) => {
+            let _ = super::removal::delete_again(s, thing, made);
+        }
         Taken::Mutes(on) => {
             for (id, v) in on {
                 if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.id.0 == id) {
@@ -1316,19 +1335,7 @@ fn put(s: &mut crate::session::Session, t: Taken) {
 /// A thing an add made, put back where it was with its id (`Taken::Back`).
 fn put_back(s: &mut crate::session::Session, back: Back) {
     match back {
-        Back::Channel(row, c) => {
-            let old: Vec<u32> = s.project.channels.iter().map(|c| c.id.0).collect();
-            let n = old.len();
-            let row = row.min(n);
-            s.project.get_mut().channels.push(c);
-            // The new last channel goes to its row, the ones from there one down.
-            let map: Vec<Option<usize>> = (0..=n).map(|r| Some(if r == n { row } else if r < row { r } else { r + 1 })).collect();
-            crate::edit::rack::remap_project(s.project.get_mut(), &map);
-            crate::edit::rack::remap_session(s, &map);
-            // The views follow by id, as after the project put back whole.
-            s.touched.rows.get_or_insert(old);
-            s.touched.views.push(crate::session::View::RackAutosize);
-        }
+        Back::Channel(row, c) => put_channel_back(s, row, c),
         Back::Track(m) => {
             let n = crate::edit::mixer::add_track_in(s, Some(m.index));
             if let Some(t) = s.project.get_mut().mixer.iter_mut().find(|t| t.index == n) {
@@ -1343,6 +1350,30 @@ fn put_back(s: &mut crate::session::Session, back: Back) {
             s.touched.views.push(crate::session::View::PatternsRenumbered);
         }
     }
+}
+
+/// Channel `c` put back on `row`, the rows from there one down with every index that names them.
+pub(super) fn put_channel_back(s: &mut crate::session::Session, row: usize, mut c: os_model::Channel) {
+    let old: Vec<u32> = s.project.channels.iter().map(|c| c.id.0).collect();
+    let n = old.len();
+    let row = row.min(n);
+    // It comes in last, under an index no other channel has, so nothing naming the others is taken for it.
+    c.index = n as u16;
+    s.project.get_mut().channels.push(c);
+    // The new last channel goes to its row, the ones from there one down.
+    let map: Vec<Option<usize>> = (0..=n).map(|r| Some(if r == n { row } else if r < row { r } else { r + 1 })).collect();
+    crate::edit::rack::remap_project(s.project.get_mut(), &map);
+    crate::edit::rack::remap_session(s, &map);
+    // The views follow by id, as after the project put back whole.
+    s.touched.rows.get_or_insert(old);
+    s.touched.views.push(crate::session::View::RackAutosize);
+}
+
+/// Pattern `p` at another timebase.
+pub(super) fn rescale_pattern(p: &mut Pattern, from: u16, to: u16) {
+    let mut one = Project { ppq: from, patterns: vec![std::mem::take(p)], ..Project::default() };
+    one.set_ppq(to);
+    *p = one.patterns.pop().unwrap_or_default();
 }
 
 /// Which channels are on now (`Taken::Mutes`).
