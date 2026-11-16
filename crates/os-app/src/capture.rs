@@ -211,7 +211,7 @@ fn system_inputs() -> Vec<(String, bool, u16)> {
     let mut v: Vec<(String, bool, u16)> =
         crate::audio_cfg::input_device(&cfg).map(|d| (crate::audio_cfg::device_name(&d), false, channels(&d))).into_iter().collect();
     let host = crate::audio_cfg::host(&cfg);
-    for d in host.input_devices().into_iter().flatten().filter(crate::audio_cfg::listed) {
+    for d in host.input_devices().into_iter().flatten().filter(crate::audio_cfg::recordable) {
         let name = crate::audio_cfg::device_name(&d);
         if !v.iter().any(|(n, ..)| *n == name) {
             v.push((name, false, channels(&d)));
