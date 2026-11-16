@@ -38,7 +38,7 @@ pub fn shown_level(s: &State, t: u16, k: u8, id: u32, wet: bool) -> f32 {
 /// A level knob turned (`State::set_knob`): the list takes the level, no undo step (a drag's is taken at its press), and
 /// the knob shows it until the chain plays it.
 pub fn put_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
-    crate::follow::around(s, |s| put_level_in(&mut s.session, t, k, id, wet, v));
+    crate::follow::around(s, |s| s.session.set_knob(KnobId::Member(t, k, id, wet), v));
 }
 
 /// The open list's level knob shows `v` until the chain plays it (`put_level`).

@@ -219,6 +219,56 @@ pub enum Command {
         enabled: Option<bool>,
     },
 
+    // ----- Controls in channel and container windows
+    /// The LFO of the automation clip on `channel`, as stored: on, add (else it multiplies), amount 0..=128, speed
+    /// 0..=65536 (45819 = one cycle per beat), tension, skew and pulse width -128..=128.
+    SetClipLfo {
+        channel: u32,
+        #[serde(default)]
+        on: Option<bool>,
+        #[serde(default)]
+        add: Option<bool>,
+        #[serde(default)]
+        amount: Option<i32>,
+        #[serde(default)]
+        speed: Option<i32>,
+        #[serde(default)]
+        tension: Option<i32>,
+        #[serde(default)]
+        skew: Option<i32>,
+        #[serde(default)]
+        pulse_width: Option<i32>,
+    },
+    /// The settings of the MIDI Out on `channel`: MIDI channel 0..=15, port 0..=255, patch 0..=128 (0 = none), the
+    /// two banks -1..=127 (-1 = none), send pan, volume and pitch, map note colour to MIDI channel.
+    SetMidiOut {
+        channel: u32,
+        #[serde(default)]
+        midi_channel: Option<u8>,
+        #[serde(default)]
+        port: Option<u8>,
+        #[serde(default)]
+        patch: Option<u8>,
+        #[serde(default)]
+        bank: Option<i32>,
+        #[serde(default)]
+        bank2: Option<i32>,
+        #[serde(default)]
+        send_levels: Option<bool>,
+        #[serde(default)]
+        map_color: Option<bool>,
+    },
+    /// The wet and dry levels 0..=1 of member `member` of the container held by `container` (the id of a mixer slot,
+    /// or of a channel whose instrument is a container).
+    SetMember {
+        container: u32,
+        member: u32,
+        #[serde(default)]
+        wet: Option<f64>,
+        #[serde(default)]
+        dry: Option<f64>,
+    },
+
     // ----- Plugins
     /// Parameter `param` (the plugin's own parameter id) of the instance playing channel or slot `owner` to `value`
     /// 0..=1. `from` is the value before; the app fills it in (`App::command`), and the undo puts it back.
@@ -271,6 +321,8 @@ pub enum Taken {
     Track(Box<MixerTrack>),
     /// One pattern.
     Pattern(Box<Pattern>),
+    /// The LFO of an automation clip, by its channel's id.
+    Lfo(u32, Box<os_model::clip_lfo::ClipLfo>),
     /// The arrangement shown.
     Arrangement(Box<os_model::Arrangement>),
     /// A plugin parameter: (owner, parameter, value).
@@ -464,6 +516,12 @@ pub struct Done {
 // ---------------------------------------------------------------------------------------------------------
 // Finding things by id
 
+/// The LFO of the automation clip on channel `id`.
+fn clip_lfo(p: &Project, id: u32) -> Result<&os_model::clip_lfo::ClipLfo, Error> {
+    let ch = p.channels[channel_row(p, id)?].index;
+    p.automation(ch).map(|a| &a.lfo).ok_or_else(|| format!("channel {id} is not an automation clip"))
+}
+
 pub fn channel_row(p: &Project, id: u32) -> Result<usize, Error> {
     p.channels.iter().position(|c| c.id.0 == id).ok_or_else(|| format!("no channel {id}"))
 }
@@ -625,9 +683,18 @@ impl Command {
             Command::DeleteClip { .. } => "Delete clip",
             Command::SetClip { .. } => "Edit clip",
             Command::SetPlaylistTrack { .. } => "Playlist track",
+            Command::SetClipLfo { .. } => "Automation clip LFO",
+            Command::SetMidiOut { .. } => "MIDI Out setting",
+            Command::SetMember { .. } => crate::container::LEVEL,
             Command::SetParam { .. } => PLUGIN_PARAMETER,
             Command::Put(_) => "Undo",
         }
+    }
+
+    /// The command that would put back what this one is about to change, as it is now: the undo of a change made in
+    /// steps under one press (a knob's drag takes it at the press, `history::knob`).
+    pub fn undo_now(&self, s: &crate::session::Session) -> Result<Command, Error> {
+        self.take(s).map(|t| Command::Put(Box::new(t)))
     }
 
     /// What this command is about to change, taken from the project as it is now.
@@ -653,6 +720,12 @@ impl Command {
                 // A project without an arrangement gets one (`playlist::arr_mut`); the undo takes it away again.
                 None => Taken::Project(Box::new(Side::of(s))),
             },
+            Command::SetClipLfo { channel, .. } => Taken::Lfo(*channel, Box::new(clip_lfo(p, *channel)?.clone())),
+            Command::SetMidiOut { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
+            Command::SetMember { container, .. } => match crate::edit::container::id_place(s, *container).ok_or_else(|| format!("no container {container}"))? {
+                (row, crate::container::CHANNEL) => Taken::Channel(Box::new(p.channels[usize::from(row)].clone())),
+                (t, _) => Taken::Track(Box::new(p.mixer.iter().find(|m| m.index == t).ok_or("the container's track is gone")?.clone())),
+            },
             Command::SetParam { owner, param, from, .. } => {
                 Taken::Param(*owner, *param, from.ok_or("the parameter's value before is not known (the app fills it in)")?)
             }
@@ -667,6 +740,7 @@ impl Command {
                 Taken::Channel(c) => Taken::Channel(Box::new(p.channels[channel_row(p, c.id.0)?].clone())),
                 Taken::Track(m) => Taken::Track(Box::new(p.mixer[track_place(p, m.id.0)?].clone())),
                 Taken::Pattern(q) => Taken::Pattern(Box::new(p.patterns[pattern_place(p, q.id.0)?].clone())),
+                Taken::Lfo(id, _) => Taken::Lfo(*id, Box::new(clip_lfo(p, *id)?.clone())),
                 Taken::Arrangement(a) => {
                     Taken::Arrangement(Box::new(p.arrangements.iter().find(|x| x.id.0 == a.id.0).cloned().ok_or("the arrangement is gone")?))
                 }
@@ -729,6 +803,7 @@ impl Command {
             }
             Taken::Removed(r) => r.rescale(from, to),
             Taken::Settings(_)
+            | Taken::Lfo(..)
             | Taken::Channel(_)
             | Taken::Track(_)
             | Taken::Param(..)
@@ -1010,9 +1085,11 @@ impl Command {
                         if !m.routes.contains(&b) {
                             m.routes.push(b);
                         }
-                        // Unity is a route without a level, as the mixer writes it.
+                        // Unity is a route without a level, as the mixer writes it; levels by destination, as the
+                        // send knobs keep them.
                         if l != 0.8 {
                             m.send_levels.push((b, l));
+                            m.send_levels.sort_by_key(|&(d, _)| d);
                         }
                     }
                     None => m.routes.retain(|&r| r != b),
@@ -1215,6 +1292,61 @@ impl Command {
                 none
             }
 
+            Command::SetClipLfo { channel, on, add, amount, speed, tension, skew, pulse_width } => {
+                for (name, v, lo, hi) in [("amount", amount, 0, 128), ("speed", speed, 0, 65536), ("tension", tension, -128, 128), ("skew", skew, -128, 128), ("pulse_width", pulse_width, -128, 128)] {
+                    if v.is_some_and(|v| !(lo..=hi).contains(&v)) {
+                        return Err(format!("{name} must be {lo}..={hi}"));
+                    }
+                }
+                clip_lfo(&s.project, channel)?;
+                let ch = s.project.channels[channel_row(&s.project, channel)?].index;
+                let Some(a) = s.project.get_mut().automation_mut(ch) else { return none };
+                let l = &mut a.lfo;
+                if let Some(on) = on {
+                    l.switch = if on { -1 } else { 0 };
+                }
+                if let Some(add) = add {
+                    l.mode = u8::from(add);
+                }
+                for (field, v) in [(&mut l.amount, amount), (&mut l.speed, speed), (&mut l.tension, tension), (&mut l.skew, skew), (&mut l.pulse_width, pulse_width)] {
+                    if let Some(v) = v {
+                        *field = v;
+                    }
+                }
+                none
+            }
+            Command::SetMidiOut { channel, midi_channel, port, patch, bank, bank2, send_levels, map_color } => {
+                let row = channel_row(&s.project, channel)?;
+                let mut st = crate::lemon_midi_out::row_settings(&s.project, row).ok_or_else(|| format!("channel {channel} is not a MIDI Out"))?;
+                if midi_channel.is_some_and(|c| c > 15) || patch.is_some_and(|p| p > 128) {
+                    return Err("the MIDI channel is 0..=15 and the patch 0..=128".into());
+                }
+                if [bank, bank2].iter().flatten().any(|b| !(-1..=127).contains(b)) {
+                    return Err("banks are -1..=127".into());
+                }
+                st.channel = midi_channel.unwrap_or(st.channel);
+                st.port = port.unwrap_or(st.port);
+                st.patch = patch.unwrap_or(st.patch);
+                st.bank = [bank.unwrap_or(st.bank[0]), bank2.unwrap_or(st.bank[1])];
+                st.send_levels = send_levels.unwrap_or(st.send_levels);
+                st.map_color = map_color.unwrap_or(st.map_color);
+                crate::lemon_midi_out::set_row_settings(s.project.get_mut(), row, &st);
+                none
+            }
+            Command::SetMember { container, member, wet, dry } => {
+                let (t, k) = crate::edit::container::id_place(s, container).ok_or_else(|| format!("no container {container}"))?;
+                let wet = wet.map(|v| unit("wet", v, 0.0, 1.0)).transpose()?;
+                let dry = dry.map(|v| unit("dry", v, 0.0, 1.0)).transpose()?;
+                if crate::edit::container::member(s, t, k, member).is_none() {
+                    return Err(format!("the container has no member {member}"));
+                }
+                for (is_wet, v) in [(true, wet), (false, dry)] {
+                    if let Some(v) = v {
+                        crate::edit::container::put_level_in(s, t, k, member, is_wet, v as f32);
+                    }
+                }
+                none
+            }
             Command::SetParam { owner, param, value, .. } => {
                 unit("value", value, 0.0, 1.0)?;
                 owner_key(s, owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
@@ -1272,6 +1404,11 @@ fn put(s: &mut crate::session::Session, t: Taken) {
         Taken::Pattern(p) => {
             if let Ok(place) = pattern_place(&s.project, p.id.0) {
                 s.project.get_mut().patterns[place] = *p;
+            }
+        }
+        Taken::Lfo(id, l) => {
+            if let Some(a) = channel_row(&s.project, id).ok().map(|row| s.project.channels[row].index).and_then(|ch| s.project.get_mut().automation_mut(ch)) {
+                a.lfo = *l;
             }
         }
         Taken::Arrangement(a) => {

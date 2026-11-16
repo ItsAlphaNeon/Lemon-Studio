@@ -1531,3 +1531,62 @@ fn a_delete_s_undo_puts_back_what_it_took_with_its_ids() {
     crate::history_ui::redo(&mut a.state);
     assert_eq!((mixer(&a), outs(&a)), deleted, "and redone, the empty track it makes with the id it had");
 }
+
+/// Every kind of project knob turns through its command (control-plane step 14): a drag is one step named for the
+/// knob, its undo gives the project back as it was and its redo as the drag left it, and a knob whose thing is gone
+/// makes no step.
+#[test]
+fn every_project_knob_turns_through_its_command() {
+    use crate::knobs::{KnobId, LfoKnob};
+    use crate::lemon_midi_out::MoKnob;
+    let mut a = App::new(None);
+    a.add_midi_out();
+    let out = a.state.session.project.channels.len() - 1;
+    // Row 0 as an automation clip, with its clip.
+    let ch = a.state.session.project.channels[0].index;
+    a.state.session.project.get_mut().channels[0].kind = os_model::ChannelKind::Automation;
+    a.state.session.project.get_mut().automations.push(os_flp::project::untargeted_automation(ch, 0.5, 4.0));
+    let t = a.state.session.project.mixer.iter().position(|m| m.index == 1).unwrap();
+    a.state.session.project.get_mut().mixer[t].routes = vec![0];
+    let knobs = [
+        KnobId::MasterVol,
+        KnobId::MasterPitch,
+        KnobId::Swing,
+        KnobId::MixPan(1),
+        KnobId::MixSep(1),
+        KnobId::SlotMix(1, 2),
+        KnobId::Send(1, 0),
+        KnobId::ChanVol(1),
+        KnobId::ChanPan(1),
+        KnobId::Eq(1, 1, 0),
+        KnobId::Eq(1, 2, 2),
+        KnobId::AutoLfo(0, LfoKnob::Amount),
+        KnobId::AutoLfo(0, LfoKnob::On),
+        KnobId::AutoLfo(0, LfoKnob::Skew),
+        KnobId::MidiOut(out, MoKnob::Patch),
+        KnobId::MidiOut(out, MoKnob::Bank2),
+        KnobId::MidiOut(out, MoKnob::SendLevels),
+    ];
+    for id in knobs {
+        let before = a.state.session.project.clone();
+        let steps = a.state.session.history.len();
+        crate::history::knob(&mut a.state.session, id, false);
+        // Through the middle, to the far side from where it starts (a check flips).
+        let far = if a.state.knob(id) >= 0.5 { 0.1 } else { 0.9 };
+        a.state.set_knob(id, 0.45);
+        a.state.set_knob(id, far);
+        a.state.session.history.end_gesture_run();
+        let after = a.state.session.project.clone();
+        assert_ne!(after, before, "{id:?} changes the project");
+        assert_eq!(a.state.session.history.len(), steps + 1, "{id:?}: one step");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(a.state.session.project, before, "{id:?} undone");
+        crate::history_ui::redo(&mut a.state);
+        assert_eq!(a.state.session.project, after, "{id:?} redone");
+    }
+    // A knob on a track that isn't there.
+    let steps = a.state.session.history.len();
+    crate::history::knob(&mut a.state.session, KnobId::MixPan(500), false);
+    a.state.set_knob(KnobId::MixPan(500), 0.2);
+    assert_eq!(a.state.session.history.len(), steps);
+}

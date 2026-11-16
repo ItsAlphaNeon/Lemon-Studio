@@ -5,7 +5,6 @@
 //! The knobs a change, an undo step or a controller link names (control-plane step 9: the session's; `crate::knobs`
 //! keeps how they behave under the mouse, `KnobUi`), and the dialogs' own knobs they include; the project's values of them.
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum KnobId {
@@ -242,6 +241,78 @@ pub fn eq_pos(field: u8, v: i32) -> f32 {
     }
 }
 
+impl KnobId {
+    /// The command setting this control of `s`'s project to knob position `v` (0..1, the main pitch's pull onto a
+    /// semitone already made), naming what it sets by id (`s`'s ids settled); `None` for the dialogs' knobs, for those
+    /// still set directly, and when the control's channel or track is gone.
+    pub fn command(self, s: &crate::session::Session, v: f32) -> Option<crate::control::Command> {
+        use crate::control::Command;
+        let p = &s.project;
+        let track = |t: u16| p.mixer.iter().find(|m| m.index == t).map(|m| m.id.0);
+        let channel = |row: usize| p.channels.get(row).map(|c| c.id.0);
+        let set_track = |t: u16, pan: Option<f64>, stereo: Option<f64>| {
+            Some(Command::SetTrack { track: track(t)?, name: None, color: None, volume: None, pan, stereo, enabled: None, polarity: None, swap: None, effects_enabled: None })
+        };
+        let set_channel = |row: usize, volume: Option<f64>, pan: Option<f64>| {
+            Some(Command::SetChannel { channel: channel(row)?, name: None, color: None, volume, pan, pitch: None, enabled: None, track: None })
+        };
+        let bipolar = f64::from((v - 0.5) * 2.0);
+        match self {
+            KnobId::MasterVol => Some(Command::SetMainVolume { volume: f64::from(v) }),
+            KnobId::MasterPitch => Some(Command::SetMainPitch { cents: ((v - 0.5) * 2400.0).round() as i16 }),
+            KnobId::Swing => Some(Command::SetSwing { swing: f64::from(v) }),
+            KnobId::MixPan(t) => set_track(t, Some(bipolar), None),
+            // In 64ths, as the file keeps it and FL's knob sets it (12% merged is 8, a typed 1% is 1).
+            KnobId::MixSep(t) => set_track(t, None, Some((bipolar * 64.0).round() / 64.0)),
+            KnobId::SlotMix(t, k) => Some(Command::SetSlot { track: track(t)?, slot: k.min(9), enabled: None, mix: Some(f64::from(v)) }),
+            KnobId::Send(a, b) => Some(Command::SetSend { from: track(a)?, to: track(b)?, level: Some(f64::from(v)) }),
+            KnobId::ChanVol(row) => set_channel(row, Some(f64::from(v)), None),
+            KnobId::ChanPan(row) => set_channel(row, None, Some(bipolar)),
+            KnobId::Eq(t, b, f) => {
+                let stored = if f == 0 { ((v * 2.0 - 1.0) * 1800.0).round() as i32 } else { (v * 65536.0).round() as i32 };
+                let field = |k: u8| (f.min(2) == k).then_some(stored);
+                Some(Command::SetEq { track: track(t)?, band: b.min(2), gain: field(0), frequency: field(1), width: field(2) })
+            }
+            KnobId::AutoLfo(row, k) => {
+                let mut l = s.clip_lfo(row)?.clone();
+                k.store(&mut l, v);
+                let field = |want: LfoKnob, x: i32| (k == want).then_some(x);
+                Some(Command::SetClipLfo {
+                    channel: channel(row)?,
+                    on: (k == LfoKnob::On).then(|| l.on()),
+                    add: (k == LfoKnob::Mode).then(|| l.adds()),
+                    amount: field(LfoKnob::Amount, l.amount),
+                    speed: field(LfoKnob::Speed, l.speed),
+                    tension: field(LfoKnob::Tension, l.tension),
+                    skew: field(LfoKnob::Skew, l.skew),
+                    pulse_width: field(LfoKnob::Pulse, l.pulse_width),
+                })
+            }
+            KnobId::MidiOut(row, k) => {
+                use crate::lemon_midi_out::MoKnob;
+                let mut st = crate::lemon_midi_out::row_settings(p, row)?;
+                k.store(&mut st, v);
+                Some(Command::SetMidiOut {
+                    channel: channel(row)?,
+                    midi_channel: (k == MoKnob::Channel).then_some(st.channel),
+                    port: (k == MoKnob::Port).then_some(st.port),
+                    patch: (k == MoKnob::Patch).then_some(st.patch),
+                    bank: (k == MoKnob::Bank).then_some(st.bank[0]),
+                    bank2: (k == MoKnob::Bank2).then_some(st.bank[1]),
+                    send_levels: (k == MoKnob::SendLevels).then_some(st.send_levels),
+                    map_color: (k == MoKnob::MapColor).then_some(st.map_color),
+                })
+            }
+            KnobId::Member(t, k, member, wet) => {
+                let container = crate::edit::container::place_id(s, t, k)?.0;
+                let level = Some(f64::from(v));
+                Some(Command::SetMember { container, member, wet: level.filter(|_| wet), dry: level.filter(|_| !wet) })
+            }
+            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) => None,
+        }
+    }
+}
+
 /// The project's knobs (`State`'s are these and the interface's own).
 impl crate::session::Session {
     /// The project's value of control `id` as its knob shows it (0..1); `None` for the piano roll dialogs' knobs,
@@ -299,82 +370,11 @@ impl crate::session::Session {
                 v = nearest;
             }
         }
-        match id {
-            KnobId::MixPan(t) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
-                    m.pan = Some(f64::from((v - 0.5) * 2.0));
-                    self.dirty = true;
-                }
-            }
-            KnobId::MixSep(t) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
-                    // In 64ths, as the file keeps it and FL's knob sets it (12% merged is 8, a typed 1% is 1).
-                    m.stereo_separation = Some((f64::from((v - 0.5) * 2.0) * 64.0).round() / 64.0);
-                    self.dirty = true;
-                }
-            }
-            KnobId::SlotMix(t, k) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
-                    m.slot_mix[usize::from(k).min(9)] = f64::from(v);
-                    self.dirty = true;
-                }
-            }
-            KnobId::Send(a, b) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == a) {
-                    m.send_levels.retain(|&(d, _)| d != b);
-                    m.send_levels.push((b, f64::from(v)));
-                    m.send_levels.sort_by_key(|&(d, _)| d);
-                    self.dirty = true;
-                }
-            }
-            KnobId::ChanVol(i) => {
-                if let Some(c) = self.project.get_mut().channels.get_mut(i) {
-                    c.volume = f64::from(v);
-                    self.dirty = true;
-                }
-            }
-            KnobId::ChanPan(i) => {
-                if let Some(c) = self.project.get_mut().channels.get_mut(i) {
-                    c.pan = f64::from((v - 0.5) * 2.0);
-                    self.dirty = true;
-                }
-            }
-            KnobId::Swing => {
-                self.project.get_mut().swing = Some((v * 128.0).round() as u8);
-                self.dirty = true;
-            }
-            KnobId::MasterVol => {
-                self.project.get_mut().main_volume = Some((v * 16000.0).round() as u16);
-                self.dirty = true;
-            }
-            KnobId::MasterPitch => {
-                self.project.get_mut().main_pitch = Some(((v - 0.5) * 2400.0).round() as i16);
-                self.dirty = true;
-            }
-            KnobId::Eq(t, b, f) => {
-                if let Some(m) = self.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
-                    let stored = if f == 0 { ((v * 2.0 - 1.0) * 1800.0).round() as i32 } else { (v * 65536.0).round() as i32 };
-                    m.eq[usize::from(b.min(2))][usize::from(f.min(2))] = stored;
-                    self.dirty = true;
-                }
-            }
-            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) => {}
-            KnobId::AutoLfo(row, k) => {
-                let Some(ch) = self.project.channels.get(row).map(|c| c.index) else { return };
-                if let Some(a) = self.project.get_mut().automation_mut(ch) {
-                    k.store(&mut a.lfo, v);
-                    self.dirty = true;
-                }
-            }
-            KnobId::MidiOut(row, k) => {
-                let Some(mut st) = crate::lemon_midi_out::row_settings(&self.project, row) else { return };
-                k.store(&mut st, v);
-                if crate::lemon_midi_out::set_row_settings(self.project.get_mut(), row, &st) {
-                    self.dirty = true;
-                }
-            }
-            // No undo step here: a drag's is taken at the press (`history::knob`).
-            KnobId::Member(t, k, id, wet) => crate::edit::container::put_level_in(self, t, k, id, wet, v),
+        // Its command, with no step of its own (a drag's is taken at the press, `history::knob`; a controller's moves
+        // make none). Nothing for the dialogs' knobs or a control whose channel, track or member is gone.
+        crate::control::settle_in(self);
+        if let Some(c) = id.command(self, v) {
+            let _ = crate::control::run_in(self, vec![c]);
         }
     }
 }

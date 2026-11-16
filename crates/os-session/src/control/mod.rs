@@ -273,9 +273,17 @@ fn op(c: &Command) -> &'static str {
         Command::DeleteClip { .. } => "delete_clip",
         Command::SetClip { .. } => "set_clip",
         Command::SetPlaylistTrack { .. } => "set_playlist_track",
+        Command::SetClipLfo { .. } => "set_clip_lfo",
+        Command::SetMidiOut { .. } => "set_midi_out",
+        Command::SetMember { .. } => "set_member",
         Command::SetParam { .. } => "set_param",
         Command::Put(_) => "put",
     }
+}
+
+/// Gives ids to what has none (`Control::settle`), so commands can name it.
+pub fn settle_in(s: &mut crate::session::Session) {
+    s.control.settle(s.project.get_mut());
 }
 
 /// `run` on the session: what the views are to follow is reported (`Session::touched`); a list that fails reports
@@ -407,6 +415,7 @@ fn region_key(c: &Command) -> Option<(u8, u32, u32)> {
         Taken::Channel(c) => (1, c.id.0, 0),
         Taken::Track(m) => (2, m.id.0, 0),
         Taken::Pattern(p) => (3, p.id.0, 0),
+        Taken::Lfo(id, _) => (10, *id, 0),
         Taken::Arrangement(a) => (4, a.id.0, 0),
         Taken::Param(owner, param, _) => (5, *owner, *param),
         Taken::Plugin(owner, _) => (6, *owner, 0),

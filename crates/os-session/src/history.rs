@@ -61,9 +61,6 @@ pub enum Snap {
     Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32>, loops: (Vec<(u16, u32)>, Option<u32>) },
     /// The playlist (`playlist::capture`).
     Playlist(Box<crate::edit::playlist::Snapshot>),
-    /// A knob's value: the model's own for the channel knobs, else the knob's 0..1; `None` for a send with no level
-    /// record (at unity), so undo leaves none behind.
-    Knob(KnobId, Option<f64>),
     /// Mixer track `.0`'s audio input, output, record source and monitor mode (`MixerTrack::audio_in` ...); its armed
     /// state is no part of it (spec: audio/track-io.md §2.3).
     TrackIo(u16, [i32; 4]),
@@ -153,36 +150,6 @@ pub fn put_rack(s: &mut crate::session::Session, r: RackSide) {
         }
         before != (p.groups.clone(), p.current_group, p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>())
     });
-}
-
-/// The model's value of a knob: the channels' volume and pan as stored (exact), the others as the knob reads them.
-pub fn knob_value(s: &crate::session::Session, id: KnobId) -> Option<f64> {
-    Some(match id {
-        KnobId::ChanVol(i) => s.project.channels.get(i).map_or(0.0, |c| c.volume),
-        KnobId::ChanPan(i) => s.project.channels.get(i).map_or(0.0, |c| c.pan),
-        // The level the container's list holds (the knob shows the chain's, an automated one included).
-        KnobId::Member(t, k, id, wet) => crate::edit::container::level(s, t, k, id, wet).map_or(0.0, f64::from),
-        // A route with no level record: the knob shows unity, and the record is what the step must put back.
-        KnobId::Send(a, b) => return crate::edit::mixer::track(s, a).map_or(Some(0.8), |m| m.send_levels.iter().find(|(d, _)| *d == b).map(|&(_, l)| l)),
-        _ => f64::from(s.knob(id).unwrap_or(0.0)),
-    })
-}
-
-pub fn set_knob_value(s: &mut crate::session::Session, id: KnobId, v: Option<f64>) {
-    let Some(v) = v else {
-        if let KnobId::Send(a, b) = id {
-            if let Some(m) = crate::edit::mixer::track_mut(s, a) {
-                m.send_levels.retain(|&(d, _)| d != b);
-                s.dirty = true;
-            }
-        }
-        return;
-    };
-    match id {
-        KnobId::ChanVol(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.volume = v),
-        KnobId::ChanPan(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.pan = v),
-        _ => s.set_knob(id, v as f32),
-    }
 }
 
 /// A knob step's name.
@@ -484,8 +451,10 @@ pub fn knob(s: &mut crate::session::Session, id: KnobId, wheel: bool) {
     if wheel && h.joins(Run::Wheel(id)) {
         return;
     }
-    let snap = Snap::Knob(id, knob_value(s, id));
-    record(s, knob_name(id), snap);
+    // What the knob's command changes, as it is before the drag (`KnobId::command`); none when what it names is gone.
+    crate::control::settle_in(s);
+    let Some(undo) = id.command(s, 0.0).and_then(|c| c.undo_now(s).ok()) else { return };
+    record(s, knob_name(id), Snap::Commands(vec![undo]));
     if wheel {
         s.history.run = Some(Run::Wheel(id));
     }
@@ -618,7 +587,6 @@ impl Snap {
         match self {
             Snap::Pattern { number, .. } => Snap::pattern(s, *number),
             Snap::Playlist(_) => Snap::Playlist(Box::new(crate::edit::playlist::capture(s))),
-            Snap::Knob(id, _) => Snap::Knob(*id, knob_value(s, *id)),
             // A track gone since is left as the step has it (`put` does nothing then).
             Snap::TrackIo(t, _) => crate::edit::mixer::track(s, *t).map_or_else(|| self.clone(), |m| Snap::TrackIo(*t, track_io_of(m))),
             // A channel gone since is left as the step has it (`put` does nothing then).
@@ -675,7 +643,7 @@ impl Snap {
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
             Snap::Commands(v) => v.iter_mut().for_each(|c| c.rescale(from, to)),
             // A channel or an initial value holds no ticks; a timebase step's are at its own timebase.
-            Snap::Knob(..) | Snap::TrackIo(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Timebase(_) => {}
+            Snap::TrackIo(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Timebase(_) => {}
         }
     }
 
@@ -690,7 +658,6 @@ impl Snap {
                 s.touched.notes = true;
             }
             Snap::Playlist(p) => crate::edit::playlist::restore(s, *p),
-            Snap::Knob(id, v) => set_knob_value(s, id, v),
             Snap::TrackIo(t, [i, o, r, m]) => {
                 if let Some(x) = crate::edit::mixer::track_mut(s, t) {
                     (x.audio_in, x.audio_out, x.rec_source, x.monitor) = (i, o, r as u8, m as u8);

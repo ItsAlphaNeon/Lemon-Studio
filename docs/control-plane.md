@@ -109,6 +109,9 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `delete_clip` | `clip` | |
 | `set_clip` | `clip`; `position`, `track`, `length`, `muted` (optional) | |
 | `set_playlist_track` | `track`; `name`, `color`, `enabled` (optional) | |
+| `set_clip_lfo` | `channel`; `on`, `add`, `amount` (0..128), `speed` (0..65536, 45819 = a cycle a beat), `tension`, `skew`, `pulse_width` (-128..128) (optional) | The LFO of an automation clip's channel, as stored |
+| `set_midi_out` | `channel`; `midi_channel` (0..15), `port`, `patch` (0..128, 0 = none), `bank`, `bank2` (-1..127, -1 = none), `send_levels`, `map_color` (optional) | A MIDI Out channel's settings |
+| `set_member` | `container`, `member`; `wet`, `dry` (0..1) (optional) | A container's member levels; `container` is the id of the mixer slot or channel holding it |
 | `set_param` | `owner`, `param`, `value` | A plugin parameter (`params` lists them) to `value` 0..1 |
 
 A note is `{"channel", "position", "length", "key", "velocity", "pan"}`: `key` is a MIDI number (60 = C5, the
