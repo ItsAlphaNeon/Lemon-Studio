@@ -28,6 +28,14 @@ const SLOT: &str = "Effect slot";
 
 use crate::control::command::{color_text, Command};
 
+/// The mixer tracks have their ids, for commands (a track just added gets its own on the next tick). Only then: a
+/// settle gives ids to everything new, and something about to go would take one.
+fn track_ids(s: &mut State) {
+    if s.session.project.mixer.iter().any(|m| m.id == os_model::Id::NONE) {
+        crate::control_ui::settle_ids(s);
+    }
+}
+
 /// Track `t`'s id, for a command.
 fn id_of(s: &State, t: u16) -> Option<u32> {
     track(&s.session, t).map(|m| m.id.0)
@@ -466,7 +474,7 @@ pub fn select(s: &mut State, n: u16, ctrl: bool) {
 
 /// Left click (or press) on a mixer control.
 pub fn hit(app: &mut App, h: MHit) -> Option<String> {
-    crate::control_ui::settle_ids(&mut app.state);
+    track_ids(&mut app.state);
     let (ctrl, shift) = (app.ctrl, app.shift);
     let at = app.mouse;
     let s = &mut app.state;
@@ -643,7 +651,7 @@ pub fn latency_text(ms: f32) -> String {
 /// Sets track `t`'s input (`input`) or output latency setting, in ms: one undo step, "Track latency"; playback takes it
 /// at once (delay compensation works it out again).
 pub fn set_latency(s: &mut State, t: u16, input: bool, ms: f32) {
-    crate::control_ui::settle_ids(s);
+    track_ids(s);
     if track(&s.session, t).is_none_or(|m| (if input { m.latency_in } else { m.latency_out }) == ms) {
         return;
     }
@@ -692,7 +700,7 @@ pub fn eq_graph_drag(s: &mut State, t: u16, band: u8, g: os_ui::Rect, (x, y): (f
 
 /// Right click on a mixer control. Returns false when it is not handled here (knob menus).
 pub fn right(app: &mut App, h: MHit) -> bool {
-    crate::control_ui::settle_ids(&mut app.state);
+    track_ids(&mut app.state);
     let at = app.mouse;
     let s = &mut app.state;
     match h {
@@ -756,7 +764,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
 
 /// Middle click: rename a filled slot (§7).
 pub fn middle(app: &mut App, h: MHit) -> bool {
-    crate::control_ui::settle_ids(&mut app.state);
+    track_ids(&mut app.state);
     if let MHit::SlotName(i) = h {
         let t = app.state.selected_mixer;
         if slot_name(&app.state.session, t, i).is_some() {
@@ -797,7 +805,7 @@ fn start_rename(s: &mut State, n: u16, at: (f32, f32)) {
 /// Create group..., Enter in its name box: names track `n` (an empty box keeps its name) and turns Separator on
 /// for the first target track and for the track after the last one, as one undo step (spec: ui/mixer.md §6.1).
 pub fn create_group(s: &mut State, n: u16, text: &str) {
-    crate::control_ui::settle_ids(s);
+    track_ids(s);
     let tg: Vec<u16> = targets(s, n).into_iter().filter(|&t| t > 0).collect();
     let (Some(&a), Some(&b)) = (tg.iter().min(), tg.iter().max()) else { return };
     let last = inserts(&s.session);
@@ -985,7 +993,7 @@ fn remove_tracks(s: &mut State, gone: &[u16]) -> Option<String> {
 /// Routes the selected tracks to `dst` (§5): a normal route at unity, a sidechain at level 0, `only` drops their
 /// other routes.
 pub fn route(s: &mut State, dst: u16, only: bool, side: bool) -> Option<String> {
-    crate::control_ui::settle_ids(s);
+    track_ids(s);
     let mut msg = None;
     let mut c = Vec::new();
     for src in selected(s) {
@@ -1338,7 +1346,7 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 // Commands
 
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
-    crate::control_ui::settle_ids(&mut app.state);
+    track_ids(&mut app.state);
     if let MCmd::SlotScale(slot, pct) = c {
         let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
         app.state.editor_host.set_editor_scale(&mut app.state.session.plugins, key, pct.map(|p| f32::from(p) / 100.0));
