@@ -413,6 +413,41 @@ pub enum Command {
         wet: Option<f64>,
         #[serde(default)]
         dry: Option<f64>,
+        /// A name typed for it (empty, or its plugin's name: none).
+        #[serde(default)]
+        name: Option<String>,
+        /// `#rrggbb`, empty for none.
+        #[serde(default)]
+        color: Option<String>,
+        /// An icon's name as the Change icon... list names it, empty for none.
+        #[serde(default)]
+        icon: Option<String>,
+        #[serde(default)]
+        auto_bypass: Option<bool>,
+        #[serde(default)]
+        threaded: Option<bool>,
+    },
+    /// Member `member` of the container to place `to` (0 = first) of its list.
+    MoveMember { container: u32, member: u32, to: usize },
+    /// Member `member` goes from the container.
+    RemoveMember { container: u32, member: u32 },
+    /// Plugin `plugin` (its identity, else its name; an instrument with `instrument`, in a channel's container only)
+    /// at the end of the container, from its defaults: an effect wet only, an instrument at the container's instrument
+    /// levels. The result names its member id.
+    AddMember {
+        container: u32,
+        plugin: String,
+        #[serde(default)]
+        instrument: bool,
+    },
+    /// Member `member` plays plugin `plugin` (as `add_member` names it) from its defaults, keeping its place, id and
+    /// levels; its name, colour, icon and switches go back to a new plugin's.
+    ReplaceMember {
+        container: u32,
+        member: u32,
+        plugin: String,
+        #[serde(default)]
+        instrument: bool,
     },
 
     // ----- Plugins
@@ -468,6 +503,21 @@ pub struct NoteIn {
     /// without one, or with another, gets a new id. `add_notes` takes none: its notes are new.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u32>,
+}
+
+/// The container named by `container`'s place, its members, and member `member`'s index in them.
+fn member_at(s: &crate::session::Session, container: u32, member: u32) -> Result<(u16, u8, Vec<crate::container::Member>, usize), Error> {
+    let (t, k) = crate::edit::container::id_place(s, container).ok_or_else(|| format!("no container {container}"))?;
+    let list = crate::edit::container::members(s, t, k).ok_or_else(|| format!("no container {container}"))?;
+    let i = list.iter().position(|m| m.id == member).ok_or_else(|| format!("the container has no member {member}"))?;
+    Ok((t, k, list, i))
+}
+
+/// The identity and name of the plugin `plugin` names (its identity, else its name): an effect, or an instrument.
+fn plugin_named(s: &crate::session::Session, plugin: &str, instrument: bool) -> Result<(String, String), Error> {
+    let list = if instrument { &s.plugins.available } else { &s.plugins.effects };
+    let a = list.iter().find(|a| a.desc.uid() == plugin).or_else(|| list.iter().find(|a| a.desc.name == plugin)).ok_or_else(|| format!("no {} {plugin}", if instrument { "instrument" } else { "effect" }))?;
+    Ok((a.desc.uid(), a.desc.name.clone()))
 }
 
 /// A channel's filter group (`Command::SetGroups`).
@@ -924,6 +974,11 @@ impl Command {
             Command::SetClipLfo { .. } => "Automation clip LFO",
             Command::SetMidiOut { .. } => "MIDI Out setting",
             Command::SetMember { .. } => crate::container::LEVEL,
+            Command::MoveMember { .. } => crate::container::MOVE,
+            Command::RemoveMember { .. } => crate::container::REMOVE,
+            Command::AddMember { instrument: false, .. } => crate::container::ADD,
+            Command::AddMember { instrument: true, .. } => crate::container::ADD_INSTRUMENT,
+            Command::ReplaceMember { .. } => crate::container::REPLACE,
             Command::SetParam { .. } => PLUGIN_PARAMETER,
             Command::Put(_) => "Undo",
         }
@@ -1020,7 +1075,11 @@ impl Command {
             Command::LoadTrackState { track, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone())),
             Command::SetClipLfo { channel, .. } => Taken::Lfo(*channel, Box::new(clip_lfo(p, *channel)?.clone())),
             Command::SetMidiOut { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
-            Command::SetMember { container, .. } => match crate::edit::container::id_place(s, *container).ok_or_else(|| format!("no container {container}"))? {
+            Command::SetMember { container, .. }
+            | Command::MoveMember { container, .. }
+            | Command::RemoveMember { container, .. }
+            | Command::AddMember { container, .. }
+            | Command::ReplaceMember { container, .. } => match crate::edit::container::id_place(s, *container).ok_or_else(|| format!("no container {container}"))? {
                 (row, crate::container::CHANNEL) => Taken::Channel(Box::new(p.channels[usize::from(row)].clone())),
                 (t, _) => Taken::Track(Box::new(p.mixer.iter().find(|m| m.index == t).ok_or("the container's track is gone")?.clone())),
             },
@@ -1996,10 +2055,16 @@ impl Command {
                 crate::lemon_midi_out::set_row_settings(s.project.get_mut(), row, &st);
                 none
             }
-            Command::SetMember { container, member, wet, dry } => {
+            Command::SetMember { container, member, wet, dry, name, color, icon, auto_bypass, threaded } => {
                 let (t, k) = crate::edit::container::id_place(s, container).ok_or_else(|| format!("no container {container}"))?;
                 let wet = wet.map(|v| unit("wet", v, 0.0, 1.0)).transpose()?;
                 let dry = dry.map(|v| unit("dry", v, 0.0, 1.0)).transpose()?;
+                let color = color.map(|c| parse_color(&c)).transpose()?;
+                let icon = match icon {
+                    Some(n) if n.is_empty() => Some(None),
+                    Some(n) => Some(Some(crate::icon::ICONS.iter().find(|(x, _)| *x == n).map(|(_, i)| *i).ok_or_else(|| format!("no icon {n}"))?)),
+                    None => None,
+                };
                 if crate::edit::container::member(s, t, k, member).is_none() {
                     return Err(format!("the container has no member {member}"));
                 }
@@ -2008,6 +2073,69 @@ impl Command {
                         crate::edit::container::put_level_in(s, t, k, member, is_wet, v as f32);
                     }
                 }
+                if name.is_some() || color.is_some() || icon.is_some() || auto_bypass.is_some() || threaded.is_some() {
+                    let mut list = crate::edit::container::members(s, t, k).unwrap_or_default();
+                    if let Some(m) = list.iter_mut().find(|m| m.id == member) {
+                        if let Some(n) = name {
+                            let n = n.trim();
+                            m.label = (!n.is_empty() && n != m.name).then(|| n.to_string());
+                        }
+                        if let Some(c) = color {
+                            m.color = c;
+                        }
+                        if let Some(i) = icon {
+                            m.icon = i;
+                        }
+                        if let Some(v) = auto_bypass {
+                            m.cpu.smart_disable = v;
+                        }
+                        if let Some(v) = threaded {
+                            m.cpu.threaded = v;
+                        }
+                    }
+                    crate::edit::container::set_members(s, t, k, &list);
+                }
+                none
+            }
+            Command::MoveMember { container, member, to } => {
+                let (t, k, mut list, i) = member_at(s, container, member)?;
+                if to >= list.len() {
+                    return Err(format!("place {to} is past the last ({})", list.len() - 1));
+                }
+                let m = list.remove(i);
+                list.insert(to, m);
+                crate::edit::container::set_members(s, t, k, &list);
+                none
+            }
+            Command::RemoveMember { container, member } => {
+                let (t, k, mut list, i) = member_at(s, container, member)?;
+                list.remove(i);
+                crate::edit::container::set_members(s, t, k, &list);
+                none
+            }
+            Command::AddMember { container, plugin, instrument } => {
+                let (t, k) = crate::edit::container::id_place(s, container).ok_or_else(|| format!("no container {container}"))?;
+                if instrument && k != crate::container::CHANNEL {
+                    return Err("an instrument goes in a channel's container".into());
+                }
+                let (uid, name) = plugin_named(s, &plugin, instrument)?;
+                let mut list = crate::edit::container::members(s, t, k).unwrap_or_default();
+                // The smallest free id: a removed member's goes to the next one added (its clips and links would follow it).
+                let id = crate::container::free_id(&list).ok_or_else(|| format!("A container holds at most {} effects", os_model::target::MEMBER_IDS))?;
+                let (wet, dry) = if instrument { crate::container::INSTRUMENT_LEVELS } else { (1.0, 0.0) };
+                list.push(crate::container::Member { id, instrument, uid, name, wet, dry, state: Vec::new(), ..Default::default() });
+                crate::edit::container::set_members(s, t, k, &list);
+                Ok(serde_json::json!({ "member": id }))
+            }
+            Command::ReplaceMember { container, member, plugin, instrument } => {
+                let (t, k, mut list, i) = member_at(s, container, member)?;
+                let (uid, name) = plugin_named(s, &plugin, instrument)?;
+                let m = &mut list[i];
+                (m.instrument, m.uid, m.name, m.state) = (instrument, uid, name, Vec::new());
+                // The new plugin's own: no name, colour or icon, the switches a new plugin starts with (as a slot's on
+                // Replace).
+                (m.cpu, m.label, m.color, m.icon) = (os_model::PluginCpu::default(), None, None, None);
+                crate::edit::container::set_members(s, t, k, &list);
                 none
             }
             Command::SetParam { owner, param, value, .. } => {

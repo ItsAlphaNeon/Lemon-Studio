@@ -1485,18 +1485,15 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::AssignAudio(_) => Some(crate::track_links::ASSIGN_AUDIO),
         MCmd::UnassignAudio(_) => Some(crate::track_links::UNASSIGN_AUDIO),
         MCmd::AddContainer(_) => Some("Add effect"),
-        MCmd::Member(_, _, crate::container::Op::Up | crate::container::Op::Down) => Some(crate::container::MOVE),
-        MCmd::Member(_, _, crate::container::Op::Remove) => Some(crate::container::REMOVE),
-        MCmd::MemberAdd(..) => Some(crate::container::ADD),
-        MCmd::MemberAddInst(..) => Some(crate::container::ADD_INSTRUMENT),
-        MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..) => Some(crate::container::REPLACE),
         _ => None,
     };
+    // The member edits apply their commands (`container_ui`), the containers' members as their windows left them first:
+    // what the step keeps and an undo brings back.
+    if matches!(c, MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberAddInst(..) | MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..)) {
+        crate::container::store_members(app.state.session.project.get_mut(), &app.state.session.plugins);
+        return run_now(app, c);
+    }
     if let Some(name) = step {
-        // The containers' members as their windows left them: what the step keeps and an undo brings back.
-        if matches!(c, MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberAddInst(..) | MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..)) {
-            crate::container::store_members(app.state.session.project.get_mut(), &app.state.session.plugins);
-        }
         return crate::control_ui::edit_app(app, name, Region::Project, |app| run_now(app, c));
     }
     // A slot's sidechain input is the track's own (its slot's saved state).

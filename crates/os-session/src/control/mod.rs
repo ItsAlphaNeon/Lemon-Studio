@@ -294,6 +294,10 @@ fn op(c: &Command) -> &'static str {
         Command::SetClipLfo { .. } => "set_clip_lfo",
         Command::SetMidiOut { .. } => "set_midi_out",
         Command::SetMember { .. } => "set_member",
+        Command::MoveMember { .. } => "move_member",
+        Command::RemoveMember { .. } => "remove_member",
+        Command::AddMember { .. } => "add_member",
+        Command::ReplaceMember { .. } => "replace_member",
         Command::SetParam { .. } => "set_param",
         Command::Put(_) => "put",
     }

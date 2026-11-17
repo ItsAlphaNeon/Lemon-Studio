@@ -129,7 +129,11 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_playlist_track` | `track`; `name`, `color`, `enabled` (optional) | |
 | `set_clip_lfo` | `channel`; `on`, `add`, `amount` (0..128), `speed` (0..65536, 45819 = a cycle a beat), `tension`, `skew`, `pulse_width` (-128..128) (optional) | The LFO of an automation clip's channel, as stored |
 | `set_midi_out` | `channel`; `midi_channel` (0..15), `port`, `patch` (0..128, 0 = none), `bank`, `bank2` (-1..127, -1 = none), `send_levels`, `map_color` (optional) | A MIDI Out channel's settings |
-| `set_member` | `container`, `member`; `wet`, `dry` (0..1) (optional) | A container's member levels; `container` is the id of the mixer slot or channel holding it |
+| `set_member` | `container`, `member`; `wet`, `dry` (0..1), `name`, `color`, `icon` (a name from Change icon...), `auto_bypass`, `threaded` (optional) | A container's member levels; `container` is the id of the mixer slot or channel holding it |
+| `move_member` | `container`, `member`, `to` | To place `to` (0 = first) of the container's list |
+| `remove_member` | `container`, `member` | |
+| `add_member` | `container`, `plugin`; `instrument` (optional) | At the end, from the plugin's defaults (`plugin`: its identity or name; an instrument in a channel's container only). Result: `member` |
+| `replace_member` | `container`, `member`, `plugin`; `instrument` (optional) | The member keeps its place, id and levels |
 | `set_param` | `owner`, `param`, `value` | A plugin parameter (`params` lists them) to `value` 0..1 |
 
 A note is `{"channel", "position", "length", "key", "velocity", "pan"}`: `key` is a MIDI number (60 = C5, the

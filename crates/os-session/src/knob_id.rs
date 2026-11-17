@@ -310,7 +310,7 @@ impl KnobId {
             KnobId::Member(t, k, member, wet) => {
                 let container = crate::edit::container::place_id(s, t, k)?.0;
                 let level = Some(f64::from(v));
-                Some(Command::SetMember { container, member, wet: level.filter(|_| wet), dry: level.filter(|_| !wet) })
+                Some(Command::SetMember { container, member, wet: level.filter(|_| wet), dry: level.filter(|_| !wet), name: None, color: None, icon: None, auto_bypass: None, threaded: None })
             }
             KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) => None,
         }
