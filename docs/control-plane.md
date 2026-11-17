@@ -128,7 +128,9 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
   notches on one box or knob is one step. The pattern length box and the Misc tab make none, as in FL.
 - A channel muted, soloed or switched on or off is one step of its own ("Channel mute / solo") that follows "Undo knob
   tweaks", and a mixer track's mute and solo make none, as in FL. An undo or redo of any other step leaves every
-  channel and track muted or not as it is (a client's `enabled` too).
+  channel and track muted or not as it is (a client's `enabled` too); the undo of the step that set a client's
+  `enabled` takes it back.
+- The mixer tracks commands name are the ones `project` lists: not the mixer's hidden last track.
 - An undone channel or effect keeps its plugin instance's state: a redo hosts it again from that state.
 - A proposal is applied to see what it changes and taken back at once; with a window the app asks the user to Apply
   or Discard it. Accepted, it is one undo step named after its client.

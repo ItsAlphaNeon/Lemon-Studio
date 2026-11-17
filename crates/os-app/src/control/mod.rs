@@ -264,9 +264,11 @@ pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Val
     let mut undo = Vec::with_capacity(commands.len());
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
+        let on_off = c.on_off_undo(s);
         match c.apply(s) {
             Ok(done) => {
                 undo.push(done.undo);
+                undo.extend(on_off);
                 results.push(done.result);
                 s.control.settle(&mut s.project);
             }
