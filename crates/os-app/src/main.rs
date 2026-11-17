@@ -95,6 +95,7 @@ mod smith;
 mod chord_tool;
 mod slicer;
 mod drums;
+mod soundfont;
 mod monitor;
 mod motion;
 mod params;

@@ -3074,6 +3074,7 @@ dependencies = [
  "lemon-slicer",
  "lemon-small-fx",
  "lemon-soft-clipper",
+ "lemon-soundfont",
  "lemon-stereo-enhancer",
  "lemon-stereo-shaper",
  "lemon-transient-processor",

@@ -29,13 +29,14 @@ pub const PLUGINS_URL: &str = "https://getlemonstudio.app/wiki/plugins/";
 
 /// The wiki's page on each of Lemon Studio's own plugins that can sit in a mixer slot, as (plugin, page under
 /// `PLUGINS_URL`).
-const PLUGIN_PAGES: [(&str, &str); 28] = [
+const PLUGIN_PAGES: [(&str, &str); 29] = [
     ("Lemon Sampler", "instruments/lemon-sampler"),
     ("Lemon Trio", "instruments/lemon-trio"),
     ("Citrus", "instruments/citrus"),
     ("Smith", "instruments/smith"),
     ("Lemon Slicer", "instruments/lemon-slicer"),
     ("Lemon Drum Sampler", "instruments/lemon-drum-sampler"),
+    ("Lemon SoundFont Player", "instruments/lemon-soundfont-player"),
     ("Lemon Parametric EQ", "effects/lemon-parametric-eq"),
     ("Pulp Filter", "effects/pulp-filter"),
     ("Press", "effects/press"),

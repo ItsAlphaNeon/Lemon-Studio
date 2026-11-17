@@ -30,6 +30,7 @@ lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", features = ["linked"] }
 citrus = { path = "../../plugins/citrus", features = ["linked"] }
 smith = { path = "../../plugins/smith", features = ["linked"] }
 lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", features = ["linked"] }
+lemon-soundfont = { path = "../../plugins/lemon-soundfont", features = ["linked"] }
 lemon-limiter = { path = "../../plugins/lemon-limiter", features = ["linked"] }
 lemon-reverb = { path = "../../plugins/lemon-reverb", features = ["linked"] }
 lemon-delay = { path = "../../plugins/lemon-delay", features = ["linked"] }
