@@ -69,7 +69,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
     let pa: Vec<u32> = p.patterns.iter().map(|q| q.id.0).collect();
     let clips: Vec<u32> = p.arrangement().map(|x| x.clips.iter().map(|c| c.id.0).collect()).unwrap_or_default();
     let note = |r: &mut Rng, ch: &[u32]| json!({"channel": r.id(ch), "position": r.below(4) * 96, "length": 1 + r.below(96), "key": 36 + r.below(48), "velocity": r.below(128)});
-    match r.below(28) {
+    match r.below(29) {
         0 => json!({"op": "set_tempo", "bpm": 40.0 + r.unit() * 200.0}),
         1 => json!({"op": "set_swing", "swing": r.unit()}),
         2 => json!({"op": "set_main_volume", "volume": r.unit()}),
@@ -100,6 +100,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
         24 => json!({"op": "set_slot", "track": r.id(&tr), "slot": r.below(10), "enabled": r.chance(0.5), "mix": r.unit()}),
         25 => json!({"op": "set_clip_lfo", "channel": r.id(&ch), "on": r.chance(0.5), "amount": r.below(129), "speed": r.below(65537), "tension": r.below(257) as i64 - 128}),
         26 => json!({"op": "set_midi_out", "channel": r.id(&ch), "midi_channel": r.below(16), "patch": r.below(129), "bank": r.below(129) as i64 - 1, "send_levels": r.chance(0.5)}),
+        27 => json!({"op": "set_project", "beats": 1 + r.below(32), "steps": 1 + r.below(16), "signature": r.chance(0.5), "panning_law": if r.chance(0.5) { "circular" } else { "triangular" }, "play_truncated": r.chance(0.5)}),
         _ => json!({"op": "load_sample", "channel": r.id(&ch), "path": "/no/such/folder/snare.wav"}),
     }
 }

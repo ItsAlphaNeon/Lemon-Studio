@@ -12,7 +12,7 @@ use os_model::{Project, WorkTime};
 use os_ui::{Color, Font, Rect};
 use crate::keys::{Key, NamedKey};
 use crate::app::{Action, App, State, Ui};
-use crate::control::command::{Region, SONG_INFO};
+use crate::control::command::SONG_INFO;
 use crate::dialog::Field;
 use crate::views::settings::{self, InfoEdit, InfoField};
 #[allow(unused_imports)]
@@ -40,7 +40,7 @@ pub fn opened(s: &mut State) {
 
 /// A new project: started now, nothing spent (spec: ui/settings-choices.md "Info": "A new project starts now").
 pub fn created(s: &mut State) {
-    s.session.project.get_mut().work_time = Some(work_time_now());
+    s.session.start_work_time();
     s.credits.clock.restart(crate::anim::now());
     s.credits.song_box = false;
 }
@@ -168,12 +168,7 @@ impl App {
     pub fn set_genre(&mut self, genre: Option<&'static str>) -> Option<String> {
         let s = &mut self.state;
         accept_info(s);
-        crate::control_ui::edit(s, SONG_INFO, Region::Settings, |s| {
-            let value = &mut s.session.project.get_mut().info.genre;
-            if value.as_deref().unwrap_or("") != genre.unwrap_or("") {
-                *value = genre.map(str::to_string);
-            }
-        });
+        set_info(s, &[(InfoField::Genre, genre.unwrap_or(""))]);
         self.invalidate();
         Some(format!("Genre: {}", genre.unwrap_or("(none)")))
     }
@@ -200,20 +195,16 @@ impl App {
     /// (the session's time is not in it, `WorkClock`): the saved copy then forgets its time so the two differ.
     pub fn reset_work_time(&mut self) {
         let s = &mut self.state;
-        s.session.project.get_mut().work_time.get_or_insert_with(os_flp::project::work_time_now).spent = 0.0;
+        s.session.reset_work_time();
         s.credits.clock.restart(crate::anim::now());
-        if s.session.saved.0.work_time == s.session.project.work_time {
-            s.session.saved.0.work_time = None;
-        }
         s.message = Some("Working time reset".into());
         self.invalidate();
     }
 
     /// Info ▸ Show info on opening (event 10): switched for the project and saved with it.
     pub fn toggle_show_info(&mut self) {
-        let p = self.state.session.project.get_mut();
-        let on = !p.show_info.unwrap_or(false);
-        p.show_info = Some(on);
+        let on = self.state.session.project.show_info != Some(true);
+        self.state.session.set_show_info(on);
         self.state.message = Some(format!("Show info on opening: {}", if on { "on" } else { "off" }));
     }
 
@@ -257,12 +248,22 @@ impl App {
 pub fn accept_info(s: &mut State) {
     let Some(e) = s.settings.info_edit.take() else { return };
     let text = if e.field.multiline() { e.text.text } else { e.text.text.trim().to_string() };
-    crate::control_ui::edit(s, SONG_INFO, Region::Settings, |s| {
-        let value = e.field.get_mut(&mut s.session.project.get_mut().info);
-        if value.as_deref().unwrap_or("") != text {
-            *value = (!text.is_empty()).then_some(text);
-        }
-    });
+    set_info(s, &[(e.field, &text)]);
+}
+
+/// Song info `fields` written by the interface, each with its box's text: one step, "Song info", setting the fields
+/// whose text changed (an emptied box clears its field; a file's empty field stays while its box stays empty).
+pub fn set_info(s: &mut State, fields: &[(InfoField, &str)]) {
+    let info = &s.session.project.info;
+    let changed = |f: InfoField| fields.iter().find(|(g, t)| *g == f && f.get(info).as_deref().unwrap_or("") != *t).map(|(_, t)| t.to_string());
+    let c = crate::control::command::Command::SetInfo {
+        title: changed(InfoField::Title),
+        author: changed(InfoField::Author),
+        genre: changed(InfoField::Genre),
+        comments: changed(InfoField::Comments),
+        url: changed(InfoField::Url),
+    };
+    let _ = crate::control_ui::command(s, SONG_INFO, None, vec![c]);
 }
 
 /// The Song info box, centred on the main window of size `screen`.

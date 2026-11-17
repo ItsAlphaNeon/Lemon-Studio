@@ -72,6 +72,7 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_main_pitch", "cents": -300}),
         json!({"op": "set_time_signature", "numerator": 3, "denominator": 4}),
         json!({"op": "set_info", "title": "Song", "author": "Me"}),
+        json!({"op": "set_project", "beats": 7, "steps": 2, "signature": false, "panning_law": "triangular", "play_truncated": true}),
         json!({"op": "set_channel", "channel": kick, "name": "Big kick", "color": "#ff8000", "volume": 0.5, "pan": -0.25, "pitch": 100, "track": ins2}),
         json!({"op": "load_sample", "channel": clap, "path": "/no/such/folder/snare.wav"}),
         json!({"op": "set_track", "track": ins1, "name": "Drums", "color": "#102030", "volume": 0.6, "pan": 0.5, "stereo": -0.5, "polarity": true, "swap": true, "effects_enabled": false}),
@@ -103,6 +104,19 @@ fn every_command_undoes_and_redoes() {
     let slot = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().flat_map(|t| t["slots"].as_array().unwrap().clone()).next().unwrap();
     let track = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().find(|t| !t["slots"].as_array().unwrap().is_empty()).unwrap()["id"].as_u64().unwrap();
     round_trip(&mut a, json!({"op": "remove_effect", "track": track, "slot": slot["slot"]}));
+}
+
+#[test]
+fn set_project_checks_its_values() {
+    let mut a = app();
+    let mut bad = |v: Value| apply(&mut a.state, &test_client(), None, vec![cmd(v)]).unwrap_err();
+    assert!(bad(json!({"op": "set_project", "beats": 0})).contains("beats"));
+    assert!(bad(json!({"op": "set_project", "steps": 17})).contains("steps"));
+    assert!(bad(json!({"op": "set_project", "panning_law": "square"})).contains("panning_law"));
+    // A bar value the project already has is kept, even out of the range.
+    a.state.session.project.get_mut().bar = Some((40, 4));
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_project", "beats": 40, "steps": 2}))]).unwrap();
+    assert_eq!(a.state.session.project.bar(), (40, 2));
 }
 
 #[test]

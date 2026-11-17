@@ -39,6 +39,22 @@ pub enum Command {
         #[serde(default)]
         url: Option<String>,
     },
+    /// Settings > Project's own settings: each one given is set. The bar as `beats` per bar (1..=32) and `steps` per
+    /// beat (1..=16), a value the project already has kept as it is; `signature`: the bar shown as a time signature
+    /// (else as a time division); `panning_law`: "circular" or "triangular"; `play_truncated`: notes a pattern clip
+    /// cuts off still play.
+    SetProject {
+        #[serde(default)]
+        beats: Option<u16>,
+        #[serde(default)]
+        steps: Option<u16>,
+        #[serde(default)]
+        signature: Option<bool>,
+        #[serde(default)]
+        panning_law: Option<String>,
+        #[serde(default)]
+        play_truncated: Option<bool>,
+    },
 
     // ----- Channels
     /// A new channel at the bottom of the rack: a Lemon Sampler channel (with `sample` loaded, when given), or one
@@ -662,6 +678,7 @@ impl Command {
             Command::SetMainPitch { .. } => "Main pitch",
             Command::SetTimeSignature { .. } => TIME_SIGNATURE,
             Command::SetInfo { .. } => SONG_INFO,
+            Command::SetProject { .. } => crate::history::PROJECT_SETTINGS,
             Command::AddChannel { .. } => "Add channel",
             Command::DeleteChannel { .. } => "Delete channel",
             Command::MoveChannel { .. } => "Move channel",
@@ -706,7 +723,8 @@ impl Command {
             | Command::SetMainVolume { .. }
             | Command::SetMainPitch { .. }
             | Command::SetTimeSignature { .. }
-            | Command::SetInfo { .. } => Taken::Settings(Box::new(Settings::of(s))),
+            | Command::SetInfo { .. }
+            | Command::SetProject { .. } => Taken::Settings(Box::new(Settings::of(s))),
             Command::SetChannel { channel, .. } | Command::LoadSample { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
             Command::SetTrack { track, .. } | Command::SetEq { track, .. } | Command::SetSlot { track, .. } | Command::AddEffect { track, .. } | Command::RemoveEffect { track, .. } => {
                 Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone()))
@@ -906,6 +924,34 @@ impl Command {
                     if let Some(v) = v {
                         *field = text(&v);
                     }
+                }
+                none
+            }
+            Command::SetProject { beats, steps, signature, panning_law, play_truncated } => {
+                let (b0, s0) = s.project.bar();
+                let check = |name: &str, v: Option<u16>, now: u16, max: u16| match v {
+                    Some(v) if v != now && !(1..=max).contains(&v) => Err(format!("{name} must be 1..={max}, not {v}")),
+                    _ => Ok(v.unwrap_or(now)),
+                };
+                let bar = (check("beats", beats, b0, 32)?, check("steps", steps, s0, 16)?);
+                let law = match panning_law.as_deref() {
+                    None => None,
+                    Some("circular") => Some(0),
+                    Some("triangular") => Some(2),
+                    Some(l) => return Err(format!("panning_law must be circular or triangular, not {l}")),
+                };
+                let p = s.project.get_mut();
+                if bar != (b0, s0) {
+                    p.bar = Some(bar);
+                }
+                if let Some(on) = signature.filter(|&on| on != p.bar_is_signature()) {
+                    p.bar_as_signature = Some(on);
+                }
+                if let Some(l) = law.filter(|&l| l != p.panning_law.unwrap_or(0)) {
+                    p.panning_law = Some(l);
+                }
+                if let Some(on) = play_truncated {
+                    p.play_truncated = on;
                 }
                 none
             }

@@ -46,6 +46,32 @@ pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: im
     r
 }
 
+/// An edit in the interface made of `commands`: applied as one undo step named `name` holding their undo, none when
+/// they changed nothing. With `run`, the edit joins the step of that run just before it (wheel notches on a value box,
+/// the tempo tapper's taps): the first change records the step, the others go into it. An error when the list can't
+/// be applied (nothing changed then).
+pub fn command(s: &mut State, name: &'static str, run: Option<crate::history::Run>, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    if run.is_some_and(|r| s.session.history.joins(r)) {
+        let (results, _) = crate::follow::around(s, |s| run_in(&mut s.session, commands))?;
+        s.session.dirty = true;
+        return Ok(results);
+    }
+    s.session.link_moves.clear();
+    crate::history::settle(&mut s.session);
+    let taken = |s: &State, commands: &[Command]| commands.iter().map(|c| c.undo_now(&s.session).ok()).collect::<Vec<_>>();
+    let before = taken(s, &commands);
+    let (results, undo) = crate::follow::around(s, |s| run_in(&mut s.session, commands.clone()))?;
+    if taken(s, &commands) != before {
+        s.session.dirty = true;
+        crate::history::record(&mut s.session, name, crate::history::Snap::Commands(undo));
+        crate::history::done_with(&mut s.session);
+        if let Some(r) = run {
+            s.session.history.set_run(r);
+        }
+    }
+    Ok(results)
+}
+
 /// `edit` for a knob-like control (a mixer fader's typed value): no step while Undo knob tweaks is off.
 pub fn knob_edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
     if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
@@ -110,27 +136,6 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     let put = Command::Put(Box::new(command::Taken::Param(owner, param, v)));
     crate::history::record(&mut s.session, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));
     crate::history::done_with(&mut s.session);
-}
-
-/// `edit_app` for a run of changes that make one step (the tempo tapper's taps, wheel notches on a value box): a change
-/// that joins the newest step of run `run` (`History::joins`) records none, as that step holds the region from before
-/// the run.
-pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, run: crate::history::Run, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
-    if app.state.session.history.joins(run) {
-        return f(app);
-    }
-    app.state.session.link_moves.clear();
-    crate::history::settle(&mut app.state.session);
-    let before = command::Taken::of(&app.state.session, region);
-    let r = f(app);
-    let s = &mut app.state;
-    if let Some(before) = before {
-        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
-            record_edit(&mut s.session, name, before);
-            s.session.history.set_run(run);
-        }
-    }
-    r
 }
 
 /// Applies `commands` to see what they change and takes them back at once: the project is as it was. Returns the

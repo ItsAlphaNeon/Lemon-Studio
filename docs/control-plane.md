@@ -87,6 +87,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_main_pitch` | `cents` | -1200 to 1200 |
 | `set_time_signature` | `numerator`, `denominator` | denominator 2, 4, 8 or 16 |
 | `set_info` | `title`, `author`, `genre`, `comments`, `url` (all optional) | the Song info |
+| `set_project` | `beats` (1..=32), `steps` (1..=16), `signature`, `panning_law` (`circular` or `triangular`), `play_truncated` (all optional) | Settings > Project: the bar, shown as a time signature or a division, the panning law, and whether notes a pattern clip cuts off play. A bar value the project already has is kept even out of range |
 | `add_channel` | `name`, `plugin`, `sample`, `track` (all optional) | A Lemon Sampler channel (with `sample` loaded), or one played by generator `plugin`, on mixer track `track`. Result: `channel` |
 | `delete_channel` | `channel` | Its notes, clips and automation go too |
 | `move_channel` | `channel`, `row` | 0 = top |

@@ -401,16 +401,10 @@ impl App {
             self.tell(Kind::Error, f.title(), spans(&["", &dir.display().to_string(), &format!(" could not be made: {e}")]));
             return self.dialog_done(Then::SaveProject(f.next), Reply::File(None));
         }
-        // One undo step when the text changed (`control::edit`).
-        crate::control_ui::edit(&mut self.state, crate::control::command::SONG_INFO, crate::control::command::Region::Settings, |s| {
-            let info = &mut s.session.project.get_mut().info;
-            for (value, field) in [&mut info.title, &mut info.author, &mut info.url, &mut info.genre].into_iter().zip(&f.info) {
-                let text = field.text.trim();
-                if value.as_deref().unwrap_or("") != text {
-                    *value = (!text.is_empty()).then(|| text.to_string());
-                }
-            }
-        });
+        // One undo step when the text changed.
+        use crate::views::settings::InfoField;
+        let fields: Vec<_> = [InfoField::Title, InfoField::Author, InfoField::Url, InfoField::Genre].into_iter().zip(&f.info).map(|(k, field)| (k, field.text.trim())).collect();
+        crate::project_info_ui::set_info(&mut self.state, &fields);
         if f.new {
             self.set_timebase(f.ppq);
             self.set_bar(f.num, 16 / f.den.max(1));

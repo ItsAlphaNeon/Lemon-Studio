@@ -3676,7 +3676,7 @@ impl App {
             TapAct::Apply => {
                 if crate::tapper::toggle_apply() {
                     if let Some(bpm) = self.state.tapper.count.tempo() {
-                        crate::control_ui::edit_app(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, |app| app.set_tempo(bpm));
+                        self.tempo_edit(bpm, None);
                     }
                 }
             }
@@ -3708,7 +3708,7 @@ impl App {
             self.state.session.history.end_run();
         }
         if let Some(bpm) = bpm.filter(|_| crate::tapper::get().apply) {
-            crate::control_ui::edit_run(self, crate::control::command::TEMPO, crate::control::command::Region::Settings, crate::history::Run::Tap, |app| app.set_tempo(bpm));
+            self.tempo_edit(bpm, Some(crate::history::Run::Tap));
         }
         self.damage_win(Win::Tapper);
     }
@@ -3727,14 +3727,22 @@ impl App {
 
     /// Sets the project tempo, kept in the tempo box's range (10-522 BPM): playback follows from the next tick, the
     /// toolbar shows it. Returns the tempo set.
+    /// The step is the caller's (a drag's, recorded at its press).
     pub fn set_tempo(&mut self, bpm: f64) -> f64 {
         let t = bpm.clamp(10.0, 522.0);
         if self.state.tempo() != t {
-            self.state.set_tempo(t);
+            let _ = crate::control_ui::run(&mut self.state, vec![crate::control::command::Command::SetTempo { bpm: t }]);
             self.state.session.dirty = true;
             self.damage_band(TEMPO_RECT);
         }
         t
+    }
+
+    /// `set_tempo` as one undo step, "Tempo", or as part of the step of run `run` (the tapper's taps).
+    fn tempo_edit(&mut self, bpm: f64, run: Option<crate::history::Run>) {
+        let c = crate::control::command::Command::SetTempo { bpm: bpm.clamp(10.0, 522.0) };
+        let _ = crate::control_ui::command(&mut self.state, crate::control::command::TEMPO, run, vec![c]);
+        self.damage_band(TEMPO_RECT);
     }
 
     /// Repaint what scroll target `t` scrolls.
@@ -5231,35 +5239,38 @@ impl App {
     /// metronome's accents, what hosted plugins are told), as do the pattern lengths the editors draw; the project
     /// counts as changed.
     pub fn set_bar(&mut self, beats: u16, steps: u16) -> Option<String> {
-        crate::control_ui::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_bar_now(beats, steps))
+        let r = self.bar_edit((beats, steps), None, None);
+        Some(r.err().unwrap_or_else(|| bar_text(&self.state.session.project)))
     }
 
-    fn set_bar_now(&mut self, beats: u16, steps: u16) -> Option<String> {
-        let bar = (beats.max(1), steps.max(1));
-        if self.state.session.project.bar() != bar {
-            self.state.session.project.get_mut().bar = Some(bar);
-            self.state.session.dirty = true;
-        }
+    /// The bar set to `bar` and, when given, shown as a time `signature` or a division: one undo step, "Time
+    /// signature", or part of the step of run `run` (a value box's wheel notches).
+    fn bar_edit(&mut self, bar: (u16, u16), signature: Option<bool>, run: Option<crate::history::Run>) -> Result<(), String> {
+        let c = crate::control::command::Command::SetProject {
+            beats: Some(bar.0.max(1)),
+            steps: Some(bar.1.max(1)),
+            signature,
+            panning_law: None,
+            play_truncated: None,
+        };
+        let r = crate::control_ui::command(&mut self.state, crate::control::command::TIME_SIGNATURE, run, vec![c]);
         self.invalidate();
-        Some(bar_text(&self.state.session.project))
+        r.map(|_| ())
     }
 
     /// Settings > Project ▸ Set as time signature / time division (event 35; spec: ui/settings-choices.md "Set as time
     /// division"). Each mode keeps its own last bar while the program runs (4/4 at first): switching keeps the bar of
     /// the mode left and writes the other mode's into the project. A bar is never converted between the modes.
     pub fn set_time_mode(&mut self, signature: bool) -> Option<String> {
-        crate::control_ui::edit_app(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, |app| app.set_time_mode_now(signature))
-    }
-
-    fn set_time_mode_now(&mut self, signature: bool) -> Option<String> {
         let s = &mut self.state;
         let now = s.session.project.bar_is_signature();
         if now != signature {
             let memory = &mut s.settings.bar_memory;
             memory[usize::from(now)] = Some(s.session.project.bar());
-            s.session.project.get_mut().bar = Some(memory[usize::from(signature)].unwrap_or(Project::BAR_DEFAULT));
-            s.session.project.get_mut().bar_as_signature = Some(signature);
-            s.session.dirty = true;
+            let bar = memory[usize::from(signature)].unwrap_or(Project::BAR_DEFAULT);
+            if let Err(e) = self.bar_edit(bar, Some(signature), None) {
+                return Some(e);
+            }
         }
         self.invalidate();
         let mode = if signature { views::settings::SET_AS_SIGNATURE } else { views::settings::SET_AS_DIVISION };
@@ -5293,7 +5304,8 @@ impl App {
         let v = (i32::from(now) + delta).clamp(i32::from(lo.min(now)), i32::from(hi.max(now))) as u16;
         // Wheel notches in a row make one undo step.
         let bar = if beat_box { (v, steps) } else { (beats, v) };
-        crate::control_ui::edit_run(self, crate::control::command::TIME_SIGNATURE, crate::control::command::Region::Settings, crate::history::Run::Bar, |app| app.set_bar_now(bar.0, bar.1))
+        let r = self.bar_edit(bar, None, Some(crate::history::Run::Bar));
+        Some(r.err().unwrap_or_else(|| bar_text(&self.state.session.project)))
     }
 
     /// Settings > Project ▸ Timebase (PPQ): the project's ticks per quarter (the file header's PPQ). Every tick count
@@ -5318,12 +5330,14 @@ impl App {
     /// "Panning law: Triangular"): the law of the channel and mixer track pans. Playback follows from its next tick, as
     /// for any pan edit; the project counts as changed. A file without the event is Circular.
     pub fn set_panning_law(&mut self, law: u8) -> Option<String> {
-        crate::control_ui::edit(&mut self.state, "Panning law", crate::control::command::Region::Settings, |s| {
-            if s.session.project.panning_law.unwrap_or(0) != law {
-                s.session.project.get_mut().panning_law = Some(law);
-                s.session.dirty = true;
-            }
-        });
+        let c = crate::control::command::Command::SetProject {
+            beats: None,
+            steps: None,
+            signature: None,
+            panning_law: Some(if law == 2 { "triangular" } else { "circular" }.into()),
+            play_truncated: None,
+        };
+        let _ = crate::control_ui::command(&mut self.state, "Panning law", None, vec![c]);
         self.invalidate();
         Some(format!("Panning law: {}", views::settings::panning_text(Some(law))))
     }
@@ -5332,8 +5346,8 @@ impl App {
     /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
     fn toggle_play_truncated(&mut self) {
         let on = !self.state.session.project.play_truncated;
-        crate::control_ui::edit(&mut self.state, "Play truncated notes in clips", crate::control::command::Region::Settings, |s| s.session.project.get_mut().play_truncated = on);
-        self.state.session.dirty = true;
+        let c = crate::control::command::Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: Some(on) };
+        let _ = crate::control_ui::command(&mut self.state, "Play truncated notes in clips", None, vec![c]);
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
     }
 
