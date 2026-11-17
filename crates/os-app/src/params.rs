@@ -109,6 +109,15 @@ impl ParamUi {
         self.visible(key).next().is_some()
     }
 
+    /// The hosted instances moved (`m(old key) = new key`, `None`: gone): "Most recent" and "Second most recent"
+    /// follow their plugin's parameter; one whose plugin went is forgotten.
+    pub fn remap(&mut self, m: impl Fn(usize) -> Option<usize>) {
+        self.last.retain_mut(|t| match t {
+            Tweak::Plugin { key, .. } => m(*key).map(|k| *key = k).is_some(),
+            Tweak::Host(_) => true,
+        });
+    }
+
     fn note(&mut self, t: Tweak) {
         if self.last.first() == Some(&t) {
             return;
@@ -717,6 +726,21 @@ mod tests {
         p.note(Tweak::Host(Action::Tempo));
         p.note(Tweak::Plugin { key: 0, index: 0 });
         assert_eq!(p.last, vec![Tweak::Plugin { key: 0, index: 0 }, Tweak::Host(Action::Tempo)]);
+    }
+
+    /// "Most recent" follows its plugin's parameter when the plugin's rack row moves, and is forgotten when the row goes.
+    #[test]
+    fn the_most_recent_parameter_follows_its_row() {
+        let mut app = App::new(None);
+        app.state.params.last = vec![Tweak::Plugin { key: 2, index: 5 }, Tweak::Plugin { key: fx_key(3, 1), index: 2 }];
+        app.remap_rows(&|r| Some(match r {
+            1 => 2,
+            2 => 1,
+            r => r,
+        }));
+        assert_eq!(app.state.params.last, vec![Tweak::Plugin { key: 1, index: 5 }, Tweak::Plugin { key: fx_key(3, 1), index: 2 }]);
+        app.remap_rows(&|r| (r != 1).then_some(r));
+        assert_eq!(app.state.params.last, vec![Tweak::Plugin { key: fx_key(3, 1), index: 2 }], "its row went");
     }
 
     /// The built-in EQ in a mixer slot: "Show all parameters" lists its parameters in the browser, a parameter row makes
