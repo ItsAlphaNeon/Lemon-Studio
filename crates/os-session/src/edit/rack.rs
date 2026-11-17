@@ -278,26 +278,44 @@ pub fn snapshot(s: &mut crate::session::Session) {
 
 /// Fill each N steps (§18): the row's notes inside the pattern length become steps 1, 1+N, 1+2N, …
 pub fn fill_each(s: &mut crate::session::Session, r: usize, every: u32) {
+    let notes = filled(s, r, every);
+    set_row_notes(s, r, notes);
+}
+
+/// The row's notes `fill_each` leaves.
+pub fn filled(s: &crate::session::Session, r: usize, every: u32) -> Vec<Note> {
     let (len, ps) = (row_len(s, r), per_step(s));
     let mut notes: Vec<Note> = row_notes(s, r).into_iter().filter(|n| n.position >= len * ps).collect();
     notes.extend((0..len).step_by(every.max(1) as usize).map(|k| Note::step(0, k * ps)));
-    set_row_notes(s, r, notes);
+    notes
 }
 
 /// Write a step sequence (Advanced fill's Accept) over the row's notes inside the sequence length.
 pub fn write_sequence(s: &mut crate::session::Session, r: usize, steps: &[bool]) {
+    let notes = sequenced(s, r, steps);
+    set_row_notes(s, r, notes);
+}
+
+/// The row's notes `write_sequence` leaves.
+pub fn sequenced(s: &crate::session::Session, r: usize, steps: &[bool]) -> Vec<Note> {
     let ps = per_step(s);
     let len = steps.len() as u32;
     let mut notes: Vec<Note> = row_notes(s, r).into_iter().filter(|n| n.position >= len * ps).collect();
     notes.extend(steps.iter().enumerate().filter(|(_, on)| **on).map(|(k, _)| Note::step(0, k as u32 * ps)));
-    set_row_notes(s, r, notes);
+    notes
 }
 
 /// Rotate the row's notes by one step, wrapping inside the pattern length (§18).
 pub fn rotate(s: &mut crate::session::Session, r: usize, dir: i32) {
+    let notes = rotated(s, r, dir);
+    set_row_notes(s, r, notes);
+}
+
+/// The row's notes `rotate` leaves.
+pub fn rotated(s: &crate::session::Session, r: usize, dir: i32) -> Vec<Note> {
     let (len, ps) = (row_len(s, r), per_step(s));
     let span = i64::from(len * ps);
-    let notes = row_notes(s, r)
+    row_notes(s, r)
         .into_iter()
         .map(|mut n| {
             if i64::from(n.position) < span {
@@ -305,8 +323,32 @@ pub fn rotate(s: &mut crate::session::Session, r: usize, dir: i32) {
             }
             n
         })
-        .collect();
-    set_row_notes(s, r, notes);
+        .collect()
+}
+
+/// Step `k` of channel `ch` (its index) in pattern `n` on or off (`Command::SetStep`): on adds a step note, or brings
+/// back the notes a removal muted (Lemon Studio's design); off removes the notes inside the step, or mutes them with
+/// `mute` ("Mute removed steps").
+pub fn set_step_in(s: &mut crate::session::Session, n: u16, ch: u16, k: u32, on: bool, mute: bool) {
+    let ps = per_step(s);
+    let p = crate::edit::patterns::pat_mut(s, n);
+    let has = p.notes.iter().any(|x| x.channel == ch && x.position / ps == k && !x.muted());
+    let at = |x: &Note| x.channel == ch && x.position / ps == k;
+    if on && !has {
+        if p.notes.iter().any(at) {
+            p.notes.iter_mut().filter(|x| at(x)).for_each(|x| x.set_muted(false));
+        } else {
+            p.notes.push(Note::step(ch, k * ps));
+            p.notes.sort_by_key(|x| (x.position, x.channel));
+        }
+    } else if !on && has {
+        if mute {
+            p.notes.iter_mut().filter(|x| at(x)).for_each(|x| x.set_muted(true));
+        } else {
+            p.notes.retain(|x| !at(x));
+        }
+    }
+    s.dirty = true;
 }
 
 /// The steps the row shows: on/off for steps `0..len` (used by the Advanced fill dialog).

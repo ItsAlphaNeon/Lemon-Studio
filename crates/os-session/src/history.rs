@@ -217,6 +217,8 @@ pub enum Run {
     Member(u16, u8, u32, bool),
     /// A client's gesture (`control::begin_in`).
     Gesture(u64),
+    /// The steps a press in the step sequencer paints, with the drag that follows.
+    Steps,
 }
 
 /// A channel control a run of changes goes to (`Run::Channel`).
@@ -248,7 +250,7 @@ impl History {
     /// ends, so the next drag or run of notches is a step of its own, as in FL (spec: ui/undo-steps.md). The tempo
     /// tapper's taps, a plugin's own values, a controller's and a client's gesture run on.
     pub fn end_gesture_run(&mut self) {
-        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..))) {
+        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..) | Run::Steps)) {
             self.run = None;
         }
     }

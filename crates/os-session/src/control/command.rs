@@ -281,6 +281,17 @@ pub enum Command {
     },
     /// `notes` are added to the pattern.
     AddNotes { pattern: u32, notes: Vec<NoteIn> },
+    /// Step `step` (a sixteenth) of the channel's row in the pattern on or off, as a click in the step sequencer: on adds
+    /// a step note (or brings back its notes when they are muted), off removes the notes inside the step, or mutes
+    /// them with `mute` (the rack's "Mute removed steps").
+    SetStep {
+        pattern: u32,
+        channel: u32,
+        step: u32,
+        on: bool,
+        #[serde(default)]
+        mute: bool,
+    },
 
     // ----- The playlist (the arrangement shown)
     /// A clip of pattern `pattern` or of audio / automation channel `channel` on playlist track `track` (1-based) at
@@ -387,7 +398,9 @@ pub enum Command {
 }
 
 /// A note as commands give it. Keys are MIDI numbers (60 = C5); velocity 0..=128 (100 by default), pan 0..=128 (64
-/// = centre).
+/// = centre), fine pitch 0..=240 (120 = none), release, mod X and Y 0..=128, repeat 0..=14 (0 = off), colour group
+/// 0..=15. In `set_notes`, a note named by the id of a note the pattern holds keeps that note's values for what is not
+/// given.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NoteIn {
@@ -397,14 +410,53 @@ pub struct NoteIn {
     pub length: u32,
     #[serde(default = "middle_c")]
     pub key: u16,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velocity: Option<u8>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pan: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fine_pitch: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_x: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_y: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u8>,
     /// `set_notes`: the note's id as the notes query names it, kept when the pattern held a note with it; a note
     /// without one, or with another, gets a new id. `add_notes` takes none: its notes are new.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u32>,
+}
+
+impl NoteIn {
+    /// Note `n` of channel `channel` (an id) with every value it has: what `set_notes` puts back as it was.
+    pub fn of(n: &Note, channel: u32) -> NoteIn {
+        NoteIn {
+            channel,
+            position: n.position,
+            length: n.length,
+            key: n.key,
+            velocity: Some(n.velocity),
+            pan: Some(n.pan),
+            fine_pitch: Some(n.fine_pitch),
+            release: Some(n.release),
+            mod_x: Some(n.mod_x),
+            mod_y: Some(n.mod_y),
+            repeat: Some(n.repeat),
+            slide: Some(n.slide()),
+            muted: Some(n.muted()),
+            color: Some(n.group & 0x0f),
+            id: (n.id.0 != 0).then_some(n.id.0),
+        }
+    }
 }
 
 fn middle_c() -> u16 {
@@ -803,6 +855,7 @@ impl Command {
             Command::DeletePattern { .. } => "Delete pattern",
             Command::SetPattern { .. } => "Pattern settings",
             Command::SetNotes { .. } | Command::AddNotes { .. } => "Edit notes",
+            Command::SetStep { .. } => crate::history::STEP_SEQ_EDIT,
             Command::AddClip { .. } => "Add clip",
             Command::DeleteClip { .. } => "Delete clip",
             Command::SetClip { .. } => "Edit clip",
@@ -891,7 +944,7 @@ impl Command {
             Command::ShiftPatterns { .. } | Command::MovePattern { .. } | Command::ClonePattern { .. } | Command::SplitPattern { .. } | Command::SetPatternSignature { .. } => {
                 Taken::Project(Box::new(Side::of(s)))
             }
-            Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } | Command::TransposePattern { pattern, .. } => {
+            Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } | Command::SetStep { pattern, .. } | Command::TransposePattern { pattern, .. } => {
                 Taken::Pattern(Box::new(p.patterns[pattern_place(p, *pattern)?].clone()))
             }
             Command::AddClip { .. } | Command::DeleteClip { .. } | Command::SetClip { .. } | Command::SetPlaylistTrack { .. } => match p.arrangement() {
@@ -1635,27 +1688,35 @@ impl Command {
                 none
             }
             Command::SetNotes { pattern, channel, notes } => {
-                let notes = notes_of(&s.project, &notes)?;
-                let only = channel.map(|c| channel_row(&s.project, c).map(|r| s.project.channels[r].index)).transpose()?;
                 let place = pattern_place(&s.project, pattern)?;
+                let notes = notes_of(&s.project, &notes, &s.project.patterns[place].notes)?;
+                let only = channel.map(|c| channel_row(&s.project, c).map(|r| s.project.channels[r].index)).transpose()?;
                 let held: std::collections::HashSet<u32> = s.project.patterns[place].notes.iter().map(|n| n.id.0).filter(|&i| i != 0).collect();
                 let (notes, ids) = with_ids(s, notes, &held);
                 let p = &mut s.project.get_mut().patterns[place];
                 p.notes.retain(|n| only.is_some_and(|c| n.channel != c));
                 p.notes.extend(notes);
-                p.notes.sort_by_key(|n| n.position);
+                p.notes.sort_by_key(|n| (n.position, n.channel));
                 Ok(ids)
+            }
+            Command::SetStep { pattern, channel, step, on, mute } => {
+                let place = pattern_place(&s.project, pattern)?;
+                let ch = s.project.channels[channel_row(&s.project, channel)?].index;
+                let n = s.project.patterns[place].number;
+                crate::edit::rack::set_step_in(s, n, ch, step, on, mute);
+                s.control.settle(s.project.get_mut());
+                none
             }
             Command::AddNotes { pattern, notes } => {
                 if notes.iter().any(|n| n.id.is_some()) {
                     return Err("add_notes makes new notes: give them no id (set_notes keeps a note's)".into());
                 }
-                let notes = notes_of(&s.project, &notes)?;
+                let notes = notes_of(&s.project, &notes, &[])?;
                 let place = pattern_place(&s.project, pattern)?;
                 let (notes, ids) = with_ids(s, notes, &Default::default());
                 let p = &mut s.project.get_mut().patterns[place];
                 p.notes.extend(notes);
-                p.notes.sort_by_key(|n| n.position);
+                p.notes.sort_by_key(|n| (n.position, n.channel));
                 Ok(ids)
             }
 
@@ -2076,7 +2137,9 @@ impl Mutes {
 }
 
 /// Notes as the model stores them.
-fn notes_of(p: &Project, notes: &[NoteIn]) -> Result<Vec<Note>, Error> {
+/// `notes` as the pattern stores them; a note whose id names one of `held` starts from it (the values not given are
+/// kept), any other from a new step.
+fn notes_of(p: &Project, notes: &[NoteIn], held: &[Note]) -> Result<Vec<Note>, Error> {
     notes
         .iter()
         .map(|n| {
@@ -2086,14 +2149,31 @@ fn notes_of(p: &Project, notes: &[NoteIn]) -> Result<Vec<Note>, Error> {
             if n.key > 131 {
                 return Err(format!("key {} is past the last (131)", n.key));
             }
-            Ok(Note {
-                length: n.length,
-                key: n.key,
-                velocity: n.velocity.unwrap_or(100).min(128),
-                pan: n.pan.unwrap_or(64).min(128),
-                id: Id(n.id.unwrap_or(0)),
-                ..Note::step(ch, n.position)
-            })
+            let check = |name: &str, v: Option<u8>, max: u8| match v {
+                Some(v) if v > max => Err(format!("a note's {name} is 0..={max}, not {v}")),
+                _ => Ok(v),
+            };
+            let was = n.id.filter(|&i| i != 0).and_then(|i| held.iter().find(|h| h.id.0 == i));
+            let mut x = Note { id: Id(n.id.unwrap_or(0)), ..was.copied().unwrap_or_else(|| Note::step(ch, n.position)) };
+            (x.channel, x.position, x.length, x.key) = (ch, n.position, n.length, n.key);
+            let keep = |v: Option<u8>, now: u8, new: u8| v.unwrap_or(if was.is_some() { now } else { new });
+            x.velocity = keep(n.velocity.map(|v| v.min(128)), x.velocity, 100);
+            x.pan = keep(n.pan.map(|v| v.min(128)), x.pan, 64);
+            x.fine_pitch = keep(check("fine pitch", n.fine_pitch, 240)?, x.fine_pitch, x.fine_pitch);
+            x.release = keep(check("release", n.release, 128)?, x.release, x.release);
+            x.mod_x = keep(check("mod X", n.mod_x, 128)?, x.mod_x, x.mod_x);
+            x.mod_y = keep(check("mod Y", n.mod_y, 128)?, x.mod_y, x.mod_y);
+            x.repeat = keep(check("repeat", n.repeat, 14)?, x.repeat, x.repeat);
+            if let Some(c) = check("colour", n.color, 15)? {
+                x.group = (x.group & !0x0f) | c;
+            }
+            if let Some(v) = n.slide {
+                x.flags = if v { x.flags | Note::SLIDE } else { x.flags & !Note::SLIDE };
+            }
+            if let Some(v) = n.muted {
+                x.set_muted(v);
+            }
+            Ok(x)
         })
         .collect()
 }

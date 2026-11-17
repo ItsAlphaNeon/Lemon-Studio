@@ -5884,7 +5884,7 @@ impl App {
                 }
                 Drag::RackLen { y0, v0 } => {
                     let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(0, crate::edit::rack::max_steps(&self.state.session) as i32) as u32;
-                    crate::edit::rack::set_len(&mut self.state.session, (v > 0).then_some(v));
+                    crate::rack::set_length(&mut self.state, (v > 0).then_some(v));
                     self.hint = Cow::Owned(if v == 0 { "Pattern length: Auto".into() } else { format!("Pattern length: {v} steps") });
                     self.invalidate();
                 }
@@ -7672,7 +7672,7 @@ impl App {
             }
             Some(Action::RackLen) => {
                 let v = (crate::edit::rack::len_value(&self.state.session) as i32 + d).clamp(0, crate::edit::rack::max_steps(&self.state.session) as i32) as u32;
-                crate::edit::rack::set_len(&mut self.state.session, (v > 0).then_some(v));
+                crate::rack::set_length(&mut self.state, (v > 0).then_some(v));
                 return None;
             }
             Some(Action::RackLoopBox(i)) => {
@@ -9112,16 +9112,8 @@ impl App {
         self.focus_channel(i);
         let s = &mut self.state;
         s.piano.clear_selection();
-        // One undo step for the press and the painting that follows.
-        crate::edit::rack::snapshot(&mut s.session);
-        // A step past an explicit length grows the pattern to the end of the pattern's bar holding it (§5, §23).
-        if let Some(l) = crate::edit::rack::explicit_len(&s.session) {
-            if k >= l {
-                let ps = crate::edit::rack::per_step(&s.session);
-                let len = s.session.project.pattern_bar_end(s.pattern(), (k + 1) * ps).div_ceil(ps);
-                crate::edit::rack::set_len(&mut s.session, Some(len));
-            }
-        }
+        // One undo step for the press and the painting that follows (`rack::set_step`).
+        crate::rack::grow_for_step(s, k);
         if crate::prefs::check(&crate::prefs::BOTH_MOUSE_BUTTONS) {
             crate::rack::set_step(s, i, k, !right);
         } else {

@@ -83,6 +83,93 @@ fn set_colors(s: &mut State, rows: &[usize], colors: impl IntoIterator<Item = Op
     apply(s, COLOR, commands)
 }
 
+/// The shown pattern's id, for commands; `None` when the project holds no pattern with its number yet.
+fn shown_id(s: &mut State) -> Option<u32> {
+    if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+        crate::control_ui::settle_ids(s);
+    }
+    s.session.project.pattern(s.pattern().max(1)).map(|p| p.id.0)
+}
+
+/// The commands `make` builds for the shown pattern (given its id) as one step named `name` (with `run`, joining that
+/// run's step; `quiet`, none: the length box). A pattern number the project holds no pattern for gets one first, in
+/// the same step.
+fn on_pattern(s: &mut State, name: &'static str, run: Option<crate::history::Run>, quiet: bool, make: impl FnOnce(&State, u32) -> Vec<Command>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let n = s.pattern().max(1);
+    let id_of = |r: &[serde_json::Value]| r.first().and_then(|v| v["pattern"].as_u64()).map(|id| id as u32);
+    let add = vec![Command::AddPattern { name: None, color: None, number: Some(n) }];
+    let r = match (shown_id(s), quiet) {
+        (Some(id), true) => crate::control_ui::run(s, make(s, id)).map(drop),
+        (Some(id), false) => {
+            let c = make(s, id);
+            if c.is_empty() {
+                return None;
+            }
+            crate::control_ui::command(s, name, run, c).map(drop)
+        }
+        (None, true) => crate::control_ui::run(s, add).and_then(|(r, _)| match id_of(&r) {
+            Some(id) => crate::control_ui::run(s, make(s, id)).map(drop),
+            None => Ok(()),
+        }),
+        (None, false) => {
+            let r = crate::control_ui::command_then(s, name, add, |s, r| id_of(r).map(|id| make(s, id)).unwrap_or_default()).map(drop);
+            if let (Ok(()), Some(run)) = (&r, run) {
+                s.session.history.set_run(run);
+            }
+            r
+        }
+    };
+    if quiet && r.is_ok() {
+        s.session.dirty = true;
+    }
+    r.err()
+}
+
+/// Rows' notes in the shown pattern replaced (`rows`: each row with its new notes), one step, "Step seq edit".
+fn set_rows_notes(s: &mut State, rows: Vec<(usize, Vec<Note>)>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let rows: Vec<(u32, Vec<Note>)> = rows.into_iter().filter_map(|(r, n)| Some((ch_id(s, r)?, n))).collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let e = on_pattern(s, crate::history::STEP_SEQ_EDIT, None, false, |_, pattern| {
+        rows.into_iter()
+            .map(|(channel, notes)| Command::SetNotes { pattern, channel: Some(channel), notes: notes.iter().map(|n| crate::control::command::NoteIn::of(n, channel)).collect() })
+            .collect()
+    });
+    if let Some(e) = &e {
+        s.message = Some(e.clone());
+    }
+    e
+}
+
+/// The shown pattern's length set to `steps` (`None`: Auto) by its command, with no undo step, as in FL (measured
+/// 2026-10-28).
+pub fn set_length(s: &mut State, steps: Option<u32>) {
+    let (ps, max) = (per_step(&s.session), max_steps(&s.session));
+    let len = steps.filter(|&v| v > 0).map_or(0, |v| v.min(max) * ps);
+    let set = move |_: &State, pattern| vec![Command::SetPattern { pattern, name: None, color: None, length: Some(len) }];
+    if let Some(e) = on_pattern(s, "", None, true, set) {
+        s.message = Some(e);
+    }
+}
+
+/// Before a press in the step sequencer on step `k`: a step past an explicit length grows the pattern to the end of the
+/// pattern's bar holding it (§5, §23), the first change of the press's step.
+pub fn grow_for_step(s: &mut State, k: u32) {
+    s.session.history.end_run_of(crate::history::Run::Steps);
+    if explicit_len(&s.session).is_none_or(|l| k < l) {
+        return;
+    }
+    let (ps, max) = (per_step(&s.session), max_steps(&s.session));
+    let len = s.session.project.pattern_bar_end(s.pattern(), (k + 1) * ps).div_ceil(ps).min(max) * ps;
+    let set = move |_: &State, pattern| vec![Command::SetPattern { pattern, name: None, color: None, length: Some(len) }];
+    if let Some(e) = on_pattern(s, crate::history::STEP_SEQ_EDIT, Some(crate::history::Run::Steps), false, set) {
+        s.message = Some(e);
+    }
+}
+
 /// Rows `rows` with `f` making each one's command (`set_channel!`), one step named `name`.
 fn set_rows(s: &mut State, name: &'static str, rows: &[usize], f: impl Fn(&State, usize) -> Option<Command>) -> Option<String> {
     crate::mixer::track_ids(s);
@@ -592,10 +679,7 @@ fn cut_rows(s: &mut State, rows: &[usize]) {
         return;
     }
     copy_rows(s, rows);
-    snapshot(&mut s.session);
-    for &r in rows {
-        set_row_notes(&mut s.session, r, Vec::new());
-    }
+    set_rows_notes(s, rows.iter().map(|&r| (r, Vec::new())).collect());
 }
 
 /// Paste (§11): the clipboard's first row replaces row `r`'s notes of the pattern, the next ones those of the rows shown
@@ -604,37 +688,21 @@ fn paste_at(s: &mut State, r: usize) {
     let Some(rows) = s.rack.clipboard.clone() else { return };
     let shown = shown(&s.session);
     let below = shown.iter().position(|&x| x == r).map_or(vec![r], |i| shown[i..].to_vec());
-    snapshot(&mut s.session);
-    for (to, notes) in below.into_iter().zip(rows) {
-        set_row_notes(&mut s.session, to, notes);
-    }
+    // The pasted notes are new ones (the copied ones may still be there).
+    let fresh = |notes: Vec<Note>| notes.into_iter().map(|n| Note { id: os_model::Id::NONE, ..n }).collect();
+    set_rows_notes(s, below.into_iter().zip(rows).map(|(to, notes)| (to, fresh(notes))).collect());
 }
 
 /// Turn step `k` of row `r` on or off.
+/// A press's step and the drag's after it are one undo step, "Step seq edit" (`Run::Steps`).
 pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
-    let Some(ch) = ch_index(&s.session, r) else { return };
-    let ps = per_step(&s.session);
-    let n = s.pattern().max(1);
     let mute = s.rack.opts.contains(MUTE_REMOVED);
-    let p = crate::edit::patterns::pat_mut(&mut s.session, n);
-    let has = step_on(&p.notes, ch, k, ps);
-    let at = |x: &Note| x.channel == ch && x.position / ps == k;
-    if on && !has {
-        // A step removed with Mute removed steps on comes back with its notes (Lemon Studio's design), else a new one.
-        if p.notes.iter().any(at) {
-            p.notes.iter_mut().filter(|x| at(x)).for_each(|x| x.set_muted(false));
-        } else {
-            p.notes.push(Note::step(ch, k * ps));
-            p.notes.sort_by_key(|x| (x.position, x.channel));
-        }
-    } else if !on && has {
-        if mute {
-            p.notes.iter_mut().filter(|x| at(x)).for_each(|x| x.set_muted(true));
-        } else {
-            p.notes.retain(|x| !at(x));
-        }
+    crate::mixer::track_ids(s);
+    let Some(channel) = ch_id(s, r) else { return };
+    let set = move |_: &State, pattern| vec![Command::SetStep { pattern, channel, step: k, on, mute }];
+    if let Some(e) = on_pattern(s, crate::history::STEP_SEQ_EDIT, Some(crate::history::Run::Steps), false, set) {
+        s.message = Some(e);
     }
-    s.session.dirty = true;
 }
 
 /// Toggle step `k` of row `r`; returns its new state (§9).
@@ -1956,18 +2024,16 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Fill(r, n) => {
-            snapshot(&mut s.session);
-            fill_each(&mut s.session, r, n);
-            None
+            let notes = filled(&s.session, r, n);
+            set_rows_notes(s, vec![(r, notes)])
         }
         RCmd::AdvancedFill(r) => {
             open_fill(s, r);
             None
         }
         RCmd::Rotate(r, d) => {
-            snapshot(&mut s.session);
-            rotate(&mut s.session, r, d);
-            None
+            let notes = rotated(&s.session, r, d);
+            set_rows_notes(s, vec![(r, notes)])
         }
         RCmd::Solo(r) => {
             solo(s, r);
@@ -2052,7 +2118,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::SetLen(v) => {
-            set_len(&mut s.session, v);
+            set_length(s, v);
             None
         }
         RCmd::LoopType(t) => {
@@ -2366,8 +2432,8 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
 /// Accept in the Advanced fill dialog: write the sequence to the channel.
 pub fn fill_accept(s: &mut State) {
     if let Some(f) = s.rack.fill.take() {
-        snapshot(&mut s.session);
-        write_sequence(&mut s.session, f.row, &f.steps);
+        let notes = sequenced(&s.session, f.row, &f.steps);
+        set_rows_notes(s, vec![(f.row, notes)]);
     }
 }
 

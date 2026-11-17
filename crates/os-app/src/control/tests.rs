@@ -87,6 +87,9 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_pattern", "pattern": pat, "name": "Beat", "color": "#00ff00", "length": 384}),
         json!({"op": "set_notes", "pattern": pat, "channel": kick, "notes": [{"channel": kick, "position": 0, "length": 24, "key": 48}]}),
         json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": clap, "position": 96, "velocity": 80}]}),
+        json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": clap, "position": 192, "fine_pitch": 130, "release": 10, "mod_x": 20, "mod_y": 30, "repeat": 2, "slide": true, "muted": true, "color": 5}]}),
+        json!({"op": "set_step", "pattern": pat, "channel": kick, "step": 5, "on": true}),
+        json!({"op": "set_step", "pattern": pat, "channel": clap, "step": 4, "on": false, "mute": true}),
         json!({"op": "set_playlist_track", "track": 2, "name": "Lead", "color": "#abcdef", "enabled": false}),
         json!({"op": "move_channel", "channel": kick, "row": 3}),
         json!({"op": "delete_channel", "channel": clap}),
@@ -261,6 +264,44 @@ fn links_follow_rows_moved_by_commands() {
     crate::history_ui::redo(&mut a.state);
     assert_eq!(on(&st), Target::RackLed(2));
     crate::remote::set_links(&st, &[]);
+}
+
+/// A press in the step sequencer and its drag are one step; a note named by its id keeps what `set_notes` leaves out.
+#[test]
+fn steps_paint_as_one_step_and_notes_keep_their_values() {
+    let mut a = app();
+    a.state.set_pattern(1);
+    let n = a.state.session.history.done;
+    crate::rack::grow_for_step(&mut a.state, 0);
+    crate::rack::set_step(&mut a.state, 0, 0, true);
+    for k in 1..4 {
+        crate::rack::set_step(&mut a.state, 0, k, true);
+    }
+    assert_eq!(a.state.session.history.done, n + 1, "one step");
+    let ch0 = a.state.session.project.channels[0].index;
+    let on = |a: &App| a.state.session.project.pattern(1).map_or(0, |p| p.notes.iter().filter(|x| x.channel == ch0).count());
+    assert_eq!(on(&a), 4);
+    crate::history::settle(&mut a.state.session);
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!(on(&a), 0);
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!(on(&a), 4);
+    // The next press is a step of its own.
+    crate::rack::grow_for_step(&mut a.state, 6);
+    crate::rack::set_step(&mut a.state, 0, 6, true);
+    assert_eq!(a.state.session.history.done, n + 2);
+    // set_notes with only the id, position and key keeps the rest.
+    let p = &a.state.session.project;
+    let pat = p.pattern(1).unwrap().id.0;
+    let mut first = p.pattern(1).unwrap().notes[0];
+    first.fine_pitch = 100;
+    first.release = 9;
+    a.state.session.project.get_mut().patterns.iter_mut().find(|q| q.number == 1).unwrap().notes[0] = first;
+    let kick = a.state.session.project.channels[0].id.0;
+    let notes: Vec<Value> = a.state.session.project.pattern(1).unwrap().notes.iter().filter(|x| x.channel == ch0).map(|x| json!({"channel": kick, "position": x.position + 24, "key": x.key, "id": x.id.0})).collect();
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_notes", "pattern": pat, "channel": kick, "notes": notes}))]).unwrap();
+    let moved = a.state.session.project.pattern(1).unwrap().notes.iter().find(|x| x.id == first.id).copied().unwrap();
+    assert_eq!((moved.position, moved.fine_pitch, moved.release), (first.position + 24, 100, 9));
 }
 
 #[test]
@@ -464,7 +505,10 @@ fn rpc_requests_and_errors() {
     let n = call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 12, "method": "notes", "params": {"pattern": pat}}));
     let id = n["result"]["notes"][0]["id"].clone();
     assert!(id.as_u64().is_some_and(|i| i > 0), "the note has an id");
-    assert_eq!(n["result"]["notes"], json!([{"id": id, "channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64}]));
+    assert_eq!(
+        n["result"]["notes"],
+        json!([{"id": id, "channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64, "fine_pitch": 120, "release": 64, "mod_x": 128, "mod_y": 128, "repeat": 0, "slide": false, "muted": false, "color": 0}])
+    );
 }
 
 /// Notes a command makes name their ids in its result, the notes query shows them, and writing the notes back keeps

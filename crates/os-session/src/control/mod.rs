@@ -283,6 +283,7 @@ fn op(c: &Command) -> &'static str {
         Command::SetPattern { .. } => "set_pattern",
         Command::SetNotes { .. } => "set_notes",
         Command::AddNotes { .. } => "add_notes",
+        Command::SetStep { .. } => "set_step",
         Command::AddClip { .. } => "add_clip",
         Command::DeleteClip { .. } => "delete_clip",
         Command::SetClip { .. } => "set_clip",

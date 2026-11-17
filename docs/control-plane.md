@@ -117,7 +117,8 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `split_pattern` | `pattern` | Split by channel: a pattern per channel with notes, clips under the original's |
 | `set_pattern_signature` | `pattern`, `numerator`, `denominator` | the time signature at the pattern's start, `numerator` 0 for none; its clips follow |
 | `set_pattern` | `pattern`; `name`, `color`, `length` (0 = Auto) (optional) | |
-| `set_notes` | `pattern`, `notes`, `channel` (optional) | The notes of `channel` (or all notes) become `notes`. A note keeps its `id` (as `notes` lists it) when the pattern had it; others get new ones. Result: `notes` (their ids, in order) |
+| `set_notes` | `pattern`, `notes`, `channel` (optional) | The notes of `channel` (or all notes) become `notes`. A note keeps its `id` (as `notes` lists it) when the pattern had it, and with it its values not given; others get new ones. Result: `notes` (their ids, in order) |
+| `set_step` | `pattern`, `channel`, `step`, `on`; `mute` (optional) | A step sequencer click: on adds a step (or unmutes the step's notes), off removes the step's notes, or mutes them with `mute` |
 | `add_notes` | `pattern`, `notes` (without `id`) | Result: `notes` (their ids, in order) |
 | `add_clip` | `track` (1-based), `position`; `length`, and `pattern` or `channel` | A pattern clip, or an audio or automation channel's clip, in the arrangement shown. Result: `clip` |
 | `delete_clip` | `clip` | |
@@ -129,7 +130,8 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_param` | `owner`, `param`, `value` | A plugin parameter (`params` lists them) to `value` 0..1 |
 
 A note is `{"channel", "position", "length", "key", "velocity", "pan"}`: `key` is a MIDI number (60 = C5, the
-default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
+default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre). Optional too: `fine_pitch` 0..240 (120 = none),
+`release`, `mod_x`, `mod_y` 0..128, `repeat` 0..14 (0 = off), `slide`, `muted`, `color` (a colour group 0..15).
 
 ## Undo, proposals and events
 
