@@ -1334,7 +1334,11 @@ impl Plugins {
             let look = h.due(h.seen);
             let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
             if let Some(mut p) = look.and_then(|_| lock_for_tick(&h.plugin, h.meter.as_deref())) {
+                // The dropout log is Linux only; elsewhere the hold is only timed.
+                #[cfg(target_os = "linux")]
                 let t0 = crate::dropout_log::Hold::start();
+                #[cfg(not(target_os = "linux"))]
+                let t0 = std::time::Instant::now();
                 h.seen = look.unwrap_or(h.seen);
                 // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
                 if let (Some(code), false) = (p.stopped(), h.stop_told) {
