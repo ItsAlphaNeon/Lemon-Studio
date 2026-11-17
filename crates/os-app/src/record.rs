@@ -1114,6 +1114,8 @@ mod tests {
         assert_eq!((app.state.selected_channel, app.state.selected_mixer), (0, 1));
         assert!(app.state.mixer.solo.is_none());
         assert!(!app.state.z.contains(&crate::app::Win::Events));
+    }
+
     /// An edit made to the pattern during a take stays when the take writes its next note.
     #[test]
     fn an_edit_during_a_take_stays() {
