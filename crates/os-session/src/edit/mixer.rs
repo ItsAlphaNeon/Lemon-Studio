@@ -94,6 +94,25 @@ pub fn set_slot_label(s: &mut crate::session::Session, t: u16, k: u8, name: Opti
     });
 }
 
+/// The effects in slots `a` and `b` of track `t` change places, with their lights, levels, names, colours and icons;
+/// the automation and remote control links on them go along, and so do the hosted instances.
+pub fn swap_slots(s: &mut crate::session::Session, t: u16, a: u8, b: u8) {
+    let (x, y) = (usize::from(a), usize::from(b));
+    if let Some(m) = track_mut(s, t) {
+        m.slots.swap(x, y);
+        m.slot_on.swap(x, y);
+        m.slot_mix.swap(x, y);
+        m.slot_cpu.swap(x, y);
+        m.slot_names.swap(x, y);
+        m.slot_colors.swap(x, y);
+        m.slot_icons.swap(x, y);
+    }
+    let swap = move |u: u16, k: u8| Some((u, if u != t { k } else if k == a { b } else if k == b { a } else { k }));
+    follow_places(s, &Some, &swap);
+    s.fx_requests.push(FxReq::Remap(vec![((t, a), (t, b)), ((t, b), (t, a))]));
+    changed(s);
+}
+
 /// Colours slot `k` of track `t` (`None`: none).
 pub fn set_slot_color(s: &mut crate::session::Session, t: u16, k: u8, color: Option<Rgb>) {
     s.project.write_if(|p| {

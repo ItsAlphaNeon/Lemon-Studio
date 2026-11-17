@@ -95,6 +95,8 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "add_pattern", "name": "Fill", "color": "#112233"}),
         json!({"op": "add_effect", "track": ins2, "plugin": "Fruity Limiter"}),
         json!({"op": "set_auto_bypass", "on": true}),
+        json!({"op": "move_effect", "track": ins2, "slot": 0, "to": 4}),
+        json!({"op": "set_slot", "track": ins2, "slot": 4, "name": "Limit", "color": "#204060"}),
     ] {
         round_trip(&mut a, c);
     }

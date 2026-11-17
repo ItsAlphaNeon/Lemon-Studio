@@ -187,9 +187,12 @@ pub enum Command {
         slot: Option<u8>,
         plugin: String,
     },
-    /// The effect in the track's slot `slot` goes.
+    /// The effect in the track's slot `slot` goes, with the name and colour given to the slot.
     RemoveEffect { track: u32, slot: u8 },
-    /// The slot's light and mix level 0..=1.
+    /// The effect in the track's slot `slot` and the one in slot `to` change places (Move up / down).
+    MoveEffect { track: u32, slot: u8, to: u8 },
+    /// The slot's light, mix level 0..=1, the name it shows (empty: the plugin's) and its colour (`#rrggbb`, empty:
+    /// none).
     SetSlot {
         track: u32,
         slot: u8,
@@ -197,6 +200,10 @@ pub enum Command {
         enabled: Option<bool>,
         #[serde(default)]
         mix: Option<f64>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
     },
 
     // ----- Patterns
@@ -728,6 +735,7 @@ impl Command {
             Command::SetTrack { .. } => "Mixer track settings",
             Command::ResetTrack { .. } => "Mixer track reset",
             Command::RemoveTracks { .. } => "Delete mixer track",
+            Command::MoveEffect { .. } => "Move effect",
             Command::MoveTrack { .. } => "Move mixer track",
             Command::LoadTrackState { .. } => "Open mixer track state",
             Command::SetAutoBypass { .. } => "Auto-bypass for all plugins",
@@ -813,7 +821,8 @@ impl Command {
                 // A project without an arrangement gets one (`playlist::arr_mut`); the undo takes it away again.
                 None => Taken::Project(Box::new(Side::of(s))),
             },
-            Command::SetAutoBypass { .. } | Command::RemoveTracks { .. } | Command::MoveTrack { .. } => Taken::Project(Box::new(Side::of(s))),
+            // A slot moved takes the automation and remote control links on it along (`edit::mixer::follow_places`).
+            Command::SetAutoBypass { .. } | Command::RemoveTracks { .. } | Command::MoveTrack { .. } | Command::MoveEffect { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::LoadTrackState { track, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone())),
             Command::SetClipLfo { channel, .. } => Taken::Lfo(*channel, Box::new(clip_lfo(p, *channel)?.clone())),
             Command::SetMidiOut { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
@@ -1340,7 +1349,7 @@ impl Command {
                 m.slot_on[k] = true;
                 m.slot_mix[k] = 1.0;
                 m.slot_cpu[k] = os_model::PluginCpu::default();
-                m.slot_names[k] = None;
+                (m.slot_names[k], m.slot_colors[k], m.slot_icons[k]) = (None, None, None);
                 s.control.settle(s.project.get_mut());
                 let id = s.project.mixer[place].slots[k].as_ref().map_or(Id::NONE, |x| x.id);
                 s.control.host.push(super::HostReq::Effect { slot: id, plugin });
@@ -1357,10 +1366,23 @@ impl Command {
                 m.slot_on[k] = true;
                 m.slot_mix[k] = 1.0;
                 m.slot_cpu[k] = os_model::PluginCpu::default();
+                (m.slot_names[k], m.slot_colors[k], m.slot_icons[k]) = (None, None, None);
+                // The instance goes now, its state kept for an undo that brings the slot back.
+                let t = s.project.mixer[place].index;
+                s.fx_requests.push(crate::edit::mixer::FxReq::Delete { track: t, slot });
                 none
             }
-            Command::SetSlot { track, slot, enabled, mix } => {
+            Command::MoveEffect { track, slot, to } => {
+                if slot > 9 || to > 9 {
+                    return Err(format!("slots are 0..=9, not {}", slot.max(to)));
+                }
+                let t = track_number(&s.project, track)?;
+                crate::edit::mixer::swap_slots(s, t, slot, to);
+                none
+            }
+            Command::SetSlot { track, slot, enabled, mix, name, color } => {
                 let mix = mix.map(|v| unit("mix", v, 0.0, 1.0)).transpose()?;
+                let color = color.map(|c| parse_color(&c)).transpose()?;
                 if slot > 9 {
                     return Err(format!("slots are 0..=9, not {slot}"));
                 }
@@ -1371,6 +1393,12 @@ impl Command {
                 }
                 if let Some(v) = mix {
                     m.slot_mix[usize::from(slot)] = v;
+                }
+                if let Some(n) = name {
+                    m.slot_names[usize::from(slot)] = text(&n);
+                }
+                if let Some(c) = color {
+                    m.slot_colors[usize::from(slot)] = c;
                 }
                 none
             }

@@ -269,6 +269,7 @@ fn op(c: &Command) -> &'static str {
         Command::SetEq { .. } => "set_eq",
         Command::AddEffect { .. } => "add_effect",
         Command::RemoveEffect { .. } => "remove_effect",
+        Command::MoveEffect { .. } => "move_effect",
         Command::SetSlot { .. } => "set_slot",
         Command::AddPattern { .. } => "add_pattern",
         Command::DeletePattern { .. } => "delete_pattern",

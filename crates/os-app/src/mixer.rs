@@ -29,7 +29,7 @@ use crate::control::command::{color_text, Command};
 
 /// The mixer tracks and channels have their ids, for commands (a track just added gets its own on the next tick). Only then: a
 /// settle gives ids to everything new, and something about to go would take one.
-fn track_ids(s: &mut State) {
+pub fn track_ids(s: &mut State) {
     let p = &s.session.project;
     if p.mixer.iter().any(|m| m.id == os_model::Id::NONE) || p.channels.iter().any(|c| c.id == os_model::Id::NONE) {
         crate::control_ui::settle_ids(s);
@@ -551,7 +551,7 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             let t = s.selected_mixer;
             track_ids(s);
             let on = !track(&s.session, t)?.slot_on[usize::from(i)];
-            apply(s, SLOT, vec![Command::SetSlot { track: id_of(s, t)?, slot: i, enabled: Some(on), mix: None }])
+            apply(s, SLOT, vec![Command::SetSlot { track: id_of(s, t)?, slot: i, enabled: Some(on), mix: None, name: None, color: None }])
         }
         MHit::Input => {
             s.playlist.popup = input_menu(s, at.0, at.1 + 10.0);
@@ -742,7 +742,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             track_ids(s);
             if let (Some(m), Some(id)) = (track(&s.session, t), id_of(s, t)) {
                 let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
-                let c = (0..10u8).map(|k| Command::SetSlot { track: id, slot: k, enabled: Some(only || k == i), mix: None }).collect();
+                let c = (0..10u8).map(|k| Command::SetSlot { track: id, slot: k, enabled: Some(only || k == i), mix: None, name: None, color: None }).collect();
                 if let Some(e) = apply(s, SLOT, c) {
                     s.message = Some(e);
                 }
@@ -1439,10 +1439,6 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         return app.wrap_slot(slot, all);
     }
     // An effect slot's colour: one step on its track, as FL's "Name/color/icon effect" (spec: ui/undo-steps.md).
-    if let MCmd::SlotColor(..) | MCmd::SlotRandomColor(_) = c {
-        let t = app.state.selected_mixer;
-        return crate::control_ui::edit_app(app, "Effect slot color", Region::Track(t), |app| run_now(app, c));
-    }
     // The track settings: the commands of the control plane, one undo step each.
     if commands_of(&app.state, &c).is_some() {
         track_ids(&mut app.state);
@@ -1460,20 +1456,36 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         app.invalidate();
         return m;
     }
+    if let MCmd::AddEffect(slot, index) = c {
+        let m = add_effect(&mut app.state, slot, index);
+        app.invalidate();
+        return m;
+    }
+    if let MCmd::RemoveTeslasNow = c {
+        let gone = teslas(&app.state.session);
+        track_ids(&mut app.state);
+        let s = &app.state;
+        let c = gone.iter().filter_map(|&(t, k)| Some(Command::RemoveEffect { track: id_of(s, t)?, slot: k })).collect();
+        let e = apply(&mut app.state, "Remove audio editors", c);
+        app.invalidate();
+        return e.or_else(|| {
+            Some(match gone.len() {
+                1 => "Removed 1 audio editor".into(),
+                n => format!("Removed {n} audio editors"),
+            })
+        });
+    }
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
     let step = match &c {
         // The original's History names (spec: ui/one-click-recording.md §1).
         MCmd::AssignAudio(_) => Some(crate::track_links::ASSIGN_AUDIO),
         MCmd::UnassignAudio(_) => Some(crate::track_links::UNASSIGN_AUDIO),
-        MCmd::AddEffect(..) | MCmd::AddContainer(_) => Some("Add effect"),
-        MCmd::SlotDelete(_) => Some("Remove effect"),
-        MCmd::SlotMove(..) => Some("Move effect"),
+        MCmd::AddContainer(_) => Some("Add effect"),
         MCmd::Member(_, _, crate::container::Op::Up | crate::container::Op::Down) => Some(crate::container::MOVE),
         MCmd::Member(_, _, crate::container::Op::Remove) => Some(crate::container::REMOVE),
         MCmd::MemberAdd(..) => Some(crate::container::ADD),
         MCmd::MemberAddInst(..) => Some(crate::container::ADD_INSTRUMENT),
         MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..) => Some(crate::container::REPLACE),
-        MCmd::RemoveTeslasNow => Some("Remove audio editors"),
         _ => None,
     };
     if let Some(name) = step {
@@ -1545,6 +1557,18 @@ fn commands_of(s: &State, c: &MCmd) -> Option<(&'static str, Vec<Command>)> {
             }
             (ROUTING, c)
         }
+        MCmd::SlotDelete(k) => ("Remove effect", vec![Command::RemoveEffect { track: id_of(s, s.selected_mixer)?, slot: k }]),
+        MCmd::SlotMove(k, d) => {
+            let o = i32::from(k) + i32::from(d);
+            let c = (0..10).contains(&o).then(|| id_of(s, s.selected_mixer).map(|track| Command::MoveEffect { track, slot: k, to: o as u8 })).flatten();
+            ("Move effect", c.into_iter().collect())
+        }
+        MCmd::SlotColor(k, col) => ("Effect slot color", vec![slot_color_cmd(s, k, col)?]),
+        MCmd::SlotRandomColor(k) => {
+            let t = s.selected_mixer;
+            let col = crate::patterns::random_color((u64::from(t) << 8 | u64::from(k)).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed()));
+            ("Effect slot color", vec![slot_color_cmd(s, k, Some(col))?])
+        }
         MCmd::AutoBypassAll => ("Auto-bypass for all plugins", crate::edit::mixer::auto_bypass_switch(&s.session).map(|on| Command::SetAutoBypass { on }).into_iter().collect()),
         MCmd::PdcAuto => {
             let mut c = Command::set_project();
@@ -1555,6 +1579,27 @@ fn commands_of(s: &State, c: &MCmd) -> Option<(&'static str, Vec<Command>)> {
         }
         _ => return None,
     })
+}
+
+/// Slot `k` of the current track coloured `col`.
+fn slot_color_cmd(s: &State, k: u8, col: Option<Rgb>) -> Option<Command> {
+    Some(Command::SetSlot { track: id_of(s, s.selected_mixer)?, slot: k, enabled: None, mix: None, name: None, color: Some(color_text(col).unwrap_or_default()) })
+}
+
+/// Effect `index` (in the plugin list) into slot `k` of the current track: one undo step, "Add effect". The plugin is
+/// hosted as the interface hosts it (its window opens), not as a client's command is.
+fn add_effect(s: &mut State, k: u8, index: usize) -> Option<String> {
+    let t = s.selected_mixer;
+    let nm = s.session.plugins.effects.get(index).map(|a| a.desc.name.clone())?;
+    track_ids(s);
+    let c = Command::AddEffect { track: id_of(s, t)?, slot: Some(k), plugin: nm };
+    if let Err(e) = crate::control_ui::command(s, "Add effect", None, vec![c]) {
+        return Some(e);
+    }
+    let id = track(&s.session, t).and_then(|m| m.slots[usize::from(k)].as_ref()).map(|p| p.id);
+    s.session.control.host.retain(|r| !matches!(r, crate::control::HostReq::Effect { slot, .. } if Some(*slot) == id));
+    s.session.fx_requests.push(FxReq::Create { track: t, slot: k, index, state: None });
+    None
 }
 
 fn run_now(app: &mut App, c: MCmd) -> Option<String> {
@@ -1594,17 +1639,6 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             set_io(&mut s.session, t, |m| m.monitor = v);
             None
         }
-        MCmd::RemoveTeslasNow => {
-            let gone = teslas(&s.session);
-            for &(t, k) in &gone {
-                clear_slot(&mut s.session, t, k);
-            }
-            changed(&mut s.session);
-            Some(match gone.len() {
-                1 => "Removed 1 audio editor".into(),
-                n => format!("Removed {n} audio editors"),
-            })
-        }
         MCmd::Solo(n) => {
             solo(s, n);
             None
@@ -1634,6 +1668,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         // Answered in `run`.
         MCmd::SlotHelp(_) | MCmd::SlotScale(..) | MCmd::SaveState(_) => None,
+        MCmd::AddEffect(..) | MCmd::RemoveTeslasNow | MCmd::SlotDelete(_) | MCmd::SlotMove(..) | MCmd::SlotColor(..) | MCmd::SlotRandomColor(_) => None,
         MCmd::Color(..)
         | MCmd::RandomColor(_)
         | MCmd::GradientColor
@@ -1736,20 +1771,6 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             app.invalidate();
             None
         }
-        MCmd::AddEffect(slot, index) => {
-            let t = s.selected_mixer;
-            let Some(nm) = s.session.plugins.effects.get(index).map(|a| a.desc.name.clone()) else { return None };
-            if let Some(m) = track_mut(&mut s.session, t) {
-                m.slots[usize::from(slot)] = Some(crate::plugins::new_slot(&nm));
-                m.slot_on[usize::from(slot)] = true;
-                m.slot_mix[usize::from(slot)] = 1.0;
-                m.slot_cpu[usize::from(slot)] = os_model::PluginCpu::default();
-            }
-            forget_slot_ui(&mut s.session, t, slot);
-            s.session.fx_requests.push(FxReq::Create { track: t, slot, index, state: None });
-            changed(&mut s.session);
-            None
-        }
         MCmd::AddContainer(slot) => {
             // The slot's instance goes as a replaced effect's does; the container plays from the next tick
             // (`App::sync_containers`).
@@ -1758,11 +1779,6 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             if let Some(m) = track_mut(&mut s.session, t) {
                 m.slots[usize::from(slot)] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::container::CONTAINER.into(), state: crate::container::encode(&[]) });
             }
-            changed(&mut s.session);
-            None
-        }
-        MCmd::SlotDelete(slot) => {
-            clear_slot(&mut s.session, s.selected_mixer, slot);
             changed(&mut s.session);
             None
         }
@@ -1808,40 +1824,6 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::ContainerList(slot) => {
             crate::container_ui::show(s, s.selected_mixer, slot);
-            None
-        }
-        MCmd::SlotMove(slot, d) => {
-            let t = s.selected_mixer;
-            let o = i32::from(slot) + i32::from(d);
-            if !(0..10).contains(&o) {
-                return None;
-            }
-            let (a, b) = (usize::from(slot), o as usize);
-            if let Some(m) = track_mut(&mut s.session, t) {
-                m.slots.swap(a, b);
-                m.slot_on.swap(a, b);
-                m.slot_mix.swap(a, b);
-                m.slot_cpu.swap(a, b);
-                m.slot_names.swap(a, b);
-                m.slot_colors.swap(a, b);
-                m.slot_icons.swap(a, b);
-            }
-            let (ka, kb) = (a as u8, b as u8);
-            let swap = move |u: u16, k: u8| Some((u, if u != t { k } else if k == ka { kb } else if k == kb { ka } else { k }));
-            crate::follow::around(s, |s| follow_places(&mut s.session, &Some, &swap));
-            s.session.fx_requests.push(FxReq::Remap(vec![((t, a as u8), (t, b as u8)), ((t, b as u8), (t, a as u8))]));
-            changed(&mut s.session);
-            None
-        }
-        MCmd::SlotColor(slot, c) => {
-            let t = s.selected_mixer;
-            set_slot_color(&mut s.session, t, slot, c);
-            None
-        }
-        MCmd::SlotRandomColor(slot) => {
-            let t = s.selected_mixer;
-            let c = crate::patterns::random_color((u64::from(t) << 8 | u64::from(slot)).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed()));
-            set_slot_color(&mut s.session, t, slot, Some(c));
             None
         }
         MCmd::SlotRename(slot) => {

@@ -3426,15 +3426,22 @@ pub fn commit_edit(s: &mut State) {
         }
         EditTarget::MixerName(n) => {
             let def = if n == 0 { "Master".to_string() } else { format!("Bus {n}") };
-            crate::control_ui::edit(s, "Mixer track name", crate::control::command::Region::Track(n), |s| {
-                if let Some(m) = s.session.project.get_mut().mixer.iter_mut().find(|m| m.index == n) {
-                    m.name = (!text.is_empty() && text != def).then_some(text);
+            crate::mixer::track_ids(s);
+            if let Some(m) = s.session.project.mixer.iter().find(|m| m.index == n) {
+                let mut c = crate::control::command::Command::set_track(m.id.0);
+                if let crate::control::command::Command::SetTrack { name, .. } = &mut c {
+                    *name = Some(if text == def { String::new() } else { text });
                 }
-            });
+                let _ = crate::control_ui::command(s, "Mixer track name", None, vec![c]);
+            }
         }
-        EditTarget::SlotName(t, k) => crate::control_ui::edit(s, "Slot name", crate::control::command::Region::Project, |s| {
-            crate::edit::mixer::set_slot_label(&mut s.session, t, k, (!text.is_empty()).then_some(text));
-        }),
+        EditTarget::SlotName(t, k) => {
+            crate::mixer::track_ids(s);
+            if let Some(m) = s.session.project.mixer.iter().find(|m| m.index == t) {
+                let c = crate::control::command::Command::SetSlot { track: m.id.0, slot: k, enabled: None, mix: None, name: Some(text), color: None };
+                let _ = crate::control_ui::command(s, "Slot name", None, vec![c]);
+            }
+        }
         EditTarget::MemberName(t, k, id) => crate::container_ui::rename(s, t, k, id, &text),
         EditTarget::TypeIn(t, norm) => crate::typein_ui::accept(s, t, norm, &text),
         // Their own steps too. Settled first: they renumber mixer tracks, which moves channels' mixer tracks, part of

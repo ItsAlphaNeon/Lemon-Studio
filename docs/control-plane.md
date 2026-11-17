@@ -99,13 +99,14 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `move_track` | `track`, `to` | the track moves to insert number `to`, the ones between moving over |
 | `remove_tracks` | `tracks` (ids) | the tracks go and the mixer gets shorter (Trim unused tracks); the others close up in order |
 | `load_track_state` | `track`, `path`; `named` (optional) | the saved mixer track state in `path` onto the track, its old effects going; `named`: with its name and colour |
+| `move_effect` | `track`, `slot`, `to` | the effects in the two slots change places, with what is linked to them |
 | `reset_track` | `track` | back to a new track's settings, routed to the master; its effects stay |
 | `set_auto_bypass` | `on` | Auto-bypass when silent for every plugin: the slots', the plugin channels' and the containers' members' |
 | `set_send` | `from`, `to`, `level` (optional) | `level` 0..1 routes `from` to `to` (0 = sidechain only); none removes the route |
 | `set_eq` | `track`, `band` (0..2); `gain` (-1800..1800, 0.01 dB), `frequency`, `width` (0..65536) (optional) | The track's three-band equaliser, as stored |
 | `add_effect` | `track`, `plugin`, `slot` (optional) | Into slot 0..9, else the first empty one. Result: `slot` (the slot plugin's id) |
-| `remove_effect` | `track`, `slot` | |
-| `set_slot` | `track`, `slot`; `enabled`, `mix` (0..1) (optional) | |
+| `remove_effect` | `track`, `slot` | with the name and colour given to the slot |
+| `set_slot` | `track`, `slot`; `enabled`, `mix` (0..1), `name` (empty: the plugin's), `color` (`#rrggbb`, empty: none) (optional) | |
 | `add_pattern` | `name`, `color` (optional) | Result: `pattern` |
 | `delete_pattern` | `pattern` | Its clips go; later patterns move down a number |
 | `set_pattern` | `pattern`; `name`, `color`, `length` (0 = Auto) (optional) | |

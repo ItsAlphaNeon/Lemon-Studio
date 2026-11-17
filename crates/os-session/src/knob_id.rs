@@ -264,7 +264,7 @@ impl KnobId {
             KnobId::MixPan(t) => set_track(t, Some(bipolar), None),
             // In 64ths, as the file keeps it and FL's knob sets it (12% merged is 8, a typed 1% is 1).
             KnobId::MixSep(t) => set_track(t, None, Some((bipolar * 64.0).round() / 64.0)),
-            KnobId::SlotMix(t, k) => Some(Command::SetSlot { track: track(t)?, slot: k.min(9), enabled: None, mix: Some(f64::from(v)) }),
+            KnobId::SlotMix(t, k) => Some(Command::SetSlot { track: track(t)?, slot: k.min(9), enabled: None, mix: Some(f64::from(v)), name: None, color: None }),
             KnobId::Send(a, b) => Some(Command::SetSend { from: track(a)?, to: track(b)?, level: Some(f64::from(v)) }),
             KnobId::ChanVol(row) => set_channel(row, Some(f64::from(v)), None),
             KnobId::ChanPan(row) => set_channel(row, None, Some(bipolar)),
