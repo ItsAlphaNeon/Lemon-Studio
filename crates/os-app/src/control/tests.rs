@@ -111,32 +111,44 @@ fn every_command_undoes_and_redoes() {
 }
 
 /// A track added or deleted moves the others and makes or takes away the one before the hidden last track: undo and
-/// redo put every track's light back as it was, as the whole project's step did (a solo turns off every track).
+/// redo put the tracks back with their arm switches, and with the lights they have now, a track that was not there
+/// with the light it had, as the whole project's step did (a solo turns off every track).
 #[test]
 fn adding_or_deleting_a_track_keeps_the_lights() {
     let mut a = app();
     let tr = ids(&a).1;
     let n = a.state.session.project.mixer.len();
     for (i, m) in a.state.session.project.get_mut().mixer.iter_mut().enumerate() {
-        m.enabled = i == 0 || i == 3 || i + 2 == n;
+        (m.enabled, m.armed) = (i == 0 || i == 3 || i + 2 == n, i == 4);
     }
+    // `to` with the lights of the tracks in `now` as they are there.
+    let lit = |to: &[os_model::MixerTrack], now: &[os_model::MixerTrack]| -> Vec<os_model::MixerTrack> {
+        to.iter().map(|m| os_model::MixerTrack { enabled: now.iter().find(|x| x.id.0 == m.id.0).map_or(m.enabled, |x| x.enabled), ..m.clone() }).collect()
+    };
     for c in [json!({"op": "delete_track", "track": tr[2]}), json!({"op": "add_track", "at": 2})] {
-        let before = reading(&a);
+        let before = a.state.session.project.mixer.clone();
         apply(&mut a.state, &test_client(), None, vec![cmd(c)]).unwrap();
-        // Muted after, as a solo of the track would.
+        // A solo after it, and an arm switch.
         for m in a.state.session.project.get_mut().mixer.iter_mut().skip(1) {
-            m.enabled = !m.enabled;
+            (m.enabled, m.armed) = (!m.enabled, !m.armed);
         }
-        let after = reading(&a);
+        let after = a.state.session.project.mixer.clone();
         crate::history_ui::undo(&mut a.state).unwrap();
-        same(&reading(&a).0.mixer, &before.0.mixer);
+        same(&a.state.session.project.mixer, &lit(&before, &after));
+        let undone = a.state.session.project.mixer.clone();
         crate::history_ui::redo(&mut a.state).unwrap();
-        same(&reading(&a).0.mixer, &after.0.mixer);
+        same(&a.state.session.project.mixer, &lit(&after, &undone));
     }
 }
 
+#[track_caller]
 fn same<T: std::fmt::Debug + PartialEq>(a: &T, b: &T) {
-    assert!(a == b, "differs:\n{a:?}\n{b:?}");
+    if a != b {
+        let (x, y) = (format!("{a:?}"), format!("{b:?}"));
+        let at = x.chars().zip(y.chars()).take_while(|(p, q)| p == q).count();
+        let from = at.saturating_sub(300);
+        panic!("differs at {at}:\n  now: ...{}\n  was: ...{}", &x[from..(at + 80).min(x.len())], &y[from..(at + 80).min(y.len())]);
+    }
 }
 
 #[test]

@@ -399,9 +399,10 @@ pub enum Taken {
     /// A thing to delete again (the redo of a delete), with the ids the things the delete makes had. Its other side is
     /// `Removed`.
     Deleted(Thing, Vec<u32>),
-    /// `.0` put back, then every mixer track on or off and armed or not by id as `.1` has it (adding or deleting a
-    /// track moves the others and makes or takes away the one before the hidden last track: their mute lights and arm
-    /// switches go back with it, as a whole project's would). Its other side is the same with them as they are.
+    /// `.0` put back, then the mixer tracks' arm switches by id as `.1` has them, and the mute lights of the tracks
+    /// that were not there before (adding or deleting a track moves the others and makes or takes away the one before
+    /// the hidden last track), as a whole project put back does (`Mutes::keep`). Its other side is the same with them
+    /// as they are.
     WithOn(Box<Taken>, Vec<(u32, bool, bool)>),
 }
 
@@ -1671,10 +1672,12 @@ fn put(s: &mut crate::session::Session, t: Taken) {
             s.dirty = true;
         }
         Taken::WithOn(t, on) => {
+            // A track that is there before and after keeps its light as it is now (`Mutes::keep`).
+            let now: std::collections::HashMap<u32, bool> = s.project.mixer.iter().map(|m| (m.id.0, m.enabled)).collect();
             put(s, *t);
             for (id, on, armed) in on {
                 if let Some(m) = s.project.get_mut().mixer.iter_mut().find(|m| m.id.0 == id) {
-                    (m.enabled, m.armed) = (on, armed);
+                    (m.enabled, m.armed) = (now.get(&id).copied().unwrap_or(on), armed);
                 }
             }
         }
