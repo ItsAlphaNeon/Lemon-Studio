@@ -173,12 +173,10 @@ pub struct Extra {
     pub group: Option<u8>,
 }
 
-/// The take being recorded: the pattern's notes as they were before it, the channels it recorded, the span from its
-/// first start to its last end, and its notes.
+/// The take being recorded: the channels it recorded, the span from its first start to its last end, and its notes.
 #[derive(Debug, Clone)]
 struct Take {
     pattern: u16,
-    before: Vec<Note>,
     channels: Vec<u16>,
     span: Option<(u32, u32)>,
     new: Vec<Note>,
@@ -605,8 +603,7 @@ impl App {
             snap
         };
         crate::history::record(s, RECORDED, snap);
-        let before = s.project.pattern(pattern).map(|p| p.notes.clone()).unwrap_or_default();
-        s.rec.take = Some(Take { pattern, before, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new(), clip: None });
+        s.rec.take = Some(Take { pattern, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new(), clip: None });
     }
 
     /// The current pattern's tick at playback tick `t`: the tick itself in PAT mode; in SONG mode where a clip of the
@@ -684,23 +681,23 @@ impl App {
             note.group = note.group & !0x0F | g & 0x0F;
         }
         note.release = h.release.unwrap_or(note.release);
-        take.new.push(note);
         let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
         take.span = Some((lo, hi));
         // Blend recorded notes: the earlier notes stay (spec §3).
         let (lo, hi) = if Opt::Blend.on() { (0, 0) } else { (lo, hi) };
-        let notes: Vec<Note> = take
-            .before
-            .iter()
-            .filter(|n| !(take.channels.contains(&n.channel) && n.position >= lo && n.position < hi))
-            .chain(take.new.iter())
-            .cloned()
-            .collect();
-        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pattern) {
-            p.notes = notes;
-        } else {
-            s.project.patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
-        }
+        // The pattern as it is now, so edits made during the take stay: the take's span replaces the other notes on
+        // its channels, and the new note joins.
+        let i = match s.project.patterns.iter().position(|p| p.number == pattern) {
+            Some(i) => i,
+            None => {
+                s.project.patterns.push(os_model::Pattern { number: pattern, ..os_model::Pattern::default() });
+                s.project.patterns.len() - 1
+            }
+        };
+        let p = &mut s.project.patterns[i];
+        p.notes.retain(|n| take.new.contains(n) || !(take.channels.contains(&n.channel) && n.position >= lo && n.position < hi));
+        p.notes.push(note);
+        take.new.push(note);
         // The time selection stays (it may be looping, spec §5).
         let range = s.piano.range;
         s.piano.select(pattern, h.channel, Vec::new());
@@ -1077,6 +1074,24 @@ mod tests {
         app.record_tick();
         stop(&mut app);
         assert!(notes(&app).contains(&(301, 32, 0)), "{:?}", notes(&app));
+    }
+
+    /// An edit made to the pattern during a take stays when the take writes its next note.
+    #[test]
+    fn an_edit_during_a_take_stays() {
+        let mut app = app();
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 30.0, false);
+        key(&mut app, KeyCode::KeyZ, false, 100.0, false);
+        // Drawn while recording, outside the take's span and on another channel.
+        if let Some(p) = app.state.project.patterns.iter_mut().find(|p| p.number == 1) {
+            p.notes.push(Note { length: 24, ..Note::step(0, 600) });
+            p.notes.push(Note { length: 24, ..Note::step(1, 48) });
+        }
+        key(&mut app, KeyCode::KeyX, true, 190.0, false);
+        key(&mut app, KeyCode::KeyX, false, 205.0, false);
+        stop(&mut app);
+        assert_eq!(notes(&app), [(24, 72, 0), (48, 24, 1), (192, 24, 0), (600, 24, 0)]);
     }
 
     /// MIDI channel through (spec: ui/channel-rack.md §18): a note recorded from a MIDI device takes the MIDI channel it
