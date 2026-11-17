@@ -108,6 +108,19 @@ pub enum Command {
     },
     /// The track goes (as its menu's Delete does): later tracks move left, channels on it go to the master.
     DeleteTrack { track: u32 },
+    /// The tracks go and the mixer gets shorter (Trim unused tracks): the others close up in order, channels and sends
+    /// follow them.
+    RemoveTracks { tracks: Vec<u32> },
+    /// The track moves to insert number `to` (1 = the first insert), the ones between moving over by one.
+    MoveTrack { track: u32, to: u16 },
+    /// The saved mixer track state in file `path` onto the track, its old effects going; `named`: with the state's
+    /// name and colour.
+    LoadTrackState {
+        track: u32,
+        path: String,
+        #[serde(default)]
+        named: bool,
+    },
     /// Each setting given is set: name, colour, volume 0..=1 (0.8 = unity), pan -1..=1, stereo separation -1..=1,
     /// enabled (the mute light), polarity, swap left / right, effects enabled, separator (a group starts here), dock
     /// ("left", "middle" or "right"), threaded (allow threaded processing), input and track latency in ms
@@ -709,6 +722,9 @@ impl Command {
             Command::DeleteTrack { .. } => "Delete mixer track",
             Command::SetTrack { .. } => "Mixer track settings",
             Command::ResetTrack { .. } => "Mixer track reset",
+            Command::RemoveTracks { .. } => "Delete mixer track",
+            Command::MoveTrack { .. } => "Move mixer track",
+            Command::LoadTrackState { .. } => "Open mixer track state",
             Command::SetAutoBypass { .. } => "Auto-bypass for all plugins",
             Command::SetSend { .. } => "Mixer routing",
             Command::SetEq { .. } => "Mixer track equalizer",
@@ -759,6 +775,11 @@ impl Command {
         Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: None, pdc: None }
     }
 
+    /// A command that adds a thing: its undo takes it away, so applying it always changes the project.
+    pub fn adds(&self) -> bool {
+        matches!(self, Command::AddChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::AddClip { .. })
+    }
+
     pub fn undo_now(&self, s: &crate::session::Session) -> Result<Command, Error> {
         self.take(s).map(|t| Command::Put(Box::new(t)))
     }
@@ -787,7 +808,8 @@ impl Command {
                 // A project without an arrangement gets one (`playlist::arr_mut`); the undo takes it away again.
                 None => Taken::Project(Box::new(Side::of(s))),
             },
-            Command::SetAutoBypass { .. } => Taken::Project(Box::new(Side::of(s))),
+            Command::SetAutoBypass { .. } | Command::RemoveTracks { .. } | Command::MoveTrack { .. } => Taken::Project(Box::new(Side::of(s))),
+            Command::LoadTrackState { track, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone())),
             Command::SetClipLfo { channel, .. } => Taken::Lfo(*channel, Box::new(clip_lfo(p, *channel)?.clone())),
             Command::SetMidiOut { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
             Command::SetMember { container, .. } => match crate::edit::container::id_place(s, *container).ok_or_else(|| format!("no container {container}"))? {
@@ -1190,6 +1212,41 @@ impl Command {
                 if let Some(v) = latency_out {
                     m.latency_out = v as f32;
                 }
+                none
+            }
+            Command::RemoveTracks { tracks } => {
+                let gone = tracks.iter().map(|&t| track_number(&s.project, t)).collect::<Result<Vec<_>, _>>()?;
+                if gone.contains(&0) {
+                    return Err("the master track can't be deleted".into());
+                }
+                crate::edit::mixer::remove_tracks_in(s, &gone);
+                none
+            }
+            Command::MoveTrack { track, to } => {
+                let mut n = track_number(&s.project, track)?;
+                let last = crate::edit::mixer::inserts(s);
+                if n == 0 {
+                    return Err("the master track doesn't move".into());
+                }
+                if !(1..=last).contains(&to) {
+                    return Err(format!("a track moves to 1..={last}"));
+                }
+                // One place at a time, as Move left / right do.
+                while n != to {
+                    let o = if to > n { n + 1 } else { n - 1 };
+                    let m = move |t: u16| if t == n { o } else if t == o { n } else { t };
+                    crate::edit::mixer::renumber(s, &m, n.min(o), n.max(o) + 1, 0);
+                    n = o;
+                }
+                none
+            }
+            Command::LoadTrackState { track, path, named } => {
+                let n = track_number(&s.project, track)?;
+                let path = std::path::PathBuf::from(path);
+                if crate::mixer_state::load(&path).is_none() {
+                    return Err(format!("couldn't read the mixer track state {}", path.display()));
+                }
+                crate::edit::mixer::open_state(s, n, &path, named);
                 none
             }
             Command::ResetTrack { track } => {

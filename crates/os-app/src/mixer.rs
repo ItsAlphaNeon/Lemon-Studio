@@ -15,11 +15,10 @@
 use std::collections::HashMap;
 pub use crate::edit::mixer::*;
 
-use os_model::{MixerTrack, Rgb};
+use os_model::Rgb;
 
 use crate::app::{App, State};
 use crate::control::command::Region;
-use crate::control_ui::edit;
 
 /// Undo step names of the mixer's edits.
 const ROUTING: &str = "Mixer routing";
@@ -28,10 +27,11 @@ const SLOT: &str = "Effect slot";
 
 use crate::control::command::{color_text, Command};
 
-/// The mixer tracks have their ids, for commands (a track just added gets its own on the next tick). Only then: a
+/// The mixer tracks and channels have their ids, for commands (a track just added gets its own on the next tick). Only then: a
 /// settle gives ids to everything new, and something about to go would take one.
 fn track_ids(s: &mut State) {
-    if s.session.project.mixer.iter().any(|m| m.id == os_model::Id::NONE) {
+    let p = &s.session.project;
+    if p.mixer.iter().any(|m| m.id == os_model::Id::NONE) || p.channels.iter().any(|c| c.id == os_model::Id::NONE) {
         crate::control_ui::settle_ids(s);
     }
 }
@@ -511,14 +511,8 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             let c = Command::SetSend { from: id_of(s, cur)?, to: id_of(s, dst)?, level: None };
             apply(s, ROUTING, vec![c]).or_else(|| Some(format!("{} no longer sends to {}", name(&s.session, cur), name(&s.session, dst))))
         }
-        MHit::Add => {
-            let n = edit(s, INSERT, Region::Project, |s| add_track(s, None));
-            Some(format!("Added {}", name(&s.session, n)))
-        }
-        MHit::AddAfter => {
-            let n = edit(s, INSERT, Region::Project, |s| add_track(s, Some(s.selected_mixer + 1)));
-            Some(format!("Added {}", name(&s.session, n)))
-        }
+        MHit::Add => Some(insert_tracks(s, None, 1).map_or_else(|e| e, |n| format!("Added {}", name(&s.session, n)))),
+        MHit::AddAfter => Some(insert_tracks(s, Some(s.selected_mixer + 1), 1).map_or_else(|e| e, |n| format!("Added {}", name(&s.session, n)))),
         MHit::Options => {
             s.playlist.popup = Some(options_menu(s, at.0, at.1 + 10.0));
             None
@@ -873,21 +867,16 @@ pub fn route_channels(s: &mut State, dst: u16, spread: bool) -> Option<String> {
     let rows = selected_channels(s);
     let first = *rows.first()?;
     let max = inserts(&s.session);
-    let mut moved = 0;
-    for (k, &r) in rows.iter().enumerate() {
-        let t = if spread { dst + k as u16 } else { dst };
-        if t > max {
-            break;
-        }
-        s.session.project.get_mut().channels[r].mixer_track = t;
-        if spread || k == 0 {
-            name_after(&mut s.session, t, r);
-        }
-        moved += 1;
-    }
+    let plan: Vec<(usize, u16, bool)> = rows
+        .iter()
+        .enumerate()
+        .map(|(k, &r)| (r, if spread { dst + k as u16 } else { dst }, spread || k == 0))
+        .take_while(|&(_, t, _)| t <= max)
+        .collect();
+    let moved = plan.len();
+    route_plan(s, plan, 0)?;
     s.mixer.sel.clear();
     s.selected_mixer = dst;
-    changed(&mut s.session);
     Some(if moved == 1 {
         format!("Routed {} to {}", crate::edit::rack::channel_name(&s.session, first), name(&s.session, dst))
     } else {
@@ -899,31 +888,71 @@ pub fn route_channels(s: &mut State, dst: u16, spread: bool) -> Option<String> {
 /// move to the lowest insert no channel uses (a new track when none is free); the track is named after the channel
 /// and becomes the current one.
 pub fn route_free(s: &mut State, rows: &[usize]) -> Option<String> {
-    let mut last = None;
+    // Where each channel goes, worked out before: a channel routed takes its track for the next ones.
+    let mut on: Vec<u16> = s.session.project.channels.iter().map(|c| c.mixer_track).collect();
+    let mut last = inserts(&s.session);
+    let mut adds = 0;
+    let mut plan = Vec::new();
     for &r in rows {
-        let Some(cur) = s.session.project.channels.get(r).map(|c| c.mixer_track) else { continue };
-        let alone = cur != 0 && cur <= inserts(&s.session) && !s.session.project.channels.iter().enumerate().any(|(i, c)| i != r && c.mixer_track == cur);
+        let Some(&cur) = on.get(r) else { continue };
+        let alone = cur != 0 && cur <= last && !on.iter().enumerate().any(|(i, &c)| i != r && c == cur);
         let t = if alone {
             cur
+        } else if let Some(t) = (1..=last).find(|t| !on.contains(t)) {
+            t
         } else {
-            match (1..=inserts(&s.session)).find(|t| !s.session.project.channels.iter().any(|c| c.mixer_track == *t)) {
-                Some(t) => t,
-                None => add_track(s, None),
-            }
+            // A new track after the last one in use.
+            last += 1;
+            adds += 1;
+            last
         };
-        s.session.project.get_mut().channels[r].mixer_track = t;
-        name_after(&mut s.session, t, r);
-        last = Some((r, t));
+        on[r] = t;
+        plan.push((r, t, true));
     }
-    let (r, t) = last?;
+    let &(r, t, _) = plan.last()?;
+    route_plan(s, plan, adds)?;
     s.mixer.sel.clear();
     s.selected_mixer = t;
-    changed(&mut s.session);
     Some(if rows.len() == 1 {
         format!("Routed {} to {}", crate::edit::rack::channel_name(&s.session, r), name(&s.session, t))
     } else {
         format!("Routed {} channels to free tracks", rows.len())
     })
+}
+
+/// Channel rows routed to mixer tracks (`plan`: row, track, whether the track is named after the channel), after `adds`
+/// new tracks at the end, as one undo step, "Mixer routing". `None` (with the message set) when it can't be applied.
+fn route_plan(s: &mut State, plan: Vec<(usize, u16, bool)>, adds: u16) -> Option<()> {
+    track_ids(s);
+    let commands = move |s: &State, _: &[serde_json::Value]| -> Vec<Command> {
+        let mut c = Vec::new();
+        for &(r, t, named) in &plan {
+            let (Some(ch), Some(track)) = (s.session.project.channels.get(r), id_of(s, t)) else { continue };
+            c.push(Command::SetChannel { channel: ch.id.0, name: None, color: None, volume: None, pan: None, pitch: None, enabled: None, track: Some(track) });
+            // Named after the channel, and coloured when it has a colour (`edit::mixer::name_after`).
+            if named && t != 0 {
+                let nm = crate::edit::rack::channel_name(&s.session, r);
+                c.extend(match ch.color {
+                    Some(col) => set_track!(s, t, name: nm, color: color_text(Some(col)).unwrap_or_default()),
+                    None => set_track!(s, t, name: nm),
+                });
+            }
+        }
+        c
+    };
+    let r = if adds == 0 {
+        let c = commands(s, &[]);
+        crate::control_ui::command(s, ROUTING, None, c)
+    } else {
+        crate::control_ui::command_then(s, ROUTING, vec![Command::AddTrack { at: None }; usize::from(adds)], commands)
+    };
+    match r {
+        Ok(_) => Some(()),
+        Err(e) => {
+            s.message = Some(e);
+            None
+        }
+    }
 }
 
 /// Select ▸ Tracks this one is routed to / Tracks routed to this one (spec: ui/mixer-track-commands.md §3), for every
@@ -949,47 +978,23 @@ fn remove_tracks(s: &mut State, gone: &[u16]) -> Option<String> {
     if gone.is_empty() {
         return Some("No unused mixer tracks".into());
     }
-    let mut new_of = std::collections::HashMap::new();
+    track_ids(s);
+    let tracks = gone.iter().filter_map(|&t| id_of(s, t)).collect();
+    // The numbers the kept tracks get, for the selection.
     let mut k = 0u16;
+    let mut new_of = std::collections::HashMap::new();
     for m in &s.session.project.mixer {
         if !gone.contains(&m.index) {
             new_of.insert(m.index, k);
             k += 1;
         }
     }
+    if let Some(e) = apply(s, "Delete mixer track", vec![Command::RemoveTracks { tracks }]) {
+        return Some(e);
+    }
     let m = |t: u16| new_of.get(&t).copied();
-    for &t in gone {
-        for slot in 0..10 {
-            s.session.fx_requests.push(FxReq::Delete { track: t, slot });
-        }
-    }
-    let mut map = Vec::new();
-    for (&o, &n) in &new_of {
-        if o != n {
-            map.extend((0..10u8).map(|slot| ((o, slot), (n, slot))));
-        }
-    }
-    s.session.fx_requests.push(FxReq::Remap(map));
-    let old = std::mem::take(&mut s.session.project.get_mut().mixer);
-    s.session.project.get_mut().mixer = old
-        .into_iter()
-        .filter_map(|t| {
-            let index = m(t.index)?;
-            let routes = t.routes.iter().filter_map(|&r| m(r)).collect();
-            let send_levels = t.send_levels.iter().filter_map(|&(d, l)| m(d).map(|d| (d, l))).collect();
-            Some(MixerTrack { index, routes, send_levels, ..t })
-        })
-        .collect();
-    s.session.project.get_mut().mixer.sort_by_key(|t| t.index);
-    for c in s.session.project.get_mut().channels.iter_mut() {
-        c.mixer_track = m(c.mixer_track).unwrap_or(0);
-    }
-    // Audio tracks follow their mixer track; one whose track goes is unassigned (spec: ui/playlist.md §6c).
-    s.session.project.get_mut().remap_link_mixers(m);
-    crate::follow::around(s, |s| follow_places(&mut s.session, &m, &|t, k| Some((m(t)?, k))));
     s.selected_mixer = m(s.selected_mixer).unwrap_or(1).min(inserts(&s.session));
     s.mixer.sel = s.mixer.sel.iter().filter_map(|&t| m(t)).collect();
-    changed(&mut s.session);
     Some(format!("Removed {} unused mixer track(s)", gone.len()))
 }
 
@@ -1030,11 +1035,9 @@ pub const INSERT_MAX: u16 = 100;
 pub fn insert_many(s: &mut State, n: u16, text: &str) -> Option<String> {
     let Ok(k) = text.trim().parse::<u16>() else { return Some(format!("Insert multiple: \"{}\" is not a number", text.trim())) };
     let k = k.clamp(1, INSERT_MAX);
-    edit(s, INSERT, Region::Project, |s| {
-        for _ in 0..k {
-            add_track(s, Some(n));
-        }
-    });
+    if let Err(e) = insert_tracks(s, Some(n), k) {
+        return Some(e);
+    }
     Some(format!("Inserted {k} mixer track{}", if k == 1 { "" } else { "s" }))
 }
 
@@ -1044,11 +1047,62 @@ fn move_track(s: &mut State, n: u16, d: i32) -> Option<String> {
     if n == 0 || o < 1 || o > i32::from(inserts(&s.session)) {
         return None;
     }
-    let o = o as u16;
-    let m = move |t: u16| if t == n { o } else if t == o { n } else { t };
-    let (a, b) = (n.min(o), n.max(o) + 1);
-    crate::follow::around(s, |s| renumber(&mut s.session, &m, a, b, 0));
-    None
+    track_ids(s);
+    apply(s, "Move mixer track", vec![Command::MoveTrack { track: id_of(s, n)?, to: o as u16 }])
+}
+
+/// `k` new tracks inserted before track `at` (else after the last one in use), as one undo step. Returns the last new
+/// track's number.
+fn insert_tracks(s: &mut State, at: Option<u16>, k: u16) -> Result<u16, String> {
+    let at = at.map(|n| n.clamp(1, inserts(&s.session) + 1));
+    let r = crate::control_ui::command(s, INSERT, None, vec![Command::AddTrack { at }; usize::from(k)])?;
+    Ok(number_of(s, r.last()))
+}
+
+/// The number of the track a command's result names (`{"track": id}`); the master when none.
+fn number_of(s: &State, result: Option<&serde_json::Value>) -> u16 {
+    let id = result.and_then(|v| v["track"].as_u64());
+    s.session.project.mixer.iter().find(|m| Some(u64::from(m.id.0)) == id).map_or(0, |m| m.index)
+}
+
+/// Open mixer track state: the saved state in `path` onto track `n`, its old effects going; one undo step.
+fn load_state(s: &mut State, n: u16, path: &std::path::Path) -> Option<String> {
+    if crate::mixer_state::load(path).is_none() {
+        return Some(unreadable(path));
+    }
+    track_ids(s);
+    let c = Command::LoadTrackState { track: id_of(s, n)?, path: path.to_string_lossy().into_owned(), named: false };
+    apply(s, "Open mixer track state", vec![c]).or_else(|| Some(state_taken(s, n, path)))
+}
+
+/// Insert mixer track state: a new track before track `n` takes the saved state in `path` with its name and colour;
+/// one undo step.
+fn insert_state(s: &mut State, n: u16, path: &std::path::Path) -> Option<String> {
+    if crate::mixer_state::load(path).is_none() {
+        return Some(unreadable(path));
+    }
+    let p = path.to_string_lossy().into_owned();
+    let then = |_: &State, r: &[serde_json::Value]| -> Vec<Command> {
+        let Some(track) = r.first().and_then(|v| v["track"].as_u64()) else { return Vec::new() };
+        vec![Command::LoadTrackState { track: track as u32, path: p, named: true }]
+    };
+    match crate::control_ui::command_then(s, INSERT, vec![Command::AddTrack { at: Some(n.max(1)) }], then) {
+        Ok(r) => {
+            let t = number_of(s, r.first());
+            Some(state_taken(s, t, path))
+        }
+        Err(e) => Some(e),
+    }
+}
+
+fn unreadable(path: &std::path::Path) -> String {
+    format!("Couldn't read the mixer track state {}", path.display())
+}
+
+/// What a track taking a saved state says.
+fn state_taken(s: &State, n: u16, path: &std::path::Path) -> String {
+    let file = path.file_stem().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    format!("{} takes the mixer track state \"{file}\"", name(&s.session, n))
 }
 
 /// Shift+wheel over track `n`'s strip: it becomes the only selected track and moves one place per notch, left for
@@ -1073,7 +1127,12 @@ pub fn wheel_move(app: &mut App, n: u16, notches: i32) {
 
 /// Deletes track `n`: later tracks move one left, a default track is added at the end (§6.1 Delete).
 pub fn delete_track(s: &mut State, n: u16) -> Option<String> {
-    crate::follow::around(s, |s| delete_track_in(&mut s.session, n))
+    if n == 0 || n > inserts(&s.session) {
+        return Some("The master track can't be deleted".into());
+    }
+    track_ids(s);
+    let label = name(&s.session, n);
+    apply(s, "Delete mixer track", vec![Command::DeleteTrack { track: id_of(s, n)? }]).or_else(|| Some(format!("Deleted {label}")))
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1403,13 +1462,9 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     }
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
     let step = match &c {
-        MCmd::RouteChannels { .. } => Some(ROUTING),
-        MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
         // The original's History names (spec: ui/one-click-recording.md §1).
         MCmd::AssignAudio(_) => Some(crate::track_links::ASSIGN_AUDIO),
         MCmd::UnassignAudio(_) => Some(crate::track_links::UNASSIGN_AUDIO),
-        MCmd::MoveLeft(_) | MCmd::MoveRight(_) => Some("Move mixer track"),
-        MCmd::InsertOne(_) => Some(INSERT),
         MCmd::AddEffect(..) | MCmd::AddContainer(_) => Some("Add effect"),
         MCmd::SlotDelete(_) => Some("Remove effect"),
         MCmd::SlotMove(..) => Some("Move effect"),
@@ -1419,8 +1474,6 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::MemberAddInst(..) => Some(crate::container::ADD_INSTRUMENT),
         MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..) => Some(crate::container::REPLACE),
         MCmd::RemoveTeslasNow => Some("Remove audio editors"),
-        MCmd::OpenState(..) => Some("Open mixer track state"),
-        MCmd::InsertState(..) => Some(INSERT),
         _ => None,
     };
     if let Some(name) = step {
@@ -1594,11 +1647,8 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         | MCmd::ResetRouting(_)
         | MCmd::UnrouteTo(_)
         | MCmd::Route { .. } => None,
-        MCmd::OpenState(n, p) => open_state(&mut s.session, n, &p, false),
-        MCmd::InsertState(n, p) => {
-            let n = add_track(s, Some(n.max(1)));
-            open_state(&mut s.session, n, &p, true)
-        }
+        MCmd::OpenState(n, p) => load_state(s, n, &p),
+        MCmd::InsertState(n, p) => insert_state(s, n, &p),
         MCmd::ViewWaveforms => {
             view_waveforms(s);
             None
@@ -1658,10 +1708,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::MoveLeft(n) => move_track(s, n, -1),
         MCmd::MoveRight(n) => move_track(s, n, 1),
         MCmd::Delete(n) => delete_track(s, n),
-        MCmd::InsertOne(n) => {
-            let n = add_track(s, Some(n.max(1)));
-            Some(format!("Inserted {}", name(&s.session, n)))
-        }
+        MCmd::InsertOne(n) => Some(insert_tracks(s, Some(n.max(1)), 1).map_or_else(|e| e, |n| format!("Inserted {}", name(&s.session, n)))),
         MCmd::InsertMultiple(n) => {
             crate::playlist::start_edit(s, EditTarget::MixerInsert(n.max(1)), at);
             if let Some(e) = s.playlist.edit.as_mut() {

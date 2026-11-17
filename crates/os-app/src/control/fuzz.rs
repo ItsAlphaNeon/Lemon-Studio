@@ -69,7 +69,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
     let pa: Vec<u32> = p.patterns.iter().map(|q| q.id.0).collect();
     let clips: Vec<u32> = p.arrangement().map(|x| x.clips.iter().map(|c| c.id.0).collect()).unwrap_or_default();
     let note = |r: &mut Rng, ch: &[u32]| json!({"channel": r.id(ch), "position": r.below(4) * 96, "length": 1 + r.below(96), "key": 36 + r.below(48), "velocity": r.below(128)});
-    match r.below(32) {
+    match r.below(34) {
         0 => json!({"op": "set_tempo", "bpm": 40.0 + r.unit() * 200.0}),
         1 => json!({"op": "set_swing", "swing": r.unit()}),
         2 => json!({"op": "set_main_volume", "volume": r.unit()}),
@@ -104,6 +104,8 @@ fn command(r: &mut Rng, a: &App) -> Value {
         28 => json!({"op": "set_track", "track": r.id(&tr), "separator": r.chance(0.5), "dock": (["left", "middle", "right"][r.below(3)]), "threaded": r.chance(0.5), "latency_in": r.unit() * 20.0, "latency_out": -r.unit() * 20.0}),
         29 => json!({"op": "reset_track", "track": r.id(&tr)}),
         30 => json!({"op": "set_auto_bypass", "on": r.chance(0.5)}),
+        31 => json!({"op": "move_track", "track": r.id(&tr), "to": 1 + r.below(8)}),
+        32 => json!({"op": "remove_tracks", "tracks": [r.id(&tr), r.id(&tr)]}),
         _ => json!({"op": "load_sample", "channel": r.id(&ch), "path": "/no/such/folder/snare.wav"}),
     }
 }

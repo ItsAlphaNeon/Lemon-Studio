@@ -435,6 +435,51 @@ pub fn delete_track_in(s: &mut crate::session::Session, n: u16) -> Option<String
     Some(format!("Deleted {label}"))
 }
 
+/// Deletes the tracks in `gone` (Trim unused tracks): the others close up in order, channels and sends follow them, the
+/// mixer gets shorter (spec: ui/mixer-track-commands.md §4). Returns the map of old track numbers to new ones.
+pub fn remove_tracks_in(s: &mut crate::session::Session, gone: &[u16]) -> std::collections::HashMap<u16, u16> {
+    let mut new_of = std::collections::HashMap::new();
+    let mut k = 0u16;
+    for m in &s.project.mixer {
+        if !gone.contains(&m.index) {
+            new_of.insert(m.index, k);
+            k += 1;
+        }
+    }
+    let m = |t: u16| new_of.get(&t).copied();
+    for &t in gone {
+        for slot in 0..10 {
+            s.fx_requests.push(FxReq::Delete { track: t, slot });
+        }
+    }
+    let mut map = Vec::new();
+    for (&o, &n) in &new_of {
+        if o != n {
+            map.extend((0..10u8).map(|slot| ((o, slot), (n, slot))));
+        }
+    }
+    s.fx_requests.push(FxReq::Remap(map));
+    let old = std::mem::take(&mut s.project.get_mut().mixer);
+    s.project.get_mut().mixer = old
+        .into_iter()
+        .filter_map(|t| {
+            let index = m(t.index)?;
+            let routes = t.routes.iter().filter_map(|&r| m(r)).collect();
+            let send_levels = t.send_levels.iter().filter_map(|&(d, l)| m(d).map(|d| (d, l))).collect();
+            Some(MixerTrack { index, routes, send_levels, ..t })
+        })
+        .collect();
+    s.project.get_mut().mixer.sort_by_key(|t| t.index);
+    for c in s.project.get_mut().channels.iter_mut() {
+        c.mixer_track = m(c.mixer_track).unwrap_or(0);
+    }
+    // Audio tracks follow their mixer track; one whose track goes is unassigned (spec: ui/playlist.md §6c).
+    s.project.get_mut().remap_link_mixers(m);
+    follow_places(s, &m, &|t, k| Some((m(t)?, k)));
+    changed(s);
+    new_of
+}
+
 /// Back to a fresh track (name, colour, levels, slots kept out), routed to the master (§6.1 Reset).
 pub fn reset_track(s: &mut crate::session::Session, n: u16) {
     if let Some(m) = track_mut(s, n) {

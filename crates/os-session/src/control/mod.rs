@@ -261,6 +261,9 @@ fn op(c: &Command) -> &'static str {
         Command::DeleteTrack { .. } => "delete_track",
         Command::SetTrack { .. } => "set_track",
         Command::ResetTrack { .. } => "reset_track",
+        Command::RemoveTracks { .. } => "remove_tracks",
+        Command::MoveTrack { .. } => "move_track",
+        Command::LoadTrackState { .. } => "load_track_state",
         Command::SetAutoBypass { .. } => "set_auto_bypass",
         Command::SetSend { .. } => "set_send",
         Command::SetEq { .. } => "set_eq",
@@ -299,8 +302,15 @@ pub fn run_in(s: &mut crate::session::Session, commands: Vec<Command>) -> Result
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
         let on_off = c.on_off_undo(s);
+        s.link_moves.clear();
         match c.apply(s) {
             Ok(done) => {
+                // The remote control links the command moved with what they drive (`remote::follow`) go back after
+                // it is undone.
+                let links: Vec<_> = std::mem::take(&mut s.link_moves).into_iter().map(|(from, to)| (to, from)).collect();
+                if !links.is_empty() {
+                    undo.push(Command::Put(Box::new(command::Taken::Links(links))));
+                }
                 undo.push(done.undo);
                 undo.extend(on_off);
                 results.push(done.result);

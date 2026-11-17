@@ -78,6 +78,7 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_track", "track": ins1, "name": "Drums", "color": "#102030", "volume": 0.6, "pan": 0.5, "stereo": -0.5, "polarity": true, "swap": true, "effects_enabled": false}),
         json!({"op": "set_track", "track": ins2, "separator": true, "dock": "right", "threaded": false, "latency_in": 2.5, "latency_out": -1.0}),
         json!({"op": "reset_track", "track": ins1}),
+        json!({"op": "move_track", "track": ins1, "to": 3}),
         json!({"op": "set_send", "from": ins1, "to": ins2, "level": 0.5}),
         json!({"op": "set_send", "from": ins1, "to": master}),
         json!({"op": "set_eq", "track": ins1, "band": 1, "gain": 600, "frequency": 30000}),

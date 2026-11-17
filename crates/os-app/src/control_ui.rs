@@ -60,8 +60,9 @@ pub fn command(s: &mut State, name: &'static str, run: Option<crate::history::Ru
     crate::history::settle(&mut s.session);
     let taken = |s: &State, commands: &[Command]| commands.iter().map(|c| c.undo_now(&s.session).ok()).collect::<Vec<_>>();
     let before = taken(s, &commands);
+    let adds = commands.iter().any(Command::adds);
     let (results, undo) = crate::follow::around(s, |s| run_in(&mut s.session, commands.clone()))?;
-    if taken(s, &commands) != before {
+    if adds || taken(s, &commands) != before {
         s.session.dirty = true;
         crate::history::record(&mut s.session, name, crate::history::Snap::Commands(undo));
         crate::history::done_with(&mut s.session);
@@ -69,6 +70,30 @@ pub fn command(s: &mut State, name: &'static str, run: Option<crate::history::Ru
             s.session.history.set_run(r);
         }
     }
+    Ok(results)
+}
+
+/// `command` in two parts: `first`, then the commands `then` makes from first's results (the ids of what it added),
+/// as one undo step named `name`. An error takes both back.
+pub fn command_then(s: &mut State, name: &'static str, first: Vec<Command>, then: impl FnOnce(&State, &[serde_json::Value]) -> Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    s.session.link_moves.clear();
+    crate::history::settle(&mut s.session);
+    let (mut results, mut undo) = crate::follow::around(s, |s| run_in(&mut s.session, first))?;
+    let more = then(s, &results);
+    match crate::follow::around(s, |s| run_in(&mut s.session, more)) {
+        Ok((r, mut u)) => {
+            results.extend(r);
+            u.append(&mut undo);
+            undo = u;
+        }
+        Err(e) => {
+            let _ = crate::follow::around(s, |s| take_back_in(&mut s.session, undo));
+            return Err(e);
+        }
+    }
+    s.session.dirty = true;
+    crate::history::record(&mut s.session, name, crate::history::Snap::Commands(undo));
+    crate::history::done_with(&mut s.session);
     Ok(results)
 }
 
