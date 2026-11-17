@@ -804,6 +804,12 @@ impl Plugins {
         self.hosted.get(&key)?.lock_for_state()?.save_state()
     }
 
+    /// The names of the instance's outputs past its main one (spec: audio/multi-output.md); empty when it has none or
+    /// nothing is hosted under `key`.
+    pub fn extra_output_names(&self, key: usize) -> Vec<String> {
+        self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).map(|p| p.extra_output_names()).unwrap_or_default()
+    }
+
 
     /// Marks the instance under `key`, just created, as a copy standing in for a plugin in another format
     /// (`Hosted::stand_in`).

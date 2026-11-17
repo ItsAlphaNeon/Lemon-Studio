@@ -145,6 +145,7 @@ pub fn render(o: &Opts) -> Result<(), String> {
     lemon_sampler::set_host_ticks(project.ppq);
     let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &app.plugins.instruments());
     crate::project_plugins::attach_effects(&mut e, &project, app.plugins.effects());
+    crate::project_plugins::attach_outputs(&mut e, &project);
     if o.from > 0 {
         e.seek_tick(o.from);
     } else {

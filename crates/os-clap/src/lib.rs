@@ -82,6 +82,15 @@ unsafe fn cstr(p: *const c_char) -> String {
     if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() }
 }
 
+/// A fixed-size name field's text, up to its first NUL (a field the plugin filled to the end has none).
+fn fixed_str(a: &[c_char]) -> String {
+    let bytes: Vec<u8> = a.iter().map(|&c| c as u8).take_while(|&b| b != 0).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Audio ports read per direction: a multi-output instrument may have a main port and 16 or more extra ones.
+const MAX_PORTS: u32 = 64;
+
 impl Library {
     /// Loads plugin `path`: a `.clap` file, or on macOS a `.clap` bundle (its `init` gets the bundle's path).
     pub fn load(path: &Path) -> Result<Arc<Library>, String> {
@@ -724,6 +733,8 @@ pub struct Plugin {
     /// extra outputs get unheard scratch (spec: audio/sidechain.md "Hosted plugins' input buses").
     aux_ins: Vec<usize>,
     aux_outs: Vec<usize>,
+    /// The names of the output ports after the main one (`extra_output_names`).
+    aux_out_names: Vec<String>,
     /// Buffers for channels the host has no audio for (a mono input's mix of both sides, channels beyond two, the
     /// other ports), the channel pointers and the port buffers of the current process call: sized at activation, so
     /// the audio thread never allocates.
@@ -1004,6 +1015,7 @@ impl Plugin {
                 outs: 2,
                 aux_ins: Vec::new(),
                 aux_outs: Vec::new(),
+                aux_out_names: Vec::new(),
                 scratch: Vec::new(),
                 in_ptrs: Vec::new(),
                 out_ptrs: Vec::new(),
@@ -1086,24 +1098,29 @@ impl Plugin {
     /// The channels of the plugin's input and output ports, the main one first (main thread, inactive: ports only
     /// change then), and buffers for them. Without the audio-ports extension the plugin is taken as stereo in and out.
     fn read_ports(&mut self) {
-        let ports = |is_input: bool| -> Option<Vec<usize>> {
+        let ports = |is_input: bool| -> Option<Vec<(usize, String)>> {
             let ports = unsafe { self.audio_ports.as_ref() }?;
-            let count = unsafe { ports.count.map_or(0, |c| c(self.plugin, is_input)) }.min(16);
+            let count = unsafe { ports.count.map_or(0, |c| c(self.plugin, is_input)) }.min(MAX_PORTS);
             Some(
                 (0..count)
                     .map(|i| {
                         // SAFETY: plain data the plugin fills.
                         let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
                         let ok = unsafe { ports.get.is_some_and(|g| g(self.plugin, i, is_input, &mut info)) };
-                        if ok { (info.channel_count as usize).min(64) } else { 2 }
+                        match ok {
+                            true => ((info.channel_count as usize).min(64), fixed_str(&info.name)),
+                            false => (2, String::new()),
+                        }
                     })
                     .collect(),
             )
         };
-        let (ins, outs) = (ports(true).unwrap_or_else(|| vec![2]), ports(false).unwrap_or_else(|| vec![2]));
-        (self.ins, self.outs) = (ins.first().copied().unwrap_or(0), outs.first().copied().unwrap_or(0));
-        self.aux_ins = ins.get(1..).unwrap_or_default().to_vec();
-        self.aux_outs = outs.get(1..).unwrap_or_default().to_vec();
+        let stereo = || vec![(2, String::new())];
+        let (ins, outs) = (ports(true).unwrap_or_else(stereo), ports(false).unwrap_or_else(stereo));
+        (self.ins, self.outs) = (ins.first().map_or(0, |p| p.0), outs.first().map_or(0, |p| p.0));
+        self.aux_ins = ins.iter().skip(1).map(|p| p.0).collect();
+        self.aux_outs = outs.iter().skip(1).map(|p| p.0).collect();
+        self.aux_out_names = outs.iter().enumerate().skip(1).map(|(i, p)| if p.1.trim().is_empty() { format!("Output {}", i + 1) } else { p.1.trim().to_string() }).collect();
         let (aux_in, aux_out): (usize, usize) = (self.aux_ins.iter().sum(), self.aux_outs.iter().sum());
         self.scratch = vec![0.0; (self.ins + self.outs + aux_in + aux_out) * self.max_frames as usize];
         self.in_ptrs = Vec::with_capacity(self.ins + aux_in);
@@ -1503,6 +1520,28 @@ impl Plugin {
         unsafe { (*self.state).load.is_some_and(|f| f(self.plugin, &stream)) }
     }
 
+    /// Copies the output ports after the main one, as the chunk of `n` frames just processed left them in scratch, to
+    /// frame `at` of `extra` (`Instrument::process_extra`'s layout): a mono port on both sides, a port of more than two
+    /// channels by its first two (spec: audio/multi-output.md).
+    /// `frames` is the whole block's length (`left.len()` of `process_extra`).
+    fn take_extra(&self, extra: &mut [f32], frames: usize, at: usize, n: usize) {
+        if extra.is_empty() || frames == 0 {
+            return;
+        }
+        let max = self.max_frames as usize;
+        let mut ch = self.ins + self.outs + self.aux_ins.iter().sum::<usize>();
+        for (k, &channels) in self.aux_outs.iter().enumerate() {
+            let Some(pair) = extra.get_mut(2 * k * frames..2 * (k + 1) * frames) else { break };
+            let (l, r) = pair.split_at_mut(frames);
+            let side = |c: usize| &self.scratch[(ch + c) * max..(ch + c) * max + n];
+            if channels > 0 {
+                l[at..at + n].copy_from_slice(side(0));
+                r[at..at + n].copy_from_slice(side(if channels > 1 { 1 } else { 0 }));
+            }
+            ch += channels;
+        }
+    }
+
     /// Processes `n` frames (≤ max) with the queued events whose time falls inside them.
     fn process_chunk(&mut self, left: &mut [f32], right: &mut [f32]) {
         self.process_chunk_in(left, right, None, None);
@@ -1856,7 +1895,9 @@ impl Plugin {
             right.copy_from_slice(left);
         }
         // CONTINUE / TAIL: the plugin says it is still going; CONTINUE_IF_NOT_QUIET: while its output is not silent.
-        let loud = left.iter().chain(right.iter()).any(|v| v.abs() > QUIET);
+        // Sound on an extra output port counts too (a drum's own output).
+        let extra = (aux_out_at..aux_out_at + self.aux_outs.iter().sum::<usize>()).any(|c| self.scratch[c * max..c * max + frames].iter().any(|v| v.abs() > QUIET));
+        let loud = extra || left.iter().chain(right.iter()).any(|v| v.abs() > QUIET);
         self.sounding = status == CLAP_PROCESS_CONTINUE || status == CLAP_PROCESS_TAIL || (status == CLAP_PROCESS_CONTINUE_IF_NOT_QUIET && loud);
         self.steady += i64::from(n);
         // Voices: the ends it reported, none once it sleeps, released voices ringing out (spec: audio/voices.md §2).
@@ -2034,6 +2075,10 @@ impl os_host::Plugin for Plugin {
         self.note_outputs
     }
 
+    fn extra_output_names(&self) -> Vec<String> {
+        self.aux_out_names.clone()
+    }
+
     fn take_automation_requests(&mut self) -> Vec<u32> {
         self.automation_requests()
     }
@@ -2208,8 +2253,24 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        self.render(rate, left, right, &mut []);
+    }
+
+    fn extra_outputs(&self) -> usize {
+        self.aux_outs.len()
+    }
+
+    fn process_extra(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
+        self.render(rate, left, right, extra);
+    }
+}
+
+impl Plugin {
+    /// An instrument's block (`Instrument::process_extra`): `extra` receives the output ports after the main one.
+    fn render(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
+        extra.fill(0.0);
         if self.rate != rate {
             // Activation is a main-thread call: ask the UI to do it and stay silent until then.
             if debug() && self.wanted_rate.load(Ordering::Acquire) != rate {
@@ -2242,6 +2303,7 @@ impl os_engine::Instrument for Plugin {
             self.chunk_song = song.map(|s| s.advanced(at as u64, rate));
             let (l, r) = (&mut left[at..at + n], &mut right[at..at + n]);
             self.process_chunk(l, r);
+            self.take_extra(extra, left.len(), at, n);
             at += n;
         }
         if debug() {
@@ -2391,6 +2453,8 @@ impl Drop for Plugin {
 
 #[cfg(test)]
 mod mono_mock;
+#[cfg(test)]
+mod multi_mock;
 #[cfg(all(test, unix, not(target_os = "macos")))]
 mod timer_mock;
 #[cfg(test)]
@@ -2482,6 +2546,37 @@ mod tests {
         p.audio_ports = ptr::null();
         p.read_ports();
         assert_eq!((p.ins, p.outs), (2, 2));
+    }
+
+    /// A second output port is the plugin's first extra output, by its port's name: `process` leaves it out, and
+    /// `process_extra` gives it after the main output, left then right, across a block boundary (spec:
+    /// audio/multi-output.md §2).
+    #[test]
+    fn a_second_output_port_is_an_extra_output() {
+        use crate::multi_mock::ENTRY;
+        use os_engine::Instrument as _;
+        let entry = &ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Multi Test.clap")) }.expect("mock");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 48000));
+        assert_eq!(p.extra_outputs(), 1);
+        assert_eq!(os_host::Plugin::extra_output_names(&p), ["Snare"]);
+        let n = MAX_FRAMES as usize + 904;
+        // An idle instrument sleeps (`asleep`): a note wakes it.
+        p.note_on(0, 60, 1.0);
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        p.process(48000, &mut l, &mut r);
+        let bad: Vec<(usize, f32, f32)> = l.iter().zip(&r).enumerate().filter(|(_, (a, b))| (*a - 0.25).abs() > 1e-6 || (*b - 0.25).abs() > 1e-6).map(|(i, (a, b))| (i, *a, *b)).take(5).collect();
+        assert!(bad.is_empty(), "{bad:?} of {n}");
+        let (mut l, mut r, mut extra) = (vec![0.0f32; n], vec![0.0f32; n], vec![9.0f32; 2 * n]);
+        p.process_extra(48000, &mut l, &mut r, &mut extra);
+        assert!(l.iter().chain(&r).all(|v| (v - 0.25).abs() < 1e-6));
+        assert!(extra[..n].iter().all(|&v| v == 0.5), "left");
+        assert!(extra[n..].iter().all(|&v| v == -0.5), "right");
+        // More room than outputs: the rest is silence.
+        let mut extra = vec![9.0f32; 4 * 64];
+        p.process_extra(48000, &mut l[..64], &mut r[..64], &mut extra);
+        assert!(extra[128..].iter().all(|&v| v == 0.0));
     }
 
     /// A plugin with ports besides its main ones (Lemon Limiter's sidechain input) gets a buffer for every port, as
