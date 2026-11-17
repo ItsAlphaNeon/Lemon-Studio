@@ -126,6 +126,41 @@ fn on_pattern(s: &mut State, name: &'static str, run: Option<crate::history::Run
     r.err()
 }
 
+/// The shown pattern's loops changed by `c`, one step named `name` (`run`: a loop box's drag), which is no unsaved
+/// change (spec: ui/undo-steps.md).
+fn set_loops(s: &mut State, name: &'static str, run: Option<crate::history::Run>, c: LoopChange) {
+    if c == LoopChange::default() {
+        return;
+    }
+    crate::mixer::track_ids(s);
+    let dirty = s.session.dirty;
+    let make = |s: &State, pattern| {
+        let ids: std::collections::HashMap<u16, u32> = s.session.project.channels.iter().map(|ch| (ch.index, ch.id.0)).collect();
+        let loops = c.loops.iter().filter_map(|&(ch, value)| Some(crate::control::command::LoopIn { channel: *ids.get(&ch)?, value })).collect();
+        vec![Command::SetLoops { pattern, mode: c.mode, loops }]
+    };
+    if let Some(e) = on_pattern(s, name, run, false, make) {
+        s.message = Some(e);
+    }
+    s.session.dirty = dirty;
+}
+
+/// The loop icon: loop mode on or off, one step (the window width follows the loop boxes, `relayout`).
+pub fn toggle_loop_mode(s: &mut State) {
+    relayout(s, |s| {
+        let c = loop_mode_change(&s.session, !loop_mode(&s.session));
+        set_loops(s, crate::history::LOOP_MODE, None, c);
+    });
+}
+
+/// A loop box set to `v` (a drag's moves join the drag's step, `drag`; a wheel notch is a step of its own); the hint.
+pub fn loop_box(s: &mut State, r: usize, v: i32, drag: bool) -> String {
+    let (c, hint) = loop_box_change(&s.session, r, v);
+    let run = drag.then_some(crate::history::Run::Loop(r));
+    set_loops(s, crate::history::LOOP_POINT, run, LoopChange { mode: None, loops: c.into_iter().collect() });
+    hint
+}
+
 /// Rows' notes in the shown pattern replaced (`rows`: each row with its new notes), one step, "Step seq edit".
 fn set_rows_notes(s: &mut State, rows: Vec<(usize, Vec<Note>)>) -> Option<String> {
     crate::mixer::track_ids(s);
@@ -1552,12 +1587,10 @@ fn ask_stretch(app: &mut App, all: bool, method: i32, sel: &[usize]) {
 /// Rows `rows` take stretch method `method`, their TIME, PITCH and MUL kept: the channel's sound settings, which the
 /// engine plays and the project saves, and its Lemon Sampler (spec: ui/channel-switches.md §1).
 pub fn set_stretch(app: &mut App, rows: &[usize], method: i32) {
-    for &r in rows {
-        let Some(c) = app.state.session.project.get_mut().channels.get_mut(r) else { continue };
-        c.sound.stretch[3] = method as u32;
-        app.state.session.plugins.set_sampler_stretch(r, &c.sound);
+    let s = &mut app.state;
+    if let Some(e) = set_rows(s, SETTINGS, rows, |s, r| set_channel!(s, r, stretch: method as u32)) {
+        s.message = Some(e);
     }
-    app.state.session.dirty = true;
 }
 
 /// Every selected channel (`rows`) takes declick mode `mode`: the channel's sound settings, which the engine plays, and
@@ -1873,16 +1906,11 @@ pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     let s = &mut app.state;
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
     let path = crate::data_folder_ui::adopt(s, &p.to_string_lossy());
-    if r < s.session.project.channels.len() {
-        crate::history::load_sample(&mut s.session, r);
+    crate::mixer::track_ids(s);
+    let Some(channel) = ch_id(s, r) else { return };
+    if let Some(e) = apply(s, crate::history::LOAD_SAMPLE, vec![Command::LoadSample { channel, path }]) {
+        s.message = Some(e);
     }
-    if let Some(ch) = s.session.project.get_mut().channels.get_mut(r) {
-        auto_name(&crate::settings_file::store(), ch, &p);
-        read_tags(&crate::settings_file::store(), ch, &p);
-        ch.sample_path = Some(path.clone());
-    }
-    s.session.sample_loads.push((r, path));
-    s.session.dirty = true;
 }
 
 /// Run a rack menu command. Returns a status message.
@@ -1890,7 +1918,6 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md); Cut, Paste, Fill
     // and Rotate record their own.
     let step = match c {
-        RCmd::Burn(_) => Some("Burn loops"),
         RCmd::AssignInstrument(_) => Some(crate::track_links::ASSIGN_INSTRUMENT),
         _ => None,
     };
@@ -2122,14 +2149,11 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::LoopType(t) => {
-            loop_step(&mut s.session, LOOP_MODE_STEP);
-            set_loop_type(&mut s.session, t);
+            let c = loop_type_change(&mut s.session, t);
+            set_loops(s, crate::history::LOOP_MODE, None, c);
             None
         }
-        RCmd::Burn(all) => {
-            burn(s, all);
-            None
-        }
+        RCmd::Burn(all) => burn(s, all),
         RCmd::SelectUnused => {
             s.rack.sel = unused(&s.session);
             Some(format!("{} unused channel(s) selected", s.rack.sel.len()))
@@ -2314,19 +2338,32 @@ pub fn play_project(s: &State) -> Project {
 }
 
 /// Loop button > Burn: write the loops into the current pattern's notes and drop the loop lengths.
-fn burn(s: &mut State, all: bool) {
+fn burn(s: &mut State, all: bool) -> Option<String> {
     let looping = loop_rows(&s.session);
     let rows: Vec<usize> = if all { looping } else { s.rack.sel.iter().copied().filter(|r| looping.contains(r)).collect() };
     let mut p = s.session.project.clone();
     expand_loops(&mut p, &s.session, Some(&rows));
-    let n = s.pattern();
-    if let (Some(src), Some(dst)) = (p.pattern(n).cloned(), s.session.project.get_mut().patterns.iter_mut().find(|x| x.number == n)) {
-        dst.notes = src.notes;
-    }
-    for r in rows {
-        put_loop(&mut s.session, r, None);
-    }
-    s.session.dirty = true;
+    let burnt = p.pattern(s.pattern()).map(|q| q.notes.clone()).unwrap_or_default();
+    crate::mixer::track_ids(s);
+    // Each row's notes as the loops played them, and its loop gone.
+    let parts: Vec<(u32, Vec<Note>, Option<(u16, Option<u32>)>)> = rows
+        .iter()
+        .filter_map(|&r| {
+            let ch = s.session.project.channels.get(r)?;
+            Some((ch.id.0, burnt.iter().filter(|n| n.channel == ch.index).copied().collect(), loop_put(&s.session, r, None)))
+        })
+        .collect();
+    on_pattern(s, "Burn loops", None, false, |_, pattern| {
+        let mut c: Vec<Command> = parts
+            .iter()
+            .map(|(channel, notes, _)| Command::SetNotes { pattern, channel: Some(*channel), notes: notes.iter().map(|n| crate::control::command::NoteIn::of(n, *channel)).collect() })
+            .collect();
+        let loops: Vec<crate::control::command::LoopIn> = parts.iter().filter_map(|(channel, _, l)| l.map(|(_, value)| crate::control::command::LoopIn { channel: *channel, value })).collect();
+        if !loops.is_empty() {
+            c.push(Command::SetLoops { pattern, mode: None, loops });
+        }
+        c
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -2602,6 +2639,20 @@ mod tests {
         assert_eq!(a.state.session.history.newest_done(), Some(LOOP_MODE_STEP));
         assert!(loop_mode(&a.state.session) && !a.unsaved());
         assert!(crate::history_ui::undo(&mut a.state).is_some());
+        assert!(!loop_mode(&a.state.session));
+        // The icon and a loop box's drag, through their commands: a step each, no unsaved change.
+        a.mark_saved();
+        let n = a.state.session.history.done;
+        toggle_loop_mode(&mut a.state);
+        assert!(loop_mode(&a.state.session) && !a.unsaved());
+        loop_box(&mut a.state, 0, 3, true);
+        loop_box(&mut a.state, 0, 5, true);
+        assert_eq!(loop_len_of(&a.state.session, 0), Some(5));
+        assert!(!a.unsaved());
+        assert_eq!(a.state.session.history.done, n + 2, "the drag's moves are one step");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(loop_len_of(&a.state.session, 0), None);
+        crate::history_ui::undo(&mut a.state);
         assert!(!loop_mode(&a.state.session));
     }
 

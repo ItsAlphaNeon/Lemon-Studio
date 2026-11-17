@@ -1253,13 +1253,11 @@ fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<Str
     }
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
     let path = crate::data_folder_ui::adopt(s, path);
-    crate::history::load_sample(&mut s.session, row);
-    let ch = &mut s.session.project.get_mut().channels[row];
-    crate::rack::auto_name(&s.session.settings, ch, std::path::Path::new(&path));
-    crate::rack::read_tags(&s.session.settings, ch, std::path::Path::new(&path));
-    ch.sample_path = Some(path.clone());
-    s.session.sample_loads.push((row, path));
-    s.session.dirty = true;
+    crate::mixer::track_ids(s);
+    let channel = s.session.project.channels[row].id.0;
+    if let Err(e) = crate::control_ui::command(s, crate::history::LOAD_SAMPLE, None, vec![crate::control::command::Command::LoadSample { channel, path }]) {
+        return Some(e);
+    }
     Some(format!("Sent {label} to the selected channel"))
 }
 

@@ -33,6 +33,11 @@ use crate::prefs;
 /// The history's first entry: the project as opened or reset.
 pub const LAST_RESET: &str = "Last reset";
 /// A step-sequencer step click (FL's name).
+/// The loop icon and the loop type (spec: ui/undo-steps.md).
+pub const LOOP_MODE: &str = "Set pattern loop mode";
+/// A loop box (spec: ui/undo-steps.md).
+pub const LOOP_POINT: &str = "Set advanced looping settings";
+
 pub const STEP_SEQ_EDIT: &str = "Step seq edit";
 /// A sample loaded into a channel (FL's name; spec: ui/settings-choices.md "Undo history: the four checks").
 pub const LOAD_SAMPLE: &str = "Load channel sample(s)";
@@ -219,6 +224,8 @@ pub enum Run {
     Gesture(u64),
     /// The steps a press in the step sequencer paints, with the drag that follows.
     Steps,
+    /// A loop box dragged.
+    Loop(usize),
 }
 
 /// A channel control a run of changes goes to (`Run::Channel`).
@@ -250,7 +257,7 @@ impl History {
     /// ends, so the next drag or run of notches is a step of its own, as in FL (spec: ui/undo-steps.md). The tempo
     /// tapper's taps, a plugin's own values, a controller's and a client's gesture run on.
     pub fn end_gesture_run(&mut self) {
-        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..) | Run::Steps)) {
+        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..) | Run::Steps | Run::Loop(_))) {
             self.run = None;
         }
     }

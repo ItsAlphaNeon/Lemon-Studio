@@ -5889,7 +5889,7 @@ impl App {
                     self.invalidate();
                 }
                 Drag::RackLoopLen { row, y0, v0 } => {
-                    let hint = crate::edit::rack::set_loop_box(&mut self.state.session, row, v0 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32);
+                    let hint = crate::rack::loop_box(&mut self.state, row, v0 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32, true);
                     self.hint = Cow::Owned(hint);
                     self.invalidate();
                 }
@@ -7676,9 +7676,8 @@ impl App {
                 return None;
             }
             Some(Action::RackLoopBox(i)) => {
-                crate::edit::rack::loop_step(&mut self.state.session, crate::rack::LOOP_POINT_STEP);
                 let v = crate::edit::rack::loop_box_value(&self.state.session, i) + d;
-                crate::edit::rack::set_loop_box(&mut self.state.session, i, v);
+                crate::rack::loop_box(&mut self.state, i, v, false);
                 return None;
             }
             // Shift+wheel over a channel's name button moves the channel (spec: ui/channel-rack.md §13).
@@ -9217,18 +9216,10 @@ impl App {
             Action::RackDots => self.drag = Some(Drag::RackDots { x0: mouse.0, p0: self.state.rack.name_pct }),
             Action::RackSpeaker => self.rack_speaker(),
             Action::RackLen => self.drag = Some(Drag::RackLen { y0: mouse.1, v0: rk::len_value(&self.state.session) }),
-            Action::RackLoop => {
-                let s = &mut self.state;
-                rk::loop_step(&mut s.session, rk::LOOP_MODE_STEP);
-                rk::relayout(s, |s| {
-                    let on = !rk::loop_mode(&s.session);
-                    rk::set_loop_mode(&mut s.session, on);
-                });
-                s.session.dirty = true;
-            }
+            Action::RackLoop => rk::toggle_loop_mode(&mut self.state),
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
             Action::RackLoopBox(i) => {
-                rk::loop_step(&mut self.state.session, rk::LOOP_POINT_STEP);
+                self.state.session.history.end_run_of(crate::history::Run::Loop(i));
                 self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state.session, i) });
             }
             Action::RackGraphArea => {

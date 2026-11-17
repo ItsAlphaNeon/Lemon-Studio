@@ -116,6 +116,9 @@ pub enum Command {
         /// Lock active / mute state: solos leave the channel as it is. An undo of another step leaves the lock as it is.
         #[serde(default)]
         locked: Option<bool>,
+        /// A sampler's time stretch method (`os_model::stretch_mode`), its time, pitch and multiplier kept.
+        #[serde(default)]
+        stretch: Option<u32>,
     },
     /// A sample file into a sampler channel (empty: none).
     LoadSample { channel: u32, path: String },
@@ -281,6 +284,16 @@ pub enum Command {
     },
     /// `notes` are added to the pattern.
     AddNotes { pattern: u32, notes: Vec<NoteIn> },
+    /// The pattern's step sequencer loops (spec: ui/channel-rack.md §15): `mode` 0 off, 1 Loop step channels, 2 Loop all
+    /// channels, 3 Advanced looping; each of `loops` sets a channel's loop value as the file keeps it (a length in steps,
+    /// a loop point's code, Bar), `null` for none.
+    SetLoops {
+        pattern: u32,
+        #[serde(default)]
+        mode: Option<u8>,
+        #[serde(default)]
+        loops: Vec<LoopIn>,
+    },
     /// Step `step` (a sixteenth) of the channel's row in the pattern on or off, as a click in the step sequencer: on adds
     /// a step note (or brings back its notes when they are muted), off removes the notes inside the step, or mutes
     /// them with `mute` (the rack's "Mute removed steps").
@@ -434,6 +447,15 @@ pub struct NoteIn {
     /// without one, or with another, gets a new id. `add_notes` takes none: its notes are new.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u32>,
+}
+
+/// A channel's loop value (`Command::SetLoops`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopIn {
+    pub channel: u32,
+    #[serde(default)]
+    pub value: Option<u32>,
 }
 
 impl NoteIn {
@@ -856,6 +878,7 @@ impl Command {
             Command::SetPattern { .. } => "Pattern settings",
             Command::SetNotes { .. } | Command::AddNotes { .. } => "Edit notes",
             Command::SetStep { .. } => crate::history::STEP_SEQ_EDIT,
+            Command::SetLoops { .. } => crate::history::LOOP_MODE,
             Command::AddClip { .. } => "Add clip",
             Command::DeleteClip { .. } => "Delete clip",
             Command::SetClip { .. } => "Edit clip",
@@ -909,6 +932,7 @@ impl Command {
             cut: None,
             cut_by: None,
             locked: None,
+            stretch: None,
         }
     }
 
@@ -944,7 +968,7 @@ impl Command {
             Command::ShiftPatterns { .. } | Command::MovePattern { .. } | Command::ClonePattern { .. } | Command::SplitPattern { .. } | Command::SetPatternSignature { .. } => {
                 Taken::Project(Box::new(Side::of(s)))
             }
-            Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } | Command::SetStep { pattern, .. } | Command::TransposePattern { pattern, .. } => {
+            Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } | Command::SetStep { pattern, .. } | Command::SetLoops { pattern, .. } | Command::TransposePattern { pattern, .. } => {
                 Taken::Pattern(Box::new(p.patterns[pattern_place(p, *pattern)?].clone()))
             }
             Command::AddClip { .. } | Command::DeleteClip { .. } | Command::SetClip { .. } | Command::SetPlaylistTrack { .. } => match p.arrangement() {
@@ -1271,7 +1295,7 @@ impl Command {
                 crate::edit::rack::remap_in(s, &map);
                 none
             }
-            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked } => {
+            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch } => {
                 let track = track.map(|t| track_number(&s.project, t)).transpose()?;
                 if declick.is_some_and(|d| d > crate::edit::rack::DECLICK_MAX) {
                     return Err(format!("declick is 0..={}", crate::edit::rack::DECLICK_MAX));
@@ -1324,11 +1348,18 @@ impl Command {
                     ch.rack.locked = v;
                 }
                 let sampler = ch.kind.is_sampler();
+                if let Some(v) = stretch {
+                    ch.sound.stretch[3] = v;
+                }
+                let sound = ch.sound.clone();
                 if let Some(v) = declick {
-                    ch.sound.declick = v;
+                    s.project.get_mut().channels[row].sound.declick = v;
                     if sampler {
                         crate::edit::rack::sync_declick(s, row);
                     }
+                }
+                if stretch.is_some() && sampler {
+                    s.plugins.set_sampler_stretch(row, &sound);
                 }
                 if sampler && (swing.is_some() || truncate_swing.is_some() || cut.is_some() || cut_by.is_some()) {
                     s.control.misc.push(row);
@@ -1699,6 +1730,25 @@ impl Command {
                 p.notes.sort_by_key(|n| (n.position, n.channel));
                 Ok(ids)
             }
+            Command::SetLoops { pattern, mode, loops } => {
+                let place = pattern_place(&s.project, pattern)?;
+                if mode.is_some_and(|m| m > 3) {
+                    return Err("mode is 0..=3".into());
+                }
+                let loops = loops.iter().map(|l| channel_row(&s.project, l.channel).map(|r| (s.project.channels[r].index, l.value))).collect::<Result<Vec<_>, _>>()?;
+                let p = &mut s.project.get_mut().patterns[place];
+                if let Some(m) = mode {
+                    p.loop_mode = (m > 0).then_some(u32::from(m));
+                }
+                for (ch, v) in loops {
+                    p.loops.retain(|l| l.0 != ch);
+                    if let Some(v) = v {
+                        p.loops.push((ch, v));
+                    }
+                }
+                p.loops.sort_by_key(|l| l.0);
+                none
+            }
             Command::SetStep { pattern, channel, step, on, mute } => {
                 let place = pattern_place(&s.project, pattern)?;
                 let ch = s.project.channels[channel_row(&s.project, channel)?].index;
@@ -1889,6 +1939,7 @@ fn put(s: &mut crate::session::Session, t: Taken) {
                     s.control.misc.push(row);
                 }
                 let declick = ch.sound.declick != c.sound.declick && c.kind.is_sampler();
+                let stretch = ch.sound.stretch != c.sound.stretch && c.kind.is_sampler();
                 // Muting is a step of its own, a lock, a zip and a filter group none: the channel stays as it is in
                 // those (`Mutes`).
                 let (on, locked, zipped, group) = (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group);
@@ -1896,6 +1947,10 @@ fn put(s: &mut crate::session::Session, t: Taken) {
                 (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group) = (on, locked, zipped, group);
                 if declick {
                     crate::edit::rack::sync_declick(s, row);
+                }
+                if stretch {
+                    let sound = s.project.channels[row].sound.clone();
+                    s.plugins.set_sampler_stretch(row, &sound);
                 }
             }
         }

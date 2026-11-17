@@ -621,6 +621,63 @@ pub fn fill_all(s: &mut crate::session::Session) {
     }
 }
 
+/// A change of the shown pattern's loops (`Command::SetLoops`): the mode (0 off, else its code), and channels' values
+/// by channel index.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LoopChange {
+    pub mode: Option<u8>,
+    pub loops: Vec<(u16, Option<u32>)>,
+}
+
+/// What `put_loop` changes: row `r`'s value, or nothing when it has it already.
+pub fn loop_put(s: &crate::session::Session, r: usize, v: Option<u32>) -> Option<(u16, Option<u32>)> {
+    let ch = ch_index(s, r)?;
+    let v = v.or((loop_mode(s) && loop_type(s) == 1).then_some(os_model::Pattern::LOOP_BAR));
+    (loop_value(s, r) != v).then_some((ch, v))
+}
+
+/// What `set_loop_box` changes, and the hint it shows.
+pub fn loop_box_change(s: &crate::session::Session, r: usize, v: i32) -> (Option<(u16, Option<u32>)>, String) {
+    if advanced(s) {
+        match LOOP_UNITS[v.clamp(0, LOOP_UNITS.len() as i32 - 1) as usize] {
+            Some(u) => (loop_put(s, r, Some(unit_code(u))), format!("Loop point: {}", u.name())),
+            None => (loop_put(s, r, None), "Loop point: don't loop".into()),
+        }
+    } else {
+        let v = v.clamp(1, MAX_STEPS as i32) as u32;
+        (loop_put(s, r, Some(v)), format!("Loop point: {v} steps"))
+    }
+}
+
+/// What `set_loop_mode` changes.
+pub fn loop_mode_change(s: &crate::session::Session, on: bool) -> LoopChange {
+    if loop_mode(s) == on {
+        return LoopChange::default();
+    }
+    let t = loop_type(s);
+    let mode = if on { LOOP_TYPE_CODES[usize::from(t.min(2))] as u8 } else { 0 };
+    let loops = if on && t == 1 { bar_for_all(s) } else { Vec::new() };
+    LoopChange { mode: Some(mode), loops }
+}
+
+/// What `set_loop_type` changes in the project, the type remembered (`Session::loop_type`) set already.
+pub fn loop_type_change(s: &mut crate::session::Session, t: u8) -> LoopChange {
+    (s.loop_type, s.loop_type_of) = (t, s.pattern());
+    if t == 2 && !loop_mode(s) {
+        return loop_mode_change(s, true);
+    }
+    if !loop_mode(s) {
+        return LoopChange::default();
+    }
+    let loops = if t == 1 { bar_for_all(s) } else { Vec::new() };
+    LoopChange { mode: Some(LOOP_TYPE_CODES[usize::from(t.min(2))] as u8), loops }
+}
+
+/// Bar for every row without a value (Loop all channels: FL writes one for each channel).
+fn bar_for_all(s: &crate::session::Session) -> Vec<(u16, Option<u32>)> {
+    (0..s.project.channels.len()).filter(|&r| loop_value(s, r).is_none()).filter_map(|r| Some((ch_index(s, r)?, Some(os_model::Pattern::LOOP_BAR)))).collect()
+}
+
 /// The loop icon (§15): loop mode on or off in the shown pattern, its type written while it is on.
 pub fn set_loop_mode(s: &mut crate::session::Session, on: bool) {
     if loop_mode(s) == on {
