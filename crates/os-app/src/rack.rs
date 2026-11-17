@@ -888,23 +888,6 @@ pub fn reorder(app: &mut App, order: &[usize]) {
     app.invalidate();
 }
 
-/// Where remote control link target `l` goes as rack rows move (`m`: a row's new row, `None` for one deleted; spec:
-/// audio/automation.md "Targets follow moves"); `None`: its row went.
-fn moved_link(l: crate::typein::Target, m: &dyn Fn(usize) -> Option<usize>) -> Option<crate::typein::Target> {
-    use crate::typein::Target as T;
-    Some(match l {
-        T::Knob(KnobId::ChanVol(r)) => T::Knob(KnobId::ChanVol(m(r)?)),
-        T::Knob(KnobId::ChanPan(r)) => T::Knob(KnobId::ChanPan(m(r)?)),
-        T::Knob(KnobId::AutoLfo(r, k)) => T::Knob(KnobId::AutoLfo(m(r)?, k)),
-        T::Knob(KnobId::MidiOut(r, k)) => T::Knob(KnobId::MidiOut(m(r)?, k)),
-        T::RackTrack(r) => T::RackTrack(m(r)?),
-        T::RackLed(r) => T::RackLed(m(r)?),
-        // A channel's plugin is hosted by its row.
-        T::Param(key, i) if key < crate::plugins::FX_KEY => T::Param(m(key)?, i),
-        l => l,
-    })
-}
-
 /// Channel `ch` comes back as the last row (a redone drop that made it, `history`); Lemon Sampler hosts it from its
 /// settings on the next tick.
 pub fn push_channel(s: &mut State, ch: os_model::Channel) {
@@ -944,44 +927,25 @@ pub fn remap_view(s: &mut State, map: &[Option<usize>]) {
 }
 
 /// Clone rows (§18): each copy goes right below its channel, named "<name> #2", same settings and mixer track,
-/// no steps; the hosted instrument is copied with its state. The clones become the selection.
+/// no steps; the hosted instrument is copied with its state (`Command::CloneChannel`). One step; the clones become the
+/// selection.
 pub fn clone_rows(app: &mut App, rows: &[usize]) {
-    let n = app.state.session.project.channels.len();
-    let rows: BTreeSet<usize> = rows.iter().copied().filter(|&r| r < n).collect();
-    if rows.is_empty() {
+    let s = &mut app.state;
+    crate::mixer::track_ids(s);
+    let rows: BTreeSet<usize> = rows.iter().copied().filter(|&r| r < s.session.project.channels.len()).collect();
+    let commands: Vec<Command> = rows.iter().filter_map(|&r| ch_id(s, r)).map(|channel| Command::CloneChannel { channel }).collect();
+    if commands.is_empty() {
         return;
     }
-    let mut order = Vec::new();
-    let mut sources = Vec::new();
-    for r in 0..n {
-        order.push(r);
-        if rows.contains(&r) {
-            let name = clone_name(&app.state.session, r);
-            let mut c = app.state.session.project.channels[r].clone();
-            let from = c.index;
-            c.index = app.state.session.project.channels.len() as u16;
-            c.name = Some(name);
-            // The copy starts unlocked and unzipped.
-            (c.rack.locked, c.rack.zipped) = (false, false);
-            // An automation clip's copy has its curve and targets (spec: ui/playlist.md §10a).
-            if let Some(mut a) = app.state.session.project.automation(from).cloned() {
-                a.channel = c.index;
-                app.state.session.project.get_mut().automations.push(a);
-            }
-            app.state.session.project.get_mut().channels.push(c);
-            order.push(app.state.session.project.channels.len() - 1);
-            sources.push(r);
+    let made = match crate::control_ui::command(s, "Clone channel", None, commands) {
+        Ok(r) => r,
+        Err(e) => {
+            s.message = Some(e);
+            return;
         }
-    }
-    let states: Vec<Option<(usize, Vec<u8>)>> = sources.iter().map(|&r| app.plugin_copy(r)).collect();
-    reorder(app, &order);
-    let new_rows: Vec<usize> = order.iter().enumerate().filter(|(_, o)| **o >= n).map(|(i, _)| i).collect();
-    for (row, st) in new_rows.iter().zip(states) {
-        if let Some((index, blob)) = st {
-            app.plugin_paste(*row, index, &blob);
-        }
-    }
-    let s = &mut app.state;
+    };
+    let ids: Vec<u32> = made.iter().filter_map(|v| v["channel"].as_u64()).map(|id| id as u32).collect();
+    let new_rows: Vec<usize> = s.session.project.channels.iter().enumerate().filter(|(_, c)| ids.contains(&c.id.0)).map(|(r, _)| r).collect();
     s.rack.sel = new_rows.iter().copied().collect();
     if let Some(&last) = new_rows.last() {
         s.selected_channel = last;
@@ -1021,30 +985,52 @@ pub fn ask_purge(s: &mut State) -> Option<String> {
     None
 }
 
-/// `delete_rows` as one undo step (their hosted instruments come back with an undo, `control::host`).
+/// Delete rows `rows` as one undo step: the channels, their notes and clips go (`Command::DeleteChannel`; their hosted
+/// instruments come back with an undo, `control::host`).
 pub fn delete_step(app: &mut App, rows: &[usize]) {
-    crate::control_ui::edit_app(app, crate::history::DELETE_CHANNEL, crate::control::command::Region::Project, |app| delete_rows(app, rows));
-}
-
-/// Delete rows now: the channels, their notes and clips go.
-pub fn delete_rows(app: &mut App, rows: &[usize]) {
-    let n = app.state.session.project.channels.len();
-    let order: Vec<usize> = (0..n).filter(|r| !rows.contains(r)).collect();
-    let first = rows.iter().copied().min().unwrap_or(0);
-    reorder(app, &order);
     let s = &mut app.state;
+    crate::mixer::track_ids(s);
+    let commands: Vec<Command> = rows.iter().filter_map(|&r| ch_id(s, r)).map(|channel| Command::DeleteChannel { channel }).collect();
+    if let Some(e) = apply(s, crate::history::DELETE_CHANNEL, commands) {
+        s.message = Some(e);
+        return;
+    }
+    let first = rows.iter().copied().min().unwrap_or(0);
     let r = first.min(s.session.project.channels.len().saturating_sub(1));
     s.rack.select_only(r);
     s.selected_channel = r;
     s.message = Some(if rows.len() == 1 { "Deleted the channel".into() } else { format!("Deleted {} channels", rows.len()) });
 }
 
-/// Move the selected channels one row up (`dir` -1) or down (+1).
-pub fn move_selected(app: &mut App, dir: i32) {
-    let n = app.state.session.project.channels.len();
-    let sel = app.state.rack.sel.clone();
+/// The rows in a new order (`order`: the old rows top to bottom, each once) by `Command::MoveChannel`, one step named
+/// `name`; none when the order is the same.
+fn reorder_step(s: &mut State, name: &'static str, order: &[usize]) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let want: Vec<u32> = order.iter().filter_map(|&r| ch_id(s, r)).collect();
+    let mut now: Vec<u32> = s.session.project.channels.iter().map(|c| c.id.0).collect();
+    if want.len() != now.len() {
+        return None;
+    }
+    let mut commands = Vec::new();
+    for (row, &id) in want.iter().enumerate() {
+        if now[row] != id {
+            let from = now.iter().position(|&x| x == id)?;
+            let c = now.remove(from);
+            now.insert(row, c);
+            commands.push(Command::MoveChannel { channel: id, row });
+        }
+    }
+    if commands.is_empty() {
+        return None;
+    }
+    apply(s, name, commands)
+}
+
+/// The order (old rows top to bottom) that moves the rows in `sel` one row up (`dir` -1) or down (+1), the others
+/// making room; `None` when one of them is at the edge already.
+fn moved_order(n: usize, sel: &BTreeSet<usize>, dir: i32) -> Option<Vec<usize>> {
     if sel.is_empty() || (dir < 0 && sel.contains(&0)) || (dir > 0 && sel.contains(&(n - 1))) {
-        return;
+        return None;
     }
     let mut order: Vec<usize> = (0..n).collect();
     if dir < 0 {
@@ -1060,8 +1046,18 @@ pub fn move_selected(app: &mut App, dir: i32) {
             }
         }
     }
-    reorder(app, &order);
+    Some(order)
 }
+
+/// Move the selected channels one row up (`dir` -1) or down (+1), one step, "Move channel".
+pub fn move_selected(app: &mut App, dir: i32) -> Option<String> {
+    let s = &mut app.state;
+    let order = moved_order(s.session.project.channels.len(), &s.rack.sel, dir)?;
+    reorder_step(s, MOVE, &order)
+}
+
+/// The undo step of channels moved or sorted.
+const MOVE: &str = "Move channel";
 
 /// Shift+wheel over channel `r`'s name button (§13): it becomes the only selected channel and moves one row per notch,
 /// up for `notches` > 0. While the mouse stays still, more notches move the same channel, which has left the cursor.
@@ -1072,17 +1068,23 @@ pub fn wheel_move(app: &mut App, r: usize, notches: i32) {
         _ => r,
     };
     app.state.rack.select_only(r);
-    // A "Move channel" step, as the menu's and Alt+Up / Down's moves are.
-    crate::control_ui::edit_app(app, "Move channel", crate::control::command::Region::Project, |app| {
-        for _ in 0..notches.unsigned_abs() {
-            move_selected(app, -notches.signum());
-        }
-    });
+    // A "Move channel" step, as the menu's and Alt+Up / Down's moves are: the notches' moves made one order.
+    let n = app.state.session.project.channels.len();
+    let (mut order, mut pos): (Vec<usize>, usize) = ((0..n).collect(), r);
+    for _ in 0..notches.unsigned_abs() {
+        let Some(o) = moved_order(n, &BTreeSet::from([pos]), -notches.signum()) else { break };
+        pos = o.iter().position(|&x| x == pos).unwrap_or(pos);
+        order = o.iter().map(|&x| order[x]).collect();
+    }
+    let s = &mut app.state;
+    if let Some(e) = reorder_step(s, MOVE, &order) {
+        s.message = Some(e);
+    }
     let now = app.state.rack.sel.first().copied().unwrap_or(r);
     app.state.rack.wheel_grab = Some((now, at));
 }
 
-pub fn sort(app: &mut App, by: SortBy) {
+pub fn sort(app: &mut App, by: SortBy) -> Option<String> {
     let s = &app.state;
     let mut order: Vec<usize> = (0..s.session.project.channels.len()).collect();
     let ch = |r: usize| &s.session.project.channels[r];
@@ -1099,7 +1101,7 @@ pub fn sort(app: &mut App, by: SortBy) {
             ChannelKind::Other(k) => 5 + u32::from(k),
         }),
     }
-    reorder(app, &order);
+    reorder_step(&mut app.state, MOVE, &order)
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1820,8 +1822,6 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md); Cut, Paste, Fill
     // and Rotate record their own.
     let step = match c {
-        RCmd::Clone(_) | RCmd::CloneSel => Some("Clone channel"),
-        RCmd::MoveSel(_) | RCmd::Sort(_) => Some("Move channel"),
         RCmd::Burn(_) => Some("Burn loops"),
         RCmd::AssignInstrument(_) => Some(crate::track_links::ASSIGN_INSTRUMENT),
         _ => None,
@@ -1855,8 +1855,8 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
     match c {
         RCmd::Clone(r) => clone_rows(app, &[r]),
         RCmd::CloneSel => clone_rows(app, &sel),
-        RCmd::MoveSel(d) => move_selected(app, d),
-        RCmd::Sort(by) => sort(app, by),
+        RCmd::MoveSel(d) => return move_selected(app, d),
+        RCmd::Sort(by) => return sort(app, by),
         RCmd::LoadSample(r) => {
             // Starts in the folder of the channel's sample, when it has one.
             let dir = app.state.session.project.channels.get(r).and_then(|c| c.sample_path.as_deref()).map(|p| crate::plugins::resolve_sample(&app.state.session.settings, p)).map(std::path::PathBuf::from);
@@ -3255,7 +3255,7 @@ mod tests {
         move_selected(&mut app, -1);
         assert_eq!(name(&app, 1), n2);
         assert!(app.state.session.project.patterns[0].notes.iter().any(|x| x.channel == 1), "the note moved with its channel");
-        delete_rows(&mut app, &[1]);
+        delete_step(&mut app, &[1]);
         assert_eq!(app.state.session.project.channels.len(), n);
         assert_eq!(name(&app, 1), n1);
         assert!(app.state.session.project.patterns[0].notes.iter().all(|x| usize::from(x.channel) < n));
@@ -3383,7 +3383,7 @@ mod tests {
         let names: Vec<Option<String>> = app.state.session.project.channels.iter().map(|c| c.name.clone()).collect();
         // Clone channel 0, delete channel 1, then set the rack state on the new rows.
         clone_rows(&mut app, &[0]);
-        delete_rows(&mut app, &[2]);
+        delete_step(&mut app, &[2]);
         let s = &mut app.state;
         s.session.project.get_mut().swing = Some(64);
         toggle_lock(&mut s.session, 1);
@@ -3995,6 +3995,28 @@ mod tests {
 
     /// Undo and redo of a load reach the channel's Lemon Sampler on the next tick: its sample, root note and stretch
     /// match the channel again, back to no sample at all; a channel a drop made loses its instrument and gets it back.
+    /// A clone's instrument is a copy of the original's as it plays now, not one made from the channel's settings: a
+    /// value set only on the instance comes along (`Command::CloneChannel`, hosted from the kept state on the tick).
+    #[test]
+    fn a_clone_copies_the_instrument_state() {
+        let mut app = App::new(None);
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
+        let r = sampler_row(&app);
+        app.plugin_tick();
+        assert!(app.state.session.plugins.set_param_named(r, crate::edit::rack::SAMPLER_DECLICK, 4.0));
+        let params = |app: &App, r: usize| {
+            let st = app.state.session.plugins.state(r).expect("hosted");
+            let (_, json) = crate::plugins::state_json(&st);
+            serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone()
+        };
+        let want = params(&app, r);
+        clone_rows(&mut app, &[r]);
+        app.plugin_tick();
+        assert_eq!(params(&app, r + 1), want, "the clone plays as the original");
+        assert_eq!(app.state.session.project.channels[r + 1].sound.declick, app.state.session.project.channels[r].sound.declick);
+    }
+
     #[test]
     fn the_hosted_sampler_follows_undo_and_redo() {
         use crate::history_ui::ctrl_z;

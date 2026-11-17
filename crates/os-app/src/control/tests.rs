@@ -215,11 +215,52 @@ fn rack_edits_are_one_step_each() {
         let t = a.state.session.project.channels[0].mixer_track + 1;
         crate::rack::set_mixer_track(&mut a.state, 0, t, None);
     });
+    // Clone, move, sort and delete: one step each.
+    let rows = |a: &App| a.state.session.project.channels.iter().map(|c| (c.id.0, c.name.clone())).collect::<Vec<_>>();
+    let shape = |a: &mut App, what: &str, edit: &dyn Fn(&mut App)| {
+        let (before, n) = (rows(a), steps(a));
+        edit(a);
+        let after = rows(a);
+        assert_ne!(before, after, "{what} changed nothing");
+        assert_eq!(steps(a), n + 1, "{what}: one step");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(rows(a), before, "{what}: undo");
+        crate::history_ui::redo(&mut a.state);
+        assert_eq!(rows(a).len(), after.len(), "{what}: redo");
+    };
+    shape(&mut a, "clone", &|a| crate::rack::clone_rows(a, &[0, 1]));
+    assert_eq!(a.state.session.project.channels[1].name.as_deref(), Some("Kick #2"));
+    a.state.rack.sel = [1].into_iter().collect();
+    shape(&mut a, "move", &|a| {
+        crate::rack::move_selected(a, 1);
+    });
+    shape(&mut a, "sort", &|a| {
+        crate::rack::sort(a, crate::rack::SortBy::Name);
+    });
+    shape(&mut a, "delete", &|a| crate::rack::delete_step(a, &[1, 2]));
     // The lock makes no step.
     let n = steps(&a);
     crate::rack::lock(&mut a.state, 0);
     assert!(a.state.session.project.channels[0].rack.locked);
     assert_eq!(steps(&a), n);
+}
+
+/// A remote control link on a rack row follows the row a command moves, and goes back with the undo.
+#[test]
+fn links_follow_rows_moved_by_commands() {
+    use crate::typein::Target;
+    let mut a = app();
+    let (ch, ..) = ids(&a);
+    let st = a.state.session.settings.clone();
+    crate::remote::set_links(&st, &[crate::remote::Link::new(0, 30, Target::RackLed(0))]);
+    let on = |st: &crate::settings_file::SettingsStore| crate::remote::links(st)[0].target;
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "move_channel", "channel": ch[0], "row": 2}))]).unwrap();
+    assert_eq!(on(&st), Target::RackLed(2));
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!(on(&st), Target::RackLed(0));
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!(on(&st), Target::RackLed(2));
+    crate::remote::set_links(&st, &[]);
 }
 
 #[test]

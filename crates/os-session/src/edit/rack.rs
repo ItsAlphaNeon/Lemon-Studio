@@ -331,6 +331,50 @@ pub fn clone_name(s: &crate::session::Session, r: usize) -> String {
     (2..).map(|k| format!("{base} #{k}")).find(|c| !taken(c)).expect("unbounded")
 }
 
+/// Clone of row `row` (§18): the copy goes right below it, named "<name> #2", with the same settings and mixer track,
+/// unlocked and unzipped, no steps; an automation clip's copy has its curve and targets (spec: ui/playlist.md §10a).
+/// Its row.
+pub fn clone_channel_in(s: &mut crate::session::Session, row: usize) -> usize {
+    let mut c = s.project.channels[row].clone();
+    let from = c.index;
+    c.id = os_model::Id::NONE;
+    c.name = Some(clone_name(s, row));
+    (c.rack.locked, c.rack.zipped) = (false, false);
+    let auto = s.project.automation(from).cloned();
+    crate::control::command::put_channel_back(s, row + 1, c);
+    if let Some(mut a) = auto {
+        a.channel = s.project.channels[row + 1].index;
+        a.points.iter_mut().for_each(|p| p.id = os_model::Id::NONE);
+        s.project.get_mut().automations.push(a);
+    }
+    row + 1
+}
+
+/// The remote control links on rack rows follow them (`map`: each old row's new row, `None` for one gone; spec:
+/// audio/automation.md "Targets follow moves"). A link whose row went goes.
+pub fn follow_links(s: &mut crate::session::Session, map: &[Option<usize>]) {
+    let m = |r: usize| map.get(r).copied().flatten();
+    crate::remote::follow(s, |l| moved_link(l, &m));
+}
+
+/// Where remote control link target `l` goes as rack rows move (`m`: a row's new row, `None` for one deleted);
+/// `None`: its row went.
+pub fn moved_link(l: crate::typein::Target, m: &dyn Fn(usize) -> Option<usize>) -> Option<crate::typein::Target> {
+    use crate::knob_id::KnobId;
+    use crate::typein::Target as T;
+    Some(match l {
+        T::Knob(KnobId::ChanVol(r)) => T::Knob(KnobId::ChanVol(m(r)?)),
+        T::Knob(KnobId::ChanPan(r)) => T::Knob(KnobId::ChanPan(m(r)?)),
+        T::Knob(KnobId::AutoLfo(r, k)) => T::Knob(KnobId::AutoLfo(m(r)?, k)),
+        T::Knob(KnobId::MidiOut(r, k)) => T::Knob(KnobId::MidiOut(m(r)?, k)),
+        T::RackTrack(r) => T::RackTrack(m(r)?),
+        T::RackLed(r) => T::RackLed(m(r)?),
+        // A channel's plugin is hosted by its row.
+        T::Param(key, i) if key < crate::plugins::FX_KEY => T::Param(m(key)?, i),
+        l => l,
+    })
+}
+
 /// The highest declick mode (spec: audio/declick.md).
 pub const DECLICK_MAX: u8 = 5;
 

@@ -733,6 +733,18 @@ impl Plugins {
         }
     }
 
+    /// The state of the instance under `key` kept in `stash` for `owner` too (a cloned channel, hosted from it on the
+    /// next tick as a channel back from an undo is: `control::host::follow_apply`).
+    pub fn stash_copy(&mut self, key: usize, owner: os_model::Id) {
+        let Some(h) = self.hosted.get(&key).filter(|h| !h.stopped()) else { return };
+        let Some((uid, state)) = h.lock_for_state().and_then(|p| Some((p.desc().uid(), p.save_state()?))) else { return };
+        self.stash.retain(|e| e.0 .0 != owner.0);
+        self.stash.push((owner, key >= FX_KEY, uid, state));
+        if self.stash.len() > STASH_MAX {
+            self.stash.remove(0);
+        }
+    }
+
     /// `keep` for an instance already taken out of `hosted`.
     fn keep_hosted(&mut self, h: &Hosted, fx: bool) {
         if h.owner.is_none() || h.stopped() {

@@ -77,6 +77,9 @@ pub enum Command {
     DeleteChannel { channel: u32 },
     /// The channel moves to rack row `row` (0 = top).
     MoveChannel { channel: u32, row: usize },
+    /// A copy of the channel right below it (as the rack's Clone does): "<name> #2", its settings, its mixer track and a
+    /// copy of its instrument, no notes. The result names its id.
+    CloneChannel { channel: u32 },
     /// Each setting given is set: name (empty = the default name), colour (`#rrggbb`, empty = the default), volume
     /// 0..=1 (0.78125 = the default), pan -1..=1, pitch in cents, enabled (the rack's mute light), mixer track (an id).
     SetChannel {
@@ -771,6 +774,7 @@ impl Command {
             Command::SetInfo { .. } => SONG_INFO,
             Command::SetProject { .. } => crate::history::PROJECT_SETTINGS,
             Command::AddChannel { .. } => "Add channel",
+            Command::CloneChannel { .. } => "Clone channel",
             Command::DeleteChannel { .. } => "Delete channel",
             Command::MoveChannel { .. } => "Move channel",
             Command::SetChannel { .. } => "Channel settings",
@@ -861,7 +865,7 @@ impl Command {
 
     /// A command that adds a thing: its undo takes it away, so applying it always changes the project.
     pub fn adds(&self) -> bool {
-        matches!(self, Command::AddChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::AddClip { .. })
+        matches!(self, Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::AddClip { .. })
     }
 
     pub fn undo_now(&self, s: &crate::session::Session) -> Result<Command, Error> {
@@ -909,7 +913,7 @@ impl Command {
             }
             Command::MoveChannel { channel, .. } => Taken::Row(*channel, channel_row(p, *channel)?),
             // What an add made is known once it is made (`apply`); this is not used.
-            Command::AddChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } => Taken::Gone(Thing::Channel(0)),
+            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } => Taken::Gone(Thing::Channel(0)),
             Command::DeleteChannel { channel } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Channel(*channel))?)),
             Command::DeletePattern { pattern } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Pattern(*pattern))?)),
             Command::DeleteTrack { track } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Track(*track))?)),
@@ -1038,14 +1042,25 @@ impl Command {
             _ => self.take(s)?,
         };
         let added = match &self {
-            Command::AddChannel { .. } => Some(Thing::Channel as fn(u32) -> Thing),
+            Command::AddChannel { .. } | Command::CloneChannel { .. } => Some(Thing::Channel as fn(u32) -> Thing),
             Command::AddTrack { .. } => Some(Thing::Track as fn(u32) -> Thing),
             Command::AddPattern { .. } => Some(Thing::Pattern as fn(u32) -> Thing),
             _ => None,
         };
         // A track added or deleted: the tracks' lights go back with it.
         let on = matches!(self, Command::AddTrack { .. } | Command::DeleteTrack { .. }).then(|| lights(&s.project));
+        // The remote control links on rack rows follow a command that moves rows (an undo puts them back as
+        // `Taken::Links`, not by following the rows again).
+        let rows_before = matches!(self, Command::MoveChannel { .. } | Command::DeleteChannel { .. } | Command::CloneChannel { .. })
+            .then(|| s.project.channels.iter().map(|c| c.id.0).collect::<Vec<u32>>());
         let result = self.change(s)?;
+        if let Some(before) = rows_before {
+            let now: std::collections::HashMap<u32, usize> = s.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
+            let map: Vec<Option<usize>> = before.iter().map(|id| now.get(id).copied()).collect();
+            if map.iter().enumerate().any(|(r, &m)| m != Some(r)) {
+                crate::edit::rack::follow_links(s, &map);
+            }
+        }
         s.dirty = true;
         // An add's undo removes what it made, by the id its result names.
         let taken = match added {
@@ -1177,6 +1192,15 @@ impl Command {
                 let map: Vec<Option<usize>> = (0..n).map(|r| (r != row).then(|| if r < row { r } else { r - 1 })).collect();
                 crate::edit::rack::remap_in(s, &map);
                 none
+            }
+            Command::CloneChannel { channel } => {
+                let row = channel_row(&s.project, channel)?;
+                let new = crate::edit::rack::clone_channel_in(s, row);
+                s.control.settle(s.project.get_mut());
+                let id = s.project.channels[new].id;
+                // Its instrument: a copy of the original's state, hosted on the next tick (the original keeps its row).
+                s.plugins.stash_copy(row, id);
+                Ok(id_result("channel", id))
             }
             Command::MoveChannel { channel, row: to } => {
                 let row = channel_row(&s.project, channel)?;
@@ -1927,7 +1951,7 @@ fn put_back(s: &mut crate::session::Session, back: Back) {
 }
 
 /// Channel `c` put back on `row`, the rows from there one down with every index that names them.
-pub(super) fn put_channel_back(s: &mut crate::session::Session, row: usize, mut c: os_model::Channel) {
+pub(crate) fn put_channel_back(s: &mut crate::session::Session, row: usize, mut c: os_model::Channel) {
     let old: Vec<u32> = s.project.channels.iter().map(|c| c.id.0).collect();
     let n = old.len();
     let row = row.min(n);

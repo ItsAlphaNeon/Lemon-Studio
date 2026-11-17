@@ -91,6 +91,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `add_channel` | `name`, `plugin`, `sample`, `track` (all optional) | A Lemon Sampler channel (with `sample` loaded), or one played by generator `plugin`, on mixer track `track`. Result: `channel` |
 | `delete_channel` | `channel` | Its notes, clips and automation go too |
 | `move_channel` | `channel`, `row` | 0 = top |
+| `clone_channel` | `channel` | A copy right below it, as the rack's Clone: "<name> #2", its settings, mixer track and a copy of its instrument, no notes. Result: `channel` |
 | `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track`, `declick` (0..5), `swing` (0..1), `truncate_swing`, `cut`, `cut_by` (groups, 0 = none), `locked` (optional) | A colour's parts are kept at least `14` (hex), as projects save them. Swing is kept in steps of 1/128. An undo of another step leaves `locked` as it is |
 | `load_sample` | `channel`, `path` | A sampler channel; an empty path clears it |
 | `add_track` | `at` (optional) | A mixer insert, at number `at` or after the last. Result: `track` |

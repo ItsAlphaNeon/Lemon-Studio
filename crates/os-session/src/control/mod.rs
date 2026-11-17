@@ -253,6 +253,7 @@ fn op(c: &Command) -> &'static str {
         Command::SetInfo { .. } => "set_info",
         Command::SetProject { .. } => "set_project",
         Command::AddChannel { .. } => "add_channel",
+        Command::CloneChannel { .. } => "clone_channel",
         Command::DeleteChannel { .. } => "delete_channel",
         Command::MoveChannel { .. } => "move_channel",
         Command::SetChannel { .. } => "set_channel",
