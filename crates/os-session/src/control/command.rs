@@ -399,6 +399,10 @@ pub enum Taken {
     /// A thing to delete again (the redo of a delete), with the ids the things the delete makes had. Its other side is
     /// `Removed`.
     Deleted(Thing, Vec<u32>),
+    /// `.0` put back, then every mixer track on or off by id as `.1` has it (adding or deleting a track moves the
+    /// others and makes or takes away the one before the hidden last track: their mute lights go back with it, as a
+    /// whole project's would). Its other side is the same with the lights as they are.
+    WithOn(Box<Taken>, Vec<(u32, bool)>),
 }
 
 /// Something a command added (`Taken::Gone`), by id.
@@ -840,6 +844,11 @@ impl Command {
                 Taken::Project(_) => Taken::Project(Box::new(Side::of(s))),
                 Taken::Mutes(_) => mutes(p),
                 Taken::TracksOn(_) => tracks_on(p),
+                Taken::WithOn(t, _) => {
+                    let inner = Command::Put(t.clone()).take(s)?;
+                    let Taken::TracksOn(on) = tracks_on(p) else { unreachable!() };
+                    Taken::WithOn(Box::new(inner), on)
+                }
                 // The other way: the links back onto what they were on.
                 Taken::Links(pairs) => Taken::Links(pairs.iter().map(|&(a, b)| (b, a)).collect()),
                 Taken::Gone(thing) => Taken::Back(Box::new(match *thing {
@@ -892,6 +901,13 @@ impl Command {
                 }
             }
             Taken::Removed(r) => r.rescale(from, to),
+            Taken::WithOn(inner, _) => {
+                let mut c = Command::Put(std::mem::replace(inner, Box::new(Taken::Mutes(Vec::new()))));
+                c.rescale(from, to);
+                if let Command::Put(t) = c {
+                    *inner = t;
+                }
+            }
             Taken::Settings(_)
             | Taken::Lfo(..)
             | Taken::Channel(_)
@@ -942,6 +958,8 @@ impl Command {
             Command::AddPattern { .. } => Some(Thing::Pattern as fn(u32) -> Thing),
             _ => None,
         };
+        // A track added or deleted: the tracks' lights go back with it.
+        let on = matches!(self, Command::AddTrack { .. } | Command::DeleteTrack { .. }).then(|| tracks_on(&s.project));
         let result = self.change(s)?;
         s.dirty = true;
         // An add's undo removes what it made, by the id its result names.
@@ -951,6 +969,10 @@ impl Command {
                 Taken::Gone(thing(id as u32))
             }
             None => taken,
+        };
+        let taken = match on {
+            Some(Taken::TracksOn(on)) => Taken::WithOn(Box::new(taken), on),
+            _ => taken,
         };
         Ok(Done { undo: Command::Put(Box::new(taken)), result })
     }
@@ -1648,6 +1670,10 @@ fn put(s: &mut crate::session::Session, t: Taken) {
                 }
             }
             s.dirty = true;
+        }
+        Taken::WithOn(t, on) => {
+            put(s, *t);
+            put(s, Taken::TracksOn(on));
         }
         Taken::TracksOn(on) => {
             for (id, v) in on {

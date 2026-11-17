@@ -110,6 +110,35 @@ fn every_command_undoes_and_redoes() {
     round_trip(&mut a, json!({"op": "remove_effect", "track": track, "slot": slot["slot"]}));
 }
 
+/// A track added or deleted moves the others and makes or takes away the one before the hidden last track: undo and
+/// redo put every track's light back as it was, as the whole project's step did (a solo turns off every track).
+#[test]
+fn adding_or_deleting_a_track_keeps_the_lights() {
+    let mut a = app();
+    let tr = ids(&a).1;
+    let n = a.state.session.project.mixer.len();
+    for (i, m) in a.state.session.project.get_mut().mixer.iter_mut().enumerate() {
+        m.enabled = i == 0 || i == 3 || i + 2 == n;
+    }
+    for c in [json!({"op": "delete_track", "track": tr[2]}), json!({"op": "add_track", "at": 2})] {
+        let before = reading(&a);
+        apply(&mut a.state, &test_client(), None, vec![cmd(c)]).unwrap();
+        // Muted after, as a solo of the track would.
+        for m in a.state.session.project.get_mut().mixer.iter_mut().skip(1) {
+            m.enabled = !m.enabled;
+        }
+        let after = reading(&a);
+        crate::history_ui::undo(&mut a.state).unwrap();
+        same(&reading(&a).0.mixer, &before.0.mixer);
+        crate::history_ui::redo(&mut a.state).unwrap();
+        same(&reading(&a).0.mixer, &after.0.mixer);
+    }
+}
+
+fn same<T: std::fmt::Debug + PartialEq>(a: &T, b: &T) {
+    assert!(a == b, "differs:\n{a:?}\n{b:?}");
+}
+
 #[test]
 fn set_project_checks_its_values() {
     let mut a = app();
