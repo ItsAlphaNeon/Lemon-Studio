@@ -160,25 +160,38 @@ pub fn changed(s: &mut crate::session::Session) {
 /// plugins inside containers have switches of their own (`crate::container::Member::cpu`) and are switched with them.
 /// No message, as in the original. Returns whether there was a plugin to switch.
 pub fn switch_auto_bypass(s: &mut crate::session::Session) -> bool {
-    let (mut members, mut off) = (0, false);
-    crate::container::each_member_cpu(s.project.get_mut(), |c| {
-        members += 1;
-        off |= !c.smart_disable;
-    });
+    let Some(on) = auto_bypass_switch(s) else { return false };
+    set_auto_bypass(s, on);
+    true
+}
+
+/// What Switch auto-bypass for all plugins sets (see `switch_auto_bypass`): on when one plugin has it off, else off;
+/// `None` when there is no plugin.
+pub fn auto_bypass_switch(s: &crate::session::Session) -> Option<bool> {
+    let mut members = Vec::new();
+    crate::container::each_member_cpu_of(&s.project, |c| members.push(c.smart_disable));
+    let p = &s.project;
+    let slots = p.mixer.iter().flat_map(|m| m.slot_cpu.iter().zip(&m.slots).filter(|(_, p)| p.is_some()).map(|(c, _)| c.smart_disable));
+    let channels = p.channels.iter().filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| c.misc.cpu.smart_disable);
+    let all: Vec<bool> = slots.chain(channels).chain(members).collect();
+    (!all.is_empty()).then(|| all.iter().any(|&on| !on))
+}
+
+/// Auto-bypass when silent set to `on` for every plugin (see `switch_auto_bypass`).
+pub fn set_auto_bypass(s: &mut crate::session::Session, on: bool) {
     let p = s.project.get_mut();
-    let slots = p.mixer.iter_mut().flat_map(|m| m.slot_cpu.iter_mut().zip(&m.slots).filter(|(_, p)| p.is_some()).map(|(c, _)| c));
-    let channels = p.channels.iter_mut().filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| &mut c.misc.cpu);
-    let mut all: Vec<&mut os_model::PluginCpu> = slots.chain(channels).collect();
-    if all.is_empty() && members == 0 {
-        return false;
+    for m in &mut p.mixer {
+        for (c, slot) in m.slot_cpu.iter_mut().zip(&m.slots) {
+            if slot.is_some() {
+                c.smart_disable = on;
+            }
+        }
     }
-    let on = off || all.iter().any(|c| !c.smart_disable);
-    for c in &mut all {
-        c.smart_disable = on;
+    for c in p.channels.iter_mut().filter(|c| c.kind == os_model::ChannelKind::Plugin) {
+        c.misc.cpu.smart_disable = on;
     }
     crate::container::each_member_cpu(s.project.get_mut(), |c| c.smart_disable = on);
     changed(s);
-    true
 }
 
 /// The input combo's text for track `n`, and whether the device has inputs to choose from.
@@ -425,8 +438,8 @@ pub fn delete_track_in(s: &mut crate::session::Session, n: u16) -> Option<String
 /// Back to a fresh track (name, colour, levels, slots kept out), routed to the master (§6.1 Reset).
 pub fn reset_track(s: &mut crate::session::Session, n: u16) {
     if let Some(m) = track_mut(s, n) {
-        let (slots, origin) = (m.slots.clone(), m.origin);
-        *m = MixerTrack { slots, origin, ..MixerTrack::new(n) };
+        let (id, slots, origin) = (m.id, m.slots.clone(), m.origin);
+        *m = MixerTrack { id, slots, origin, ..MixerTrack::new(n) };
     }
     changed(s);
 }

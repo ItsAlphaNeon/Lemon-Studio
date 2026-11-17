@@ -260,6 +260,8 @@ fn op(c: &Command) -> &'static str {
         Command::AddTrack { .. } => "add_track",
         Command::DeleteTrack { .. } => "delete_track",
         Command::SetTrack { .. } => "set_track",
+        Command::ResetTrack { .. } => "reset_track",
+        Command::SetAutoBypass { .. } => "set_auto_bypass",
         Command::SetSend { .. } => "set_send",
         Command::SetEq { .. } => "set_eq",
         Command::AddEffect { .. } => "add_effect",

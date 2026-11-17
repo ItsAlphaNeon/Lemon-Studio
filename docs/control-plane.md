@@ -87,7 +87,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_main_pitch` | `cents` | -1200 to 1200 |
 | `set_time_signature` | `numerator`, `denominator` | denominator 2, 4, 8 or 16 |
 | `set_info` | `title`, `author`, `genre`, `comments`, `url` (all optional) | the Song info |
-| `set_project` | `beats` (1..=32), `steps` (1..=16), `signature`, `panning_law` (`circular` or `triangular`), `play_truncated` (all optional) | Settings > Project: the bar, shown as a time signature or a division, the panning law, and whether notes a pattern clip cuts off play. A bar value the project already has is kept even out of range |
+| `set_project` | `beats` (1..=32), `steps` (1..=16), `signature`, `panning_law` (`circular` or `triangular`), `play_truncated`, `pdc` (all optional) | Settings > Project: the bar, shown as a time signature or a division, the panning law, whether notes a pattern clip cuts off play, and automatic plugin delay compensation. A bar value the project already has is kept even out of range |
 | `add_channel` | `name`, `plugin`, `sample`, `track` (all optional) | A Lemon Sampler channel (with `sample` loaded), or one played by generator `plugin`, on mixer track `track`. Result: `channel` |
 | `delete_channel` | `channel` | Its notes, clips and automation go too |
 | `move_channel` | `channel`, `row` | 0 = top |
@@ -95,7 +95,9 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `load_sample` | `channel`, `path` | A sampler channel; an empty path clears it |
 | `add_track` | `at` (optional) | A mixer insert, at number `at` or after the last. Result: `track` |
 | `delete_track` | `track` | Later tracks move left; its channels go to the master |
-| `set_track` | `track`; `name`, `color`, `volume` (0..1, 0.8 = unity), `pan`, `stereo` (-1..1), `enabled`, `polarity`, `swap`, `effects_enabled` (optional) | |
+| `set_track` | `track`; `name`, `color`, `volume` (0..1, 0.8 = unity), `pan`, `stereo` (-1..1), `enabled`, `polarity`, `swap`, `effects_enabled`, `separator`, `dock` (`left`, `middle` or `right`), `threaded`, `latency_in`, `latency_out` (ms, -1000..1000) (optional) | |
+| `reset_track` | `track` | back to a new track's settings, routed to the master; its effects stay |
+| `set_auto_bypass` | `on` | Auto-bypass when silent for every plugin: the slots', the plugin channels' and the containers' members' |
 | `set_send` | `from`, `to`, `level` (optional) | `level` 0..1 routes `from` to `to` (0 = sidechain only); none removes the route |
 | `set_eq` | `track`, `band` (0..2); `gain` (-1800..1800, 0.01 dB), `frequency`, `width` (0..65536) (optional) | The track's three-band equaliser, as stored |
 | `add_effect` | `track`, `plugin`, `slot` (optional) | Into slot 0..9, else the first empty one. Result: `slot` (the slot plugin's id) |

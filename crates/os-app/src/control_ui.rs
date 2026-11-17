@@ -72,6 +72,12 @@ pub fn command(s: &mut State, name: &'static str, run: Option<crate::history::Ru
     Ok(results)
 }
 
+/// Every thing in the project has its id (things just added get theirs on the next tick): for an edit that names
+/// them in commands.
+pub fn settle_ids(s: &mut State) {
+    s.session.control.settle(s.session.project.get_mut());
+}
+
 /// `edit` for a knob-like control (a mixer fader's typed value): no step while Undo knob tweaks is off.
 pub fn knob_edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
     if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {

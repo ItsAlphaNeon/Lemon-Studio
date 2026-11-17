@@ -25,6 +25,48 @@ use crate::control_ui::edit;
 const ROUTING: &str = "Mixer routing";
 const INSERT: &str = "Insert mixer track";
 const SLOT: &str = "Effect slot";
+
+use crate::control::command::{color_text, Command};
+
+/// Track `t`'s id, for a command.
+fn id_of(s: &State, t: u16) -> Option<u32> {
+    track(&s.session, t).map(|m| m.id.0)
+}
+
+/// `Command::SetTrack` for track `t` with the settings given (`set_track!(s, t, color: c)`); `None` without the track.
+macro_rules! set_track {
+    ($s:expr, $t:expr, $($f:ident: $v:expr),+ $(,)?) => {{
+        // The values first: the fields' names may be the caller's variables.
+        let values = ($(Some($v),)+);
+        id_of($s, $t).map(move |id| {
+            let mut c = Command::set_track(id);
+            if let Command::SetTrack { $($f,)+ .. } = &mut c {
+                ($(*$f,)+) = values;
+            }
+            c
+        })
+    }};
+}
+
+/// The interface's edit made of `commands`: one undo step named `name` (none when nothing changed); the error as the
+/// message when they can't be applied.
+fn apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Option<String> {
+    crate::control_ui::command(s, name, None, commands).err()
+}
+
+/// Changes that make no undo step (a mute light, a solo).
+fn apply_quietly(s: &mut State, commands: Vec<Command>) {
+    let _ = crate::control_ui::run(s, commands);
+}
+
+/// The commands that route track `from` to `to` only: its other routes and sends go.
+fn unroute_all(s: &State, from: u16, keep: Option<u16>) -> Vec<Command> {
+    let Some(m) = track(&s.session, from) else { return Vec::new() };
+    let mut dests: Vec<u16> = m.routes.iter().copied().chain(m.send_levels.iter().map(|l| l.0)).filter(|&d| Some(d) != keep).collect();
+    dests.sort_unstable();
+    dests.dedup();
+    dests.into_iter().filter_map(|d| Some(Command::SetSend { from: id_of(s, from)?, to: id_of(s, d)?, level: None })).collect()
+}
 use crate::knobs::KnobId;
 use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
 
@@ -424,6 +466,7 @@ pub fn select(s: &mut State, n: u16, ctrl: bool) {
 
 /// Left click (or press) on a mixer control.
 pub fn hit(app: &mut App, h: MHit) -> Option<String> {
+    crate::control_ui::settle_ids(&mut app.state);
     let (ctrl, shift) = (app.ctrl, app.shift);
     let at = app.mouse;
     let s = &mut app.state;
@@ -437,41 +480,25 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::Led(n) => {
             select(s, n, ctrl);
-            let m = track_mut(&mut s.session, n)?;
-            m.enabled = !m.enabled;
-            changed(&mut s.session);
+            let on = !track(&s.session, n)?.enabled;
+            apply_quietly(s, vec![set_track!(s, n, enabled: on)?]);
             None
         }
         MHit::Polarity(n) => {
             select(s, n, ctrl);
-            edit(s, "Mixer track polarity", Region::Track(n), |s| {
-                let m = track_mut(&mut s.session, n)?;
-                m.polarity = !m.polarity;
-                changed(&mut s.session);
-                Some(())
-            })?;
-            None
+            let on = !track(&s.session, n)?.polarity;
+            apply(s, "Mixer track polarity", vec![set_track!(s, n, polarity: on)?])
         }
         MHit::Swap(n) => {
             select(s, n, ctrl);
-            edit(s, "Mixer track swap", Region::Track(n), |s| {
-                let m = track_mut(&mut s.session, n)?;
-                m.swap = !m.swap;
-                changed(&mut s.session);
-                Some(())
-            })?;
-            None
+            let on = !track(&s.session, n)?.swap;
+            apply(s, "Mixer track swap", vec![set_track!(s, n, swap: on)?])
         }
-        MHit::Route(dst) => edit(s, ROUTING, Region::Project, |s| route(s, dst, ctrl, shift)),
+        MHit::Route(dst) => route(s, dst, ctrl, shift),
         MHit::Unroute(dst) => {
             let cur = s.selected_mixer;
-            edit(s, ROUTING, Region::Track(cur), |s| {
-                let m = track_mut(&mut s.session, cur)?;
-                m.routes.retain(|&r| r != dst);
-                m.send_levels.retain(|&(d, _)| d != dst);
-                changed(&mut s.session);
-                Some(format!("{} no longer sends to {}", name(&s.session, cur), name(&s.session, dst)))
-            })
+            let c = Command::SetSend { from: id_of(s, cur)?, to: id_of(s, dst)?, level: None };
+            apply(s, ROUTING, vec![c]).or_else(|| Some(format!("{} no longer sends to {}", name(&s.session, cur), name(&s.session, dst))))
         }
         MHit::Add => {
             let n = edit(s, INSERT, Region::Project, |s| add_track(s, None));
@@ -517,14 +544,8 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::SlotLed(i) => {
             let t = s.selected_mixer;
-            edit(s, SLOT, Region::Track(t), |s| {
-                let m = track_mut(&mut s.session, t)?;
-                let k = usize::from(i);
-                m.slot_on[k] = !m.slot_on[k];
-                changed(&mut s.session);
-                Some(())
-            })?;
-            None
+            let on = !track(&s.session, t)?.slot_on[usize::from(i)];
+            apply(s, SLOT, vec![Command::SetSlot { track: id_of(s, t)?, slot: i, enabled: Some(on), mix: None }])
         }
         MHit::Input => {
             s.playlist.popup = input_menu(s, at.0, at.1 + 10.0);
@@ -622,19 +643,15 @@ pub fn latency_text(ms: f32) -> String {
 /// Sets track `t`'s input (`input`) or output latency setting, in ms: one undo step, "Track latency"; playback takes it
 /// at once (delay compensation works it out again).
 pub fn set_latency(s: &mut State, t: u16, input: bool, ms: f32) {
+    crate::control_ui::settle_ids(s);
     if track(&s.session, t).is_none_or(|m| (if input { m.latency_in } else { m.latency_out }) == ms) {
         return;
     }
-    edit(s, LATENCY, Region::Track(t), |s| {
-        if let Some(m) = track_mut(&mut s.session, t) {
-            if input {
-                m.latency_in = ms;
-            } else {
-                m.latency_out = ms;
-            }
-        }
-        changed(&mut s.session);
-    });
+    let c = if input { set_track!(s, t, latency_in: f64::from(ms)) } else { set_track!(s, t, latency_out: f64::from(ms)) };
+    if let Some(e) = c.and_then(|c| apply(s, LATENCY, vec![c])) {
+        s.message = Some(e);
+        return;
+    }
     s.message = Some(format!("{} - {} latency: {}", name(&s.session, t), if input { "Input" } else { "Track" }, latency_text(ms)));
 }
 
@@ -675,6 +692,7 @@ pub fn eq_graph_drag(s: &mut State, t: u16, band: u8, g: os_ui::Rect, (x, y): (f
 
 /// Right click on a mixer control. Returns false when it is not handled here (knob menus).
 pub fn right(app: &mut App, h: MHit) -> bool {
+    crate::control_ui::settle_ids(&mut app.state);
     let at = app.mouse;
     let s = &mut app.state;
     match h {
@@ -716,15 +734,13 @@ pub fn right(app: &mut App, h: MHit) -> bool {
         MHit::SlotLed(i) => {
             // Solo the slot: the track's other slots are bypassed (§7).
             let t = s.selected_mixer;
-            edit(s, SLOT, Region::Track(t), |s| {
-                if let Some(m) = track_mut(&mut s.session, t) {
-                    let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
-                    for k in 0..10 {
-                        m.slot_on[k] = only || k == usize::from(i);
-                    }
-                    changed(&mut s.session);
+            if let (Some(m), Some(id)) = (track(&s.session, t), id_of(s, t)) {
+                let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
+                let c = (0..10u8).map(|k| Command::SetSlot { track: id, slot: k, enabled: Some(only || k == i), mix: None }).collect();
+                if let Some(e) = apply(s, SLOT, c) {
+                    s.message = Some(e);
                 }
-            });
+            }
         }
         MHit::Polarity(n) | MHit::Swap(n) => select(s, n, false),
         MHit::Latency(n) => {
@@ -740,6 +756,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
 
 /// Middle click: rename a filled slot (§7).
 pub fn middle(app: &mut App, h: MHit) -> bool {
+    crate::control_ui::settle_ids(&mut app.state);
     if let MHit::SlotName(i) = h {
         let t = app.state.selected_mixer;
         if slot_name(&app.state.session, t, i).is_some() {
@@ -780,21 +797,20 @@ fn start_rename(s: &mut State, n: u16, at: (f32, f32)) {
 /// Create group..., Enter in its name box: names track `n` (an empty box keeps its name) and turns Separator on
 /// for the first target track and for the track after the last one, as one undo step (spec: ui/mixer.md §6.1).
 pub fn create_group(s: &mut State, n: u16, text: &str) {
+    crate::control_ui::settle_ids(s);
     let tg: Vec<u16> = targets(s, n).into_iter().filter(|&t| t > 0).collect();
     let (Some(&a), Some(&b)) = (tg.iter().min(), tg.iter().max()) else { return };
     let last = inserts(&s.session);
     let def = format!("Bus {n}");
     let name = text.trim().to_string();
-    crate::control_ui::edit(s, "Create group", Region::Project, |s| {
-        if let Some(m) = track_mut(&mut s.session, n).filter(|_| !name.is_empty()) {
-            m.name = (name != def).then_some(name);
-        }
-        for t in [a, b + 1].into_iter().filter(|&t| t <= last) {
-            if let Some(m) = track_mut(&mut s.session, t) {
-                m.separator = true;
-            }
-        }
-    });
+    let mut c = Vec::new();
+    if !name.is_empty() {
+        c.extend(set_track!(s, n, name: if name == def { String::new() } else { name }));
+    }
+    c.extend([a, b + 1].into_iter().filter(|&t| t <= last).filter_map(|t| set_track!(s, t, separator: true)));
+    if let Some(e) = apply(s, "Create group", c) {
+        s.message = Some(e);
+    }
 }
 
 /// Right click on a LED (§3): solo, or back to all on when it already is the only one audible.
@@ -969,7 +985,9 @@ fn remove_tracks(s: &mut State, gone: &[u16]) -> Option<String> {
 /// Routes the selected tracks to `dst` (§5): a normal route at unity, a sidechain at level 0, `only` drops their
 /// other routes.
 pub fn route(s: &mut State, dst: u16, only: bool, side: bool) -> Option<String> {
+    crate::control_ui::settle_ids(s);
     let mut msg = None;
+    let mut c = Vec::new();
     for src in selected(s) {
         if src == dst || src == 0 {
             continue;
@@ -978,22 +996,12 @@ pub fn route(s: &mut State, dst: u16, only: bool, side: bool) -> Option<String> 
             msg = Some(format!("Can't route {} to {}: it would make a loop", name(&s.session, src), name(&s.session, dst)));
             continue;
         }
-        let m = track_mut(&mut s.session, src)?;
         if only {
-            m.routes.clear();
-            m.send_levels.clear();
+            c.extend(unroute_all(s, src, Some(dst)));
         }
-        if !m.routes.contains(&dst) {
-            m.routes.push(dst);
-            m.routes.sort_unstable();
-        }
-        m.send_levels.retain(|&(d, _)| d != dst);
-        if side {
-            m.send_levels.push((dst, 0.0));
-        }
+        c.push(Command::SetSend { from: id_of(s, src)?, to: id_of(s, dst)?, level: Some(if side { 0.0 } else { 0.8 }) });
     }
-    changed(&mut s.session);
-    msg
+    apply(s, ROUTING, c).or(msg)
 }
 
 /// Appends a track (`at` = None) or inserts one before `at`, shifting the later ones; selects it. Returns its number.
@@ -1330,6 +1338,7 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 // Commands
 
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
+    crate::control_ui::settle_ids(&mut app.state);
     if let MCmd::SlotScale(slot, pct) = c {
         let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
         app.state.editor_host.set_editor_scale(&mut app.state.session.plugins, key, pct.map(|p| f32::from(p) / 100.0));
@@ -1365,16 +1374,23 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         let t = app.state.selected_mixer;
         return crate::control_ui::edit_app(app, "Effect slot color", Region::Track(t), |app| run_now(app, c));
     }
+    // The track settings: the commands of the control plane, one undo step each.
+    if let Some((name, commands)) = commands_of(&app.state, &c) {
+        let e = apply(&mut app.state, name, commands);
+        app.invalidate();
+        return e.or_else(|| match c {
+            MCmd::PdcAuto => Some(format!("Automatic plugin delay compensation {}", if app.state.session.project.pdc_off { "off" } else { "on" })),
+            _ => None,
+        });
+    }
+    if let MCmd::Route { dst, only, side } = c {
+        let m = route(&mut app.state, dst, only, side);
+        app.invalidate();
+        return m;
+    }
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
     let step = match &c {
-        MCmd::Color(..) | MCmd::RandomColor(_) | MCmd::GradientColor | MCmd::AutoColorGroup(_) => Some("Mixer track color"),
-        MCmd::Separator(_) => Some("Mixer track separator"),
-        MCmd::Dock(..) => Some("Mixer track docking"),
-        MCmd::Threaded(_) => Some("Mixer track threading"),
-        MCmd::AutoBypassAll => Some("Auto-bypass for all plugins"),
-        MCmd::PdcAuto => Some("Plugin delay compensation"),
-        MCmd::Reset(_) => Some("Mixer track reset"),
-        MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
+        MCmd::RouteChannels { .. } => Some(ROUTING),
         MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
         // The original's History names (spec: ui/one-click-recording.md §1).
         MCmd::AssignAudio(_) => Some(crate::track_links::ASSIGN_AUDIO),
@@ -1409,42 +1425,78 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     run_now(app, c)
 }
 
+/// The menu commands that are commands of the control plane: their step's name and the commands.
+fn commands_of(s: &State, c: &MCmd) -> Option<(&'static str, Vec<Command>)> {
+    let each = |n: u16, f: &dyn Fn(u16) -> Option<Command>| targets(s, n).into_iter().filter_map(f).collect::<Vec<_>>();
+    let color = |t: u16, c: Option<Rgb>| set_track!(s, t, color: color_text(c).unwrap_or_default());
+    Some(match *c {
+        MCmd::Color(n, col) => ("Mixer track color", each(n, &|t| color(t, col))),
+        MCmd::RandomColor(n) => ("Mixer track color", each(n, &|t| color(t, Some(crate::patterns::random_color(u64::from(t).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed())))))),
+        MCmd::GradientColor => {
+            let mut t = selected(s);
+            t.sort_unstable();
+            let mut c = Vec::new();
+            if let (Some(&a), Some(&b)) = (t.first(), t.last()) {
+                let (a, b) = (track(&s.session, a).and_then(|m| m.color), track(&s.session, b).and_then(|m| m.color));
+                c = crate::rack::gradient_colors(a, b, t.len()).into_iter().zip(&t).filter_map(|(c, &n)| color(n, Some(c))).collect();
+            }
+            ("Mixer track color", c)
+        }
+        MCmd::AutoColorGroup(n) => {
+            let col = group(&s.session, n).and_then(|g| Some((g.clone(), track(&s.session, *g.start())?.color?)));
+            ("Mixer track color", col.map(|(g, col)| g.filter_map(|t| color(t, Some(col))).collect()).unwrap_or_default())
+        }
+        MCmd::Separator(n) => {
+            let on = !track(&s.session, n).is_some_and(|m| m.separator);
+            ("Mixer track separator", each(n, &|t| (t > 0).then(|| set_track!(s, t, separator: on)).flatten()))
+        }
+        MCmd::Dock(n, d) => {
+            let d = ["left", "middle", "right"][usize::from(d.min(os_model::DOCK_RIGHT))];
+            ("Mixer track docking", each(n, &|t| (t > 0).then(|| set_track!(s, t, dock: d.to_string())).flatten()))
+        }
+        MCmd::Threaded(n) => {
+            let on = !track(&s.session, n).is_none_or(|m| m.threaded);
+            ("Mixer track threading", each(n, &|t| set_track!(s, t, threaded: on)))
+        }
+        MCmd::Reset(n) => ("Mixer track reset", each(n, &|t| Some(Command::ResetTrack { track: id_of(s, t)? }))),
+        MCmd::ResetRouting(n) => {
+            let mut c = Vec::new();
+            for t in targets(s, n).into_iter().filter(|&t| t != 0) {
+                c.extend(unroute_all(s, t, None));
+                c.extend(id_of(s, t).zip(id_of(s, 0)).map(|(from, to)| Command::SetSend { from, to, level: Some(0.8) }));
+            }
+            (ROUTING, c)
+        }
+        MCmd::UnrouteTo(n) => {
+            let tg = targets(s, n);
+            let last = inserts(&s.session);
+            let mut c = Vec::new();
+            for m in s.session.project.mixer.iter().filter(|m| m.index <= last) {
+                let mut dests: Vec<u16> = m.routes.iter().copied().chain(m.send_levels.iter().map(|l| l.0)).filter(|d| tg.contains(d)).collect();
+                dests.sort_unstable();
+                dests.dedup();
+                c.extend(dests.into_iter().filter_map(|d| Some(Command::SetSend { from: m.id.0, to: id_of(s, d)?, level: None })));
+            }
+            (ROUTING, c)
+        }
+        MCmd::AutoBypassAll => ("Auto-bypass for all plugins", crate::edit::mixer::auto_bypass_switch(&s.session).map(|on| Command::SetAutoBypass { on }).into_iter().collect()),
+        MCmd::PdcAuto => {
+            let mut c = Command::set_project();
+            if let Command::SetProject { pdc, .. } = &mut c {
+                *pdc = Some(s.session.project.pdc_off);
+            }
+            ("Plugin delay compensation", vec![c])
+        }
+        _ => return None,
+    })
+}
+
 fn run_now(app: &mut App, c: MCmd) -> Option<String> {
     let at = app.mouse;
     let s = &mut app.state;
     let msg = match c {
         MCmd::Rename(n) => {
             start_rename(s, n, at);
-            None
-        }
-        MCmd::Color(n, col) => {
-            for t in targets(s, n) {
-                if let Some(m) = track_mut(&mut s.session, t) {
-                    m.color = col;
-                }
-            }
-            None
-        }
-        MCmd::RandomColor(n) => {
-            for t in targets(s, n) {
-                let c = crate::patterns::random_color(u64::from(t).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed()));
-                if let Some(m) = track_mut(&mut s.session, t) {
-                    m.color = Some(c);
-                }
-            }
-            None
-        }
-        MCmd::GradientColor => {
-            let mut t = selected(s);
-            t.sort_unstable();
-            if let (Some(&a), Some(&b)) = (t.first(), t.last()) {
-                let (a, b) = (track(&s.session, a).and_then(|m| m.color), track(&s.session, b).and_then(|m| m.color));
-                for (c, &n) in crate::rack::gradient_colors(a, b, t.len()).into_iter().zip(&t) {
-                    if let Some(m) = track_mut(&mut s.session, n) {
-                        m.color = Some(c);
-                    }
-                }
-            }
             None
         }
         MCmd::AudioEditor(n) => {
@@ -1487,31 +1539,6 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 n => format!("Removed {n} audio editors"),
             })
         }
-        MCmd::Reset(n) => {
-            for t in targets(s, n) {
-                reset_track(&mut s.session, t);
-            }
-            None
-        }
-        MCmd::ResetRouting(n) => {
-            for t in targets(s, n).into_iter().filter(|&t| t != 0) {
-                if let Some(m) = track_mut(&mut s.session, t) {
-                    m.routes = vec![0];
-                    m.send_levels.clear();
-                }
-            }
-            changed(&mut s.session);
-            None
-        }
-        MCmd::UnrouteTo(n) => {
-            let tg = targets(s, n);
-            for m in s.session.project.get_mut().mixer.iter_mut() {
-                m.routes.retain(|r| !tg.contains(r));
-                m.send_levels.retain(|(d, _)| !tg.contains(d));
-            }
-            changed(&mut s.session);
-            None
-        }
         MCmd::Solo(n) => {
             solo(s, n);
             None
@@ -1529,29 +1556,8 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             crate::typein_ui::open(s, crate::typein::Target::Latency(t, input, u), at);
             None
         }
-        MCmd::Separator(n) => {
-            let on = !track(&s.session, n).is_some_and(|m| m.separator);
-            for t in targets(s, n).into_iter().filter(|&t| t > 0) {
-                if let Some(m) = track_mut(&mut s.session, t) {
-                    m.separator = on;
-                }
-            }
-            None
-        }
         MCmd::CreateGroup(n) => {
             crate::playlist::start_edit(s, EditTarget::MixerGroup(n), at);
-            None
-        }
-        MCmd::AutoColorGroup(n) => {
-            if let Some(g) = group(&s.session, n) {
-                if let Some(c) = track(&s.session, *g.start()).and_then(|m| m.color) {
-                    for t in g {
-                        if let Some(m) = track_mut(&mut s.session, t) {
-                            m.color = Some(c);
-                        }
-                    }
-                }
-            }
             None
         }
         MCmd::SelectGroup(n) => {
@@ -1560,39 +1566,25 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             s.mixer.sel = g.collect();
             None
         }
-        MCmd::Dock(n, d) => {
-            for t in targets(s, n).into_iter().filter(|&t| t > 0) {
-                if let Some(m) = track_mut(&mut s.session, t) {
-                    m.dock = d.min(os_model::DOCK_RIGHT);
-                }
-            }
-            None
-        }
-        MCmd::Threaded(n) => {
-            let on = !track(&s.session, n).is_none_or(|m| m.threaded);
-            for t in targets(s, n) {
-                if let Some(m) = track_mut(&mut s.session, t) {
-                    m.threaded = on;
-                }
-            }
-            changed(&mut s.session);
-            None
-        }
-        MCmd::AutoBypassAll => {
-            switch_auto_bypass(&mut s.session);
-            None
-        }
         // Answered in `run`.
         MCmd::SlotHelp(_) | MCmd::SlotScale(..) | MCmd::SaveState(_) => None,
+        MCmd::Color(..)
+        | MCmd::RandomColor(_)
+        | MCmd::GradientColor
+        | MCmd::AutoColorGroup(_)
+        | MCmd::Separator(_)
+        | MCmd::Dock(..)
+        | MCmd::Threaded(_)
+        | MCmd::AutoBypassAll
+        | MCmd::PdcAuto
+        | MCmd::Reset(_)
+        | MCmd::ResetRouting(_)
+        | MCmd::UnrouteTo(_)
+        | MCmd::Route { .. } => None,
         MCmd::OpenState(n, p) => open_state(&mut s.session, n, &p, false),
         MCmd::InsertState(n, p) => {
             let n = add_track(s, Some(n.max(1)));
             open_state(&mut s.session, n, &p, true)
-        }
-        MCmd::PdcAuto => {
-            s.session.project.get_mut().pdc_off = !s.session.project.pdc_off;
-            changed(&mut s.session);
-            Some(format!("Automatic plugin delay compensation {}", if s.session.project.pdc_off { "off" } else { "on" }))
         }
         MCmd::ViewWaveforms => {
             view_waveforms(s);
@@ -1669,7 +1661,6 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             app.open_track_render(tracks);
             return None;
         }
-        MCmd::Route { dst, only, side } => route(s, dst, only, side),
         // Wide is the layout shown; the others are greyed out in the menu.
         MCmd::Layout(_) => None,
         MCmd::CablePhysics => {

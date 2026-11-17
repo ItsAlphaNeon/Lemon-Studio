@@ -320,6 +320,17 @@ pub fn pct(v: f32) -> i32 {
 
 /// Every container member's CPU switches in project `p`, for `f` to read or change (Switch auto-bypass for all plugins,
 /// `mixer::switch_auto_bypass`); a container whose members `f` changed is written again.
+/// `each_member_cpu` reading: `f` sees each member's CPU settings.
+pub fn each_member_cpu_of(p: &Project, mut f: impl FnMut(&os_model::PluginCpu)) {
+    let slots = p.mixer.iter().flat_map(|m| m.slots.iter().flatten()).filter(|s| s.name == CONTAINER).map(|s| &s.state);
+    let channels = p.channels.iter().filter(|c| is_container_channel(c)).filter_map(|c| c.plugin_state.as_ref());
+    for b in slots.chain(channels) {
+        for m in decode(b).unwrap_or_default() {
+            f(&m.cpu);
+        }
+    }
+}
+
 pub fn each_member_cpu(p: &mut Project, mut f: impl FnMut(&mut os_model::PluginCpu)) {
     let slots = p.mixer.iter_mut().flat_map(|m| m.slots.iter_mut().flatten()).filter(|s| s.name == CONTAINER).map(|s| &mut s.state);
     let channels = p.channels.iter_mut().filter(|c| is_container_channel(c)).filter_map(|c| c.plugin_state.as_mut());

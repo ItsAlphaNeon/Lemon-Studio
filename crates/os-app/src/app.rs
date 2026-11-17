@@ -5252,6 +5252,7 @@ impl App {
             signature,
             panning_law: None,
             play_truncated: None,
+            pdc: None,
         };
         let r = crate::control_ui::command(&mut self.state, crate::control::command::TIME_SIGNATURE, run, vec![c]);
         self.invalidate();
@@ -5336,6 +5337,7 @@ impl App {
             signature: None,
             panning_law: Some(if law == 2 { "triangular" } else { "circular" }.into()),
             play_truncated: None,
+            pdc: None,
         };
         let _ = crate::control_ui::command(&mut self.state, "Panning law", None, vec![c]);
         self.invalidate();
@@ -5346,7 +5348,7 @@ impl App {
     /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
     fn toggle_play_truncated(&mut self) {
         let on = !self.state.session.project.play_truncated;
-        let c = crate::control::command::Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: Some(on) };
+        let c = crate::control::command::Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: Some(on), pdc: None };
         let _ = crate::control_ui::command(&mut self.state, "Play truncated notes in clips", None, vec![c]);
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
     }

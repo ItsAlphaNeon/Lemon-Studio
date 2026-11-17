@@ -54,6 +54,9 @@ pub enum Command {
         panning_law: Option<String>,
         #[serde(default)]
         play_truncated: Option<bool>,
+        /// Automatic plugin delay compensation.
+        #[serde(default)]
+        pdc: Option<bool>,
     },
 
     // ----- Channels
@@ -106,7 +109,9 @@ pub enum Command {
     /// The track goes (as its menu's Delete does): later tracks move left, channels on it go to the master.
     DeleteTrack { track: u32 },
     /// Each setting given is set: name, colour, volume 0..=1 (0.8 = unity), pan -1..=1, stereo separation -1..=1,
-    /// enabled (the mute light), polarity, swap left / right, effects enabled.
+    /// enabled (the mute light), polarity, swap left / right, effects enabled, separator (a group starts here), dock
+    /// ("left", "middle" or "right"), threaded (allow threaded processing), input and track latency in ms
+    /// (-1000..=1000).
     SetTrack {
         track: u32,
         #[serde(default)]
@@ -127,7 +132,21 @@ pub enum Command {
         swap: Option<bool>,
         #[serde(default)]
         effects_enabled: Option<bool>,
+        #[serde(default)]
+        separator: Option<bool>,
+        #[serde(default)]
+        dock: Option<String>,
+        #[serde(default)]
+        threaded: Option<bool>,
+        #[serde(default)]
+        latency_in: Option<f64>,
+        #[serde(default)]
+        latency_out: Option<f64>,
     },
+    /// The track back to a new track's settings, routed to the master; its name, colour, levels... go, its effects stay.
+    ResetTrack { track: u32 },
+    /// Auto-bypass when silent, for every plugin: the mixer slots', the plugin channels' and the containers' members'.
+    SetAutoBypass { on: bool },
     /// Track `from` sends to `to` at `level` 0..=1 (0.8 = unity, 0 = a sidechain only); no level: the route goes.
     SetSend {
         from: u32,
@@ -437,6 +456,7 @@ pub struct Settings {
     /// Settings > Project's switches that are the project's own (its interface edits; no command sets them).
     pub panning_law: Option<u8>,
     pub play_truncated: bool,
+    pub pdc_off: bool,
 }
 
 impl Settings {
@@ -452,6 +472,7 @@ impl Settings {
             info: p.info.clone(),
             panning_law: p.panning_law,
             play_truncated: p.play_truncated,
+            pdc_off: p.pdc_off,
         }
     }
 
@@ -460,7 +481,7 @@ impl Settings {
         let p = s.project.get_mut();
         (p.swing, p.main_volume, p.main_pitch, p.bar, p.bar_as_signature, p.info) =
             (self.swing, self.main_volume, self.main_pitch, self.bar, self.bar_as_signature, self.info);
-        (p.panning_law, p.play_truncated) = (self.panning_law, self.play_truncated);
+        (p.panning_law, p.play_truncated, p.pdc_off) = (self.panning_law, self.play_truncated, self.pdc_off);
     }
 }
 
@@ -687,6 +708,8 @@ impl Command {
             Command::AddTrack { .. } => "Insert mixer track",
             Command::DeleteTrack { .. } => "Delete mixer track",
             Command::SetTrack { .. } => "Mixer track settings",
+            Command::ResetTrack { .. } => "Mixer track reset",
+            Command::SetAutoBypass { .. } => "Auto-bypass for all plugins",
             Command::SetSend { .. } => "Mixer routing",
             Command::SetEq { .. } => "Mixer track equalizer",
             Command::AddEffect { .. } => "Add effect",
@@ -710,6 +733,32 @@ impl Command {
 
     /// The command that would put back what this one is about to change, as it is now: the undo of a change made in
     /// steps under one press (a knob's drag takes it at the press, `history::knob`).
+    /// A `SetTrack` for track `track` that sets nothing yet.
+    pub fn set_track(track: u32) -> Command {
+        Command::SetTrack {
+            track,
+            name: None,
+            color: None,
+            volume: None,
+            pan: None,
+            stereo: None,
+            enabled: None,
+            polarity: None,
+            swap: None,
+            effects_enabled: None,
+            separator: None,
+            dock: None,
+            threaded: None,
+            latency_in: None,
+            latency_out: None,
+        }
+    }
+
+    /// A `SetProject` that sets nothing yet.
+    pub fn set_project() -> Command {
+        Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: None, pdc: None }
+    }
+
     pub fn undo_now(&self, s: &crate::session::Session) -> Result<Command, Error> {
         self.take(s).map(|t| Command::Put(Box::new(t)))
     }
@@ -726,7 +775,7 @@ impl Command {
             | Command::SetInfo { .. }
             | Command::SetProject { .. } => Taken::Settings(Box::new(Settings::of(s))),
             Command::SetChannel { channel, .. } | Command::LoadSample { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
-            Command::SetTrack { track, .. } | Command::SetEq { track, .. } | Command::SetSlot { track, .. } | Command::AddEffect { track, .. } | Command::RemoveEffect { track, .. } => {
+            Command::SetTrack { track, .. } | Command::ResetTrack { track } | Command::SetEq { track, .. } | Command::SetSlot { track, .. } | Command::AddEffect { track, .. } | Command::RemoveEffect { track, .. } => {
                 Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone()))
             }
             Command::SetSend { from, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *from)?].clone())),
@@ -738,6 +787,7 @@ impl Command {
                 // A project without an arrangement gets one (`playlist::arr_mut`); the undo takes it away again.
                 None => Taken::Project(Box::new(Side::of(s))),
             },
+            Command::SetAutoBypass { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::SetClipLfo { channel, .. } => Taken::Lfo(*channel, Box::new(clip_lfo(p, *channel)?.clone())),
             Command::SetMidiOut { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
             Command::SetMember { container, .. } => match crate::edit::container::id_place(s, *container).ok_or_else(|| format!("no container {container}"))? {
@@ -927,7 +977,7 @@ impl Command {
                 }
                 none
             }
-            Command::SetProject { beats, steps, signature, panning_law, play_truncated } => {
+            Command::SetProject { beats, steps, signature, panning_law, play_truncated, pdc } => {
                 let (b0, s0) = s.project.bar();
                 let check = |name: &str, v: Option<u16>, now: u16, max: u16| match v {
                     Some(v) if v != now && !(1..=max).contains(&v) => Err(format!("{name} must be 1..={max}, not {v}")),
@@ -952,6 +1002,9 @@ impl Command {
                 }
                 if let Some(on) = play_truncated {
                     p.play_truncated = on;
+                }
+                if let Some(on) = pdc {
+                    p.pdc_off = !on;
                 }
                 none
             }
@@ -1078,11 +1131,21 @@ impl Command {
                 crate::edit::mixer::delete_track_in(s, n);
                 none
             }
-            Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled } => {
+            Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled, separator, dock, threaded, latency_in, latency_out } => {
+                let dock = match dock.as_deref() {
+                    None => None,
+                    Some("left") => Some(os_model::DOCK_LEFT),
+                    Some("middle") => Some(os_model::DOCK_MIDDLE),
+                    Some("right") => Some(os_model::DOCK_RIGHT),
+                    Some(d) => return Err(format!("dock must be left, middle or right, not {d}")),
+                };
                 let color = color.map(|c| parse_color(&c)).transpose()?;
                 let volume = volume.map(|v| unit("volume", v, 0.0, 1.0)).transpose()?;
                 let pan = pan.map(|v| unit("pan", v, -1.0, 1.0)).transpose()?;
                 let stereo = stereo.map(|v| unit("stereo", v, -1.0, 1.0)).transpose()?;
+                let max = crate::typein::LATENCY_MAX_MS;
+                let latency_in = latency_in.map(|v| unit("latency_in", v, -max, max)).transpose()?;
+                let latency_out = latency_out.map(|v| unit("latency_out", v, -max, max)).transpose()?;
                 let place = track_place(&s.project, track)?;
                 let m = &mut s.project.get_mut().mixer[place];
                 if let Some(n) = name {
@@ -1112,6 +1175,30 @@ impl Command {
                 if let Some(v) = effects_enabled {
                     m.slots_enabled = v;
                 }
+                if let Some(v) = separator {
+                    m.separator = v;
+                }
+                if let Some(v) = dock {
+                    m.dock = v;
+                }
+                if let Some(v) = threaded {
+                    m.threaded = v;
+                }
+                if let Some(v) = latency_in {
+                    m.latency_in = v as f32;
+                }
+                if let Some(v) = latency_out {
+                    m.latency_out = v as f32;
+                }
+                none
+            }
+            Command::ResetTrack { track } => {
+                let n = track_number(&s.project, track)?;
+                crate::edit::mixer::reset_track(s, n);
+                none
+            }
+            Command::SetAutoBypass { on } => {
+                crate::edit::mixer::set_auto_bypass(s, on);
                 none
             }
             Command::SetSend { from, to, level } => {
@@ -1130,6 +1217,7 @@ impl Command {
                     Some(l) => {
                         if !m.routes.contains(&b) {
                             m.routes.push(b);
+                            m.routes.sort_unstable();
                         }
                         // Unity is a route without a level, as the mixer writes it; levels by destination, as the
                         // send knobs keep them.
@@ -1576,7 +1664,7 @@ impl Command {
     pub fn on_off_undo(&self, s: &crate::session::Session) -> Option<Command> {
         match self {
             Command::SetChannel { enabled: Some(_), .. } => Some(Command::Put(Box::new(mutes(&s.project)))),
-            Command::SetTrack { enabled: Some(_), .. } => Some(Command::Put(Box::new(tracks_on(&s.project)))),
+            Command::SetTrack { enabled: Some(_), .. } | Command::ResetTrack { .. } => Some(Command::Put(Box::new(tracks_on(&s.project)))),
             _ => None,
         }
     }
