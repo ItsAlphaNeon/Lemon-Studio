@@ -302,6 +302,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn param_value(&self, id: u32) -> Option<f64> {
         self.look(None, |p| p.param_value(id))
     }
+    fn param_values(&self, ids: &[u32]) -> Vec<Option<f64>> {
+        self.look(vec![None; ids.len()], |p| p.param_values(ids))
+    }
     fn param_text(&self, id: u32, value: f64) -> Option<String> {
         self.look(None, |p| p.param_text(id, value))
     }

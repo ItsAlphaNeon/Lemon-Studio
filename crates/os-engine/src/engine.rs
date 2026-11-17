@@ -4841,6 +4841,11 @@ fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, fines: &mut
     }
 }
 
+/// How long the audio thread sleeps between tries for a plugin the UI thread holds. It sleeps rather than yields: a
+/// real-time thread that yields keeps the CPU, so a UI thread holding the plugin on the same core could not run until
+/// the wait ran out, and the plugin missed the tick.
+const BUSY_RETRY: Duration = Duration::from_micros(50);
+
 /// Locks a hosted plugin the UI thread also uses. While it is busy there the tick waits, until `until` (set at the
 /// tick's first wait, `wait` from then); `None` once that has passed. An export waits as long as it takes.
 fn lock_busy<'a, T: ?Sized>(m: &'a Mutex<T>, until: &mut Option<Instant>, wait: Duration, export: bool) -> Option<MutexGuard<'a, T>> {
@@ -4857,7 +4862,7 @@ fn lock_busy<'a, T: ?Sized>(m: &'a Mutex<T>, until: &mut Option<Instant>, wait: 
         if now >= *until.get_or_insert(now + wait) {
             return None;
         }
-        std::thread::yield_now();
+        std::thread::sleep(BUSY_RETRY);
     }
 }
 
@@ -5364,6 +5369,52 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
 mod tests {
     // spec: audio/pattern-controls.md (note repeat and channel control points, measured in FL)
     use super::*;
+
+    /// A real-time audio thread waiting for a plugin gets it once the UI thread holding it on the same core is done,
+    /// not after the whole wait. Linux; skipped where the test may not run real-time.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_waiting_audio_thread_lets_the_holder_on_its_core_finish() {
+        use std::sync::{Arc, Barrier};
+        #[repr(C)]
+        struct Param {
+            priority: i32,
+        }
+        unsafe extern "C" {
+            fn sched_setscheduler(pid: i32, policy: i32, param: *const Param) -> i32;
+            fn sched_setaffinity(pid: i32, size: usize, mask: *const u64) -> i32;
+            fn sched_getcpu() -> i32;
+        }
+        const SCHED_FIFO: i32 = 1;
+        let core = unsafe { sched_getcpu() }.clamp(0, 63) as u32;
+        let pin = move || {
+            let mask = 1u64 << core;
+            unsafe { sched_setaffinity(0, size_of::<u64>(), &mask) };
+        };
+        let m = Arc::new(Mutex::new(0u64));
+        let started = Arc::new(Barrier::new(2));
+        let (m2, started2) = (m.clone(), started.clone());
+        let ui = std::thread::spawn(move || {
+            pin();
+            let mut g = m2.lock().unwrap();
+            started2.wait();
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_micros(200) {
+                *g = std::hint::black_box(g.wrapping_add(1));
+            }
+        });
+        let audio = std::thread::spawn(move || {
+            pin();
+            let rt = unsafe { sched_setscheduler(0, SCHED_FIFO, &Param { priority: 10 }) } == 0;
+            started.wait();
+            rt.then(|| lock_busy(&m, &mut None, BUSY_WAIT, false).is_some())
+        });
+        ui.join().unwrap();
+        match audio.join().unwrap() {
+            Some(got) => assert!(got, "the audio thread gave up on a plugin held for 0.2 ms"),
+            None => eprintln!("no real-time priority here; skipped"),
+        }
+    }
     use os_model::{Channel, Note, Pattern};
 
     fn channel() -> Channel {

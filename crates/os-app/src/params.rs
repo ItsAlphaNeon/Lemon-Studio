@@ -21,7 +21,8 @@ use crate::plugins::{fx_key, fx_of, MEMBER_KEY};
 
 /// The values of an instance's parameters, by id.
 fn read_values(p: &dyn os_host::Plugin, params: &[Entry]) -> BTreeMap<u32, f64> {
-    params.iter().filter_map(|e| Some((e.id, p.param_value(e.id)?))).collect()
+    let ids: Vec<u32> = params.iter().map(|e| e.id).collect();
+    ids.iter().zip(p.param_values(&ids)).filter_map(|(&id, v)| Some((id, v?))).collect()
 }
 
 /// Browser tab of the project tree, and the sections plugin nodes live in (spec: ui/browser.md §2).
@@ -416,6 +417,10 @@ impl App {
             let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
             // A plugin's parameters can take a few ms to read (`lock_for_tick`).
             let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };
+            // The dropout log is Linux only; elsewhere the hold is only timed.
+            #[cfg(target_os = "linux")]
+            let t0 = crate::dropout_log::Hold::start();
+            #[cfg(not(target_os = "linux"))]
             let t0 = std::time::Instant::now();
             let weak = Arc::downgrade(&h.plugin);
             let count = p.param_count();
@@ -504,7 +509,7 @@ impl App {
                 m.note_hold(t0.elapsed());
             }
             #[cfg(target_os = "linux")]
-            crate::dropout_log::held(&p.desc().name, "reading its parameters", t0.elapsed());
+            crate::dropout_log::held(&p.desc().name, "reading its parameters", t0);
         }
         // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
         // begin to its end, values sent without one joined while they come in a row.
