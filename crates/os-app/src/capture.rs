@@ -211,7 +211,7 @@ fn system_inputs() -> Vec<(String, bool, u16)> {
     let mut v: Vec<(String, bool, u16)> =
         crate::audio_cfg::input_device(&cfg).map(|d| (crate::audio_cfg::device_name(&d), false, channels(&d))).into_iter().collect();
     let host = crate::audio_cfg::host(&cfg);
-    for d in host.input_devices().into_iter().flatten().filter(crate::audio_cfg::listed) {
+    for d in host.input_devices().into_iter().flatten().filter(crate::audio_cfg::recordable) {
         let name = crate::audio_cfg::device_name(&d);
         if !v.iter().any(|(n, ..)| *n == name) {
             v.push((name, false, channels(&d)));
@@ -239,10 +239,10 @@ impl Drop for InputStream {
 
 /// Opens system input device `name` in shared mode at its own rate, pushing into `capture`.
 pub fn open_input(name: &str) -> Result<InputStream, String> {
-    use cpal::traits::{HostTrait, StreamTrait};
+    use cpal::traits::StreamTrait;
     use cpal::SampleFormat;
     let host = crate::audio_cfg::host(&crate::audio_cfg::AudioCfg::current());
-    let device = crate::audio_cfg::find(host.input_devices().map_err(|e| e.to_string())?, name).ok_or_else(|| format!("{name} is not there"))?;
+    let device = crate::audio_cfg::find_input(&host, name).ok_or_else(|| format!("{name} is not there"))?;
     let supported = crate::device::system_input::input_config(&device)?;
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
