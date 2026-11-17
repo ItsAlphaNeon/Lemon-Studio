@@ -70,6 +70,11 @@ impl Ids {
         id
     }
 
+    /// The id `fresh` gives next.
+    pub fn next(&self) -> u32 {
+        self.next
+    }
+
     /// A new id for a note, control point, time marker, playlist track or automation point (from `PARTS` up).
     pub fn part(&mut self) -> Id {
         let id = Id(self.next_part);

@@ -469,7 +469,10 @@ impl Rig {
             let dir = traces_dir().join("dumps");
             let _ = std::fs::create_dir_all(&dir);
             let n = std::fs::read_dir(&dir).map_or(0, |d| d.count());
-            let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}", self.app.state.session.project, side(&self.app)));
+            let s = &self.app.state.session;
+            let steps: Vec<&str> = s.history.entries(&crate::settings_file::store()).into_iter().map(|e| e.1).collect();
+            let ids = format!("next id {}\nundo steps {steps:?}", s.control.ids.next());
+            let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}\n{ids}", s.project, side(&self.app)));
         }
         if self.id_fault.is_none() {
             self.id_fault = ids_fault(&self.app.state.session.project).map(|f| format!("step {}: {f}", self.step));

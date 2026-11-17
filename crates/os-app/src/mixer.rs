@@ -474,7 +474,6 @@ pub fn select(s: &mut State, n: u16, ctrl: bool) {
 
 /// Left click (or press) on a mixer control.
 pub fn hit(app: &mut App, h: MHit) -> Option<String> {
-    track_ids(&mut app.state);
     let (ctrl, shift) = (app.ctrl, app.shift);
     let at = app.mouse;
     let s = &mut app.state;
@@ -488,23 +487,27 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::Led(n) => {
             select(s, n, ctrl);
+            track_ids(s);
             let on = !track(&s.session, n)?.enabled;
             apply_quietly(s, vec![set_track!(s, n, enabled: on)?]);
             None
         }
         MHit::Polarity(n) => {
             select(s, n, ctrl);
+            track_ids(s);
             let on = !track(&s.session, n)?.polarity;
             apply(s, "Mixer track polarity", vec![set_track!(s, n, polarity: on)?])
         }
         MHit::Swap(n) => {
             select(s, n, ctrl);
+            track_ids(s);
             let on = !track(&s.session, n)?.swap;
             apply(s, "Mixer track swap", vec![set_track!(s, n, swap: on)?])
         }
         MHit::Route(dst) => route(s, dst, ctrl, shift),
         MHit::Unroute(dst) => {
             let cur = s.selected_mixer;
+            track_ids(s);
             let c = Command::SetSend { from: id_of(s, cur)?, to: id_of(s, dst)?, level: None };
             apply(s, ROUTING, vec![c]).or_else(|| Some(format!("{} no longer sends to {}", name(&s.session, cur), name(&s.session, dst))))
         }
@@ -552,6 +555,7 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::SlotLed(i) => {
             let t = s.selected_mixer;
+            track_ids(s);
             let on = !track(&s.session, t)?.slot_on[usize::from(i)];
             apply(s, SLOT, vec![Command::SetSlot { track: id_of(s, t)?, slot: i, enabled: Some(on), mix: None }])
         }
@@ -700,7 +704,6 @@ pub fn eq_graph_drag(s: &mut State, t: u16, band: u8, g: os_ui::Rect, (x, y): (f
 
 /// Right click on a mixer control. Returns false when it is not handled here (knob menus).
 pub fn right(app: &mut App, h: MHit) -> bool {
-    track_ids(&mut app.state);
     let at = app.mouse;
     let s = &mut app.state;
     match h {
@@ -742,6 +745,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
         MHit::SlotLed(i) => {
             // Solo the slot: the track's other slots are bypassed (§7).
             let t = s.selected_mixer;
+            track_ids(s);
             if let (Some(m), Some(id)) = (track(&s.session, t), id_of(s, t)) {
                 let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
                 let c = (0..10u8).map(|k| Command::SetSlot { track: id, slot: k, enabled: Some(only || k == i), mix: None }).collect();
@@ -764,7 +768,6 @@ pub fn right(app: &mut App, h: MHit) -> bool {
 
 /// Middle click: rename a filled slot (§7).
 pub fn middle(app: &mut App, h: MHit) -> bool {
-    track_ids(&mut app.state);
     if let MHit::SlotName(i) = h {
         let t = app.state.selected_mixer;
         if slot_name(&app.state.session, t, i).is_some() {
@@ -1346,7 +1349,6 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 // Commands
 
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
-    track_ids(&mut app.state);
     if let MCmd::SlotScale(slot, pct) = c {
         let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
         app.state.editor_host.set_editor_scale(&mut app.state.session.plugins, key, pct.map(|p| f32::from(p) / 100.0));
@@ -1383,6 +1385,9 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         return crate::control_ui::edit_app(app, "Effect slot color", Region::Track(t), |app| run_now(app, c));
     }
     // The track settings: the commands of the control plane, one undo step each.
+    if commands_of(&app.state, &c).is_some() {
+        track_ids(&mut app.state);
+    }
     if let Some((name, commands)) = commands_of(&app.state, &c) {
         let e = apply(&mut app.state, name, commands);
         app.invalidate();
