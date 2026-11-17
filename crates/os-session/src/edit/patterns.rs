@@ -88,10 +88,10 @@ pub fn clone_name(s: &crate::session::Session, n: u16) -> String {
     (2..).map(|k| format!("{base} #{k}")).find(|c| !taken(c)).expect("unbounded")
 }
 
-/// Transpose every note of pattern `n` by `semis`.
-pub fn transpose(s: &mut crate::session::Session, n: u16, semis: i32) {
+/// Transpose every note of pattern `n` by `semis`; with channels in `only` (their indexes), only their notes.
+pub fn transpose(s: &mut crate::session::Session, n: u16, semis: i32, only: &[u16]) {
     if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
-        for note in &mut p.notes {
+        for note in p.notes.iter_mut().filter(|x| only.is_empty() || only.contains(&x.channel)) {
             note.key = (i32::from(note.key) + semis).clamp(0, 131) as u16;
         }
         s.dirty = true;

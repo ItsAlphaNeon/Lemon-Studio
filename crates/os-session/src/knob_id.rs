@@ -254,7 +254,11 @@ impl KnobId {
             Some(Command::SetTrack { track: track(t)?, name: None, color: None, volume: None, pan, stereo, enabled: None, polarity: None, swap: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, effects_enabled: None })
         };
         let set_channel = |row: usize, volume: Option<f64>, pan: Option<f64>| {
-            Some(Command::SetChannel { channel: channel(row)?, name: None, color: None, volume, pan, pitch: None, enabled: None, track: None })
+            let mut c = Command::set_channel(channel(row)?);
+            if let Command::SetChannel { volume: v, pan: p, .. } = &mut c {
+                (*v, *p) = (volume, pan);
+            }
+            Some(c)
         };
         let bipolar = f64::from((v - 0.5) * 2.0);
         match self {

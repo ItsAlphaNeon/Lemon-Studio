@@ -8,7 +8,9 @@
 // spec: ui/pattern-menu.md
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
-use os_model::{ClipSource, Pattern, Rgb};
+use os_model::{ClipSource, Rgb};
+#[cfg(test)]
+use os_model::Pattern;
 pub use crate::edit::patterns::*;
 
 use crate::app::State;
@@ -361,22 +363,12 @@ fn move_pattern(s: &mut State, cur: u16, to: u16) -> Option<String> {
 /// Accept the name box.
 pub fn accept(s: &mut State) {
     let Some(b) = s.pat_ui.name_box.as_ref() else { return };
-    // Filter groups (Group selected, Add and Rename filter group) are no undo step, as in FL (spec: ui/undo-steps.md).
-    if matches!(b.target, BoxTarget::Rack(crate::rack::RBox::GroupSel | crate::rack::RBox::NewGroup | crate::rack::RBox::RenameGroup(_))) {
-        return accept_now(s);
-    }
     if let BoxTarget::Name(n) | BoxTarget::Transpose(n) = b.target {
         return accept_pattern(s, n);
     }
-    let name = match b.target {
-        BoxTarget::Name(_) => "Pattern name",
-        BoxTarget::Transpose(_) | BoxTarget::Rack(crate::rack::RBox::Transpose) => "Transpose",
-        BoxTarget::Rack(crate::rack::RBox::Channel(_)) => "Channel name",
-        BoxTarget::Rack(crate::rack::RBox::SwingMix) => "Channel settings",
-        BoxTarget::Rack(crate::rack::RBox::ColorSel) => "Channel color",
-        BoxTarget::Rack(_) => "Channel group",
-    };
-    crate::control_ui::edit(s, name, crate::control::command::Region::Project, accept_now);
+    // The rack's boxes apply their commands (`rack::box_accept`); filter groups (Group selected, Add and Rename filter
+    // group) are no undo step, as in FL (spec: ui/undo-steps.md).
+    accept_now(s);
 }
 
 /// The name box of pattern `n` accepted: its name, or its transposition.
@@ -404,7 +396,7 @@ fn accept_pattern(s: &mut State, n: u16) {
         }
         _ => {
             if let (Ok(v), Some(pattern)) = (b.text.trim().trim_start_matches('+').parse::<i32>(), pat_id(s, n)) {
-                if let Some(e) = apply(s, "Transpose", vec![Command::TransposePattern { pattern, semitones: v }]) {
+                if let Some(e) = apply(s, "Transpose", vec![Command::TransposePattern { pattern, semitones: v, channels: Vec::new() }]) {
                     s.message = Some(e);
                 }
             }
@@ -433,13 +425,10 @@ fn accept_now(s: &mut State) {
         }
         BoxTarget::Transpose(n) => {
             if let Ok(v) = b.text.trim().trim_start_matches('+').parse::<i32>() {
-                transpose(&mut s.session, n, v);
+                transpose(&mut s.session, n, v, &[]);
             }
         }
-        BoxTarget::Rack(rb) => {
-            crate::rack::box_accept(s, rb, &b.text);
-            s.session.dirty = true;
-        }
+        BoxTarget::Rack(rb) => crate::rack::box_accept(s, rb, &b.text),
     }
 }
 
@@ -453,50 +442,25 @@ pub fn suggest(s: &mut State, col: usize, row: usize) {
 }
 
 pub fn set_color(s: &mut State, i: usize) {
-    let name = match s.pat_ui.name_box.as_ref().map(|b| b.target) {
-        Some(BoxTarget::Rack(_)) => "Channel color",
-        _ => "Pattern color",
-    };
-    if let Some(BoxTarget::Name(n)) = s.pat_ui.name_box.as_ref().map(|b| b.target) {
-        if let Some(&c) = SWATCHES.get(i) {
-            pattern_ids(s);
-            let col = crate::control::command::color_text(Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8)));
-            let cmd = set_pattern(s, n, None, col);
-            if let Some(e) = apply(s, name, vec![cmd]) {
-                s.message = Some(e);
-            }
-        }
-        if let Some(b) = s.pat_ui.name_box.as_mut() {
-            b.palette = false;
-        }
-        return;
-    }
-    crate::control_ui::edit(s, name, crate::control::command::Region::Project, |s| set_color_now(s, i));
-}
-
-fn set_color_now(s: &mut State, i: usize) {
-    let target = s.pat_ui.name_box.as_ref().map(|b| b.target);
-    if let Some(&c) = SWATCHES.get(i) {
-        let col = Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8));
-        match target {
-            Some(BoxTarget::Name(n)) => pat_mut(&mut s.session, n).color = col,
-            Some(BoxTarget::Rack(crate::rack::RBox::Channel(r))) => {
-                if let Some(ch) = s.session.project.get_mut().channels.get_mut(r) {
-                    ch.color = col.map(Rgb::for_channel);
+    let col = SWATCHES.get(i).map(|&c| Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8));
+    match s.pat_ui.name_box.as_ref().map(|b| b.target) {
+        Some(BoxTarget::Name(n)) => {
+            if let Some(col) = col {
+                pattern_ids(s);
+                let cmd = set_pattern(s, n, None, crate::control::command::color_text(Some(col)));
+                if let Some(e) = apply(s, "Pattern color", vec![cmd]) {
+                    s.message = Some(e);
                 }
             }
-            // Color selected ▸ All...: every selected channel, and the box closes.
-            Some(BoxTarget::Rack(crate::rack::RBox::ColorSel)) => {
-                for r in s.rack.sel.clone() {
-                    if let Some(ch) = s.session.project.get_mut().channels.get_mut(r) {
-                        ch.color = col.map(Rgb::for_channel);
-                    }
-                }
-                s.pat_ui.name_box = None;
-            }
-            _ => return,
         }
-        s.session.dirty = true;
+        Some(BoxTarget::Rack(rb @ (crate::rack::RBox::Channel(_) | crate::rack::RBox::ColorSel))) => {
+            if let Some(col) = col {
+                if let Some(e) = crate::rack::box_color(s, rb, col.for_channel()) {
+                    s.message = Some(e);
+                }
+            }
+        }
+        _ => return,
     }
     if let Some(b) = s.pat_ui.name_box.as_mut() {
         b.palette = false;

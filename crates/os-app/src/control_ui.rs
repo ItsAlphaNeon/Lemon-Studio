@@ -103,6 +103,21 @@ pub fn settle_ids(s: &mut State) {
     s.session.control.settle(s.session.project.get_mut());
 }
 
+/// `command` for a knob-like control (a mute light, a typed fader value): applied without a step while Undo knob tweaks
+/// is off.
+pub fn knob_command(s: &mut State, name: &'static str, run: Option<crate::history::Run>, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
+        return command(s, name, run, commands);
+    }
+    let before: Vec<_> = commands.iter().map(|c| c.undo_now(&s.session).ok()).collect();
+    let check = commands.clone();
+    let (results, _) = crate::follow::around(s, |s| run_in(&mut s.session, commands))?;
+    if check.iter().map(|c| c.undo_now(&s.session).ok()).collect::<Vec<_>>() != before {
+        s.session.dirty = true;
+    }
+    Ok(results)
+}
+
 /// `edit` for a knob-like control (a mixer fader's typed value): no step while Undo knob tweaks is off.
 pub fn knob_edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
     if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {

@@ -74,6 +74,7 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_info", "title": "Song", "author": "Me"}),
         json!({"op": "set_project", "beats": 7, "steps": 2, "signature": false, "panning_law": "triangular", "play_truncated": true, "pdc": false}),
         json!({"op": "set_channel", "channel": kick, "name": "Big kick", "color": "#ff8000", "volume": 0.5, "pan": -0.25, "pitch": 100, "track": ins2}),
+        json!({"op": "set_channel", "channel": clap, "declick": 3, "swing": 0.25, "truncate_swing": true, "cut": 2, "cut_by": 2}),
         json!({"op": "load_sample", "channel": clap, "path": "/no/such/folder/snare.wav"}),
         json!({"op": "set_track", "track": ins1, "name": "Drums", "color": "#102030", "volume": 0.6, "pan": 0.5, "stereo": -0.5, "polarity": true, "swap": true, "effects_enabled": false}),
         json!({"op": "set_track", "track": ins2, "separator": true, "dock": "right", "threaded": false, "latency_in": 2.5, "latency_out": -1.0}),
@@ -174,6 +175,51 @@ fn pattern_commands_undo_and_redo() {
     }
     let bad = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_pattern", "number": 12}))]).unwrap_err();
     assert!(bad.contains("there already"), "{bad}");
+}
+
+/// The rack's edits apply their commands, each one step that undo and redo take back and put again.
+#[test]
+fn rack_edits_are_one_step_each() {
+    let mut a = app();
+    let steps = |a: &App| a.state.session.history.done;
+    let check = |a: &mut App, what: &str, edit: &dyn Fn(&mut App)| {
+        let (before, n) = (a.state.session.project.channels.clone(), steps(a));
+        edit(a);
+        let after = a.state.session.project.channels.clone();
+        assert_ne!(before, after, "{what} changed nothing");
+        assert_eq!(steps(a), n + 1, "{what}: one step");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(a.state.session.project.channels, before, "{what}: undo");
+        crate::history_ui::redo(&mut a.state);
+        assert_eq!(a.state.session.project.channels, after, "{what}: redo");
+    };
+    check(&mut a, "mute", &|a| crate::rack::toggle_mute(&mut a.state, 0));
+    check(&mut a, "solo", &|a| crate::rack::solo(&mut a.state, 1));
+    a.state.rack.sel = [0, 1].into_iter().collect();
+    check(&mut a, "gradient", &|a| {
+        crate::rack::gradient(&mut a.state);
+    });
+    check(&mut a, "swing", &|a| {
+        crate::rack::swing_selected(&mut a.state, 0.5);
+    });
+    // Two channels on one track: the second one moves to a free one.
+    let t = a.state.session.project.channels[0].mixer_track;
+    a.state.session.project.get_mut().channels[1].mixer_track = t;
+    check(&mut a, "free track", &|a| {
+        crate::rack::run(a, crate::rack::RCmd::AssignFreeSel);
+    });
+    check(&mut a, "cut itself", &|a| {
+        crate::rack::run(a, crate::rack::RCmd::CutItself(0));
+    });
+    check(&mut a, "mixer track", &|a| {
+        let t = a.state.session.project.channels[0].mixer_track + 1;
+        crate::rack::set_mixer_track(&mut a.state, 0, t, None);
+    });
+    // The lock makes no step.
+    let n = steps(&a);
+    crate::rack::lock(&mut a.state, 0);
+    assert!(a.state.session.project.channels[0].rack.locked);
+    assert_eq!(steps(&a), n);
 }
 
 #[test]

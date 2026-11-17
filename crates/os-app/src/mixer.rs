@@ -874,7 +874,7 @@ pub fn route_channels(s: &mut State, dst: u16, spread: bool) -> Option<String> {
         .take_while(|&(_, t, _)| t <= max)
         .collect();
     let moved = plan.len();
-    route_plan(s, plan, 0)?;
+    route_plan(s, ROUTING, plan, 0)?;
     s.mixer.sel.clear();
     s.selected_mixer = dst;
     Some(if moved == 1 {
@@ -910,7 +910,7 @@ pub fn route_free(s: &mut State, rows: &[usize]) -> Option<String> {
         plan.push((r, t, true));
     }
     let &(r, t, _) = plan.last()?;
-    route_plan(s, plan, adds)?;
+    route_plan(s, crate::rack::MIXER_TRACK, plan, adds)?;
     s.mixer.sel.clear();
     s.selected_mixer = t;
     Some(if rows.len() == 1 {
@@ -921,14 +921,18 @@ pub fn route_free(s: &mut State, rows: &[usize]) -> Option<String> {
 }
 
 /// Channel rows routed to mixer tracks (`plan`: row, track, whether the track is named after the channel), after `adds`
-/// new tracks at the end, as one undo step, "Mixer routing". `None` (with the message set) when it can't be applied.
-fn route_plan(s: &mut State, plan: Vec<(usize, u16, bool)>, adds: u16) -> Option<()> {
+/// new tracks at the end, as one undo step named `step`. `None` (with the message set) when it can't be applied.
+fn route_plan(s: &mut State, step: &'static str, plan: Vec<(usize, u16, bool)>, adds: u16) -> Option<()> {
     track_ids(s);
     let commands = move |s: &State, _: &[serde_json::Value]| -> Vec<Command> {
         let mut c = Vec::new();
         for &(r, t, named) in &plan {
             let (Some(ch), Some(track)) = (s.session.project.channels.get(r), id_of(s, t)) else { continue };
-            c.push(Command::SetChannel { channel: ch.id.0, name: None, color: None, volume: None, pan: None, pitch: None, enabled: None, track: Some(track) });
+            let mut set = Command::set_channel(ch.id.0);
+            if let Command::SetChannel { track: t, .. } = &mut set {
+                *t = Some(track);
+            }
+            c.push(set);
             // Named after the channel, and coloured when it has a colour (`edit::mixer::name_after`).
             if named && t != 0 {
                 let nm = crate::edit::rack::channel_name(&s.session, r);
@@ -942,9 +946,9 @@ fn route_plan(s: &mut State, plan: Vec<(usize, u16, bool)>, adds: u16) -> Option
     };
     let r = if adds == 0 {
         let c = commands(s, &[]);
-        crate::control_ui::command(s, ROUTING, None, c)
+        crate::control_ui::command(s, step, None, c)
     } else {
-        crate::control_ui::command_then(s, ROUTING, vec![Command::AddTrack { at: None }; usize::from(adds)], commands)
+        crate::control_ui::command_then(s, step, vec![Command::AddTrack { at: None }; usize::from(adds)], commands)
     };
     match r {
         Ok(_) => Some(()),

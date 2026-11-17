@@ -331,10 +331,29 @@ pub fn clone_name(s: &crate::session::Session, r: usize) -> String {
     (2..).map(|k| format!("{base} #{k}")).find(|c| !taken(c)).expect("unbounded")
 }
 
+/// The highest declick mode (spec: audio/declick.md).
+pub const DECLICK_MAX: u8 = 5;
+
+/// Lemon Sampler's declick mode parameter (its index is the mode).
+pub const SAMPLER_DECLICK: &str = "Click removal";
+
+/// Row `row`'s Lemon Sampler takes the channel's declick mode, which it plays in the engine's place (spec:
+/// plugins/lemon-sampler.md §7).
+pub fn sync_declick(s: &mut crate::session::Session, row: usize) {
+    let Some(mode) = s.project.channels.get(row).filter(|c| c.kind.is_sampler()).map(|c| c.sound.declick) else { return };
+    s.plugins.set_param_named(row, SAMPLER_DECLICK, f64::from(mode));
+    s.params.reread(row);
+}
+
 pub fn random_color(s: &mut crate::session::Session, r: usize, salt: u64) {
     if let Some(c) = s.project.get_mut().channels.get_mut(r) {
-        c.color = Some(crate::edit::patterns::random_color(seed() ^ salt.wrapping_mul(0x9e37_79b9)).for_channel());
+        c.color = Some(random_color_of(salt));
     }
+}
+
+/// A random channel colour (`random_color`), `salt` telling apart the channels coloured at once.
+pub fn random_color_of(salt: u64) -> os_model::Rgb {
+    crate::edit::patterns::random_color(seed() ^ salt.wrapping_mul(0x9e37_79b9)).for_channel()
 }
 
 /// Channel `r` is the only unlocked channel on.
@@ -383,18 +402,23 @@ pub fn unused(s: &crate::session::Session) -> BTreeSet<usize> {
 /// Chokes itself on a channel's menu (§18), as the original does: ticking gives the channel the lowest cut group no
 /// channel uses yet, as both its cut and cut by; unticking sets both to none (spec: ui/channel-rack.md §18).
 pub fn cut_itself(s: &mut crate::session::Session, r: usize) {
-    let Some(on) = s.project.channels.get(r).map(|c| cuts_itself(&c.misc)) else { return };
-    let group = if on {
-        0
-    } else {
-        let used: BTreeSet<u32> = s.project.channels.iter().flat_map(|c| [c.misc.cut, c.misc.cut_by]).collect();
-        (1..).find(|g| !used.contains(g)).unwrap_or(1)
-    };
+    let Some(group) = cut_itself_group(s, r) else { return };
     if let Some(c) = s.project.get_mut().channels.get_mut(r) {
         c.misc.cut = group;
         c.misc.cut_by = group;
     }
     s.dirty = true;
+}
+
+/// The cut and cut-by group Cut itself gives row `r` (`cut_itself`): none when it cuts itself, else the lowest group
+/// no channel uses.
+pub fn cut_itself_group(s: &crate::session::Session, r: usize) -> Option<u32> {
+    let on = s.project.channels.get(r).map(|c| cuts_itself(&c.misc))?;
+    if on {
+        return Some(0);
+    }
+    let used: BTreeSet<u32> = s.project.channels.iter().flat_map(|c| [c.misc.cut, c.misc.cut_by]).collect();
+    Some((1..).find(|g| !used.contains(g)).unwrap_or(1))
 }
 
 /// The last row's channel goes (an undone drop that made it, `history`): `reorder` without the app, whose instrument

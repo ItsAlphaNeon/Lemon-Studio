@@ -91,7 +91,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `add_channel` | `name`, `plugin`, `sample`, `track` (all optional) | A Lemon Sampler channel (with `sample` loaded), or one played by generator `plugin`, on mixer track `track`. Result: `channel` |
 | `delete_channel` | `channel` | Its notes, clips and automation go too |
 | `move_channel` | `channel`, `row` | 0 = top |
-| `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track` (optional) | A colour's parts are kept at least `14` (hex), as projects save them |
+| `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track`, `declick` (0..5), `swing` (0..1), `truncate_swing`, `cut`, `cut_by` (groups, 0 = none), `locked` (optional) | A colour's parts are kept at least `14` (hex), as projects save them. Swing is kept in steps of 1/128. An undo of another step leaves `locked` as it is |
 | `load_sample` | `channel`, `path` | A sampler channel; an empty path clears it |
 | `add_track` | `at` (optional) | A mixer insert, at number `at` or after the last. Result: `track` |
 | `delete_track` | `track` | Later tracks move left; its channels go to the master |
@@ -112,7 +112,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `shift_patterns` | `from`, `by` (1 or -1) | patterns from `from` on move by one: 1 opens a gap at `from` (Insert one), -1 closes the empty number below `from` |
 | `move_pattern` | `from`, `to` (numbers) | pattern number `from` takes number `to` and the one there `from`, with their clips (by number: a number can have clips before the project holds a pattern for it) |
 | `clone_pattern` | `pattern` | a copy right after it named "<name> #k"; later ones move up. Result: `pattern` |
-| `transpose_pattern` | `pattern`, `semitones` | every note of the pattern |
+| `transpose_pattern` | `pattern`, `semitones`; `channels` (optional) | every note of the pattern, or only those channels' notes |
 | `split_pattern` | `pattern` | Split by channel: a pattern per channel with notes, clips under the original's |
 | `set_pattern_signature` | `pattern`, `numerator`, `denominator` | the time signature at the pattern's start, `numerator` 0 for none; its clips follow |
 | `set_pattern` | `pattern`; `name`, `color`, `length` (0 = Auto) (optional) | |

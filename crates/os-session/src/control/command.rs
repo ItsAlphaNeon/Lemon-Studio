@@ -95,6 +95,24 @@ pub enum Command {
         enabled: Option<bool>,
         #[serde(default)]
         track: Option<u32>,
+        /// Click removal (the sampler's declick mode, 0..=5).
+        #[serde(default)]
+        declick: Option<u8>,
+        /// The channel's share of the main swing, 0..=1.
+        #[serde(default)]
+        swing: Option<f64>,
+        /// Truncate swing notes.
+        #[serde(default)]
+        truncate_swing: Option<bool>,
+        /// Cut group (0: none): the channel cuts the channels cut by it.
+        #[serde(default)]
+        cut: Option<u32>,
+        /// Cut by group (0: none).
+        #[serde(default)]
+        cut_by: Option<u32>,
+        /// Lock active / mute state: solos leave the channel as it is. An undo of another step leaves the lock as it is.
+        #[serde(default)]
+        locked: Option<bool>,
     },
     /// A sample file into a sampler channel (empty: none).
     LoadSample { channel: u32, path: String },
@@ -226,8 +244,13 @@ pub enum Command {
     /// A copy of the pattern right after it, named "<name> #k"; later patterns move up a number. The result names
     /// the copy's id.
     ClonePattern { pattern: u32 },
-    /// Every note of the pattern moves by `semitones`.
-    TransposePattern { pattern: u32, semitones: i32 },
+    /// Every note of the pattern moves by `semitones`; with `channels`, only those channels' notes.
+    TransposePattern {
+        pattern: u32,
+        semitones: i32,
+        #[serde(default)]
+        channels: Vec<u32>,
+    },
     /// The pattern keeps the first channel's notes (in rack order) and takes its name; each other channel with notes
     /// gets a pattern of its own right after it, and the original's clips get one clip per new pattern under them.
     SplitPattern { pattern: u32 },
@@ -408,6 +431,8 @@ pub enum Taken {
     Project(Box<Side>),
     /// Which channels are on, by id (a channel muted or soloed).
     Mutes(Vec<(u32, bool)>),
+    /// Which channels have their mute state locked, by id (a client's `set_channel` locking one: the step's own undo).
+    Locks(Vec<(u32, bool)>),
     /// Which mixer tracks are on, by id (a client's `set_track` switching one on or off: the step's own undo).
     TracksOn(Vec<(u32, bool)>),
     /// Remote control links re-pointed (a wrap moving plugins into a container, `crate::container`): each link on the
@@ -810,6 +835,26 @@ impl Command {
     }
 
     /// A `SetProject` that sets nothing yet.
+    /// `SetChannel` on channel `channel` setting nothing yet.
+    pub fn set_channel(channel: u32) -> Command {
+        Command::SetChannel {
+            channel,
+            name: None,
+            color: None,
+            volume: None,
+            pan: None,
+            pitch: None,
+            enabled: None,
+            track: None,
+            declick: None,
+            swing: None,
+            truncate_swing: None,
+            cut: None,
+            cut_by: None,
+            locked: None,
+        }
+    }
+
     pub fn set_project() -> Command {
         Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: None, pdc: None }
     }
@@ -882,6 +927,7 @@ impl Command {
                 Taken::Plugin(..) => return Err("a plugin state's undo is taken by `apply`".into()),
                 Taken::Project(_) => Taken::Project(Box::new(Side::of(s))),
                 Taken::Mutes(_) => mutes(p),
+                Taken::Locks(_) => locks(p),
                 Taken::TracksOn(_) => tracks_on(p),
                 Taken::WithOn(t, _) => {
                     let inner = Command::Put(t.clone()).take(s)?;
@@ -953,6 +999,7 @@ impl Command {
             | Taken::Param(..)
             | Taken::Plugin(..)
             | Taken::Mutes(_)
+            | Taken::Locks(_)
             | Taken::TracksOn(_)
             | Taken::Links(_)
             | Taken::Gone(_)
@@ -1147,8 +1194,12 @@ impl Command {
                 crate::edit::rack::remap_in(s, &map);
                 none
             }
-            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track } => {
+            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked } => {
                 let track = track.map(|t| track_number(&s.project, t)).transpose()?;
+                if declick.is_some_and(|d| d > crate::edit::rack::DECLICK_MAX) {
+                    return Err(format!("declick is 0..={}", crate::edit::rack::DECLICK_MAX));
+                }
+                let swing = swing.map(|v| unit("swing", v, 0.0, 1.0)).transpose()?;
                 let color = color.map(|c| parse_color(&c)).transpose()?;
                 let volume = volume.map(|v| unit("volume", v, 0.0, 1.0)).transpose()?;
                 let pan = pan.map(|v| unit("pan", v, -1.0, 1.0)).transpose()?;
@@ -1159,6 +1210,10 @@ impl Command {
                 }
                 if let Some(c) = color {
                     ch.color = c.map(os_model::Rgb::for_channel);
+                    // The colour the file's event holds (what the playlist draws audio clips with) follows.
+                    if ch.color.is_some() {
+                        ch.rack.stored_color = ch.color;
+                    }
                 }
                 if let Some(v) = volume {
                     ch.volume = v;
@@ -1174,6 +1229,32 @@ impl Command {
                 }
                 if let Some(t) = track {
                     ch.mixer_track = t;
+                }
+                // Steps of 1/128, as the file keeps it.
+                if let Some(v) = swing {
+                    ch.misc.swing = ((v * 128.0).round() / 128.0) as f32;
+                }
+                if let Some(v) = truncate_swing {
+                    ch.misc.truncate_swing = v;
+                }
+                if let Some(v) = cut {
+                    ch.misc.cut = v;
+                }
+                if let Some(v) = cut_by {
+                    ch.misc.cut_by = v;
+                }
+                if let Some(v) = locked {
+                    ch.rack.locked = v;
+                }
+                let sampler = ch.kind.is_sampler();
+                if let Some(v) = declick {
+                    ch.sound.declick = v;
+                    if sampler {
+                        crate::edit::rack::sync_declick(s, row);
+                    }
+                }
+                if sampler && (swing.is_some() || truncate_swing.is_some() || cut.is_some() || cut_by.is_some()) {
+                    s.control.misc.push(row);
                 }
                 none
             }
@@ -1473,9 +1554,10 @@ impl Command {
                 let id = s.project.pattern(n + 1).map_or(Id::NONE, |p| p.id);
                 Ok(id_result("pattern", id))
             }
-            Command::TransposePattern { pattern, semitones } => {
+            Command::TransposePattern { pattern, semitones, channels } => {
                 let n = s.project.patterns[pattern_place(&s.project, pattern)?].number;
-                crate::edit::patterns::transpose(s, n, semitones);
+                let only = channels.iter().map(|&c| channel_row(&s.project, c).map(|r| s.project.channels[r].index)).collect::<Result<Vec<u16>, _>>()?;
+                crate::edit::patterns::transpose(s, n, semitones, &only);
                 none
             }
             Command::SplitPattern { pattern } => {
@@ -1721,11 +1803,15 @@ fn put(s: &mut crate::session::Session, t: Taken) {
                 if ch.misc != c.misc && c.kind.is_sampler() {
                     s.control.misc.push(row);
                 }
+                let declick = ch.sound.declick != c.sound.declick && c.kind.is_sampler();
                 // Muting is a step of its own, a lock, a zip and a filter group none: the channel stays as it is in
                 // those (`Mutes`).
                 let (on, locked, zipped, group) = (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group);
                 *ch = *c;
                 (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group) = (on, locked, zipped, group);
+                if declick {
+                    crate::edit::rack::sync_declick(s, row);
+                }
             }
         }
         Taken::Track(m) => {
@@ -1791,6 +1877,13 @@ fn put(s: &mut crate::session::Session, t: Taken) {
                 }
             }
             s.dirty = true;
+        }
+        Taken::Locks(on) => {
+            for (id, v) in on {
+                if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.id.0 == id) {
+                    c.rack.locked = v;
+                }
+            }
         }
         Taken::WithOn(t, on) => {
             // A track that is there before and after keeps its light as it is now (`Mutes::keep`).
@@ -1862,6 +1955,11 @@ fn mutes(p: &Project) -> Taken {
     Taken::Mutes(p.channels.iter().map(|c| (c.id.0, c.enabled)).collect())
 }
 
+/// Which channels' mute states are locked now (`Taken::Locks`).
+fn locks(p: &Project) -> Taken {
+    Taken::Locks(p.channels.iter().map(|c| (c.id.0, c.rack.locked)).collect())
+}
+
 /// Which mixer tracks are on now (`Taken::TracksOn`).
 /// Every mixer track's mute light and arm switch, by id (`Taken::WithOn`).
 fn lights(p: &Project) -> Vec<(u32, bool, bool)> {
@@ -1874,13 +1972,16 @@ fn tracks_on(p: &Project) -> Taken {
 
 impl Command {
     /// The undo of what a command switches on or off, beside its own (`Taken::Channel` and `Taken::Track` keep a
-    /// channel or track on or off as it is, since an undo of another step leaves muting alone): `set_channel` and
-    /// `set_track` with `enabled`, taken before they apply.
-    pub fn on_off_undo(&self, s: &crate::session::Session) -> Option<Command> {
+    /// channel or track on or off, and a channel's lock, as it is, since an undo of another step leaves muting alone):
+    /// `set_channel` with `enabled` or `locked` and `set_track` with `enabled`, taken before they apply.
+    pub fn on_off_undo(&self, s: &crate::session::Session) -> Vec<Command> {
+        let put = |t: Taken| Command::Put(Box::new(t));
         match self {
-            Command::SetChannel { enabled: Some(_), .. } => Some(Command::Put(Box::new(mutes(&s.project)))),
-            Command::SetTrack { enabled: Some(_), .. } | Command::ResetTrack { .. } => Some(Command::Put(Box::new(tracks_on(&s.project)))),
-            _ => None,
+            Command::SetChannel { enabled, locked, .. } => {
+                enabled.map(|_| put(mutes(&s.project))).into_iter().chain(locked.map(|_| put(locks(&s.project)))).collect()
+            }
+            Command::SetTrack { enabled: Some(_), .. } | Command::ResetTrack { .. } => vec![put(tracks_on(&s.project))],
+            _ => Vec::new(),
         }
     }
 }

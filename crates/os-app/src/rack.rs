@@ -22,6 +22,74 @@ use crate::app::{App, State, Win};
 use crate::knobs::KnobId;
 use crate::playlist::{Cmd, Mark, PItem, Popup};
 
+use crate::control::command::{color_text, Command};
+
+/// The undo step of a channel's mixer track.
+pub const MIXER_TRACK: &str = "Channel mixer track";
+/// The undo step of a channel's colour.
+const COLOR: &str = "Channel color";
+/// The undo step of a channel's Misc and sound settings set from the rack's menus.
+const SETTINGS: &str = "Channel settings";
+
+/// Row `r`'s channel id, for a command.
+fn ch_id(s: &State, r: usize) -> Option<u32> {
+    s.session.project.channels.get(r).map(|c| c.id.0)
+}
+
+/// `Command::SetChannel` for row `r` with the settings given (`set_channel!(s, r, color: c)`); `None` without the row.
+/// The channels need their ids first (`crate::mixer::track_ids`).
+macro_rules! set_channel {
+    ($s:expr, $r:expr, $($f:ident: $v:expr),+ $(,)?) => {{
+        // The values first: the fields' names may be the caller's variables.
+        let values = ($(Some($v),)+);
+        ch_id($s, $r).map(move |id| {
+            let mut c = Command::set_channel(id);
+            if let Command::SetChannel { $($f,)+ .. } = &mut c {
+                ($(*$f,)+) = values;
+            }
+            c
+        })
+    }};
+}
+
+/// The rack's edit made of `commands`: one undo step named `name` (none when nothing changed); the error as the
+/// message.
+fn apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Option<String> {
+    crate::control_ui::command(s, name, None, commands).err()
+}
+
+/// A knob-like edit (the mute lights): a step only with Undo knob tweaks on.
+fn apply_knob(s: &mut State, name: &'static str, commands: Vec<Command>) {
+    if let Err(e) = crate::control_ui::knob_command(s, name, None, commands) {
+        s.message = Some(e);
+    }
+}
+
+/// Each row in `rows` on (`true`) or off, as one mute and solo step.
+fn set_on(s: &mut State, rows: impl IntoIterator<Item = (usize, bool)>) {
+    crate::mixer::track_ids(s);
+    let p = &s.session.project;
+    let changes: Vec<(usize, bool)> = rows.into_iter().filter(|&(r, on)| p.channels.get(r).is_some_and(|c| c.enabled != on)).collect();
+    let commands: Vec<Command> = changes.into_iter().filter_map(|(r, on)| set_channel!(s, r, enabled: on)).collect();
+    if !commands.is_empty() {
+        apply_knob(s, MUTE_SOLO, commands);
+    }
+}
+
+/// Rows `rows` take colours `colors`, one step.
+fn set_colors(s: &mut State, rows: &[usize], colors: impl IntoIterator<Item = Option<Rgb>>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let commands: Vec<Command> = rows.iter().zip(colors).filter_map(|(&r, c)| set_channel!(s, r, color: color_text(c).unwrap_or_default())).collect();
+    apply(s, COLOR, commands)
+}
+
+/// Rows `rows` with `f` making each one's command (`set_channel!`), one step named `name`.
+fn set_rows(s: &mut State, name: &'static str, rows: &[usize], f: impl Fn(&State, usize) -> Option<Command>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let commands: Vec<Command> = rows.iter().filter_map(|&r| f(s, r)).collect();
+    apply(s, name, commands)
+}
+
 /// Name button width at 100 % (§17): wide enough for a new project's "Lemon Sampler" at every UI scale with every text
 /// engine; Linux's Barlow is the widest (Lemon Studio).
 pub const NAME_W: f32 = 94.0;
@@ -599,16 +667,20 @@ pub fn join_group(s: &mut State, r: usize, name: &str) {
 
 /// Color selected > Gradient: from the first selected channel's colour to the last one's (a hue sweep when they
 /// match or have none; Lemon Studio's version of FL's gradient dialog).
-pub fn gradient(s: &mut State) {
+pub fn gradient(s: &mut State) -> Option<String> {
     let rows: Vec<usize> = s.rack.sel.iter().copied().filter(|&r| r < s.session.project.channels.len()).collect();
     if rows.len() < 2 {
-        return;
+        return None;
     }
     let (a, b) = (s.session.project.channels[rows[0]].color, s.session.project.channels[*rows.last().expect("len >= 2")].color);
-    for (c, &r) in gradient_colors(a, b, rows.len()).into_iter().zip(&rows) {
-        s.session.project.get_mut().channels[r].color = Some(c.for_channel());
-        s.session.project.get_mut().channels[r].rack.stored_color = Some(c.for_channel());
-    }
+    let colors = gradient_colors(a, b, rows.len());
+    set_colors(s, &rows, colors.into_iter().map(|c| Some(c.for_channel())))
+}
+
+/// Rows `rows` get random colours, `salt` added to each row's own number (`edit::rack::random_color_of`).
+fn random_colors(s: &mut State, rows: &[usize], salt: u64) -> Option<String> {
+    let colors: Vec<Option<Rgb>> = rows.iter().map(|&r| Some(random_color_of(r as u64 + salt))).collect();
+    set_colors(s, rows, colors)
 }
 
 /// `k` (2 or more) colours from `a` to `b`, or a hue sweep when they match or either is missing (`gradient`; the
@@ -633,7 +705,8 @@ pub fn gradient_colors(a: Option<Rgb>, b: Option<Rgb>, k: usize) -> Vec<Rgb> {
 /// with "Restore previous state after solo" on, puts back the states from before the first solo (a solo moved to
 /// another channel keeps them; spec: ui/settings-choices.md "Miscellaneous"). Locked channels keep their state.
 pub fn solo(s: &mut State, r: usize) {
-    crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| solo_now(s, r));
+    let on = solo_now(s, r);
+    set_on(s, on.into_iter().enumerate());
 }
 
 /// The undo step of a channel muted, soloed or switched on or off: a knob tweak's, as in FL (none with "Undo knob
@@ -642,12 +715,11 @@ pub const MUTE_SOLO: &str = "Channel mute / solo";
 
 /// The ON switch of a channel's plugin window: the channel on or off, a mute and solo step.
 pub fn toggle_on(s: &mut State, row: usize) {
-    crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
-        s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled)
-    })
+    toggle_mute(s, row);
 }
 
-fn solo_now(s: &mut State, r: usize) {
+/// Which channels a solo click on row `r` leaves on, row by row.
+fn solo_now(s: &mut State, r: usize) -> Vec<bool> {
     let locked: BTreeSet<usize> = locked_rows(&s.session.project);
     let soloed_now = solo_of(&s.session, r);
     // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
@@ -656,19 +728,24 @@ fn solo_now(s: &mut State, r: usize) {
         s.rack.pre_solo = Some(s.session.project.channels.iter().map(|c| c.enabled).collect());
     }
     let back = if soloed_now { s.rack.pre_solo.take().filter(|_| in_solo && crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO)) } else { None };
-    for (i, c) in s.session.project.get_mut().channels.iter_mut().enumerate() {
-        if locked.contains(&i) {
-            if i == r {
-                c.enabled = true;
+    let on = s
+        .session
+        .project
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if locked.contains(&i) {
+                c.enabled || i == r
+            } else if let Some(b) = &back {
+                b.get(i).copied().unwrap_or(true)
+            } else {
+                i == r || soloed_now
             }
-        } else if let Some(b) = &back {
-            c.enabled = b.get(i).copied().unwrap_or(true);
-        } else {
-            c.enabled = i == r || soloed_now;
-        }
-    }
+        })
+        .collect();
     s.rack.soloed = (!soloed_now).then_some(r);
-    s.session.dirty = true;
+    on
 }
 
 /// What follows a pattern switch. Run on every tick and before each frame (`App::follow_settings`), so every way of
@@ -721,34 +798,48 @@ pub fn zipped_rows(p: &os_model::Project) -> BTreeSet<usize> {
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
-    crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
-        if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-            c.enabled = !c.enabled;
-            s.session.dirty = true;
-        }
-    });
+    if let Some(on) = s.session.project.channels.get(r).map(|c| !c.enabled) {
+        set_on(s, [(r, on)]);
+    }
+}
+
+/// Lock active / mute state on row `r` on or off: no step, as in FL (an undo leaves the lock as it is).
+pub fn lock(s: &mut State, r: usize) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let on = !is_locked(&s.session, r);
+    let c = set_channel!(s, r, locked: on)?;
+    crate::control_ui::run(s, vec![c]).err()
+}
+
+/// Row `r`'s channel on mixer track `t` (an insert number), one step, "Channel mixer track"; with `run`, a wheel's or
+/// drag's notches join one step. Knob-like: no step while Undo knob tweaks is off.
+pub fn set_mixer_track(s: &mut State, r: usize, t: u16, run: Option<crate::history::Run>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let track = s.session.project.mixer.iter().find(|m| m.index == t).map(|m| m.id.0)?;
+    let c = set_channel!(s, r, track: track)?;
+    crate::control_ui::knob_command(s, MIXER_TRACK, run, vec![c]).err()
 }
 
 /// Set swing mix for selected (§17): each selected channel's share of the main swing, 0..1 (channel event 97, 0..128;
 /// spec: audio/swing.md).
-pub fn swing_selected(s: &mut State, mix: f32) {
-    let mix = (mix.clamp(0.0, 1.0) * 128.0).round() / 128.0;
-    for &r in &s.rack.sel.clone() {
-        if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-            c.misc.swing = mix;
-        }
-    }
-    s.session.dirty = true;
+pub fn swing_selected(s: &mut State, mix: f32) -> Option<String> {
+    let mix = f64::from(mix.clamp(0.0, 1.0));
+    let rows: Vec<usize> = s.rack.sel.iter().copied().collect();
+    set_rows(s, SETTINGS, &rows, |s, r| set_channel!(s, r, swing: mix))
 }
 
 /// Transpose the selected channels' notes of the current pattern.
-pub fn transpose_selected(s: &mut State, semis: i32) {
-    let chans: Vec<u16> = s.rack.sel.iter().filter_map(|&r| ch_index(&s.session, r)).collect();
-    let n = s.pattern().max(1);
-    for note in crate::edit::patterns::pat_mut(&mut s.session, n).notes.iter_mut().filter(|x| chans.contains(&x.channel)) {
-        note.key = (i32::from(note.key) + semis).clamp(0, 131) as u16;
+pub fn transpose_selected(s: &mut State, semis: i32) -> Option<String> {
+    crate::mixer::track_ids(s);
+    if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+        crate::control_ui::settle_ids(s);
     }
-    s.session.dirty = true;
+    let channels: Vec<u32> = s.rack.sel.iter().filter_map(|&r| ch_id(s, r)).collect();
+    let pattern = s.session.project.pattern(s.pattern().max(1))?.id.0;
+    if channels.is_empty() {
+        return None;
+    }
+    apply(s, "Transpose", vec![Command::TransposePattern { pattern, semitones: semis, channels }])
 }
 
 /// Window height for Auto resize (§17): Minimum = fit the shown rows; Maximum = down to the screen bottom.
@@ -1043,8 +1134,9 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
     let text = text.trim();
     match b {
         RBox::Channel(r) => {
-            if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-                c.name = (!text.is_empty()).then(|| text.to_string());
+            let name = text.to_string();
+            if let Some(e) = set_rows(s, "Channel name", &[r], |s, r| set_channel!(s, r, name: name.clone())) {
+                s.message = Some(e);
             }
         }
         RBox::GroupSel | RBox::NewGroup if !text.is_empty() => {
@@ -1054,12 +1146,12 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
         RBox::RenameGroup(g) if !text.is_empty() => rename_group(&mut s.session, g, text),
         RBox::Transpose => {
             if let Ok(v) = text.trim_start_matches('+').parse::<i32>() {
-                transpose_selected(s, v);
+                s.message = transpose_selected(s, v).or(s.message.take());
             }
         }
         RBox::SwingMix => {
             if let Ok(v) = text.trim_end_matches('%').trim().parse::<f32>() {
-                swing_selected(s, v / 100.0);
+                s.message = swing_selected(s, v / 100.0).or(s.message.take());
             }
         }
         // The range the dots drag gives.
@@ -1072,6 +1164,21 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
         }
         _ => {}
     }
+}
+
+/// A swatch picked in the rack's name box `b`: the row's colour, or Color selected ▸ All...'s every selected channel
+/// (and that box closes). One step.
+pub fn box_color(s: &mut State, b: RBox, col: Rgb) -> Option<String> {
+    let rows: Vec<usize> = match b {
+        RBox::Channel(r) => vec![r],
+        RBox::ColorSel => {
+            s.pat_ui.name_box = None;
+            s.rack.sel.iter().copied().collect()
+        }
+        _ => return None,
+    };
+    let n = rows.len();
+    set_colors(s, &rows, std::iter::repeat_n(Some(col), n))
 }
 
 /// Open a rack name box at `at`.
@@ -1385,16 +1492,8 @@ pub fn set_stretch(app: &mut App, rows: &[usize], method: i32) {
 
 /// Every selected channel (`rows`) takes declick mode `mode`: the channel's sound settings, which the engine plays, and
 /// a sampler channel's Lemon Sampler, which plays it in their place (spec: audio/declick.md, plugins/lemon-sampler.md §7).
-fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
-    for &r in rows {
-        let Some(c) = app.state.session.project.get_mut().channels.get_mut(r) else { continue };
-        c.sound.declick = mode;
-        if c.kind.is_sampler() {
-            app.state.session.plugins.set_param_named(r, SAMPLER_DECLICK, f64::from(mode));
-            app.state.session.params.reread(r);
-        }
-    }
-    app.state.session.dirty = true;
+fn set_declick(app: &mut App, rows: &[usize], mode: u8) -> Option<String> {
+    set_rows(&mut app.state, SETTINGS, rows, |s, r| set_channel!(s, r, declick: mode))
 }
 
 /// Sources `srcs` play row `row` from now on (`None`: the focused channel). Notes they hold end first, so none hangs
@@ -1409,9 +1508,6 @@ fn lock_notes(app: &mut App, srcs: &[NoteSrc], row: Option<usize>) {
     }
     app.invalidate();
 }
-
-/// Lemon Sampler's declick mode parameter (its index is the mode).
-const SAMPLER_DECLICK: &str = "Click removal";
 
 /// The rows a channel menu command on row `r` acts on: the selection when `r` is in it, else `r` alone.
 fn menu_rows(s: &State, r: usize) -> Vec<usize> {
@@ -1724,11 +1820,8 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md); Cut, Paste, Fill
     // and Rotate record their own.
     let step = match c {
-        RCmd::RandomColor(_) | RCmd::ColorGradient | RCmd::ColorRandom => Some("Channel color"),
         RCmd::Clone(_) | RCmd::CloneSel => Some("Clone channel"),
         RCmd::MoveSel(_) | RCmd::Sort(_) => Some("Move channel"),
-        RCmd::MixerReset(_) | RCmd::AssignFree(_) | RCmd::AssignFreeSel => Some("Channel mixer track"),
-        RCmd::DeclickSel(_) | RCmd::SwingSel(Some(_)) | RCmd::TruncSel(_) | RCmd::CutItself(_) => Some("Channel settings"),
         RCmd::Burn(_) => Some("Burn loops"),
         RCmd::AssignInstrument(_) => Some(crate::track_links::ASSIGN_INSTRUMENT),
         _ => None,
@@ -1787,7 +1880,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             }
             app.state.raise(Win::PianoRoll);
         }
-        RCmd::DeclickSel(mode) => set_declick(app, &sel, mode),
+        RCmd::DeclickSel(mode) => return set_declick(app, &sel, mode),
         RCmd::ReceiveFrom(r, src) => lock_notes(app, &[src], Some(r)),
         RCmd::Unlock(r) => {
             let held: Vec<NoteSrc> = NoteSrc::ALL.into_iter().filter(|&src| app.state.rack.note_lock[src as usize] == Some(r)).collect();
@@ -1829,10 +1922,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             }
             None
         }
-        RCmd::RandomColor(r) => {
-            random_color(&mut s.session, r, r as u64);
-            None
-        }
+        RCmd::RandomColor(r) => random_colors(s, &[r], 0),
         RCmd::Delete(r) => {
             ask_delete(s, vec![r]);
             None
@@ -1883,10 +1973,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             solo(s, r);
             None
         }
-        RCmd::Lock(r) => {
-            toggle_lock(&mut s.session, r);
-            None
-        }
+        RCmd::Lock(r) => lock(s, r),
         RCmd::Reset(k) => {
             s.reset_knob(k);
             None
@@ -1922,14 +2009,11 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             crate::typein_ui::set_value(s, t, v);
             None
         }
+        // The default target: the insert the channel was made with (its own number).
         RCmd::MixerReset(r) => {
-            // The default target: the insert the channel was made with (its own number).
             let max = crate::mixer::max_insert_of(&s.session.project.mixer);
-            if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-                c.mixer_track = (c.index + 1).min(max);
-                s.session.dirty = true;
-            }
-            None
+            let t = s.session.project.channels.get(r).map(|c| (c.index + 1).min(max));
+            t.and_then(|t| set_mixer_track(s, r, t, None))
         }
         // spec: ui/mixer-track-commands.md §1
         RCmd::AssignFree(r) => crate::mixer::route_free(s, &[r]),
@@ -1985,47 +2069,22 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             Some(format!("{} unused channel(s) selected", s.rack.sel.len()))
         }
         RCmd::Purge => ask_purge(s),
-        RCmd::ColorGradient => {
-            gradient(s);
-            None
-        }
-        RCmd::ColorRandom => {
-            for &r in &sel {
-                random_color(&mut s.session, r, r as u64 + 1);
-            }
-            None
-        }
+        RCmd::ColorGradient => gradient(s),
+        RCmd::ColorRandom => random_colors(s, &sel, 1),
         RCmd::MuteSel(mute) => {
-            crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
-                for &r in &sel {
-                    if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-                        c.enabled = !mute;
-                    }
-                }
-                s.session.dirty = true;
-            });
+            set_on(s, sel.iter().map(|&r| (r, !mute)));
             None
         }
         RCmd::TransposeSel => {
             open_box(s, RBox::Transpose, crate::patterns::box_at_mouse(mouse));
             None
         }
-        RCmd::SwingSel(Some(p)) => {
-            swing_selected(s, f32::from(p) / 100.0);
-            Some(format!("Swing mix {p}% for {} channel(s)", sel.len()))
-        }
-        RCmd::TruncSel(on) => {
-            for &r in &sel {
-                if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-                    c.misc.truncate_swing = on;
-                }
-            }
-            s.session.dirty = true;
-            Some(format!("Truncate swing notes {} for {} channel(s)", if on { "on" } else { "off" }, sel.len()))
-        }
+        RCmd::SwingSel(Some(p)) => swing_selected(s, f32::from(p) / 100.0).or_else(|| Some(format!("Swing mix {p}% for {} channel(s)", sel.len()))),
+        RCmd::TruncSel(on) => set_rows(s, SETTINGS, &sel, |s, r| set_channel!(s, r, truncate_swing: on))
+            .or_else(|| Some(format!("Truncate swing notes {} for {} channel(s)", if on { "on" } else { "off" }, sel.len()))),
         RCmd::CutItself(r) => {
-            cut_itself(&mut s.session, r);
-            None
+            let group = cut_itself_group(&s.session, r);
+            group.and_then(|g| set_rows(s, SETTINGS, &[r], |s, r| set_channel!(s, r, cut: g, cut_by: g)))
         }
         RCmd::SwingSel(None) => {
             open_box(s, RBox::SwingMix, crate::patterns::box_at_mouse(mouse));

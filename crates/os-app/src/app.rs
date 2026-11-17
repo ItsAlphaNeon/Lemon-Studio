@@ -2807,11 +2807,25 @@ impl App {
             ChannelControl::Track => "Channel mixer track",
         };
         let run = crate::history::Run::Channel(row, which);
-        crate::control_ui::run_edit(&mut self.state, name, Region::Channel(row), run, true, |s| {
-            if let Some(c) = s.session.project.get_mut().channels.get_mut(row) {
-                f(c);
+        let s = &mut self.state;
+        crate::mixer::track_ids(s);
+        let Some(mut ch) = s.session.project.channels.get(row).cloned() else { return };
+        f(&mut ch);
+        let mut c = crate::control::command::Command::set_channel(ch.id.0);
+        if let crate::control::command::Command::SetChannel { volume, pan, pitch, track, .. } = &mut c {
+            match which {
+                ChannelControl::Volume => *volume = Some(ch.volume.clamp(0.0, 1.0)),
+                ChannelControl::Pan => *pan = Some(ch.pan.clamp(-1.0, 1.0)),
+                ChannelControl::Pitch => *pitch = Some(ch.pitch_cents),
+                ChannelControl::Track => match s.session.project.mixer.iter().find(|m| m.index == ch.mixer_track) {
+                    Some(m) => *track = Some(m.id.0),
+                    None => return,
+                },
             }
-        });
+        }
+        if let Err(e) = crate::control_ui::knob_command(s, name, Some(run), vec![c]) {
+            s.message = Some(e);
+        }
     }
 
     /// Screen point -> canvas logical px (an X11 main window: Linux; macOS).
@@ -9182,7 +9196,7 @@ impl App {
                 if ctrl || alt {
                     rk::solo(s, i);
                 } else if shift {
-                    rk::toggle_lock(&mut s.session, i);
+                    s.message = rk::lock(s, i).or(s.message.take());
                 } else {
                     rk::toggle_mute(s, i);
                 }

@@ -440,6 +440,7 @@ fn region_key(c: &Command) -> Option<(u8, u32, u32)> {
         Taken::Param(owner, param, _) => (5, *owner, *param),
         Taken::Plugin(owner, _) => (6, *owner, 0),
         Taken::Mutes(_) => (7, 0, 0),
+        Taken::Locks(_) => (11, 0, 0),
         Taken::TracksOn(_) => (9, 0, 0),
         Taken::Row(id, _) => (8, *id, 0),
         Taken::Project(_) | Taken::Links(_) | Taken::Gone(_) | Taken::Back(_) | Taken::Removed(_) | Taken::Deleted(..) | Taken::WithOn(..) => return None,
