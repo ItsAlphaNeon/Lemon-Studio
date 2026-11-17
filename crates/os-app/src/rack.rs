@@ -891,7 +891,7 @@ fn seed() -> u64 {
 
 pub fn random_color(s: &mut State, r: usize, salt: u64) {
     if let Some(c) = s.project.channels.get_mut(r) {
-        c.color = Some(crate::patterns::random_color(seed() ^ salt.wrapping_mul(0x9e37_79b9)));
+        c.color = Some(crate::patterns::random_color(seed() ^ salt.wrapping_mul(0x9e37_79b9)).for_channel());
     }
 }
 
@@ -904,8 +904,8 @@ pub fn gradient(s: &mut State) {
     }
     let (a, b) = (s.project.channels[rows[0]].color, s.project.channels[*rows.last().expect("len >= 2")].color);
     for (c, &r) in gradient_colors(a, b, rows.len()).into_iter().zip(&rows) {
-        s.project.channels[r].color = Some(c);
-        s.project.channels[r].rack.stored_color = Some(c);
+        s.project.channels[r].color = Some(c.for_channel());
+        s.project.channels[r].rack.stored_color = Some(c.for_channel());
     }
 }
 

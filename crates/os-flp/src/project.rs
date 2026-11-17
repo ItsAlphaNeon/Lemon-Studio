@@ -302,7 +302,7 @@ fn bgr_from_rgb(c: Rgb, alpha: u8) -> u32 {
 }
 /// Channel colors: FL raises each component to at least 0x14.
 fn clamp_channel_color(c: Rgb) -> Rgb {
-    Rgb::new(c.r.max(0x14), c.g.max(0x14), c.b.max(0x14))
+    c.for_channel()
 }
 
 // ---------------------------------------------------------------------------------------

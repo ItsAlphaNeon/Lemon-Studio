@@ -892,7 +892,19 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
     let grow = ti >= at + c.length;
     if grow {
         c.length = (ti / bar + 1) * bar - at;
+        let end = at + c.length;
         s.piano.dirty = true;
+        // Grown into another clip on its track: it moves to the first track free over its whole length.
+        let own = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none() && c.track == track && c.position == at;
+        if crate::playlist::clips(s).iter().any(|o| o.track == track && o.position < end && o.end() > at && !own(o)) {
+            let free = crate::playlist::free_track(s, 0, at, end);
+            if let Some(c) = crate::playlist::arr_mut(s).clips.iter_mut().find(|c| own(c)) {
+                c.track = free;
+            }
+            if let Some(k) = s.rec.take.as_mut() {
+                k.clip = Some((free, at));
+            }
+        }
     }
     Some((t - f64::from(at), grow))
 }
@@ -1185,6 +1197,30 @@ mod tests {
         let clips = crate::playlist::clips(&app.state);
         assert_eq!(clips.len(), 1, "{clips:?}");
         assert_eq!((clips[0].position, clips[0].length), (0, 2 * bar));
+        assert_eq!(notes(&app), [(48, 48, 0), (bar + 48, 24, 0)]);
+    }
+
+    /// SONG mode: the take's clip, placed on the first track free for the pattern's length, grew over a clip further
+    /// along that track. It moves to the first track free over its whole length.
+    #[test]
+    fn a_growing_take_clip_leaves_a_taken_track() {
+        let mut app = app();
+        crate::playlist::arr_mut(&mut app.state).clips.clear();
+        let bar = app.state.project.bar_ticks();
+        let b = f64::from(bar);
+        // Another pattern's clip on track 1 from bar 2.
+        let other = app.state.pattern + 1;
+        crate::playlist::arr_mut(&mut app.state).clips.push(os_model::Clip::new(bar, bar, 0, ClipSource::Pattern(other)));
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 48.0, true);
+        key(&mut app, KeyCode::KeyZ, false, 96.0, true);
+        key(&mut app, KeyCode::KeyX, true, b + 48.0, true);
+        key(&mut app, KeyCode::KeyX, false, b + 72.0, true);
+        stop(&mut app);
+        let clips = crate::playlist::clips(&app.state);
+        let take = clips.iter().find(|c| c.source == ClipSource::Pattern(app.state.pattern)).expect("the take's clip");
+        assert_eq!((take.position, take.length), (0, 2 * bar));
+        assert!(!clips.iter().any(|o| o.track == take.track && o.position < take.end() && o.end() > take.position && o.source != take.source), "{clips:?}");
         assert_eq!(notes(&app), [(48, 48, 0), (bar + 48, 24, 0)]);
     }
 

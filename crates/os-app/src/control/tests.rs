@@ -1069,3 +1069,14 @@ fn a_hosted_slots_scaling_and_help() {
     a.plugins.hosted.clear();
     assert!(!scaling(&a).enabled);
 }
+
+/// A channel colour darker than FL keeps (a component under 0x14) is kept as the save will write it, so it does not
+/// change after a save and reopen.
+#[test]
+fn a_dark_channel_colour_shows_as_it_is_saved() {
+    let mut a = app();
+    let r = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_channel", "name": "Dark"}))]).unwrap();
+    let ch = r[0]["channel"].as_u64().unwrap() as u32;
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": ch, "color": "#000a40"}))]).unwrap();
+    assert_eq!(a.state.project.channels.last().unwrap().color, Some(os_model::Rgb::new(0x14, 0x14, 0x40)));
+}
