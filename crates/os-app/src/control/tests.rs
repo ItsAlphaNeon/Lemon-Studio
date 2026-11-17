@@ -164,7 +164,7 @@ fn pattern_commands_undo_and_redo() {
         json!({"op": "add_pattern", "name": "Twelve", "number": 12}),
         json!({"op": "shift_patterns", "from": 1, "by": 1}),
         json!({"op": "shift_patterns", "from": 2, "by": -1}),
-        json!({"op": "move_pattern", "pattern": pat, "to": 5}),
+        json!({"op": "move_pattern", "from": 1, "to": 5}),
         json!({"op": "clone_pattern", "pattern": pat}),
         json!({"op": "transpose_pattern", "pattern": pat, "semitones": 3}),
         json!({"op": "set_pattern_signature", "pattern": pat, "numerator": 3, "denominator": 4}),

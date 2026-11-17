@@ -351,13 +351,7 @@ fn delete_pattern(s: &mut State) -> Option<String> {
 
 /// Move up / down: the current pattern takes number `to`, the one there its number; `to` becomes current.
 fn move_pattern(s: &mut State, cur: u16, to: u16) -> Option<String> {
-    pattern_ids(s);
-    let c = match (pat_id(s, cur), pat_id(s, to)) {
-        (Some(pattern), _) => Some(Command::MovePattern { pattern, to }),
-        (None, Some(pattern)) => Some(Command::MovePattern { pattern, to: cur }),
-        (None, None) => None,
-    };
-    if let Some(e) = c.and_then(|c| apply(s, "Move pattern", vec![c])) {
+    if let Some(e) = apply(s, "Move pattern", vec![Command::MovePattern { from: cur, to }]) {
         return Some(e);
     }
     s.set_pattern(to);

@@ -108,7 +108,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
         32 => json!({"op": "remove_tracks", "tracks": [r.id(&tr), r.id(&tr)]}),
         33 => json!({"op": "move_effect", "track": r.id(&tr), "slot": r.below(10), "to": r.below(10)}),
         35 => json!({"op": "shift_patterns", "from": 1 + r.below(6), "by": if r.chance(0.5) { 1 } else { -1 }}),
-        36 => json!({"op": "move_pattern", "pattern": r.id(&pa), "to": 1 + r.below(8)}),
+        36 => json!({"op": "move_pattern", "from": 1 + r.below(8), "to": 1 + r.below(8)}),
         37 => json!({"op": "clone_pattern", "pattern": r.id(&pa)}),
         38 => json!({"op": "transpose_pattern", "pattern": r.id(&pa), "semitones": r.below(25) as i64 - 12}),
         39 => json!({"op": "split_pattern", "pattern": r.id(&pa)}),

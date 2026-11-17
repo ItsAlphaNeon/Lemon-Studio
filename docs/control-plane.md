@@ -110,7 +110,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `add_pattern` | `name`, `color`, `number` (optional) | Result: `pattern` |
 | `delete_pattern` | `pattern` | Its clips go; later patterns move down a number |
 | `shift_patterns` | `from`, `by` (1 or -1) | patterns from `from` on move by one: 1 opens a gap at `from` (Insert one), -1 closes the empty number below `from` |
-| `move_pattern` | `pattern`, `to` | the pattern takes number `to`, the one there its number |
+| `move_pattern` | `from`, `to` (numbers) | pattern number `from` takes number `to` and the one there `from`, with their clips (by number: a number can have clips before the project holds a pattern for it) |
 | `clone_pattern` | `pattern` | a copy right after it named "<name> #k"; later ones move up. Result: `pattern` |
 | `transpose_pattern` | `pattern`, `semitones` | every note of the pattern |
 | `split_pattern` | `pattern` | Split by channel: a pattern per channel with notes, clips under the original's |

@@ -220,8 +220,9 @@ pub enum Command {
     /// The patterns numbered `from` and up move by `by` (1: a gap opens at `from`, as Insert one; -1: they close the
     /// gap at `from` - 1, which must hold no pattern), their clips with them.
     ShiftPatterns { from: u16, by: i8 },
-    /// The pattern takes number `to`, the pattern there (if any) its number (Move up / down).
-    MovePattern { pattern: u32, to: u16 },
+    /// Pattern number `from` takes number `to` and the one there `from` (Move up / down), with their clips: by number,
+    /// as a pattern number can have clips before the project holds a pattern for it.
+    MovePattern { from: u16, to: u16 },
     /// A copy of the pattern right after it, named "<name> #k"; later patterns move up a number. The result names
     /// the copy's id.
     ClonePattern { pattern: u32 },
@@ -1449,9 +1450,8 @@ impl Command {
                 });
                 none
             }
-            Command::MovePattern { pattern, to } => {
-                let n = s.project.patterns[pattern_place(&s.project, pattern)?].number;
-                if !(1..=crate::edit::patterns::MAX).contains(&to) {
+            Command::MovePattern { from: n, to } => {
+                if !(1..=crate::edit::patterns::MAX).contains(&to) || !(1..=crate::edit::patterns::MAX).contains(&n) {
                     return Err(format!("patterns are 1..={}", crate::edit::patterns::MAX));
                 }
                 crate::edit::patterns::renumber_in(s, |m| Some(if m == n { to } else if m == to { n } else { m }));
