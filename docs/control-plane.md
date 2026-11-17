@@ -88,9 +88,10 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_time_signature` | `numerator`, `denominator` | denominator 2, 4, 8 or 16 |
 | `set_info` | `title`, `author`, `genre`, `comments`, `url` (all optional) | the Song info |
 | `set_project` | `beats` (1..=32), `steps` (1..=16), `signature`, `panning_law` (`circular` or `triangular`), `play_truncated`, `pdc` (all optional) | Settings > Project: the bar, shown as a time signature or a division, the panning law, whether notes a pattern clip cuts off play, and automatic plugin delay compensation. A bar value the project already has is kept even out of range |
-| `add_channel` | `name`, `plugin`, `sample`, `track` (all optional) | A Lemon Sampler channel (with `sample` loaded), or one played by generator `plugin`, on mixer track `track`. Result: `channel` |
+| `add_channel` | `name`, `plugin`, `sample`, `track` (all optional) | A Lemon Sampler channel (with `sample` loaded), or one played by generator `plugin`, on mixer track `track`. A MIDI Out channel (`"MIDI Out"`) goes on the master track. Result: `channel` |
 | `delete_channel` | `channel` | Its notes, clips and automation go too |
 | `move_channel` | `channel`, `row` | 0 = top |
+| `replace_instrument` | `channel`; `plugin` (optional: none is Lemon Sampler) | As the rack's Replace: the channel keeps its row, notes, mixer track, levels and Misc settings and takes the plugin's name (a MIDI Out channel keeps its own) and a new instance; it gets a new id, so an undo brings the old instrument back. Result: `channel` (the new id) |
 | `clone_channel` | `channel` | A copy right below it, as the rack's Clone: "<name> #2", its settings, mixer track and a copy of its instrument, no notes. Result: `channel` |
 | `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track`, `declick` (0..5), `swing` (0..1), `truncate_swing`, `cut`, `cut_by` (groups, 0 = none), `locked`, `stretch` (a sampler's time stretch method), `zipped` (optional) | A colour's parts are kept at least `14` (hex), as projects save them. Swing is kept in steps of 1/128. An undo of another step leaves `locked` and `zipped` as they are |
 | `load_sample` | `channel`, `path` | A sampler channel; an empty path clears it |

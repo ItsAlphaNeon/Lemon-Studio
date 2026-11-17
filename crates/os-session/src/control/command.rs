@@ -77,6 +77,14 @@ pub enum Command {
     DeleteChannel { channel: u32 },
     /// The channel moves to rack row `row` (0 = top).
     MoveChannel { channel: u32, row: usize },
+    /// The channel's instrument replaced by generator `plugin` (none: Lemon Sampler), as the rack's Replace does: the
+    /// channel keeps its row, notes, mixer track, levels and Misc settings, takes the plugin's name and a new instance
+    /// from its defaults, and a new id (the result names it), so an undo brings the old instrument back by the old one.
+    ReplaceInstrument {
+        channel: u32,
+        #[serde(default)]
+        plugin: Option<String>,
+    },
     /// A copy of the channel right below it (as the rack's Clone does): "<name> #2", its settings, its mixer track and a
     /// copy of its instrument, no notes. The result names its id.
     CloneChannel { channel: u32 },
@@ -532,6 +540,8 @@ pub enum Taken {
     Mutes(Vec<(u32, bool)>),
     /// Which channels have their mute state locked, by id (a client's `set_channel` locking one: the step's own undo).
     Locks(Vec<(u32, bool)>),
+    /// A channel as it was before its instrument was replaced, and the id it has now (`Command::ReplaceInstrument`).
+    Swap(Box<os_model::Channel>, u32),
     /// Which channels are zipped, by id (as `Locks`).
     Zips(Vec<(u32, bool)>),
     /// The filter groups: their names, each channel's group by id, the filter shown.
@@ -875,6 +885,7 @@ impl Command {
             Command::SetProject { .. } => crate::history::PROJECT_SETTINGS,
             Command::AddChannel { .. } => "Add channel",
             Command::CloneChannel { .. } => "Clone channel",
+            Command::ReplaceInstrument { .. } => crate::history::REPLACE_CHANNEL,
             Command::DeleteChannel { .. } => "Delete channel",
             Command::MoveChannel { .. } => "Move channel",
             Command::SetChannel { .. } => "Channel settings",
@@ -1017,6 +1028,8 @@ impl Command {
                 Taken::Param(*owner, *param, from.ok_or("the parameter's value before is not known (the app fills it in)")?)
             }
             Command::MoveChannel { channel, .. } => Taken::Row(*channel, channel_row(p, *channel)?),
+            // The id it has after is known once it is replaced (`apply`).
+            Command::ReplaceInstrument { channel, .. } => Taken::Swap(Box::new(p.channels[channel_row(p, *channel)?].clone()), *channel),
             Command::SetGroups { .. } => groups(p),
             // What an add made is known once it is made (`apply`); this is not used.
             Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } => Taken::Gone(Thing::Channel(0)),
@@ -1070,6 +1083,7 @@ impl Command {
                     Back::Pattern(q) => Thing::Pattern(q.id.0),
                 }),
                 Taken::Row(id, _) => Taken::Row(*id, channel_row(p, *id)?),
+                Taken::Swap(c, now) => Taken::Swap(Box::new(p.channels[channel_row(p, *now)?].clone()), c.id.0),
                 Taken::Removed(r) => Taken::Deleted(r.thing(), r.made(p)),
                 Taken::Deleted(thing, _) => Taken::Removed(Box::new(super::removal::Removed::of(s, *thing)?)),
             },
@@ -1118,7 +1132,8 @@ impl Command {
             | Taken::Links(_)
             | Taken::Gone(_)
             | Taken::Deleted(..)
-            | Taken::Row(..) => {}
+            | Taken::Row(..)
+            | Taken::Swap(..) => {}
         }
     }
 
@@ -1157,6 +1172,7 @@ impl Command {
             Command::AddPattern { .. } => Some(Thing::Pattern as fn(u32) -> Thing),
             _ => None,
         };
+        let replace = matches!(self, Command::ReplaceInstrument { .. });
         // A track added or deleted: the tracks' lights go back with it.
         let on = matches!(self, Command::AddTrack { .. } | Command::DeleteTrack { .. }).then(|| lights(&s.project));
         // The remote control links on rack rows follow a command that moves rows (an undo puts them back as
@@ -1178,7 +1194,11 @@ impl Command {
                 let id = result.as_object().and_then(|o| o.values().next()).and_then(serde_json::Value::as_u64).ok_or("an add names no id")?;
                 Taken::Gone(thing(id as u32))
             }
-            None => taken,
+            None => match taken {
+                // A replaced channel's new id, from the result.
+                Taken::Swap(c, _) if replace => Taken::Swap(c, result["channel"].as_u64().ok_or("a replace names no id")? as u32),
+                t => t,
+            },
         };
         let taken = match on {
             Some(on) => Taken::WithOn(Box::new(taken), on),
@@ -1269,10 +1289,15 @@ impl Command {
                 if !sampler && sample.is_some() {
                     return Err("a sample goes into a sampler channel (no plugin)".into());
                 }
+                let midi_out = plugin.as_deref() == Some(crate::lemon_midi_out::LEMON_MIDI_OUT);
                 let row = match &plugin {
                     Some(p) if !sampler => crate::projects::add_plugin_channel(s.project.get_mut(), p),
                     _ => crate::projects::add_channel(s.project.get_mut()),
                 };
+                // A MIDI Out channel is hosted from its settings (`lemon_midi_out::sync_midi_outs`), on the master track.
+                if midi_out {
+                    crate::lemon_midi_out::make_midi_out(&mut s.project.get_mut().channels[row], &Default::default());
+                }
                 let ch = &mut s.project.get_mut().channels[row];
                 if let Some(t) = track {
                     ch.mixer_track = t;
@@ -1288,7 +1313,7 @@ impl Command {
                 s.touched.views.push(crate::session::View::RackAutosize);
                 s.control.settle(s.project.get_mut());
                 let id = s.project.channels[row].id;
-                if !sampler {
+                if !sampler && !midi_out {
                     s.control.host.push(super::HostReq::Instrument { channel: id, plugin: plugin.unwrap_or_default() });
                 }
                 Ok(id_result("channel", id))
@@ -1302,6 +1327,43 @@ impl Command {
                 let map: Vec<Option<usize>> = (0..n).map(|r| (r != row).then(|| if r < row { r } else { r - 1 })).collect();
                 crate::edit::rack::remap_in(s, &map);
                 none
+            }
+            Command::ReplaceInstrument { channel, plugin } => {
+                let row = channel_row(&s.project, channel)?;
+                let sampler = plugin.as_deref().is_none_or(|p| p == crate::plugins::LEMON_SAMPLER);
+                crate::project_plugins::drop_row(s, row);
+                let ch = &mut s.project.get_mut().channels[row];
+                ch.plugin_state = None;
+                // A new id at once, before the new instance is hosted and takes its channel's.
+                ch.id = Id::NONE;
+                let name = plugin.clone().unwrap_or_else(|| crate::plugins::LEMON_SAMPLER.to_string());
+                let midi_out = name == crate::lemon_midi_out::LEMON_MIDI_OUT;
+                if midi_out {
+                    // Hosted from its settings, on the master track; the channel keeps its name (Set up for MIDI
+                    // export).
+                    crate::lemon_midi_out::make_midi_out(ch, &Default::default());
+                } else if sampler {
+                    ch.kind = os_model::ChannelKind::Sampler;
+                    ch.plugin = None;
+                    ch.clear_sample();
+                } else {
+                    ch.kind = os_model::ChannelKind::Plugin;
+                    ch.plugin = Some(crate::osc3::file_name(&name).to_string());
+                    // A Lemon Trio channel's sample is its custom shape's (spec: plugins/lemon-3x-osc.md §6): the new
+                    // instance has none, so neither does the channel.
+                    if crate::osc3::is_osc3(ch) {
+                        ch.sample_path = None;
+                    }
+                }
+                if !midi_out {
+                    ch.name = Some(name.clone());
+                }
+                s.control.settle(s.project.get_mut());
+                let id = s.project.channels[row].id;
+                if !sampler && !midi_out {
+                    s.control.host.push(super::HostReq::Instrument { channel: id, plugin: name });
+                }
+                Ok(id_result("channel", id))
             }
             Command::CloneChannel { channel } => {
                 let row = channel_row(&s.project, channel)?;
@@ -2031,6 +2093,18 @@ fn put(s: &mut crate::session::Session, t: Taken) {
         Taken::Param(..) | Taken::Plugin(..) => {}
         Taken::Project(side) => restore(s, *side),
         Taken::Links(pairs) => crate::remote::retarget(&s.settings, &pairs),
+        Taken::Swap(c, now) => {
+            if let Ok(row) = channel_row(&s.project, now) {
+                // The instrument there goes, kept by its channel's id; the one kept by `c`'s comes back on the tick
+                // (`control::host`).
+                crate::project_plugins::drop_row(s, row);
+                let ch = &mut s.project.get_mut().channels[row];
+                let (on, locked, zipped, group) = (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group);
+                *ch = *c;
+                (ch.enabled, ch.rack.locked, ch.rack.zipped, ch.rack.group) = (on, locked, zipped, group);
+                s.touched.repaint = true;
+            }
+        }
         Taken::Row(id, row) => {
             let _ = Command::MoveChannel { channel: id, row }.change(s);
         }

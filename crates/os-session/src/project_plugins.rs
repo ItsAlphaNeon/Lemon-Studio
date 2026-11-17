@@ -590,6 +590,18 @@ pub fn remap_rows_in(s: &mut crate::session::Session, m: &dyn Fn(usize) -> Optio
     s.dirty = true;
 }
 
+/// Row `row`'s instance goes, its state kept by its channel's id (`Plugins::keep`): a replaced instrument, whose channel
+/// stays.
+pub fn drop_row(s: &mut crate::session::Session, row: usize) {
+    s.plugins.keep(row);
+    s.plugins.drop_key(row);
+    s.hosted_rows.retain(|&r| r != row);
+    s.plugins.sampler_failed.retain(|&r| r != row);
+    s.plugins.native_failed.retain(|&r| r != row);
+    s.plugins.wrap_failed.retain(|&r| r != row);
+    s.transport.set_instruments(s.plugins.instruments());
+}
+
 /// `App::plugin_paste` in the session: row `row` hosts available plugin `index` from saved state `blob`.
 pub fn plugin_paste_in(s: &mut crate::session::Session, row: usize, index: usize, blob: &[u8]) {
     if s.plugins.create_with(row, index, Some(blob)).is_ok() {
