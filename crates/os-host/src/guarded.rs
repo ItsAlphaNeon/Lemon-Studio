@@ -134,6 +134,26 @@ impl<P: Plugin> Instrument for Guarded<P> {
             }
         }
     }
+    fn extra_outputs(&self) -> usize {
+        self.look(0, |p| p.extra_outputs())
+    }
+    fn process_extra(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
+        let t0 = Instant::now();
+        let voices = self.run(None, |p| {
+            p.process_extra(rate, left, right, extra);
+            Some(p.voices())
+        });
+        self.meter.add(t0.elapsed());
+        match voices {
+            Some(n) => self.meter.set_voices(n),
+            None => {
+                left.fill(0.0);
+                right.fill(0.0);
+                extra.fill(0.0);
+                self.meter.set_voices(0);
+            }
+        }
+    }
     fn active(&self) -> bool {
         self.look(false, |p| p.active())
     }
@@ -302,6 +322,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn puts_out_notes(&self) -> bool {
         self.look(false, |p| p.puts_out_notes())
+    }
+    fn extra_output_names(&self) -> Vec<String> {
+        self.look(Vec::new(), |p| p.extra_output_names())
     }
     fn take_menu(&mut self) -> Option<Menu> {
         self.run(None, |p| p.take_menu())

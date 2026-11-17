@@ -170,6 +170,15 @@ impl Instance {
         (i.clamp(0, 64) as usize, o.clamp(0, 64) as usize)
     }
 
+    /// Output channel `c`'s label, if the plugin gives one.
+    fn output_label(&self, c: usize) -> Option<String> {
+        // SAFETY: plain data the plugin fills.
+        let mut p: abi::PinProperties = unsafe { std::mem::zeroed() };
+        let ok = self.dispatch(op::OUTPUT_PROPERTIES, c as i32, 0, (&mut p as *mut abi::PinProperties).cast(), 0.0) == 1;
+        let text = String::from_utf8_lossy(&p.label[..p.label.iter().position(|&b| b == 0).unwrap_or(p.label.len())]).trim().to_string();
+        (ok && !text.is_empty()).then_some(text)
+    }
+
     fn delay(&self) -> u32 {
         unsafe { (*self.effect).delay }.max(0) as u32
     }
@@ -774,7 +783,9 @@ impl Plugin {
         if self.outs == 1 {
             right.copy_from_slice(left);
         }
-        let loud = left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
+        // Sound on an extra output counts too (a drum's own output).
+        let extra = (2..self.outs).any(|c| self.scratch[(self.ins + c) * max..(self.ins + c) * max + n].iter().any(|v| v.abs() > 1e-5));
+        let loud = extra || left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
         self.sounding = loud;
         self.steady += n as u64;
         if !loud {
@@ -783,9 +794,33 @@ impl Plugin {
         self.ledger.advance(n as f64 / f64::from(self.rate.max(1)));
     }
 
+    /// Copies the output channels after the first two, as the piece of `n` frames just run left them in scratch, to
+    /// frame `at` of `extra` (`Instrument::process_extra`'s layout, `frames` the whole block): channels 3 and 4 are the
+    /// first extra output, 5 and 6 the second and so on; an odd last channel is heard on both sides (spec:
+    /// audio/multi-output.md).
+    fn take_extra(&self, extra: &mut [f32], frames: usize, at: usize, n: usize) {
+        if extra.is_empty() || frames == 0 {
+            return;
+        }
+        let max = MAX_FRAMES as usize;
+        let side = |c: usize| &self.scratch[(self.ins + c) * max..(self.ins + c) * max + n];
+        for k in 0..os_engine::Instrument::extra_outputs(self) {
+            let Some(pair) = extra.get_mut(2 * k * frames..2 * (k + 1) * frames) else { break };
+            let (l, r) = pair.split_at_mut(frames);
+            let c = 2 + 2 * k;
+            l[at..at + n].copy_from_slice(side(c));
+            r[at..at + n].copy_from_slice(side(if c + 1 < self.outs { c + 1 } else { c }));
+        }
+    }
+
+    /// The extra outputs' names: each pair's first channel's label, else its number.
+    fn extra_names(&self) -> Vec<String> {
+        (0..os_engine::Instrument::extra_outputs(self)).map(|k| self.inst.output_label(2 + 2 * k).unwrap_or_else(|| format!("Output {}", k + 2))).collect()
+    }
+
     /// Renders a host block in pieces: notes and automation inside it, the transport, an effect's input (`effect`: the
     /// buffers hold it, and get the output).
-    fn render(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], effect: bool) {
+    fn render(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], effect: bool, extra: &mut [f32]) {
         self.start_processing();
         // Stable sorts: events at the same time keep their order (a note off before the next note on).
         self.queue.sort_by_key(|e| e.time);
@@ -807,6 +842,7 @@ impl Plugin {
                 self.run(&mut left[a..b], &mut right[a..b], Some((&il, &ir)));
             } else {
                 self.run(&mut left[a..b], &mut right[a..b], None);
+                self.take_extra(extra, left.len(), a, b - a);
             }
             at = end;
         }
@@ -928,6 +964,10 @@ impl Plugin {
 impl os_host::Plugin for Plugin {
     fn desc(&self) -> &Descriptor {
         &self.desc
+    }
+
+    fn extra_output_names(&self) -> Vec<String> {
+        self.extra_names()
     }
 
     fn activate(&mut self, rate: u32) -> bool {
@@ -1124,8 +1164,17 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        self.process_extra(rate, left, right, &mut []);
+    }
+
+    fn extra_outputs(&self) -> usize {
+        self.outs.saturating_sub(1) / 2
+    }
+
+    fn process_extra(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
+        extra.fill(0.0);
         if self.rate != rate {
             // Activation is a UI-thread call: ask for it and stay silent until then.
             self.wanted_rate.store(rate, Ordering::Release);
@@ -1133,7 +1182,7 @@ impl os_engine::Instrument for Plugin {
             os_host::wake();
             return;
         }
-        self.render(rate, left, right, false);
+        self.render(rate, left, right, false, extra);
     }
 }
 
@@ -1147,7 +1196,7 @@ impl os_engine::HostedEffect for Plugin {
             os_host::wake();
             return;
         }
-        self.render(rate, left, right, true);
+        self.render(rate, left, right, true, &mut []);
     }
 
     fn reset_fx(&mut self) {

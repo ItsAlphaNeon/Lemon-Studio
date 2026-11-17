@@ -349,6 +349,12 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     fn puts_out_notes(&self) -> bool {
         false
     }
+    /// The names of the plugin's extra outputs ([`Instrument::extra_outputs`]), in order (UI thread, active): its
+    /// output buses' names after the main one's, or numbers where it names none (spec: audio/multi-output.md).
+    /// Default: none.
+    fn extra_output_names(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// The notes put out during the `process` calls since the last call, oldest first, while capturing.
     fn take_notes_out(&mut self) -> Vec<NoteOut> {
         Vec::new()

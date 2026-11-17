@@ -221,6 +221,9 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
   its default and minimum to maximum), remove an initial value read from a file
 - Not yet in the parameter menu: Init song with this position on a plugin parameter
 - VST2 shells (one file offering several plugins); a VST2 plugin's state is saved in the layout FL Studio's projects use
+- Multi-output instruments (CLAP, VST3, VST2): each extra output plays into a mixer track after the channel's own,
+  picked from the plugin window menu's Outputs ▸, or all at once with Auto map outputs. Saved where FL Studio keeps
+  output ports, and counted by delay compensation. Not yet: effects' extra outputs
 - A plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio. On macOS
   and Linux this is new, and on macOS a crash in a plugin's editor still closes Lemon Studio
 - Not yet: 32-bit plugins, and Intel-only plugins on Apple silicon (they need a bridge)
