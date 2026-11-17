@@ -146,11 +146,6 @@ pub fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
     crate::follow::around(s, |s| renumber_in(&mut s.session, map));
 }
 
-/// Swap patterns `a` and `b`.
-fn swap(s: &mut State, a: u16, b: u16) {
-    renumber(s, |n| Some(if n == a { b } else if n == b { a } else { n }));
-}
-
 /// Open the name box for pattern `n` at `at`.
 pub fn open_name_box(s: &mut State, target: BoxTarget, at: (f32, f32)) {
     let text = match target {
@@ -176,21 +171,39 @@ pub fn select(s: &mut State, n: u16) {
 /// Box position for "+" (§4).
 pub const PLUS_BOX_AT: (f32, f32) = (949.0, 46.0);
 
-/// Run a command; `at` is where a name box opens. Returns a status message.
+/// Run a command; `at` is where a name box opens. Returns a status message. The commands that change the project are
+/// commands of the control plane, one undo step each.
 pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
-    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
-    let step = match cmd {
-        Cmd::RandomColor => Some("Pattern color"),
-        Cmd::InsertOne => Some("Insert pattern"),
-        Cmd::Clone => Some("Clone pattern"),
-        Cmd::Delete if !crate::messages::on(&crate::messages::DELETE_PATTERN) => Some(DELETE),
-        Cmd::MoveUp | Cmd::MoveDown => Some("Move pattern"),
-        _ => None,
-    };
-    match step {
-        Some(name) => crate::control_ui::edit(s, name, crate::control::command::Region::Project, |s| run_now(s, cmd, at)),
-        None => run_now(s, cmd, at),
+    run_now(s, cmd, at)
+}
+
+use crate::control::command::Command;
+
+/// The patterns have their ids, for commands (a pattern just made gets its own on the next tick).
+fn pattern_ids(s: &mut State) {
+    if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+        crate::control_ui::settle_ids(s);
     }
+}
+
+/// Pattern `n`'s id, when the project has it.
+fn pat_id(s: &State, n: u16) -> Option<u32> {
+    s.session.project.pattern(n).map(|p| p.id.0)
+}
+
+/// Pattern `n` named `name` and / or coloured `color` (as the commands take them): its `set_pattern`, or an
+/// `add_pattern` at `n` when the project has no pattern there yet.
+fn set_pattern(s: &State, n: u16, name: Option<String>, color: Option<String>) -> Command {
+    match pat_id(s, n) {
+        Some(pattern) => Command::SetPattern { pattern, name, color, length: None },
+        None => Command::AddPattern { name, color, number: Some(n) },
+    }
+}
+
+/// The interface's pattern edit made of `commands`: one undo step named `name`; the error as the message.
+fn apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Option<String> {
+    pattern_ids(s);
+    crate::control_ui::command(s, name, None, commands).err()
 }
 
 /// The undo step of a pattern's deletion.
@@ -236,12 +249,15 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
         }
         Cmd::RandomColor => {
             let seed = crate::clip_colors::clock();
-            pat_mut(&mut s.session, cur).color = Some(random_color(seed ^ u64::from(cur)));
-            s.session.dirty = true;
+            pattern_ids(s);
+            let c = set_pattern(s, cur, None, crate::control::command::color_text(Some(random_color(seed ^ u64::from(cur)))));
+            return apply(s, "Pattern color", vec![c]);
         }
         Cmd::Transpose => open_name_box(s, BoxTarget::Transpose(cur), at),
         Cmd::InsertOne => {
-            renumber(s, |n| Some(if n >= cur { (n + 1).min(MAX) } else { n }));
+            if let Some(e) = apply(s, "Insert pattern", vec![Command::ShiftPatterns { from: cur, by: 1 }]) {
+                return Some(e);
+            }
             open_name_box(s, BoxTarget::Name(cur), at);
             created_box(s);
         }
@@ -249,26 +265,24 @@ fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             if cur >= MAX {
                 return None;
             }
-            let mut copy = s.session.project.pattern(cur).cloned().unwrap_or(Pattern { number: cur, ..Pattern::default() });
-            copy.name = Some(clone_name(&s.session, cur));
-            renumber(s, |n| Some(if n > cur { (n + 1).min(MAX) } else { n }));
-            copy.number = cur + 1;
-            *pat_mut(&mut s.session, cur + 1) = copy;
+            pattern_ids(s);
+            let c = match pat_id(s, cur) {
+                Some(pattern) => vec![Command::ClonePattern { pattern }],
+                // An empty number: its copy is an empty pattern with the clone's name.
+                None => vec![Command::ShiftPatterns { from: cur + 1, by: 1 }, Command::AddPattern { name: Some(clone_name(&s.session, cur)), color: None, number: Some(cur + 1) }],
+            };
+            if let Some(e) = apply(s, "Clone pattern", c) {
+                return Some(e);
+            }
             s.set_pattern(cur + 1);
         }
         // Its Manage messages entry off: as if Ok was pressed.
-        Cmd::Delete if !crate::messages::on(&crate::messages::DELETE_PATTERN) => delete_pattern(s),
+        Cmd::Delete if !crate::messages::on(&crate::messages::DELETE_PATTERN) => return delete_pattern(s),
         Cmd::Delete => open_confirm(s),
-        Cmd::MoveUp if cur > 1 => {
-            swap(s, cur, cur - 1);
-            s.set_pattern(cur - 1);
-        }
-        Cmd::MoveDown if cur < MAX => {
-            swap(s, cur, cur + 1);
-            s.set_pattern(cur + 1);
-        }
+        Cmd::MoveUp if cur > 1 => return move_pattern(s, cur, cur - 1),
+        Cmd::MoveDown if cur < MAX => return move_pattern(s, cur, cur + 1),
         Cmd::MoveUp | Cmd::MoveDown => {}
-        Cmd::SplitByChannel => split_by_channel(s),
+        Cmd::SplitByChannel => return split_by_channel(s),
         // Dialogs, the browser and the renders: `App::pattern_cmd` runs them.
         Cmd::TimeSignature | Cmd::OpenInBrowser | Cmd::QuickRender | Cmd::RenderReplace | Cmd::RenderAsClip => {}
     }
@@ -296,51 +310,10 @@ fn confirming(s: &State) -> &'static crate::messages::Message {
 /// after it, right after the current one in channel order (later patterns move up with their clips, as Insert one),
 /// with the original's colour, markers and other settings but only that channel's notes. Every playlist clip of the
 /// original gets one clip per new pattern at the same place, under it. No notes: nothing happens. One undo step.
-pub fn split_by_channel(s: &mut State) {
-    let cur = s.pattern().max(1);
-    let Some(orig) = s.session.project.pattern(cur).cloned() else { return };
-    let chans: Vec<(u16, String)> = s
-        .session.project
-        .channels
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| orig.notes.iter().any(|n| n.channel == c.index))
-        .map(|(r, c)| (c.index, crate::edit::rack::channel_name(&s.session, r)))
-        .collect();
-    let Some(((first, name), rest)) = chans.split_first() else { return };
-    let k = rest.len() as u16;
-    // Room for the new numbers: no used pattern may move past the last one.
-    let last = s.session.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).max().unwrap_or(cur).max(cur);
-    if usize::from(last) + rest.len() > usize::from(MAX) {
-        return;
-    }
-    let undo = crate::history::Snap::Patterns { patterns: s.session.project.patterns.clone(), current: cur };
-    crate::edit::playlist::snapshot_with(&mut s.session, "Split by instrument", undo);
-    // Notes of a channel no longer in the rack stay with the original.
-    let p = pat_mut(&mut s.session, cur);
-    p.notes.retain(|n| n.channel == *first || !chans.iter().any(|c| c.0 == n.channel));
-    p.name = Some(name.clone());
-    s.session.dirty = true;
-    if k == 0 {
-        return;
-    }
-    renumber(s, |n| Some(if n > cur { n + k } else { n }));
-    for (j, (ch, name)) in (1..).zip(rest) {
-        // Control points stay with the original (only notes are divided).
-        let notes = orig.notes.iter().filter(|n| n.channel == *ch).copied().collect();
-        *pat_mut(&mut s.session, cur + j) = Pattern { number: cur + j, name: Some(name.clone()), notes, controls: Vec::new(), ..orig.clone() };
-    }
-    if let Some(a) = s.session.project.get_mut().arrangement_mut() {
-        // Clips are drawn in record order: the new ones go just before their original, which stays on top.
-        let mut clips = Vec::with_capacity(a.clips.len());
-        for c in std::mem::take(&mut a.clips) {
-            if c.source == ClipSource::Pattern(cur) {
-                clips.extend((1..=k).map(|j| os_model::Clip { source: ClipSource::Pattern(cur + j), ..c }));
-            }
-            clips.push(c);
-        }
-        a.clips = clips;
-    }
+pub fn split_by_channel(s: &mut State) -> Option<String> {
+    pattern_ids(s);
+    let pattern = pat_id(s, s.pattern().max(1))?;
+    apply(s, "Split by instrument", vec![Command::SplitPattern { pattern }])
 }
 
 /// Ok in the delete confirmation (channels waiting in the rack go to the app, which removes them). With Remember my
@@ -355,7 +328,7 @@ pub fn delete_current(s: &mut State) {
         s.rack.delete_now = Some(rows);
         return;
     }
-    crate::control_ui::edit(s, DELETE, crate::control::command::Region::Project, delete_pattern);
+    s.message = delete_pattern(s).or(s.message.take());
 }
 
 /// Cancel in the delete confirmation: nothing is deleted and Remember my choice is not kept.
@@ -365,10 +338,30 @@ fn cancel_confirm(s: &mut State) {
     s.rack.pending_delete = None;
 }
 
-/// Deletes the current pattern: later ones move down a number, its clips go.
-fn delete_pattern(s: &mut State) {
+/// Deletes the current pattern: later ones move down a number, its clips go. One undo step.
+fn delete_pattern(s: &mut State) -> Option<String> {
     let cur = s.pattern().max(1);
-    renumber(s, |n| if n == cur { None } else if n > cur { Some(n - 1) } else { Some(n) });
+    pattern_ids(s);
+    let c = match pat_id(s, cur) {
+        Some(pattern) => Command::DeletePattern { pattern },
+        None => Command::ShiftPatterns { from: cur + 1, by: -1 },
+    };
+    apply(s, DELETE, vec![c])
+}
+
+/// Move up / down: the current pattern takes number `to`, the one there its number; `to` becomes current.
+fn move_pattern(s: &mut State, cur: u16, to: u16) -> Option<String> {
+    pattern_ids(s);
+    let c = match (pat_id(s, cur), pat_id(s, to)) {
+        (Some(pattern), _) => Some(Command::MovePattern { pattern, to }),
+        (None, Some(pattern)) => Some(Command::MovePattern { pattern, to: cur }),
+        (None, None) => None,
+    };
+    if let Some(e) = c.and_then(|c| apply(s, "Move pattern", vec![c])) {
+        return Some(e);
+    }
+    s.set_pattern(to);
+    None
 }
 
 /// Accept the name box.
@@ -377,6 +370,9 @@ pub fn accept(s: &mut State) {
     // Filter groups (Group selected, Add and Rename filter group) are no undo step, as in FL (spec: ui/undo-steps.md).
     if matches!(b.target, BoxTarget::Rack(crate::rack::RBox::GroupSel | crate::rack::RBox::NewGroup | crate::rack::RBox::RenameGroup(_))) {
         return accept_now(s);
+    }
+    if let BoxTarget::Name(n) | BoxTarget::Transpose(n) = b.target {
+        return accept_pattern(s, n);
     }
     let name = match b.target {
         BoxTarget::Name(_) => "Pattern name",
@@ -387,6 +383,39 @@ pub fn accept(s: &mut State) {
         BoxTarget::Rack(_) => "Channel group",
     };
     crate::control_ui::edit(s, name, crate::control::command::Region::Project, accept_now);
+}
+
+/// The name box of pattern `n` accepted: its name, or its transposition.
+fn accept_pattern(s: &mut State, n: u16) {
+    let Some(b) = s.pat_ui.name_box.take() else { return };
+    pattern_ids(s);
+    match b.target {
+        BoxTarget::Name(_) => {
+            let text = b.text.trim().to_string();
+            let named = !text.is_empty() && text != format!("Pattern {n}");
+            if named || pat_id(s, n).is_some() {
+                let c = set_pattern(s, n, Some(if named { text.clone() } else { String::new() }), None);
+                if let Some(e) = apply(s, "Pattern name", vec![c]) {
+                    s.message = Some(e);
+                }
+            }
+            if b.created {
+                s.playlist.source = Some(ClipSource::Pattern(n));
+            }
+            if !text.is_empty() {
+                s.pat_ui.recent.retain(|r| *r != text);
+                s.pat_ui.recent.insert(0, text);
+                s.pat_ui.recent.truncate(RECENT);
+            }
+        }
+        _ => {
+            if let (Ok(v), Some(pattern)) = (b.text.trim().trim_start_matches('+').parse::<i32>(), pat_id(s, n)) {
+                if let Some(e) = apply(s, "Transpose", vec![Command::TransposePattern { pattern, semitones: v }]) {
+                    s.message = Some(e);
+                }
+            }
+        }
+    }
 }
 
 fn accept_now(s: &mut State) {
@@ -434,6 +463,20 @@ pub fn set_color(s: &mut State, i: usize) {
         Some(BoxTarget::Rack(_)) => "Channel color",
         _ => "Pattern color",
     };
+    if let Some(BoxTarget::Name(n)) = s.pat_ui.name_box.as_ref().map(|b| b.target) {
+        if let Some(&c) = SWATCHES.get(i) {
+            pattern_ids(s);
+            let col = crate::control::command::color_text(Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8)));
+            let cmd = set_pattern(s, n, None, col);
+            if let Some(e) = apply(s, name, vec![cmd]) {
+                s.message = Some(e);
+            }
+        }
+        if let Some(b) = s.pat_ui.name_box.as_mut() {
+            b.palette = false;
+        }
+        return;
+    }
     crate::control_ui::edit(s, name, crate::control::command::Region::Project, |s| set_color_now(s, i));
 }
 

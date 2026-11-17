@@ -61,28 +61,37 @@ pub fn start_marker(s: &State, n: u16) -> Option<usize> {
 /// after the signature as FL names it ("3/8", §4-5). The pattern's bars follow it, and so do its clips that kept their
 /// natural length. One undo step.
 pub fn set_start(s: &mut State, n: u16, num: u8, den: u8) {
-    crate::control_ui::edit(s, STEP, crate::control::command::Region::Project, |s| set_start_now(s, n, num, den));
+    signature(s, n, num, den);
+}
+
+/// Pattern `n`'s signature at its start set (`num` 0: taken away) by its command, one undo step; a pattern number the
+/// project has no pattern for gets one.
+fn signature(s: &mut State, n: u16, num: u8, den: u8) {
+    use crate::control::command::Command;
+    if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+        crate::control_ui::settle_ids(s);
+    }
+    let r = match s.session.project.pattern(n).map(|p| p.id.0) {
+        Some(pattern) => crate::control_ui::command(s, STEP, None, vec![Command::SetPatternSignature { pattern, numerator: num, denominator: den }]),
+        None => crate::control_ui::command_then(s, STEP, vec![Command::AddPattern { name: None, color: None, number: Some(n) }], |_, r| {
+            r.first().and_then(|v| v["pattern"].as_u64()).map(|p| Command::SetPatternSignature { pattern: p as u32, numerator: num, denominator: den }).into_iter().collect()
+        }),
+    };
+    if let Err(e) = r {
+        s.message = Some(e);
+    }
 }
 
 /// The pattern time signature's undo step.
 const STEP: &str = "Pattern time signature";
 
-fn set_start_now(s: &mut State, n: u16, num: u8, den: u8) {
-    let old = s.session.project.pattern_length(n);
-    let markers = &mut crate::edit::patterns::pat_mut(&mut s.session, n).markers;
-    markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && m.position == 0));
-    markers.insert(0, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(0, &format!("{num}/{den}")) });
-    crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
-}
 
 /// Yes to the conflict question took the start marker away: the pattern's bars are the project's again (§3).
 pub fn remove_start(s: &mut State, n: u16) {
-    let Some(i) = start_marker(s, n) else { return };
-    crate::control_ui::edit(s, STEP, crate::control::command::Region::Project, |s| {
-        let old = s.session.project.pattern_length(n);
-        crate::edit::patterns::pat_mut(&mut s.session, n).markers.remove(i);
-        crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
-    });
+    if start_marker(s, n).is_none() {
+        return;
+    }
+    signature(s, n, 0, 0);
 }
 
 /// The time signature dialog is the top dialog.

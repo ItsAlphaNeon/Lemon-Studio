@@ -69,7 +69,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
     let pa: Vec<u32> = p.patterns.iter().map(|q| q.id.0).collect();
     let clips: Vec<u32> = p.arrangement().map(|x| x.clips.iter().map(|c| c.id.0).collect()).unwrap_or_default();
     let note = |r: &mut Rng, ch: &[u32]| json!({"channel": r.id(ch), "position": r.below(4) * 96, "length": 1 + r.below(96), "key": 36 + r.below(48), "velocity": r.below(128)});
-    match r.below(36) {
+    match r.below(42) {
         0 => json!({"op": "set_tempo", "bpm": 40.0 + r.unit() * 200.0}),
         1 => json!({"op": "set_swing", "swing": r.unit()}),
         2 => json!({"op": "set_main_volume", "volume": r.unit()}),
@@ -107,6 +107,12 @@ fn command(r: &mut Rng, a: &App) -> Value {
         31 => json!({"op": "move_track", "track": r.id(&tr), "to": 1 + r.below(8)}),
         32 => json!({"op": "remove_tracks", "tracks": [r.id(&tr), r.id(&tr)]}),
         33 => json!({"op": "move_effect", "track": r.id(&tr), "slot": r.below(10), "to": r.below(10)}),
+        35 => json!({"op": "shift_patterns", "from": 1 + r.below(6), "by": if r.chance(0.5) { 1 } else { -1 }}),
+        36 => json!({"op": "move_pattern", "pattern": r.id(&pa), "to": 1 + r.below(8)}),
+        37 => json!({"op": "clone_pattern", "pattern": r.id(&pa)}),
+        38 => json!({"op": "transpose_pattern", "pattern": r.id(&pa), "semitones": r.below(25) as i64 - 12}),
+        39 => json!({"op": "split_pattern", "pattern": r.id(&pa)}),
+        40 => json!({"op": "set_pattern_signature", "pattern": r.id(&pa), "numerator": r.below(8), "denominator": 4}),
         34 => json!({"op": "set_slot", "track": r.id(&tr), "slot": r.below(10), "name": format!("S{}", r.below(9)), "color": r.color()}),
         _ => json!({"op": "load_sample", "channel": r.id(&ch), "path": "/no/such/folder/snare.wav"}),
     }

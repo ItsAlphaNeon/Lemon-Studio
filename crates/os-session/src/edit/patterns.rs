@@ -98,6 +98,69 @@ pub fn transpose(s: &mut crate::session::Session, n: u16, semis: i32) {
     }
 }
 
+/// PATTERNS > Split by channel (spec: ui/split-by-channel.md §2) on pattern `cur`. Channels with notes in it, in rack
+/// order: the pattern keeps the first one's notes and takes its name; each further one gets a pattern of its own
+/// named after it, right after it in channel order (later patterns move up with their clips, as Insert one), with the
+/// original's colour, markers and other settings but only that channel's notes. Every playlist clip of the original
+/// gets one clip per new pattern at the same place, under it. No notes, or no room: nothing happens.
+pub fn split_by_channel(s: &mut crate::session::Session, cur: u16) {
+    let Some(orig) = s.project.pattern(cur).cloned() else { return };
+    let chans: Vec<(u16, String)> = s
+        .project
+        .channels
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| orig.notes.iter().any(|n| n.channel == c.index))
+        .map(|(r, c)| (c.index, crate::edit::rack::channel_name(s, r)))
+        .collect();
+    let Some(((first, name), rest)) = chans.split_first() else { return };
+    let k = rest.len() as u16;
+    // Room for the new numbers: no used pattern may move past the last one.
+    let last = s.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).max().unwrap_or(cur).max(cur);
+    if usize::from(last) + rest.len() > usize::from(MAX) {
+        return;
+    }
+    // Notes of a channel no longer in the rack stay with the original.
+    let p = pat_mut(s, cur);
+    p.notes.retain(|n| n.channel == *first || !chans.iter().any(|c| c.0 == n.channel));
+    p.name = Some(name.clone());
+    s.dirty = true;
+    if k == 0 {
+        return;
+    }
+    renumber_in(s, |n| Some(if n > cur { n + k } else { n }));
+    for (j, (ch, name)) in (1..).zip(rest) {
+        // Control points stay with the original (only notes are divided).
+        let notes = orig.notes.iter().filter(|n| n.channel == *ch).copied().collect();
+        *pat_mut(s, cur + j) = Pattern { number: cur + j, name: Some(name.clone()), notes, controls: Vec::new(), id: os_model::Id::NONE, ..orig.clone() };
+    }
+    if let Some(a) = s.project.get_mut().arrangement_mut() {
+        // Clips are drawn in record order: the new ones go just before their original, which stays on top.
+        let mut clips = Vec::with_capacity(a.clips.len());
+        for c in std::mem::take(&mut a.clips) {
+            if c.source == ClipSource::Pattern(cur) {
+                clips.extend((1..=k).map(|j| os_model::Clip { source: ClipSource::Pattern(cur + j), ..c }));
+            }
+            clips.push(c);
+        }
+        a.clips = clips;
+    }
+}
+
+/// Pattern `n`'s time signature at its start (spec: ui/pattern-time-signature.md §3-5): `Some((num, den))` puts it
+/// first among its markers, named as FL names it ("3/8"); `None` takes it away. The pattern's bars follow, and so do
+/// its clips that kept their natural length.
+pub fn set_signature(s: &mut crate::session::Session, n: u16, sig: Option<(u8, u8)>) {
+    use os_model::TimeMarker;
+    let old = s.project.pattern_length(n);
+    let markers = &mut pat_mut(s, n).markers;
+    markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && m.position == 0));
+    if let Some((num, den)) = sig {
+        markers.insert(0, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(0, &format!("{num}/{den}")) });
+    }
+    crate::edit::playlist::refit_pattern_clips(s, n, old);
+}
+
 /// Highest pattern number (§1).
 pub const MAX: u16 = 999;
 

@@ -153,6 +153,29 @@ fn same<T: std::fmt::Debug + PartialEq>(a: &T, b: &T) {
     }
 }
 
+/// The pattern commands the PATTERNS menu and the pattern selector use.
+#[test]
+fn pattern_commands_undo_and_redo() {
+    let mut a = app();
+    let pat = ids(&a).2[0];
+    let kick = ids(&a).0[0];
+    round_trip(&mut a, json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": kick, "position": 0, "length": 24, "key": 60}]}));
+    for c in [
+        json!({"op": "add_pattern", "name": "Twelve", "number": 12}),
+        json!({"op": "shift_patterns", "from": 1, "by": 1}),
+        json!({"op": "shift_patterns", "from": 2, "by": -1}),
+        json!({"op": "move_pattern", "pattern": pat, "to": 5}),
+        json!({"op": "clone_pattern", "pattern": pat}),
+        json!({"op": "transpose_pattern", "pattern": pat, "semitones": 3}),
+        json!({"op": "set_pattern_signature", "pattern": pat, "numerator": 3, "denominator": 4}),
+        json!({"op": "set_pattern_signature", "pattern": pat, "numerator": 0, "denominator": 4}),
+    ] {
+        round_trip(&mut a, c);
+    }
+    let bad = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_pattern", "number": 12}))]).unwrap_err();
+    assert!(bad.contains("there already"), "{bad}");
+}
+
 #[test]
 fn set_project_checks_its_values() {
     let mut a = app();

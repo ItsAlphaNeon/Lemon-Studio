@@ -107,8 +107,14 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `add_effect` | `track`, `plugin`, `slot` (optional) | Into slot 0..9, else the first empty one. Result: `slot` (the slot plugin's id) |
 | `remove_effect` | `track`, `slot` | with the name and colour given to the slot |
 | `set_slot` | `track`, `slot`; `enabled`, `mix` (0..1), `name` (empty: the plugin's), `color` (`#rrggbb`, empty: none) (optional) | |
-| `add_pattern` | `name`, `color` (optional) | Result: `pattern` |
+| `add_pattern` | `name`, `color`, `number` (optional) | Result: `pattern` |
 | `delete_pattern` | `pattern` | Its clips go; later patterns move down a number |
+| `shift_patterns` | `from`, `by` (1 or -1) | patterns from `from` on move by one: 1 opens a gap at `from` (Insert one), -1 closes the empty number below `from` |
+| `move_pattern` | `pattern`, `to` | the pattern takes number `to`, the one there its number |
+| `clone_pattern` | `pattern` | a copy right after it named "<name> #k"; later ones move up. Result: `pattern` |
+| `transpose_pattern` | `pattern`, `semitones` | every note of the pattern |
+| `split_pattern` | `pattern` | Split by channel: a pattern per channel with notes, clips under the original's |
+| `set_pattern_signature` | `pattern`, `numerator`, `denominator` | the time signature at the pattern's start, `numerator` 0 for none; its clips follow |
 | `set_pattern` | `pattern`; `name`, `color`, `length` (0 = Auto) (optional) | |
 | `set_notes` | `pattern`, `notes`, `channel` (optional) | The notes of `channel` (or all notes) become `notes`. A note keeps its `id` (as `notes` lists it) when the pattern had it; others get new ones. Result: `notes` (their ids, in order) |
 | `add_notes` | `pattern`, `notes` (without `id`) | Result: `notes` (their ids, in order) |

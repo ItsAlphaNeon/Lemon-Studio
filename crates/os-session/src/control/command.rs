@@ -213,7 +213,26 @@ pub enum Command {
         name: Option<String>,
         #[serde(default)]
         color: Option<String>,
+        /// At this number (1..=999, one no pattern has) instead of after the last one.
+        #[serde(default)]
+        number: Option<u16>,
     },
+    /// The patterns numbered `from` and up move by `by` (1: a gap opens at `from`, as Insert one; -1: they close the
+    /// gap at `from` - 1, which must hold no pattern), their clips with them.
+    ShiftPatterns { from: u16, by: i8 },
+    /// The pattern takes number `to`, the pattern there (if any) its number (Move up / down).
+    MovePattern { pattern: u32, to: u16 },
+    /// A copy of the pattern right after it, named "<name> #k"; later patterns move up a number. The result names
+    /// the copy's id.
+    ClonePattern { pattern: u32 },
+    /// Every note of the pattern moves by `semitones`.
+    TransposePattern { pattern: u32, semitones: i32 },
+    /// The pattern keeps the first channel's notes (in rack order) and takes its name; each other channel with notes
+    /// gets a pattern of its own right after it, and the original's clips get one clip per new pattern under them.
+    SplitPattern { pattern: u32 },
+    /// The time signature at the pattern's start (`numerator` / `denominator`), or none (`numerator` 0); its clips
+    /// that kept their natural length follow.
+    SetPatternSignature { pattern: u32, numerator: u8, denominator: u8 },
     /// The pattern goes, with its clips; later patterns move down a number.
     DeletePattern { pattern: u32 },
     /// Each setting given is set: name, colour, length in ticks (0 = Auto).
@@ -745,6 +764,12 @@ impl Command {
             Command::RemoveEffect { .. } => "Remove effect",
             Command::SetSlot { .. } => "Effect slot",
             Command::AddPattern { .. } => "Add pattern",
+            Command::ShiftPatterns { by, .. } => if *by > 0 { "Insert pattern" } else { "Delete pattern" },
+            Command::MovePattern { .. } => "Move pattern",
+            Command::ClonePattern { .. } => "Clone pattern",
+            Command::TransposePattern { .. } => "Transpose",
+            Command::SplitPattern { .. } => "Split by instrument",
+            Command::SetPatternSignature { .. } => "Pattern time signature",
             Command::DeletePattern { .. } => "Delete pattern",
             Command::SetPattern { .. } => "Pattern settings",
             Command::SetNotes { .. } | Command::AddNotes { .. } => "Edit notes",
@@ -813,7 +838,10 @@ impl Command {
                 Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone()))
             }
             Command::SetSend { from, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *from)?].clone())),
-            Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } => {
+            Command::ShiftPatterns { .. } | Command::MovePattern { .. } | Command::ClonePattern { .. } | Command::SplitPattern { .. } | Command::SetPatternSignature { .. } => {
+                Taken::Project(Box::new(Side::of(s)))
+            }
+            Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } | Command::TransposePattern { pattern, .. } => {
                 Taken::Pattern(Box::new(p.patterns[pattern_place(p, *pattern)?].clone()))
             }
             Command::AddClip { .. } | Command::DeleteClip { .. } | Command::SetClip { .. } | Command::SetPlaylistTrack { .. } => match p.arrangement() {
@@ -1403,9 +1431,74 @@ impl Command {
                 none
             }
 
-            Command::AddPattern { name, color } => {
+            Command::ShiftPatterns { from, by } => {
+                let max = crate::edit::patterns::MAX;
+                if !(1..=max).contains(&from) || !(by == 1 || by == -1) || (by == -1 && from < 2) {
+                    return Err(format!("patterns shift by 1 or -1 from 1..={max} (2.. for -1)"));
+                }
+                if by < 0 && s.project.pattern(from - 1).is_some_and(crate::edit::patterns::used) {
+                    return Err(format!("pattern {} is in the way", from - 1));
+                }
+                let gap = from - 1;
+                // An empty pattern in the gap goes.
+                crate::edit::patterns::renumber_in(s, |n| match (n >= from, by > 0) {
+                    (true, true) => Some((n + 1).min(max)),
+                    (true, false) => Some(n - 1),
+                    (false, false) if n == gap => None,
+                    _ => Some(n),
+                });
+                none
+            }
+            Command::MovePattern { pattern, to } => {
+                let n = s.project.patterns[pattern_place(&s.project, pattern)?].number;
+                if !(1..=crate::edit::patterns::MAX).contains(&to) {
+                    return Err(format!("patterns are 1..={}", crate::edit::patterns::MAX));
+                }
+                crate::edit::patterns::renumber_in(s, |m| Some(if m == n { to } else if m == to { n } else { m }));
+                none
+            }
+            Command::ClonePattern { pattern } => {
+                let n = s.project.patterns[pattern_place(&s.project, pattern)?].number;
+                let max = crate::edit::patterns::MAX;
+                if n >= max {
+                    return Err("the last pattern can't be cloned".into());
+                }
+                let mut copy = s.project.patterns[pattern_place(&s.project, pattern)?].clone();
+                copy.name = Some(crate::edit::patterns::clone_name(s, n));
+                crate::edit::patterns::renumber_in(s, |m| Some(if m > n { (m + 1).min(max) } else { m }));
+                copy.number = n + 1;
+                copy.id = Id::NONE;
+                *crate::edit::patterns::pat_mut(s, n + 1) = copy;
+                s.control.settle(s.project.get_mut());
+                let id = s.project.pattern(n + 1).map_or(Id::NONE, |p| p.id);
+                Ok(id_result("pattern", id))
+            }
+            Command::TransposePattern { pattern, semitones } => {
+                let n = s.project.patterns[pattern_place(&s.project, pattern)?].number;
+                crate::edit::patterns::transpose(s, n, semitones);
+                none
+            }
+            Command::SplitPattern { pattern } => {
+                let n = s.project.patterns[pattern_place(&s.project, pattern)?].number;
+                crate::edit::patterns::split_by_channel(s, n);
+                none
+            }
+            Command::SetPatternSignature { pattern, numerator, denominator } => {
+                let n = s.project.patterns[pattern_place(&s.project, pattern)?].number;
+                if numerator > 0 && (numerator > 16 || ![2, 4, 8, 16].contains(&denominator)) {
+                    return Err(format!("not a time signature: {numerator}/{denominator}"));
+                }
+                crate::edit::patterns::set_signature(s, n, (numerator > 0).then_some((numerator, denominator)));
+                none
+            }
+            Command::AddPattern { name, color, number } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;
-                let n = s.project.patterns.iter().map(|p| p.number).max().unwrap_or(0) + 1;
+                let n = match number {
+                    Some(n) if !(1..=crate::edit::patterns::MAX).contains(&n) => return Err(format!("patterns are 1..={}", crate::edit::patterns::MAX)),
+                    Some(n) if s.project.pattern(n).is_some() => return Err(format!("pattern {n} is there already")),
+                    Some(n) => n,
+                    None => s.project.patterns.iter().map(|p| p.number).max().unwrap_or(0) + 1,
+                };
                 let p = crate::edit::patterns::pat_mut(s, n);
                 p.name = name.as_deref().and_then(text);
                 p.color = color.flatten();
