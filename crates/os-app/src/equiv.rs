@@ -816,6 +816,10 @@ fn leaves(text: &str) -> Vec<(String, String)> {
 /// `rounding` takes numbers within 1e-4 as equal (what the file format keeps of them).
 fn difference(a: &impl fmt::Debug, b: &impl fmt::Debug, rounding: bool) -> Option<String> {
     let diff = differences(a, b, rounding);
+    // `OS_EQUIV_ALL=1`: every difference, on stderr, to see what a finding's count is made of.
+    if std::env::var_os("OS_EQUIV_ALL").is_some() && !diff.is_empty() {
+        eprintln!("differences: {diff:#?}");
+    }
     diff.first().map(|d| format!("{d}(+{})", diff.len() - 1))
 }
 

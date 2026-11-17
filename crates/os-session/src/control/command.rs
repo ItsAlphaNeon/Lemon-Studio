@@ -399,10 +399,10 @@ pub enum Taken {
     /// A thing to delete again (the redo of a delete), with the ids the things the delete makes had. Its other side is
     /// `Removed`.
     Deleted(Thing, Vec<u32>),
-    /// `.0` put back, then every mixer track on or off by id as `.1` has it (adding or deleting a track moves the
-    /// others and makes or takes away the one before the hidden last track: their mute lights go back with it, as a
-    /// whole project's would). Its other side is the same with the lights as they are.
-    WithOn(Box<Taken>, Vec<(u32, bool)>),
+    /// `.0` put back, then every mixer track on or off and armed or not by id as `.1` has it (adding or deleting a
+    /// track moves the others and makes or takes away the one before the hidden last track: their mute lights and arm
+    /// switches go back with it, as a whole project's would). Its other side is the same with them as they are.
+    WithOn(Box<Taken>, Vec<(u32, bool, bool)>),
 }
 
 /// Something a command added (`Taken::Gone`), by id.
@@ -846,8 +846,7 @@ impl Command {
                 Taken::TracksOn(_) => tracks_on(p),
                 Taken::WithOn(t, _) => {
                     let inner = Command::Put(t.clone()).take(s)?;
-                    let Taken::TracksOn(on) = tracks_on(p) else { unreachable!() };
-                    Taken::WithOn(Box::new(inner), on)
+                    Taken::WithOn(Box::new(inner), lights(p))
                 }
                 // The other way: the links back onto what they were on.
                 Taken::Links(pairs) => Taken::Links(pairs.iter().map(|&(a, b)| (b, a)).collect()),
@@ -959,7 +958,7 @@ impl Command {
             _ => None,
         };
         // A track added or deleted: the tracks' lights go back with it.
-        let on = matches!(self, Command::AddTrack { .. } | Command::DeleteTrack { .. }).then(|| tracks_on(&s.project));
+        let on = matches!(self, Command::AddTrack { .. } | Command::DeleteTrack { .. }).then(|| lights(&s.project));
         let result = self.change(s)?;
         s.dirty = true;
         // An add's undo removes what it made, by the id its result names.
@@ -971,8 +970,8 @@ impl Command {
             None => taken,
         };
         let taken = match on {
-            Some(Taken::TracksOn(on)) => Taken::WithOn(Box::new(taken), on),
-            _ => taken,
+            Some(on) => Taken::WithOn(Box::new(taken), on),
+            None => taken,
         };
         Ok(Done { undo: Command::Put(Box::new(taken)), result })
     }
@@ -1673,7 +1672,11 @@ fn put(s: &mut crate::session::Session, t: Taken) {
         }
         Taken::WithOn(t, on) => {
             put(s, *t);
-            put(s, Taken::TracksOn(on));
+            for (id, on, armed) in on {
+                if let Some(m) = s.project.get_mut().mixer.iter_mut().find(|m| m.id.0 == id) {
+                    (m.enabled, m.armed) = (on, armed);
+                }
+            }
         }
         Taken::TracksOn(on) => {
             for (id, v) in on {
@@ -1736,6 +1739,11 @@ fn mutes(p: &Project) -> Taken {
 }
 
 /// Which mixer tracks are on now (`Taken::TracksOn`).
+/// Every mixer track's mute light and arm switch, by id (`Taken::WithOn`).
+fn lights(p: &Project) -> Vec<(u32, bool, bool)> {
+    p.mixer.iter().map(|m| (m.id.0, m.enabled, m.armed)).collect()
+}
+
 fn tracks_on(p: &Project) -> Taken {
     Taken::TracksOn(p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect())
 }
