@@ -226,6 +226,8 @@ pub enum Run {
     Steps,
     /// A loop box dragged.
     Loop(usize),
+    /// The graph editor's bars dragged.
+    Graph,
 }
 
 /// A channel control a run of changes goes to (`Run::Channel`).
@@ -257,7 +259,7 @@ impl History {
     /// ends, so the next drag or run of notches is a step of its own, as in FL (spec: ui/undo-steps.md). The tempo
     /// tapper's taps, a plugin's own values, a controller's and a client's gesture run on.
     pub fn end_gesture_run(&mut self) {
-        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..) | Run::Steps | Run::Loop(_))) {
+        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..) | Run::Steps | Run::Loop(_) | Run::Graph)) {
             self.run = None;
         }
     }

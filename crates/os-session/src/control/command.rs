@@ -119,6 +119,19 @@ pub enum Command {
         /// A sampler's time stretch method (`os_model::stretch_mode`), its time, pitch and multiplier kept.
         #[serde(default)]
         stretch: Option<u32>,
+        /// Zipped (folded to a thin row in the rack). An undo of another step leaves it as it is.
+        #[serde(default)]
+        zipped: Option<bool>,
+    },
+    /// The channel rack's filter groups (spec: ui/channel-rack.md §7): `groups` their names in file order ("Unsorted"
+    /// among them), `channels` each listed channel's group (an index into `groups`, `null` none), `shown` the filter
+    /// shown (an index, `null` All).
+    SetGroups {
+        groups: Vec<String>,
+        #[serde(default)]
+        channels: Vec<GroupIn>,
+        #[serde(default)]
+        shown: Option<u32>,
     },
     /// A sample file into a sampler channel (empty: none).
     LoadSample { channel: u32, path: String },
@@ -449,6 +462,15 @@ pub struct NoteIn {
     pub id: Option<u32>,
 }
 
+/// A channel's filter group (`Command::SetGroups`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupIn {
+    pub channel: u32,
+    #[serde(default)]
+    pub group: Option<u32>,
+}
+
 /// A channel's loop value (`Command::SetLoops`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -510,6 +532,10 @@ pub enum Taken {
     Mutes(Vec<(u32, bool)>),
     /// Which channels have their mute state locked, by id (a client's `set_channel` locking one: the step's own undo).
     Locks(Vec<(u32, bool)>),
+    /// Which channels are zipped, by id (as `Locks`).
+    Zips(Vec<(u32, bool)>),
+    /// The filter groups: their names, each channel's group by id, the filter shown.
+    Groups(Box<(Vec<String>, Vec<(u32, Option<u32>)>, Option<u32>)>),
     /// Which mixer tracks are on, by id (a client's `set_track` switching one on or off: the step's own undo).
     TracksOn(Vec<(u32, bool)>),
     /// Remote control links re-pointed (a wrap moving plugins into a container, `crate::container`): each link on the
@@ -879,6 +905,7 @@ impl Command {
             Command::SetNotes { .. } | Command::AddNotes { .. } => "Edit notes",
             Command::SetStep { .. } => crate::history::STEP_SEQ_EDIT,
             Command::SetLoops { .. } => crate::history::LOOP_MODE,
+            Command::SetGroups { .. } => "Filter groups",
             Command::AddClip { .. } => "Add clip",
             Command::DeleteClip { .. } => "Delete clip",
             Command::SetClip { .. } => "Edit clip",
@@ -933,6 +960,7 @@ impl Command {
             cut_by: None,
             locked: None,
             stretch: None,
+            zipped: None,
         }
     }
 
@@ -989,6 +1017,7 @@ impl Command {
                 Taken::Param(*owner, *param, from.ok_or("the parameter's value before is not known (the app fills it in)")?)
             }
             Command::MoveChannel { channel, .. } => Taken::Row(*channel, channel_row(p, *channel)?),
+            Command::SetGroups { .. } => groups(p),
             // What an add made is known once it is made (`apply`); this is not used.
             Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } => Taken::Gone(Thing::Channel(0)),
             Command::DeleteChannel { channel } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Channel(*channel))?)),
@@ -1009,6 +1038,8 @@ impl Command {
                 Taken::Project(_) => Taken::Project(Box::new(Side::of(s))),
                 Taken::Mutes(_) => mutes(p),
                 Taken::Locks(_) => locks(p),
+                Taken::Zips(_) => zips(p),
+                Taken::Groups(_) => groups(p),
                 Taken::TracksOn(_) => tracks_on(p),
                 Taken::WithOn(t, _) => {
                     let inner = Command::Put(t.clone()).take(s)?;
@@ -1081,6 +1112,8 @@ impl Command {
             | Taken::Plugin(..)
             | Taken::Mutes(_)
             | Taken::Locks(_)
+            | Taken::Zips(_)
+            | Taken::Groups(_)
             | Taken::TracksOn(_)
             | Taken::Links(_)
             | Taken::Gone(_)
@@ -1295,7 +1328,7 @@ impl Command {
                 crate::edit::rack::remap_in(s, &map);
                 none
             }
-            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch } => {
+            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch, zipped } => {
                 let track = track.map(|t| track_number(&s.project, t)).transpose()?;
                 if declick.is_some_and(|d| d > crate::edit::rack::DECLICK_MAX) {
                     return Err(format!("declick is 0..={}", crate::edit::rack::DECLICK_MAX));
@@ -1346,6 +1379,9 @@ impl Command {
                 }
                 if let Some(v) = locked {
                     ch.rack.locked = v;
+                }
+                if let Some(v) = zipped {
+                    ch.rack.zipped = v;
                 }
                 let sampler = ch.kind.is_sampler();
                 if let Some(v) = stretch {
@@ -1730,6 +1766,20 @@ impl Command {
                 p.notes.sort_by_key(|n| (n.position, n.channel));
                 Ok(ids)
             }
+            Command::SetGroups { groups, channels, shown } => {
+                let n = groups.len() as u32;
+                if shown.is_some_and(|g| g >= n) || channels.iter().any(|c| c.group.is_some_and(|g| g >= n)) {
+                    return Err(format!("a group is 0..{n}"));
+                }
+                let rows = channels.iter().map(|c| channel_row(&s.project, c.channel).map(|r| (r, c.group))).collect::<Result<Vec<_>, _>>()?;
+                let p = s.project.get_mut();
+                p.groups = groups;
+                for (r, g) in rows {
+                    p.channels[r].rack.group = g;
+                }
+                p.current_group = shown;
+                none
+            }
             Command::SetLoops { pattern, mode, loops } => {
                 let place = pattern_place(&s.project, pattern)?;
                 if mode.is_some_and(|m| m > 3) {
@@ -2025,6 +2075,24 @@ fn put(s: &mut crate::session::Session, t: Taken) {
                 }
             }
         }
+        Taken::Zips(on) => {
+            for (id, v) in on {
+                if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.id.0 == id) {
+                    c.rack.zipped = v;
+                }
+            }
+        }
+        Taken::Groups(g) => {
+            let (names, members, shown) = *g;
+            let p = s.project.get_mut();
+            p.groups = names;
+            for (id, v) in members {
+                if let Some(c) = p.channels.iter_mut().find(|c| c.id.0 == id) {
+                    c.rack.group = v;
+                }
+            }
+            p.current_group = shown;
+        }
         Taken::WithOn(t, on) => {
             // A track that is there before and after keeps its light as it is now (`Mutes::keep`).
             let now: std::collections::HashMap<u32, bool> = s.project.mixer.iter().map(|m| (m.id.0, m.enabled)).collect();
@@ -2095,6 +2163,16 @@ fn mutes(p: &Project) -> Taken {
     Taken::Mutes(p.channels.iter().map(|c| (c.id.0, c.enabled)).collect())
 }
 
+/// Which channels are zipped now (`Taken::Zips`).
+fn zips(p: &Project) -> Taken {
+    Taken::Zips(p.channels.iter().map(|c| (c.id.0, c.rack.zipped)).collect())
+}
+
+/// The filter groups now (`Taken::Groups`).
+fn groups(p: &Project) -> Taken {
+    Taken::Groups(Box::new((p.groups.clone(), p.channels.iter().map(|c| (c.id.0, c.rack.group)).collect(), p.current_group)))
+}
+
 /// Which channels' mute states are locked now (`Taken::Locks`).
 fn locks(p: &Project) -> Taken {
     Taken::Locks(p.channels.iter().map(|c| (c.id.0, c.rack.locked)).collect())
@@ -2117,9 +2195,12 @@ impl Command {
     pub fn on_off_undo(&self, s: &crate::session::Session) -> Vec<Command> {
         let put = |t: Taken| Command::Put(Box::new(t));
         match self {
-            Command::SetChannel { enabled, locked, .. } => {
-                enabled.map(|_| put(mutes(&s.project))).into_iter().chain(locked.map(|_| put(locks(&s.project)))).collect()
-            }
+            Command::SetChannel { enabled, locked, zipped, .. } => enabled
+                .map(|_| put(mutes(&s.project)))
+                .into_iter()
+                .chain(locked.map(|_| put(locks(&s.project))))
+                .chain(zipped.map(|_| put(zips(&s.project))))
+                .collect(),
             Command::SetTrack { enabled: Some(_), .. } | Command::ResetTrack { .. } => vec![put(tracks_on(&s.project))],
             _ => Vec::new(),
         }

@@ -90,7 +90,8 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": clap, "position": 192, "fine_pitch": 130, "release": 10, "mod_x": 20, "mod_y": 30, "repeat": 2, "slide": true, "muted": true, "color": 5}]}),
         json!({"op": "set_step", "pattern": pat, "channel": kick, "step": 5, "on": true}),
         json!({"op": "set_loops", "pattern": pat, "mode": 3, "loops": [{"channel": kick, "value": 8}, {"channel": clap}]}),
-        json!({"op": "set_channel", "channel": kick, "stretch": 2}),
+        json!({"op": "set_channel", "channel": kick, "stretch": 2, "zipped": true}),
+        json!({"op": "set_groups", "groups": ["Drums", "Unsorted"], "channels": [{"channel": kick, "group": 0}, {"channel": clap}], "shown": 0}),
         json!({"op": "set_step", "pattern": pat, "channel": clap, "step": 4, "on": false, "mute": true}),
         json!({"op": "set_playlist_track", "track": 2, "name": "Lead", "color": "#abcdef", "enabled": false}),
         json!({"op": "move_channel", "channel": kick, "row": 3}),
@@ -243,6 +244,16 @@ fn rack_edits_are_one_step_each() {
         crate::rack::sort(a, crate::rack::SortBy::Name);
     });
     shape(&mut a, "delete", &|a| crate::rack::delete_step(a, &[1, 2]));
+    // Filter groups and zips: no step; the group shown and its members as asked.
+    let n = steps(&a);
+    a.state.rack.sel = [0].into_iter().collect();
+    crate::rack::add_group(&mut a.state, "Drums", &[0].into_iter().collect());
+    crate::rack::zip_rows(&mut a.state, &[1].into_iter().collect());
+    let p = &a.state.session.project;
+    assert_eq!(p.channels[0].rack.group.map(|g| p.groups[g as usize].as_str()), Some("Drums"));
+    assert_eq!(p.current_group, p.channels[0].rack.group);
+    assert!(p.channels[1].rack.zipped && !p.channels[0].rack.zipped);
+    assert_eq!(steps(&a), n);
     // The lock makes no step.
     let n = steps(&a);
     crate::rack::lock(&mut a.state, 0);

@@ -92,7 +92,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `delete_channel` | `channel` | Its notes, clips and automation go too |
 | `move_channel` | `channel`, `row` | 0 = top |
 | `clone_channel` | `channel` | A copy right below it, as the rack's Clone: "<name> #2", its settings, mixer track and a copy of its instrument, no notes. Result: `channel` |
-| `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track`, `declick` (0..5), `swing` (0..1), `truncate_swing`, `cut`, `cut_by` (groups, 0 = none), `locked`, `stretch` (a sampler's time stretch method) (optional) | A colour's parts are kept at least `14` (hex), as projects save them. Swing is kept in steps of 1/128. An undo of another step leaves `locked` as it is |
+| `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track`, `declick` (0..5), `swing` (0..1), `truncate_swing`, `cut`, `cut_by` (groups, 0 = none), `locked`, `stretch` (a sampler's time stretch method), `zipped` (optional) | A colour's parts are kept at least `14` (hex), as projects save them. Swing is kept in steps of 1/128. An undo of another step leaves `locked` and `zipped` as they are |
 | `load_sample` | `channel`, `path` | A sampler channel; an empty path clears it |
 | `add_track` | `at` (optional) | A mixer insert, at number `at` or after the last. Result: `track` |
 | `delete_track` | `track` | Later tracks move left; its channels go to the master |
@@ -118,6 +118,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_pattern_signature` | `pattern`, `numerator`, `denominator` | the time signature at the pattern's start, `numerator` 0 for none; its clips follow |
 | `set_pattern` | `pattern`; `name`, `color`, `length` (0 = Auto) (optional) | |
 | `set_notes` | `pattern`, `notes`, `channel` (optional) | The notes of `channel` (or all notes) become `notes`. A note keeps its `id` (as `notes` lists it) when the pattern had it, and with it its values not given; others get new ones. Result: `notes` (their ids, in order) |
+| `set_groups` | `groups`; `channels` (`[{"channel", "group"}]`), `shown` (optional) | The rack's filter groups: their names in file order ("Unsorted" among them), channels' groups (an index, `null` none), the filter shown (`null` All) |
 | `set_loops` | `pattern`; `mode` (0 off, 1 loop step channels, 2 loop all channels, 3 advanced looping), `loops` (`[{"channel", "value"}]`) (optional) | The step sequencer's loops; a value is a length in steps or a loop point as the file keeps it, `null` none |
 | `set_step` | `pattern`, `channel`, `step`, `on`; `mute` (optional) | A step sequencer click: on adds a step (or unmutes the step's notes), off removes the step's notes, or mutes them with `mute` |
 | `add_notes` | `pattern`, `notes` (without `id`) | Result: `notes` (their ids, in order) |

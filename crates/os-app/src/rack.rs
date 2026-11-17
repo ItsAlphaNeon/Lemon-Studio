@@ -589,20 +589,62 @@ pub fn euclid(n: usize, k: usize) -> Vec<bool> {
 
 /// Group selected… / Add filter group (§7): a group named `name` after the others, holding `rows`, shown.
 pub fn add_group(s: &mut State, name: &str, rows: &BTreeSet<usize>) {
-    s.session.project.write_if(|p| {
+    groups_edit(s, |p| {
         // Last in the file's list when it has "Unsorted" (after it too); else before the "Unsorted" it gets.
         let at = unsorted_at(p).map(|_| p.groups.len());
         let g = insert_group(p, at, name);
         put_in_group(p, rows.iter().copied(), Some(g));
         p.current_group = Some(g);
-        true
     });
     autosize(s);
 }
 
+/// A filter group edit `f`, made on a copy of the project, applied by `Command::SetGroups`: no undo step and no unsaved
+/// change, as in FL.
+fn groups_edit(s: &mut State, f: impl FnOnce(&mut Project)) {
+    crate::mixer::track_ids(s);
+    let mut p = s.session.project.clone();
+    f(&mut p);
+    let now = &s.session.project;
+    let members = |p: &Project| p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>();
+    if p.groups == now.groups && p.current_group == now.current_group && members(&p) == members(now) {
+        return;
+    }
+    let channels = p.channels.iter().map(|c| crate::control::command::GroupIn { channel: c.id.0, group: c.rack.group }).collect();
+    let c = Command::SetGroups { groups: p.groups, channels, shown: p.current_group };
+    let dirty = s.session.dirty;
+    if let Err(e) = crate::control_ui::run(s, vec![c]) {
+        s.message = Some(e);
+    }
+    s.session.dirty = dirty;
+}
+
+/// The filter shown set to `f` (§7; no step, `groups_edit`).
+pub fn show_filter(s: &mut State, f: Filter) {
+    groups_edit(s, |p| {
+        p.current_group = match f {
+            Filter::All => None,
+            Filter::Group(g) => file_group(p, g),
+            Filter::Unsorted => Some(p.unsorted_group()),
+        };
+    });
+}
+
+/// The rows in `rows` zipped and the others unzipped (no undo step, an unsaved change: `ui/undo-steps.md`).
+pub fn zip_rows(s: &mut State, rows: &BTreeSet<usize>) {
+    crate::mixer::track_ids(s);
+    let changes: Vec<(usize, bool)> = s.session.project.channels.iter().enumerate().filter(|(r, c)| c.rack.zipped != rows.contains(r)).map(|(r, _)| (r, rows.contains(&r))).collect();
+    let commands: Vec<Command> = changes.into_iter().filter_map(|(r, on)| set_channel!(s, r, zipped: on)).collect();
+    if !commands.is_empty() {
+        if let Err(e) = crate::control_ui::run(s, commands) {
+            s.message = Some(e);
+        }
+    }
+}
+
 /// Delete filter group: the rack's group `g` goes, its channels to "Unsorted"; the filter shows All.
 pub fn delete_group(s: &mut State, g: usize) {
-    s.session.project.write_if(|p| {
+    groups_edit(s, |p| {
         if let Some(i) = file_group(p, g) {
             p.groups.remove(i as usize);
             for c in &mut p.channels {
@@ -614,7 +656,6 @@ pub fn delete_group(s: &mut State, g: usize) {
             }
         }
         p.current_group = None;
-        true
     });
     autosize(s);
 }
@@ -655,7 +696,7 @@ pub fn filter_tick(s: &mut State) -> bool {
         return false;
     }
     let f = s.session.project.channels[r].rack.group.and_then(|i| rack_group(&s.session.project, i)).map_or(Filter::Unsorted, Filter::Group);
-    set_filter(&mut s.session, f);
+    show_filter(s, f);
     autosize(s);
     true
 }
@@ -753,7 +794,7 @@ pub fn toggle_step(s: &mut State, r: usize, k: u32) -> bool {
 /// Put row `r` into the filter group `name` and show that group (ADD > Audio clip / Automation clip, spec:
 /// ui/add-clip-channels.md §1-3). A missing group is made, before "Unsorted" in the file's order.
 pub fn join_group(s: &mut State, r: usize, name: &str) {
-    s.session.project.write_if(|p| {
+    groups_edit(s, |p| {
         let g = match p.groups.iter().position(|g| g == name) {
             Some(g) => g as u32,
             None => {
@@ -763,7 +804,6 @@ pub fn join_group(s: &mut State, r: usize, name: &str) {
         };
         put_in_group(p, [r], Some(g));
         p.current_group = Some(g);
-        true
     });
     autosize(s);
 }
@@ -875,7 +915,7 @@ impl App {
         if crate::prefs::check(&crate::prefs::AUTO_ZIP_EMPTY) {
             let s = &mut self.state;
             let zipped: BTreeSet<usize> = used.iter().enumerate().filter(|&(_, &u)| !u).map(|(r, _)| r).collect();
-            set_zipped(&mut s.session, &if zipped.len() == used.len() { BTreeSet::new() } else { zipped });
+            zip_rows(s, &if zipped.len() == used.len() { BTreeSet::new() } else { zipped });
             autosize(s);
             self.invalidate();
         }
@@ -1248,7 +1288,11 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
             let members = if b == RBox::GroupSel { s.rack.sel.clone() } else { BTreeSet::new() };
             add_group(s, text, &members);
         }
-        RBox::RenameGroup(g) if !text.is_empty() => rename_group(&mut s.session, g, text),
+        RBox::RenameGroup(g) if !text.is_empty() => groups_edit(s, |p| {
+            if let Some(n) = file_group(p, g).and_then(|i| p.groups.get_mut(i as usize)) {
+                *n = text.to_string();
+            }
+        }),
         RBox::Transpose => {
             if let Ok(v) = text.trim_start_matches('+').parse::<i32>() {
                 s.message = transpose_selected(s, v).or(s.message.take());
@@ -2119,7 +2163,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::SetFilter(f) => {
-            set_filter(&mut s.session, f);
+            show_filter(s, f);
             s.rack_scroll = 0.0;
             autosize(s);
             None
@@ -2199,12 +2243,12 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::ZipSel => {
             let rows: BTreeSet<usize> = zipped_rows(&s.session.project).into_iter().chain(sel.iter().copied()).collect();
-            set_zipped(&mut s.session, &rows);
+            zip_rows(s, &rows);
             autosize(s);
             None
         }
         RCmd::UnzipAll => {
-            set_zipped(&mut s.session, &BTreeSet::new());
+            zip_rows(s, &BTreeSet::new());
             autosize(s);
             None
         }
@@ -2559,34 +2603,28 @@ pub const LOOP_POINT_STEP: &str = "Set advanced looping settings";
 /// A press in the graph editor (§14): one undo step for the drag, dropped on release when it changed nothing (spec:
 /// ui/undo-steps.md, "Graph editor change velocity", one per drag). Only the velocity tab's name was measured.
 pub fn graph_step(s: &mut State) {
-    let name = if s.rack.graph_tab == Tab::Vel { "Graph editor change velocity" } else { "Graph editor change" };
-    let snap = crate::history::Snap::pattern(&s.session, s.pattern().max(1));
-    crate::history::record(&mut s.session, name, snap);
+    s.session.history.end_run_of(crate::history::Run::Graph);
 }
 
 /// Graph editor (§14): set step `k`'s value of the focused channel from 0..1; a column without a step edits the
 /// nearest step note to its left.
+/// A press and its drag are one undo step (`Run::Graph`; `graph_step` ends the one before).
 pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
     let r = s.selected_channel;
     let ch = ch_index(&s.session, r)?;
     let ps = per_step(&s.session);
     let tab = s.rack.graph_tab;
-    let n = s.pattern().max(1);
-    let p = crate::edit::patterns::pat_mut(&mut s.session, n);
-    let idx = p
-        .notes
-        .iter()
-        .enumerate()
-        .filter(|(_, x)| x.channel == ch && x.position / ps <= k)
-        .max_by_key(|(_, x)| x.position)
-        .map(|(i, _)| i)?;
-    let note = &mut p.notes[idx];
-    tab.set(note, v, ps);
-    let text = tab.text(note, ps);
-    if tab == Tab::Shift {
-        p.notes.sort_by_key(|x| (x.position, x.channel));
+    let mut notes = row_notes(&s.session, r);
+    let idx = notes.iter().enumerate().filter(|(_, x)| x.channel == ch && x.position / ps <= k).max_by_key(|(_, x)| x.position).map(|(i, _)| i)?;
+    tab.set(&mut notes[idx], v, ps);
+    let text = tab.text(&notes[idx], ps);
+    crate::mixer::track_ids(s);
+    let channel = ch_id(s, r)?;
+    let name = if tab == Tab::Vel { "Graph editor change velocity" } else { "Graph editor change" };
+    let set = move |_: &State, pattern| vec![Command::SetNotes { pattern, channel: Some(channel), notes: notes.iter().map(|n| crate::control::command::NoteIn::of(n, channel)).collect() }];
+    if let Some(e) = on_pattern(s, name, Some(crate::history::Run::Graph), false, set) {
+        s.message = Some(e);
     }
-    s.session.dirty = true;
     Some(text)
 }
 
