@@ -1073,7 +1073,11 @@ mod tests {
     fn render_editor() {
         let Ok(dir) = std::env::var("OS_SHOT_DIR") else { return };
         let mut l = logic();
-        let font = std::env::var("OS_SF2").map(std::path::PathBuf::from).unwrap_or_else(|_| font_file("shot"));
+        let font = std::env::var("OS_SF2").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+            let p = std::env::temp_dir().join(format!("lemon-sf-ed-{}-shot.sf2", std::process::id()));
+            std::fs::write(&p, crate::sf2::tests::named_font_bytes(&[8000; 400], 44100, (0, 0), &[], 4, "Lemon Demo Kit", "Soft Strings")).unwrap();
+            p
+        });
         l.load(&font.to_string_lossy());
         let mut st = l.state();
         st.set_control(Control::Attack, Some(600));
@@ -1083,7 +1087,9 @@ mod tests {
         l.commit(&st);
         paint(&mut l);
         l.view.mouse = Some(centre(&l, &Target::Value(Control::Cutoff)));
-        let mut c = os_ui::Canvas::new(view::W * 2, view::H * 2, 2.0).unwrap();
+        // `OS_SHOT_SCALE` sets the display scale (2 when unset).
+        let k: f32 = std::env::var("OS_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).filter(|k: &f32| *k > 0.0).unwrap_or(2.0);
+        let mut c = os_ui::Canvas::new((view::W as f32 * k) as u32, (view::H as f32 * k) as u32, k).unwrap();
         l.paint(&mut c, &os_plugkit::palette());
         c.pixmap.save_png(std::path::Path::new(&dir).join("lemon_soundfont.png")).unwrap();
     }

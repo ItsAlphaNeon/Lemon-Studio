@@ -461,6 +461,11 @@ pub(crate) mod tests {
 
     /// A minimal font: one preset (bank 0, program `prog`) whose one instrument zone plays one sample with `igens`.
     pub(crate) fn font_bytes(data: &[i16], rate: u32, loop_: (u32, u32), igens: &[(u16, i16)], prog: u16) -> Vec<u8> {
+        named_font_bytes(data, rate, loop_, igens, prog, "test", "p")
+    }
+
+    /// [`font_bytes`] with the font's and the preset's names.
+    pub(crate) fn named_font_bytes(data: &[i16], rate: u32, loop_: (u32, u32), igens: &[(u16, i16)], prog: u16, font: &str, preset: &str) -> Vec<u8> {
         fn ck(id: &[u8], body: &[u8]) -> Vec<u8> {
             let mut v = id.to_vec();
             v.extend((body.len() as u32).to_le_bytes());
@@ -489,7 +494,7 @@ pub(crate) mod tests {
         shdr.extend([60u8, 0, 0, 0, 1, 0]);
         shdr.extend(n20("EOS"));
         shdr.extend([0u8; 26]);
-        let mut phdr = n20("p");
+        let mut phdr = n20(preset);
         phdr.extend(prog.to_le_bytes());
         phdr.extend([0u8; 2 + 2 + 12]);
         phdr.extend(n20("EOP"));
@@ -515,7 +520,9 @@ pub(crate) mod tests {
         igen.extend([53u8, 0, 0, 0]);
         igen.extend([0u8; 4]);
         let modt = [0u8; 10];
-        let info = list(b"INFO", [ck(b"ifil", &[2, 0, 1, 0]), ck(b"INAM", b"test\0\0")].concat());
+        let mut inam = font.as_bytes().to_vec();
+        inam.extend([0, 0]);
+        let info = list(b"INFO", [ck(b"ifil", &[2, 0, 1, 0]), ck(b"INAM", &inam)].concat());
         let sdta = list(b"sdta", ck(b"smpl", &smpl));
         let pdta = list(
             b"pdta",
