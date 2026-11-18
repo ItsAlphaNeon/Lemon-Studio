@@ -2368,6 +2368,36 @@ mod tests {
         capture(hwnd, &dir.join("win_nostrip.bmp"));
     }
 
+    /// A 32-bit VST 2 plugin (`OS_VST2_PLUGIN32`) in its window through the 32-bit bridge: loaded as the app loads any
+    /// plugin file, its editor (in the helper process) inside the app's frame. Needs the helper built for 32-bit Windows
+    /// (`cargo build -p os-vst2-bridge --bin lemonstudio-bridge32 --target i686-pc-windows-msvc`, same profile).
+    /// `OS_SHOT_DIR=.. OS_VST2_PLUGIN32=.. cargo test -p os-app --bin lemonstudio vst2_32_bit_window -- --ignored`
+    #[test]
+    #[ignore]
+    fn vst2_32_bit_window() {
+        let (Some(dir), Some(file)) = (std::env::var_os("OS_SHOT_DIR"), std::env::var_os("OS_VST2_PLUGIN32")) else { return };
+        let dir = std::path::PathBuf::from(dir);
+        // Per-monitor DPI awareness and the monitor's scale, as the app has them (and the helper).
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+            fn GetDpiForSystem() -> u32;
+        }
+        unsafe { SetProcessDpiAwarenessContext(-4) };
+        let scale = unsafe { GetDpiForSystem() } as f32 / 96.0;
+        let lib = load_file(std::path::Path::new(&file), os_host::Format::Vst2).expect("load through the bridge");
+        let desc = lib.plugins()[0].clone();
+        let mut pl = Plugins { available: vec![Available { lib, desc: desc.clone() }], scale, rate: 44100, ..Plugins::default() };
+        pl.create(0, 0).unwrap();
+        let info = ChannelInfo { name: desc.name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 800);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        capture(frame, &dir.join("vst2_32_bit.bmp"));
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
+        assert!(!editor.is_null(), "the plugin's editor is inside the frame");
+    }
+
     /// The built-in Lemon Parametric EQ in a mixer slot window: the frame without a strip, the editor inside it, and a
     /// click on a band's switch reaching the plugin state.
     /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio eq_window_shots -- --ignored`
