@@ -41,8 +41,8 @@ fn arr_apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Optio
 }
 
 /// A playlist edit `f` of the interface's own (it works on the shown arrangement's clips and markers) applied as
-/// commands: what it made of them goes in by `set_clips` and `set_markers`, as one undo step named `name` (none when
-/// nothing changed). `f` works on the arrangement, which is put back before the commands apply its result, so the step
+/// commands: what it made of them goes in by `set_clips` and `set_markers`, as one undo step named `name` (when nothing
+/// changed, the empty step the edit's snapshot made before). `f` works on the arrangement, which is put back before the commands apply its result, so the step
 /// holds their undo and a client could have made the same edit. The selection `f` leaves is kept: the commands give
 /// the clips their order.
 pub fn arr_edit<R>(s: &mut State, name: &'static str, f: impl FnOnce(&mut State) -> R) -> R {
@@ -61,7 +61,10 @@ pub fn arr_edit<R>(s: &mut State, name: &'static str, f: impl FnOnce(&mut State)
     let same = |a: &[Clip], b: &[Clip]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y && x.id.0 == y.id.0);
     let clips_changed = !same(&clips0, &clips1);
     let markers_changed = markers0 != markers1;
+    // Nothing changed: the step a snapshot made before the edit, as before (a button's release drops it, a key's
+    // keeps it).
     if !clips_changed && !markers_changed {
+        snapshot_as(&mut s.session, name);
         return r;
     }
     let sel = s.playlist.sel.clone();
@@ -3957,12 +3960,19 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             arr_edit(s, ARRANGER_EDIT, insert_space);
             None
         }
+        // Nothing to group: no step.
         Cmd::GroupClips => match arr_edit(s, ARRANGER_EDIT, group_clips) {
-            0 => Some("Group: select two or more clips first".into()),
+            0 => {
+                crate::history::unrecord(&mut s.session);
+                Some("Group: select two or more clips first".into())
+            }
             n => Some(format!("Grouped {n} clips")),
         },
         Cmd::UngroupClips => match arr_edit(s, ARRANGER_EDIT, ungroup_clips) {
-            0 => Some("Ungroup: no grouped clip is selected".into()),
+            0 => {
+                crate::history::unrecord(&mut s.session);
+                Some("Ungroup: no grouped clip is selected".into())
+            }
             n => Some(format!("Ungrouped {n} clips")),
         },
         Cmd::CycleSnap => {
