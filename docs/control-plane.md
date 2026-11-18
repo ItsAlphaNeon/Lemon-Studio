@@ -130,7 +130,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `add_clip` | `track` (1-based), `position`; `length`, and `pattern` or `channel` | A pattern clip, or an audio or automation channel's clip, in the arrangement shown. Result: `clip` |
 | `delete_clip` | `clip` | |
 | `set_clip` | `clip`; `position`, `track`, `length`, `muted` (optional) | |
-| `set_playlist_track` | `track`; `name`, `color`, `enabled`, `grouped`, `motion`, `press`, `trigger_sync`, `position_sync`, `queue`, `tolerant`, `clip_lock` (`{"pattern"}` (a number) or `{"channel"}`, `{}` none) (optional) | `grouped`: with the track above (not track 1). The performance settings as the project numbers them |
+| `set_playlist_track` | `track`; `name`, `color`, `enabled`, `grouped`, `motion`, `press`, `trigger_sync`, `position_sync`, `queue`, `tolerant`, `clip_lock` (`{"pattern"}` (a number) or `{"channel"}`, `{}` none), `link` (`{"mixer"}`: an audio track on that insert, `{"channel"}`: an instrument track, `{}` none) (optional) | `grouped`: with the track above (not track 1). The performance settings as the project numbers them |
 | `set_points` | `channel`, `points`: `[{"beat", "value"; "tension", "mode", "flag", "id"}]` | The automation clip's points (beats from its start, values 0..1, at least two); a point named by its id keeps what is not given |
 | `add_arrangement` | `name`, `copy` (an arrangement's id) (optional) | After the others; a copy of `copy`, else empty. Result: `arrangement` |
 | `delete_arrangement` | `arrangement` | A project keeps one; the one shown going, the one before it is shown |

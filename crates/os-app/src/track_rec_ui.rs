@@ -30,6 +30,7 @@ impl App {
     /// Audio on in Record's filter, so the armed tracks record (spec: audio/track-io.md §2.5).
     pub fn arm_tracks(&mut self, tracks: &[u16], on: bool) -> Option<String> {
         // Arming is no undo step (the track is the same armed or not, §1.5).
+        crate::control_ui::settle_ids(&mut self.state);
         let ses = &self.state.session;
         let cmds: Vec<_> = tracks
             .iter()

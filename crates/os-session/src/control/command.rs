@@ -8,7 +8,7 @@
 //! that gives the redo. Positions and lengths are ticks of the project's timebase (`ppq`).
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
-use os_model::{ChannelKind, Clip, ClipSource, Id, MixerTrack, Note, Pattern, Project, Rgb};
+use os_model::{ChannelKind, Clip, ClipSource, Id, MixerTrack, Note, Pattern, Project, Rgb, TrackLink};
 use serde::{Deserialize, Serialize};
 
 
@@ -449,6 +449,9 @@ pub enum Command {
         /// The source Draw and Paint place on the track: a pattern by number or a clip channel by id; `{}` none.
         #[serde(default)]
         clip_lock: Option<LockIn>,
+        /// An audio track on a mixer track or an instrument track of a channel, by id; `{}` neither.
+        #[serde(default)]
+        link: Option<LinkIn>,
     },
     /// The points of the automation clip on channel `channel` (an id) become `points`, in beat order; a point named by
     /// its id keeps its values for what is not given. A clip keeps two points at least.
@@ -924,6 +927,16 @@ pub struct GroupIn {
 pub struct LockIn {
     #[serde(default)]
     pub pattern: Option<u16>,
+    #[serde(default)]
+    pub channel: Option<u32>,
+}
+
+/// A playlist track's link (`Command::SetPlaylistTrack`): a mixer track or a channel by id, neither for none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkIn {
+    #[serde(default)]
+    pub mixer: Option<u32>,
     #[serde(default)]
     pub channel: Option<u32>,
 }
@@ -2653,8 +2666,24 @@ impl Command {
                 s.touched.clips = true;
                 none
             }
-            Command::SetPlaylistTrack { track, name, color, enabled, grouped, motion, press, trigger_sync, position_sync, queue, tolerant, clip_lock } => {
+            Command::SetPlaylistTrack { track, name, color, enabled, grouped, motion, press, trigger_sync, position_sync, queue, tolerant, clip_lock, link } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;
+                let link = match link {
+                    Some(LinkIn { mixer: Some(m), channel: None }) => match track_number(&s.project, m)? {
+                        0 => return Err("an audio track plays through an insert, not the master".into()),
+                        n => Some(TrackLink::audio(n)),
+                    },
+                    Some(LinkIn { mixer: None, channel: Some(c) }) => {
+                        let ch = &s.project.channels[channel_row(&s.project, c)?];
+                        if !crate::track_links::instrument_kind(ch.kind) {
+                            return Err("an instrument track plays a sampler, plugin or layer channel".into());
+                        }
+                        Some(TrackLink::instrument(ch.index))
+                    }
+                    Some(LinkIn { mixer: None, channel: None }) => Some(TrackLink::NONE),
+                    Some(_) => return Err("a track links to a mixer track or a channel".into()),
+                    None => None,
+                };
                 let lock = match clip_lock {
                     Some(LockIn { pattern: Some(n), channel: None }) => Some(Some(ClipSource::Pattern(n))),
                     Some(LockIn { pattern: None, channel: Some(c) }) => Some(Some(ClipSource::Channel(s.project.channels[channel_row(&s.project, c)?].index))),
@@ -2692,6 +2721,9 @@ impl Command {
                 }
                 if let Some(l) = lock {
                     t.clip_lock = l;
+                }
+                if let Some(l) = link {
+                    t.link = l;
                 }
                 none
             }

@@ -18,7 +18,6 @@ pub use crate::edit::mixer::*;
 use os_model::Rgb;
 
 use crate::app::{App, State};
-use crate::control::command::Region;
 
 /// Undo step names of the mixer's edits.
 const ROUTING: &str = "Mixer routing";
@@ -1479,21 +1478,11 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
             })
         });
     }
-    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
-    let step = match &c {
-        // The original's History names (spec: ui/one-click-recording.md §1).
-        MCmd::AssignAudio(_) => Some(crate::track_links::ASSIGN_AUDIO),
-        MCmd::UnassignAudio(_) => Some(crate::track_links::UNASSIGN_AUDIO),
-        _ => None,
-    };
     // The member edits apply their commands (`container_ui`), the containers' members as their windows left them first:
     // what the step keeps and an undo brings back.
     if matches!(c, MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberAddInst(..) | MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..)) {
         crate::container::store_members(app.state.session.project.get_mut(), &app.state.session.plugins);
         return run_now(app, c);
-    }
-    if let Some(name) = step {
-        return crate::control_ui::edit_app(app, name, Region::Project, |app| run_now(app, c));
     }
     run_now(app, c)
 }
@@ -1622,6 +1611,7 @@ fn set_io(s: &mut State, t: u16, c: Option<Command>) -> bool {
 
 /// Track `t` takes its input alone (the External input question's Yes); no step of its own, as in FL.
 pub fn external_only(s: &mut State, t: u16) {
+    crate::control_ui::settle_ids(s);
     if let Some(c) = set_track!(s, t, rec_source: os_model::REC_EXTERNAL) {
         let _ = crate::control_ui::run(s, vec![c]);
         s.session.dirty = true;
@@ -1631,6 +1621,8 @@ pub fn external_only(s: &mut State, t: u16) {
 fn run_now(app: &mut App, c: MCmd) -> Option<String> {
     let at = app.mouse;
     let s = &mut app.state;
+    // The commands below name tracks by id.
+    crate::control_ui::settle_ids(s);
     let msg = match c {
         MCmd::Rename(n) => {
             start_rename(s, n, at);
@@ -1753,7 +1745,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::UnassignAudio(n) => {
             let tg = targets(s, n);
-            crate::track_links::unassign_audio(&mut s.session, &tg)
+            crate::track_links_ui::unassign_audio(s, &tg)
         }
         MCmd::SelectDest(n) => select_linked(s, n, true),
         MCmd::SelectSources(n) => select_linked(s, n, false),

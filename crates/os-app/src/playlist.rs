@@ -153,7 +153,7 @@ fn auto_edit(s: &mut State, ch: u16, f: impl FnOnce(&mut State)) {
 }
 
 /// `Command::SetPlaylistTrack` on track `t` (0-based) setting nothing yet.
-fn track_cmd(t: u16) -> Command {
+pub fn track_cmd(t: u16) -> Command {
     Command::SetPlaylistTrack {
         track: t + 1,
         name: None,
@@ -167,6 +167,7 @@ fn track_cmd(t: u16) -> Command {
         queue: None,
         tolerant: None,
         clip_lock: None,
+        link: None,
     }
 }
 
@@ -4402,9 +4403,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             arr_apply(s, ARRANGER_EDIT, vec![c])
         }
         Cmd::TrackGroup(_) => None,
-        Cmd::TrackMode(t, m) => crate::control_ui::edit(s, crate::track_links::TRACK_MODE, crate::control::command::Region::Project, |s| {
-            crate::track_links_ui::set_mode(s, t, m)
-        }),
+        Cmd::TrackMode(t, m) => crate::track_links_ui::set_mode(s, t, m),
         Cmd::GroupCollapse(t) => {
             toggle_collapse(&mut s.session, t);
             None

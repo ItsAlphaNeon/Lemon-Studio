@@ -69,7 +69,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
     let pa: Vec<u32> = p.patterns.iter().map(|q| q.id.0).collect();
     let clips: Vec<u32> = p.arrangement().map(|x| x.clips.iter().map(|c| c.id.0).collect()).unwrap_or_default();
     let note = |r: &mut Rng, ch: &[u32]| json!({"channel": r.id(ch), "position": r.below(4) * 96, "length": 1 + r.below(96), "key": 36 + r.below(48), "velocity": r.below(128)});
-    match r.below(55) {
+    match r.below(56) {
         0 => json!({"op": "set_tempo", "bpm": 40.0 + r.unit() * 200.0}),
         1 => json!({"op": "set_swing", "swing": r.unit()}),
         2 => json!({"op": "set_main_volume", "volume": r.unit()}),
@@ -87,6 +87,8 @@ fn command(r: &mut Rng, a: &App) -> Value {
         }
         12 => json!({"op": "add_notes", "pattern": r.id(&pa), "notes": (0..1 + r.below(3)).map(|_| note(r, &ch)).collect::<Vec<_>>()}),
         13 => json!({"op": "set_playlist_track", "track": r.below(8), "name": format!("L{}", r.below(100)), "color": r.color(), "enabled": r.chance(0.5)}),
+        // Linked to an insert (not the master), or not linked.
+        55 => json!({"op": "set_playlist_track", "track": 1 + r.below(8), "link": if r.chance(0.5) && tr.len() > 1 { json!({"mixer": r.id(&tr[1..])}) } else { json!({}) }}),
         14 => json!({"op": "move_channel", "channel": r.id(&ch), "row": r.below(ch.len() + 1)}),
         15 => json!({"op": "delete_channel", "channel": r.id(&ch)}),
         16 => json!({"op": "add_channel", "name": format!("N{}", r.below(100)), "track": r.id(&tr)}),

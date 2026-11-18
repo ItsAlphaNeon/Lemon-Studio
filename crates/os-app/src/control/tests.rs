@@ -100,6 +100,8 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_playlist_track", "track": 2, "name": "Lead", "color": "#abcdef", "enabled": false}),
         json!({"op": "set_playlist_track", "track": 3, "grouped": true}),
         json!({"op": "set_playlist_track", "track": 4, "motion": 2, "press": 1, "trigger_sync": 3, "position_sync": 1, "queue": true, "tolerant": false, "clip_lock": {"pattern": 2}}),
+        json!({"op": "set_playlist_track", "track": 5, "link": {"mixer": ins2}}),
+        json!({"op": "set_playlist_track", "track": 6, "link": {"channel": kick}}),
         json!({"op": "reset_playlist_track", "track": 3}),
         json!({"op": "add_marker", "marker": {"position": 384, "name": "Drop"}}),
         json!({"op": "add_marker", "marker": {"position": 768, "root": 2, "scale": 0}}),

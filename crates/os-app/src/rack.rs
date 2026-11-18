@@ -1980,15 +1980,6 @@ pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
 
 /// Run a rack menu command. Returns a status message.
 pub fn run(app: &mut App, c: RCmd) -> Option<String> {
-    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md); Cut, Paste, Fill
-    // and Rotate record their own.
-    let step = match c {
-        RCmd::AssignInstrument(_) => Some(crate::track_links::ASSIGN_INSTRUMENT),
-        _ => None,
-    };
-    if let Some(name) = step {
-        return crate::control_ui::edit_app(app, name, crate::control::command::Region::Project, |app| run_now(app, c));
-    }
     run_now(app, c)
 }
 

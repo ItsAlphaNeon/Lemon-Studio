@@ -8,6 +8,7 @@
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ChannelKind, ClipSource, TrackLink};
 use crate::app::State;
+use crate::control::command::{Command, LinkIn};
 use crate::playlist::TRACKS;
 use crate::edit::playlist::{arr_mut, clips, track_info};
 #[allow(unused_imports)]
@@ -16,38 +17,90 @@ use crate::track_links::*;
 /// Assign to new Audio track(s) (spec: ui/mixer-track-commands.md §8): each of `mixers` without an audio track gets
 /// one on a new playlist track (`new_track`), named after the mixer track. The playlist selects the last one.
 pub fn assign_audio(s: &mut State, mixers: &[u16]) -> Option<String> {
+    crate::control_ui::settle_ids(s);
     let todo = assignable(&s.session, mixers);
-    let mut made = Vec::new();
-    for m in todo {
-        let Some(t) = new_track(&s.session) else { break };
-        let name = crate::edit::mixer::name(&s.session, m);
-        set_link(&mut s.session, t, TrackLink::audio(m));
-        arr_mut(&mut s.session).tracks[usize::from(t)].name = Some(name);
-        made.push((m, t));
-    }
+    let made: Vec<(u16, u16)> = todo.into_iter().zip(new_tracks(&s.session)).collect();
     let &(m, t) = made.last()?;
+    let cmds = made.iter().filter_map(|&(m, t)| audio_link(s, t, m)).collect();
+    if let Err(e) = crate::control_ui::command(s, ASSIGN_AUDIO, None, cmds) {
+        return Some(e);
+    }
     s.playlist.track = t;
-    s.session.dirty = true;
     Some(match made.len() {
         1 => format!("Assigned {} to {}", crate::edit::mixer::name(&s.session, m), crate::edit::playlist::track_name(&s.session, t)),
         n => format!("Assigned {n} mixer tracks to new audio tracks"),
     })
 }
 
+/// Unassign from Audio track(s): the audio tracks of `mixers` become plain tracks; names, colours and clips stay.
+pub fn unassign_audio(s: &mut State, mixers: &[u16]) -> Option<String> {
+    crate::control_ui::settle_ids(s);
+    let tracks: Vec<u16> = mixers.iter().flat_map(|&m| audio_tracks_of(&s.session, m)).collect();
+    let cmds = tracks.iter().map(|&t| link_cmd(t, None, None)).collect();
+    if let Err(e) = crate::control_ui::command(s, UNASSIGN_AUDIO, None, cmds) {
+        return Some(e);
+    }
+    match tracks.as_slice() {
+        [] => Some("No audio track to unassign".into()),
+        [t] => Some(format!("Unassigned {}", crate::edit::playlist::track_name(&s.session, *t))),
+        v => Some(format!("Unassigned {} audio tracks", v.len())),
+    }
+}
+
+/// Playlist track `t`'s link set to mixer track `mixer` or channel `channel` (ids), neither: none.
+fn link_cmd(t: u16, mixer: Option<u32>, channel: Option<u32>) -> Command {
+    let mut c = crate::playlist::track_cmd(t);
+    if let Command::SetPlaylistTrack { link, .. } = &mut c {
+        *link = Some(LinkIn { mixer, channel });
+    }
+    c
+}
+
+/// Track `t` becomes the audio track of insert `m`, named after it.
+fn audio_link(s: &State, t: u16, m: u16) -> Option<Command> {
+    let id = crate::edit::mixer::track(&s.session, m)?.id.0;
+    let mut c = link_cmd(t, Some(id), None);
+    if let Command::SetPlaylistTrack { name, .. } = &mut c {
+        *name = Some(crate::edit::mixer::name(&s.session, m));
+    }
+    Some(c)
+}
+
+/// Track `t` becomes the instrument track of rack row `r`, named and coloured after the channel; the channel's insert
+/// takes its name and colour (measured: Assign to new instrument track on 808 Clap wrote both to Insert 2, events 204
+/// and 149); the master keeps its own.
+fn instrument_link(s: &State, t: u16, r: usize) -> Vec<Command> {
+    let Some(ch) = s.session.project.channels.get(r) else { return Vec::new() };
+    let name = crate::edit::rack::channel_name(&s.session, r);
+    let color = crate::control::command::color_text(ch.color);
+    let mut c = link_cmd(t, None, Some(ch.id.0));
+    if let Command::SetPlaylistTrack { name: n, color: k, .. } = &mut c {
+        (*n, *k) = (Some(name.clone()), color.clone());
+    }
+    let mut v = vec![c];
+    if let Some(m) = crate::edit::mixer::track(&s.session, ch.mixer_track).filter(|_| ch.mixer_track != 0) {
+        let mut c = Command::set_track(m.id.0);
+        if let Command::SetTrack { name: n, color: k, .. } = &mut c {
+            (*n, *k) = (Some(name), color);
+        }
+        v.push(c);
+    }
+    v
+}
+
 /// Assign to new instrument track (spec: ui/channel-rack.md §18): each channel of `rows` gets a new playlist track
 /// (`new_track`) linked to it, named and coloured after it; the channel's mixer insert is named after it too (the
 /// master keeps its name), as the original does.
 pub fn assign_instrument(s: &mut State, rows: &[usize]) -> Option<String> {
+    crate::control_ui::settle_ids(s);
     let todo = instrument_rows(&s.session, rows);
-    let mut made = Vec::new();
-    for r in todo {
-        let Some(t) = new_track(&s.session) else { break };
-        link_instrument(&mut s.session, t, r);
-        made.push((r, t));
-    }
+    let made: Vec<(usize, u16)> = todo.into_iter().zip(new_tracks(&s.session)).collect();
     let &(r, t) = made.last()?;
+    let cmds = made.iter().flat_map(|&(r, t)| instrument_link(s, t, r)).collect();
+    if let Err(e) = crate::control_ui::command(s, ASSIGN_INSTRUMENT, None, cmds) {
+        return Some(e);
+    }
     s.playlist.track = t;
-    s.session.dirty = true;
     Some(match made.len() {
         1 => format!("Assigned {} to {}", crate::edit::rack::channel_name(&s.session, r), crate::edit::playlist::track_name(&s.session, t)),
         n => format!("Assigned {n} channels to new instrument tracks"),
@@ -55,25 +108,23 @@ pub fn assign_instrument(s: &mut State, rows: &[usize]) -> Option<String> {
 }
 
 /// Track mode ▸ on track `t`: an audio track takes its mixer track's name, an instrument track its channel's name and
-/// colour; Unassigned keeps the name.
+/// colour; Unassigned keeps the name. One undo step, "Playlist track mode".
 pub fn set_mode(s: &mut State, t: u16, mode: Mode) -> Option<String> {
-    match mode {
-        Mode::Unassigned => set_link(&mut s.session, t, TrackLink::NONE),
-        Mode::Audio(_) | Mode::NewAudio => {
-            let m = match mode {
-                Mode::Audio(m) => m,
-                _ => crate::mixer::add_track(s, None),
-            };
-            let name = crate::edit::mixer::name(&s.session, m);
-            set_link(&mut s.session, t, TrackLink::audio(m));
-            arr_mut(&mut s.session).tracks[usize::from(t)].name = Some(name);
-        }
-        Mode::Instrument(r) => link_instrument(&mut s.session, t, r),
+    crate::control_ui::settle_ids(s);
+    let r = match mode {
+        Mode::Unassigned => crate::control_ui::command(s, TRACK_MODE, None, vec![link_cmd(t, None, None)]),
+        Mode::Audio(m) => crate::control_ui::command(s, TRACK_MODE, None, audio_link(s, t, m).into_iter().collect()),
+        // A new insert, then the link to it, in one step.
+        Mode::NewAudio => crate::control_ui::command_then(s, TRACK_MODE, vec![Command::AddTrack { at: None }], |s, r| {
+            let id = r.first().and_then(|v| v["track"].as_u64());
+            let m = s.session.project.mixer.iter().find(|m| Some(u64::from(m.id.0)) == id).map(|m| m.index);
+            m.and_then(|m| audio_link(s, t, m)).into_iter().collect()
+        }),
+        Mode::Instrument(r) => crate::control_ui::command(s, TRACK_MODE, None, instrument_link(s, t, r)),
         // Needs the app to host the plugin (`new_instrument`).
         Mode::NewInstrument(_) => return None,
-    }
-    s.session.dirty = true;
-    None
+    };
+    r.err()
 }
 
 /// Track mode ▸ Instrument track ▸ and a generator (spec: ui/playlist.md §6c, measured): a new channel with that plugin,
@@ -87,9 +138,12 @@ pub fn new_instrument(app: &mut crate::app::App, t: u16, index: usize) -> Option
             return msg;
         }
         let row = app.state.selected_channel;
-        link_instrument(&mut app.state.session, t, row);
+        crate::control_ui::settle_ids(&mut app.state);
+        let cmds = instrument_link(&app.state, t, row);
+        if let Err(e) = crate::control_ui::run(&mut app.state, cmds) {
+            return Some(e);
+        }
         app.state.playlist.track = t;
-        app.state.session.dirty = true;
         Some(format!("Added {} on {}", crate::edit::rack::channel_name(&app.state.session, row), crate::edit::playlist::track_name(&app.state.session, t)))
     })
 }
