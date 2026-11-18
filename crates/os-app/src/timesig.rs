@@ -37,19 +37,22 @@ pub enum SongSig {
 
 /// Accept on a song marker: a time signature marker named after its signature ("3/4"), one undo step.
 pub fn set_song(s: &mut State, at: SongSig, num: u8, den: u8) {
-    crate::edit::playlist::snapshot(&mut s.session);
+    use crate::control::command::{Command, MarkerIn};
     let name = format!("{num}/{den}");
-    match at {
-        SongSig::At(t) => {
-            crate::edit::playlist::add_marker(&mut s.session, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) });
-        }
+    let c = match at {
+        SongSig::At(t) => Command::AddMarker { marker: MarkerIn::of(&TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) }) },
         SongSig::Marker(i) => {
-            if let Some(m) = crate::edit::playlist::arr_mut(&mut s.session).markers.get_mut(i) {
-                *m = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, name, ..m.clone() };
+            let Some(m) = crate::edit::playlist::markers(&s.session).get(i) else { return };
+            if m.id == os_model::Id::NONE {
+                crate::control_ui::settle_ids(s);
             }
+            let marker = crate::edit::playlist::markers(&s.session)[i].id.0;
+            Command::SetMarker { marker, position: None, name: Some(name), kind: Some(TimeMarker::SIGNATURE), numerator: Some(num), denominator: Some(den) }
         }
+    };
+    if let Err(e) = crate::control_ui::command(s, crate::edit::playlist::ARRANGER_EDIT, None, vec![c]) {
+        s.message = Some(e);
     }
-    s.session.dirty = true;
 }
 
 /// Index of pattern `n`'s time-signature marker at its start.

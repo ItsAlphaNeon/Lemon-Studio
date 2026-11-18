@@ -97,6 +97,8 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_playlist_track", "track": 2, "name": "Lead", "color": "#abcdef", "enabled": false}),
         json!({"op": "set_playlist_track", "track": 3, "grouped": true}),
         json!({"op": "reset_playlist_track", "track": 3}),
+        json!({"op": "add_marker", "marker": {"position": 384, "name": "Drop"}}),
+        json!({"op": "add_marker", "marker": {"position": 768, "root": 2, "scale": 0}}),
         json!({"op": "swap_playlist_tracks", "track": 1, "with": 2}),
         json!({"op": "insert_playlist_track", "at": 1}),
         json!({"op": "delete_playlist_track", "track": 2}),

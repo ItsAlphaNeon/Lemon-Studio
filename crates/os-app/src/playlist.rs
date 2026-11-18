@@ -977,9 +977,29 @@ fn add_every(s: &mut State, n: u32, base: &str) {
     let end = clips(&s.session).iter().map(|c| c.end()).max().unwrap_or(0);
     let (a, b) = s.playlist.range.unwrap_or((0, end));
     let step = (bar(&s.session) * n).max(1);
-    for (k, t) in (a..b).step_by(step as usize).enumerate() {
-        add_marker(&mut s.session, TimeMarker::new(t, &format!("{base} #{}", k + 1)));
+    let all = (a..b).step_by(step as usize).enumerate().map(|(k, t)| TimeMarker::new(t, &format!("{base} #{}", k + 1))).collect();
+    add_markers(s, all);
+}
+
+/// Markers `all` added, one step.
+fn add_markers(s: &mut State, all: Vec<TimeMarker>) {
+    let commands = all.iter().map(|m| Command::AddMarker { marker: crate::control::command::MarkerIn::of(m) }).collect();
+    if let Some(e) = arr_apply(s, ARRANGER_EDIT, commands) {
+        s.message = Some(e);
     }
+}
+
+/// Marker `i`'s id, for a command.
+fn marker_id(s: &mut State, i: usize) -> Option<u32> {
+    if markers(&s.session).iter().any(|m| m.id == os_model::Id::NONE) {
+        crate::control_ui::settle_ids(s);
+    }
+    markers(&s.session).get(i).map(|m| m.id.0)
+}
+
+/// `Command::SetMarker` on marker `i` setting nothing yet.
+fn marker_cmd(s: &mut State, i: usize) -> Option<Command> {
+    Some(Command::SetMarker { marker: marker_id(s, i)?, position: None, name: None, kind: None, numerator: None, denominator: None })
 }
 
 /// The current clip source (the current pattern unless another was picked).
@@ -3433,18 +3453,27 @@ pub fn commit_edit(s: &mut State) {
         }
         EditTarget::TrackName(t) => {
             let def = format!("Track {}", t + 1);
-            if let Some(tr) = arr_mut(&mut s.session).tracks.get_mut(usize::from(t)) {
-                tr.name = (!text.is_empty() && text != def).then_some(text);
+            let mut c = track_cmd(t);
+            if let Command::SetPlaylistTrack { name, .. } = &mut c {
+                *name = Some(if text == def { String::new() } else { text });
+            }
+            if let Some(e) = arr_apply(s, ARRANGER_EDIT, vec![c]) {
+                s.message = Some(e);
             }
         }
         EditTarget::MarkerName(i) => {
-            if let Some(m) = arr_mut(&mut s.session).markers.get_mut(i) {
-                m.name = text;
+            if let Some(mut c) = marker_cmd(s, i) {
+                if let Command::SetMarker { name, .. } = &mut c {
+                    *name = Some(text);
+                }
+                if let Some(e) = arr_apply(s, ARRANGER_EDIT, vec![c]) {
+                    s.message = Some(e);
+                }
             }
         }
         EditTarget::NewMarker(pos) => {
             let name = if text.is_empty() { format!("Marker {}", markers(&s.session).len() + 1) } else { text };
-            add_marker(&mut s.session, TimeMarker::new(pos, &name));
+            add_markers(s, vec![TimeMarker::new(pos, &name)]);
         }
         EditTarget::MarkerBase(n) => {
             let base = if text.is_empty() { "Marker".to_string() } else { text };
@@ -3453,8 +3482,7 @@ pub fn commit_edit(s: &mut State) {
         EditTarget::MarkerTwo(a, b) => {
             // FL's names, two spaces included: "Sec -  start", "Sec -  end" (measured).
             let base = if text.is_empty() { "Marker".to_string() } else { text };
-            add_marker(&mut s.session, TimeMarker::new(a, &format!("{base} -  start")));
-            add_marker(&mut s.session, TimeMarker::new(b, &format!("{base} -  end")));
+            add_markers(s, vec![TimeMarker::new(a, &format!("{base} -  start")), TimeMarker::new(b, &format!("{base} -  end"))]);
         }
         EditTarget::PointValue(ch, i) => {
             if let Some(v) = parse_value(&s.session, ch, &text) {
@@ -3978,17 +4006,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::AddAutoMarker => {
-            snapshot(&mut s.session);
             let pos = s.session.song_pos;
-            add_marker(&mut s.session, TimeMarker::new(pos, "Auto"));
+            add_markers(s, vec![TimeMarker::new(pos, "Auto")]);
             None
         }
         Cmd::AddJumpMarker => {
             // A Marker skip at the song position and its goal one bar later, both named with one space (§7a).
-            snapshot(&mut s.session);
             let (pos, bar) = (s.session.song_pos, bar(&s.session));
-            add_marker(&mut s.session, TimeMarker { kind: TimeMarker::SKIP, ..TimeMarker::new(pos, " ") });
-            add_marker(&mut s.session, TimeMarker::new(pos + bar, " "));
+            add_markers(s, vec![TimeMarker { kind: TimeMarker::SKIP, ..TimeMarker::new(pos, " ") }, TimeMarker::new(pos + bar, " ")]);
             None
         }
         Cmd::MarkerEvery(n) => {
@@ -4005,17 +4030,24 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::AddKeyMarker(k) => {
             // At the song position (measured: with it at bar 5, and at a time selection's start, which the song
             // position follows), named after the root and scale; one undo step.
-            snapshot(&mut s.session);
             s.playlist.key_scale = k;
             let pos = s.session.song_pos;
-            add_marker(&mut s.session, TimeMarker::key(pos, s.playlist.key_root, k));
+            add_markers(s, vec![TimeMarker::key(pos, s.playlist.key_root, k)]);
             None
         }
         Cmd::PlaceLoop | Cmd::PlaceLoopAt(_) => {
             let pos = if let Cmd::PlaceLoopAt(t) = cmd { t } else { s.playlist.range.map_or(0, |(a, _)| a) };
-            snapshot(&mut s.session);
-            place_loop(&mut s.session, pos);
-            None
+            // A loop marker there goes; else one comes (`place_loop`).
+            match markers(&s.session).iter().position(|m| m.kind == TimeMarker::LOOP && m.position == pos) {
+                Some(i) => {
+                    let c = marker_id(s, i).map(|marker| Command::DeleteMarker { marker });
+                    arr_apply(s, ARRANGER_EDIT, c.into_iter().collect())
+                }
+                None => {
+                    add_markers(s, vec![TimeMarker { kind: TimeMarker::LOOP, ..TimeMarker::new(pos, " ") }]);
+                    None
+                }
+            }
         }
         Cmd::DeleteMarkers | Cmd::ToMarkerLoop => {
             // The markers in the time selection (its start included, its end not); all of them without one.
@@ -4024,39 +4056,39 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             if !markers(&s.session).iter().any(inside) {
                 return None;
             }
-            snapshot(&mut s.session);
-            let arr = arr_mut(&mut s.session);
-            if cmd == Cmd::DeleteMarkers {
-                arr.markers.retain(|m| !inside(m));
-            } else {
-                arr.markers.iter_mut().filter(|m| inside(m)).for_each(|m| m.kind = TimeMarker::MARKER_LOOP);
-            }
-            s.session.dirty = true;
-            None
+            let rows: Vec<usize> = markers(&s.session).iter().enumerate().filter(|(_, m)| inside(m)).map(|(i, _)| i).collect();
+            let commands = rows
+                .into_iter()
+                .filter_map(|i| {
+                    let marker = marker_id(s, i)?;
+                    Some(if cmd == Cmd::DeleteMarkers {
+                        Command::DeleteMarker { marker }
+                    } else {
+                        Command::SetMarker { marker, position: None, name: None, kind: Some(TimeMarker::MARKER_LOOP), numerator: None, denominator: None }
+                    })
+                })
+                .collect();
+            arr_apply(s, ARRANGER_EDIT, commands)
         }
+        // Nothing to trade places with: no step.
         Cmd::MoveContent(i, right) => {
-            snapshot(&mut s.session);
-            if !move_content(&mut s.session, i, right) {
-                crate::history::unrecord(&mut s.session);
-            }
+            let c = marker_id(s, i).map(|marker| Command::MoveContent { marker, right });
+            let _ = arr_apply(s, ARRANGER_EDIT, c.into_iter().collect());
             None
         }
-        Cmd::MarkerAction(i, kind) => {
-            if markers(&s.session).get(i).is_some_and(|m| m.kind != kind) {
-                snapshot(&mut s.session);
-                arr_mut(&mut s.session).markers[i].kind = kind;
-                s.session.dirty = true;
-            }
-            None
+        Cmd::MarkerAction(i, kind) if markers(&s.session).get(i).is_some_and(|m| m.kind != kind) => {
+            let c = marker_cmd(s, i).map(|mut c| {
+                if let Command::SetMarker { kind: k, .. } = &mut c {
+                    *k = Some(kind);
+                }
+                c
+            });
+            arr_apply(s, ARRANGER_EDIT, c.into_iter().collect())
         }
+        Cmd::MarkerAction(..) => None,
         Cmd::DeleteMarker(i) => {
-            snapshot(&mut s.session);
-            let arr = arr_mut(&mut s.session);
-            if i < arr.markers.len() {
-                arr.markers.remove(i);
-            }
-            s.session.dirty = true;
-            None
+            let c = marker_id(s, i).map(|marker| Command::DeleteMarker { marker });
+            arr_apply(s, ARRANGER_EDIT, c.into_iter().collect())
         }
         Cmd::RenameMarker(i) => {
             let at = grid.zip(markers(&s.session).get(i)).map_or((600.0, 200.0), |(g, m)| (PGeom::new(s, g).x_of(m.position as f32), g.y - MARKER_H));

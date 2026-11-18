@@ -127,6 +127,10 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `delete_clip` | `clip` | |
 | `set_clip` | `clip`; `position`, `track`, `length`, `muted` (optional) | |
 | `set_playlist_track` | `track`; `name`, `color`, `enabled`, `grouped` (optional) | `grouped`: with the track above (not track 1) |
+| `add_marker` | `marker`: `position`; `name`, `kind`, `numerator`, `denominator`, `root`, `scale` (optional) | A time marker (`kind`: 0 marker, 1 marker loop, 2 skip, 3 pause, 4 loop, 5 start, 8 time signature, 9 punch in, 10 punch out, 12 key; a key marker by `root` 0..11 and `scale`, a place in the Add key marker list). Result: `marker` |
+| `set_marker` | `marker`; `position`, `name`, `kind`, `numerator`, `denominator` (optional) | |
+| `delete_marker` | `marker` | |
+| `move_content` | `marker`, `right` | The marker's section trades places with the next one (else the previous one), with its clips and markers |
 | `swap_playlist_tracks` | `track`, `with` | The two tracks change places, with their clips |
 | `insert_playlist_track` | `at` | An empty track; the ones from there move down |
 | `delete_playlist_track` | `track` | With its clips; the ones below move up |

@@ -69,7 +69,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
     let pa: Vec<u32> = p.patterns.iter().map(|q| q.id.0).collect();
     let clips: Vec<u32> = p.arrangement().map(|x| x.clips.iter().map(|c| c.id.0).collect()).unwrap_or_default();
     let note = |r: &mut Rng, ch: &[u32]| json!({"channel": r.id(ch), "position": r.below(4) * 96, "length": 1 + r.below(96), "key": 36 + r.below(48), "velocity": r.below(128)});
-    match r.below(51) {
+    match r.below(52) {
         0 => json!({"op": "set_tempo", "bpm": 40.0 + r.unit() * 200.0}),
         1 => json!({"op": "set_swing", "swing": r.unit()}),
         2 => json!({"op": "set_main_volume", "volume": r.unit()}),
@@ -116,6 +116,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
         41 => json!({"op": "clone_channel", "channel": r.id(&ch)}),
         43 => json!({"op": "set_loops", "pattern": r.id(&pa), "mode": r.below(4), "loops": [{"channel": r.id(&ch), "value": if r.chance(0.5) { Some(1 + r.below(16)) } else { None }}]}),
         44 => json!({"op": "set_groups", "groups": ["A", "Unsorted"], "channels": [{"channel": r.id(&ch), "group": if r.chance(0.5) { Some(r.below(2)) } else { None }}], "shown": if r.chance(0.5) { Some(r.below(2)) } else { None }}),
+        50 => json!({"op": "add_marker", "marker": {"position": r.below(8) * 384, "name": format!("M{}", r.below(9)), "kind": r.below(6)}}),
         46 => json!({"op": "swap_playlist_tracks", "track": 1 + r.below(8), "with": 1 + r.below(8)}),
         47 => json!({"op": "insert_playlist_track", "at": 1 + r.below(8)}),
         48 => json!({"op": "delete_playlist_track", "track": 1 + r.below(8)}),

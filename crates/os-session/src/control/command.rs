@@ -369,6 +369,30 @@ pub enum Command {
         #[serde(default)]
         grouped: Option<bool>,
     },
+    /// A time marker in the playlist (spec: ui/playlist.md §7a). The result names its id.
+    AddMarker { marker: MarkerIn },
+    /// Each setting given is set on the marker.
+    SetMarker {
+        marker: u32,
+        #[serde(default)]
+        position: Option<u32>,
+        #[serde(default)]
+        name: Option<String>,
+        /// Its action (`os_model::TimeMarker`'s kinds: 0 marker, 1 marker loop, 2 skip, 3 pause, 4 loop, 5 start, 8
+        /// time signature, 9 punch in, 10 punch out, 12 key).
+        #[serde(default)]
+        kind: Option<u8>,
+        /// A time signature marker's.
+        #[serde(default)]
+        numerator: Option<u8>,
+        #[serde(default)]
+        denominator: Option<u8>,
+    },
+    /// The marker goes.
+    DeleteMarker { marker: u32 },
+    /// Move content right (else left): the marker's section trades places with the next (previous) one, with the clips
+    /// that start in them and the markers at their starts.
+    MoveContent { marker: u32, right: bool },
     /// Playlist tracks `track` and `with` (1-based) change places, with their clips.
     SwapPlaylistTracks { track: u16, with: u16 },
     /// An empty playlist track at `at` (1-based); the ones from there move down (the last track's clips stay on it).
@@ -543,6 +567,71 @@ fn plugin_named(s: &crate::session::Session, plugin: &str, instrument: bool) -> 
     let list = if instrument { &s.plugins.available } else { &s.plugins.effects };
     let a = list.iter().find(|a| a.desc.uid() == plugin).or_else(|| list.iter().find(|a| a.desc.name == plugin)).ok_or_else(|| format!("no {} {plugin}", if instrument { "instrument" } else { "effect" }))?;
     Ok((a.desc.uid(), a.desc.name.clone()))
+}
+
+/// A time marker as commands give it: its position, name and action (`SetMarker`'s kinds), a time signature's
+/// numerator and denominator, a key marker's root (0 = C) and scale (its place in `os_model::SCALES`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarkerIn {
+    pub position: u32,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub kind: Option<u8>,
+    #[serde(default)]
+    pub numerator: Option<u8>,
+    #[serde(default)]
+    pub denominator: Option<u8>,
+    #[serde(default)]
+    pub root: Option<u8>,
+    #[serde(default)]
+    pub scale: Option<i32>,
+}
+
+impl MarkerIn {
+    /// The marker as the arrangement keeps it.
+    pub fn made(&self) -> Result<os_model::TimeMarker, Error> {
+        use os_model::TimeMarker;
+        ticks("position", self.position)?;
+        let mut m = match (self.root, self.scale) {
+            (Some(r), Some(k)) if r < 12 => TimeMarker::key(self.position, r, k),
+            (Some(_), Some(_)) => return Err("a key marker's root is 0..=11".into()),
+            _ => TimeMarker::new(self.position, self.name.as_deref().unwrap_or("Marker")),
+        };
+        if let Some(n) = &self.name {
+            m.name = n.clone();
+        }
+        if let Some(k) = self.kind {
+            m.kind = k;
+        }
+        if let Some(n) = self.numerator {
+            m.numerator = n;
+        }
+        if let Some(d) = self.denominator {
+            m.denominator = d;
+        }
+        Ok(m)
+    }
+
+    /// Marker `m` with everything it has: what `AddMarker` makes again.
+    pub fn of(m: &os_model::TimeMarker) -> MarkerIn {
+        let key = m.kind == os_model::TimeMarker::KEY;
+        MarkerIn {
+            position: m.position,
+            name: Some(m.name.clone()),
+            kind: Some(m.kind),
+            numerator: Some(m.numerator),
+            denominator: Some(m.denominator),
+            root: key.then_some(m.root),
+            scale: key.then_some(m.scale_index),
+        }
+    }
+}
+
+/// Marker `id`'s place in the shown arrangement's list.
+fn marker_place(s: &crate::session::Session, id: u32) -> Result<usize, Error> {
+    crate::edit::playlist::markers(s).iter().position(|m| m.id.0 == id).ok_or_else(|| format!("no marker {id}"))
 }
 
 /// Playlist track `track` (1-based) as the arrangement indexes it (0-based).
@@ -1006,6 +1095,8 @@ impl Command {
             Command::DeleteClip { .. } => "Delete clip",
             Command::SetClip { .. } => "Edit clip",
             Command::SetPlaylistTrack { .. } => "Playlist track",
+            Command::AddMarker { .. } | Command::SetMarker { .. } | Command::DeleteMarker { .. } => crate::edit::playlist::ARRANGER_EDIT,
+            Command::MoveContent { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::SwapPlaylistTracks { .. } | Command::InsertPlaylistTrack { .. } | Command::DeletePlaylistTrack { .. } | Command::ResetPlaylistTrack { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::SetClipLfo { .. } => "Automation clip LFO",
             Command::SetMidiOut { .. } => "MIDI Out setting",
@@ -1108,7 +1199,11 @@ impl Command {
             | Command::SwapPlaylistTracks { .. }
             | Command::InsertPlaylistTrack { .. }
             | Command::DeletePlaylistTrack { .. }
-            | Command::ResetPlaylistTrack { .. } => match p.arrangement() {
+            | Command::ResetPlaylistTrack { .. }
+            | Command::AddMarker { .. }
+            | Command::SetMarker { .. }
+            | Command::DeleteMarker { .. }
+            | Command::MoveContent { .. } => match p.arrangement() {
                 Some(a) => Taken::Arrangement(Box::new(a.clone())),
                 // A project without an arrangement gets one (`playlist::arr_mut`); the undo takes it away again.
                 None => Taken::Project(Box::new(Side::of(s))),
@@ -2077,6 +2172,52 @@ impl Command {
                 if let Some(v) = grouped {
                     t.grouped = v && track > 1;
                 }
+                none
+            }
+            Command::AddMarker { marker } => {
+                let m = marker.made()?;
+                let i = crate::edit::playlist::add_marker(s, m);
+                s.control.settle(s.project.get_mut());
+                let id = crate::edit::playlist::markers(s)[i].id;
+                Ok(id_result("marker", id))
+            }
+            Command::SetMarker { marker, position, name, kind, numerator, denominator } => {
+                if let Some(p) = position {
+                    ticks("position", p)?;
+                }
+                let i = marker_place(s, marker)?;
+                let m = &mut crate::edit::playlist::arr_mut(s).markers[i];
+                if let Some(p) = position {
+                    m.position = p;
+                }
+                if let Some(n) = name {
+                    m.name = n;
+                }
+                if let Some(k) = kind {
+                    m.kind = k;
+                }
+                if let Some(n) = numerator {
+                    m.numerator = n;
+                }
+                if let Some(d) = denominator {
+                    m.denominator = d;
+                }
+                if position.is_some() {
+                    crate::edit::playlist::sort_markers(s);
+                }
+                none
+            }
+            Command::DeleteMarker { marker } => {
+                let i = marker_place(s, marker)?;
+                crate::edit::playlist::arr_mut(s).markers.remove(i);
+                none
+            }
+            Command::MoveContent { marker, right } => {
+                let i = marker_place(s, marker)?;
+                if !crate::edit::playlist::move_content(s, i, right) {
+                    return Err("there is no section to trade places with".into());
+                }
+                s.touched.clips = true;
                 none
             }
             Command::SwapPlaylistTracks { track, with } => {
