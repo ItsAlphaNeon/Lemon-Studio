@@ -2449,6 +2449,47 @@ mod tests {
         assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
     }
 
+    /// The built-in Lemon SoundFont Player's editor in its window, a font open (`OS_SF2`, else none): the wheel on the
+    /// envelope's attack slider edits the state the channel saves (spec: plugins/lemon-soundfont.md §4).
+    /// `OS_SHOT_DIR=.. OS_SF2=font.sf2 cargo test -p os-app --bin lemonstudio soundfont_window_edits -- --ignored`
+    #[test]
+    #[ignore]
+    fn soundfont_window_edits() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(crate::soundfont::LEMON_SOUNDFONT).expect("built-in Lemon SoundFont Player");
+        let mut st = lemon_soundfont::state::State::default();
+        if let Some(f) = std::env::var_os("OS_SF2") {
+            st.set_path(&f.to_string_lossy());
+        }
+        pl.create_with(0, index, Some(&crate::soundfont::plugin_state(&st.to_bytes()))).unwrap();
+        let name = crate::soundfont::LEMON_SOUNDFONT;
+        let info = ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 400);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
+        assert!(editor != 0, "the editor is a child of the frame");
+        let mut er: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(editor as HWND, &mut er) };
+        let state = |pl: &Plugins| pl.soundfont_file_state(0).unwrap();
+        let (a, b) = (dir.join("soundfont_before.bmp"), dir.join("soundfont_after.bmp"));
+        capture(frame, &a);
+        let before = state(&pl);
+        let (sx, sy) = (er.left + 51, er.top + 300);
+        for _ in 0..3 {
+            unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
+            pump(&mut pl, 60);
+        }
+        pump(&mut pl, 300);
+        capture(frame, &b);
+        let after = state(&pl);
+        assert_ne!(after, before, "the slider moved the attack");
+        assert_eq!(lemon_soundfont::state::State::parse(&after).unwrap().control(lemon_soundfont::state::Control::Attack), Some(383));
+        assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
+    }
+
     /// The built-in Citrus's editor in its window: the wheel on SOFTEN and a right click on a matrix cell edit the
     /// Sytrus state the channel saves (spec: plugins/citrus.md §6).
     /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio citrus_window_edits -- --ignored`
