@@ -1581,7 +1581,9 @@ impl Engine {
                     start,
                     stop,
                     buf: 0,
-                    shape: n.clip.map(|fx| {
+                    // Every playlist clip has a shape (a plain one without fades or gain), so an instrument that takes
+                    // voice gains gets the channel's clip level on the clips' voices alone (`instrument_job`).
+                    shape: n.cut.map(|_| n.clip.unwrap_or(ClipFx { fade_in: (0.0, 0.0), fade_out: (0.0, 0.0), gain: 1.0 })).map(|fx| {
                         let ms = |v: f32| (f64::from(v.max(0.0)) * f64::from(rate) / 1000.0).round() as u64;
                         let total = Clock::frame_of_tick(rate, ppq, tick_tempo, n.tick + n.len) - Clock::frame_of_tick(rate, ppq, tick_tempo, n.tick);
                         ClipShape {
@@ -4556,16 +4558,20 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     let voiced = inst.voice_gains();
     // SAFETY: only this channel's turn touches its clips.
     let shapes = || unsafe { cx.shapes.of_channel(c) };
+    // A playlist clip's own level (the channel's clip level) goes on its voice with its shape, so the channel's
+    // pattern notes play at the level of a sampler's notes (measured on FL 12.5.1, "It's TV Time!": the kick and snare
+    // of two audio clip channels, played by pattern notes, null against FL at -85 dB without it).
+    let cl = ch.clip_level;
     if voiced {
         let step = crate::instrument::VOICE_GAIN_FRAMES;
         for s in shapes() {
             if s.sent.is_none() {
-                let g = s.shape.at(s.age);
+                let g = s.shape.at(s.age) * cl;
                 inst.voice_gain(0, s.voice, g);
                 s.sent = Some(g);
             }
             for off in (0..n as u32).step_by(step as usize) {
-                let g = s.shape.at(s.age + u64::from(off + step));
+                let g = s.shape.at(s.age + u64::from(off + step)) * cl;
                 if s.sent != Some(g) {
                     inst.voice_gain(off, s.voice, g);
                     s.sent = Some(g);
@@ -4596,9 +4602,9 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
         }
     }
     out.active = inst.active();
-    // An audio clip channel's voices are its playlist clips: their own level is on the channel's output, since a
-    // hosted sampler takes velocities only up to 128 (spec: audio/audio-clips.md "Level").
-    let cl = ch.clip_level;
+    // An instrument without voice gains has its playlist clips' own level on the channel's output (a hosted sampler
+    // takes velocities only up to 128; spec: audio/audio-clips.md "Level"), its pattern notes with them.
+    let cl = if voiced { 1.0 } else { cl };
     let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_after(n as u32, f64::from(cl), layer) };
     // A level that changed smooths over the tick, as a voice's does: it has arrived when the curve says so (spec:
     // audio/automation.md).
@@ -8026,6 +8032,31 @@ mod tests {
             assert!((second[2 * at(288)] - mid).abs() < 2e-4, "t {t}: {} vs {mid}", second[2 * at(288)]);
             assert!(second[2 * at(100)].abs() < 1e-6, "nothing before the second clip");
         }
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    // spec: audio/audio-clips.md "Level"
+    /// On a hosted sampler that takes voice gains, an audio clip channel's own level reaches its playlist clips' voices
+    /// alone: a clip plays at unity through the channel at its default volume, centred, and a pattern note of the same
+    /// channel at a sampler note's level (measured on FL 12.5.1: "It's TV Time!", whose kick and snare are pattern
+    /// notes on audio clip channels).
+    #[test]
+    fn a_pattern_note_on_an_audio_clip_channel_plays_without_the_clips_level() {
+        use os_model::{Clip, ClipSource};
+        let wav = std::env::temp_dir().join(format!("os-engine-pattern-note-level-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
+        let mut p = song(vec![Note { length: 96, ..Note::step(0, 0) }], vec![Clip::new(0, 96, 0, ClipSource::Channel(0)), Clip::new(384, 192, 0, ClipSource::Pattern(1))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        e.set_instrument(0, Arc::new(std::sync::Mutex::new(VoicedSampler::default())));
+        let out = e.render_all(480);
+        let at = |t: u64| crate::clock::Clock::frame_of_tick(48000, 96, 130.0, t) as usize;
+        // A voice plays 0.5 at its gain; the channel's default volume, centred, is curve(0.78125) * cos(pi / 4).
+        let channel = laws::channel_gain(10000.0 / 12800.0) * std::f64::consts::FRAC_1_SQRT_2;
+        assert!((out[2 * at(48)] - 0.5).abs() < 1e-4, "the clip at unity: {}", out[2 * at(48)]);
+        let note = (0.5 * channel) as f32;
+        assert!((out[2 * at(432)] - note).abs() < 1e-4, "the pattern note: {} vs {note}", out[2 * at(432)]);
         let _ = std::fs::remove_file(&wav);
     }
 
