@@ -3200,9 +3200,9 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             crate::perform_ui::release(&mut app.state, now);
         }
         PlDrag::Slice { .. } => {
+            // Nothing sliced: no step.
             if let Some(Overlay::Slice { tick, t0, t1 }) = overlay {
-                snapshot(&mut s.session);
-                if slice(&mut s.session, tick, t0, t1) == 0 {
+                if arr_edit(s, ARRANGER_EDIT, |s| slice(&mut s.session, tick, t0, t1)) == 0 {
                     crate::history::unrecord(&mut s.session);
                 }
             }
@@ -3242,14 +3242,8 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
                 crate::history::unrecord(&mut s.session);
             }
         }
-        PlDrag::Marker { i, t0, .. } => {
-            // A click leaves no undo step; a moved marker goes back in position order.
-            if markers(&s.session).get(i).is_none_or(|m| m.position == t0) {
-                crate::history::unrecord(&mut s.session);
-            } else {
-                sort_markers(&mut s.session);
-                s.session.dirty = true;
-            }
+        // A moved marker went back in position order with its step (`set_markers`, above).
+        PlDrag::Marker { .. } => {
             // The song position went to the marker: playback follows, as from the ruler (§7a).
             if app.state.session.transport.playing() && (app.state.session.transport.song() || !app.state.session.transport.paused()) {
                 let p = app.state.session.song_pos;
@@ -3432,7 +3426,8 @@ pub fn press_markers(app: &mut App, grid: Rect, right: bool) {
             None => lane_menu(tick, x, y),
         });
     } else if let Some(i) = hit {
-        snapshot(&mut s.session);
+        // The drag's step is made at the release (`drag_end`), none for a click.
+        arr_begin(s, ARRANGER_EDIT);
         let t0 = markers(&s.session)[i].position;
         // As a click on the ruler: SONG mode, the initial values follow (§7).
         s.session.song_pos = t0;
@@ -3627,7 +3622,7 @@ pub fn commit_edit(s: &mut State) {
         EditTarget::SlotName(t, k) => {
             crate::mixer::track_ids(s);
             if let Some(m) = s.session.project.mixer.iter().find(|m| m.index == t) {
-                let c = crate::control::command::Command::SetSlot { track: m.id.0, slot: k, enabled: None, mix: None, name: Some(text), color: None, sidechain: None };
+                let c = crate::control::command::Command::SetSlot { track: m.id.0, slot: k, enabled: None, mix: None, name: Some(text), color: None, sidechain: None, auto_bypass: None, threaded: None };
                 let _ = crate::control_ui::command(s, "Slot name", None, vec![c]);
             }
         }
@@ -3644,13 +3639,19 @@ pub fn commit_edit(s: &mut State) {
             crate::mixer::create_group(s, n, &text);
         }
         EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
-        EditTarget::PatternName(n) => crate::control_ui::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
-            if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
-                p.name = (!text.is_empty()).then_some(text);
-            } else if !text.is_empty() {
-                s.session.project.get_mut().patterns.push(os_model::Pattern { number: n, name: Some(text), ..Default::default() });
+        // A pattern number the project holds no pattern for gets one, named.
+        EditTarget::PatternName(n) => {
+            if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+                crate::control_ui::settle_ids(s);
             }
-        }),
+            let c = match s.session.project.pattern(n).map(|p| p.id.0) {
+                Some(pattern) => Some(Command::SetPattern { pattern, name: Some(text), color: None, length: None }),
+                None => (!text.is_empty()).then(|| Command::AddPattern { name: Some(text), color: None, number: Some(n) }),
+            };
+            if let Some(Err(e)) = c.map(|c| crate::control_ui::command(s, "Pattern name", None, vec![c])) {
+                s.message = Some(e);
+            }
+        }
     }
     s.session.dirty = true;
 }
@@ -4946,7 +4947,6 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
 /// Plugin window menu > CPU (spec: ui/plugin-window.md "CPU"): flips Smart disable (`smart`) or Allow threaded processing
 /// of the plugin in window `key`, one undo step. Saved with the plugin (event 212's flags); the engine renders the same.
 pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
-    use crate::control::command::Region;
     if plugin_cpu(&s.session, key).is_none() {
         return;
     }
@@ -4959,15 +4959,26 @@ pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
         crate::container_ui::edit_own(s, t, k, id, name, |m| flip(&mut m.cpu));
         return;
     }
-    match crate::plugins::fx_of(key) {
-        Some((t, k)) => crate::control_ui::edit(s, name, Region::Track(t), |s| {
-            if let Some(m) = s.session.project.get_mut().mixer.iter_mut().find(|m| m.index == t) {
-                flip(&mut m.slot_cpu[usize::from(k)]);
-            }
+    crate::mixer::track_ids(s);
+    let c = match crate::plugins::fx_of(key) {
+        Some((t, k)) => crate::mixer::track(&s.session, t).map(|m| {
+            let mut cpu = m.slot_cpu[usize::from(k)];
+            flip(&mut cpu);
+            Command::SetSlot { track: m.id.0, slot: k, enabled: None, mix: None, name: None, color: None, sidechain: None, auto_bypass: Some(cpu.smart_disable), threaded: Some(cpu.threaded) }
         }),
-        None => crate::control_ui::edit(s, name, Region::Channel(key), |s| flip(&mut s.session.project.get_mut().channels[key].misc.cpu)),
+        None => s.session.project.channels.get(key).map(|ch| {
+            let mut cpu = ch.misc.cpu;
+            flip(&mut cpu);
+            let mut c = Command::set_channel(ch.id.0);
+            if let Command::SetChannel { auto_bypass, threaded, .. } = &mut c {
+                (*auto_bypass, *threaded) = (Some(cpu.smart_disable), Some(cpu.threaded));
+            }
+            c
+        }),
+    };
+    if let Some(Err(e)) = c.map(|c| crate::control_ui::command(s, name, None, vec![c])) {
+        s.message = Some(e);
     }
-    s.session.dirty = true;
 }
 
 /// Enables the window menu's entries that act on the window's channel or slot (`key`, a rack row or a `fx_key`; spec:

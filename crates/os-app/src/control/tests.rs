@@ -90,7 +90,7 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": clap, "position": 192, "fine_pitch": 130, "release": 10, "mod_x": 20, "mod_y": 30, "repeat": 2, "slide": true, "muted": true, "color": 5}]}),
         json!({"op": "set_step", "pattern": pat, "channel": kick, "step": 5, "on": true}),
         json!({"op": "set_loops", "pattern": pat, "mode": 3, "loops": [{"channel": kick, "value": 8}, {"channel": clap}]}),
-        json!({"op": "set_channel", "channel": kick, "stretch": 2, "zipped": true}),
+        json!({"op": "set_channel", "channel": kick, "stretch": 2, "zipped": true, "auto_bypass": true, "threaded": false}),
         json!({"op": "replace_instrument", "channel": ch[4], "plugin": "MIDI Out"}),
         json!({"op": "set_groups", "groups": ["Drums", "Unsorted"], "channels": [{"channel": kick, "group": 0}, {"channel": clap}], "shown": 0}),
         json!({"op": "set_step", "pattern": pat, "channel": clap, "step": 4, "on": false, "mute": true}),

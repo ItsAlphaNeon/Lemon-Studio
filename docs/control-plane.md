@@ -93,7 +93,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `move_channel` | `channel`, `row` | 0 = top |
 | `replace_instrument` | `channel`; `plugin` (optional: none is Lemon Sampler) | As the rack's Replace: the channel keeps its row, notes, mixer track, levels and Misc settings and takes the plugin's name (a MIDI Out channel keeps its own) and a new instance; it gets a new id, so an undo brings the old instrument back. Result: `channel` (the new id) |
 | `clone_channel` | `channel` | A copy right below it, as the rack's Clone: "<name> #2", its settings, mixer track and a copy of its instrument, no notes. Result: `channel` |
-| `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track`, `declick` (0..5), `swing` (0..1), `truncate_swing`, `cut`, `cut_by` (groups, 0 = none), `locked`, `stretch` (a sampler's time stretch method), `zipped` (optional) | A colour's parts are kept at least `14` (hex), as projects save them. Swing is kept in steps of 1/128. An undo of another step leaves `locked` and `zipped` as they are |
+| `set_channel` | `channel`; `name`, `color`, `volume` (0..1), `pan` (-1..1), `pitch` (cents), `enabled`, `track`, `declick` (0..5), `swing` (0..1), `truncate_swing`, `cut`, `cut_by` (groups, 0 = none), `locked`, `stretch` (a sampler's time stretch method), `zipped`, `auto_bypass`, `threaded` (optional) | A colour's parts are kept at least `14` (hex), as projects save them. Swing is kept in steps of 1/128. An undo of another step leaves `locked` and `zipped` as they are |
 | `load_sample` | `channel`, `path` | A sampler channel; an empty path clears it |
 | `add_track` | `at` (optional) | A mixer insert, at number `at` or after the last. Result: `track` |
 | `delete_track` | `track` | Later tracks move left; its channels go to the master |
@@ -108,7 +108,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_eq` | `track`, `band` (0..2); `gain` (-1800..1800, 0.01 dB), `frequency`, `width` (0..65536) (optional) | The track's three-band equaliser, as stored |
 | `add_effect` | `track`, `plugin`, `slot` (optional) | Into slot 0..9, else the first empty one; `"Lemon Container"` puts an empty container there. Result: `slot` (the slot plugin's id) |
 | `remove_effect` | `track`, `slot` | with the name and colour given to the slot |
-| `set_slot` | `track`, `slot`; `enabled`, `mix` (0..1), `name` (empty: the plugin's), `color` (`#rrggbb`, empty: none), `sidechain` (an input port, 0: none) (optional) | The sidechain input is for a plugin that has one |
+| `set_slot` | `track`, `slot`; `enabled`, `mix` (0..1), `name` (empty: the plugin's), `color` (`#rrggbb`, empty: none), `sidechain` (an input port, 0: none), `auto_bypass`, `threaded` (optional) | The sidechain input is for a plugin that has one |
 | `add_pattern` | `name`, `color`, `number` (optional) | Result: `pattern` |
 | `delete_pattern` | `pattern` | Its clips go; later patterns move down a number |
 | `shift_patterns` | `from`, `by` (1 or -1) | patterns from `from` on move by one: 1 opens a gap at `from` (Insert one), -1 closes the empty number below `from` |

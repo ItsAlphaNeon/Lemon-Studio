@@ -130,6 +130,11 @@ pub enum Command {
         /// Zipped (folded to a thin row in the rack). An undo of another step leaves it as it is.
         #[serde(default)]
         zipped: Option<bool>,
+        /// The instrument's CPU switches: Auto-bypass when silent, Allow threaded processing.
+        #[serde(default)]
+        auto_bypass: Option<bool>,
+        #[serde(default)]
+        threaded: Option<bool>,
     },
     /// The channel rack's filter groups (spec: ui/channel-rack.md §7): `groups` their names in file order ("Unsorted"
     /// among them), `channels` each listed channel's group (an index into `groups`, `null` none), `shown` the filter
@@ -252,6 +257,11 @@ pub enum Command {
         /// The input port its sidechain input takes (0: none), for a plugin that has one.
         #[serde(default)]
         sidechain: Option<u32>,
+        /// The slot plugin's CPU switches: Auto-bypass when silent, Allow threaded processing.
+        #[serde(default)]
+        auto_bypass: Option<bool>,
+        #[serde(default)]
+        threaded: Option<bool>,
     },
 
     // ----- Patterns
@@ -1330,6 +1340,8 @@ impl Command {
             locked: None,
             stretch: None,
             zipped: None,
+            auto_bypass: None,
+            threaded: None,
         }
     }
 
@@ -1775,7 +1787,7 @@ impl Command {
                 crate::edit::rack::remap_in(s, &map);
                 none
             }
-            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch, zipped } => {
+            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch, zipped, auto_bypass, threaded } => {
                 let track = track.map(|t| track_number(&s.project, t)).transpose()?;
                 if declick.is_some_and(|d| d > crate::edit::rack::DECLICK_MAX) {
                     return Err(format!("declick is 0..={}", crate::edit::rack::DECLICK_MAX));
@@ -1829,6 +1841,12 @@ impl Command {
                 }
                 if let Some(v) = zipped {
                     ch.rack.zipped = v;
+                }
+                if let Some(v) = auto_bypass {
+                    ch.misc.cpu.smart_disable = v;
+                }
+                if let Some(v) = threaded {
+                    ch.misc.cpu.threaded = v;
                 }
                 let sampler = ch.kind.is_sampler();
                 if let Some(v) = stretch {
@@ -2088,7 +2106,7 @@ impl Command {
                 crate::edit::mixer::swap_slots(s, t, slot, to);
                 none
             }
-            Command::SetSlot { track, slot, enabled, mix, name, color, sidechain } => {
+            Command::SetSlot { track, slot, enabled, mix, name, color, sidechain, auto_bypass, threaded } => {
                 let mix = mix.map(|v| unit("mix", v, 0.0, 1.0)).transpose()?;
                 let color = color.map(|c| parse_color(&c)).transpose()?;
                 if slot > 9 {
@@ -2107,6 +2125,12 @@ impl Command {
                 }
                 if let Some(c) = color {
                     m.slot_colors[usize::from(slot)] = c;
+                }
+                if let Some(v) = auto_bypass {
+                    m.slot_cpu[usize::from(slot)].smart_disable = v;
+                }
+                if let Some(v) = threaded {
+                    m.slot_cpu[usize::from(slot)].threaded = v;
                 }
                 if let Some(port) = sidechain {
                     let t = m.index;

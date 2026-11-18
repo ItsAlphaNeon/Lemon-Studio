@@ -551,7 +551,7 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             let t = s.selected_mixer;
             track_ids(s);
             let on = !track(&s.session, t)?.slot_on[usize::from(i)];
-            apply(s, SLOT, vec![Command::SetSlot { track: id_of(s, t)?, slot: i, enabled: Some(on), mix: None, name: None, color: None, sidechain: None }])
+            apply(s, SLOT, vec![Command::SetSlot { track: id_of(s, t)?, slot: i, enabled: Some(on), mix: None, name: None, color: None, sidechain: None, auto_bypass: None, threaded: None }])
         }
         MHit::Input => {
             s.playlist.popup = input_menu(s, at.0, at.1 + 10.0);
@@ -742,7 +742,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             track_ids(s);
             if let (Some(m), Some(id)) = (track(&s.session, t), id_of(s, t)) {
                 let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
-                let c = (0..10u8).map(|k| Command::SetSlot { track: id, slot: k, enabled: Some(only || k == i), mix: None, name: None, color: None, sidechain: None }).collect();
+                let c = (0..10u8).map(|k| Command::SetSlot { track: id, slot: k, enabled: Some(only || k == i), mix: None, name: None, color: None, sidechain: None, auto_bypass: None, threaded: None }).collect();
                 if let Some(e) = apply(s, SLOT, c) {
                     s.message = Some(e);
                 }
@@ -1578,7 +1578,7 @@ fn commands_of(s: &State, c: &MCmd) -> Option<(&'static str, Vec<Command>)> {
 
 /// Slot `k` of the current track coloured `col`.
 fn slot_color_cmd(s: &State, k: u8, col: Option<Rgb>) -> Option<Command> {
-    Some(Command::SetSlot { track: id_of(s, s.selected_mixer)?, slot: k, enabled: None, mix: None, name: None, color: Some(color_text(col).unwrap_or_default()), sidechain: None })
+    Some(Command::SetSlot { track: id_of(s, s.selected_mixer)?, slot: k, enabled: None, mix: None, name: None, color: Some(color_text(col).unwrap_or_default()), sidechain: None, auto_bypass: None, threaded: None })
 }
 
 /// Effect `index` (in the plugin list) into slot `k` of the current track: one undo step, "Add effect". The plugin is
@@ -1837,7 +1837,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::SlotSidechain(slot, port) => {
             track_ids(s);
             let t = s.selected_mixer;
-            let c = id_of(s, t).map(|track| Command::SetSlot { track, slot, enabled: None, mix: None, name: None, color: None, sidechain: Some(port as u32) });
+            let c = id_of(s, t).map(|track| Command::SetSlot { track, slot, enabled: None, mix: None, name: None, color: None, sidechain: Some(port as u32), auto_bypass: None, threaded: None });
             c.and_then(|c| apply(s, "Sidechain input", vec![c]))
         }
     };
