@@ -104,7 +104,7 @@ yet is kept, not thrown away. This support is still young, so work on copies. Se
 | Piano roll | 🚧 | Note colours, scale and chord helpers, sound for release velocity |
 | Arranger | 🚧 | Per-clip pitch, pan and reverse. Bars are always 4 beats. Consolidate and exporting all tracks leave plugins out |
 | Mixer and routing | ✅ | Other mixer layouts |
-| Plugin hosting | ✅ | 32-bit plugins, Audio Units, outputs past a plugin's main stereo pair |
+| Plugin hosting | ✅ | Audio Units, outputs past a plugin's main stereo pair |
 | Built-in plugins | 🚧 | Some settings of the larger plugins aren't played yet |
 | Automation | 🚧 | Editing a clip's targets, making controller links in the app |
 | Recording | 🚧 | Loop recording and take lanes for audio |
