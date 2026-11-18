@@ -265,6 +265,14 @@ pub enum Command {
     },
 
     // ----- Patterns
+    /// A copy of pattern number `from` (an empty one when the project holds none with that number) as pattern number
+    /// `to`, which no pattern has, named `name` (else as the original); nothing else moves. The result names its id.
+    CopyPattern {
+        from: u16,
+        to: u16,
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// A new pattern after the last one. The result names its id.
     AddPattern {
         #[serde(default)]
@@ -1297,6 +1305,7 @@ impl Command {
             Command::RemoveEffect { .. } => "Remove effect",
             Command::SetSlot { .. } => "Effect slot",
             Command::AddPattern { .. } => "Add pattern",
+            Command::CopyPattern { .. } => "Make unique",
             Command::ShiftPatterns { by, .. } => if *by > 0 { "Insert pattern" } else { "Delete pattern" },
             Command::MovePattern { .. } => "Move pattern",
             Command::ClonePattern { .. } => "Clone pattern",
@@ -1388,7 +1397,7 @@ impl Command {
 
     /// A command that adds a thing: its undo takes it away, so applying it always changes the project.
     pub fn adds(&self) -> bool {
-        matches!(self, Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::AddClip { .. })
+        matches!(self, Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::CopyPattern { .. } | Command::AddClip { .. })
     }
 
     pub fn undo_now(&self, s: &crate::session::Session) -> Result<Command, Error> {
@@ -1462,7 +1471,7 @@ impl Command {
             Command::ReplaceInstrument { channel, .. } => Taken::Swap(Box::new(p.channels[channel_row(p, *channel)?].clone()), *channel),
             Command::SetGroups { .. } => groups(p),
             // What an add made is known once it is made (`apply`); this is not used.
-            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } => Taken::Gone(Thing::Channel(0)),
+            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::CopyPattern { .. } => Taken::Gone(Thing::Channel(0)),
             Command::DeleteChannel { channel } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Channel(*channel))?)),
             Command::DeletePattern { pattern } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Pattern(*pattern))?)),
             Command::DeleteTrack { track } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Track(*track))?)),
@@ -1601,7 +1610,7 @@ impl Command {
         let added = match &self {
             Command::AddChannel { .. } | Command::CloneChannel { .. } => Some(Thing::Channel as fn(u32) -> Thing),
             Command::AddTrack { .. } => Some(Thing::Track as fn(u32) -> Thing),
-            Command::AddPattern { .. } => Some(Thing::Pattern as fn(u32) -> Thing),
+            Command::AddPattern { .. } | Command::CopyPattern { .. } => Some(Thing::Pattern as fn(u32) -> Thing),
             _ => None,
         };
         let replace = matches!(self, Command::ReplaceInstrument { .. });
@@ -2240,6 +2249,28 @@ impl Command {
                 }
                 crate::edit::patterns::set_signature(s, n, (numerator > 0).then_some((numerator, denominator)));
                 none
+            }
+            Command::CopyPattern { from, to, name } => {
+                let max = crate::edit::patterns::MAX;
+                if !(1..=max).contains(&from) || !(1..=max).contains(&to) {
+                    return Err(format!("patterns are 1..={max}"));
+                }
+                if s.project.pattern(to).is_some() {
+                    return Err(format!("pattern {to} is there already"));
+                }
+                let mut p = s.project.pattern(from).cloned().unwrap_or(Pattern { number: from, ..Pattern::default() });
+                p.number = to;
+                p.id = Id::NONE;
+                p.notes.iter_mut().for_each(|n| n.id = Id::NONE);
+                if let Some(n) = name {
+                    p.name = text(&n);
+                }
+                let ps = &mut s.project.get_mut().patterns;
+                let at = ps.partition_point(|q| q.number < to);
+                ps.insert(at, p);
+                s.control.settle(s.project.get_mut());
+                let id = s.project.pattern(to).map_or(Id::NONE, |p| p.id);
+                Ok(id_result("pattern", id))
             }
             Command::AddPattern { name, color, number } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;

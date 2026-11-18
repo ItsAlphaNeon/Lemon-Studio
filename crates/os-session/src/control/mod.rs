@@ -274,6 +274,7 @@ fn op(c: &Command) -> &'static str {
         Command::MoveEffect { .. } => "move_effect",
         Command::SetSlot { .. } => "set_slot",
         Command::AddPattern { .. } => "add_pattern",
+        Command::CopyPattern { .. } => "copy_pattern",
         Command::ShiftPatterns { .. } => "shift_patterns",
         Command::MovePattern { .. } => "move_pattern",
         Command::ClonePattern { .. } => "clone_pattern",

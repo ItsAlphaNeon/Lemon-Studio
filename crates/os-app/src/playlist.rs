@@ -73,22 +73,32 @@ pub fn arr_begin(s: &mut State, name: &'static str) {
     s.playlist.arr_before = Some((name, clips(&s.session).to_vec(), markers(&s.session).to_vec()));
 }
 
+/// `arr_commit` with `first` applied before the clips' and markers' commands.
+fn arr_commit_first(s: &mut State, first: Vec<Command>) -> bool {
+    s.playlist.arr_first = first;
+    arr_commit(s, Vec::new())
+}
+
 /// The edit begun by `arr_begin` applied as commands: what it made of the clips and markers goes in by `set_clips` and
 /// `set_markers`, with `extra` (what else the edit changes, as commands), as one undo step; the arrangement is put
 /// back first, so the step holds the commands' undo. The selection the edit left is kept (the commands give the clips
 /// their order). False when nothing changed (no step, none of `extra` applied).
 pub fn arr_commit(s: &mut State, extra: Vec<Command>) -> bool {
-    let Some((name, clips0, markers0)) = s.playlist.arr_before.take() else { return false };
+    let Some((name, clips0, markers0)) = s.playlist.arr_before.take() else {
+        s.playlist.arr_first.clear();
+        return false;
+    };
     let (clips1, markers1) = (clips(&s.session).to_vec(), markers(&s.session).to_vec());
     let same = |a: &[Clip], b: &[Clip]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y && x.id.0 == y.id.0);
     let clips_changed = !same(&clips0, &clips1);
     let markers_changed = markers0 != markers1;
     if !clips_changed && !markers_changed {
+        s.playlist.arr_first.clear();
         return false;
     }
     let sel = s.playlist.sel.clone();
     let p = &s.session.project;
-    let mut commands = Vec::new();
+    let mut commands = std::mem::take(&mut s.playlist.arr_first);
     if clips_changed {
         commands.push(Command::SetClips { clips: clips1.iter().map(|c| crate::control::command::ClipIn::of(c, p)).collect() });
     }
@@ -755,6 +765,8 @@ pub struct TextEdit {
 pub struct PlaylistState {
     /// The automation points' edit or drag under way (`auto_begin`): its step's name, the channel and its points before.
     pub auto_before: Option<(&'static str, u16, Vec<AutoPoint>)>,
+    /// Commands `arr_commit` applies before the clips' (`arr_commit_first`).
+    pub arr_first: Vec<Command>,
     /// The edit or drag under way (`arr_begin`): its step's name and the shown arrangement's clips and markers before.
     pub arr_before: Option<(&'static str, Vec<Clip>, Vec<TimeMarker>)>,
     pub tool: PlTool,
@@ -879,6 +891,7 @@ impl Default for PlaylistState {
     fn default() -> Self {
         PlaylistState {
             auto_before: None,
+            arr_first: Vec::new(),
             arr_before: None,
             tool: PlTool::Draw,
             snap: EditorSnap::Main,
@@ -1624,22 +1637,32 @@ fn end_solo(s: &mut State) -> Vec<bool> {
 }
 
 /// Make unique: a pattern clip gets its own copy of the pattern (§5).
-pub fn make_unique(s: &mut State, i: usize) -> Option<u16> {
-    let c = *clips(&s.session).get(i)?;
-    let ClipSource::Pattern(n) = c.source else { return None };
-    let mut p = s.session.project.pattern(n).cloned().unwrap_or(os_model::Pattern { number: n, ..Default::default() });
-    let next = s.session.project.patterns.iter().map(|p| p.number).max().unwrap_or(0).max(n) + 1;
-    let base = p.name.clone().unwrap_or_else(|| format!("Pattern {n}"));
-    p.number = next;
-    p.name = Some(format!("{base} #2"));
-    s.session.project.get_mut().patterns.push(p);
-    if let Some(cl) = arr_mut(&mut s.session).clips.get_mut(i) {
-        cl.source = ClipSource::Pattern(next);
+pub fn make_unique(s: &mut State, idx: &[usize]) -> Vec<u16> {
+    // Each pattern clip gets a copy of its pattern, numbered after the last; one step.
+    arr_begin(s, ARRANGER_EDIT);
+    let mut top = s.session.project.patterns.iter().map(|p| p.number).max().unwrap_or(0);
+    let (mut made, mut copies) = (Vec::new(), Vec::new());
+    for &i in idx {
+        let Some(c) = clips(&s.session).get(i).copied() else { continue };
+        let ClipSource::Pattern(n) = c.source else { continue };
+        let next = top.max(n) + 1;
+        top = next;
+        let base = s.session.project.pattern(n).and_then(|p| p.name.clone()).unwrap_or_else(|| format!("Pattern {n}"));
+        copies.push(Command::CopyPattern { from: n, to: next, name: Some(format!("{base} #2")) });
+        if let Some(cl) = arr_mut(&mut s.session).clips.get_mut(i) {
+            cl.source = ClipSource::Pattern(next);
+        }
+        made.push(next);
     }
-    s.playlist.source = Some(ClipSource::Pattern(next));
-    s.set_pattern(next);
-    s.session.dirty = true;
-    Some(next)
+    // The copies first, so the clips name patterns the project holds.
+    if !arr_commit_first(s, copies) {
+        return Vec::new();
+    }
+    if let Some(&next) = made.last() {
+        s.playlist.source = Some(ClipSource::Pattern(next));
+        s.set_pattern(next);
+    }
+    made
 }
 
 /// Make unique on an audio clip: the clip gets a copy of its channel (sample and settings), named as a clone, so a
@@ -4069,8 +4092,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::MakeUnique => {
             let sel = s.playlist.sel.clone();
-            snapshot(&mut s.session);
-            let made: Vec<u16> = sel.iter().filter_map(|&i| make_unique(s, i)).collect();
+            let made = make_unique(s, &sel);
             if made.is_empty() { Some("Make unique: select a pattern clip".into()) } else { None }
         }
         Cmd::InsertSpace => {
@@ -4260,8 +4282,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ClipUnique(i) if clips(&s.session).get(i).is_some_and(|c| source_kind(&s.session, c.source) == PickKind::Audio) => make_unique_audio(s, i),
         Cmd::ClipUnique(i) => {
-            snapshot(&mut s.session);
-            make_unique(s, i).map(|n| format!("Made unique: pattern {n}"))
+            make_unique(s, &[i]).first().map(|n| format!("Made unique: pattern {n}"))
         }
         Cmd::ClipUniqueSample(i) => Some(make_unique_sample(s, i)),
         Cmd::ClipEditSource(i) => {

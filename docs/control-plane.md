@@ -114,6 +114,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `shift_patterns` | `from`, `by` (1 or -1) | patterns from `from` on move by one: 1 opens a gap at `from` (Insert one), -1 closes the empty number below `from` |
 | `move_pattern` | `from`, `to` (numbers) | pattern number `from` takes number `to` and the one there `from`, with their clips (by number: a number can have clips before the project holds a pattern for it) |
 | `clone_pattern` | `pattern` | a copy right after it named "<name> #k"; later ones move up. Result: `pattern` |
+| `copy_pattern` | `from`, `to` (numbers); `name` (optional) | A copy of pattern `from` (empty when the project holds none with that number) as pattern `to`, which none has; nothing else moves. Result: `pattern` |
 | `transpose_pattern` | `pattern`, `semitones`; `channels` (optional) | every note of the pattern, or only those channels' notes |
 | `split_pattern` | `pattern` | Split by channel: a pattern per channel with notes, clips under the original's |
 | `set_pattern_signature` | `pattern`, `numerator`, `denominator` | the time signature at the pattern's start, `numerator` 0 for none; its clips follow |
