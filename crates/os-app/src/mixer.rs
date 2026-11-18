@@ -31,7 +31,7 @@ use crate::control::command::{color_text, Command};
 /// settle gives ids to everything new, and something about to go would take one.
 pub fn track_ids(s: &mut State) {
     let p = &s.session.project;
-    if p.mixer.iter().any(|m| m.id == os_model::Id::NONE) || p.channels.iter().any(|c| c.id == os_model::Id::NONE) {
+    if p.mixer.iter().any(|m| m.id.is_none()) || p.channels.iter().any(|c| c.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
 }

@@ -183,7 +183,7 @@ use crate::control::command::Command;
 
 /// The patterns have their ids, for commands (a pattern just made gets its own on the next tick).
 fn pattern_ids(s: &mut State) {
-    if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+    if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
 }

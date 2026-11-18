@@ -26,7 +26,7 @@ use crate::control::command::Command;
 /// The shown arrangement's clips and tracks have their ids, for commands (a clip just made gets its own on the next
 /// tick); only then, as a settle numbers everything new.
 fn clip_ids(s: &mut State) {
-    if clips(&s.session).iter().any(|c| c.id == os_model::Id::NONE) {
+    if clips(&s.session).iter().any(|c| c.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
 }
@@ -67,7 +67,7 @@ pub fn arr_begin(s: &mut State, name: &'static str) {
         return;
     }
     clip_ids(s);
-    if markers(&s.session).iter().any(|m| m.id == os_model::Id::NONE) {
+    if markers(&s.session).iter().any(|m| m.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
     s.playlist.arr_before = Some((name, clips(&s.session).to_vec(), markers(&s.session).to_vec()));
@@ -119,7 +119,7 @@ pub fn arr_commit(s: &mut State, extra: Vec<Command>) -> bool {
 
 /// The points of automation channel `ch` (its index) as an edit or a drag of them starts (`auto_commit`).
 pub fn auto_begin(s: &mut State, ch: u16, name: &'static str) {
-    if s.session.project.automation(ch).is_some_and(|a| a.points.iter().any(|p| p.id == os_model::Id::NONE)) || s.session.project.channels.iter().any(|c| c.id == os_model::Id::NONE) {
+    if s.session.project.automation(ch).is_some_and(|a| a.points.iter().any(|p| p.id.is_none())) || s.session.project.channels.iter().any(|c| c.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
     s.playlist.auto_before = s.session.project.automation(ch).map(|a| (name, ch, a.points.clone()));
@@ -1125,7 +1125,7 @@ fn add_markers(s: &mut State, all: Vec<TimeMarker>) {
 
 /// Marker `i`'s id, for a command.
 fn marker_id(s: &mut State, i: usize) -> Option<u32> {
-    if markers(&s.session).iter().any(|m| m.id == os_model::Id::NONE) {
+    if markers(&s.session).iter().any(|m| m.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
     markers(&s.session).get(i).map(|m| m.id.0)
@@ -3711,7 +3711,7 @@ pub fn commit_edit(s: &mut State) {
         EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
         // A pattern number the project holds no pattern for gets one, named.
         EditTarget::PatternName(n) => {
-            if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+            if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
                 crate::control_ui::settle_ids(s);
             }
             let c = match s.session.project.pattern(n).map(|p| p.id.0) {
@@ -4336,7 +4336,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             let rgb = hsl_rgb((seed % 360) as f32, 0.45, 0.45);
             let color = crate::control::command::color_text(Some(rgb));
             crate::mixer::track_ids(s);
-            if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+            if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
                 crate::control_ui::settle_ids(s);
             }
             let r = match src {
@@ -4415,7 +4415,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ArrAdd | Cmd::ArrClone => {
             let copy = if cmd_is_clone(&cmd) {
-                if s.session.project.arrangement().is_some_and(|a| a.id == os_model::Id::NONE) {
+                if s.session.project.arrangement().is_some_and(|a| a.id.is_none()) {
                     crate::control_ui::settle_ids(s);
                 }
                 s.session.project.arrangement().map(|a| a.id.0)
@@ -4443,7 +4443,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::ArrDelete if s.session.project.arrangements.len() > 1 => {
-            if s.session.project.arrangement().is_some_and(|a| a.id == os_model::Id::NONE) {
+            if s.session.project.arrangement().is_some_and(|a| a.id.is_none()) {
                 crate::control_ui::settle_ids(s);
             }
             let arrangement = s.session.project.arrangement()?.id.0;

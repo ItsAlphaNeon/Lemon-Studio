@@ -631,6 +631,12 @@ pub struct NoteIn {
     pub muted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<u8>,
+    /// Its own portamento switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub porta: Option<bool>,
+    /// The stored record's other bits, kept for a copy: its flags, its byte 19 and bytes 14-15 (before the values above).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<[u16; 3]>,
     /// `set_notes`: the note's id as the notes query names it, kept when the pattern held a note with it; a note
     /// without one, or with another, gets a new id. `add_notes` takes none: its notes are new.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -930,6 +936,8 @@ impl NoteIn {
             slide: Some(n.slide()),
             muted: Some(n.muted()),
             color: Some(n.group & 0x0f),
+            porta: Some(n.porta()),
+            raw: Some([n.flags, u16::from(n.group), n.unk14]),
             id: (n.id.0 != 0).then_some(n.id.0),
         }
     }
@@ -2430,7 +2438,10 @@ impl Command {
                 let p = &mut s.project.get_mut().patterns[place];
                 p.notes.retain(|n| only.is_some_and(|c| n.channel != c));
                 p.notes.extend(notes);
-                p.notes.sort_by_key(|n| (n.position, n.channel));
+                // One channel's notes merge with the others in position order; all of them keep the order given.
+                if only.is_some() {
+                    p.notes.sort_by_key(|n| (n.position, n.channel));
+                }
                 Ok(ids)
             }
             Command::SetGroups { groups, channels, shown } => {
@@ -2663,7 +2674,7 @@ impl Command {
                 // Each id once: a second clip naming one is new.
                 let mut seen = std::collections::HashSet::new();
                 let list: Vec<Clip> = list.into_iter().map(|mut c| {
-                    if c.id != Id::NONE && !seen.insert(c.id.0) {
+                    if !c.id.is_none() && !seen.insert(c.id.0) {
                         c.id = Id::NONE;
                     }
                     c
@@ -2678,7 +2689,7 @@ impl Command {
                 let mut list = markers.iter().map(|m| m.made_from(&held)).collect::<Result<Vec<_>, _>>()?;
                 let mut seen = std::collections::HashSet::new();
                 for m in &mut list {
-                    if m.id != Id::NONE && !seen.insert(m.id.0) {
+                    if !m.id.is_none() && !seen.insert(m.id.0) {
                         m.id = Id::NONE;
                     }
                 }
@@ -2962,6 +2973,7 @@ fn put(s: &mut crate::session::Session, t: Taken) {
             if let Ok(place) = pattern_place(&s.project, p.id.0) {
                 s.project.get_mut().patterns[place] = *p;
             }
+            s.touched.notes = true;
         }
         Taken::Lfo(id, l) => {
             if let Some(a) = channel_row(&s.project, id).ok().map(|row| s.project.channels[row].index).and_then(|ch| s.project.get_mut().automation_mut(ch)) {
@@ -3268,6 +3280,9 @@ fn notes_of(p: &Project, notes: &[NoteIn], held: &[Note]) -> Result<Vec<Note>, E
             x.mod_x = keep(check("mod X", n.mod_x, 128)?, x.mod_x, x.mod_x);
             x.mod_y = keep(check("mod Y", n.mod_y, 128)?, x.mod_y, x.mod_y);
             x.repeat = keep(check("repeat", n.repeat, 14)?, x.repeat, x.repeat);
+            if let Some([flags, group, unk14]) = n.raw {
+                (x.flags, x.group, x.unk14) = (flags, group as u8, unk14);
+            }
             if let Some(c) = check("colour", n.color, 15)? {
                 x.group = (x.group & !0x0f) | c;
             }
@@ -3276,6 +3291,9 @@ fn notes_of(p: &Project, notes: &[NoteIn], held: &[Note]) -> Result<Vec<Note>, E
             }
             if let Some(v) = n.muted {
                 x.set_muted(v);
+            }
+            if let Some(v) = n.porta {
+                x.group = if v { x.group | Note::PORTA } else { x.group & !Note::PORTA };
             }
             Ok(x)
         })

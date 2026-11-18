@@ -287,6 +287,11 @@ impl History {
         self.done.checked_sub(1).map(|i| &*self.steps[i].name)
     }
 
+    /// Whether the newest done step is made of commands (`Snap::Commands`).
+    pub fn newest_is_commands(&self) -> bool {
+        self.done.checked_sub(1).is_some_and(|i| matches!(self.steps[i].snap, Snap::Commands(_)))
+    }
+
     /// Forgets every step: the project was opened or made ("Last reset").
     pub fn reset(&mut self) {
         *self = History::default();
@@ -420,11 +425,57 @@ pub fn unrecord(s: &mut crate::session::Session) {
 /// note that did not move it, a knob clicked without a turn).
 pub fn settle(s: &mut crate::session::Session) {
     let h = &s.history;
-    if h.fresh && h.done > 0 && h.done == h.steps.len() && h.steps[h.done - 1].snap.now(s) == h.steps[h.done - 1].snap {
-        unrecord(s);
+    if h.fresh && h.done > 0 && h.done == h.steps.len() {
+        if h.steps[h.done - 1].snap.now(s) == h.steps[h.done - 1].snap {
+            unrecord(s);
+        } else {
+            pattern_to_commands(s, h.done - 1);
+        }
     }
     s.history.fresh = false;
     s.history.end_gesture_run();
+}
+
+/// An edit of a pattern the interface made on it, step `i` holding the pattern as it was (`Snap::Pattern`), turned
+/// into the commands a client would apply for it: the pattern goes back as it was and `set_notes` and `set_pattern`
+/// bring it to what the edit made, the step holding their undo. Left as it is when the edit changed what no command
+/// sets yet (the pattern's controls or loops) or a note names no channel the rack has.
+fn pattern_to_commands(s: &mut crate::session::Session, i: usize) {
+    use crate::control::command::{Command, NoteIn};
+    let Snap::Pattern { number, notes, controls, length, loops } = &s.history.steps[i].snap else { return };
+    let Some(p) = s.project.pattern(*number) else { return };
+    if p.controls != *controls || (p.loops.clone(), p.loop_mode) != *loops {
+        return;
+    }
+    let ids: std::collections::HashMap<u16, u32> = s.project.channels.iter().map(|c| (c.index, c.id.0)).collect();
+    if p.id.is_none() || p.notes.iter().any(|n| ids.get(&n.channel).is_none_or(|&id| id == 0)) {
+        return;
+    }
+    let after = p.clone();
+    let mut commands = Vec::new();
+    let same_notes = after.notes.len() == notes.len() && after.notes.iter().zip(notes).all(|(a, b)| a == b && a.id.0 == b.id.0);
+    if !same_notes {
+        commands.push(Command::SetNotes { pattern: after.id.0, channel: None, notes: after.notes.iter().map(|n| NoteIn::of(n, ids[&n.channel])).collect() });
+    }
+    if after.length != *length {
+        commands.push(Command::SetPattern { pattern: after.id.0, name: None, color: None, length: Some(after.length.unwrap_or(0)) });
+    }
+    if commands.is_empty() {
+        return;
+    }
+    // The pattern as it was, then the commands.
+    let snap = std::mem::replace(&mut s.history.steps[i].snap, Snap::Commands(Vec::new()));
+    snap.clone().put(s);
+    match crate::control::run_in(s, commands) {
+        Ok((_, undo)) => s.history.steps[i].snap = Snap::Commands(undo),
+        Err(_) => {
+            // Not expressible after all: the edit's pattern back, the step as it was.
+            if let Some(place) = s.project.patterns.iter().position(|q| q.number == after.number) {
+                s.project.get_mut().patterns[place] = after;
+            }
+            s.history.steps[i].snap = snap;
+        }
+    }
 }
 
 /// How long the wheel may rest between notches that make one step. FL joined notches about 120 ms apart and made a

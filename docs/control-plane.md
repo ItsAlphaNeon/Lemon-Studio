@@ -156,7 +156,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 
 A note is `{"channel", "position", "length", "key", "velocity", "pan"}`: `key` is a MIDI number (60 = C5, the
 default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre). Optional too: `fine_pitch` 0..240 (120 = none),
-`release`, `mod_x`, `mod_y` 0..128, `repeat` 0..14 (0 = off), `slide`, `muted`, `color` (a colour group 0..15).
+`release`, `mod_x`, `mod_y` 0..128, `repeat` 0..14 (0 = off), `slide`, `muted`, `porta`, `color` (a colour group 0..15), `raw` (the stored record's other bits, `[flags, byte 19, bytes 14-15]`, kept for a copy; the values above go over them).
 
 ## Undo, proposals and events
 

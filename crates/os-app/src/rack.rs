@@ -85,7 +85,7 @@ fn set_colors(s: &mut State, rows: &[usize], colors: impl IntoIterator<Item = Op
 
 /// The shown pattern's id, for commands; `None` when the project holds no pattern with its number yet.
 fn shown_id(s: &mut State) -> Option<u32> {
-    if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+    if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
     s.session.project.pattern(s.pattern().max(1)).map(|p| p.id.0)
@@ -995,7 +995,7 @@ pub fn swing_selected(s: &mut State, mix: f32) -> Option<String> {
 /// Transpose the selected channels' notes of the current pattern.
 pub fn transpose_selected(s: &mut State, semis: i32) -> Option<String> {
     crate::mixer::track_ids(s);
-    if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+    if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
     let channels: Vec<u32> = s.rack.sel.iter().filter_map(|&r| ch_id(s, r)).collect();

@@ -43,7 +43,7 @@ pub fn set_song(s: &mut State, at: SongSig, num: u8, den: u8) {
         SongSig::At(t) => Command::AddMarker { marker: MarkerIn::of(&TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) }) },
         SongSig::Marker(i) => {
             let Some(m) = crate::edit::playlist::markers(&s.session).get(i) else { return };
-            if m.id == os_model::Id::NONE {
+            if m.id.is_none() {
                 crate::control_ui::settle_ids(s);
             }
             let marker = crate::edit::playlist::markers(&s.session)[i].id.0;
@@ -71,7 +71,7 @@ pub fn set_start(s: &mut State, n: u16, num: u8, den: u8) {
 /// project has no pattern for gets one.
 fn signature(s: &mut State, n: u16, num: u8, den: u8) {
     use crate::control::command::Command;
-    if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+    if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
     let r = match s.session.project.pattern(n).map(|p| p.id.0) {

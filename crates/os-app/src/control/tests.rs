@@ -351,6 +351,27 @@ fn automation_points_undo_and_redo() {
     assert!(bad.contains("two points"), "{bad}");
 }
 
+/// A pattern edit the interface makes on the pattern (a snapshot step) turns into the commands that make it when the
+/// button comes up: the pattern as it was, then `set_notes` and `set_pattern`, undone and redone as theirs.
+#[test]
+fn pattern_edits_become_commands() {
+    let mut a = app();
+    a.state.set_pattern(1);
+    let before = a.state.session.project.pattern(1).unwrap().notes.clone();
+    crate::piano::snapshot(&mut a.state.session);
+    let ch = a.state.session.project.channels[1].index;
+    crate::edit::patterns::pat_mut(&mut a.state.session, 1).notes.push(os_model::Note { length: 48, key: 64, ..os_model::Note::step(ch, 96) });
+    crate::edit::patterns::pat_mut(&mut a.state.session, 1).length = Some(768);
+    crate::history::settle(&mut a.state.session);
+    let after = a.state.session.project.pattern(1).unwrap().clone();
+    assert!(a.state.session.history.newest_is_commands(), "a step of commands");
+    assert_eq!((after.notes.len(), after.length), (before.len() + 1, Some(768)));
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!((&a.state.session.project.pattern(1).unwrap().notes, a.state.session.project.pattern(1).unwrap().length), (&before, None));
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!(a.state.session.project.pattern(1).unwrap(), &after);
+}
+
 #[test]
 fn set_project_checks_its_values() {
     let mut a = app();
@@ -554,7 +575,7 @@ fn rpc_requests_and_errors() {
     assert!(id.as_u64().is_some_and(|i| i > 0), "the note has an id");
     assert_eq!(
         n["result"]["notes"],
-        json!([{"id": id, "channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64, "fine_pitch": 120, "release": 64, "mod_x": 128, "mod_y": 128, "repeat": 0, "slide": false, "muted": false, "color": 0}])
+        json!([{"id": id, "channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64, "fine_pitch": 120, "release": 64, "mod_x": 128, "mod_y": 128, "repeat": 0, "slide": false, "muted": false, "color": 0, "porta": false, "raw": [16384, 0, 0]}])
     );
 }
 
