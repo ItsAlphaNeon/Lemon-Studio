@@ -3608,7 +3608,9 @@ impl Engine {
                     fine: t.fine,
                     long: t.end.is_some(),
                     glide: 0,
-                    levels: t.levels,
+                    // A hosted plugin gets the note on the MIDI channel of its colour group, as FL sends it (measured on
+                    // FL 12.5.1: notes of colours 1, 2, 13 and 14 reached a VST 2 plugin on those channels).
+                    levels: crate::NoteLevels { channel: t.colour & 15, ..t.levels },
                     cuts: t.cuts,
                     layer: t.via.map(|w| w.layer),
                     porta: t.porta,
@@ -4839,16 +4841,21 @@ fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, fines: &mut
                 (false, Some(m)) => (i32::from(key) + m).clamp(0, 127) as u8,
                 (false, None) => key,
             };
+            let k = key & 127;
+            (fines.fine[usize::from(k)], fines.glide[usize::from(k)], fines.sent[usize::from(k)]) = (fine, 0.0, sent);
+            fines.keys |= 1 << k;
+            let tuning = fines.tuning(key);
+            // A plugin that bends has the bend in place before the note starts, as FL's wrapper sends it (a plugin may
+            // take a note's pitch when it starts).
+            if fines.root_move.is_some() {
+                inst.tune(off, sent, tuning);
+            }
             // The note's own pan and mod X / Y go with it (spec: audio/voice-levels.md "The note's own levels").
             match voice {
                 Some(v) => inst.voice_start(off, sent, vel, start, end, levels, v),
                 None => inst.note_start(off, sent, vel, start, levels),
             }
-            let k = key & 127;
-            (fines.fine[usize::from(k)], fines.glide[usize::from(k)], fines.sent[usize::from(k)]) = (fine, 0.0, sent);
-            fines.keys |= 1 << k;
-            let tuning = fines.tuning(key);
-            if tuning.abs() > 1e-3 {
+            if fines.root_move.is_none() && tuning.abs() > 1e-3 {
                 inst.tune(off, sent, tuning);
             }
         }
@@ -6973,6 +6980,63 @@ mod tests {
         let mut out = vec![0.0f32; 256];
         e.process(&mut out);
         assert_eq!(log.lock().unwrap().0, [(64, 5), (67, 0), (69, 3)], "the channel's low nibble");
+    }
+
+    /// A pattern note reaches a hosted instrument on the MIDI channel of its colour group, as FL sends it (measured on
+    /// FL 12.5.1 with a VST 2 plugin).
+    #[test]
+    fn pattern_notes_carry_their_colour_as_the_midi_channel() {
+        #[derive(Default)]
+        struct Log(Vec<(u8, u8)>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
+                panic!("notes start with their levels");
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn note_start(&mut self, _o: u32, key: u8, _v: f32, _start: f32, levels: crate::NoteLevels) {
+                self.0.push((key, levels.channel));
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        let mut notes = vec![Note { key: 60, ..Note::step(0, 0) }, Note { key: 62, group: 12 | Note::PORTA, ..Note::step(0, 24) }];
+        notes[0].group = 1;
+        let mut p = project(notes, vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Pattern(1));
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        e.set_instrument(0, log.clone());
+        e.render_all(480);
+        assert_eq!(log.lock().unwrap().0, [(60, 1), (62, 12)]);
+    }
+
+    /// A plugin that bends gets the bend before each note starts, at the note's frame, as FL's wrapper has it in place
+    /// before its notes.
+    #[test]
+    fn a_bending_plugin_gets_the_bend_before_the_note() {
+        #[derive(Default)]
+        struct Log(Vec<&'static str>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
+                self.0.push("on");
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn tune(&mut self, _o: u32, _k: u8, _s: f32) {
+                self.0.push("tune");
+            }
+            fn tunes_by_bend(&self) -> bool {
+                true
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        let mut p = project(vec![Note::step(0, 0), Note::step(0, 24)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        p.channels[0].pitch_cents = -80;
+        let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Pattern(1));
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        e.set_instrument(0, log.clone());
+        e.render_all(480);
+        let l = log.lock().unwrap().0.clone();
+        assert_eq!(&l[..4], ["tune", "on", "tune", "on"], "{l:?}");
     }
 
     /// Records what a layer's child is given, by frame: note ons (velocity), offs, chokes and tunings (semitones); it

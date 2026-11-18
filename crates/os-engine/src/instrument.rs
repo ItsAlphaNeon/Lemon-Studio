@@ -353,11 +353,13 @@ pub struct TuningBend {
     /// The key the bend follows and its tuning in semitones.
     key: Option<u8>,
     tune: f32,
+    /// The bend was set for `key` ahead of its note (`tune` before `note_on`): the note keeps it.
+    ahead: bool,
 }
 
 impl Default for TuningBend {
     fn default() -> Self {
-        TuningBend { range: DEFAULT_BEND_RANGE, sent: 8192, key: None, tune: 0.0 }
+        TuningBend { range: DEFAULT_BEND_RANGE, sent: 8192, key: None, tune: 0.0, ahead: false }
     }
 }
 
@@ -367,18 +369,23 @@ impl TuningBend {
         self.range = if (1..=48).contains(&semitones) { semitones } else { DEFAULT_BEND_RANGE };
     }
 
-    /// A note of `key` starts: the bend follows it, untuned until its `tune`. The pitch-bend message to send before
-    /// the note, if the bend moves.
+    /// A note of `key` starts: the bend follows it, untuned until its `tune`, unless it was tuned just before
+    /// (the engine tunes a key ahead of its note). The pitch-bend message to send before the note, if the bend moves.
     pub fn note_on(&mut self, key: u8) -> Option<[u8; 3]> {
+        if std::mem::take(&mut self.ahead) && self.key == Some(key) {
+            return None;
+        }
         self.key = Some(key);
         self.tune = 0.0;
         self.bend()
     }
 
-    /// Key `key` is tuned to `semitones`: the message to send, if the bend moves.
+    /// Key `key` is tuned to `semitones`: the message to send, if the bend moves. A note of `key` that starts next
+    /// keeps it.
     pub fn tune(&mut self, key: u8, semitones: f32) -> Option<[u8; 3]> {
         self.key = Some(key);
         self.tune = semitones;
+        self.ahead = true;
         self.bend()
     }
 
@@ -386,6 +393,7 @@ impl TuningBend {
     pub fn reset(&mut self) -> Option<[u8; 3]> {
         self.key = None;
         self.tune = 0.0;
+        self.ahead = false;
         self.bend()
     }
 
@@ -485,5 +493,17 @@ mod tests {
         b.set_range(0);
         assert_eq!(b.tune(64, 3.0), Some([0xE0, 0x00, 0x50]), "an unusable range is the default 12: 10240");
         assert_eq!(b.reset(), Some([0xE0, 0x00, 0x40]));
+    }
+
+    /// A key tuned just before its note keeps the bend when the note starts (nothing is sent); a note of another key,
+    /// or a second note of the key, starts centred.
+    #[test]
+    fn a_bend_set_ahead_of_its_note_stays() {
+        let mut b = TuningBend::default();
+        assert_eq!(b.tune(60, -0.8), Some([0xE0, 94, 59]), "8192 - 0.8 / 12 * 8192 = 7646");
+        assert_eq!(b.note_on(60), None, "kept for its note");
+        assert_eq!(b.note_on(60), Some([0xE0, 0x00, 0x40]), "the next note starts centred");
+        assert_eq!(b.tune(62, -0.8), Some([0xE0, 94, 59]));
+        assert_eq!(b.note_on(64), Some([0xE0, 0x00, 0x40]), "another key starts centred");
     }
 }
