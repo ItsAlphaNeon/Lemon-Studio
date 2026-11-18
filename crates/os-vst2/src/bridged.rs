@@ -45,21 +45,23 @@ pub const HELPER: &str = "lemonstudio-bridge32.exe";
 
 /// The helper Lemon Studio runs 32-bit plugins with, when it has one: `OS_VST2_BRIDGE`, else the one beside this
 /// program, else the one this program carries (written out once), else (a build from source) the one Cargo built
-/// beside it for 32-bit Windows.
+/// beside it for 32-bit Windows. Only a 32-bit program is taken: a build of the helper for this machine (Cargo puts
+/// one beside a build of Lemon Studio) cannot load a 32-bit plugin.
 pub fn helper() -> Option<PathBuf> {
     static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let x86 = |p: &Path| crate::files::pe_machine(p) == Some("x86");
     FOUND
         .get_or_init(|| {
             if let Some(p) = std::env::var_os("OS_VST2_BRIDGE").filter(|p| !p.is_empty()) {
-                return Some(PathBuf::from(p)).filter(|p| p.is_file());
+                return Some(PathBuf::from(p)).filter(|p| x86(p));
             }
             let exe = std::env::current_exe().ok()?;
             let dir = exe.parent()?;
             let beside = dir.join(HELPER);
-            if beside.is_file() {
+            if x86(&beside) {
                 return Some(beside);
             }
-            if let Some(p) = carried() {
+            if let Some(p) = carried().filter(|p| x86(p)) {
                 return Some(p);
             }
             // target/<profile>/[deps/] → target/i686-pc-windows-msvc/<profile>/
@@ -69,7 +71,7 @@ pub fn helper() -> Option<PathBuf> {
             }
             let profile = d.file_name()?;
             let built = d.parent()?.join("i686-pc-windows-msvc").join(profile).join(HELPER);
-            built.is_file().then_some(built)
+            x86(&built).then_some(built)
         })
         .clone()
 }
