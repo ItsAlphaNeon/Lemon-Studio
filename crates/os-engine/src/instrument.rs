@@ -166,6 +166,14 @@ pub trait Instrument: Send {
         let _ = levels;
         false
     }
+    /// True for a third-party plugin, which FL plays through its plugin wrapper: when the engine applies the channel's
+    /// volume and pan to its output (`channel_levels` false), a centred channel gives each side the volume's full level
+    /// (the pan split of `volume * sqrt(2)`), not `cos(pi / 4)` of it. Measured on FL 12.5.1: a VST 2 plugin that
+    /// plays a constant 0.25 came out of a channel exactly twice as loud as `volume * cos(pi / 4)` gives. Default false
+    /// (Lemon Studio's own instruments, which stand in for FL's native ones).
+    fn wrapper_levels(&self) -> bool {
+        false
+    }
     /// The channel's envelopes, LFOs and filter, given before each tick's `process` call, whose first frame starts the
     /// tick. An instrument that runs them on its voices takes them (FL native generators: spec plugins/fruity-abi.md
     /// "Voices"). Default: ignored (the instrument has envelopes of its own, or none).

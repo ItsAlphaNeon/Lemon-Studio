@@ -265,6 +265,12 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         false
     }
 
+    /// Marks the instance as a third-party plugin, which gets the channel's levels as FL's plugin wrapper gives them
+    /// (`Instrument::wrapper_levels`; UI thread). False when the instance is not guarded.
+    fn use_wrapper_levels(&mut self) -> bool {
+        false
+    }
+
     /// Automation of index `.0` of each pair reaches parameter `.1`: a project file's indexes for the plugin this one
     /// stands in for (UI thread). Ignored where the format has no such list.
     fn use_param_aliases(&mut self, _aliases: &'static [(u32, u32)]) {}

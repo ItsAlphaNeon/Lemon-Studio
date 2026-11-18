@@ -31,12 +31,14 @@ pub struct Guarded<P: Plugin> {
     meter: Arc<Meter>,
     /// The instance's attention count, raised here too when it crashes (the UI then reports the stop).
     attention: Option<Arc<Attention>>,
+    /// A third-party plugin (`Plugin::use_wrapper_levels`).
+    wrapped: bool,
 }
 
 /// Shares `plugin`, code of `module`, as a guarded instance (format crates' `Library::create`).
 pub fn share<P: Plugin + 'static>(plugin: P, module: Arc<Module>) -> SharedPlugin {
     let attention = plugin.attention();
-    Arc::new(Mutex::new(Guarded { inner: ManuallyDrop::new(plugin), module, state: RefCell::new(None), meter: Arc::default(), attention }))
+    Arc::new(Mutex::new(Guarded { inner: ManuallyDrop::new(plugin), module, state: RefCell::new(None), meter: Arc::default(), attention, wrapped: false }))
 }
 
 impl<P: Plugin> Guarded<P> {
@@ -183,6 +185,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
         self.run(false, |p| p.channel_levels(levels))
     }
+    fn wrapper_levels(&self) -> bool {
+        self.wrapped
+    }
     fn channel_voicing(&mut self, voicing: &ChannelVoicing) {
         self.run((), |p| p.channel_voicing(voicing))
     }
@@ -289,6 +294,10 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn use_channel_levels(&mut self) -> bool {
         self.run(false, |p| p.use_channel_levels())
+    }
+    fn use_wrapper_levels(&mut self) -> bool {
+        self.wrapped = true;
+        true
     }
     fn use_param_aliases(&mut self, aliases: &'static [(u32, u32)]) {
         self.run((), |p| p.use_param_aliases(aliases))

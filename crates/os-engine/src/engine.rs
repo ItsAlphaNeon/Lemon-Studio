@@ -4605,7 +4605,9 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     // An instrument without voice gains has its playlist clips' own level on the channel's output (a hosted sampler
     // takes velocities only up to 128; spec: audio/audio-clips.md "Level"), its pattern notes with them.
     let cl = if voiced { 1.0 } else { cl };
-    let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_after(n as u32, f64::from(cl), layer) };
+    // A third-party plugin is at unity on each side of a centred channel, as FL's plugin wrapper plays it.
+    let wrapper = if inst.wrapper_levels() { std::f64::consts::SQRT_2 } else { 1.0 };
+    let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_after(n as u32, f64::from(cl) * wrapper, layer) };
     // A level that changed smooths over the tick, as a voice's does: it has arrived when the curve says so (spec:
     // audio/automation.md).
     let (sl, sr) = out.gain.replace((gl, gr)).unwrap_or((gl, gr));
@@ -5711,6 +5713,50 @@ mod tests {
         assert!((frames[held] - g).abs() < 1e-6, "{} vs {g}", frames[held]);
         // (The probe holds its level for a whole process call; the next span after the note-off is silent.)
         assert_eq!(frames[(off as usize + 1024) * 2], 0.0);
+    }
+
+    /// Plays 1.0 on both sides; `wrapped`: what `Instrument::wrapper_levels` says.
+    struct Steady {
+        wrapped: bool,
+    }
+
+    impl Instrument for Steady {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, left: &mut [f32], right: &mut [f32]) {
+            left.fill(1.0);
+            right.fill(1.0);
+        }
+        fn wrapper_levels(&self) -> bool {
+            self.wrapped
+        }
+    }
+
+    // spec: audio/voice-levels.md "A plugin's output"
+    /// A third-party plugin gets the channel's volume at unity on each side of a centred channel, as FL's plugin
+    /// wrapper gives it (measured on FL 12.5.1: twice `cos(pi / 4)` of it); Lemon Studio's own instruments get the pan
+    /// split of the volume. Hard left, both put the volume times `sqrt(2)` (resp. 1) on the left alone.
+    #[test]
+    fn a_third_party_plugin_is_at_unity_on_each_side_of_a_centred_channel() {
+        let run = |wrapped: bool, pan: f64| {
+            let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+            p.channels[0].kind = ChannelKind::Plugin;
+            p.channels[0].pan = pan;
+            let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Pattern(1));
+            e.set_instrument(0, Arc::new(std::sync::Mutex::new(Steady { wrapped })));
+            let mut out = vec![0.0f32; 512 * 2];
+            for _ in 0..8 {
+                e.process(&mut out);
+            }
+            (out[0], out[1])
+        };
+        let v = laws::channel_gain(0.78125) as f32;
+        let close = |(l, r): (f32, f32), want: (f32, f32)| (l - want.0).abs() < 1e-5 && (r - want.1).abs() < 1e-5;
+        let c = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(close(run(true, 0.0), (v, v)), "{:?}", run(true, 0.0));
+        assert!(close(run(false, 0.0), (v * c, v * c)), "{:?}", run(false, 0.0));
+        assert!(close(run(true, -1.0), (v * std::f32::consts::SQRT_2, 0.0)), "{:?}", run(true, -1.0));
+        assert!(close(run(false, -1.0), (v, 0.0)), "{:?}", run(false, -1.0));
     }
 
     /// Plays 1.0 on both sides and keeps the channel levels it was given; the engine applies volume and pan.
