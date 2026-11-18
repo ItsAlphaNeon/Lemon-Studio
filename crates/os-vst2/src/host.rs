@@ -9,13 +9,13 @@
 //! reached through the effect (`Effect::host_reserved_2` points at its `Shared`) and never through the instance.
 
 use std::cell::{Cell, UnsafeCell};
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use os_host::{Attention, ParamEvent};
 
-use crate::abi::{host_op, Effect, TimeInfo, HOST_SUPPORTS};
+use crate::abi::{Effect, HOST_SUPPORTS, TimeInfo, host_op};
 
 /// What the host reports as its VST version.
 const HOST_VERSION: isize = 2400;
@@ -99,7 +99,11 @@ thread_local! {
 }
 
 /// Sets `cell` to `v` for the length of `f`.
-fn with_set<T: Copy + 'static, R>(cell: &'static std::thread::LocalKey<Cell<T>>, v: T, f: impl FnOnce() -> R) -> R {
+fn with_set<T: Copy + 'static, R>(
+    cell: &'static std::thread::LocalKey<Cell<T>>,
+    v: T,
+    f: impl FnOnce() -> R,
+) -> R {
     // A crash contained by the unix guard jumps over `Restore`: the cells are put back to rest then.
     static RESET: std::sync::Once = std::sync::Once::new();
     RESET.call_once(|| os_host::guard::after_crash(reset));
@@ -139,8 +143,16 @@ pub unsafe fn attach(effect: *mut Effect, shared: &Arc<Shared>) {
 
 /// The host side of `effect` (or of the effect being created on this thread).
 unsafe fn shared_of<'a>(effect: *mut Effect) -> Option<&'a Shared> {
-    let own = if effect.is_null() { std::ptr::null() } else { unsafe { (*effect).host_reserved_2 as *const Shared } };
-    let p = if own.is_null() { CREATING.with(Cell::get) } else { own };
+    let own = if effect.is_null() {
+        std::ptr::null()
+    } else {
+        unsafe { (*effect).host_reserved_2 as *const Shared }
+    };
+    let p = if own.is_null() {
+        CREATING.with(Cell::get)
+    } else {
+        own
+    };
     unsafe { p.as_ref() }
 }
 
@@ -160,7 +172,14 @@ unsafe fn write_text(ptr: *mut c_void, s: &str, cap: usize) {
 ///
 /// # Safety
 /// Called by plugins only, with the arguments each op-code documents.
-pub unsafe extern "C" fn callback(effect: *mut Effect, opcode: i32, index: i32, value: isize, ptr: *mut c_void, opt: f32) -> isize {
+pub unsafe extern "C" fn callback(
+    effect: *mut Effect,
+    opcode: i32,
+    index: i32,
+    value: isize,
+    ptr: *mut c_void,
+    opt: f32,
+) -> isize {
     let shared = unsafe { shared_of(effect) };
     let Some(s) = shared else {
         // Nothing to answer from yet: only what does not depend on an instance.
@@ -174,7 +193,10 @@ pub unsafe extern "C" fn callback(effect: *mut Effect, opcode: i32, index: i32, 
         host_op::CURRENT_ID => s.shell_id as isize,
         host_op::AUTOMATE => {
             if !HOST_EDIT.with(Cell::get) {
-                s.event(ParamEvent::Value(index.max(0) as u32, f64::from(opt).clamp(0.0, 1.0)));
+                s.event(ParamEvent::Value(
+                    index.max(0) as u32,
+                    f64::from(opt).clamp(0.0, 1.0),
+                ));
             }
             1
         }

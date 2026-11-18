@@ -54,12 +54,36 @@ pub const fn fourcc(c: [u8; 4]) -> i32 {
 }
 
 /// The host's side of every call a plugin makes (vst2sdk `vst_host_callback_t`).
-pub type HostCallback = unsafe extern "C" fn(effect: *mut Effect, opcode: i32, index: i32, value: isize, ptr: *mut c_void, opt: f32) -> isize;
+pub type HostCallback = unsafe extern "C" fn(
+    effect: *mut Effect,
+    opcode: i32,
+    index: i32,
+    value: isize,
+    ptr: *mut c_void,
+    opt: f32,
+) -> isize;
 /// The plugin's op-code entry (vst2sdk `vst_effect_control_t`).
-pub type Control = unsafe extern "C" fn(effect: *mut Effect, opcode: i32, index: i32, value: isize, ptr: *mut c_void, opt: f32) -> isize;
+pub type Control = unsafe extern "C" fn(
+    effect: *mut Effect,
+    opcode: i32,
+    index: i32,
+    value: isize,
+    ptr: *mut c_void,
+    opt: f32,
+) -> isize;
 /// Processing: `inputs` / `outputs` are `num_inputs` / `num_outputs` channel pointers of `frames` samples each.
-pub type Process = unsafe extern "C" fn(effect: *mut Effect, inputs: *const *const f32, outputs: *mut *mut f32, frames: i32);
-pub type ProcessDouble = unsafe extern "C" fn(effect: *mut Effect, inputs: *const *const f64, outputs: *mut *mut f64, frames: i32);
+pub type Process = unsafe extern "C" fn(
+    effect: *mut Effect,
+    inputs: *const *const f32,
+    outputs: *mut *mut f32,
+    frames: i32,
+);
+pub type ProcessDouble = unsafe extern "C" fn(
+    effect: *mut Effect,
+    inputs: *const *const f64,
+    outputs: *mut *mut f64,
+    frames: i32,
+);
 pub type SetParameter = unsafe extern "C" fn(effect: *mut Effect, index: i32, value: f32);
 pub type GetParameter = unsafe extern "C" fn(effect: *mut Effect, index: i32) -> f32;
 /// The plugin file's entry point (`VSTPluginMain`): a new effect, or null.
@@ -244,7 +268,15 @@ pub mod supports {
 }
 
 /// Feature names a plugin asks the host about (`host_op::SUPPORTS`; vst2sdk `vst_host_supports_t`) and Lemon Studio has.
-pub const HOST_SUPPORTS: &[&[u8]] = &[b"sendVstEvents", b"sendVstMidiEvent", b"sendVstTimeInfo", b"sizeWindow", b"startStopProcess", b"shellCategory", b"acceptIOChanges"];
+pub const HOST_SUPPORTS: &[&[u8]] = &[
+    b"sendVstEvents",
+    b"sendVstMidiEvent",
+    b"sendVstTimeInfo",
+    b"sizeWindow",
+    b"startStopProcess",
+    b"shellCategory",
+    b"acceptIOChanges",
+];
 
 /// An editor's rectangle (vst2sdk `vst_rect_t`).
 #[repr(C)]
@@ -285,7 +317,13 @@ impl MidiEvent {
     pub const SIZE: i32 = (std::mem::size_of::<MidiEvent>() - 8) as i32;
 
     pub fn new(offset: u32, data: [u8; 3]) -> MidiEvent {
-        MidiEvent { kind: EVENT_MIDI, size: Self::SIZE, offset: offset as i32, data: [data[0], data[1], data[2], 0], ..MidiEvent::default() }
+        MidiEvent {
+            kind: EVENT_MIDI,
+            size: Self::SIZE,
+            offset: offset as i32,
+            data: [data[0], data[1], data[2], 0],
+            ..MidiEvent::default()
+        }
     }
 }
 

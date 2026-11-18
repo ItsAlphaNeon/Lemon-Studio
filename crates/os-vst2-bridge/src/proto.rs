@@ -47,6 +47,9 @@ pub mod call {
     pub const PROCESS: u32 = 5;
     /// The plugin calls the host: as for `DISPATCH`, with the host op-code.
     pub const CALLBACK: u32 = 6;
+    /// `index` parameters from the first: the reply's payload their values (32-bit floats, little-endian), so a host
+    /// reading many parameters makes one call.
+    pub const GET_PARAMS: u32 = 7;
 }
 
 /// The effect's fields, sent with every reply from the helper so the host's copy follows the plugin's.
@@ -121,7 +124,10 @@ pub const MIDI_EVENT_SIZE: usize = 32;
 pub fn out_text(opcode: i32) -> bool {
     // program name, param label / display / name, program name by index, effect / vendor / product name, a shell's
     // next plugin.
-    matches!(opcode, 0x05 | 0x06 | 0x07 | 0x08 | 0x1D | 0x2D | 0x2F | 0x30 | 0x46)
+    matches!(
+        opcode,
+        0x05 | 0x06 | 0x07 | 0x08 | 0x1D | 0x2D | 0x2F | 0x30 | 0x46
+    )
 }
 
 /// Op-codes whose pointer carries text to the plugin: program name, parameter from text, supports.

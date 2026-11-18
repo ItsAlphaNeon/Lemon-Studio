@@ -39,13 +39,26 @@ fn program(data: &[u8]) -> Option<(String, Saved, usize)> {
         return None;
     }
     let raw = data.get(28..PROGRAM_HEAD)?;
-    let name = String::from_utf8_lossy(&raw[..raw.iter().position(|&c| c == 0).unwrap_or(raw.len())]).trim().to_string();
+    let name =
+        String::from_utf8_lossy(&raw[..raw.iter().position(|&c| c == 0).unwrap_or(raw.len())])
+            .trim()
+            .to_string();
     match data.get(8..12)? {
         b"FxCk" => {
             let n = count(data, 24)?;
             let vals = data.get(PROGRAM_HEAD..PROGRAM_HEAD.checked_add(n.checked_mul(4)?)?)?;
-            let values = vals.chunks_exact(4).map(|v| f32::from_be_bytes(v.try_into().unwrap_or_default())).collect();
-            Some((name, Saved::Params { program: None, values }, PROGRAM_HEAD + n * 4))
+            let values = vals
+                .chunks_exact(4)
+                .map(|v| f32::from_be_bytes(v.try_into().unwrap_or_default()))
+                .collect();
+            Some((
+                name,
+                Saved::Params {
+                    program: None,
+                    values,
+                },
+                PROGRAM_HEAD + n * 4,
+            ))
         }
         b"FPCh" => {
             let n = count(data, PROGRAM_HEAD)?;
@@ -79,11 +92,17 @@ pub fn parse(data: &[u8]) -> Option<Fxp> {
         b"FBCh" => {
             let n = count(data, BANK_HEAD)?;
             let at = BANK_HEAD + 4;
-            vec![(String::new(), Saved::Chunk(data.get(at..at.checked_add(n)?)?.to_vec()))]
+            vec![(
+                String::new(),
+                Saved::Chunk(data.get(at..at.checked_add(n)?)?.to_vec()),
+            )]
         }
         _ => return None,
     };
-    Some(Fxp { unique_id, programs })
+    Some(Fxp {
+        unique_id,
+        programs,
+    })
 }
 
 #[cfg(test)]
@@ -118,22 +137,42 @@ mod tests {
     fn programs_and_banks_read() {
         let p = parse(&params("Warm pad", &[0.5, 1.0])).unwrap();
         assert_eq!(p.unique_id, 0x41424344);
-        assert_eq!(p.programs, [("Warm pad".to_string(), Saved::Params { program: None, values: vec![0.5, 1.0] })]);
+        assert_eq!(
+            p.programs,
+            [(
+                "Warm pad".to_string(),
+                Saved::Params {
+                    program: None,
+                    values: vec![0.5, 1.0]
+                }
+            )]
+        );
         let mut c = named(head(b"FPCh", 7, 0), "Chunky");
         c.extend(3i32.to_be_bytes());
         c.extend([1, 2, 3]);
-        assert_eq!(parse(&c).unwrap().programs, [("Chunky".to_string(), Saved::Chunk(vec![1, 2, 3]))]);
+        assert_eq!(
+            parse(&c).unwrap().programs,
+            [("Chunky".to_string(), Saved::Chunk(vec![1, 2, 3]))]
+        );
         let mut bank = head(b"FxBk", 0x41424344, 2);
         bank.extend([0u8; 128]);
         bank.extend(params("One", &[0.1]));
         bank.extend(params("Two", &[0.2]));
-        let names: Vec<String> = parse(&bank).unwrap().programs.into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = parse(&bank)
+            .unwrap()
+            .programs
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert_eq!(names, ["One", "Two"]);
         let mut bc = head(b"FBCh", 9, 4);
         bc.extend([0u8; 128]);
         bc.extend(2i32.to_be_bytes());
         bc.extend([8, 9]);
-        assert_eq!(parse(&bc).unwrap().programs, [(String::new(), Saved::Chunk(vec![8, 9]))]);
+        assert_eq!(
+            parse(&bc).unwrap().programs,
+            [(String::new(), Saved::Chunk(vec![8, 9]))]
+        );
     }
 
     #[test]

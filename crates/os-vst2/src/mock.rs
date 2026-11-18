@@ -8,7 +8,7 @@
 //! automation timing, the transport, editor requests, input / output changes and the teardown order.
 
 use std::cell::RefCell;
-use std::ffi::{c_void, CStr};
+use std::ffi::{CStr, c_void};
 
 use crate::abi::*;
 
@@ -84,7 +84,13 @@ fn create(host: HostCallback, id: i32) -> *mut Effect {
         set_parameter: Some(set_parameter),
         get_parameter: Some(get_parameter),
         num_programs: if synth { 4 } else { 1 },
-        num_params: if gain { 2 } else if synth { 1 } else { 0 },
+        num_params: if gain {
+            2
+        } else if synth {
+            1
+        } else {
+            0
+        },
         num_inputs: if gain { 2 } else { 0 },
         num_outputs: 2,
         flags: if gain {
@@ -113,7 +119,12 @@ fn create(host: HostCallback, id: i32) -> *mut Effect {
         id,
         params: [0.5, 0.0],
         program: 0,
-        rect: Rect { top: 0, left: 0, bottom: EDITOR.1, right: EDITOR.0 },
+        rect: Rect {
+            top: 0,
+            left: 0,
+            bottom: EDITOR.1,
+            right: EDITOR.0,
+        },
         chunk: Vec::new(),
         shell_next: 0,
         level: 0.0,
@@ -139,8 +150,26 @@ pub unsafe extern "C" fn synth_main(host: HostCallback) -> *mut Effect {
 
 /// A shell: the plugin the host asks for, else the shell itself.
 pub unsafe extern "C" fn shell_main(host: HostCallback) -> *mut Effect {
-    let version = unsafe { host(std::ptr::null_mut(), host_op::VERSION, 0, 0, std::ptr::null_mut(), 0.0) };
-    let id = unsafe { host(std::ptr::null_mut(), host_op::CURRENT_ID, 0, 0, std::ptr::null_mut(), 0.0) } as i32;
+    let version = unsafe {
+        host(
+            std::ptr::null_mut(),
+            host_op::VERSION,
+            0,
+            0,
+            std::ptr::null_mut(),
+            0.0,
+        )
+    };
+    let id = unsafe {
+        host(
+            std::ptr::null_mut(),
+            host_op::CURRENT_ID,
+            0,
+            0,
+            std::ptr::null_mut(),
+            0.0,
+        )
+    } as i32;
     log(format!("shell main {version} {id:08X}"));
     create(host, id)
 }
@@ -150,7 +179,14 @@ pub unsafe extern "C" fn broken_main(_host: HostCallback) -> *mut Effect {
     std::ptr::null_mut()
 }
 
-unsafe extern "C" fn dispatch(e: *mut Effect, opcode: i32, index: i32, value: isize, ptr: *mut c_void, opt: f32) -> isize {
+unsafe extern "C" fn dispatch(
+    e: *mut Effect,
+    opcode: i32,
+    index: i32,
+    value: isize,
+    ptr: *mut c_void,
+    opt: f32,
+) -> isize {
     let m = unsafe { mock(e) };
     let (gain, synth) = (m.id == GAIN_ID, m.id == SYNTH_ID);
     match opcode {
@@ -169,12 +205,25 @@ unsafe extern "C" fn dispatch(e: *mut Effect, opcode: i32, index: i32, value: is
                 category::CONTAINER
             };
         }
-        op::EFFECT_NAME => unsafe { write(ptr, if gain { "Mock Gain" } else if synth { "Mock Synth" } else { "Mock Shell" }) },
+        op::EFFECT_NAME => unsafe {
+            write(
+                ptr,
+                if gain {
+                    "Mock Gain"
+                } else if synth {
+                    "Mock Synth"
+                } else {
+                    "Mock Shell"
+                },
+            )
+        },
         op::VENDOR_NAME => unsafe { write(ptr, "Mock Audio") },
         op::VENDOR_VERSION => return 0x01_02_03,
         op::CONTAINER_NEXT_EFFECT_ID => {
             let list = [(GAIN_ID, "Shell Gain"), (SYNTH_ID, "Shell Synth")];
-            let Some(&(id, name)) = list.get(m.shell_next) else { return 0 };
+            let Some(&(id, name)) = list.get(m.shell_next) else {
+                return 0;
+            };
             m.shell_next += 1;
             unsafe { write(ptr, name) };
             return id as isize;
@@ -194,9 +243,16 @@ unsafe extern "C" fn dispatch(e: *mut Effect, opcode: i32, index: i32, value: is
             m.program = value;
             log(format!("program {value}"));
         }
-        op::PARAM_NAME => unsafe { write(ptr, ["Gain", "Mode"].get(index as usize).copied().unwrap_or("")) },
+        op::PARAM_NAME => unsafe {
+            write(
+                ptr,
+                ["Gain", "Mode"].get(index as usize).copied().unwrap_or(""),
+            )
+        },
         op::PARAM_LABEL if gain && index == 0 => unsafe { write(ptr, "dB") },
-        op::PARAM_DISPLAY => unsafe { write(ptr, &format!("{:.2}", m.params[index as usize & 1] * 2.0)) },
+        op::PARAM_DISPLAY => unsafe {
+            write(ptr, &format!("{:.2}", m.params[index as usize & 1] * 2.0))
+        },
         op::PARAM_PROPERTIES if gain && index == 1 => {
             let p = unsafe { &mut *(ptr as *mut ParameterProperties) };
             p.flags = param_flags::SWITCH | param_flags::CATEGORY;
@@ -204,7 +260,11 @@ unsafe extern "C" fn dispatch(e: *mut Effect, opcode: i32, index: i32, value: is
             return 1;
         }
         op::GET_CHUNK => {
-            m.chunk = b"MOCK".iter().copied().chain(m.params.iter().flat_map(|v| v.to_le_bytes())).collect();
+            m.chunk = b"MOCK"
+                .iter()
+                .copied()
+                .chain(m.params.iter().flat_map(|v| v.to_le_bytes()))
+                .collect();
             unsafe { *(ptr as *mut *mut c_void) = m.chunk.as_mut_ptr().cast() };
             return m.chunk.len() as isize;
         }
@@ -217,7 +277,16 @@ unsafe extern "C" fn dispatch(e: *mut Effect, opcode: i32, index: i32, value: is
                 }
             }
             // Some plugins report their restored values as edits.
-            unsafe { (m.host)(e, host_op::AUTOMATE, 0, 0, std::ptr::null_mut(), m.params[0]) };
+            unsafe {
+                (m.host)(
+                    e,
+                    host_op::AUTOMATE,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                    m.params[0],
+                )
+            };
         }
         op::EVENTS => {
             // The list holds as many pointers as it counts, whatever its declared length.
@@ -234,7 +303,11 @@ unsafe extern "C" fn dispatch(e: *mut Effect, opcode: i32, index: i32, value: is
         }
         op::SUPPORTS => {
             let name = unsafe { CStr::from_ptr(ptr as *const std::ffi::c_char) };
-            return if synth && name == supports::RECEIVE_MIDI_EVENT { 1 } else { -1 };
+            return if synth && name == supports::RECEIVE_MIDI_EVENT {
+                1
+            } else {
+                -1
+            };
         }
         op::TAIL_SAMPLES => return if synth { 4800 } else { 1 },
         op::EDITOR_GET_RECT => {
@@ -244,7 +317,9 @@ unsafe extern "C" fn dispatch(e: *mut Effect, opcode: i32, index: i32, value: is
         op::EDITOR_OPEN => log(format!("editor open {}", ptr as usize)),
         op::EDITOR_CLOSE => log("editor close"),
         op::EDITOR_IDLE => probe(|p| p.idles += 1),
-        op::CUSTOM if index == fourcc(*b"PreS") && value == fourcc(*b"AeCs") as isize => log(format!("scale {opt}")),
+        op::CUSTOM if index == fourcc(*b"PreS") && value == fourcc(*b"AeCs") as isize => {
+            log(format!("scale {opt}"))
+        }
         _ => {}
     }
     0
@@ -261,24 +336,40 @@ unsafe extern "C" fn set_parameter(e: *mut Effect, index: i32, value: f32) {
 }
 
 unsafe extern "C" fn get_parameter(e: *mut Effect, index: i32) -> f32 {
-    unsafe { mock(e) }.params.get(index as usize).copied().unwrap_or(0.0)
+    unsafe { mock(e) }
+        .params
+        .get(index as usize)
+        .copied()
+        .unwrap_or(0.0)
 }
 
-unsafe extern "C" fn process(e: *mut Effect, inputs: *const *const f32, outputs: *mut *mut f32, frames: i32) {
+unsafe extern "C" fn process(
+    e: *mut Effect,
+    inputs: *const *const f32,
+    outputs: *mut *mut f32,
+    frames: i32,
+) {
     let m = unsafe { mock(e) };
     let n = frames as usize;
-    let t = unsafe { (m.host)(e, host_op::GET_TIME, 0, 0, std::ptr::null_mut(), 0.0) } as *const TimeInfo;
-    let time = unsafe { t.as_ref() }.map(|t| (t.flags, t.tempo, t.ppq_pos, t.sample_pos)).unwrap_or_default();
+    let t = unsafe { (m.host)(e, host_op::GET_TIME, 0, 0, std::ptr::null_mut(), 0.0) }
+        as *const TimeInfo;
+    let time = unsafe { t.as_ref() }
+        .map(|t| (t.flags, t.tempo, t.ppq_pos, t.sample_pos))
+        .unwrap_or_default();
     probe(|p| {
         p.blocks.push(frames);
         p.times.push(time);
     });
     let outs = m.effect.num_outputs as usize;
-    let out: Vec<&mut [f32]> = (0..outs).map(|c| unsafe { std::slice::from_raw_parts_mut(*outputs.add(c), n) }).collect();
+    let out: Vec<&mut [f32]> = (0..outs)
+        .map(|c| unsafe { std::slice::from_raw_parts_mut(*outputs.add(c), n) })
+        .collect();
     if m.id == GAIN_ID {
         let gain = m.params[0] * 2.0;
         for (c, o) in out.into_iter().enumerate() {
-            let input = unsafe { std::slice::from_raw_parts(*inputs.add(c.min(m.effect.num_inputs as usize - 1)), n) };
+            let input = unsafe {
+                std::slice::from_raw_parts(*inputs.add(c.min(m.effect.num_inputs as usize - 1)), n)
+            };
             o.iter_mut().zip(input).for_each(|(o, i)| *o = i * gain);
         }
         return;
@@ -325,7 +416,16 @@ pub unsafe fn edit(e: *mut Effect, index: i32, value: f32) {
 /// Simulates the editor asking for a new size.
 pub unsafe fn ask_size(e: *mut Effect, w: i32, h: i32) {
     let m = unsafe { mock(e) };
-    unsafe { (m.host)(e, host_op::SIZE_WINDOW, w, h as isize, std::ptr::null_mut(), 0.0) };
+    unsafe {
+        (m.host)(
+            e,
+            host_op::SIZE_WINDOW,
+            w,
+            h as isize,
+            std::ptr::null_mut(),
+            0.0,
+        )
+    };
 }
 
 /// Simulates the plugin switching to one output with `delay` frames of latency.
