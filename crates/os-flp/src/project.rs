@@ -1509,9 +1509,13 @@ fn decode_clip(r: &[u8]) -> Clip {
     let f32_at = |o: usize| f32::from_le_bytes(r[o..o + 4].try_into().unwrap());
     let item = u16_at(6);
     let source = if item >= 0x5000 { ClipSource::Pattern(item - 0x5000) } else { ClipSource::Channel(item) };
-    // Pattern clips: u32 ticks, `ffffffff` = none; others: f32, -1 = none (spec: "Clip offsets").
+    // Pattern clips: u32 ticks, `ffffffff` = none; others: f32, -1 = none (spec: "Clip offsets"). FL 12 also writes
+    // the float -1 (`bf800000`) into pattern clips it never trimmed: none as well.
     let window = match source {
-        ClipSource::Pattern(_) => (u32_at(24) != u32::MAX).then(|| (f64::from(u32_at(24)), f64::from(u32_at(28)))),
+        ClipSource::Pattern(_) => {
+            let none = |v: u32| v == u32::MAX || v == (-1.0f32).to_bits();
+            (!none(u32_at(24)) && !none(u32_at(28))).then(|| (f64::from(u32_at(24)), f64::from(u32_at(28))))
+        }
         ClipSource::Channel(_) => {
             let (a, b) = (f32_at(24), f32_at(28));
             (a != -1.0 && a.is_finite() && b.is_finite()).then(|| (f64::from(a), f64::from(b)))
@@ -6274,6 +6278,19 @@ mod tests {
         assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
         assert_eq!(encode_clips(&back, CLIP_LEN_25), d);
         assert_eq!(list_clip_len(&encode_clips(&back, CLIP_LEN)), Some(CLIP_LEN));
+    }
+
+    /// FL 12 marks some untrimmed pattern clips with the float -1 (`bf800000`), as other clips are marked: the clip
+    /// plays the pattern from its start, and the bytes are written back as read (spec: flp/events/playlist.md "Clip
+    /// offsets").
+    #[test]
+    fn a_pattern_clip_marked_untrimmed_with_float_minus_one_plays_from_the_start() {
+        let mut r = encode_clip(&Clip::new(0, 39168, 0, ClipSource::Pattern(1)));
+        r[24..28].copy_from_slice(&(-1.0f32).to_le_bytes());
+        r[28..32].copy_from_slice(&(-1.0f32).to_le_bytes());
+        let c = decode_clip(&r);
+        assert_eq!((c.source, c.length, c.window), (ClipSource::Pattern(1), 39168, None));
+        assert_eq!(encode_clip(&c)[24..32], r[24..32]);
     }
 
     /// Lists of older files, 60-byte (FL 21 to 24.1) and 32-byte (up to FL 20) records, are told apart and written
