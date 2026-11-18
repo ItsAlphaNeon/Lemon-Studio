@@ -313,17 +313,19 @@ impl App {
         if let Some(r) = row.filter(|_| shift) {
             return self.wrap_channel(r);
         }
-        crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
-            let s = &mut app.state;
-            let row = crate::projects::add_plugin_channel(s.session.project.get_mut(), CONTAINER);
-            s.session.project.get_mut().channels[row].plugin_state = Some(encode(&[]));
-            s.selected_channel = row;
-            s.rack.select_only(row);
-            crate::rack::autosize(s);
-            s.session.dirty = true;
-            show(s, row as u16, CHANNEL);
-            None
-        })
+        let s = &mut self.state;
+        crate::mixer::track_ids(s);
+        let c = crate::control::command::Command::AddChannel { name: None, plugin: Some(CONTAINER.into()), sample: None, track: None };
+        let id = match crate::control_ui::command(s, crate::history::ADD_CHANNEL, None, vec![c]) {
+            Ok(r) => r.first().and_then(|v| v["channel"].as_u64())? as u32,
+            Err(e) => return Some(e),
+        };
+        let row = s.session.project.channels.iter().position(|c| c.id.0 == id)?;
+        s.selected_channel = row;
+        s.rack.select_only(row);
+        crate::rack::autosize(s);
+        show(s, row as u16, CHANNEL);
+        None
     }
 
     /// The container window's controls (`CAct`).

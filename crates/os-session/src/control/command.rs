@@ -1372,9 +1372,14 @@ impl Command {
                     Some(p) if !sampler => crate::projects::add_plugin_channel(s.project.get_mut(), p),
                     _ => crate::projects::add_channel(s.project.get_mut()),
                 };
-                // A MIDI Out channel is hosted from its settings (`lemon_midi_out::sync_midi_outs`), on the master track.
+                // A MIDI Out channel is hosted from its settings (`lemon_midi_out::sync_midi_outs`), on the master track; a
+                // container plays its members (`sync_containers`), none yet.
                 if midi_out {
                     crate::lemon_midi_out::make_midi_out(&mut s.project.get_mut().channels[row], &Default::default());
+                }
+                let container = plugin.as_deref() == Some(crate::container::CONTAINER);
+                if container {
+                    s.project.get_mut().channels[row].plugin_state = Some(crate::container::encode(&[]));
                 }
                 let ch = &mut s.project.get_mut().channels[row];
                 if let Some(t) = track {
@@ -1391,7 +1396,7 @@ impl Command {
                 s.touched.views.push(crate::session::View::RackAutosize);
                 s.control.settle(s.project.get_mut());
                 let id = s.project.channels[row].id;
-                if !sampler && !midi_out {
+                if !sampler && !midi_out && !container {
                     s.control.host.push(super::HostReq::Instrument { channel: id, plugin: plugin.unwrap_or_default() });
                 }
                 Ok(id_result("channel", id))

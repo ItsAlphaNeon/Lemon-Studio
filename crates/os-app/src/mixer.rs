@@ -1584,7 +1584,12 @@ fn slot_color_cmd(s: &State, k: u8, col: Option<Rgb>) -> Option<Command> {
 /// Effect `index` (in the plugin list) into slot `k` of the current track: one undo step, "Add effect". The plugin is
 /// hosted as the interface hosts it (its window opens), not as a client's command is.
 fn add_effect(s: &mut State, k: u8, index: usize) -> Option<String> {
-    let t = s.selected_mixer;
+    add_effect_on(s, s.selected_mixer, k, index, None)
+}
+
+/// Effect `index` into slot `k` of track `t`, from `state` when given: its command, one step "Add effect", the
+/// interface hosting it its own way so its window opens.
+fn add_effect_on(s: &mut State, t: u16, k: u8, index: usize, state: Option<Vec<u8>>) -> Option<String> {
     let nm = s.session.plugins.effects.get(index).map(|a| a.desc.name.clone())?;
     track_ids(s);
     let c = Command::AddEffect { track: id_of(s, t)?, slot: Some(k), plugin: nm };
@@ -1593,7 +1598,7 @@ fn add_effect(s: &mut State, k: u8, index: usize) -> Option<String> {
     }
     let id = track(&s.session, t).and_then(|m| m.slots[usize::from(k)].as_ref()).map(|p| p.id);
     s.session.control.host.retain(|r| !matches!(r, crate::control::HostReq::Effect { slot, .. } if Some(*slot) == id));
-    s.session.fx_requests.push(FxReq::Create { track: t, slot: k, index, state: None });
+    s.session.fx_requests.push(FxReq::Create { track: t, slot: k, index, state });
     None
 }
 
@@ -1975,20 +1980,20 @@ impl App {
                 return self.invalidate();
             }
         }
-        crate::control_ui::edit_app(self, "Add effect", Region::Project, |app| app.add_tesla(t, None));
+        self.add_tesla(t, None);
     }
 
     /// Open audio editor and record: a Tesla on track `t` set up as an audio logger, as FL's quick load sets Edison
     /// (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"): records on the host's play, for 5
     /// minutes, appended, slaved to the transport, armed.
     pub fn audio_logger(&mut self, t: u16) {
-        crate::control_ui::edit_app(self, "Add effect", Region::Project, |app| app.tesla_for_recording(t, |s| {
+        self.tesla_for_recording(t, |s| {
             s.rec.when = tesla::state::WHEN_ON_PLAY;
             s.rec.max = AUDIO_LOG_5_MINUTES;
             s.rec.append = true;
             s.rec.slave = true;
             s.rec.armed = true;
-        }));
+        });
     }
 
     /// A Tesla on track `t` to record into (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"):
@@ -2038,16 +2043,15 @@ impl App {
             self.invalidate();
             return false;
         };
-        let m = track_mut(&mut s.session, t).expect("the track");
-        m.slots[k] = Some(crate::plugins::new_slot(TESLA));
-        m.slot_on[k] = true;
-        m.slot_mix[k] = 1.0;
-        m.slot_cpu[k] = os_model::PluginCpu::default();
         forget_slot_ui(&mut s.session, t, k as u8);
-        s.session.fx_requests.push(FxReq::Create { track: t, slot: k as u8, index, state });
-        changed(&mut s.session);
+        // One step, "Add effect", as FL's Edison is one ("insert effect plugin").
+        let e = add_effect_on(s, t, k as u8, index, state);
+        let ok = e.is_none();
+        if let Some(e) = e {
+            s.message = Some(e);
+        }
         self.invalidate();
-        true
+        ok
     }
 
     /// Remove all (audio editor) instances (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"):

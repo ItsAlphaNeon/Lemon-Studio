@@ -88,7 +88,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_time_signature` | `numerator`, `denominator` | denominator 2, 4, 8 or 16 |
 | `set_info` | `title`, `author`, `genre`, `comments`, `url` (all optional) | the Song info |
 | `set_project` | `beats` (1..=32), `steps` (1..=16), `signature`, `panning_law` (`circular` or `triangular`), `play_truncated`, `pdc` (all optional) | Settings > Project: the bar, shown as a time signature or a division, the panning law, whether notes a pattern clip cuts off play, and automatic plugin delay compensation. A bar value the project already has is kept even out of range |
-| `add_channel` | `name`, `plugin`, `sample`, `track` (all optional) | A Lemon Sampler channel (with `sample` loaded), or one played by generator `plugin`, on mixer track `track`. A MIDI Out channel (`"MIDI Out"`) goes on the master track. Result: `channel` |
+| `add_channel` | `name`, `plugin`, `sample`, `track` (all optional) | A Lemon Sampler channel (with `sample` loaded), or one played by generator `plugin`, on mixer track `track`. A MIDI Out channel (`"MIDI Out"`) goes on the master track; `"Lemon Container"` makes an empty container channel. Result: `channel` |
 | `delete_channel` | `channel` | Its notes, clips and automation go too |
 | `move_channel` | `channel`, `row` | 0 = top |
 | `replace_instrument` | `channel`; `plugin` (optional: none is Lemon Sampler) | As the rack's Replace: the channel keeps its row, notes, mixer track, levels and Misc settings and takes the plugin's name (a MIDI Out channel keeps its own) and a new instance; it gets a new id, so an undo brings the old instrument back. Result: `channel` (the new id) |
