@@ -217,7 +217,8 @@ pub struct Font {
     pub presets: Vec<Preset>,
     pub instruments: Vec<Instrument>,
     pub samples: Vec<SampleHeader>,
-    pub data: Arc<Vec<f32>>,
+    /// The sample data as stored (16-bit); a voice scales it by 1 / 32768 as it reads.
+    pub data: Arc<Vec<i16>>,
 }
 
 /// What one zone pair plays for a note: the sample, every generator's final value, and the modulators.
@@ -295,7 +296,7 @@ impl Font {
         };
         let (phdr, pbag, pmod, pgen) = (get(b"phdr", 38)?, get(b"pbag", 4)?, get(b"pmod", 10)?, get(b"pgen", 4)?);
         let (inst, ibag, imod, igen, shdr) = (get(b"inst", 22)?, get(b"ibag", 4)?, get(b"imod", 10)?, get(b"igen", 4)?, get(b"shdr", 46)?);
-        font.data = Arc::new(smpl.chunks_exact(2).map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0).collect());
+        font.data = Arc::new(smpl.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect());
 
         let zones = |bag: &[u8], gv: &[u8], md: &[u8], first: usize, last: usize, link: usize| -> Vec<(Option<usize>, Zone)> {
             let nbag = bag.len() / 4;
@@ -549,6 +550,6 @@ pub(crate) mod tests {
         assert_eq!(v[0].gens[g::PAN], 250);
         assert_eq!(v[0].gens[g::VOLENV_ATTACK], -12000);
         assert_eq!(v[0].mods.len(), 10);
-        assert!((f.data[1] - 1000.0 / 32768.0).abs() < 1e-7);
+        assert_eq!(f.data[1], 1000);
     }
 }

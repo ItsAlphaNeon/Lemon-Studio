@@ -450,7 +450,7 @@ pub struct Voice {
     pub key: u8,
     pub id: Option<i32>,
     age: u64,
-    data: Arc<Vec<f32>>,
+    data: Arc<Vec<i16>>,
     start: i64,
     end: i64,
     loop_start: i64,
@@ -614,7 +614,7 @@ impl Voice {
             let len = self.loop_end - self.loop_start;
             k = self.loop_start + (k - self.loop_start) % len;
         }
-        if k < self.start || k >= self.end { 0.0 } else { self.data[k as usize] }
+        if k < self.start || k >= self.end { 0.0 } else { f32::from(self.data[k as usize]) / 32768.0 }
     }
 
     fn interpolate(&self, step: f64) -> f64 {

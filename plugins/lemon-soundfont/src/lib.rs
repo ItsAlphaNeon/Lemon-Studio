@@ -49,6 +49,23 @@ pub struct Shared {
     pub editor_open: AtomicBool,
 }
 
+/// Every font open in this process, by file: the players that name the same file share one copy of it (a project
+/// with many channels on one large font would otherwise hold it many times over). Kept while some player uses it.
+static FONTS: Mutex<std::collections::BTreeMap<String, std::sync::Weak<Font>>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// Font file `file`, the copy already open when there is one. The lock is held while it opens, so two players opening
+/// the same file at once read it once.
+fn shared_font(file: &str) -> Result<Arc<Font>, String> {
+    let mut fonts = FONTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(f) = fonts.get(file).and_then(|w| w.upgrade()) {
+        return Ok(f);
+    }
+    fonts.retain(|_, w| w.strong_count() > 0);
+    let f = Font::open(Path::new(file)).map(Arc::new).map_err(|e| format!("{file}: {e}"))?;
+    fonts.insert(file.to_string(), Arc::downgrade(&f));
+    Ok(f)
+}
+
 /// A stored path made real: `%NAME%` placeholders read from the environment, FL's factory-data ones looked up.
 pub fn resolve(stored: &str) -> String {
     let mut out = String::new();
@@ -79,7 +96,7 @@ impl Shared {
         if let Some(f) = self.cache.lock().ok().and_then(|c| c.get(file).cloned()) {
             return f;
         }
-        let f = Font::open(Path::new(file)).map(Arc::new).map_err(|e| format!("{file}: {e}"));
+        let f = shared_font(file);
         if let Ok(mut c) = self.cache.lock() {
             c.insert(file.to_string(), f.clone());
         }
@@ -131,6 +148,9 @@ impl Shared {
     /// Opens font file `path` (the editor's open dialog, a dropped file) and plays its first preset.
     pub fn load(&self, params: &FontParams, path: &str) -> Result<(), String> {
         if let Ok(mut c) = self.cache.lock() {
+            c.remove(path);
+        }
+        if let Ok(mut c) = FONTS.lock() {
             c.remove(path);
         }
         let font = self.font(path)?;
