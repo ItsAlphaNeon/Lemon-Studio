@@ -126,7 +126,11 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `add_clip` | `track` (1-based), `position`; `length`, and `pattern` or `channel` | A pattern clip, or an audio or automation channel's clip, in the arrangement shown. Result: `clip` |
 | `delete_clip` | `clip` | |
 | `set_clip` | `clip`; `position`, `track`, `length`, `muted` (optional) | |
-| `set_playlist_track` | `track`; `name`, `color`, `enabled` (optional) | |
+| `set_playlist_track` | `track`; `name`, `color`, `enabled`, `grouped` (optional) | `grouped`: with the track above (not track 1) |
+| `swap_playlist_tracks` | `track`, `with` | The two tracks change places, with their clips |
+| `insert_playlist_track` | `at` | An empty track; the ones from there move down |
+| `delete_playlist_track` | `track` | With its clips; the ones below move up |
+| `reset_playlist_track` | `track` | A new track's settings; its clips stay |
 | `set_clip_lfo` | `channel`; `on`, `add`, `amount` (0..128), `speed` (0..65536, 45819 = a cycle a beat), `tension`, `skew`, `pulse_width` (-128..128) (optional) | The LFO of an automation clip's channel, as stored |
 | `set_midi_out` | `channel`; `midi_channel` (0..15), `port`, `patch` (0..128, 0 = none), `bank`, `bank2` (-1..127, -1 = none), `send_levels`, `map_color` (optional) | A MIDI Out channel's settings |
 | `set_member` | `container`, `member`; `wet`, `dry` (0..1), `name`, `color`, `icon` (a name from Change icon...), `auto_bypass`, `threaded` (optional) | A container's member levels; `container` is the id of the mixer slot or channel holding it |

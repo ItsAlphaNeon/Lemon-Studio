@@ -357,7 +357,7 @@ pub enum Command {
         #[serde(default)]
         muted: Option<bool>,
     },
-    /// Playlist track `track` (1-based): name, colour, enabled.
+    /// Playlist track `track` (1-based): name, colour, enabled, grouped with the track above.
     SetPlaylistTrack {
         track: u16,
         #[serde(default)]
@@ -366,7 +366,17 @@ pub enum Command {
         color: Option<String>,
         #[serde(default)]
         enabled: Option<bool>,
+        #[serde(default)]
+        grouped: Option<bool>,
     },
+    /// Playlist tracks `track` and `with` (1-based) change places, with their clips.
+    SwapPlaylistTracks { track: u16, with: u16 },
+    /// An empty playlist track at `at` (1-based); the ones from there move down (the last track's clips stay on it).
+    InsertPlaylistTrack { at: u16 },
+    /// Playlist track `track` goes with its clips; the ones below move up and an empty one comes in last.
+    DeletePlaylistTrack { track: u16 },
+    /// Playlist track `track` back to a new track's settings (its clips stay).
+    ResetPlaylistTrack { track: u16 },
 
     // ----- Controls in channel and container windows
     /// The LFO of the automation clip on `channel`, as stored: on, add (else it multiplies), amount 0..=128, speed
@@ -533,6 +543,14 @@ fn plugin_named(s: &crate::session::Session, plugin: &str, instrument: bool) -> 
     let list = if instrument { &s.plugins.available } else { &s.plugins.effects };
     let a = list.iter().find(|a| a.desc.uid() == plugin).or_else(|| list.iter().find(|a| a.desc.name == plugin)).ok_or_else(|| format!("no {} {plugin}", if instrument { "instrument" } else { "effect" }))?;
     Ok((a.desc.uid(), a.desc.name.clone()))
+}
+
+/// Playlist track `track` (1-based) as the arrangement indexes it (0-based).
+fn playlist_track(track: u16) -> Result<u16, Error> {
+    if track == 0 || track > crate::edit::playlist::TRACKS {
+        return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
+    }
+    Ok(track - 1)
 }
 
 /// A channel's filter group (`Command::SetGroups`).
@@ -988,6 +1006,7 @@ impl Command {
             Command::DeleteClip { .. } => "Delete clip",
             Command::SetClip { .. } => "Edit clip",
             Command::SetPlaylistTrack { .. } => "Playlist track",
+            Command::SwapPlaylistTracks { .. } | Command::InsertPlaylistTrack { .. } | Command::DeletePlaylistTrack { .. } | Command::ResetPlaylistTrack { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::SetClipLfo { .. } => "Automation clip LFO",
             Command::SetMidiOut { .. } => "MIDI Out setting",
             Command::SetMember { .. } => crate::container::LEVEL,
@@ -1082,7 +1101,14 @@ impl Command {
             Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } | Command::SetStep { pattern, .. } | Command::SetLoops { pattern, .. } | Command::TransposePattern { pattern, .. } => {
                 Taken::Pattern(Box::new(p.patterns[pattern_place(p, *pattern)?].clone()))
             }
-            Command::AddClip { .. } | Command::DeleteClip { .. } | Command::SetClip { .. } | Command::SetPlaylistTrack { .. } => match p.arrangement() {
+            Command::AddClip { .. }
+            | Command::DeleteClip { .. }
+            | Command::SetClip { .. }
+            | Command::SetPlaylistTrack { .. }
+            | Command::SwapPlaylistTracks { .. }
+            | Command::InsertPlaylistTrack { .. }
+            | Command::DeletePlaylistTrack { .. }
+            | Command::ResetPlaylistTrack { .. } => match p.arrangement() {
                 Some(a) => Taken::Arrangement(Box::new(a.clone())),
                 // A project without an arrangement gets one (`playlist::arr_mut`); the undo takes it away again.
                 None => Taken::Project(Box::new(Side::of(s))),
@@ -2033,7 +2059,7 @@ impl Command {
                 s.touched.clips = true;
                 none
             }
-            Command::SetPlaylistTrack { track, name, color, enabled } => {
+            Command::SetPlaylistTrack { track, name, color, enabled, grouped } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;
                 if track == 0 || track > crate::edit::playlist::TRACKS {
                     return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
@@ -2048,6 +2074,31 @@ impl Command {
                 if let Some(v) = enabled {
                     t.enabled = v;
                 }
+                if let Some(v) = grouped {
+                    t.grouped = v && track > 1;
+                }
+                none
+            }
+            Command::SwapPlaylistTracks { track, with } => {
+                let (a, b) = (playlist_track(track)?, playlist_track(with)?);
+                crate::edit::playlist::swap_tracks(s, a, b);
+                s.touched.clips = true;
+                none
+            }
+            Command::InsertPlaylistTrack { at } => {
+                crate::edit::playlist::insert_track(s, playlist_track(at)?);
+                s.touched.clips = true;
+                none
+            }
+            Command::DeletePlaylistTrack { track } => {
+                crate::edit::playlist::delete_track_in(s, playlist_track(track)?);
+                s.touched.clips = true;
+                none
+            }
+            Command::ResetPlaylistTrack { track } => {
+                let t = playlist_track(track)?;
+                let tr = &mut crate::edit::playlist::arr_mut(s).tracks[usize::from(t)];
+                *tr = os_model::PlaylistTrack::new(tr.number);
                 none
             }
 

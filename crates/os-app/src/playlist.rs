@@ -21,6 +21,55 @@ use os_ui::Rect;
 
 use crate::app::{App, Drag, State};
 use crate::snap::EditorSnap;
+use crate::control::command::Command;
+
+/// The shown arrangement's clips and tracks have their ids, for commands (a clip just made gets its own on the next
+/// tick); only then, as a settle numbers everything new.
+fn clip_ids(s: &mut State) {
+    if clips(&s.session).iter().any(|c| c.id == os_model::Id::NONE) {
+        crate::control_ui::settle_ids(s);
+    }
+}
+
+/// A playlist edit made of `commands`: one undo step named `name` (none when nothing changed); the error as the
+/// message.
+fn arr_apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Option<String> {
+    if commands.is_empty() {
+        return None;
+    }
+    crate::control_ui::command(s, name, None, commands).err()
+}
+
+/// `Command::SetPlaylistTrack` on track `t` (0-based) setting nothing yet.
+fn track_cmd(t: u16) -> Command {
+    Command::SetPlaylistTrack { track: t + 1, name: None, color: None, enabled: None, grouped: None }
+}
+
+/// Every track's mute state now (a project without an arrangement yet: a new one's, every track on).
+fn tracks_on(s: &State) -> Vec<bool> {
+    s.session.project.arrangement().map_or_else(|| vec![true; usize::from(TRACKS)], |a| a.tracks.iter().map(|t| t.enabled).collect())
+}
+
+/// The tracks on or off as `on` says, one step (the tracks whose state changes).
+fn put_tracks_on(s: &mut State, on: Vec<bool>) {
+    let now = tracks_on(s);
+    // A new arrangement's tracks are on (`arr_mut`): those to change are the ones `on` switches off.
+    let commands: Vec<Command> = on
+        .iter()
+        .enumerate()
+        .filter(|&(k, v)| now.get(k).is_some_and(|n| n != v))
+        .map(|(k, &v)| {
+            let mut c = track_cmd(k as u16);
+            if let Command::SetPlaylistTrack { enabled, .. } = &mut c {
+                *enabled = Some(v);
+            }
+            c
+        })
+        .collect();
+    if let Some(e) = arr_apply(s, ARRANGER_EDIT, commands) {
+        s.message = Some(e);
+    }
+}
 
 /// Track row pitch at the default size (spec: ui/main-window.md §6); a clip fills its row less the 3 px gap.
 pub const ROW_H: f32 = 48.0;
@@ -1332,18 +1381,22 @@ pub fn delete_space(s: &mut State) -> bool {
 pub fn shift_tracks(s: &mut State, d: i32) {
     let sel = s.playlist.sel.clone();
     if !sel.is_empty() {
-        let arr = arr_mut(&mut s.session);
-        let lo = sel.iter().filter_map(|&i| arr.clips.get(i)).map(|c| i32::from(c.track)).min().unwrap_or(0);
-        let hi = sel.iter().filter_map(|&i| arr.clips.get(i)).map(|c| i32::from(c.track)).max().unwrap_or(0);
+        clip_ids(s);
+        let all = clips(&s.session);
+        let lo = sel.iter().filter_map(|&i| all.get(i)).map(|c| i32::from(c.track)).min().unwrap_or(0);
+        let hi = sel.iter().filter_map(|&i| all.get(i)).map(|c| i32::from(c.track)).max().unwrap_or(0);
         if lo + d < 0 || hi + d >= i32::from(TRACKS) {
             return;
         }
-        for &i in &sel {
-            if let Some(c) = arr.clips.get_mut(i) {
-                c.track = (i32::from(c.track) + d) as u16;
-            }
+        // The playlist's tracks are 1-based in commands.
+        let commands = sel
+            .iter()
+            .filter_map(|&i| all.get(i))
+            .map(|c| Command::SetClip { clip: c.id.0, position: None, track: Some((i32::from(c.track) + d) as u16 + 1), length: None, muted: None })
+            .collect();
+        if let Some(e) = arr_apply(s, ARRANGER_EDIT, commands) {
+            s.message = Some(e);
         }
-        s.session.dirty = true;
         return;
     }
     let t = i32::from(s.playlist.track);
@@ -1351,7 +1404,9 @@ pub fn shift_tracks(s: &mut State, d: i32) {
     if u < 0 || u >= i32::from(TRACKS) {
         return;
     }
-    swap_tracks(&mut s.session, t as u16, u as u16);
+    if let Some(e) = arr_apply(s, ARRANGER_EDIT, vec![Command::SwapPlaylistTracks { track: t as u16 + 1, with: u as u16 + 1 }]) {
+        s.message = Some(e);
+    }
     s.playlist.track = u as u16;
 }
 
@@ -1379,11 +1434,11 @@ pub fn delete_track(s: &mut State, t: u16) {
 /// mixer: unmuting a second track after a solo leaves both on.
 pub fn toggle_track(s: &mut State, t: u16) {
     s.playlist.solo = None;
-    let arr = arr_mut(&mut s.session);
-    if let Some(tr) = arr.tracks.get_mut(usize::from(t)) {
-        tr.enabled = !tr.enabled;
+    let mut on = tracks_on(s);
+    if let Some(v) = on.get_mut(usize::from(t)) {
+        *v = !*v;
     }
-    s.session.dirty = true;
+    put_tracks_on(s, on);
 }
 
 /// Ctrl+click / right-click on the LED: solo the track (others muted); again ends the solo (see [`end_solo`]). A solo
@@ -1394,38 +1449,36 @@ pub fn toggle_solo(s: &mut State, t: u16) {
     if !solo_in_effect(s) {
         s.playlist.solo = None;
     }
+    let mut states = tracks_on(s);
     if let Some((was, _)) = s.playlist.solo {
-        end_solo(s);
+        states = end_solo(s);
         if was == t {
-            return;
+            return put_tracks_on(s, states);
         }
     }
-    let arr = arr_mut(&mut s.session);
-    let states: Vec<bool> = arr.tracks.iter().map(|t| t.enabled).collect();
-    for (k, tr) in arr.tracks.iter_mut().enumerate() {
-        tr.enabled = k == usize::from(t);
-    }
+    let on = (0..states.len()).map(|k| k == usize::from(t)).collect();
     s.playlist.solo = Some((t, states));
-    s.session.dirty = true;
+    put_tracks_on(s, on);
 }
 
 /// Whether the last solo still holds: its track alone on, in a playlist of as many tracks as when it started.
 fn solo_in_effect(s: &mut State) -> bool {
     let Some((t, states)) = s.playlist.solo.clone() else { return false };
-    let arr = arr_mut(&mut s.session);
-    arr.tracks.len() == states.len() && arr.tracks.iter().enumerate().all(|(k, tr)| tr.enabled == (k == usize::from(t)))
+    let on = tracks_on(s);
+    on.len() == states.len() && on.iter().enumerate().all(|(k, &v)| v == (k == usize::from(t)))
 }
 
 /// Unsolo: every track on, or, with "Restore previous state after solo" on, the states from before the solo (spec:
 /// ui/settings-choices.md "Miscellaneous").
-fn end_solo(s: &mut State) {
-    if let Some((_, states)) = s.playlist.solo.take() {
-        let back = crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO);
-        let arr = arr_mut(&mut s.session);
-        for (k, tr) in arr.tracks.iter_mut().enumerate() {
-            tr.enabled = !back || states.get(k).copied().unwrap_or(tr.enabled);
+/// The states the solo ends with (the solo is over); the states now without one.
+fn end_solo(s: &mut State) -> Vec<bool> {
+    let now = tracks_on(s);
+    match s.playlist.solo.take() {
+        Some((_, states)) => {
+            let back = crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO);
+            now.iter().enumerate().map(|(k, &v)| !back || states.get(k).copied().unwrap_or(v)).collect()
         }
-        s.session.dirty = true;
+        None => now,
     }
 }
 
@@ -3280,7 +3333,6 @@ pub fn press_header(app: &mut App, t: u16, right: bool, at: (f32, f32)) {
 
 /// Track LED: click mutes, Ctrl+click or right-click solos (§6).
 pub fn press_led(app: &mut App, t: u16, right: bool) {
-    snapshot(&mut app.state.session);
     // Alt: the whole group the track is in (its group track and the tracks grouped under it).
     let group = if app.alt { group_span(&app.state, t) } else { None };
     match group {
@@ -3308,29 +3360,26 @@ pub fn group_span(s: &State, t: u16) -> Option<(u16, u16)> {
 /// Alt+click on a group's LED: every track of the group on or off.
 fn set_tracks_on(s: &mut State, (a, b): (u16, u16), on: bool) {
     s.playlist.solo = None;
-    let arr = arr_mut(&mut s.session);
-    for tr in arr.tracks.iter_mut().take(usize::from(b) + 1).skip(usize::from(a)) {
-        tr.enabled = on;
+    let mut v = tracks_on(s);
+    for x in v.iter_mut().take(usize::from(b) + 1).skip(usize::from(a)) {
+        *x = on;
     }
-    s.session.dirty = true;
+    put_tracks_on(s, v);
 }
 
 /// Alt+right-click on a group's LED: solo the group (its tracks on, the others muted); again ends the solo, as
 /// [`toggle_solo`] does for one track.
 fn toggle_group_solo(s: &mut State, (a, b): (u16, u16)) {
+    let mut states = tracks_on(s);
     if let Some((was, _)) = s.playlist.solo {
-        end_solo(s);
+        states = end_solo(s);
         if was == a {
-            return;
+            return put_tracks_on(s, states);
         }
     }
-    let arr = arr_mut(&mut s.session);
-    let states: Vec<bool> = arr.tracks.iter().map(|t| t.enabled).collect();
-    for (k, tr) in arr.tracks.iter_mut().enumerate() {
-        tr.enabled = (usize::from(a)..=usize::from(b)).contains(&k);
-    }
+    let on = (0..states.len()).map(|k| (usize::from(a)..=usize::from(b)).contains(&k)).collect();
     s.playlist.solo = Some((a, states));
-    s.session.dirty = true;
+    put_tracks_on(s, on);
 }
 
 pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
@@ -3815,7 +3864,6 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::ShiftTracks(d) => {
-            snapshot(&mut s.session);
             shift_tracks(s, d);
             None
         }
@@ -4125,20 +4173,20 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::TrackMute(t) => {
-            snapshot(&mut s.session);
             toggle_track(s, t);
             None
         }
         Cmd::TrackSolo(t) => {
-            snapshot(&mut s.session);
             toggle_solo(s, t);
             None
         }
         Cmd::TrackGroup(t) if t > 0 => {
-            snapshot(&mut s.session);
-            let tr = &mut arr_mut(&mut s.session).tracks[usize::from(t)];
-            tr.grouped = !tr.grouped;
-            None
+            let on = !track_info(&s.session, t).is_some_and(|x| x.grouped);
+            let mut c = track_cmd(t);
+            if let Command::SetPlaylistTrack { grouped, .. } = &mut c {
+                *grouped = Some(on);
+            }
+            arr_apply(s, ARRANGER_EDIT, vec![c])
         }
         Cmd::TrackGroup(_) => None,
         Cmd::TrackMode(t, m) => crate::control_ui::edit(s, crate::track_links::TRACK_MODE, crate::control::command::Region::Project, |s| {
@@ -4193,47 +4241,34 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             Some(format!("Merged the clips of {}", other.name.unwrap_or_else(|| "Arrangement".into())))
         }
         Cmd::TrackUp(t) if t > 0 => {
-            snapshot(&mut s.session);
-            swap_tracks(&mut s.session, t, t - 1);
             s.playlist.track = t - 1;
-            None
+            arr_apply(s, ARRANGER_EDIT, vec![Command::SwapPlaylistTracks { track: t + 1, with: t }])
         }
         Cmd::TrackDown(t) if t + 1 < TRACKS => {
-            snapshot(&mut s.session);
-            swap_tracks(&mut s.session, t, t + 1);
             s.playlist.track = t + 1;
-            None
+            arr_apply(s, ARRANGER_EDIT, vec![Command::SwapPlaylistTracks { track: t + 1, with: t + 2 }])
         }
         Cmd::TrackUp(_) | Cmd::TrackDown(_) => None,
-        Cmd::TrackInsert(t) => {
-            snapshot(&mut s.session);
-            insert_track(&mut s.session, t);
-            None
-        }
+        Cmd::TrackInsert(t) => arr_apply(s, ARRANGER_EDIT, vec![Command::InsertPlaylistTrack { at: t + 1 }]),
         Cmd::TrackDelete(t) => {
-            snapshot(&mut s.session);
-            delete_track(s, t);
-            None
+            s.playlist.hover_clip = None;
+            arr_apply(s, ARRANGER_EDIT, vec![Command::DeletePlaylistTrack { track: t + 1 }])
         }
         Cmd::TrackColor(t, c) => {
-            snapshot(&mut s.session);
-            if let Some(tr) = arr_mut(&mut s.session).tracks.get_mut(usize::from(t)) {
-                tr.color = c;
+            let mut cmd = track_cmd(t);
+            if let Command::SetPlaylistTrack { color, name, .. } = &mut cmd {
+                *color = Some(crate::control::command::color_text(c).unwrap_or_default());
                 // FL writes the default name when a track is recoloured (flp playlist.md).
-                if c.is_some() && tr.name.is_none() {
-                    tr.name = Some(format!("Track {}", t + 1));
+                if c.is_some() && track_info(&s.session, t).is_some_and(|x| x.name.is_none()) {
+                    *name = Some(format!("Track {}", t + 1));
                 }
             }
-            s.session.dirty = true;
-            None
+            arr_apply(s, ARRANGER_EDIT, vec![cmd])
         }
         Cmd::TrackMuteClips(t, on) => {
-            snapshot(&mut s.session);
-            for c in arr_mut(&mut s.session).clips.iter_mut().filter(|c| c.track == t) {
-                c.muted = on;
-            }
-            s.session.dirty = true;
-            None
+            clip_ids(s);
+            let commands = clips(&s.session).iter().filter(|c| c.track == t && c.muted != on).map(|c| Command::SetClip { clip: c.id.0, position: None, track: None, length: None, muted: Some(on) }).collect();
+            arr_apply(s, ARRANGER_EDIT, commands)
         }
         Cmd::CreateAutomation(tgt, name, v) => {
             create_automation(s, tgt, &name, v);
@@ -4279,15 +4314,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::ResetEmptyTracks => {
-            snapshot(&mut s.session);
             let used: Vec<u16> = clips(&s.session).iter().map(|c| c.track).collect();
-            for (k, tr) in arr_mut(&mut s.session).tracks.iter_mut().enumerate() {
-                if !used.contains(&(k as u16)) {
-                    *tr = PlaylistTrack::new(tr.number);
-                }
-            }
-            s.session.dirty = true;
-            None
+            let n = s.session.project.arrangement().map_or(0, |a| a.tracks.len()) as u16;
+            let commands = (0..n).filter(|t| !used.contains(t)).filter(|&t| track_info(&s.session, t).is_some_and(|x| *x != PlaylistTrack::new(x.number))).map(|t| Command::ResetPlaylistTrack { track: t + 1 }).collect();
+            arr_apply(s, ARRANGER_EDIT, commands)
         }
         Cmd::LockClips(on) => {
             let before = s.session.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect::<Vec<_>>());

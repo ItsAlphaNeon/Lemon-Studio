@@ -480,8 +480,11 @@ pub fn to_src(s: &crate::session::Session, src: ClipSource, ticks: f64) -> f64 {
 
 /// Undo snapshot of everything the playlist edits: a step of the project's undo history (`crate::history`).
 pub fn snapshot(s: &mut crate::session::Session) {
-    snapshot_as(s, "Arranger edit");
+    snapshot_as(s, ARRANGER_EDIT);
 }
+
+/// The undo step of most playlist edits.
+pub const ARRANGER_EDIT: &str = "Arranger edit";
 
 /// `snapshot`, the step named `name` (as the browser's History lists it; spec: ui/settings-choices.md "Undo history:
 /// the four checks (2026-10-16)").
@@ -675,6 +678,24 @@ pub fn swap_tracks(s: &mut crate::session::Session, a: u16, b: u16) {
             c.track = a;
         }
     }
+    s.dirty = true;
+}
+
+/// Delete track `t` with its clips (the rest move up; an empty track comes in last).
+pub fn delete_track_in(s: &mut crate::session::Session, t: u16) {
+    let arr = arr_mut(s);
+    arr.clips.retain(|c| c.track != t);
+    for c in &mut arr.clips {
+        if c.track > t {
+            c.track -= 1;
+        }
+    }
+    let n = arr.tracks.len();
+    for k in usize::from(t)..n - 1 {
+        let next = arr.tracks[k + 1].clone();
+        arr.tracks[k] = PlaylistTrack { number: arr.tracks[k].number, ..next };
+    }
+    arr.tracks[n - 1] = PlaylistTrack::new(n as u32);
     s.dirty = true;
 }
 
