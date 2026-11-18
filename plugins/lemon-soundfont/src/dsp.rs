@@ -570,10 +570,10 @@ impl Voice {
             loop_end,
             loop_mode,
             exclusive: spec.gens[g::EXCLUSIVE_CLASS],
-            // Classic reads from the first frame; modern half a frame earlier, one frame on.
+            // Classic reads from the first frame; modern half a frame earlier.
             pos: match mode {
                 Mode::Classic => start as f64,
-                Mode::Modern => start as f64 + inc - 0.5,
+                Mode::Modern => start as f64 - 0.5,
             },
             inc,
             released: false,

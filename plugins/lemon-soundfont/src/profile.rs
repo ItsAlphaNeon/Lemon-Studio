@@ -141,10 +141,11 @@ impl Mode {
 
     /// The player's LFO depth control (−127..=127) → vibrato depth in cents (the sign does not matter).
     pub fn lfo_depth(self, a: i32) -> f64 {
-        let a = f64::from(a.clamp(-127, 127).abs()) / 127.0;
+        let a = f64::from(a.clamp(-127, 127).abs());
         match self {
-            Mode::Classic => a * 1200.0,
-            Mode::Modern => a * 1000.0,
+            Mode::Classic => a / 127.0 * 1200.0,
+            // ±995 cents at 127 and ±6.9 at 1 (the 64-bit player's new state stores 1).
+            Mode::Modern => ((a - 0.123) / 126.877).max(0.0) * 995.2,
         }
     }
 
