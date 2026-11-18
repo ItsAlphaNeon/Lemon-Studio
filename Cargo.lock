@@ -3263,6 +3263,18 @@ dependencies = [
  "libloading 0.8.9",
  "os-engine",
  "os-host",
+ "os-vst2-bridge",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "os-vst2-bridge"
+version = "0.0.1"
+dependencies = [
+ "libloading 0.8.9",
+ "os-engine",
+ "os-host",
+ "os-vst2",
  "windows-sys 0.61.2",
 ]
 

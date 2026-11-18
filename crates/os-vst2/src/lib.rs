@@ -12,6 +12,8 @@
 //! thread.
 
 pub mod abi;
+#[cfg(windows)]
+pub mod bridged;
 mod files;
 pub mod fxp;
 mod host;
@@ -105,6 +107,14 @@ fn features_of(kind: os_host::Kind, cat: isize) -> Vec<String> {
     f
 }
 
+/// How a plugin file's effects are made: its entry point in this process, or (Windows) its file run by the 32-bit bridge.
+#[derive(Clone)]
+enum Entry {
+    Native(Main),
+    #[cfg(windows)]
+    Bridged { helper: PathBuf, file: PathBuf },
+}
+
 /// One plugin object a plugin file made (an effect) and its host side. Closing it frees it.
 struct Instance {
     effect: *mut Effect,
@@ -116,9 +126,13 @@ unsafe impl Send for Instance {}
 
 impl Instance {
     /// Calls the plugin file's entry point for plugin `shell_id` (0 = the file's own) and opens the effect it gives.
-    unsafe fn create(main: Main, shell_id: i32, directory: &CString) -> Result<Instance, String> {
+    unsafe fn create(entry: &Entry, shell_id: i32, directory: &CString) -> Result<Instance, String> {
         let shared = Arc::new(Shared::new(shell_id, directory.clone()));
-        let effect = host::creating(&shared, || unsafe { main(host::callback) });
+        let effect = match entry {
+            Entry::Native(main) => host::creating(&shared, || unsafe { main(host::callback) }),
+            #[cfg(windows)]
+            Entry::Bridged { helper, file } => host::creating(&shared, || bridged::create(helper, file))?,
+        };
         if effect.is_null() {
             return Err("the plugin did not start".into());
         }
@@ -237,7 +251,7 @@ pub struct Module {
     plugins: Vec<Descriptor>,
     /// Each plugin's id in its shell (0: the file's own plugin), parallel to `plugins`.
     shell_ids: Vec<i32>,
-    main: Main,
+    entry: Entry,
     /// The plugin's folder, for plugins that ask (`DIRECTORY`).
     directory: CString,
     /// The instance made to describe the file's own plugin, given to the first `create` of it.
@@ -256,6 +270,13 @@ impl Module {
     /// plugin once (VST 2 has no other way to describe one), and a shell's plugins one by one.
     pub fn load(path: &Path) -> Result<Arc<Module>, String> {
         let file = module_file(path);
+        #[cfg(windows)]
+        if cfg!(target_pointer_width = "64") && pe_machine(&file) == Some("x86") {
+            return match bridged::helper() {
+                Some(helper) => Module::load_bridged(path, &helper),
+                None => Err(format!("{}: {}", file.display(), files::NO_BRIDGE)),
+            };
+        }
         if let Some(why) = unsupported(path) {
             return Err(format!("{}: {why}", file.display()));
         }
@@ -274,18 +295,30 @@ impl Module {
     /// # Safety
     /// `main` is a VST 2 entry point.
     pub unsafe fn from_main(path: &Path, main: Main, lib: Option<libloading::Library>) -> Result<Arc<Module>, String> {
+        unsafe { Module::from_entry(path, Entry::Native(main), lib, main as usize) }
+    }
+
+    /// Plugin file `path` run in a helper process by the 32-bit bridge (`helper`), and its plugins (Windows).
+    #[cfg(windows)]
+    pub fn load_bridged(path: &Path, helper: &Path) -> Result<Arc<Module>, String> {
+        let entry = Entry::Bridged { helper: helper.to_path_buf(), file: module_file(path) };
+        unsafe { Module::from_entry(path, entry, None, bridged::create as *const () as usize) }
+    }
+
+    /// The module whose effects `entry` makes (`code`: an address in its code, for the crash guard).
+    unsafe fn from_entry(path: &Path, entry: Entry, lib: Option<libloading::Library>, code: usize) -> Result<Arc<Module>, String> {
         let folder = path.parent().unwrap_or(path).to_string_lossy().into_owned();
         let directory = CString::new(folder).unwrap_or_default();
-        let first = unsafe { Instance::create(main, 0, &directory) }.map_err(|e| format!("{}: {e}", path.display()))?;
+        let first = unsafe { Instance::create(&entry, 0, &directory) }.map_err(|e| format!("{}: {e}", path.display()))?;
         let mut m = Module {
             path: path.to_path_buf(),
             plugins: Vec::new(),
             shell_ids: Vec::new(),
-            main,
+            entry,
             directory,
             spare: Mutex::new(None),
             lib,
-            code: main as usize,
+            code,
         };
         if first.dispatch(op::CATEGORY, 0, 0, std::ptr::null_mut(), 0.0) != category::CONTAINER {
             m.plugins.push(first.describe(path, None));
@@ -308,7 +341,7 @@ impl Module {
         drop(first);
         let start = Instant::now();
         for (id, name) in subs {
-            let made = if start.elapsed() < SHELL_BUDGET { unsafe { Instance::create(main, id, &m.directory) }.ok() } else { None };
+            let made = if start.elapsed() < SHELL_BUDGET { unsafe { Instance::create(&m.entry, id, &m.directory) }.ok() } else { None };
             let d = match made.filter(|i| i.unique_id() == id) {
                 Some(i) => i.describe(path, Some(name)),
                 None => Descriptor {
@@ -473,7 +506,7 @@ impl Plugin {
         let spare = if shell_id == 0 { module.spare.lock().ok().and_then(|mut s| s.take()) } else { None };
         let inst = match spare {
             Some(inst) => inst,
-            None => unsafe { Instance::create(module.main, shell_id, &module.directory) }.map_err(|e| format!("{}: {e}", desc.name))?,
+            None => unsafe { Instance::create(&module.entry, shell_id, &module.directory) }.map_err(|e| format!("{}: {e}", desc.name))?,
         };
         if shell_id != 0 && inst.unique_id() != shell_id {
             return Err(format!("{}: its shell did not create it", desc.name));
