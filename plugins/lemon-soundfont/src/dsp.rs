@@ -617,6 +617,12 @@ impl Voice {
         v
     }
 
+    /// The frames `lo..=hi` are all inside the sample and before any loop wrap: they can be read directly.
+    fn plain(&self, lo: i64, hi: i64) -> bool {
+        let wraps = self.loop_mode != 0 && (self.loop_mode == 1 || !self.released);
+        lo >= self.start && hi < if wraps { self.loop_end.min(self.end) } else { self.end }
+    }
+
     fn sample(&self, k: i64) -> f32 {
         let mut k = k;
         if self.loop_mode != 0 && (self.loop_mode == 1 || !self.released) && k >= self.loop_end {
@@ -636,19 +642,30 @@ impl Voice {
                 f64::from(self.sample(i)) * (1.0 - f) + f64::from(self.sample(i + 1)) * f
             }
             Mode::Classic => {
-                // Pitching up: band-limited to the output's Nyquist.
+                // Pitching up: band-limited to the output's Nyquist, `c * sinc(c * x)` under a Hann window. The taps
+                // are a frame apart, so the sinc's sine and the window's cosine turn by fixed angles from tap to tap:
+                // they are rotated rather than worked out again (64 taps a frame on every voice pitched up).
                 let c = 1.0 / step;
                 let lo = (p - HANN_HALF).ceil() as i64;
                 let hi = (p + HANN_HALF).floor() as i64;
+                let x0 = p - lo as f64;
+                let (a, b) = (PI * c, PI / HANN_HALF);
+                let (mut sn, mut cs) = (a * x0).sin_cos();
+                let (mut wsn, mut wcs) = (b * x0).sin_cos();
+                let (da_s, da_c) = a.sin_cos();
+                let (db_s, db_c) = b.sin_cos();
+                let plain = self.plain(lo, hi);
                 let mut acc = 0.0;
                 for k in lo..=hi {
-                    let s = self.sample(k);
-                    if s == 0.0 {
-                        continue;
+                    let s = if plain { f32::from(self.data[k as usize]) / 32768.0 } else { self.sample(k) };
+                    if s != 0.0 {
+                        let ax = a * (p - k as f64);
+                        let si = if ax.abs() < 1e-12 * PI { 1.0 } else { sn / ax };
+                        acc += f64::from(s) * c * si * (0.5 + 0.5 * wcs);
                     }
-                    let x = p - k as f64;
-                    let w = 0.5 + 0.5 * (PI * x / HANN_HALF).cos();
-                    acc += f64::from(s) * c * sinc(c * x) * w;
+                    // x goes down by 1: both angles turn back by their step.
+                    (sn, cs) = (sn * da_c - cs * da_s, cs * da_c + sn * da_s);
+                    (wsn, wcs) = (wsn * db_c - wcs * db_s, wcs * db_c + wsn * db_s);
                 }
                 acc
             }
@@ -656,9 +673,11 @@ impl Voice {
                 let k = Kaiser::get();
                 let lo = (p - KAISER_HALF).ceil() as i64;
                 let hi = (p + KAISER_HALF).floor() as i64;
+                let plain = self.plain(lo, hi);
                 let mut acc = 0.0;
                 for i in lo..=hi {
-                    acc += f64::from(self.sample(i)) * f64::from(k.at(p - i as f64));
+                    let s = if plain { f32::from(self.data[i as usize]) / 32768.0 } else { self.sample(i) };
+                    acc += f64::from(s) * f64::from(k.at(p - i as f64));
                 }
                 acc
             }
@@ -992,6 +1011,27 @@ mod tests {
         assert!((l[0] - g / 88.0).abs() < 1e-4, "first frame {}", l[0]);
         assert!((l[87] - g).abs() < 1e-4 && (l[2000] - g).abs() < 1e-4, "{} {}", l[87], l[2000]);
         assert_eq!(l, r);
+    }
+
+    /// Classic pitching up: the kernel worked out by rotation gives what the direct `cos` / `sinc` sum gives, inside a
+    /// sample, across a loop's wrap and at its ends.
+    #[test]
+    fn classic_pitch_up_kernel_matches_the_direct_sum() {
+        let data: Vec<i16> = (0..3000).map(|i| ((i as f64 * 0.37).sin() * 12000.0 + (i as f64 * 0.011).cos() * 9000.0) as i16).collect();
+        let font = Arc::new(Font::parse(&font_bytes(&data, 44100, (500, 2500), &[(54, 1)], 0)).unwrap());
+        let s = font.voices(0, 60, 100);
+        let mut v = Voice::new(&font, &s[0], 60, 100.0 / 128.0, None, 44100.0, Mode::Classic, &Overrides::default(), &Controls::default(), 1);
+        for &(pos, step) in &[(1000.3, 1.7), (2480.75, 2.3), (2499.0, 1.01), (10.5, 3.9), (1500.0, 1.25), (2520.2, 5.0)] {
+            v.pos = pos;
+            let got = v.interpolate(step);
+            let c = 1.0 / step;
+            let mut want = 0.0;
+            for k in (pos - HANN_HALF).ceil() as i64..=(pos + HANN_HALF).floor() as i64 {
+                let x = pos - k as f64;
+                want += f64::from(v.sample(k)) * c * sinc(c * x) * (0.5 + 0.5 * (PI * x / HANN_HALF).cos());
+            }
+            assert!((got - want).abs() < 1e-9, "pos {pos} step {step}: {got} vs {want}");
+        }
     }
 
     /// Classic pitching down interpolates linearly; an impulse becomes a triangle.
