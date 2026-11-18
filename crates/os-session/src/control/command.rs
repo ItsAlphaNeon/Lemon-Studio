@@ -173,6 +173,9 @@ pub enum Command {
         auto_bypass: Option<bool>,
         #[serde(default)]
         threaded: Option<bool>,
+        /// The pitch knob's range in semitones, 1..=48; a narrower one takes the knob with it.
+        #[serde(default)]
+        pitch_range: Option<u8>,
     },
     /// The channel rack's filter groups (spec: ui/channel-rack.md §7): `groups` their names in file order ("Unsorted"
     /// among them), `channels` each listed channel's group (an index into `groups`, `null` none), `shown` the filter
@@ -1494,6 +1497,7 @@ impl Command {
             zipped: None,
             auto_bypass: None,
             threaded: None,
+            pitch_range: None,
         }
     }
 
@@ -1839,8 +1843,8 @@ impl Command {
             }
 
             Command::AddChannel { name, plugin, sample, track, kind: Some(kind), color, target, points, children } => {
-                if plugin.is_some() || sample.is_some() {
-                    return Err("a channel of a kind has no plugin or sample".into());
+                if plugin.is_some() || (sample.is_some() && kind != "audio_clip") {
+                    return Err("a channel of a kind has no plugin, nor a sample unless an audio clip's".into());
                 }
                 let track = track.map(|t| track_number(&s.project, t)).transpose()?;
                 let color = color.map(|c| parse_color(&c)).transpose()?.flatten();
@@ -1882,12 +1886,12 @@ impl Command {
                     pan,
                     pitch_cents: 0,
                     mixer_track: track.unwrap_or(0),
-                    sample_path: None,
+                    sample_path: sample.clone().filter(|p| !p.is_empty()),
                     layer_children,
                     envelopes: Default::default(),
                     rack: Default::default(),
                     misc: Default::default(),
-                    sound: Default::default(),
+                    sound: if kind == ChannelKind::AudioClip { os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() } } else { Default::default() },
                     lemon_icon: None,
                 };
                 s.project.get_mut().channels.push(ch);
@@ -2034,8 +2038,11 @@ impl Command {
                 crate::edit::rack::remap_in(s, &map);
                 none
             }
-            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch, zipped, auto_bypass, threaded } => {
+            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch, zipped, auto_bypass, threaded, pitch_range } => {
                 let track = track.map(|t| track_number(&s.project, t)).transpose()?;
+                if pitch_range.is_some_and(|r| !(1..=48).contains(&r)) {
+                    return Err("pitch_range is 1..=48".into());
+                }
                 if declick.is_some_and(|d| d > crate::edit::rack::DECLICK_MAX) {
                     return Err(format!("declick is 0..={}", crate::edit::rack::DECLICK_MAX));
                 }
@@ -2061,8 +2068,15 @@ impl Command {
                 if let Some(v) = pan {
                     ch.pan = v;
                 }
+                if let Some(r) = pitch_range {
+                    ch.misc.pitch_range = r;
+                }
                 if let Some(v) = pitch {
                     ch.pitch_cents = v;
+                }
+                if pitch_range.is_some() {
+                    let lim = 100 * i32::from(ch.misc.pitch_range);
+                    ch.pitch_cents = ch.pitch_cents.clamp(-lim, lim);
                 }
                 if let Some(v) = enabled {
                     ch.enabled = v;

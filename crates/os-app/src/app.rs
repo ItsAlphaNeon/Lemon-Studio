@@ -11,7 +11,6 @@
 
 #![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::knobs::KnobUi;
-use crate::control::command::Region;
 use crate::history::ChannelControl;
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -2724,14 +2723,16 @@ impl App {
                     Request::PitchCents(row, v) => self.channel_control(row, ChannelControl::Pitch, |c| c.pitch_cents = v),
                     Request::PitchRange(row, r) => {
                         let _ = chans;
-                        crate::control_ui::edit(&mut self.state, "Channel pitch range", Region::Channel(row), |s| {
-                            s.session.project.get_mut().channels.get_mut(row).into_iter().for_each(|c| {
-                                // A narrower range takes the pitch knob with it.
-                                c.misc.pitch_range = r.clamp(1, 48) as u8;
-                                let lim = 100 * i32::from(c.misc.pitch_range);
-                                c.pitch_cents = c.pitch_cents.clamp(-lim, lim);
-                            })
-                        })
+                        crate::mixer::track_ids(&mut self.state);
+                        if let Some(id) = self.state.session.project.channels.get(row).map(|c| c.id.0) {
+                            let mut c = crate::control::command::Command::set_channel(id);
+                            if let crate::control::command::Command::SetChannel { pitch_range, .. } = &mut c {
+                                *pitch_range = Some(r.clamp(1, 48) as u8);
+                            }
+                            if let Err(e) = crate::control_ui::command(&mut self.state, "Channel pitch range", None, vec![c]) {
+                                self.state.message = Some(e);
+                            }
+                        }
                     }
                     Request::Track(row, t) => {
                         let _ = chans;
