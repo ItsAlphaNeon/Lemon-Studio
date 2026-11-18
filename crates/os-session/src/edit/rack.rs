@@ -60,9 +60,10 @@ pub fn set_groups(s: &mut crate::session::Session, groups: &[Group], unsorted_at
     }
 }
 
-/// An imported MIDI file's channels: a group named `name` first in the list, "Unsorted" last, shown.
-pub fn import_group(s: &mut crate::session::Session, name: &str, rows: impl IntoIterator<Item = usize>) {
-    s.project.write_if(|p| {
+/// An imported MIDI file's channels (rows `rows` of project `p`): a group named `name` first in the list, "Unsorted"
+/// last, shown.
+pub fn import_group_in(p: &mut os_model::Project, name: &str, rows: impl IntoIterator<Item = usize>) -> bool {
+    {
         if let Some(u) = unsorted_at(p) {
             p.groups.remove(u);
             let u = u as u32;
@@ -91,7 +92,7 @@ pub fn import_group(s: &mut crate::session::Session, name: &str, rows: impl Into
         put_in_group(p, rows, Some(g));
         p.current_group = Some(g);
         true
-    });
+    }
 }
 
 /// The rows the rack shows, top to bottom.

@@ -356,6 +356,9 @@ pub enum Command {
     /// The time signature at the pattern's start (`numerator` / `denominator`), or none (`numerator` 0); its clips
     /// that kept their natural length follow.
     SetPatternSignature { pattern: u32, numerator: u8, denominator: u8 },
+    /// The pattern's time markers (its time signatures over its length) become `markers`, put in position order; its
+    /// clips that kept their natural length follow.
+    SetPatternMarkers { pattern: u32, markers: Vec<MarkerIn> },
     /// The pattern goes, with its clips; later patterns move down a number.
     DeletePattern { pattern: u32 },
     /// Each setting given is set: name, colour, length in ticks (0 = Auto).
@@ -1408,6 +1411,7 @@ impl Command {
             Command::TransposePattern { .. } => "Transpose",
             Command::SplitPattern { .. } => "Split by instrument",
             Command::SetPatternSignature { .. } => "Pattern time signature",
+            Command::SetPatternMarkers { .. } => "Pattern time markers",
             Command::DeletePattern { .. } => "Delete pattern",
             Command::SetPattern { .. } => "Pattern settings",
             Command::SetNotes { .. } | Command::AddNotes { .. } => "Edit notes",
@@ -1522,7 +1526,7 @@ impl Command {
                 Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone()))
             }
             Command::SetSend { from, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *from)?].clone())),
-            Command::ShiftPatterns { .. } | Command::MovePattern { .. } | Command::ClonePattern { .. } | Command::SplitPattern { .. } | Command::SetPatternSignature { .. } => {
+            Command::ShiftPatterns { .. } | Command::MovePattern { .. } | Command::ClonePattern { .. } | Command::SplitPattern { .. } | Command::SetPatternSignature { .. } | Command::SetPatternMarkers { .. } => {
                 Taken::Project(Box::new(Side::of(s)))
             }
             Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } | Command::SetStep { pattern, .. } | Command::SetLoops { pattern, .. } | Command::SetControls { pattern, .. } | Command::TransposePattern { pattern, .. } => {
@@ -2485,6 +2489,17 @@ impl Command {
                     return Err(format!("not a time signature: {numerator}/{denominator}"));
                 }
                 crate::edit::patterns::set_signature(s, n, (numerator > 0).then_some((numerator, denominator)));
+                none
+            }
+            Command::SetPatternMarkers { pattern, markers } => {
+                let place = pattern_place(&s.project, pattern)?;
+                let n = s.project.patterns[place].number;
+                let old = s.project.pattern_length(n);
+                let held = s.project.patterns[place].markers.clone();
+                let mut list = markers.iter().map(|m| m.made_from(&held)).collect::<Result<Vec<_>, _>>()?;
+                list.sort_by_key(|m| m.position);
+                s.project.get_mut().patterns[place].markers = list;
+                crate::edit::playlist::refit_pattern_clips(s, n, old);
                 none
             }
             Command::CopyPattern { from, to, name } => {

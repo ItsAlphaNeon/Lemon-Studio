@@ -121,6 +121,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `transpose_pattern` | `pattern`, `semitones`; `channels` (optional) | every note of the pattern, or only those channels' notes |
 | `split_pattern` | `pattern` | Split by channel: a pattern per channel with notes, clips under the original's |
 | `set_pattern_signature` | `pattern`, `numerator`, `denominator` | the time signature at the pattern's start, `numerator` 0 for none; its clips follow |
+| `set_pattern_markers` | `pattern`, `markers` (as `set_markers`'s) | the pattern's time markers, in position order; its clips that kept their natural length follow |
 | `set_pattern` | `pattern`; `name`, `color`, `length` (0 = Auto) (optional) | |
 | `set_notes` | `pattern`, `notes`, `channel` (optional) | The notes of `channel` (or all notes) become `notes`. A note keeps its `id` (as `notes` lists it) when the pattern had it, and with it its values not given; others get new ones. Result: `notes` (their ids, in order) |
 | `set_groups` | `groups`; `channels` (`[{"channel", "group"}]`), `shown` (optional) | The rack's filter groups: their names in file order ("Unsorted" among them), channels' groups (an index, `null` none), the filter shown (`null` All) |

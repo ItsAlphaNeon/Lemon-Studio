@@ -200,6 +200,8 @@ fn pattern_commands_undo_and_redo() {
         json!({"op": "transpose_pattern", "pattern": pat, "semitones": 3}),
         json!({"op": "set_pattern_signature", "pattern": pat, "numerator": 3, "denominator": 4}),
         json!({"op": "set_pattern_signature", "pattern": pat, "numerator": 0, "denominator": 4}),
+        json!({"op": "set_pattern_markers", "pattern": pat, "markers": [{"position": 0, "kind": 8, "numerator": 3, "denominator": 4}, {"position": 288, "kind": 8, "numerator": 7, "denominator": 8}]}),
+        json!({"op": "set_pattern_markers", "pattern": pat, "markers": []}),
     ] {
         round_trip(&mut a, c);
     }

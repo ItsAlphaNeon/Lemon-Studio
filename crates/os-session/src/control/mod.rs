@@ -284,6 +284,7 @@ fn op(c: &Command) -> &'static str {
         Command::TransposePattern { .. } => "transpose_pattern",
         Command::SplitPattern { .. } => "split_pattern",
         Command::SetPatternSignature { .. } => "set_pattern_signature",
+        Command::SetPatternMarkers { .. } => "set_pattern_markers",
         Command::DeletePattern { .. } => "delete_pattern",
         Command::SetPattern { .. } => "set_pattern",
         Command::SetNotes { .. } => "set_notes",
