@@ -376,20 +376,21 @@ pub fn clone_name(s: &crate::session::Session, r: usize) -> String {
 /// Clone of row `row` (§18): the copy goes right below it, named "<name> #2", with the same settings and mixer track,
 /// unlocked and unzipped, no steps; an automation clip's copy has its curve and targets (spec: ui/playlist.md §10a).
 /// Its row.
-pub fn clone_channel_in(s: &mut crate::session::Session, row: usize) -> usize {
+pub fn clone_channel_in(s: &mut crate::session::Session, row: usize, at_end: bool) -> usize {
     let mut c = s.project.channels[row].clone();
     let from = c.index;
     c.id = os_model::Id::NONE;
     c.name = Some(clone_name(s, row));
     (c.rack.locked, c.rack.zipped) = (false, false);
     let auto = s.project.automation(from).cloned();
-    crate::control::command::put_channel_back(s, row + 1, c);
+    let at = if at_end { s.project.channels.len() } else { row + 1 };
+    crate::control::command::put_channel_back(s, at, c);
     if let Some(mut a) = auto {
-        a.channel = s.project.channels[row + 1].index;
+        a.channel = s.project.channels[at].index;
         a.points.iter_mut().for_each(|p| p.id = os_model::Id::NONE);
         s.project.get_mut().automations.push(a);
     }
-    row + 1
+    at
 }
 
 /// The remote control links on rack rows follow them (`map`: each old row's new row, `None` for one gone; spec:

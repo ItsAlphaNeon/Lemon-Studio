@@ -1669,15 +1669,33 @@ pub fn make_unique(s: &mut State, idx: &[usize]) -> Vec<u16> {
 /// change to one channel no longer reaches the other's clips. One undo step.
 pub fn make_unique_audio(s: &mut State, i: usize) -> Option<String> {
     let ClipSource::Channel(ch) = clips(&s.session).get(i)?.source else { return None };
-    let row = s.session.project.channels.iter().position(|c| c.index == ch)?;
-    snapshot_new_channel(&mut s.session, "Make unique");
-    let name = crate::edit::rack::clone_name(&s.session, row);
-    let mut copy = s.session.project.channels[row].clone();
-    copy.name = Some(name.clone());
-    let index = push_channel(&mut s.session, copy);
-    arr_mut(&mut s.session).clips[i].source = ClipSource::Channel(index);
+    crate::mixer::track_ids(s);
+    clip_ids(s);
+    let channel = s.session.project.channels.iter().find(|c| c.index == ch)?.id.0;
+    let clip = clips(&s.session).get(i)?.id.0;
+    // The copy, last in the rack, then the clip on it: one step.
+    let then = move |s: &State, r: &[serde_json::Value]| -> Vec<Command> {
+        let id = r.first().and_then(|v| v["channel"].as_u64()).unwrap_or(0) as u32;
+        let p = &s.session.project;
+        let list = clips(&s.session)
+            .iter()
+            .map(|x| {
+                let mut c = crate::control::command::ClipIn::of(x, p);
+                if x.id.0 == clip {
+                    (c.pattern, c.channel) = (None, Some(id));
+                }
+                c
+            })
+            .collect();
+        vec![Command::SetClips { clips: list }]
+    };
+    let r = crate::control_ui::command_then(s, "Make unique", vec![Command::CloneChannel { channel, at_end: true }], then);
+    if let Err(e) = r {
+        return Some(e);
+    }
+    let made = s.session.project.channels.last()?;
+    let (index, name) = (made.index, made.name.clone().unwrap_or_default());
     s.playlist.source = Some(ClipSource::Channel(index));
-    s.session.dirty = true;
     Some(format!("Made unique: {name}"))
 }
 
@@ -4629,14 +4647,14 @@ pub fn quantize_starts(s: &mut State) -> String {
     if moved == 0 {
         return "Quick quantize: every clip already starts on the grid".into();
     }
-    snapshot(&mut s.session);
-    let a = arr_mut(&mut s.session);
-    for &i in &idx {
-        if let Some(c) = a.clips.get_mut(i) {
-            c.position = (c.position + unit / 2) / unit * unit;
+    arr_edit(s, ARRANGER_EDIT, |s| {
+        let a = arr_mut(&mut s.session);
+        for &i in &idx {
+            if let Some(c) = a.clips.get_mut(i) {
+                c.position = (c.position + unit / 2) / unit * unit;
+            }
         }
-    }
-    s.session.dirty = true;
+    });
     format!("Quick quantize: moved {moved} clip start{}", if moved == 1 { "" } else { "s" })
 }
 

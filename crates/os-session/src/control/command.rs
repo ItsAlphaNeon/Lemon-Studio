@@ -110,7 +110,12 @@ pub enum Command {
     },
     /// A copy of the channel right below it (as the rack's Clone does): "<name> #2", its settings, its mixer track and a
     /// copy of its instrument, no notes. The result names its id.
-    CloneChannel { channel: u32 },
+    CloneChannel {
+        channel: u32,
+        /// Last in the rack instead (Make unique on an audio clip).
+        #[serde(default)]
+        at_end: bool,
+    },
     /// Each setting given is set: name (empty = the default name), colour (`#rrggbb`, empty = the default), volume
     /// 0..=1 (0.78125 = the default), pan -1..=1, pitch in cents, enabled (the rack's mute light), mixer track (an id).
     SetChannel {
@@ -1918,9 +1923,9 @@ impl Command {
                 }
                 Ok(id_result("channel", id))
             }
-            Command::CloneChannel { channel } => {
+            Command::CloneChannel { channel, at_end } => {
                 let row = channel_row(&s.project, channel)?;
-                let new = crate::edit::rack::clone_channel_in(s, row);
+                let new = crate::edit::rack::clone_channel_in(s, row, at_end);
                 s.control.settle(s.project.get_mut());
                 let id = s.project.channels[new].id;
                 // Its instrument: a copy of the original's state, hosted on the next tick (the original keeps its row).

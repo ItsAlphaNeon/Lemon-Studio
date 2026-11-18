@@ -1097,7 +1097,7 @@ pub fn clone_rows(app: &mut App, rows: &[usize]) {
     let s = &mut app.state;
     crate::mixer::track_ids(s);
     let rows: BTreeSet<usize> = rows.iter().copied().filter(|&r| r < s.session.project.channels.len()).collect();
-    let commands: Vec<Command> = rows.iter().filter_map(|&r| ch_id(s, r)).map(|channel| Command::CloneChannel { channel }).collect();
+    let commands: Vec<Command> = rows.iter().filter_map(|&r| ch_id(s, r)).map(|channel| Command::CloneChannel { channel, at_end: false }).collect();
     if commands.is_empty() {
         return;
     }
