@@ -43,15 +43,11 @@ pub fn standard_dirs() -> Vec<PathBuf> {
         let common = env("CommonProgramFiles");
         let usual = [
             program_files.as_ref().map(|p| p.join("VSTPlugins")),
-            program_files
-                .as_ref()
-                .map(|p| p.join("Steinberg").join("VSTPlugins")),
+            program_files.as_ref().map(|p| p.join("Steinberg").join("VSTPlugins")),
             common.as_ref().map(|c| c.join("VST2")),
             common.as_ref().map(|c| c.join("Steinberg").join("VST2")),
             program_files_x86.as_ref().map(|p| p.join("VSTPlugins")),
-            program_files_x86
-                .as_ref()
-                .map(|p| p.join("Steinberg").join("VSTPlugins")),
+            program_files_x86.as_ref().map(|p| p.join("Steinberg").join("VSTPlugins")),
         ];
         let first = usual[0].clone();
         v.extend(usual.into_iter().flatten().filter(|p| p.is_dir()));
@@ -75,11 +71,7 @@ pub fn standard_dirs() -> Vec<PathBuf> {
                 v.extend(home.as_ref().map(|h| h.join(".vst")));
                 v.push(PathBuf::from("/usr/lib/vst"));
                 v.push(PathBuf::from("/usr/local/lib/vst"));
-                let lxvst = [
-                    home.map(|h| h.join(".lxvst")),
-                    Some(PathBuf::from("/usr/lib/lxvst")),
-                    Some(PathBuf::from("/usr/local/lib/lxvst")),
-                ];
+                let lxvst = [home.map(|h| h.join(".lxvst")), Some(PathBuf::from("/usr/lib/lxvst")), Some(PathBuf::from("/usr/local/lib/lxvst"))];
                 v.extend(lxvst.into_iter().flatten().filter(|p| p.is_dir()));
             }
         }
@@ -97,24 +89,14 @@ pub fn standard_dirs() -> Vec<PathBuf> {
 #[cfg(windows)]
 fn registry_dir() -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
     let key: Vec<u16> = "SOFTWARE\\VST\0".encode_utf16().collect();
     let name: Vec<u16> = "VSTPluginsPath\0".encode_utf16().collect();
     let mut buf = vec![0u16; 1024];
     let mut bytes = (buf.len() * 2) as u32;
     // SAFETY: the buffer holds `bytes` bytes; the strings are NUL-terminated. A value with environment variables in it
     // comes back expanded.
-    let r = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            key.as_ptr(),
-            name.as_ptr(),
-            RRF_RT_REG_SZ,
-            std::ptr::null_mut(),
-            buf.as_mut_ptr().cast(),
-            &mut bytes,
-        )
-    };
+    let r = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut bytes) };
     if r != 0 {
         return None;
     }
@@ -135,13 +117,7 @@ pub fn module_file(path: &Path) -> PathBuf {
 
 /// Whether `p` has the plugin extension of this platform (a folder on macOS, a file elsewhere).
 pub fn has_extension(p: &Path) -> bool {
-    p.extension()
-        .is_some_and(|x| x.eq_ignore_ascii_case(EXTENSION))
-        && if cfg!(target_os = "macos") {
-            p.is_dir()
-        } else {
-            p.is_file()
-        }
+    p.extension().is_some_and(|x| x.eq_ignore_ascii_case(EXTENSION)) && if cfg!(target_os = "macos") { p.is_dir() } else { p.is_file() }
 }
 
 /// Whether `p` is a VST 2 plugin file of this platform: a `.vst` bundle on macOS; elsewhere a library with the plugin
@@ -153,15 +129,12 @@ pub fn is_plugin(p: &Path) -> bool {
     if cfg!(target_os = "macos") {
         return true;
     }
-    let Ok(mut f) = File::open(p) else {
-        return false;
-    };
+    let Ok(mut f) = File::open(p) else { return false };
     exports(&mut f).is_some_and(|names| names.iter().any(|n| ENTRY_POINTS.contains(&n.as_str())))
 }
 
 /// Why a 32-bit plugin cannot load when this program has no 32-bit bridge (`crate::bridged::helper`).
-pub const NO_BRIDGE: &str =
-    "a 32-bit plugin, which a 64-bit program cannot load (the 32-bit bridge is missing)";
+pub const NO_BRIDGE: &str = "a 32-bit plugin, which a 64-bit program cannot load (the 32-bit bridge is missing)";
 
 /// Whether 32-bit plugins run here, through the bridge's helper.
 fn bridge_available() -> bool {
@@ -176,18 +149,11 @@ fn bridge_available() -> bool {
 /// reported with this reason instead of with the system's loader error, and is not tried in a scanner.
 pub fn unsupported(path: &Path) -> Option<String> {
     let file = module_file(path);
-    if cfg!(all(windows, target_pointer_width = "64"))
-        && pe_machine(&file) == Some("x86")
-        && !bridge_available()
-    {
+    if cfg!(all(windows, target_pointer_width = "64")) && pe_machine(&file) == Some("x86") && !bridge_available() {
         return Some(NO_BRIDGE.into());
     }
-    if cfg!(all(target_os = "macos", target_arch = "aarch64"))
-        && macho_cpus(&file).is_some_and(|c| !c.is_empty() && !c.contains(&CPU_ARM64))
-    {
-        return Some(
-            "built for Intel Macs only, which Lemon Studio on Apple silicon cannot load".into(),
-        );
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) && macho_cpus(&file).is_some_and(|c| !c.is_empty() && !c.contains(&CPU_ARM64)) {
+        return Some("built for Intel Macs only, which Lemon Studio on Apple silicon cannot load".into());
     }
     None
 }
@@ -316,14 +282,8 @@ fn pe_exports<R: Read + Seek>(f: &mut R) -> Option<Vec<String>> {
     let table = read_at(f, opt_at + opt_size as u64, sections.checked_mul(40)?)?;
     let to_offset = |rva: u32| -> Option<u64> {
         table.chunks_exact(40).find_map(|s| {
-            let (vsize, va, raw_size, raw) = (
-                u32_at(s, 8)?,
-                u32_at(s, 12)?,
-                u32_at(s, 16)?,
-                u32_at(s, 20)?,
-            );
-            (rva >= va && rva - va < vsize.max(raw_size))
-                .then(|| u64::from(raw) + u64::from(rva - va))
+            let (vsize, va, raw_size, raw) = (u32_at(s, 8)?, u32_at(s, 12)?, u32_at(s, 16)?, u32_at(s, 20)?);
+            (rva >= va && rva - va < vsize.max(raw_size)).then(|| u64::from(raw) + u64::from(rva - va))
         })
     };
     let dir = read_at(f, to_offset(export_rva)?, 40)?;
@@ -331,9 +291,7 @@ fn pe_exports<R: Read + Seek>(f: &mut R) -> Option<Vec<String>> {
     let names = read_at(f, to_offset(u32_at(&dir, 32)?)?, count * 4)?;
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
-        let Some(at) = u32_at(&names, i * 4).and_then(to_offset) else {
-            continue;
-        };
+        let Some(at) = u32_at(&names, i * 4).and_then(to_offset) else { continue };
         out.extend(read_upto(f, at, 64).and_then(|b| name_at(&b, 0)));
     }
     Some(out)
@@ -355,23 +313,11 @@ fn elf_exports<R: Read + Seek>(f: &mut R) -> Option<Vec<String>> {
     let table = read_at(f, sh_off, sh_size.checked_mul(sh_num)?)?;
     let section = |i: usize| table.get(i * sh_size..(i + 1) * sh_size);
     const SHT_DYNSYM: u32 = 11;
-    let syms = (0..sh_num)
-        .filter_map(section)
-        .find(|s| u32_at(s, 4) == Some(SHT_DYNSYM))?;
+    let syms = (0..sh_num).filter_map(section).find(|s| u32_at(s, 4) == Some(SHT_DYNSYM))?;
     let strings = section(u32_at(syms, 0x28)? as usize)?;
-    let sym_bytes = read_at(
-        f,
-        u64_at(syms, 0x18)?,
-        usize::try_from(u64_at(syms, 0x20)?).ok()?,
-    )?;
-    let str_bytes = read_at(
-        f,
-        u64_at(strings, 0x18)?,
-        usize::try_from(u64_at(strings, 0x20)?).ok()?,
-    )?;
-    let entry = usize::try_from(u64_at(syms, 0x38)?)
-        .ok()
-        .filter(|&e| e >= 24)?;
+    let sym_bytes = read_at(f, u64_at(syms, 0x18)?, usize::try_from(u64_at(syms, 0x20)?).ok()?)?;
+    let str_bytes = read_at(f, u64_at(strings, 0x18)?, usize::try_from(u64_at(strings, 0x20)?).ok()?)?;
+    let entry = usize::try_from(u64_at(syms, 0x38)?).ok().filter(|&e| e >= 24)?;
     let out = sym_bytes
         .chunks_exact(entry)
         .take(MAX_NAMES)
@@ -429,11 +375,7 @@ mod tests {
     fn elf_with_symbols(defined: &[&str], imported: &[&str]) -> Vec<u8> {
         let mut strtab = vec![0u8];
         let mut syms = vec![0u8; 24];
-        for (n, ndx) in defined
-            .iter()
-            .map(|n| (n, 9u16))
-            .chain(imported.iter().map(|n| (n, 0u16)))
-        {
+        for (n, ndx) in defined.iter().map(|n| (n, 9u16)).chain(imported.iter().map(|n| (n, 0u16))) {
             let mut s = [0u8; 24];
             s[0..4].copy_from_slice(&(strtab.len() as u32).to_le_bytes());
             s[4] = 0x12;
@@ -453,13 +395,7 @@ mod tests {
         let sh_off = b.len();
         // Sections: null, .dynsym (linked to 2), .dynstr.
         let mut sh = vec![0u8; 64 * 3];
-        let set = |sh: &mut Vec<u8>,
-                   i: usize,
-                   ty: u32,
-                   off: usize,
-                   size: usize,
-                   link: u32,
-                   entsize: u64| {
+        let set = |sh: &mut Vec<u8>, i: usize, ty: u32, off: usize, size: usize, link: u32, entsize: u64| {
             let s = &mut sh[i * 64..(i + 1) * 64];
             s[4..8].copy_from_slice(&ty.to_le_bytes());
             s[0x18..0x20].copy_from_slice(&(off as u64).to_le_bytes());
@@ -479,28 +415,16 @@ mod tests {
     #[test]
     fn reads_pe_export_tables() {
         let b = pe_with_exports(&["GetPluginFactory", "VSTPluginMain", "main"], 0x8664);
-        assert_eq!(
-            exports(&mut Cursor::new(b)).unwrap(),
-            ["GetPluginFactory", "VSTPluginMain", "main"]
-        );
+        assert_eq!(exports(&mut Cursor::new(b)).unwrap(), ["GetPluginFactory", "VSTPluginMain", "main"]);
         let b = pe_with_exports(&["CreatePlugInstance"], 0x8664);
-        assert_eq!(
-            exports(&mut Cursor::new(b)).unwrap(),
-            ["CreatePlugInstance"]
-        );
-        assert_eq!(
-            exports(&mut Cursor::new(b"MZ but not a library".to_vec())),
-            None
-        );
+        assert_eq!(exports(&mut Cursor::new(b)).unwrap(), ["CreatePlugInstance"]);
+        assert_eq!(exports(&mut Cursor::new(b"MZ but not a library".to_vec())), None);
     }
 
     #[test]
     fn reads_elf_dynamic_symbols() {
         let b = elf_with_symbols(&["VSTPluginMain", "helper"], &["malloc"]);
-        assert_eq!(
-            exports(&mut Cursor::new(b)).unwrap(),
-            ["VSTPluginMain", "helper"]
-        );
+        assert_eq!(exports(&mut Cursor::new(b)).unwrap(), ["VSTPluginMain", "helper"]);
         assert_eq!(exports(&mut Cursor::new(b"\x7FELF".to_vec())), None);
     }
 
@@ -531,14 +455,8 @@ mod tests {
             std::fs::write(&p, b).unwrap();
             p
         };
-        assert_eq!(
-            macho_cpus(&write("intel", macho(&[CPU_X86_64]))),
-            Some(vec![CPU_X86_64])
-        );
-        assert_eq!(
-            macho_cpus(&write("universal", macho(&[CPU_X86_64, CPU_ARM64]))),
-            Some(vec![CPU_X86_64, CPU_ARM64])
-        );
+        assert_eq!(macho_cpus(&write("intel", macho(&[CPU_X86_64]))), Some(vec![CPU_X86_64]));
+        assert_eq!(macho_cpus(&write("universal", macho(&[CPU_X86_64, CPU_ARM64]))), Some(vec![CPU_X86_64, CPU_ARM64]));
         assert_eq!(macho_cpus(&write("text", b"not a binary".to_vec())), None);
         // An Intel-only bundle cannot load in Lemon Studio on Apple silicon; a universal one can.
         let bundle = |name: &str, cpus: &[u32]| {
@@ -547,10 +465,7 @@ mod tests {
             std::fs::write(b.join("Contents/MacOS").join(name), macho(cpus)).unwrap();
             b
         };
-        let (old, both) = (
-            bundle("Old", &[CPU_X86_64]),
-            bundle("Both", &[CPU_X86_64, CPU_ARM64]),
-        );
+        let (old, both) = (bundle("Old", &[CPU_X86_64]), bundle("Both", &[CPU_X86_64, CPU_ARM64]));
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             assert!(unsupported(&old).is_some_and(|w| w.contains("Intel Macs only")));
         } else {
@@ -570,29 +485,17 @@ mod tests {
             std::fs::create_dir_all(file("Synth").join("Contents/MacOS")).unwrap();
             std::fs::write(file("Loose"), b"").unwrap();
             assert!(is_plugin(&file("Synth")));
-            assert!(
-                !is_plugin(&file("Loose")),
-                "a plugin is a bundle folder on macOS"
-            );
+            assert!(!is_plugin(&file("Loose")), "a plugin is a bundle folder on macOS");
         } else {
             let (plugin, library) = if cfg!(windows) {
-                (
-                    pe_with_exports(&["VSTPluginMain"], 0x8664),
-                    pe_with_exports(&["DllMain2"], 0x8664),
-                )
+                (pe_with_exports(&["VSTPluginMain"], 0x8664), pe_with_exports(&["DllMain2"], 0x8664))
             } else {
-                (
-                    elf_with_symbols(&["main"], &[]),
-                    elf_with_symbols(&["helper"], &["VSTPluginMain"]),
-                )
+                (elf_with_symbols(&["main"], &[]), elf_with_symbols(&["helper"], &["VSTPluginMain"]))
             };
             std::fs::write(file("Synth"), plugin).unwrap();
             std::fs::write(file("Support"), library).unwrap();
             assert!(is_plugin(&file("Synth")));
-            assert!(
-                !is_plugin(&file("Support")),
-                "a library without an entry point is no plugin"
-            );
+            assert!(!is_plugin(&file("Support")), "a library without an entry point is no plugin");
             assert_eq!(module_file(&file("Synth")), file("Synth"));
         }
         std::fs::write(d.join("notes.txt"), b"").unwrap();

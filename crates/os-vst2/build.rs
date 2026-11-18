@@ -9,15 +9,9 @@
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(lemon_bridge32)");
     println!("cargo:rerun-if-env-changed=LEMON_BRIDGE32");
-    let Some(path) = std::env::var_os("LEMON_BRIDGE32").filter(|p| !p.is_empty()) else {
-        return;
-    };
+    let Some(path) = std::env::var_os("LEMON_BRIDGE32").filter(|p| !p.is_empty()) else { return };
     let path = std::path::absolute(std::path::PathBuf::from(path)).expect("LEMON_BRIDGE32");
-    assert!(
-        path.is_file(),
-        "LEMON_BRIDGE32 names no file: {}",
-        path.display()
-    );
+    assert!(path.is_file(), "LEMON_BRIDGE32 names no file: {}", path.display());
     println!("cargo:rerun-if-changed={}", path.display());
     println!("cargo::rustc-env=LEMON_BRIDGE32_FILE={}", path.display());
     println!("cargo::rustc-cfg=lemon_bridge32");

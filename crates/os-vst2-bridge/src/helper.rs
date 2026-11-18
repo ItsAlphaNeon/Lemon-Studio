@@ -15,16 +15,16 @@
 // spec: plugins/vst2-bridge.md §3
 
 use std::cell::{Cell, RefCell, UnsafeCell};
-use std::ffi::{CStr, CString, c_void};
+use std::ffi::{c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
 
-use crate::abi::{Effect, Main, MidiEvent, Rect, TimeInfo, flags, host_op, op};
+use crate::abi::{flags, host_op, op, Effect, Main, MidiEvent, Rect, TimeInfo};
 use crate::ipc::{Channel, Pump};
-use crate::proto::{self, Chan, Fields, Header, call, has};
+use crate::proto::{self, call, has, Chan, Fields, Header};
 
 struct Helper {
     chans: Vec<Channel>,
@@ -68,13 +68,7 @@ fn fields_of(e: *mut Effect) -> Fields {
     unsafe {
         let e = &*e;
         let mut h = 0;
-        for (b, bit) in [
-            (e.control.is_some(), has::CONTROL),
-            (e.process.is_some(), has::PROCESS),
-            (e.process_float.is_some(), has::PROCESS_FLOAT),
-            (e.set_parameter.is_some(), has::SET_PARAM),
-            (e.get_parameter.is_some(), has::GET_PARAM),
-        ] {
+        for (b, bit) in [(e.control.is_some(), has::CONTROL), (e.process.is_some(), has::PROCESS), (e.process_float.is_some(), has::PROCESS_FLOAT), (e.set_parameter.is_some(), has::SET_PARAM), (e.get_parameter.is_some(), has::GET_PARAM)] {
             if b {
                 h |= bit;
             }
@@ -106,9 +100,7 @@ pub fn main() -> i32 {
     let (base, pid, path) = (&args[1], args[2].parse::<u32>().unwrap_or(0), &args[3]);
     // The plugin's editor sits in the host's window: the same DPI handling as the host.
     unsafe {
-        windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
-            windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-        );
+        windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     let host = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     let mut chans = Vec::new();
@@ -220,10 +212,7 @@ fn serve(c: Chan, req: &Header, payload: Vec<u8>) -> (Header, Vec<u8>) {
             }
             call::GET_PARAMS if !e.is_null() => {
                 if let Some(f) = (*e).get_parameter {
-                    let n = req
-                        .index
-                        .clamp(0, (*e).num_params.max(0))
-                        .min((proto::DATA / 4) as i32);
+                    let n = req.index.clamp(0, (*e).num_params.max(0)).min((proto::DATA / 4) as i32);
                     out = (0..n).flat_map(|i| f(e, i).to_le_bytes()).collect();
                     r.ret = i64::from(n);
                 }
@@ -242,16 +231,8 @@ fn until_nul(b: &[u8]) -> Vec<u8> {
     b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())].to_vec()
 }
 
-unsafe fn dispatch(
-    h: &Helper,
-    e: *mut Effect,
-    req: &Header,
-    mut payload: Vec<u8>,
-    out: &mut Vec<u8>,
-) -> isize {
-    let Some(f) = (unsafe { (*e).control }) else {
-        return 0;
-    };
+unsafe fn dispatch(h: &Helper, e: *mut Effect, req: &Header, mut payload: Vec<u8>, out: &mut Vec<u8>) -> isize {
+    let Some(f) = (unsafe { (*e).control }) else { return 0 };
     let (opc, index, value, opt) = (req.opcode, req.index, req.value as isize, req.opt);
     unsafe {
         if proto::out_text(opc) {
@@ -273,20 +254,10 @@ unsafe fn dispatch(
         match opc {
             op::EDITOR_GET_RECT => {
                 let mut rect: *mut Rect = std::ptr::null_mut();
-                let r = f(
-                    e,
-                    opc,
-                    index,
-                    value,
-                    (&mut rect as *mut *mut Rect).cast(),
-                    opt,
-                );
+                let r = f(e, opc, index, value, (&mut rect as *mut *mut Rect).cast(), opt);
                 if !rect.is_null() {
                     let v = *rect;
-                    *out = [v.top, v.left, v.bottom, v.right]
-                        .iter()
-                        .flat_map(|x| x.to_le_bytes())
-                        .collect();
+                    *out = [v.top, v.left, v.bottom, v.right].iter().flat_map(|x| x.to_le_bytes()).collect();
                 }
                 r
             }
@@ -294,27 +265,13 @@ unsafe fn dispatch(
             op::EDITOR_OPEN => f(e, opc, index, 0, req.value as isize as *mut c_void, opt),
             op::GET_CHUNK => {
                 let mut p: *mut c_void = std::ptr::null_mut();
-                let n = f(
-                    e,
-                    opc,
-                    index,
-                    value,
-                    (&mut p as *mut *mut c_void).cast(),
-                    opt,
-                );
+                let n = f(e, opc, index, value, (&mut p as *mut *mut c_void).cast(), opt);
                 if n > 0 && !p.is_null() {
                     *out = std::slice::from_raw_parts(p as *const u8, n as usize).to_vec();
                 }
                 n
             }
-            op::SET_CHUNK => f(
-                e,
-                opc,
-                index,
-                payload.len() as isize,
-                payload.as_mut_ptr().cast(),
-                opt,
-            ),
+            op::SET_CHUNK => f(e, opc, index, payload.len() as isize, payload.as_mut_ptr().cast(), opt),
             op::EVENTS => {
                 let mut ev = h.events.lock().unwrap_or_else(|x| x.into_inner());
                 let (midi, list) = &mut *ev;
@@ -349,18 +306,12 @@ unsafe fn process(e: *mut Effect, req: &Header, payload: &[u8]) -> Vec<u8> {
             b[i] = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
         }
         let base = b.as_mut_ptr();
-        let inp: Vec<*const f32> = (0..ins)
-            .map(|c| unsafe { base.add(c * n) as *const f32 })
-            .collect();
-        let outp: Vec<*mut f32> = (0..outs)
-            .map(|c| unsafe { base.add((ins + c) * n) })
-            .collect();
+        let inp: Vec<*const f32> = (0..ins).map(|c| unsafe { base.add(c * n) as *const f32 }).collect();
+        let outp: Vec<*mut f32> = (0..outs).map(|c| unsafe { base.add((ins + c) * n) }).collect();
         unsafe {
             let replacing = (*e).flags & flags::SUPPORTS_FLOAT != 0;
             match ((*e).process_float.filter(|_| replacing), (*e).process) {
-                (Some(f), _) | (None, Some(f)) => {
-                    f(e, inp.as_ptr(), outp.as_ptr() as *mut *mut f32, n as i32)
-                }
+                (Some(f), _) | (None, Some(f)) => f(e, inp.as_ptr(), outp.as_ptr() as *mut *mut f32, n as i32),
                 _ => {}
             }
         }
@@ -369,23 +320,14 @@ unsafe fn process(e: *mut Effect, req: &Header, payload: &[u8]) -> Vec<u8> {
 }
 
 /// The host callback the plugin gets: each call goes to the host and its answer comes back.
-pub unsafe extern "C" fn callback(
-    effect: *mut Effect,
-    opcode: i32,
-    index: i32,
-    value: isize,
-    ptr: *mut c_void,
-    opt: f32,
-) -> isize {
+pub unsafe extern "C" fn callback(effect: *mut Effect, opcode: i32, index: i32, value: isize, ptr: *mut c_void, opt: f32) -> isize {
     let _ = effect;
     let Some(h) = HELPER.get() else {
         return if opcode == host_op::VERSION { 2400 } else { 0 };
     };
     let payload: Vec<u8> = unsafe {
         if proto::host_in_text(opcode) && !ptr.is_null() {
-            CStr::from_ptr(ptr as *const std::ffi::c_char)
-                .to_bytes()
-                .to_vec()
+            CStr::from_ptr(ptr as *const std::ffi::c_char).to_bytes().to_vec()
         } else if opcode == host_op::PROCESS_EVENTS && !ptr.is_null() {
             // An event list as plugins lay it out: the count, a pointer-sized reserved field, the pointers.
             let slots = ptr as *const isize;
@@ -394,10 +336,7 @@ pub unsafe extern "C" fn callback(
             for i in 0..count.min(4096) {
                 let ev = *slots.add(2 + i) as *const MidiEvent;
                 if !ev.is_null() && (*ev).kind == crate::abi::EVENT_MIDI {
-                    v.extend_from_slice(std::slice::from_raw_parts(
-                        ev as *const u8,
-                        proto::MIDI_EVENT_SIZE,
-                    ));
+                    v.extend_from_slice(std::slice::from_raw_parts(ev as *const u8, proto::MIDI_EVENT_SIZE));
                 }
             }
             v
@@ -405,28 +344,17 @@ pub unsafe extern "C" fn callback(
             Vec::new()
         }
     };
-    let req = Header {
-        call: call::CALLBACK,
-        opcode,
-        index,
-        value: value as i64,
-        opt,
-        ..Header::default()
-    };
+    let req = Header { call: call::CALLBACK, opcode, index, value: value as i64, opt, ..Header::default() };
     let serving = SERVING.with(Cell::get);
     let result = match serving {
         Some(c) => {
             let ch = &h.chans[c as usize];
-            ch.call(req, &payload, h.host, pump_for(c), None, &mut |r, p| {
-                serve(c, r, p)
-            })
+            ch.call(req, &payload, h.host, pump_for(c), None, &mut |r, p| serve(c, r, p))
         }
         None => {
             let _lock = h.cb_lock.lock().unwrap_or_else(|x| x.into_inner());
             let ch = &h.chans[Chan::Callback as usize];
-            ch.call(req, &payload, h.host, Pump::Sent, None, &mut |r, p| {
-                serve(Chan::Callback, r, p)
-            })
+            ch.call(req, &payload, h.host, Pump::Sent, None, &mut |r, p| serve(Chan::Callback, r, p))
         }
     };
     let Ok((r, data)) = result else { return 0 };

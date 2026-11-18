@@ -40,10 +40,7 @@ pub enum Saved {
     Chunk(Vec<u8>),
     /// Every parameter's value (any other plugin), and the program where the state tells it (only Lemon Studio's first
     /// list does).
-    Params {
-        program: Option<i32>,
-        values: Vec<f32>,
-    },
+    Params { program: Option<i32>, values: Vec<f32> },
 }
 
 impl Saved {
@@ -71,25 +68,16 @@ impl Saved {
     /// list; a list is taken by any plugin). `None` when `data` is not this layout.
     pub fn parse(data: &[u8], chunks: bool) -> Option<Saved> {
         let i32_at = |p: usize| Some(i32::from_le_bytes(data.get(p..p + 4)?.try_into().ok()?));
-        let len_at = |p: usize| {
-            usize::try_from(u32::from_le_bytes(data.get(p..p + 4)?.try_into().ok()?)).ok()
-        };
+        let len_at = |p: usize| usize::try_from(u32::from_le_bytes(data.get(p..p + 4)?.try_into().ok()?)).ok();
         let floats = |from: usize, count: usize| -> Option<Vec<f32>> {
             let b = data.get(from..from.checked_add(count.checked_mul(4)?)?)?;
-            Some(
-                b.chunks_exact(4)
-                    .map(|v| f32::from_le_bytes(v.try_into().unwrap_or_default()))
-                    .collect(),
-            )
+            Some(b.chunks_exact(4).map(|v| f32::from_le_bytes(v.try_into().unwrap_or_default())).collect())
         };
         if i32_at(0)? != HEAD || i32_at(5)? != HEAD_2 {
             return None;
         }
         match data[4] {
-            KIND_PARAMS | KIND_PARAMS_5 => Some(Saved::Params {
-                program: None,
-                values: floats(HEADER + 4, len_at(HEADER)?)?,
-            }),
+            KIND_PARAMS | KIND_PARAMS_5 => Some(Saved::Params { program: None, values: floats(HEADER + 4, len_at(HEADER)?)? }),
             KIND_CHUNK | KIND_CHUNK_13 => {
                 let size = len_at(9)?;
                 let body = data.get(HEADER..HEADER.checked_add(size)?)?;
@@ -98,10 +86,7 @@ impl Saved {
                 }
                 body.strip_prefix(LIST_TAG)?;
                 let at = HEADER + LIST_TAG.len();
-                Some(Saved::Params {
-                    program: Some(i32_at(at)?),
-                    values: floats(at + 8, len_at(at + 4)?)?,
-                })
+                Some(Saved::Params { program: Some(i32_at(at)?), values: floats(at + 8, len_at(at + 4)?)? })
             }
             _ => None,
         }
@@ -116,13 +101,7 @@ mod tests {
     fn chunks_read_back_with_the_header_fl_studio_writes() {
         let s = Saved::Chunk(b"#zip#\0data".to_vec());
         let b = s.to_bytes();
-        assert_eq!(
-            &b[..21],
-            &[
-                0xF7, 0xFF, 0xFF, 0xFF, 12, 0xFE, 0xFF, 0xFF, 0xFF, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0
-            ]
-        );
+        assert_eq!(&b[..21], &[0xF7, 0xFF, 0xFF, 0xFF, 12, 0xFE, 0xFF, 0xFF, 0xFF, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(&b[21..], b"#zip#\0data");
         assert_eq!(Saved::parse(&b, true), Some(s.clone()));
         // A plugin without chunks does not take another plugin's chunk as its parameters.
@@ -137,24 +116,13 @@ mod tests {
 
     #[test]
     fn parameter_lists_are_written_as_fl_studio_writes_them() {
-        let s = Saved::Params {
-            program: Some(3),
-            values: vec![1.0, 0.8, 0.3],
-        };
+        let s = Saved::Params { program: Some(3), values: vec![1.0, 0.8, 0.3] };
         let b = s.to_bytes();
-        let mut want = vec![
-            0xF7, 0xFF, 0xFF, 0xFF, 4, 0xFE, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            3, 0, 0, 0,
-        ];
-        [1.0f32, 0.8, 0.3]
-            .iter()
-            .for_each(|v| want.extend(v.to_le_bytes()));
+        let mut want = vec![0xF7, 0xFF, 0xFF, 0xFF, 4, 0xFE, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0];
+        [1.0f32, 0.8, 0.3].iter().for_each(|v| want.extend(v.to_le_bytes()));
         assert_eq!(b, want);
         // Read back by plugins with or without chunks; the program is not kept.
-        let back = Saved::Params {
-            program: None,
-            values: vec![1.0, 0.8, 0.3],
-        };
+        let back = Saved::Params { program: None, values: vec![1.0, 0.8, 0.3] };
         assert_eq!(Saved::parse(&b, false), Some(back.clone()));
         assert_eq!(Saved::parse(&b, true), Some(back.clone()));
         // FL Studio's part about programs after the values is skipped.
@@ -170,21 +138,13 @@ mod tests {
     #[test]
     fn lemon_studios_first_parameter_lists_read_back() {
         // Kind 13, the size of the list, then `LSVP`, the program, the count and the values.
-        let mut b = vec![
-            0xF7, 0xFF, 0xFF, 0xFF, 13, 0xFE, 0xFF, 0xFF, 0xFF, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
+        let mut b = vec![0xF7, 0xFF, 0xFF, 0xFF, 13, 0xFE, 0xFF, 0xFF, 0xFF, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         b.extend(b"LSVP");
         b.extend(2i32.to_le_bytes());
         b.extend(2u32.to_le_bytes());
         b.extend(0.25f32.to_le_bytes());
         b.extend(1.0f32.to_le_bytes());
-        assert_eq!(
-            Saved::parse(&b, false),
-            Some(Saved::Params {
-                program: Some(2),
-                values: vec![0.25, 1.0]
-            })
-        );
+        assert_eq!(Saved::parse(&b, false), Some(Saved::Params { program: Some(2), values: vec![0.25, 1.0] }));
         // A chunk plugin takes it as its chunk, as it took it before.
         assert_eq!(Saved::parse(&b, true), Some(Saved::Chunk(b[21..].to_vec())));
     }
@@ -198,11 +158,7 @@ mod tests {
         b.truncate(b.len() - 1);
         assert_eq!(Saved::parse(&b, true), None);
         // A list shorter than its count.
-        let mut b = Saved::Params {
-            program: None,
-            values: vec![0.5; 4],
-        }
-        .to_bytes();
+        let mut b = Saved::Params { program: None, values: vec![0.5; 4] }.to_bytes();
         b[21] = 9;
         assert_eq!(Saved::parse(&b, false), None);
         // A kind that has not been seen.

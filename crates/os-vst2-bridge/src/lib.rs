@@ -11,9 +11,9 @@
 /// The plugin interface, the same file `os-vst2` uses (it compiles to the 32-bit layouts in a 32-bit build).
 #[path = "../../os-vst2/src/abi.rs"]
 pub mod abi;
-#[cfg(windows)]
-pub mod helper;
+pub mod proto;
 #[cfg(windows)]
 pub mod ipc;
-pub mod proto;
+#[cfg(windows)]
+pub mod helper;
 pub mod testplug;

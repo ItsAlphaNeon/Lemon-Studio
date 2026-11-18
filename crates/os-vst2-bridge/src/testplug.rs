@@ -10,9 +10,7 @@
 
 use std::ffi::c_void;
 
-use crate::abi::{
-    self, Effect, HostCallback, MidiEvent, Rect, TimeInfo, category, flags, host_op, op,
-};
+use crate::abi::{self, category, flags, host_op, op, Effect, HostCallback, MidiEvent, Rect, TimeInfo};
 
 #[repr(C)]
 struct Test {
@@ -40,25 +38,11 @@ fn write(ptr: *mut c_void, s: &str) {
 /// The entry point.
 pub unsafe extern "C" fn main(callback: HostCallback) -> *mut Effect {
     // A plugin asks the host's version while it starts, before it has an effect.
-    unsafe {
-        callback(
-            std::ptr::null_mut(),
-            host_op::VERSION,
-            0,
-            0,
-            std::ptr::null_mut(),
-            0.0,
-        )
-    };
+    unsafe { callback(std::ptr::null_mut(), host_op::VERSION, 0, 0, std::ptr::null_mut(), 0.0) };
     let mut t: Box<Test> = Box::new(unsafe { std::mem::zeroed() });
     t.callback = Some(callback);
     t.gain = 0.5;
-    t.rect = Rect {
-        top: 0,
-        left: 0,
-        bottom: 100,
-        right: 200,
-    };
+    t.rect = Rect { top: 0, left: 0, bottom: 100, right: 200 };
     let e = &mut t.effect;
     e.magic = abi::MAGIC;
     e.control = Some(control);
@@ -82,14 +66,7 @@ fn this<'a>(e: *mut Effect) -> &'a mut Test {
     unsafe { &mut *(e as *mut Test) }
 }
 
-unsafe extern "C" fn control(
-    e: *mut Effect,
-    opcode: i32,
-    index: i32,
-    value: isize,
-    ptr: *mut c_void,
-    opt: f32,
-) -> isize {
+unsafe extern "C" fn control(e: *mut Effect, opcode: i32, index: i32, value: isize, ptr: *mut c_void, opt: f32) -> isize {
     let t = this(e);
     let _ = (value, opt);
     match opcode {
@@ -158,16 +135,7 @@ unsafe extern "C" fn control(
                 std::thread::sleep(std::time::Duration::from_millis(30));
                 // As a plugin does: the value stored, then reported.
                 this(addr as *mut Effect).gain = 0.75;
-                unsafe {
-                    cb(
-                        addr as *mut Effect,
-                        host_op::AUTOMATE,
-                        0,
-                        0,
-                        std::ptr::null_mut(),
-                        0.75,
-                    )
-                };
+                unsafe { cb(addr as *mut Effect, host_op::AUTOMATE, 0, 0, std::ptr::null_mut(), 0.75) };
             });
             1
         }
@@ -186,22 +154,7 @@ fn open_editor(parent: *mut c_void) -> isize {
     use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, WS_CHILD, WS_VISIBLE};
     let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
     let title: Vec<u16> = "Bridge Test\0".encode_utf16().collect();
-    unsafe {
-        CreateWindowExW(
-            0,
-            class.as_ptr(),
-            title.as_ptr(),
-            WS_CHILD | WS_VISIBLE,
-            0,
-            0,
-            200,
-            100,
-            parent,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-        ) as isize
-    }
+    unsafe { CreateWindowExW(0, class.as_ptr(), title.as_ptr(), WS_CHILD | WS_VISIBLE, 0, 0, 200, 100, parent, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null()) as isize }
 }
 
 #[cfg(windows)]
@@ -219,21 +172,10 @@ fn open_editor(_: *mut c_void) -> isize {
 #[cfg(not(windows))]
 fn close_editor(_: isize) {}
 
-unsafe extern "C" fn process(
-    e: *mut Effect,
-    inputs: *const *const f32,
-    outputs: *mut *mut f32,
-    frames: i32,
-) {
+unsafe extern "C" fn process(e: *mut Effect, inputs: *const *const f32, outputs: *mut *mut f32, frames: i32) {
     let t = this(e);
-    let time = unsafe {
-        (t.callback.expect("callback"))(e, host_op::GET_TIME, 0, 0, std::ptr::null_mut(), 0.0)
-    } as *const TimeInfo;
-    let tempo = if time.is_null() {
-        0.0
-    } else {
-        (unsafe { (*time).tempo }) as f32
-    };
+    let time = unsafe { (t.callback.expect("callback"))(e, host_op::GET_TIME, 0, 0, std::ptr::null_mut(), 0.0) } as *const TimeInfo;
+    let tempo = if time.is_null() { 0.0 } else { (unsafe { (*time).tempo }) as f32 };
     let note = if t.held.iter().any(|&h| h) { 0.25 } else { 0.0 };
     for c in 0..2 {
         unsafe {

@@ -19,21 +19,16 @@ pub mod fxp;
 mod host;
 pub mod state;
 
-use std::ffi::{CString, c_void};
+use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use files::{
-    CPU_ARM64, CPU_X86_64, ENTRY_POINTS, EXTENSION, exports, has_extension, is_plugin, macho_cpus,
-    module_file, pe_machine, standard_dirs, unsupported,
-};
-pub use os_host::{Descriptor, set_waker, wake};
+pub use files::{exports, has_extension, is_plugin, macho_cpus, module_file, pe_machine, standard_dirs, unsupported, CPU_ARM64, CPU_X86_64, ENTRY_POINTS, EXTENSION};
+pub use os_host::{set_waker, wake, Descriptor};
 
-use abi::{
-    Effect, Events, Main, MidiEvent, ParameterProperties, Rect, TimeInfo, category, flags, op,
-};
+use abi::{category, flags, op, Effect, Events, Main, MidiEvent, ParameterProperties, Rect, TimeInfo};
 use host::Shared;
 use state::Saved;
 
@@ -98,14 +93,7 @@ fn kind_of(effect_flags: i32, cat: isize, outputs: i32) -> os_host::Kind {
 
 /// The feature words the plugin menus sort by: VST 3's "Instrument" / "Fx", and the category's menu word.
 fn features_of(kind: os_host::Kind, cat: isize) -> Vec<String> {
-    let mut f = vec![
-        if kind == os_host::Kind::Instrument {
-            "Instrument"
-        } else {
-            "Fx"
-        }
-        .to_string(),
-    ];
+    let mut f = vec![if kind == os_host::Kind::Instrument { "Instrument" } else { "Fx" }.to_string()];
     let word = match cat {
         category::METERING => Some("Analyzer"),
         category::MASTERING => Some("Mastering"),
@@ -124,10 +112,7 @@ fn features_of(kind: os_host::Kind, cat: isize) -> Vec<String> {
 enum Entry {
     Native(Main),
     #[cfg(windows)]
-    Bridged {
-        helper: PathBuf,
-        file: PathBuf,
-    },
+    Bridged { helper: PathBuf, file: PathBuf },
 }
 
 /// One plugin object a plugin file made (an effect) and its host side. Closing it frees it.
@@ -141,18 +126,12 @@ unsafe impl Send for Instance {}
 
 impl Instance {
     /// Calls the plugin file's entry point for plugin `shell_id` (0 = the file's own) and opens the effect it gives.
-    unsafe fn create(
-        entry: &Entry,
-        shell_id: i32,
-        directory: &CString,
-    ) -> Result<Instance, String> {
+    unsafe fn create(entry: &Entry, shell_id: i32, directory: &CString) -> Result<Instance, String> {
         let shared = Arc::new(Shared::new(shell_id, directory.clone()));
         let effect = match entry {
             Entry::Native(main) => host::creating(&shared, || unsafe { main(host::callback) }),
             #[cfg(windows)]
-            Entry::Bridged { helper, file } => {
-                host::creating(&shared, || bridged::create(helper, file))?
-            }
+            Entry::Bridged { helper, file } => host::creating(&shared, || bridged::create(helper, file))?,
         };
         if effect.is_null() {
             return Err("the plugin did not start".into());
@@ -209,22 +188,8 @@ impl Instance {
     fn output_label(&self, c: usize) -> Option<String> {
         // SAFETY: plain data the plugin fills.
         let mut p: abi::PinProperties = unsafe { std::mem::zeroed() };
-        let ok = self.dispatch(
-            op::OUTPUT_PROPERTIES,
-            c as i32,
-            0,
-            (&mut p as *mut abi::PinProperties).cast(),
-            0.0,
-        ) == 1;
-        let text = String::from_utf8_lossy(
-            &p.label[..p
-                .label
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(p.label.len())],
-        )
-        .trim()
-        .to_string();
+        let ok = self.dispatch(op::OUTPUT_PROPERTIES, c as i32, 0, (&mut p as *mut abi::PinProperties).cast(), 0.0) == 1;
+        let text = String::from_utf8_lossy(&p.label[..p.label.iter().position(|&b| b == 0).unwrap_or(p.label.len())]).trim().to_string();
         (ok && !text.is_empty()).then_some(text)
     }
 
@@ -251,20 +216,14 @@ impl Instance {
     /// The plugin's description, as the plugin lists show it (`name`: a shell's name for it).
     fn describe(&self, path: &Path, name: Option<String>) -> Descriptor {
         let cat = self.dispatch(op::CATEGORY, 0, 0, std::ptr::null_mut(), 0.0);
-        let mut name = name
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| self.text(op::EFFECT_NAME, 0));
+        let mut name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| self.text(op::EFFECT_NAME, 0));
         if name.is_empty() {
             name = self.text(op::PRODUCT_NAME, 0);
         }
         if name.is_empty() {
-            name = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         }
-        let vendor_version =
-            self.dispatch(op::VENDOR_VERSION, 0, 0, std::ptr::null_mut(), 0.0) as i32;
+        let vendor_version = self.dispatch(op::VENDOR_VERSION, 0, 0, std::ptr::null_mut(), 0.0) as i32;
         let kind = kind_of(self.flags(), cat, self.channels().1 as i32);
         Descriptor {
             format: os_host::Format::Vst2,
@@ -326,9 +285,7 @@ impl Module {
             let main = ["VSTPluginMain\0", "main_macho\0", "main\0"]
                 .iter()
                 .find_map(|n| lib.get::<Main>(n.as_bytes()).ok().map(|s| *s))
-                .ok_or_else(|| {
-                    format!("{}: not a VST 2 plugin (no VSTPluginMain)", file.display())
-                })?;
+                .ok_or_else(|| format!("{}: not a VST 2 plugin (no VSTPluginMain)", file.display()))?;
             Module::from_main(path, main, Some(lib))
         }
     }
@@ -337,35 +294,22 @@ impl Module {
     ///
     /// # Safety
     /// `main` is a VST 2 entry point.
-    pub unsafe fn from_main(
-        path: &Path,
-        main: Main,
-        lib: Option<libloading::Library>,
-    ) -> Result<Arc<Module>, String> {
+    pub unsafe fn from_main(path: &Path, main: Main, lib: Option<libloading::Library>) -> Result<Arc<Module>, String> {
         unsafe { Module::from_entry(path, Entry::Native(main), lib, main as usize) }
     }
 
     /// Plugin file `path` run in a helper process by the 32-bit bridge (`helper`), and its plugins (Windows).
     #[cfg(windows)]
     pub fn load_bridged(path: &Path, helper: &Path) -> Result<Arc<Module>, String> {
-        let entry = Entry::Bridged {
-            helper: helper.to_path_buf(),
-            file: module_file(path),
-        };
+        let entry = Entry::Bridged { helper: helper.to_path_buf(), file: module_file(path) };
         unsafe { Module::from_entry(path, entry, None, bridged::create as *const () as usize) }
     }
 
     /// The module whose effects `entry` makes (`code`: an address in its code, for the crash guard).
-    unsafe fn from_entry(
-        path: &Path,
-        entry: Entry,
-        lib: Option<libloading::Library>,
-        code: usize,
-    ) -> Result<Arc<Module>, String> {
+    unsafe fn from_entry(path: &Path, entry: Entry, lib: Option<libloading::Library>, code: usize) -> Result<Arc<Module>, String> {
         let folder = path.parent().unwrap_or(path).to_string_lossy().into_owned();
         let directory = CString::new(folder).unwrap_or_default();
-        let first = unsafe { Instance::create(&entry, 0, &directory) }
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let first = unsafe { Instance::create(&entry, 0, &directory) }.map_err(|e| format!("{}: {e}", path.display()))?;
         let mut m = Module {
             path: path.to_path_buf(),
             plugins: Vec::new(),
@@ -388,13 +332,7 @@ impl Module {
         let mut subs = Vec::new();
         for _ in 0..4096 {
             let mut buf = [0u8; 256];
-            let id = first.dispatch(
-                op::CONTAINER_NEXT_EFFECT_ID,
-                0,
-                0,
-                buf.as_mut_ptr().cast(),
-                0.0,
-            ) as i32;
+            let id = first.dispatch(op::CONTAINER_NEXT_EFFECT_ID, 0, 0, buf.as_mut_ptr().cast(), 0.0) as i32;
             if id == 0 {
                 break;
             }
@@ -403,11 +341,7 @@ impl Module {
         drop(first);
         let start = Instant::now();
         for (id, name) in subs {
-            let made = if start.elapsed() < SHELL_BUDGET {
-                unsafe { Instance::create(&m.entry, id, &m.directory) }.ok()
-            } else {
-                None
-            };
+            let made = if start.elapsed() < SHELL_BUDGET { unsafe { Instance::create(&m.entry, id, &m.directory) }.ok() } else { None };
             let d = match made.filter(|i| i.unique_id() == id) {
                 Some(i) => i.describe(path, Some(name)),
                 None => Descriptor {
@@ -465,13 +399,8 @@ impl os_host::Library for Module {
 
     fn create(self: Arc<Self>, id: &str) -> Result<os_host::SharedPlugin, String> {
         let guard = os_host::guard::module_of(self.code as *const c_void);
-        let name = self
-            .plugins
-            .iter()
-            .find(|d| d.id.eq_ignore_ascii_case(id))
-            .map_or(id, |d| d.name.as_str());
-        let plugin = os_host::guard::call(&guard, || Plugin::new(&self, id))
-            .map_err(|c| os_host::guard::stopped_text(name, c))??;
+        let name = self.plugins.iter().find(|d| d.id.eq_ignore_ascii_case(id)).map_or(id, |d| d.name.as_str());
+        let plugin = os_host::guard::call(&guard, || Plugin::new(&self, id)).map_err(|c| os_host::guard::stopped_text(name, c))??;
         Ok(os_host::share(plugin, guard))
     }
 }
@@ -571,22 +500,13 @@ unsafe impl Send for Plugin {}
 impl Plugin {
     /// Creates plugin `id` of `module` (suspended: call `activate`).
     pub fn new(module: &Arc<Module>, id: &str) -> Result<Plugin, String> {
-        let i = module
-            .plugins
-            .iter()
-            .position(|d| d.id.eq_ignore_ascii_case(id))
-            .ok_or_else(|| format!("no plugin {id} in {}", module.path.display()))?;
+        let i = module.plugins.iter().position(|d| d.id.eq_ignore_ascii_case(id)).ok_or_else(|| format!("no plugin {id} in {}", module.path.display()))?;
         let desc = module.plugins[i].clone();
         let shell_id = module.shell_ids[i];
-        let spare = if shell_id == 0 {
-            module.spare.lock().ok().and_then(|mut s| s.take())
-        } else {
-            None
-        };
+        let spare = if shell_id == 0 { module.spare.lock().ok().and_then(|mut s| s.take()) } else { None };
         let inst = match spare {
             Some(inst) => inst,
-            None => unsafe { Instance::create(&module.entry, shell_id, &module.directory) }
-                .map_err(|e| format!("{}: {e}", desc.name))?,
+            None => unsafe { Instance::create(&module.entry, shell_id, &module.directory) }.map_err(|e| format!("{}: {e}", desc.name))?,
         };
         if shell_id != 0 && inst.unique_id() != shell_id {
             return Err(format!("{}: its shell did not create it", desc.name));
@@ -605,11 +525,7 @@ impl Plugin {
             queue: Vec::with_capacity(MAX_NOTES),
             auto: Vec::with_capacity(MAX_AUTO),
             midi: Box::new([MidiEvent::default(); MAX_EVENTS]),
-            list: Box::new(Events {
-                count: 0,
-                reserved: 0,
-                events: [std::ptr::null_mut(); MAX_EVENTS],
-            }),
+            list: Box::new(Events { count: 0, reserved: 0, events: [std::ptr::null_mut(); MAX_EVENTS] }),
             scratch: Vec::new(),
             in_ptrs: Vec::new(),
             out_ptrs: Vec::new(),
@@ -653,10 +569,8 @@ impl Plugin {
         }
         self.deactivate();
         let none = std::ptr::null_mut();
-        self.inst
-            .dispatch(op::SET_SAMPLE_RATE, 0, 0, none, rate as f32);
-        self.inst
-            .dispatch(op::SET_BLOCK_SIZE, 0, MAX_FRAMES as isize, none, 0.0);
+        self.inst.dispatch(op::SET_SAMPLE_RATE, 0, 0, none, rate as f32);
+        self.inst.dispatch(op::SET_BLOCK_SIZE, 0, MAX_FRAMES as isize, none, 0.0);
         self.inst.shared.rate.store(rate, Ordering::Relaxed);
         self.inst.shared.block.store(MAX_FRAMES, Ordering::Relaxed);
         self.inst.dispatch(op::SUSPEND_RESUME, 0, 1, none, 0.0);
@@ -669,22 +583,12 @@ impl Plugin {
         };
         self.rate = rate;
         self.ledger.clear();
-        self.ledger
-            .set_tail((self.tail > 0).then(|| f64::from(self.tail) / f64::from(rate)));
+        self.ledger.set_tail((self.tail > 0).then(|| f64::from(self.tail) / f64::from(rate)));
         let t = self.inst.shared.time();
         // The tempo and meter are valid once the engine has given a transport.
-        self.inst.shared.set_time(TimeInfo {
-            sample_rate: f64::from(rate),
-            tempo: if t.tempo > 0.0 { t.tempo } else { 120.0 },
-            time_sig_numerator: 4,
-            time_sig_denominator: 4,
-            ..t
-        });
+        self.inst.shared.set_time(TimeInfo { sample_rate: f64::from(rate), tempo: if t.tempo > 0.0 { t.tempo } else { 120.0 }, time_sig_numerator: 4, time_sig_denominator: 4, ..t });
         if debug() {
-            eprintln!(
-                "[os-vst2] {} active at {rate} Hz (latency {}, ins {}, outs {})",
-                self.desc.name, self.latency, self.ins, self.outs
-            );
+            eprintln!("[os-vst2] {} active at {rate} Hz (latency {}, ins {}, outs {})", self.desc.name, self.latency, self.ins, self.outs);
         }
         true
     }
@@ -694,19 +598,16 @@ impl Plugin {
             return;
         }
         if self.processing {
-            self.inst
-                .dispatch(op::PROCESS_END, 0, 0, std::ptr::null_mut(), 0.0);
+            self.inst.dispatch(op::PROCESS_END, 0, 0, std::ptr::null_mut(), 0.0);
             self.processing = false;
         }
-        self.inst
-            .dispatch(op::SUSPEND_RESUME, 0, 0, std::ptr::null_mut(), 0.0);
+        self.inst.dispatch(op::SUSPEND_RESUME, 0, 0, std::ptr::null_mut(), 0.0);
         self.rate = 0;
     }
 
     fn start_processing(&mut self) {
         if !self.processing {
-            self.inst
-                .dispatch(op::PROCESS_BEGIN, 0, 0, std::ptr::null_mut(), 0.0);
+            self.inst.dispatch(op::PROCESS_BEGIN, 0, 0, std::ptr::null_mut(), 0.0);
             self.processing = true;
         }
     }
@@ -724,46 +625,33 @@ impl Plugin {
             }
             let n = self.inst.num_params() as usize;
             if self.defaults.len() < n {
-                let more: Vec<f32> = (self.defaults.len() as u32..n as u32)
-                    .map(|p| self.inst.get(p))
-                    .collect();
+                let more: Vec<f32> = (self.defaults.len() as u32..n as u32).map(|p| self.inst.get(p)).collect();
                 self.defaults.extend(more);
             }
         } else if wanted != 0 && wanted != self.rate {
             self.activate(wanted);
         }
         if self.editor {
-            self.inst
-                .dispatch(op::EDITOR_IDLE, 0, 0, std::ptr::null_mut(), 0.0);
+            self.inst.dispatch(op::EDITOR_IDLE, 0, 0, std::ptr::null_mut(), 0.0);
         }
     }
 
     /// Automation (audio thread): parameter `index` to `value`, `offset` frames into the next process call.
     fn automate(&mut self, offset: u32, index: u32, value: f64) {
         if index < self.inst.num_params() && self.auto.len() < MAX_AUTO {
-            self.auto
-                .push((offset, index, value.clamp(0.0, 1.0) as f32));
+            self.auto.push((offset, index, value.clamp(0.0, 1.0) as f32));
         }
     }
 
     /// A note on, on MIDI channel `ch` (0..15).
     fn start(&mut self, offset: u32, key: u8, velocity: f32, ch: u8) {
-        let (key, v) = (
-            key.min(127),
-            (velocity.clamp(0.0, 1.0) * 127.0).round().max(1.0) as u8,
-        );
+        let (key, v) = (key.min(127), (velocity.clamp(0.0, 1.0) * 127.0).round().max(1.0) as u8);
         // The bend is centred for the new note first (it may still hold the last glide's end).
         if let Some(m) = self.bend.note_on(key) {
             os_engine::Instrument::midi(self, offset, m);
         }
         self.key_ch[usize::from(key)] = ch & 15;
-        self.queue(Note {
-            time: offset,
-            kind: NoteKind::On,
-            key,
-            value: v,
-            ch: ch & 15,
-        });
+        self.queue(Note { time: offset, kind: NoteKind::On, key, value: v, ch: ch & 15 });
     }
 
     fn queue(&mut self, n: Note) {
@@ -789,11 +677,7 @@ impl Plugin {
         }
         self.auto.truncate(kept);
         let end = (at + MAX_FRAMES).min(n);
-        if next < end {
-            next.max(at + MIN_SPLIT).min(end)
-        } else {
-            end
-        }
+        if next < end { next.max(at + MIN_SPLIT).min(end) } else { end }
     }
 
     /// Sends the notes before frame `end` of the block to the plugin, timed from frame `at`.
@@ -826,12 +710,8 @@ impl Plugin {
 
     /// Events and automation the block did not reach wait for the next one, from its start on.
     fn carry(&mut self, n: u32) {
-        self.queue
-            .iter_mut()
-            .for_each(|e| e.time = e.time.saturating_sub(n));
-        self.auto
-            .iter_mut()
-            .for_each(|a| a.0 = a.0.saturating_sub(n));
+        self.queue.iter_mut().for_each(|e| e.time = e.time.saturating_sub(n));
+        self.auto.iter_mut().for_each(|a| a.0 = a.0.saturating_sub(n));
     }
 
     /// The transport the plugin reads during the piece starting at frame `at`: the engine's (`song`) while playing,
@@ -898,9 +778,7 @@ impl Plugin {
                 // A mono input takes both sides.
                 (Some((l, r)), 1, _) => {
                     let mono = unsafe { std::slice::from_raw_parts_mut(s, n) };
-                    mono.iter_mut()
-                        .zip(l.iter().zip(r))
-                        .for_each(|(m, (a, b))| *m = (a + b) * 0.5);
+                    mono.iter_mut().zip(l.iter().zip(r)).for_each(|(m, (a, b))| *m = (a + b) * 0.5);
                     Some(s as *const f32)
                 }
                 (Some((l, _)), _, 0) => Some(l.as_ptr()),
@@ -929,30 +807,17 @@ impl Plugin {
         let e = self.inst.effect;
         // SAFETY: every pointer holds `n` frames; the plugin's processing calls are made one at a time.
         unsafe {
-            let replacing = if (*e).flags & flags::SUPPORTS_FLOAT != 0 {
-                (*e).process_float
-            } else {
-                None
-            };
+            let replacing = if (*e).flags & flags::SUPPORTS_FLOAT != 0 { (*e).process_float } else { None };
             // Without replacing processing, the old accumulating call adds to the zeroed outputs.
             if let Some(f) = replacing.or((*e).process) {
-                f(
-                    e,
-                    self.in_ptrs.as_ptr(),
-                    self.out_ptrs.as_mut_ptr(),
-                    n as i32,
-                );
+                f(e, self.in_ptrs.as_ptr(), self.out_ptrs.as_mut_ptr(), n as i32);
             }
         }
         if self.outs == 1 {
             right.copy_from_slice(left);
         }
         // Sound on an extra output counts too (a drum's own output).
-        let extra = (2..self.outs).any(|c| {
-            self.scratch[(self.ins + c) * max..(self.ins + c) * max + n]
-                .iter()
-                .any(|v| v.abs() > 1e-5)
-        });
+        let extra = (2..self.outs).any(|c| self.scratch[(self.ins + c) * max..(self.ins + c) * max + n].iter().any(|v| v.abs() > 1e-5));
         let loud = extra || left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
         self.sounding = loud;
         self.steady += n as u64;
@@ -973,9 +838,7 @@ impl Plugin {
         let max = MAX_FRAMES as usize;
         let side = |c: usize| &self.scratch[(self.ins + c) * max..(self.ins + c) * max + n];
         for k in 0..os_engine::Instrument::extra_outputs(self) {
-            let Some(pair) = extra.get_mut(2 * k * frames..2 * (k + 1) * frames) else {
-                break;
-            };
+            let Some(pair) = extra.get_mut(2 * k * frames..2 * (k + 1) * frames) else { break };
             let (l, r) = pair.split_at_mut(frames);
             let c = 2 + 2 * k;
             l[at..at + n].copy_from_slice(side(c));
@@ -985,25 +848,12 @@ impl Plugin {
 
     /// The extra outputs' names: each pair's first channel's label, else its number.
     fn extra_names(&self) -> Vec<String> {
-        (0..os_engine::Instrument::extra_outputs(self))
-            .map(|k| {
-                self.inst
-                    .output_label(2 + 2 * k)
-                    .unwrap_or_else(|| format!("Output {}", k + 2))
-            })
-            .collect()
+        (0..os_engine::Instrument::extra_outputs(self)).map(|k| self.inst.output_label(2 + 2 * k).unwrap_or_else(|| format!("Output {}", k + 2))).collect()
     }
 
     /// Renders a host block in pieces: notes and automation inside it, the transport, an effect's input (`effect`: the
     /// buffers hold it, and get the output).
-    fn render(
-        &mut self,
-        rate: u32,
-        left: &mut [f32],
-        right: &mut [f32],
-        effect: bool,
-        extra: &mut [f32],
-    ) {
+    fn render(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], effect: bool, extra: &mut [f32]) {
         self.start_processing();
         // Stable sorts: events at the same time keep their order (a note off before the next note on).
         self.queue.sort_by_key(|e| e.time);
@@ -1037,19 +887,10 @@ impl Plugin {
     /// The editor's rectangle as the plugin reports it (width, height).
     fn rect(&self) -> Option<(i32, i32)> {
         let mut r: *mut Rect = std::ptr::null_mut();
-        self.inst.dispatch(
-            op::EDITOR_GET_RECT,
-            0,
-            0,
-            (&mut r as *mut *mut Rect).cast(),
-            0.0,
-        );
+        self.inst.dispatch(op::EDITOR_GET_RECT, 0, 0, (&mut r as *mut *mut Rect).cast(), 0.0);
         // SAFETY: a non-null answer points at the plugin's rectangle.
         let r = unsafe { r.as_ref() }?;
-        let (w, h) = (
-            i32::from(r.right) - i32::from(r.left),
-            i32::from(r.bottom) - i32::from(r.top),
-        );
+        let (w, h) = (i32::from(r.right) - i32::from(r.left), i32::from(r.bottom) - i32::from(r.top));
         (w > 0 && h > 0).then_some((w, h))
     }
 
@@ -1076,13 +917,7 @@ impl Plugin {
         let mac = cfg!(target_os = "macos");
         self.editor_scale = if mac && scale > 0.0 { scale } else { 1.0 };
         if !mac && scale > 0.0 {
-            self.inst.dispatch(
-                op::CUSTOM,
-                abi::fourcc(*b"PreS"),
-                abi::fourcc(*b"AeCs") as isize,
-                std::ptr::null_mut(),
-                scale,
-            );
+            self.inst.dispatch(op::CUSTOM, abi::fourcc(*b"PreS"), abi::fourcc(*b"AeCs") as isize, std::ptr::null_mut(), scale);
         }
         if let Ok(mut s) = self.inst.shared.size.lock() {
             *s = None;
@@ -1105,8 +940,7 @@ impl Plugin {
 
     pub fn close_editor(&mut self) {
         if std::mem::take(&mut self.editor) {
-            self.inst
-                .dispatch(op::EDITOR_CLOSE, 0, 0, std::ptr::null_mut(), 0.0);
+            self.inst.dispatch(op::EDITOR_CLOSE, 0, 0, std::ptr::null_mut(), 0.0);
         }
     }
 
@@ -1115,27 +949,14 @@ impl Plugin {
     pub fn save_state(&self) -> Option<Vec<u8>> {
         let saved = if self.inst.flags() & flags::CHUNKS != 0 {
             let mut p: *mut c_void = std::ptr::null_mut();
-            let size = self.inst.dispatch(
-                op::GET_CHUNK,
-                0,
-                0,
-                (&mut p as *mut *mut c_void).cast(),
-                0.0,
-            );
+            let size = self.inst.dispatch(op::GET_CHUNK, 0, 0, (&mut p as *mut *mut c_void).cast(), 0.0);
             if p.is_null() || size <= 0 {
                 return None;
             }
             // SAFETY: the plugin's chunk holds `size` bytes until its next call.
-            Saved::Chunk(
-                unsafe { std::slice::from_raw_parts(p as *const u8, size as usize) }.to_vec(),
-            )
+            Saved::Chunk(unsafe { std::slice::from_raw_parts(p as *const u8, size as usize) }.to_vec())
         } else {
-            Saved::Params {
-                program: None,
-                values: (0..self.inst.num_params())
-                    .map(|i| self.inst.get(i))
-                    .collect(),
-            }
+            Saved::Params { program: None, values: (0..self.inst.num_params()).map(|i| self.inst.get(i)).collect() }
         };
         Some(saved.to_bytes())
     }
@@ -1145,22 +966,12 @@ impl Plugin {
         match Saved::parse(data, self.inst.flags() & flags::CHUNKS != 0) {
             Some(Saved::Chunk(mut c)) => {
                 let len = c.len() as isize;
-                host::host_edit(|| {
-                    self.inst
-                        .dispatch(op::SET_CHUNK, 0, len, c.as_mut_ptr().cast(), 0.0)
-                });
+                host::host_edit(|| self.inst.dispatch(op::SET_CHUNK, 0, len, c.as_mut_ptr().cast(), 0.0));
                 true
             }
             Some(Saved::Params { program, values }) => {
-                if let Some(program) = program.filter(|p| (0..self.inst.num_programs()).contains(p))
-                {
-                    self.inst.dispatch(
-                        op::SET_PROGRAM,
-                        0,
-                        program as isize,
-                        std::ptr::null_mut(),
-                        0.0,
-                    );
+                if let Some(program) = program.filter(|p| (0..self.inst.num_programs()).contains(p)) {
+                    self.inst.dispatch(op::SET_PROGRAM, 0, program as isize, std::ptr::null_mut(), 0.0);
                 }
                 for (i, v) in (0..self.inst.num_params()).zip(values) {
                     self.inst.set(i, v);
@@ -1173,10 +984,7 @@ impl Plugin {
 
     fn debug_level(&mut self, rate: u32, left: &[f32], right: &[f32]) {
         if debug() {
-            self.dbg_peak = left
-                .iter()
-                .chain(right.iter())
-                .fold(self.dbg_peak, |m, v| m.max(v.abs()));
+            self.dbg_peak = left.iter().chain(right.iter()).fold(self.dbg_peak, |m, v| m.max(v.abs()));
             self.dbg_frames += left.len() as u64;
             if self.dbg_frames >= u64::from(rate) {
                 eprintln!("[os-vst2] {} peak {:.3}", self.desc.name, self.dbg_peak);
@@ -1246,28 +1054,18 @@ impl os_host::Plugin for Plugin {
     /// VST 2 parameters are numbered and already normalized; their id is their index. Ranges, steps and groups come
     /// from the plugin's parameter properties where it gives them.
     fn param_info(&self, index: usize) -> Option<os_host::ParamInfo> {
-        let i = u32::try_from(index)
-            .ok()
-            .filter(|&i| i < self.inst.num_params())?;
+        let i = u32::try_from(index).ok().filter(|&i| i < self.inst.num_params())?;
         let mut name = self.inst.text(op::PARAM_NAME, i as i32);
         if name.is_empty() {
             name = format!("Parameter {}", i + 1);
         }
         // SAFETY: plain data, filled by the plugin when it has properties.
         let mut props: ParameterProperties = unsafe { std::mem::zeroed() };
-        let has = self.inst.dispatch(
-            op::PARAM_PROPERTIES,
-            i as i32,
-            0,
-            (&mut props as *mut ParameterProperties).cast(),
-            0.0,
-        ) == 1;
+        let has = self.inst.dispatch(op::PARAM_PROPERTIES, i as i32, 0, (&mut props as *mut ParameterProperties).cast(), 0.0) == 1;
         let pf = if has { props.flags } else { 0 };
         let steps = if pf & abi::param_flags::SWITCH != 0 {
             1
-        } else if pf & abi::param_flags::INTEGER_LIMITS != 0
-            && props.max_value_i32 > props.min_value_i32
-        {
+        } else if pf & abi::param_flags::INTEGER_LIMITS != 0 && props.max_value_i32 > props.min_value_i32 {
             (props.max_value_i32 - props.min_value_i32).min(1000) as u32
         } else {
             0
@@ -1276,11 +1074,7 @@ impl os_host::Plugin for Plugin {
             id: i,
             name,
             unit: self.inst.text(op::PARAM_LABEL, i as i32),
-            group: if pf & abi::param_flags::CATEGORY != 0 {
-                text(&props.category_label)
-            } else {
-                String::new()
-            },
+            group: if pf & abi::param_flags::CATEGORY != 0 { text(&props.category_label) } else { String::new() },
             min: 0.0,
             max: 1.0,
             default: f64::from(self.defaults.get(index).copied().unwrap_or(0.0)),
@@ -1304,11 +1098,7 @@ impl os_host::Plugin for Plugin {
         }
         let display = self.inst.text(op::PARAM_DISPLAY, id as i32);
         let unit = self.inst.text(op::PARAM_LABEL, id as i32);
-        let t = if unit.is_empty() {
-            display
-        } else {
-            format!("{display} {unit}")
-        };
+        let t = if unit.is_empty() { display } else { format!("{display} {unit}") };
         (!t.is_empty()).then_some(t)
     }
 
@@ -1322,12 +1112,7 @@ impl os_host::Plugin for Plugin {
     }
 
     fn take_param_events(&mut self) -> Vec<os_host::ParamEvent> {
-        self.inst
-            .shared
-            .events
-            .lock()
-            .map(|mut v| std::mem::take(&mut *v))
-            .unwrap_or_default()
+        self.inst.shared.events.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
     }
 
     fn attention(&self) -> Option<Arc<os_host::Attention>> {
@@ -1355,23 +1140,11 @@ impl os_engine::Instrument for Plugin {
         for key in held {
             if !std::mem::replace(&mut sent[usize::from(key.min(127))], true) {
                 let ch = self.key_ch[usize::from(key.min(127))];
-                self.queue(Note {
-                    time: 0,
-                    kind: NoteKind::Off,
-                    key,
-                    value: 0,
-                    ch,
-                });
+                self.queue(Note { time: 0, kind: NoteKind::Off, key, value: 0, ch });
             }
         }
         for c in [ALL_SOUND_OFF, ALL_NOTES_OFF] {
-            self.queue(Note {
-                time: 0,
-                kind: NoteKind::Control,
-                key: c,
-                value: 0,
-                ch: 0,
-            });
+            self.queue(Note { time: 0, kind: NoteKind::Control, key: c, value: 0, ch: 0 });
         }
         self.ledger.clear();
         if let Some(m) = self.bend.reset() {
@@ -1379,8 +1152,7 @@ impl os_engine::Instrument for Plugin {
         }
         // Automation still waiting is a value the parameter should have: it is kept for the next block.
         if self.processing {
-            self.inst
-                .dispatch(op::PROCESS_END, 0, 0, std::ptr::null_mut(), 0.0);
+            self.inst.dispatch(op::PROCESS_END, 0, 0, std::ptr::null_mut(), 0.0);
             self.processing = false;
         }
     }
@@ -1390,26 +1162,13 @@ impl os_engine::Instrument for Plugin {
     }
 
     /// The note's levels are dropped (VST 2 has no way to take them), but not its MIDI channel.
-    fn note_start(
-        &mut self,
-        offset: u32,
-        key: u8,
-        velocity: f32,
-        _start: f32,
-        levels: os_engine::NoteLevels,
-    ) {
+    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, _start: f32, levels: os_engine::NoteLevels) {
         self.start(offset, key, velocity, levels.channel);
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
         let key = key.min(127);
-        self.queue(Note {
-            time: offset,
-            kind: NoteKind::Off,
-            key,
-            value: 64,
-            ch: self.key_ch[usize::from(key)],
-        });
+        self.queue(Note { time: offset, kind: NoteKind::Off, key, value: 64, ch: self.key_ch[usize::from(key)] });
     }
 
     /// A glide step as pitch bend (`TuningBend`).
@@ -1429,18 +1188,8 @@ impl os_engine::Instrument for Plugin {
 
     fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
         let (key, value) = (bytes[1] & 0x7F, bytes[2] & 0x7F);
-        let kind = if bytes[0] & 0xF0 == 0xB0 {
-            NoteKind::Control
-        } else {
-            NoteKind::Raw(bytes[0])
-        };
-        self.queue(Note {
-            time: offset,
-            kind,
-            key,
-            value,
-            ch: 0,
-        });
+        let kind = if bytes[0] & 0xF0 == 0xB0 { NoteKind::Control } else { NoteKind::Raw(bytes[0]) };
+        self.queue(Note { time: offset, kind, key, value, ch: 0 });
     }
 
     fn transport(&mut self, info: &os_engine::TransportInfo) {

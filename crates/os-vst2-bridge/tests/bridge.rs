@@ -13,15 +13,14 @@ use std::time::{Duration, Instant};
 
 use os_engine::Instrument as _;
 use os_host::{Library as _, ParamEvent, Plugin as _};
-use os_vst2::{Module, Plugin, id_text};
+use os_vst2::{id_text, Module, Plugin};
 
 fn helper() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lemonstudio-bridge32"))
 }
 
 fn module() -> Arc<Module> {
-    Module::load_bridged(Path::new(":test:"), &helper())
-        .expect("the test plugin through the bridge")
+    Module::load_bridged(Path::new(":test:"), &helper()).expect("the test plugin through the bridge")
 }
 
 fn plugin(m: &Arc<Module>) -> Plugin {
@@ -32,10 +31,7 @@ fn plugin(m: &Arc<Module>) -> Plugin {
 fn the_bridged_plugin_is_listed_as_itself() {
     let m = module();
     let d = &m.plugins()[0];
-    assert_eq!(
-        (d.name.as_str(), d.vendor.as_str(), d.version.as_str()),
-        ("Bridge Test", "Lemon Studio Tests", "1.2.3")
-    );
+    assert_eq!((d.name.as_str(), d.vendor.as_str(), d.version.as_str()), ("Bridge Test", "Lemon Studio Tests", "1.2.3"));
     assert_eq!(d.kind, os_host::Kind::Instrument);
     assert_eq!(d.format, os_host::Format::Vst2);
     // Its instances are made through the module like any plugin's.
@@ -56,12 +52,7 @@ fn notes_parameters_and_the_transport_cross_the_bridge() {
     assert!((l[100] - 0.12).abs() < 1e-6, "{}", l[100]);
     p.note_on(0, 60, 1.0);
     p.process(48000, &mut l, &mut r);
-    assert!(
-        (l[100] - 0.37).abs() < 1e-6 && (r[100] - 0.37).abs() < 1e-6,
-        "{} {}",
-        l[100],
-        r[100]
-    );
+    assert!((l[100] - 0.37).abs() < 1e-6 && (r[100] - 0.37).abs() < 1e-6, "{} {}", l[100], r[100]);
     p.note_off(0, 60);
     p.process(48000, &mut l, &mut r);
     assert!((l[100] - 0.12).abs() < 1e-6, "the note ended: {}", l[100]);
@@ -85,36 +76,16 @@ fn the_state_crosses_the_bridge_both_ways() {
 /// own (not inside any host call) reaches the host.
 #[test]
 fn the_editor_opens_in_the_hosts_window() {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GW_CHILD, GetWindow, WS_POPUP,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetWindow, GW_CHILD, WS_POPUP};
     let m = module();
     let mut p = plugin(&m);
     p.activate(48000);
     let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
-    let parent = unsafe {
-        CreateWindowExW(
-            0,
-            class.as_ptr(),
-            std::ptr::null(),
-            WS_POPUP,
-            0,
-            0,
-            300,
-            200,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-        )
-    };
+    let parent = unsafe { CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_POPUP, 0, 0, 300, 200, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null()) };
     assert!(!parent.is_null());
     let size = p.open_editor(parent.cast(), 1.0).expect("editor");
     assert_eq!(size, (200, 100));
-    assert!(
-        !unsafe { GetWindow(parent, GW_CHILD) }.is_null(),
-        "the plugin's window is the host window's child"
-    );
+    assert!(!unsafe { GetWindow(parent, GW_CHILD) }.is_null(), "the plugin's window is the host window's child");
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut events = Vec::new();
     while Instant::now() < deadline && events.is_empty() {
@@ -122,17 +93,8 @@ fn the_editor_opens_in_the_hosts_window() {
         events = p.take_param_events();
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ParamEvent::Value(0, v) if (*v - 0.75).abs() < 1e-6)),
-        "{events:?}"
-    );
-    assert_eq!(
-        p.param_value(0),
-        Some(0.75),
-        "the plugin's own edit is the value read"
-    );
+    assert!(events.iter().any(|e| matches!(e, ParamEvent::Value(0, v) if (*v - 0.75).abs() < 1e-6)), "{events:?}");
+    assert_eq!(p.param_value(0), Some(0.75), "the plugin's own edit is the value read");
     p.close_editor();
     unsafe { DestroyWindow(parent) };
 }
@@ -164,9 +126,7 @@ fn parameter_reads_are_answered_from_the_hosts_copy() {
 
 #[test]
 fn a_helper_that_cannot_load_its_plugin_says_why() {
-    let e = Module::load_bridged(Path::new("C:/nowhere/None.dll"), &helper())
-        .err()
-        .expect("an error");
+    let e = Module::load_bridged(Path::new("C:/nowhere/None.dll"), &helper()).err().expect("an error");
     assert!(e.contains("None.dll"), "{e}");
 }
 
@@ -174,18 +134,10 @@ fn a_helper_that_cannot_load_its_plugin_says_why() {
 #[test]
 #[ignore]
 fn a_32_bit_plugin_runs() {
-    let (Some(helper), Some(file)) = (
-        std::env::var_os("OS_VST2_BRIDGE32"),
-        std::env::var_os("OS_VST2_PLUGIN32"),
-    ) else {
-        return;
-    };
+    let (Some(helper), Some(file)) = (std::env::var_os("OS_VST2_BRIDGE32"), std::env::var_os("OS_VST2_PLUGIN32")) else { return };
     let m = Module::load_bridged(Path::new(&file), Path::new(&helper)).expect("load");
     let d = m.plugins()[0].clone();
-    eprintln!(
-        "{} by {} ({:?}, version {})",
-        d.name, d.vendor, d.kind, d.version
-    );
+    eprintln!("{} by {} ({:?}, version {})", d.name, d.vendor, d.kind, d.version);
     let mut p = Plugin::new(&m, &d.id).expect("create");
     assert!(p.activate(44100));
     let (mut l, mut r) = (vec![0.0f32; 4410], vec![0.0f32; 4410]);
@@ -196,10 +148,7 @@ fn a_32_bit_plugin_runs() {
         peak = l.iter().chain(&r).fold(peak, |a, v| a.max(v.abs()));
         assert!(l.iter().chain(&r).all(|v| v.is_finite()));
     }
-    eprintln!(
-        "peak {peak}, {} parameters, state {} bytes",
-        p.param_count(),
-        p.save_state().map_or(0, |s| s.len())
-    );
+    eprintln!("peak {peak}, {} parameters, state {} bytes", p.param_count(), p.save_state().map_or(0, |s| s.len()));
     assert!(peak > 0.0, "the note sounded");
 }
+
