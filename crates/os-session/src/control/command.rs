@@ -72,6 +72,29 @@ pub enum Command {
         sample: Option<String>,
         #[serde(default)]
         track: Option<u32>,
+        /// `"audio_clip"`, `"automation"` or `"layer"` for a channel of that kind (no plugin then), on the master track:
+        /// an automation clip with `points` (else two at 0.5 over a bar), driving `target` (an automation target's id)
+        /// when given; a layer playing `children` (channels' ids).
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        target: Option<u32>,
+        #[serde(default)]
+        points: Vec<PointIn>,
+        #[serde(default)]
+        children: Vec<u32>,
+    },
+    /// Audio file `path` as a clip at `position` on playlist track `track` (1-based; on an instrument track, the next
+    /// free one below), on a new audio clip channel (through `mixer`, a mixer track's id, when given; else the track's
+    /// audio link). The result names the channel and the clip.
+    AddAudioClip {
+        path: String,
+        track: u16,
+        position: u32,
+        #[serde(default)]
+        mixer: Option<u32>,
     },
     /// The channel goes, with its notes, its clips and its automation (as the rack's Delete does).
     DeleteChannel { channel: u32 },
@@ -1282,6 +1305,7 @@ impl Command {
             Command::SetInfo { .. } => SONG_INFO,
             Command::SetProject { .. } => crate::history::PROJECT_SETTINGS,
             Command::AddChannel { .. } => "Add channel",
+            Command::AddAudioClip { .. } => "Add audio clip",
             Command::CloneChannel { .. } => "Clone channel",
             Command::ReplaceInstrument { .. } => crate::history::REPLACE_CHANNEL,
             Command::WrapEffects { all: false, .. } | Command::WrapInstrument { .. } => crate::container::WRAP,
@@ -1446,6 +1470,8 @@ impl Command {
             },
             // A slot moved takes the automation and remote control links on it along (`edit::mixer::follow_places`).
             Command::SetAutoBypass { .. } | Command::RemoveTracks { .. } | Command::MoveTrack { .. } | Command::MoveEffect { .. } => Taken::Project(Box::new(Side::of(s))),
+            // A channel and a clip, and maybe a mixer track's routing.
+            Command::AddAudioClip { .. } => Taken::Project(Box::new(Side::of(s))),
             // The arrangements' list, and which one is shown.
             Command::AddArrangement { .. } | Command::DeleteArrangement { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::SetArrangement { arrangement, .. } => Taken::Arrangement(Box::new(arrangement_of(p, *arrangement)?.clone())),
@@ -1724,7 +1750,84 @@ impl Command {
                 none
             }
 
-            Command::AddChannel { name, plugin, sample, track } => {
+            Command::AddChannel { name, plugin, sample, track, kind: Some(kind), color, target, points, children } => {
+                if plugin.is_some() || sample.is_some() {
+                    return Err("a channel of a kind has no plugin or sample".into());
+                }
+                let track = track.map(|t| track_number(&s.project, t)).transpose()?;
+                let color = color.map(|c| parse_color(&c)).transpose()?.flatten();
+                let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+                let (kind, volume, pan) = match kind.as_str() {
+                    "audio_clip" => (ChannelKind::AudioClip, 0.78125, 0.0),
+                    // An automation clip's range 0..1: its pan knob is the minimum (spec: audio/automation.md "Range").
+                    "automation" => (ChannelKind::Automation, 1.0, -1.0),
+                    "layer" => (ChannelKind::Layer, 1.0, 0.0),
+                    k => return Err(format!("no channel kind {k}")),
+                };
+                let layer_children = children.iter().map(|&c| channel_row(&s.project, c).map(|r| s.project.channels[r].index)).collect::<Result<Vec<u16>, _>>()?;
+                let auto = if kind == ChannelKind::Automation {
+                    let mut pts = points.iter().map(|q| os_model::AutoPoint { tension: q.tension.unwrap_or(0.0), mode: q.mode.map_or(os_model::AutoMode::Single, os_model::AutoMode::from_byte), flag: q.flag.unwrap_or(0), ..os_model::AutoPoint::new(q.beat, q.value) }).collect::<Vec<_>>();
+                    pts.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+                    let beats = pts.last().map_or(4.0, |p| p.beat);
+                    let first = pts.first().map_or(0.5, |p| p.value);
+                    let mut a = match target {
+                        Some(t) => os_flp::project::new_automation(index, t, first, beats),
+                        None => os_flp::project::untargeted_automation(index, 0.5, 4.0),
+                    };
+                    if pts.len() >= 2 {
+                        a.points = pts;
+                    }
+                    Some(a)
+                } else {
+                    None
+                };
+                let ch = os_model::Channel {
+                    id: Id::NONE,
+                    index,
+                    kind,
+                    name: name.as_deref().and_then(text),
+                    plugin: None,
+                    plugin_state: None,
+                    color,
+                    enabled: true,
+                    volume,
+                    pan,
+                    pitch_cents: 0,
+                    mixer_track: track.unwrap_or(0),
+                    sample_path: None,
+                    layer_children,
+                    envelopes: Default::default(),
+                    rack: Default::default(),
+                    misc: Default::default(),
+                    sound: Default::default(),
+                    lemon_icon: None,
+                };
+                s.project.get_mut().channels.push(ch);
+                if let Some(a) = auto {
+                    s.project.get_mut().automations.push(a);
+                }
+                s.touched.views.push(crate::session::View::RackAutosize);
+                s.control.settle(s.project.get_mut());
+                let id = s.project.channels.last().map_or(Id::NONE, |c| c.id);
+                Ok(id_result("channel", id))
+            }
+            Command::AddAudioClip { path, track, position, mixer } => {
+                ticks("position", position)?;
+                if track == 0 || track > crate::edit::playlist::TRACKS {
+                    return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
+                }
+                let mixer = mixer.map(|m| track_number(&s.project, m)).transpose()?;
+                let i = crate::edit::playlist::add_audio_clip_on(s, &path, track - 1, position, mixer, None).ok_or_else(|| format!("{path} can't be read as audio"))?;
+                s.control.settle(s.project.get_mut());
+                let c = crate::edit::playlist::clips(s)[i];
+                let ch = match c.source {
+                    ClipSource::Channel(ix) => s.project.channels.iter().find(|x| x.index == ix).map_or(0, |x| x.id.0),
+                    ClipSource::Pattern(_) => 0,
+                };
+                // The views select the new clip (`View::AudioClipAdded`).
+                Ok(serde_json::json!({ "channel": ch, "clip": c.id.0 }))
+            }
+            Command::AddChannel { name, plugin, sample, track, .. } => {
                 let track = track.map(|t| track_number(&s.project, t)).transpose()?;
                 let sampler = plugin.as_deref().is_none_or(|p| p == crate::plugins::LEMON_SAMPLER);
                 if !sampler && sample.is_some() {

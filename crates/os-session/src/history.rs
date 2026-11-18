@@ -477,6 +477,8 @@ fn swap_step(s: &mut crate::session::Session, i: usize) {
         let other = crate::control::take_back_in(s, v);
         s.history.steps[i].snap = Snap::Commands(other);
         s.dirty = true;
+        // The interface puts back the rack's view it kept for the step, if it kept one.
+        s.touched.rack_step = Some(s.history.steps[i].id);
         return;
     }
     let now = s.history.steps[i].snap.now(s);

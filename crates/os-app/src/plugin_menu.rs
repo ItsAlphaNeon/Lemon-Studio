@@ -208,7 +208,7 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
     crate::mixer::track_ids(s);
     let n = s.session.project.channels.len();
     let to = after.filter(|&r| r + 1 < n).map(|r| r + 1);
-    let first = vec![Command::AddChannel { name: None, plugin: (!sampler).then(|| d.name.clone()), sample: None, track: None }];
+    let first = vec![Command::AddChannel { name: None, plugin: (!sampler).then(|| d.name.clone()), sample: None, track: None, kind: None, color: None, target: None, points: Vec::new(), children: Vec::new() }];
     let id_of = |r: &[serde_json::Value]| r.first().and_then(|v| v["channel"].as_u64()).map(|id| id as u32);
     let made = crate::control_ui::command_then(s, crate::history::ADD_CHANNEL, first, |_, r| {
         id_of(r).zip(to).map(|(channel, row)| Command::MoveChannel { channel, row }).into_iter().collect()

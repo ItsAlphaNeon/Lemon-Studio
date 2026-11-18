@@ -69,7 +69,7 @@ pub fn after(s: &mut State, b: Before) -> bool {
         s.piano.clear_selection();
     }
     // The step's rack view goes back, and the one before it is kept for the step's way back.
-    if let Some(id) = t.rack_step {
+    if let Some(id) = t.rack_step.filter(|id| s.rack_views.contains_key(id)) {
         if let Some(v) = s.rack_views.insert(id, b.rack) {
             v.put(s);
         }

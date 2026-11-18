@@ -253,6 +253,7 @@ fn op(c: &Command) -> &'static str {
         Command::SetInfo { .. } => "set_info",
         Command::SetProject { .. } => "set_project",
         Command::AddChannel { .. } => "add_channel",
+        Command::AddAudioClip { .. } => "add_audio_clip",
         Command::CloneChannel { .. } => "clone_channel",
         Command::ReplaceInstrument { .. } => "replace_instrument",
         Command::DeleteChannel { .. } => "delete_channel",

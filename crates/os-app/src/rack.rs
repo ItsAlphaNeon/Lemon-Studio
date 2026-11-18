@@ -619,6 +619,27 @@ fn groups_edit(s: &mut State, f: impl FnOnce(&mut Project)) {
     s.session.dirty = dirty;
 }
 
+/// `join_group` as the command that makes it (`Command::SetGroups`), for row `r`; `None` when it changes nothing.
+pub fn join_group_cmd(s: &State, r: usize, name: &str) -> Option<Command> {
+    let mut p = s.session.project.clone();
+    let g = match p.groups.iter().position(|g| g == name) {
+        Some(g) => g as u32,
+        None => {
+            let at = unsorted_at(&p).or(Some(p.groups.len()));
+            insert_group(&mut p, at, name)
+        }
+    };
+    put_in_group(&mut p, [r], Some(g));
+    p.current_group = Some(g);
+    let now = &s.session.project;
+    let members = |p: &Project| p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>();
+    if p.groups == now.groups && p.current_group == now.current_group && members(&p) == members(now) {
+        return None;
+    }
+    let channels = p.channels.iter().map(|c| crate::control::command::GroupIn { channel: c.id.0, group: c.rack.group }).collect();
+    Some(Command::SetGroups { groups: p.groups, channels, shown: p.current_group })
+}
+
 /// The filter shown set to `f` (§7; no step, `groups_edit`).
 pub fn show_filter(s: &mut State, f: Filter) {
     groups_edit(s, |p| {

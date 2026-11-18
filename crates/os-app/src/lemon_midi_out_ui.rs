@@ -27,7 +27,7 @@ impl crate::app::App {
         use crate::control::command::Command;
         let s = &mut self.state;
         crate::mixer::track_ids(s);
-        let c = Command::AddChannel { name: None, plugin: Some(LEMON_MIDI_OUT.into()), sample: None, track: None };
+        let c = Command::AddChannel { name: None, plugin: Some(LEMON_MIDI_OUT.into()), sample: None, track: None, kind: None, color: None, target: None, points: Vec::new(), children: Vec::new() };
         let id = match crate::control_ui::command(s, crate::history::ADD_CHANNEL, None, vec![c]) {
             Ok(r) => r.first().and_then(|v| v["channel"].as_u64())? as u32,
             Err(e) => return Some(e),

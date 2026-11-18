@@ -1892,42 +1892,51 @@ pub fn automation_span(s: &State) -> (u32, u32) {
 /// two default points and no target. One undo step. Returns the rack row.
 pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     let audio = kind == ChannelKind::AudioClip;
-    let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
-    snapshot_with(&mut s.session, if audio { "Add audio clip" } else { "Add automation clip" }, before);
-    crate::follow::keep_rack_view(s);
     let name = unique_channel_name(&s.session, if audio { "Audio Clip" } else { "Automation Clip" });
-    s.session.project.get_mut().channels.push(Channel {
-        id: os_model::Id::NONE,
-        index,
-        kind,
-        name: Some(name),
-        plugin: None,
-        plugin_state: None,
-        color: (!audio).then(|| Rgb::new(0x5a, 0x74, 0x4c)),
-        enabled: true,
-        volume: if audio { 0.78125 } else { 1.0 },
-        // An automation clip's range 0..1: its pan knob is the minimum (spec: audio/automation.md "Range").
-        pan: if audio { 0.0 } else { -1.0 },
-        pitch_cents: 0,
-        mixer_track: 0,
-        sample_path: None,
-        layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
-        lemon_icon: None,
-    });
-    if !audio {
-        // Two points, at 0 and at 4 beats (one 4/4 bar), both 0.5, single curve without tension (§2).
-        s.session.project.get_mut().automations.push(os_flp::project::untargeted_automation(index, 0.5, 4.0));
-    }
-    let row = s.session.project.channels.len() - 1;
+    let color = (!audio).then(|| Rgb::new(0x5a, 0x74, 0x4c));
+    let group = if audio { "Audio" } else { "Automation" };
+    let row = add_kind_channel(s, if audio { "Add audio clip" } else { "Add automation clip" }, if audio { "audio_clip" } else { "automation" }, name, color, Vec::new(), Some(group));
     s.selected_channel = row;
     s.rack.select_only(row);
-    crate::rack::join_group(s, row, if audio { "Audio" } else { "Automation" });
+    crate::rack::autosize(s);
+    let index = s.session.project.channels.get(row).map_or(0, |c| c.index);
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = if audio { PickKind::Audio } else { PickKind::Automation };
-    s.session.dirty = true;
     row
+}
+
+/// A channel of kind `kind` (`Command::AddChannel`) named `name`, in filter group `group` (made when the project has
+/// none, and shown), one step `step`; the rack's selection and the clip source before it go back with its undo
+/// (`follow::RackView`). Its row.
+fn add_kind_channel(s: &mut State, step: &'static str, kind: &str, name: String, color: Option<Rgb>, children: Vec<u32>, group: Option<&str>) -> usize {
+    let view = crate::follow::RackView::now(s);
+    let c = Command::AddChannel {
+        name: Some(name),
+        plugin: None,
+        sample: None,
+        track: None,
+        kind: Some(kind.into()),
+        color: crate::control::command::color_text(color),
+        target: None,
+        points: Vec::new(),
+        children,
+    };
+    let join = |s: &State, r: &[serde_json::Value]| -> Vec<Command> {
+        let id = r.first().and_then(|v| v["channel"].as_u64()).unwrap_or(0) as u32;
+        let row = s.session.project.channels.iter().position(|c| c.id.0 == id);
+        group.zip(row).and_then(|(g, row)| crate::rack::join_group_cmd(s, row, g)).into_iter().collect()
+    };
+    let id = match crate::control_ui::command_then(s, step, vec![c], join) {
+        Ok(r) => r.first().and_then(|v| v["channel"].as_u64()).unwrap_or(0) as u32,
+        Err(e) => {
+            s.message = Some(e);
+            return s.session.project.channels.len().saturating_sub(1);
+        }
+    };
+    if let Some(step) = s.session.history.newest_id() {
+        s.rack_views.insert(step, view);
+    }
+    s.session.project.channels.iter().position(|c| c.id.0 == id).unwrap_or(s.session.project.channels.len().saturating_sub(1))
 }
 
 /// ADD > Layer (spec: ui/add-clip-channels.md §4, Lemon Studio's design): a layer channel at the end of the rack named
@@ -1935,34 +1944,12 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
 /// channels selected in the rack, in rack order (FL's Set children, done at once). It becomes the only selected
 /// channel. One undo step. Returns the rack row.
 pub fn add_layer_channel(s: &mut State) -> usize {
-    let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let children: Vec<u16> = s.rack.sel.iter().filter_map(|&r| s.session.project.channels.get(r)).map(|c| c.index).collect();
-    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
-    snapshot_with(&mut s.session, "Add layer", before);
-    crate::follow::keep_rack_view(s);
+    crate::mixer::track_ids(s);
+    let children: Vec<u32> = s.rack.sel.iter().filter_map(|&r| s.session.project.channels.get(r)).map(|c| c.id.0).collect();
     let name = unique_channel_name(&s.session, "Layer");
-    s.session.project.get_mut().channels.push(Channel {
-        id: os_model::Id::NONE,
-        index,
-        kind: ChannelKind::Layer,
-        name: Some(name),
-        plugin: None,
-        plugin_state: None,
-        color: None,
-        enabled: true,
-        volume: 1.0,
-        pan: 0.0,
-        pitch_cents: 0,
-        mixer_track: 0,
-        sample_path: None,
-        layer_children: children,
-        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
-        lemon_icon: None,
-    });
-    let row = s.session.project.channels.len() - 1;
+    let row = add_kind_channel(s, "Add layer", "layer", name, None, children, None);
     s.selected_channel = row;
     s.rack.select_only(row);
-    s.session.dirty = true;
     row
 }
 
@@ -1975,8 +1962,10 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
 /// `add_audio_clip` as the undo step `name` (One-click audio recording's "Recorded items").
 pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name: &'static str) -> Option<usize> {
     s.session.samples.wave(&s.session.settings, path)?;
-    snapshot_as(&mut s.session, name);
-    add_audio_clip_in(s, path, track, tick, None)
+    let c = Command::AddAudioClip { path: path.to_string(), track: track + 1, position: tick, mixer: None };
+    let r = crate::control_ui::command(s, name, None, vec![c]).ok()?;
+    let clip = r.first().and_then(|v| v["clip"].as_u64())? as u32;
+    clips(&s.session).iter().position(|c| c.id.0 == clip)
 }
 
 /// `add_audio_clip_as` with no undo step of its own (the caller took one), its channel on mixer track `mixer` (`None`:
