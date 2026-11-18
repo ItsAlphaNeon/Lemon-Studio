@@ -226,7 +226,9 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
   output ports, and counted by delay compensation. Not yet: effects' extra outputs
 - A plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio. On macOS
   and Linux this is new, and on macOS a crash in a plugin's editor still closes Lemon Studio
-- Not yet: 32-bit plugins, and Intel-only plugins on Apple silicon (they need a bridge)
+- 32-bit VST2 plugins on Windows, through a bridge: each runs in a 32-bit helper process of its own (carried inside
+  the program), with its editor, state, MIDI and automation; one that crashes goes silent and the app carries on
+- Not yet: 32-bit VST3 and CLAP plugins, and Intel-only plugins on Apple silicon (they need a bridge)
 
 ## 🚧 Plugin delay compensation
 
