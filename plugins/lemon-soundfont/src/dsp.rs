@@ -441,9 +441,18 @@ fn modulate(spec: &VoiceSpec, key: u8, vel: f64, c: &Controls, mode: Mode) -> [f
         }
         let v = source(m.src, key, vel, c) * f64::from(m.amount) * source(m.amt_src, key, vel, c);
         let v = if m.transform == 2 { v.abs() } else { v };
-        out[m.dest as usize] += v;
+        out[classic_dest(m, mode)] += v;
     }
     out
+}
+
+/// Where a modulator lands. Classic: the mod wheel's vibrato (CC1 → vibrato LFO pitch) goes to the modulation LFO's
+/// pitch instead, so it runs at that LFO's rate and after its delay (measured: FL 12 with a font whose modulation LFO
+/// is 3 Hz and its vibrato LFO 8.18 Hz vibrates at 3 Hz on MOD, and starts after the modulation LFO's delay, not the
+/// vibrato LFO's).
+fn classic_dest(m: &Modulator, mode: Mode) -> usize {
+    let d = m.dest as usize;
+    if mode == Mode::Classic && m.src & 0xFF == 0x81 && d == g::VIBLFO_TO_PITCH { g::MODLFO_TO_PITCH } else { d }
 }
 
 pub struct Voice {
@@ -1040,6 +1049,20 @@ mod tests {
         let (l, _) = run(&mut e, 1900);
         assert_eq!(peak(&l[..600]), 400, "the first voice keeps its octave");
         assert_eq!(peak(&l[600..]) + 600, 1000, "the second starts untuned");
+    }
+
+    /// The mod wheel's vibrato: on the modulation LFO in Classic (FL 12), on the vibrato LFO in Modern (the SF2
+    /// default modulator).
+    #[test]
+    fn the_mod_wheel_vibrato_is_on_the_mod_lfo_in_classic() {
+        let font = Font::parse(&font_bytes(&[16384; 8000], 44100, (0, 0), &[], 0)).unwrap();
+        let spec = &font.voices(0, 60, 100)[0];
+        let mut c = Controls::default();
+        c.cc[1] = 1.0;
+        let m = modulate(spec, 60, 100.0, &c, Mode::Classic);
+        assert_eq!((m[g::MODLFO_TO_PITCH], m[g::VIBLFO_TO_PITCH]), (50.0, 0.0));
+        let m = modulate(spec, 60, 100.0, &c, Mode::Modern);
+        assert_eq!((m[g::MODLFO_TO_PITCH], m[g::VIBLFO_TO_PITCH]), (0.0, 50.0));
     }
 
     /// The release falls 96 dB per release time.
