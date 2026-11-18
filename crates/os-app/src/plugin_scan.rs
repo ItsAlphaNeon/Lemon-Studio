@@ -162,6 +162,13 @@ fn unsupported(path: &Path, format: Format) -> Option<String> {
     }
 }
 
+/// The cache without the files it lists as not supported that this program can load now (a 32-bit plugin once the
+/// 32-bit bridge is here): they are scanned again as new files.
+pub fn forget_now_loadable(mut old: Cache) -> Cache {
+    old.files.retain(|f| !(f.status == Status::Unsupported && f.format == Format::Vst2.as_str() && os_vst2::unsupported(Path::new(&f.path)).is_none()));
+    old
+}
+
 /// What the sweep thread tells the UI thread.
 pub enum Msg {
     Progress { done: usize, total: usize, file: String },
@@ -205,6 +212,7 @@ pub fn start(prefs: &db::Prefs, old: Cache, mode: Mode) -> Sweep {
                 let _ = tx.send(Msg::Progress { done, total, file });
                 os_host::wake();
             };
+            let old = forget_now_loadable(old);
             let cache = db::sweep(&found, &old, mode, rescan_errors, WORKERS, &scan_file, &progress);
             let _ = tx.send(Msg::Done(cache));
             os_host::wake();
@@ -319,6 +327,30 @@ mod tests {
         assert_eq!((bad.status, bad.error.as_str()), (Status::Error, "no clap_entry"));
         assert_eq!(parse(r#"{"ok":false,"error":"x","crashed":true}"#).status, Status::Crashed);
         assert_eq!(parse("garbage").status, Status::Error);
+    }
+
+    /// A VST2 file the cache lists as not supported is scanned again once this program can load it (a 32-bit plugin
+    /// with the 32-bit bridge here): a file it still cannot load, and other results, stay.
+    #[test]
+    fn files_that_load_now_are_scanned_again() {
+        let d = std::env::temp_dir().join(format!("os_scan_now_loadable_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        // Tells nothing about its machine: loadable as far as its file says.
+        std::fs::write(d.join("Was32.dll"), b"plugin").unwrap();
+        let rec = |name: &str, format: Format, status: Status| db::FileScan {
+            path: d.join(name).to_string_lossy().into_owned(),
+            format: format.as_str().into(),
+            size: 6,
+            modified: 0,
+            status,
+            error: String::new(),
+            plugins: Vec::new(),
+        };
+        let old = Cache { files: vec![rec("Was32.dll", Format::Vst2, Status::Unsupported), rec("Fine.clap", Format::Clap, Status::Ok), rec("Bad.dll", Format::Vst2, Status::Error)], ..Cache::default() };
+        let kept: Vec<String> = forget_now_loadable(old).files.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(kept.len(), 2);
+        assert!(!kept.iter().any(|p| p.ends_with("Was32.dll")));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A VST2 plugin built for Intel Macs only is listed as not supported on Apple silicon without being tried; a file

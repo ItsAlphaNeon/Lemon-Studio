@@ -133,13 +133,24 @@ pub fn is_plugin(p: &Path) -> bool {
     exports(&mut f).is_some_and(|names| names.iter().any(|n| ENTRY_POINTS.contains(&n.as_str())))
 }
 
+/// Why a 32-bit plugin cannot load when this program has no 32-bit bridge (`crate::bridged::helper`).
+pub const NO_BRIDGE: &str = "a 32-bit plugin, which a 64-bit program cannot load (the 32-bit bridge is missing)";
+
+/// Whether 32-bit plugins run here, through the bridge's helper.
+fn bridge_available() -> bool {
+    #[cfg(windows)]
+    return crate::bridged::helper().is_some();
+    #[allow(unreachable_code)]
+    false
+}
+
 /// Why plugin `path` cannot load in this program, when its file tells without being loaded: a 32-bit Windows plugin in
-/// 64-bit Lemon Studio, or a plugin built for Intel Macs only in Lemon Studio on Apple silicon. Such a plugin is
+/// 64-bit Lemon Studio without the 32-bit bridge, or a plugin built for Intel Macs only in Lemon Studio on Apple silicon. Such a plugin is
 /// reported with this reason instead of with the system's loader error, and is not tried in a scanner.
 pub fn unsupported(path: &Path) -> Option<String> {
     let file = module_file(path);
-    if cfg!(all(windows, target_pointer_width = "64")) && pe_machine(&file) == Some("x86") {
-        return Some("a 32-bit plugin, which a 64-bit program cannot load".into());
+    if cfg!(all(windows, target_pointer_width = "64")) && pe_machine(&file) == Some("x86") && !bridge_available() {
+        return Some(NO_BRIDGE.into());
     }
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) && macho_cpus(&file).is_some_and(|c| !c.is_empty() && !c.contains(&CPU_ARM64)) {
         return Some("built for Intel Macs only, which Lemon Studio on Apple silicon cannot load".into());
@@ -495,8 +506,10 @@ mod tests {
         assert_eq!(pe_machine(&d.join("notes.txt")), None);
         // A 32-bit plugin cannot load in 64-bit Lemon Studio on Windows; the same file means nothing elsewhere.
         let why = unsupported(&x86);
-        if cfg!(all(windows, target_pointer_width = "64")) {
+        if cfg!(all(windows, target_pointer_width = "64")) && !bridge_available() {
             assert!(why.is_some_and(|w| w.contains("32-bit")));
+        } else if cfg!(all(windows, target_pointer_width = "64")) {
+            assert_eq!(why, None, "the bridge runs it");
         } else if !cfg!(target_os = "macos") {
             assert_eq!(why, None);
         }
