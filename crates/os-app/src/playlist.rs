@@ -46,26 +46,45 @@ fn arr_apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Optio
 /// holds their undo and a client could have made the same edit. The selection `f` leaves is kept: the commands give
 /// the clips their order.
 pub fn arr_edit<R>(s: &mut State, name: &'static str, f: impl FnOnce(&mut State) -> R) -> R {
-    // A project without an arrangement yet: the first edit makes one, the whole arrangement's step.
+    arr_begin(s, name);
+    let begun = s.playlist.arr_before.is_some();
+    let r = f(s);
+    // Nothing changed: the step a snapshot made before the edit, as before (a button's release drops it, a key's
+    // keeps it).
+    if begun && !arr_commit(s, Vec::new()) {
+        snapshot_as(&mut s.session, name);
+    }
+    r
+}
+
+/// The shown arrangement's clips and markers as an edit or a drag starts (`arr_commit` turns what it makes of them
+/// into commands), with the step's name. A project without an arrangement yet: the first edit makes one, the whole
+/// arrangement's step.
+pub fn arr_begin(s: &mut State, name: &'static str) {
     if s.session.project.arrangement().is_none() {
         snapshot_as(&mut s.session, name);
-        return f(s);
+        s.playlist.arr_before = None;
+        return;
     }
     clip_ids(s);
     if markers(&s.session).iter().any(|m| m.id == os_model::Id::NONE) {
         crate::control_ui::settle_ids(s);
     }
-    let (clips0, markers0) = (clips(&s.session).to_vec(), markers(&s.session).to_vec());
-    let r = f(s);
+    s.playlist.arr_before = Some((name, clips(&s.session).to_vec(), markers(&s.session).to_vec()));
+}
+
+/// The edit begun by `arr_begin` applied as commands: what it made of the clips and markers goes in by `set_clips` and
+/// `set_markers`, with `extra` (what else the edit changes, as commands), as one undo step; the arrangement is put
+/// back first, so the step holds the commands' undo. The selection the edit left is kept (the commands give the clips
+/// their order). False when nothing changed (no step, none of `extra` applied).
+pub fn arr_commit(s: &mut State, extra: Vec<Command>) -> bool {
+    let Some((name, clips0, markers0)) = s.playlist.arr_before.take() else { return false };
     let (clips1, markers1) = (clips(&s.session).to_vec(), markers(&s.session).to_vec());
     let same = |a: &[Clip], b: &[Clip]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y && x.id.0 == y.id.0);
     let clips_changed = !same(&clips0, &clips1);
     let markers_changed = markers0 != markers1;
-    // Nothing changed: the step a snapshot made before the edit, as before (a button's release drops it, a key's
-    // keeps it).
     if !clips_changed && !markers_changed {
-        snapshot_as(&mut s.session, name);
-        return r;
+        return false;
     }
     let sel = s.playlist.sel.clone();
     let p = &s.session.project;
@@ -76,6 +95,7 @@ pub fn arr_edit<R>(s: &mut State, name: &'static str, f: impl FnOnce(&mut State)
     if markers_changed {
         commands.push(Command::SetMarkers { markers: markers1.iter().map(crate::control::command::MarkerIn::of).collect() });
     }
+    commands.extend(extra);
     {
         let a = arr_mut(&mut s.session);
         (a.clips, a.markers) = (clips0, markers0);
@@ -84,7 +104,7 @@ pub fn arr_edit<R>(s: &mut State, name: &'static str, f: impl FnOnce(&mut State)
         s.message = Some(e);
     }
     s.playlist.sel = sel;
-    r
+    true
 }
 
 /// `Command::SetPlaylistTrack` on track `t` (0-based) setting nothing yet.
@@ -698,6 +718,8 @@ pub struct TextEdit {
 }
 
 pub struct PlaylistState {
+    /// The edit or drag under way (`arr_begin`): its step's name and the shown arrangement's clips and markers before.
+    pub arr_before: Option<(&'static str, Vec<Clip>, Vec<TimeMarker>)>,
     pub tool: PlTool,
     /// The magnet's setting (§4); Main follows the global snap (spec: ui/global-snap.md).
     pub snap: EditorSnap,
@@ -819,6 +841,7 @@ fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
 impl Default for PlaylistState {
     fn default() -> Self {
         PlaylistState {
+            arr_before: None,
             tool: PlTool::Draw,
             snap: EditorSnap::Main,
             source: None,
@@ -2498,7 +2521,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     // Audio clip handles: fades, fade tensions, gain (§9a).
     if let (Some(ci), false) = (hit, right) {
         if let Some(h) = handle_at(s, &g, ci, x, y) {
-            snapshot(&mut s.session);
+            arr_begin(s, ARRANGER_EDIT);
             let c = clips(&s.session)[ci];
             app.drag = Some(Drag::Pl(match h {
                 Handle::FadeIn => PlDrag::Fade { clip: ci, out: false },
@@ -2640,7 +2663,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
             // Any other tool: the right button is the Delete tool while held (also starting on empty grid).
             _ => {
-                snapshot_as(&mut s.session, "Arranger delete clip");
+                arr_begin(s, "Arranger delete clip");
                 app.drag = Some(Drag::Pl(PlDrag::Erase));
                 erase_at(app, grid);
                 return;
@@ -2650,20 +2673,20 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
 
     match tool {
         PlTool::Delete => {
-            snapshot_as(&mut s.session, "Arranger delete clip");
+            arr_begin(s, "Arranger delete clip");
             app.drag = Some(Drag::Pl(PlDrag::Erase));
             erase_at(app, grid);
         }
         PlTool::Mute => {
             let Some(i) = hit else { return };
-            snapshot(&mut s.session);
+            arr_begin(s, ARRANGER_EDIT);
             let on = !clips(&s.session)[i].muted;
             app.drag = Some(Drag::Pl(PlDrag::Mute { on }));
             mute_at(app, grid, on);
         }
         PlTool::Slip => {
             let Some(i) = hit else { return };
-            snapshot(&mut s.session);
+            arr_begin(s, ARRANGER_EDIT);
             let orig = clips(&s.session)[i];
             app.drag = Some(Drag::Pl(PlDrag::Slip { x0: x, i, orig }));
         }
@@ -2710,7 +2733,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
             None => {
                 // FL's name for placing the current source's clip (spec: ui/settings-choices.md "Undo history").
-                snapshot_as(&mut s.session, "Arranger fill paint clip");
+                arr_begin(s, "Arranger fill paint clip");
                 s.playlist.sel.clear();
                 let start = snap_place(s, &g, tick, alt);
                 let i = place(s, track, start);
@@ -2722,7 +2745,13 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 }
             }
             Some(i) => {
-                snapshot(&mut s.session);
+                // Stretch mode: a resize also changes the clip's channel (its stretch), which the whole playlist's
+                // snapshot holds.
+                if s.playlist.stretch {
+                    snapshot(&mut s.session);
+                } else {
+                    arr_begin(s, ARRANGER_EDIT);
+                }
                 let c = clips(&s.session)[i];
                 // Clicking a clip makes its source current (§3).
                 s.playlist.source = Some(c.source);
@@ -3139,11 +3168,32 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
     {
         s.playlist.lock_len = Some((c.source, c.length));
     }
-    // Audio clips that land on an audio track play through its mixer track (§6c).
+    // Audio clips that land on an audio track play through its mixer track (§6c), in the drag's step.
+    let mut extra = Vec::new();
     if let PlDrag::Move { orig, .. } = &d {
         let idx: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
-        crate::track_links::route_clips(&mut s.session, &idx);
+        crate::mixer::track_ids(s);
+        for (ch, m) in crate::track_links::route_moves(&s.session, &idx) {
+            let id = s.session.project.channels.iter().find(|c| c.index == ch).map(|c| c.id.0);
+            let track = s.session.project.mixer.iter().find(|x| x.index == m).map(|x| x.id.0);
+            if let (Some(id), Some(track)) = (id, track) {
+                let mut c = Command::set_channel(id);
+                if let Command::SetChannel { track: t, .. } = &mut c {
+                    *t = Some(track);
+                }
+                extra.push(c);
+            }
+        }
     }
+    // The drag's edit of the clips (`arr_begin` at the press) as one step; a click that changed nothing makes none.
+    let begun = s.playlist.arr_before.is_some();
+    if !begun {
+        if let PlDrag::Move { orig, .. } = &d {
+            let idx: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+            crate::track_links::route_clips(&mut s.session, &idx);
+        }
+    }
+    arr_commit(s, extra);
     match d {
         PlDrag::Perform => {
             let now = app.state.session.transport.playing().then(|| app.state.session.transport.tick().max(0.0) as u32);
@@ -3178,6 +3228,20 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
                 s.session.plugins.set_sampler_stretch(row, &s.session.project.channels[row].sound);
             }
         }
+        // A drag on the snapshot (stretch mode): a click that changed nothing leaves no undo step.
+        PlDrag::Move { orig, fresh: false, .. } | PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } if !begun => {
+            let same = orig.iter().all(|(i, o)| clips(&s.session).get(*i) == Some(o));
+            if same && !app.shift {
+                crate::history::unrecord(&mut s.session);
+            }
+        }
+        // A drag on the snapshot (stretch mode): a click that changed nothing leaves no undo step.
+        PlDrag::Move { orig, fresh: false, .. } | PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } if !begun => {
+            let same = orig.iter().all(|(i, o)| clips(&s.session).get(*i) == Some(o));
+            if same && !app.shift {
+                crate::history::unrecord(&mut s.session);
+            }
+        }
         PlDrag::Marker { i, t0, .. } => {
             // A click leaves no undo step; a moved marker goes back in position order.
             if markers(&s.session).get(i).is_none_or(|m| m.position == t0) {
@@ -3190,13 +3254,6 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             if app.state.session.transport.playing() && (app.state.session.transport.song() || !app.state.session.transport.paused()) {
                 let p = app.state.session.song_pos;
                 app.play_song_from(p);
-            }
-        }
-        PlDrag::Move { orig, fresh: false, .. } | PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } => {
-            // A click that changed nothing leaves no undo step.
-            let same = orig.iter().all(|(i, o)| clips(&s.session).get(*i) == Some(o));
-            if same && !app.shift {
-                crate::history::unrecord(&mut s.session);
             }
         }
         _ => {}

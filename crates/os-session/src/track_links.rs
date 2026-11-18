@@ -172,14 +172,7 @@ pub fn audio_drop_track(s: &crate::session::Session, t: u16, a: u32, b: u32) -> 
 /// the original reroutes a clip's channel when it lands on an audio track (moving it off again leaves the channel
 /// where it is).
 pub fn route_clips(s: &mut crate::session::Session, idx: &[usize]) {
-    let moves: Vec<(u16, u16)> = idx
-        .iter()
-        .filter_map(|&i| clips(s).get(i))
-        .filter_map(|c| match c.source {
-            ClipSource::Channel(ch) if is_audio_source(s, c.source) => audio_mixer(s, c.track).map(|m| (ch, m)),
-            _ => None,
-        })
-        .collect();
+    let moves = route_moves(s, idx);
     let max = crate::edit::mixer::max_insert(&s.project);
     for (ch, m) in moves {
         if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
@@ -189,6 +182,21 @@ pub fn route_clips(s: &mut crate::session::Session, idx: &[usize]) {
             }
         }
     }
+}
+
+/// What `route_clips` changes: each audio channel (its index) of clips `idx` that lands on an audio track, and that
+/// track's mixer track, where it is another one.
+pub fn route_moves(s: &crate::session::Session, idx: &[usize]) -> Vec<(u16, u16)> {
+    let moves: Vec<(u16, u16)> = idx
+        .iter()
+        .filter_map(|&i| clips(s).get(i))
+        .filter_map(|c| match c.source {
+            ClipSource::Channel(ch) if is_audio_source(s, c.source) => audio_mixer(s, c.track).map(|m| (ch, m)),
+            _ => None,
+        })
+        .collect();
+    let max = crate::edit::mixer::max_insert(&s.project);
+    moves.into_iter().filter(|&(ch, m)| m <= max && s.project.channels.iter().any(|c| c.index == ch && c.mixer_track != m)).collect()
 }
 
 /// The playlist track a take recorded on mixer track `m` over ticks `a..b` goes to: `m`'s first audio track when it
