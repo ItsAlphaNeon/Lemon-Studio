@@ -1525,6 +1525,10 @@ impl Command {
                 }
                 // The other way: the links back onto what they were on.
                 Taken::Links(pairs) => Taken::Links(pairs.iter().map(|&(a, b)| (b, a)).collect()),
+                // A channel with an automation clip comes back with it, as a deleted one does.
+                Taken::Gone(Thing::Channel(id)) if channel_row(p, *id).is_ok_and(|r| p.automation(p.channels[r].index).is_some()) => {
+                    Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Channel(*id))?))
+                }
                 Taken::Gone(thing) => Taken::Back(Box::new(match *thing {
                     Thing::Channel(id) => {
                         let row = channel_row(p, id)?;
