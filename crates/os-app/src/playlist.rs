@@ -89,7 +89,20 @@ pub fn arr_edit<R>(s: &mut State, name: &'static str, f: impl FnOnce(&mut State)
 
 /// `Command::SetPlaylistTrack` on track `t` (0-based) setting nothing yet.
 fn track_cmd(t: u16) -> Command {
-    Command::SetPlaylistTrack { track: t + 1, name: None, color: None, enabled: None, grouped: None }
+    Command::SetPlaylistTrack {
+        track: t + 1,
+        name: None,
+        color: None,
+        enabled: None,
+        grouped: None,
+        motion: None,
+        press: None,
+        trigger_sync: None,
+        position_sync: None,
+        queue: None,
+        tolerant: None,
+        clip_lock: None,
+    }
 }
 
 /// Every track's mute state now (a project without an arrangement yet: a new one's, every track on).
@@ -4193,26 +4206,31 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ClipRandomColor(i) => {
             let Some(src) = clips(&s.session).get(i).map(|c| c.source) else { return None };
-            crate::control_ui::edit(s, "Clip color", crate::control::command::Region::Project, |s| {
-                let seed = (clips(&s.session).len() as u32).wrapping_mul(2654435761).wrapping_add(i as u32 * 40503);
-                let rgb = hsl_rgb((seed % 360) as f32, 0.45, 0.45);
-                match src {
-                    ClipSource::Pattern(n) => {
-                        if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == n) {
-                            p.color = Some(rgb);
-                        } else {
-                            s.session.project.get_mut().patterns.push(os_model::Pattern { number: n, color: Some(rgb), ..Default::default() });
+            let seed = (clips(&s.session).len() as u32).wrapping_mul(2654435761).wrapping_add(i as u32 * 40503);
+            let rgb = hsl_rgb((seed % 360) as f32, 0.45, 0.45);
+            let color = crate::control::command::color_text(Some(rgb));
+            crate::mixer::track_ids(s);
+            if s.session.project.patterns.iter().any(|p| p.id == os_model::Id::NONE) {
+                crate::control_ui::settle_ids(s);
+            }
+            let r = match src {
+                // A pattern number the project holds no pattern for gets one.
+                ClipSource::Pattern(n) => match s.session.project.pattern(n).map(|p| p.id.0) {
+                    Some(pattern) => crate::control_ui::command(s, "Clip color", None, vec![Command::SetPattern { pattern, name: None, color, length: None }]),
+                    None => crate::control_ui::command(s, "Clip color", None, vec![Command::AddPattern { name: None, color, number: Some(n) }]),
+                },
+                ClipSource::Channel(ch) => match s.session.project.channels.iter().find(|c| c.index == ch).map(|c| c.id.0) {
+                    Some(channel) => {
+                        let mut c = Command::set_channel(channel);
+                        if let Command::SetChannel { color: col, .. } = &mut c {
+                            *col = color;
                         }
+                        crate::control_ui::command(s, "Clip color", None, vec![c])
                     }
-                    ClipSource::Channel(ch) => {
-                        if let Some(c) = s.session.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
-                            c.color = Some(rgb);
-                            c.rack.stored_color = Some(rgb);
-                        }
-                    }
-                }
-            });
-            None
+                    None => Ok(Vec::new()),
+                },
+            };
+            r.err()
         }
         Cmd::PointDelete(ch, i) => {
             snapshot(&mut s.session);
@@ -4382,18 +4400,18 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         // No undo step, as in FL (spec: ui/undo-steps.md).
         Cmd::PerfToggle => Some(crate::perform_ui::toggle(s)),
         Cmd::PerfSet(t, which, v) => {
-            snapshot_as(&mut s.session, "Performance settings");
-            let p = &mut arr_mut(&mut s.session).tracks[usize::from(t)].perf;
-            match which {
-                0 => p.press = v,
-                1 => p.motion = v,
-                2 => p.trigger_sync = v,
-                3 => p.position_sync = v,
-                4 => p.queue = v != 0,
-                _ => p.tolerant = v != 0,
+            let mut c = track_cmd(t);
+            if let Command::SetPlaylistTrack { press, motion, trigger_sync, position_sync, queue, tolerant, .. } = &mut c {
+                match which {
+                    0 => *press = Some(v),
+                    1 => *motion = Some(v),
+                    2 => *trigger_sync = Some(v),
+                    3 => *position_sync = Some(v),
+                    4 => *queue = Some(v != 0),
+                    _ => *tolerant = Some(v != 0),
+                }
             }
-            s.session.dirty = true;
-            None
+            arr_apply(s, "Performance settings", vec![c])
         }
         Cmd::ResetEmptyTracks => {
             let used: Vec<u16> = clips(&s.session).iter().map(|c| c.track).collect();
@@ -4402,22 +4420,54 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             arr_apply(s, ARRANGER_EDIT, commands)
         }
         Cmd::LockClips(on) => {
-            let before = s.session.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect::<Vec<_>>());
-            snapshot_as(&mut s.session, if on { "Lock tracks to clips" } else { "Unlock tracks from clips" });
-            let m = if on {
-                match lock_tracks(&mut s.session) {
+            // What the locks become, worked out on the tracks as they are, applied by `set_playlist_track`.
+            let now: Vec<Option<ClipSource>> = s.session.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect()).unwrap_or_default();
+            let (want, m) = if on {
+                let mut one: std::collections::BTreeMap<u16, Option<ClipSource>> = std::collections::BTreeMap::new();
+                for c in clips(&s.session) {
+                    one.entry(c.track).and_modify(|e| if *e != Some(c.source) { *e = None }).or_insert(Some(c.source));
+                }
+                let mut want = now.clone();
+                let (mut n, mut k) = (0, 0);
+                for (t, src) in one {
+                    match (src, want.get_mut(usize::from(t))) {
+                        (Some(src), Some(w)) => {
+                            *w = Some(src);
+                            n += 1;
+                        }
+                        (None, Some(_)) => k += 1,
+                        _ => {}
+                    }
+                }
+                let m = match (n, k) {
                     (0, 0) => "No track has clips to lock to".to_string(),
                     (n, 0) => format!("Locked {n} track(s) to their clips"),
                     (n, k) => format!("Locked {n} track(s) to their clips; {k} with clips of several sources left unlocked"),
-                }
+                };
+                (want, m)
             } else {
-                match unlock_tracks(&mut s.session) {
-                    0 => "No track is locked to a clip".to_string(),
-                    n => format!("Unlocked {n} track(s)"),
-                }
+                let n = now.iter().filter(|l| l.is_some()).count();
+                (vec![None; now.len()], if n == 0 { "No track is locked to a clip".to_string() } else { format!("Unlocked {n} track(s)") })
             };
-            if s.session.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect::<Vec<_>>()) == before {
-                crate::history::unrecord(&mut s.session);
+            let p = &s.session.project;
+            let commands = want
+                .iter()
+                .enumerate()
+                .filter(|&(t, w)| now.get(t) != Some(w))
+                .map(|(t, w)| {
+                    let mut c = track_cmd(t as u16);
+                    if let Command::SetPlaylistTrack { clip_lock, .. } = &mut c {
+                        *clip_lock = Some(match w {
+                            Some(ClipSource::Pattern(n)) => crate::control::command::LockIn { pattern: Some(*n), channel: None },
+                            Some(ClipSource::Channel(i)) => crate::control::command::LockIn { pattern: None, channel: p.channels.iter().find(|c| c.index == *i).map(|c| c.id.0) },
+                            None => crate::control::command::LockIn { pattern: None, channel: None },
+                        });
+                    }
+                    c
+                })
+                .collect();
+            if let Some(e) = arr_apply(s, if on { "Lock tracks to clips" } else { "Unlock tracks from clips" }, commands) {
+                return Some(e);
             }
             Some(m)
         }

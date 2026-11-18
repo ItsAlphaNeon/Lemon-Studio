@@ -368,6 +368,22 @@ pub enum Command {
         enabled: Option<bool>,
         #[serde(default)]
         grouped: Option<bool>,
+        /// Performance settings (spec: ui/performance-mode.md §4), as `os_model::PerfSettings` numbers them.
+        #[serde(default)]
+        motion: Option<u8>,
+        #[serde(default)]
+        press: Option<u8>,
+        #[serde(default)]
+        trigger_sync: Option<u8>,
+        #[serde(default)]
+        position_sync: Option<u8>,
+        #[serde(default)]
+        queue: Option<bool>,
+        #[serde(default)]
+        tolerant: Option<bool>,
+        /// The source Draw and Paint place on the track: a pattern by number or a clip channel by id; `{}` none.
+        #[serde(default)]
+        clip_lock: Option<LockIn>,
     },
     /// A new arrangement after the others, a copy of arrangement `copy` when given, else empty; named `name`, else
     /// "Arrangement N" (a copy: "<name> #2"). The result names its id.
@@ -795,6 +811,16 @@ pub struct GroupIn {
     pub channel: u32,
     #[serde(default)]
     pub group: Option<u32>,
+}
+
+/// A track's clip lock (`Command::SetPlaylistTrack`): a pattern by number or a clip channel by id, neither for none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockIn {
+    #[serde(default)]
+    pub pattern: Option<u16>,
+    #[serde(default)]
+    pub channel: Option<u32>,
 }
 
 /// A channel's loop value (`Command::SetLoops`).
@@ -2309,8 +2335,15 @@ impl Command {
                 s.touched.clips = true;
                 none
             }
-            Command::SetPlaylistTrack { track, name, color, enabled, grouped } => {
+            Command::SetPlaylistTrack { track, name, color, enabled, grouped, motion, press, trigger_sync, position_sync, queue, tolerant, clip_lock } => {
                 let color = color.map(|c| parse_color(&c)).transpose()?;
+                let lock = match clip_lock {
+                    Some(LockIn { pattern: Some(n), channel: None }) => Some(Some(ClipSource::Pattern(n))),
+                    Some(LockIn { pattern: None, channel: Some(c) }) => Some(Some(ClipSource::Channel(s.project.channels[channel_row(&s.project, c)?].index))),
+                    Some(LockIn { pattern: None, channel: None }) => Some(None),
+                    Some(_) => return Err("a lock is to a pattern or a channel".into()),
+                    None => None,
+                };
                 if track == 0 || track > crate::edit::playlist::TRACKS {
                     return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
                 }
@@ -2326,6 +2359,21 @@ impl Command {
                 }
                 if let Some(v) = grouped {
                     t.grouped = v && track > 1;
+                }
+                let p = &mut t.perf;
+                for (v, f) in [(motion, &mut p.motion), (press, &mut p.press), (trigger_sync, &mut p.trigger_sync), (position_sync, &mut p.position_sync)] {
+                    if let Some(v) = v {
+                        *f = v;
+                    }
+                }
+                if let Some(v) = queue {
+                    p.queue = v;
+                }
+                if let Some(v) = tolerant {
+                    p.tolerant = v;
+                }
+                if let Some(l) = lock {
+                    t.clip_lock = l;
                 }
                 none
             }
