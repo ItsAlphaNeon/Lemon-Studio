@@ -335,6 +335,19 @@ fn steps_paint_as_one_step_and_notes_keep_their_values() {
     assert_eq!((moved.position, moved.fine_pitch, moved.release), (first.position + 24, 100, 9));
 }
 
+/// An automation clip's points set as a list, undone and redone.
+#[test]
+fn automation_points_undo_and_redo() {
+    let mut a = app();
+    let pts = vec![os_model::AutoPoint::new(0.0, 0.2), os_model::AutoPoint::new(4.0, 0.8)];
+    let row = crate::playlist::automation_channel(&mut a.state, os_model::target::TEMPO, "Tempo", pts);
+    a.state.session.control.settle(a.state.session.project.get_mut());
+    let ch = a.state.session.project.channels[row].id.0;
+    round_trip(&mut a, json!({"op": "set_points", "channel": ch, "points": [{"beat": 0.0, "value": 0.5}, {"beat": 2.0, "value": 1.0, "tension": 0.5}, {"beat": 8.0, "value": 0.0, "mode": 2}]}));
+    let bad = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_points", "channel": ch, "points": [{"beat": 0.0, "value": 0.5}]}))]).unwrap_err();
+    assert!(bad.contains("two points"), "{bad}");
+}
+
 #[test]
 fn set_project_checks_its_values() {
     let mut a = app();

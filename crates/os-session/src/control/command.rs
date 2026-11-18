@@ -395,6 +395,9 @@ pub enum Command {
         #[serde(default)]
         clip_lock: Option<LockIn>,
     },
+    /// The points of the automation clip on channel `channel` (an id) become `points`, in beat order; a point named by
+    /// its id keeps its values for what is not given. A clip keeps two points at least.
+    SetPoints { channel: u32, points: Vec<PointIn> },
     /// A new arrangement after the others, a copy of arrangement `copy` when given, else empty; named `name`, else
     /// "Arrangement N" (a copy: "<name> #2"). The result names its id.
     AddArrangement {
@@ -796,6 +799,37 @@ impl ClipIn {
     }
 }
 
+/// An automation clip's point as commands give it: its beat (from the clip's start), value 0..=1, tension -1..=1,
+/// the shape of the segment it ends (`os_model::AutoMode`'s stored byte) and the stored flag; in `set_points`, a point
+/// named by its id keeps its values for what is not given.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointIn {
+    pub beat: f64,
+    pub value: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tension: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
+}
+
+impl PointIn {
+    /// Point `p` with everything it has.
+    pub fn of(p: &os_model::AutoPoint) -> PointIn {
+        PointIn { beat: p.beat, value: p.value, tension: Some(p.tension), mode: Some(p.mode.byte()), flag: Some(p.flag), id: (p.id.0 != 0).then_some(p.id.0) }
+    }
+}
+
+/// The automation clip on channel `id`.
+fn auto_of(p: &Project, id: u32) -> Result<&os_model::Automation, Error> {
+    let index = p.channels[channel_row(p, id)?].index;
+    p.automation(index).ok_or_else(|| format!("channel {id} has no automation clip"))
+}
+
 /// Arrangement `id`.
 fn arrangement_of(p: &Project, id: u32) -> Result<&os_model::Arrangement, Error> {
     p.arrangements.iter().find(|a| a.id.0 == id).ok_or_else(|| format!("no arrangement {id}"))
@@ -894,6 +928,8 @@ pub enum Taken {
     Mutes(Vec<(u32, bool)>),
     /// Which channels have their mute state locked, by id (a client's `set_channel` locking one: the step's own undo).
     Locks(Vec<(u32, bool)>),
+    /// An automation clip's points, by its channel's id.
+    Points(u32, Vec<os_model::AutoPoint>),
     /// A channel as it was before its instrument was replaced, and the id it has now (`Command::ReplaceInstrument`).
     Swap(Box<os_model::Channel>, u32),
     /// Which channels are zipped, by id (as `Locks`).
@@ -1280,6 +1316,7 @@ impl Command {
             Command::AddMarker { .. } | Command::SetMarker { .. } | Command::DeleteMarker { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::SetClips { .. } | Command::SetMarkers { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::AddArrangement { .. } => "Add arrangement",
+            Command::SetPoints { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::DeleteArrangement { .. } => "Delete arrangement",
             Command::SetArrangement { .. } => "Arrangement name",
             Command::MoveContent { .. } => crate::edit::playlist::ARRANGER_EDIT,
@@ -1403,6 +1440,7 @@ impl Command {
             // The arrangements' list, and which one is shown.
             Command::AddArrangement { .. } | Command::DeleteArrangement { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::SetArrangement { arrangement, .. } => Taken::Arrangement(Box::new(arrangement_of(p, *arrangement)?.clone())),
+            Command::SetPoints { channel, .. } => Taken::Points(*channel, auto_of(p, *channel)?.points.clone()),
             // A wrap moves plugins and what names them across the project.
             Command::WrapEffects { .. } | Command::WrapInstrument { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::LoadTrackState { track, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone())),
@@ -1476,6 +1514,7 @@ impl Command {
                 }),
                 Taken::Row(id, _) => Taken::Row(*id, channel_row(p, *id)?),
                 Taken::Swap(c, now) => Taken::Swap(Box::new(p.channels[channel_row(p, *now)?].clone()), c.id.0),
+                Taken::Points(ch, _) => Taken::Points(*ch, auto_of(p, *ch)?.points.clone()),
                 Taken::Removed(r) => Taken::Deleted(r.thing(), r.made(p)),
                 Taken::Deleted(thing, _) => Taken::Removed(Box::new(super::removal::Removed::of(s, *thing)?)),
             },
@@ -1525,6 +1564,7 @@ impl Command {
             | Taken::Gone(_)
             | Taken::Deleted(..)
             | Taken::Row(..)
+            | Taken::Points(..)
             | Taken::Swap(..) => {}
         }
     }
@@ -2401,6 +2441,39 @@ impl Command {
                 }
                 none
             }
+            Command::SetPoints { channel, points } => {
+                let index = s.project.channels[channel_row(&s.project, channel)?].index;
+                let held = auto_of(&s.project, channel)?.points.clone();
+                if points.len() < 2 {
+                    return Err("an automation clip keeps two points at least".into());
+                }
+                let mut list = Vec::with_capacity(points.len());
+                let mut seen = std::collections::HashSet::new();
+                for q in &points {
+                    if !(q.beat.is_finite() && q.beat >= 0.0) || !(0.0..=1.0).contains(&q.value) {
+                        return Err("a point's beat is 0 and up, its value 0..=1".into());
+                    }
+                    let was = q.id.and_then(|i| held.iter().find(|p| p.id.0 == i)).filter(|p| seen.insert(p.id.0));
+                    let mut p = was.copied().unwrap_or(os_model::AutoPoint { id: Id::NONE, ..os_model::AutoPoint::new(q.beat, q.value) });
+                    (p.beat, p.value) = (q.beat, q.value);
+                    if let Some(t) = q.tension {
+                        p.tension = t.clamp(-1.0, 1.0);
+                    }
+                    if let Some(m) = q.mode {
+                        p.mode = os_model::AutoMode::from_byte(m);
+                    }
+                    if let Some(f) = q.flag {
+                        p.flag = f;
+                    }
+                    list.push(p);
+                }
+                list.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+                if let Some(a) = s.project.get_mut().automation_mut(index) {
+                    a.points = list;
+                }
+                s.control.settle(s.project.get_mut());
+                none
+            }
             Command::AddArrangement { name, copy } => {
                 let n = s.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
                 let mut a = match copy {
@@ -2762,6 +2835,15 @@ fn put(s: &mut crate::session::Session, t: Taken) {
         Taken::Param(..) | Taken::Plugin(..) => {}
         Taken::Project(side) => restore(s, *side),
         Taken::Links(pairs) => crate::remote::retarget(&s.settings, &pairs),
+        Taken::Points(ch, points) => {
+            if let Ok(row) = channel_row(&s.project, ch) {
+                let index = s.project.channels[row].index;
+                if let Some(a) = s.project.get_mut().automation_mut(index) {
+                    a.points = points;
+                }
+                s.touched.repaint = true;
+            }
+        }
         Taken::Swap(c, now) => {
             if let Ok(row) = channel_row(&s.project, now) {
                 // The instrument there goes, kept by its channel's id; the one kept by `c`'s comes back on the tick

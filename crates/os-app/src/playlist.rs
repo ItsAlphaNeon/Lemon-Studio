@@ -107,6 +107,41 @@ pub fn arr_commit(s: &mut State, extra: Vec<Command>) -> bool {
     true
 }
 
+/// The points of automation channel `ch` (its index) as an edit or a drag of them starts (`auto_commit`).
+pub fn auto_begin(s: &mut State, ch: u16, name: &'static str) {
+    if s.session.project.automation(ch).is_some_and(|a| a.points.iter().any(|p| p.id == os_model::Id::NONE)) || s.session.project.channels.iter().any(|c| c.id == os_model::Id::NONE) {
+        crate::control_ui::settle_ids(s);
+    }
+    s.playlist.auto_before = s.session.project.automation(ch).map(|a| (name, ch, a.points.clone()));
+}
+
+/// The edit begun by `auto_begin` applied as `set_points`, one undo step (the points put back first, so the step holds
+/// its undo). False when nothing changed (no step).
+pub fn auto_commit(s: &mut State) -> bool {
+    let Some((name, ch, before)) = s.playlist.auto_before.take() else { return false };
+    let Some(after) = s.session.project.automation(ch).map(|a| a.points.clone()) else { return false };
+    let same = before.len() == after.len() && before.iter().zip(&after).all(|(a, b)| a == b && a.id.0 == b.id.0);
+    let Some(channel) = s.session.project.channels.iter().find(|c| c.index == ch).map(|c| c.id.0) else { return false };
+    if same {
+        return false;
+    }
+    if let Some(a) = s.session.project.get_mut().automation_mut(ch) {
+        a.points = before;
+    }
+    let c = Command::SetPoints { channel, points: after.iter().map(crate::control::command::PointIn::of).collect() };
+    if let Err(e) = crate::control_ui::command(s, name, None, vec![c]) {
+        s.message = Some(e);
+    }
+    true
+}
+
+/// `auto_begin`, `f`, `auto_commit`: an edit of automation channel `ch`'s points as one step.
+fn auto_edit(s: &mut State, ch: u16, f: impl FnOnce(&mut State)) {
+    auto_begin(s, ch, ARRANGER_EDIT);
+    f(s);
+    auto_commit(s);
+}
+
 /// `Command::SetPlaylistTrack` on track `t` (0-based) setting nothing yet.
 fn track_cmd(t: u16) -> Command {
     Command::SetPlaylistTrack {
@@ -718,6 +753,8 @@ pub struct TextEdit {
 }
 
 pub struct PlaylistState {
+    /// The automation points' edit or drag under way (`auto_begin`): its step's name, the channel and its points before.
+    pub auto_before: Option<(&'static str, u16, Vec<AutoPoint>)>,
     /// The edit or drag under way (`arr_begin`): its step's name and the shown arrangement's clips and markers before.
     pub arr_before: Option<(&'static str, Vec<Clip>, Vec<TimeMarker>)>,
     pub tool: PlTool,
@@ -841,6 +878,7 @@ fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
 impl Default for PlaylistState {
     fn default() -> Self {
         PlaylistState {
+            auto_before: None,
             arr_before: None,
             tool: PlTool::Draw,
             snap: EditorSnap::Main,
@@ -2580,7 +2618,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                     s.playlist.popup = Some(point_menu(s, ch, i, x, y));
                     return;
                 }
-                snapshot(&mut s.session);
+                auto_begin(s, ch, ARRANGER_EDIT);
                 let p = s.session.project.automation(ch).map(|a| a.points[i]).unwrap_or(AutoPoint::new(0.0, 0.0));
                 app.drag = Some(Drag::Pl(PlDrag::Point { ch, clip: ci, i, x0: x, y0: y, beat0: p.beat, v0: p.value, lock: None }));
                 app.hint = Cow::Owned(value_text(s, ch, p.value));
@@ -2588,7 +2626,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
             if !right {
                 if let Some(i) = handle_near(&s.session, &g, ci, x, y) {
-                    snapshot(&mut s.session);
+                    auto_begin(s, ch, ARRANGER_EDIT);
                     let t0 = s.session.project.automation(ch).map_or(0.0, |a| a.points[i].tension);
                     app.drag = Some(Drag::Pl(PlDrag::Tension { ch, i, y0: y, t0 }));
                     return;
@@ -2596,7 +2634,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
             if edge(g.clip_rect(&c), x) == 0 && curve_dist(&s.session, &g, ci, x, y).is_some_and(|d| d <= 6.0) {
                 // Left-click on the curve adds a point (owner); FL's right-click adds one too.
-                snapshot(&mut s.session);
+                auto_begin(s, ch, ARRANGER_EDIT);
                 let beat = beat_at(&s.session, &g, &c, x);
                 let v = value_at_y(g.body(&c), y);
                 if let Some(i) = add_point(&mut s.session, ch, beat, v) {
@@ -3185,6 +3223,8 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
     }
+    // A drag of automation points (`auto_begin` at the press) as one step.
+    auto_commit(s);
     // The drag's edit of the clips (`arr_begin` at the press) as one step; a click that changed nothing makes none.
     let begun = s.playlist.arr_before.is_some();
     if !begun {
@@ -3605,7 +3645,7 @@ pub fn commit_edit(s: &mut State) {
         EditTarget::PointValue(ch, i) => {
             if let Some(v) = parse_value(&s.session, ch, &text) {
                 let beat = s.session.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.beat);
-                move_point(&mut s.session, ch, i, beat, v);
+                auto_edit(s, ch, |s| move_point(&mut s.session, ch, i, beat, v));
             }
         }
         EditTarget::MixerName(n) => {
@@ -4291,8 +4331,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             r.err()
         }
         Cmd::PointDelete(ch, i) => {
-            snapshot(&mut s.session);
-            delete_point(&mut s.session, ch, i);
+            auto_edit(s, ch, |s| delete_point(&mut s.session, ch, i));
             None
         }
         Cmd::PointCopy(ch, i) => {
@@ -4301,17 +4340,16 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::PointPaste(ch, i) => {
             let (Some(v), Some(beat)) = (s.value_clip, s.session.project.automation(ch).and_then(|a| a.points.get(i)).map(|p| p.beat)) else { return None };
-            snapshot(&mut s.session);
-            move_point(&mut s.session, ch, i, beat, v);
+            auto_edit(s, ch, |s| move_point(&mut s.session, ch, i, beat, v));
             None
         }
         Cmd::PointMode(ch, i, m) => {
-            snapshot(&mut s.session);
-            if let Some(p) = s.session.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
-                p.mode = m;
-                p.flag = if m.has_tension() && !matches!(m, AutoMode::Stairs | AutoMode::SmoothStairs | AutoMode::Pulse | AutoMode::Wave) { 2 } else { 0 };
-            }
-            s.session.dirty = true;
+            auto_edit(s, ch, |s| {
+                if let Some(p) = s.session.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
+                    p.mode = m;
+                    p.flag = if m.has_tension() && !matches!(m, AutoMode::Stairs | AutoMode::SmoothStairs | AutoMode::Pulse | AutoMode::Wave) { 2 } else { 0 };
+                }
+            });
             None
         }
         Cmd::TrackRename(t) => {
