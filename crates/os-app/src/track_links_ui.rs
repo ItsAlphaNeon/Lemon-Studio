@@ -128,24 +128,30 @@ pub fn set_mode(s: &mut State, t: u16, mode: Mode) -> Option<String> {
 }
 
 /// Track mode ▸ Instrument track ▸ and a generator (spec: ui/playlist.md §6c, measured): a new channel with that plugin,
-/// as ADD makes one (`plugin_menu::add_generator_now`), and track `t` becomes its instrument track, named and coloured
+/// as ADD makes one (`plugin_menu::add_generator`), and track `t` becomes its instrument track, named and coloured
 /// after it, its insert named after it. One undo step, "Playlist track mode".
 pub fn new_instrument(app: &mut crate::app::App, t: u16, index: usize) -> Option<String> {
-    crate::control_ui::edit_app(app, TRACK_MODE, crate::control::command::Region::Project, |app| {
-        let rows = app.state.session.project.channels.len();
-        let msg = crate::plugin_menu::add_generator_now(app, index, None);
-        if app.state.session.project.channels.len() == rows {
-            return msg;
-        }
-        let row = app.state.selected_channel;
-        crate::control_ui::settle_ids(&mut app.state);
-        let cmds = instrument_link(&app.state, t, row);
-        if let Err(e) = crate::control_ui::run(&mut app.state, cmds) {
-            return Some(e);
-        }
-        app.state.playlist.track = t;
-        Some(format!("Added {} on {}", crate::edit::rack::channel_name(&app.state.session, row), crate::edit::playlist::track_name(&app.state.session, t)))
-    })
+    let d = app.state.session.plugins.available.get(index)?.desc.clone();
+    let s = &mut app.state;
+    let sampler = crate::plugin_menu::is_sampler(&d);
+    crate::control_ui::settle_ids(s);
+    let first = vec![Command::AddChannel { name: None, plugin: (!sampler).then(|| d.name.clone()), sample: None, track: None, kind: None, color: None, target: None, points: Vec::new(), children: Vec::new() }];
+    let id_of = |r: &[serde_json::Value]| r.first().and_then(|v| v["channel"].as_u64()).map(|id| id as u32);
+    let made = crate::control_ui::command_then(s, TRACK_MODE, first, |s, r| {
+        let row = id_of(r).and_then(|id| s.session.project.channels.iter().position(|c| c.id.0 == id));
+        row.map(|row| instrument_link(s, t, row)).unwrap_or_default()
+    });
+    let id = match made {
+        Ok(r) => id_of(&r)?,
+        Err(e) => return Some(e),
+    };
+    let row = s.session.project.channels.iter().position(|c| c.id.0 == id)?;
+    crate::plugin_menu::open_hosted(s, id, row, sampler, index);
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    crate::rack::autosize(s);
+    s.playlist.track = t;
+    Some(format!("Added {} on {}", crate::edit::rack::channel_name(&s.session, row), crate::edit::playlist::track_name(&s.session, t)))
 }
 
 /// The Track mode ▸ submenu for track `t`: Unassigned, Audio track ▸ (a new mixer track, then every insert), Instrument

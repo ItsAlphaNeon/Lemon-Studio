@@ -204,7 +204,7 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
     use crate::control::command::Command;
     let d = app.state.session.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
-    let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
+    let sampler = is_sampler(&d);
     crate::mixer::track_ids(s);
     let n = s.session.project.channels.len();
     let to = after.filter(|&r| r + 1 < n).map(|r| r + 1);
@@ -231,46 +231,20 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
     sampler.then(|| "Added a sampler channel (Lemon Sampler)".into())
 }
 
+/// Whether generator `d` is the built-in Lemon Sampler (a channel of its own kind, no plugin).
+pub fn is_sampler(d: &os_host::Descriptor) -> bool {
+    d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(d)
+}
+
 /// Channel `id` on row `row` just given generator `index`: the interface hosts it its own way, so its plugin window
 /// opens (a command's own hosting opens none, `control::host`).
-fn open_hosted(s: &mut crate::app::State, id: u32, row: usize, sampler: bool, index: usize) {
+pub fn open_hosted(s: &mut crate::app::State, id: u32, row: usize, sampler: bool, index: usize) {
     s.session.control.host.retain(|r| !matches!(r, crate::control::HostReq::Instrument { channel, .. } if channel.0 == id));
     if sampler {
         s.session.pending_open = Some(row);
     } else {
         s.session.pending_plugin = Some((row, index));
     }
-}
-
-/// `add_generator` with no step of its own, inside another edit's (Assign to new instrument track; the playlist's area
-/// of control-plane step 14 moves it).
-pub fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
-    let d = app.state.session.plugins.available.get(index)?.desc.clone();
-    let s = &mut app.state;
-    let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
-    let mut ch = if sampler { crate::projects::add_channel(s.session.project.get_mut()) } else { crate::projects::add_plugin_channel(s.session.project.get_mut(), &d.name) };
-    if sampler {
-        s.session.pending_open = Some(ch);
-    } else {
-        s.session.pending_plugin = Some((ch, index));
-    }
-    s.session.dirty = true;
-    if let Some(r) = after.filter(|&r| r + 1 < ch) {
-        let order: Vec<usize> = (0..=r).chain([ch]).chain(r + 1..ch).collect();
-        crate::rack::reorder(app, &order);
-        ch = r + 1;
-    }
-    let s = &mut app.state;
-    s.selected_channel = ch;
-    s.rack.select_only(ch);
-    crate::rack::autosize(s);
-    if after.is_none() {
-        // Keep the new row in view.
-        let r = crate::views::rack::rect(s);
-        let view_h = crate::views::rack::panel(r).h;
-        s.rack_scroll = (crate::views::rack::content_h(s) - view_h).max(0.0);
-    }
-    sampler.then(|| "Added a sampler channel (Lemon Sampler)".into())
 }
 
 /// Generator `index` in place of rack row `row`'s (channel menu and plugin window menu > Replace ▸; FL: "the plugin list

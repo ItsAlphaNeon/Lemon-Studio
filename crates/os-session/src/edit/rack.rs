@@ -520,6 +520,14 @@ pub fn remove_last(s: &mut crate::session::Session) {
 }
 
 /// `push_channel` in the session; the rack's height follows.
+/// The channel a channel state file holds.
+pub fn read_channel_state(path: &std::path::Path) -> Result<os_model::Channel, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let file = os_flp::FlpFile::parse(&bytes).map_err(|e| e.to_string())?;
+    let p = os_flp::project::load(&file).map_err(|e| e.to_string())?;
+    p.channels.into_iter().next().ok_or_else(|| "it holds no channel".into())
+}
+
 pub fn push_channel_in(s: &mut crate::session::Session, mut ch: os_model::Channel) {
     ch.index = s.project.channels.len() as u16;
     s.project.get_mut().channels.push(ch);

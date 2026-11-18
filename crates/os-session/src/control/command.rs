@@ -96,6 +96,13 @@ pub enum Command {
         #[serde(default)]
         mixer: Option<u32>,
     },
+    /// The channel a channel state file holds as the rack's last row, named `name` (else the file's channel name, else
+    /// the file's name); its plugin starts from the state the file holds. The result names its id.
+    LoadChannelState {
+        path: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// Automatic crossfades on or off: on, the audio clips that overlap on a track crossfade there; off, the crossfades
     /// they made go (spec: audio/audio-clips.md "Automatic crossfades").
     SetAutoCrossfades { on: bool },
@@ -1378,6 +1385,7 @@ impl Command {
             Command::MoveChannel { .. } => "Move channel",
             Command::SetChannel { .. } => "Channel settings",
             Command::LoadSample { .. } => crate::history::LOAD_SAMPLE,
+            Command::LoadChannelState { .. } => "Load channel state",
             Command::AddTrack { .. } => "Insert mixer track",
             Command::DeleteTrack { .. } => "Delete mixer track",
             Command::SetTrack { .. } => "Mixer track settings",
@@ -1491,7 +1499,7 @@ impl Command {
 
     /// A command that adds a thing: its undo takes it away, so applying it always changes the project.
     pub fn adds(&self) -> bool {
-        matches!(self, Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::CopyPattern { .. } | Command::AddClip { .. })
+        matches!(self, Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::LoadChannelState { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::CopyPattern { .. } | Command::AddClip { .. })
     }
 
     pub fn undo_now(&self, s: &crate::session::Session) -> Result<Command, Error> {
@@ -1569,7 +1577,7 @@ impl Command {
             Command::ReplaceInstrument { channel, .. } => Taken::Swap(Box::new(p.channels[channel_row(p, *channel)?].clone()), *channel),
             Command::SetGroups { .. } => groups(p),
             // What an add made is known once it is made (`apply`); this is not used.
-            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::CopyPattern { .. } => Taken::Gone(Thing::Channel(0)),
+            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::LoadChannelState { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::CopyPattern { .. } => Taken::Gone(Thing::Channel(0)),
             Command::DeleteChannel { channel } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Channel(*channel))?)),
             Command::DeletePattern { pattern } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Pattern(*pattern))?)),
             Command::DeleteTrack { track } => Taken::Removed(Box::new(super::removal::Removed::of(s, Thing::Track(*track))?)),
@@ -1710,7 +1718,7 @@ impl Command {
             _ => self.take(s)?,
         };
         let added = match &self {
-            Command::AddChannel { .. } | Command::CloneChannel { .. } => Some(Thing::Channel as fn(u32) -> Thing),
+            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::LoadChannelState { .. } => Some(Thing::Channel as fn(u32) -> Thing),
             Command::AddTrack { .. } => Some(Thing::Track as fn(u32) -> Thing),
             Command::AddPattern { .. } | Command::CopyPattern { .. } => Some(Thing::Pattern as fn(u32) -> Thing),
             _ => None,
@@ -2252,6 +2260,21 @@ impl Command {
                     n = o;
                 }
                 none
+            }
+            Command::LoadChannelState { path, name } => {
+                let path = std::path::PathBuf::from(path);
+                let mut ch = crate::edit::rack::read_channel_state(&path).map_err(|e| format!("couldn't read the channel state {}: {e}", path.display()))?;
+                ch.id = os_model::Id::NONE;
+                if let Some(n) = name {
+                    ch.name = text(&n);
+                }
+                if ch.name.as_deref().is_none_or(str::is_empty) {
+                    ch.name = path.file_stem().map(|n| n.to_string_lossy().into_owned());
+                }
+                let row = s.project.channels.len();
+                crate::edit::rack::push_channel_in(s, ch);
+                s.control.settle(s.project.get_mut());
+                Ok(id_result("channel", s.project.channels[row].id))
             }
             Command::LoadTrackState { track, path, named } => {
                 let n = track_number(&s.project, track)?;
