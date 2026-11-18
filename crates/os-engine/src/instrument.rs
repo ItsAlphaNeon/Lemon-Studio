@@ -167,10 +167,10 @@ pub trait Instrument: Send {
         false
     }
     /// True for a third-party plugin, which FL plays through its plugin wrapper: when the engine applies the channel's
-    /// volume and pan to its output (`channel_levels` false), a centred channel gives each side the volume's full level
-    /// (the pan split of `volume * sqrt(2)`), not `cos(pi / 4)` of it. Measured on FL 12.5.1: a VST 2 plugin that
-    /// plays a constant 0.25 came out of a channel exactly twice as loud as `volume * cos(pi / 4)` gives. Default false
-    /// (Lemon Studio's own instruments, which stand in for FL's native ones).
+    /// volume and pan to its output (`channel_levels` false), it splits twice the volume (`sqrt(2)` of it on each side
+    /// of a centred channel). Measured on FL 12.5.1: a VST 2 plugin that plays a constant 0.25 came out of a channel
+    /// exactly twice as loud as the pan split of the volume gives. Default false (Lemon Studio's own instruments, which
+    /// stand in for FL's native ones).
     fn wrapper_levels(&self) -> bool {
         false
     }
