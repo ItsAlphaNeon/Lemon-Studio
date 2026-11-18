@@ -201,6 +201,10 @@ impl State {
             lfo_speed: self.control(Control::LfoSpeed),
             cutoff: self.control(Control::Cutoff),
             mod_wheel: self.control(Control::Mod).unwrap_or(0),
+            reverb_on: self.built_in(0),
+            chorus_on: self.built_in(1),
+            reverb_level: self.control(Control::ReverbLevel).unwrap_or(128),
+            chorus_level: self.control(Control::ChorusLevel).unwrap_or(128),
         }
     }
 

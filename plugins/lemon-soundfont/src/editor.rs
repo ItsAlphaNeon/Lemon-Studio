@@ -240,13 +240,19 @@ impl Logic {
             Some(Target::Name) => "Preset\tclick: the font's presets".into(),
             Some(Target::Prev) => "Previous preset".into(),
             Some(Target::Next) => "Next preset".into(),
+            Some(Target::Value(c @ (Control::ReverbLevel | Control::ChorusLevel))) if mode == Mode::Classic => {
+                format!("{}: {}	Classic plays no built-in effects", view::name(*c), view::text(*c, st.control(*c), mode))
+            }
             Some(Target::Value(c)) => format!("{}: {}", view::name(*c), view::text(*c, st.control(*c), mode)),
             Some(Target::Send(fx)) => {
                 let tr = st.send(*fx);
                 let what = if *fx == 0 { "Reverb" } else { "Chorus" };
-                if tr < 0 { format!("{what} send: none") } else { format!("{what} send: mixer track {tr}") }
+                if tr < 0 { format!("{what} send: none") } else { format!("{what} send: mixer track {tr}	kept in the project, not played") }
             }
-            Some(Target::BuiltIn(fx)) => format!("{} built-in: {}", if *fx == 0 { "Reverb" } else { "Chorus" }, if st.built_in(*fx) { "on" } else { "off" }),
+            Some(Target::BuiltIn(fx)) => {
+                let s = format!("{} built-in: {}", if *fx == 0 { "Reverb" } else { "Chorus" }, if st.built_in(*fx) { "on" } else { "off" });
+                if mode == Mode::Classic { format!("{s}	Classic plays no built-in effects") } else { s }
+            }
             Some(Target::Mode(m)) => Self::mode_hint(*m).into(),
             Some(Target::Logo) => "Lemon SoundFont Player".into(),
             None => String::new(),

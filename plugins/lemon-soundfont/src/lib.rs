@@ -10,6 +10,7 @@
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod dsp;
+pub mod effects;
 pub mod editor;
 pub mod params;
 pub mod profile;

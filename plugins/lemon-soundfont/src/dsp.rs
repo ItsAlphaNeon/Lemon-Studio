@@ -40,6 +40,11 @@ pub struct Overrides {
     pub cutoff: Option<i32>,
     /// The modulation wheel, 0..=127.
     pub mod_wheel: i32,
+    /// The built-in reverb and chorus: on, and their levels (0..=2560, 128 = the default).
+    pub reverb_on: bool,
+    pub chorus_on: bool,
+    pub reverb_level: i32,
+    pub chorus_level: i32,
 }
 
 fn timecents_to_secs(tc: i32) -> f64 {
@@ -754,6 +759,10 @@ pub struct Engine {
     age: u64,
     /// Per-voice tuning from the host (semitones), by voice id.
     tunings: Vec<(Option<i32>, u8, f64)>,
+    chorus: Option<crate::effects::Chorus>,
+    reverb: Option<crate::effects::Reverb>,
+    /// Frames the effects' tails still ring after the last voice.
+    tail: usize,
 }
 
 impl Engine {
@@ -768,11 +777,23 @@ impl Engine {
             ended: Vec::new(),
             age: 0,
             tunings: Vec::new(),
+            chorus: None,
+            reverb: None,
+            tail: 0,
         }
     }
 
     pub fn set_rate(&mut self, rate: f32) {
         self.rate = f64::from(rate);
+        self.chorus = None;
+        self.reverb = None;
+    }
+
+    /// Whether the built-in effects play: the modern mode, switched on, above level 0.
+    fn effects(&self) -> (bool, bool) {
+        let o = &self.overrides;
+        let m = self.mode == Mode::Modern;
+        (m && o.chorus_on && o.chorus_level > 0, m && o.reverb_on && o.reverb_level > 0)
     }
 
     pub fn set_patch(&mut self, p: Option<Arc<Patch>>) {
@@ -788,8 +809,9 @@ impl Engine {
         }
     }
 
+    /// Whether anything still sounds: a voice, or an effect's tail.
     pub fn has_voices(&self) -> bool {
-        !self.voices.is_empty()
+        !self.voices.is_empty() || self.tail > 0
     }
 
     pub fn take_ended(&mut self) -> Vec<(u8, Option<i32>)> {
@@ -859,6 +881,7 @@ impl Engine {
 
     pub fn render(&mut self, l: &mut [f32], r: &mut [f32]) {
         let (rate, c) = (self.rate, self.controls);
+        let sounding = !self.voices.is_empty();
         let mut i = 0;
         while i < self.voices.len() {
             let v = &mut self.voices[i];
@@ -873,6 +896,38 @@ impl Engine {
                 }
             }
         }
+        let (ch, rv) = self.effects();
+        if !(ch || rv) {
+            self.tail = 0;
+            return;
+        }
+        // A voice that sounded in this block starts (or restarts) the tails.
+        if sounding {
+            let (rt, _) = crate::effects::Reverb::settings(self.overrides.reverb_level);
+            self.tail = ((rt * 1.2 + 0.1) * rate) as usize;
+        }
+        if self.tail == 0 {
+            return;
+        }
+        let rate = self.rate;
+        let cg = crate::effects::Chorus::gain(self.overrides.chorus_level);
+        let (rt, rg) = crate::effects::Reverb::settings(self.overrides.reverb_level);
+        let rg = crate::effects::reverb_gain(rt, rg) as f32;
+        let chorus = self.chorus.get_or_insert_with(|| crate::effects::Chorus::new(rate));
+        let reverb = self.reverb.get_or_insert_with(|| crate::effects::Reverb::new(rate));
+        for i in 0..l.len() {
+            let x = 0.5 * (l[i] + r[i]);
+            let (mut a, mut b) = (l[i], r[i]);
+            if ch {
+                chorus.run(x, cg, &mut a, &mut b);
+            }
+            if rv {
+                reverb.run(x, rt, rg, &mut a, &mut b);
+            }
+            l[i] = a;
+            r[i] = b;
+        }
+        self.tail = self.tail.saturating_sub(l.len());
     }
 }
 

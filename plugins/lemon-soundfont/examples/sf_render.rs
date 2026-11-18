@@ -38,6 +38,8 @@ fn main() {
             "lfo_speed" => ov.lfo_speed = Some(v),
             "cutoff" => ov.cutoff = Some(v),
             "mod" => ov.mod_wheel = v,
+            "reverb" => (ov.reverb_on, ov.reverb_level) = (true, v),
+            "chorus" => (ov.chorus_on, ov.chorus_level) = (true, v),
             _ => panic!("unknown control {k}"),
         }
     }
