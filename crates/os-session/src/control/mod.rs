@@ -291,6 +291,8 @@ fn op(c: &Command) -> &'static str {
         Command::DeleteClip { .. } => "delete_clip",
         Command::SetClip { .. } => "set_clip",
         Command::SetPlaylistTrack { .. } => "set_playlist_track",
+        Command::SetClips { .. } => "set_clips",
+        Command::SetMarkers { .. } => "set_markers",
         Command::AddMarker { .. } => "add_marker",
         Command::SetMarker { .. } => "set_marker",
         Command::DeleteMarker { .. } => "delete_marker",

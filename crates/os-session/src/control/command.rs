@@ -369,6 +369,12 @@ pub enum Command {
         #[serde(default)]
         grouped: Option<bool>,
     },
+    /// The shown arrangement's clips become `clips`, in this order (the order they are drawn in): a clip named by the id
+    /// of one the playlist holds keeps it, and its values for what is not given; the others are new.
+    SetClips { clips: Vec<ClipIn> },
+    /// The shown arrangement's markers become `markers` (put in position order), a marker named by its id kept as
+    /// `set_clips` keeps clips.
+    SetMarkers { markers: Vec<MarkerIn> },
     /// A time marker in the playlist (spec: ui/playlist.md §7a). The result names its id.
     AddMarker { marker: MarkerIn },
     /// Each setting given is set on the marker.
@@ -587,6 +593,9 @@ pub struct MarkerIn {
     pub root: Option<u8>,
     #[serde(default)]
     pub scale: Option<i32>,
+    /// `set_markers`: the marker's id, kept when the arrangement held a marker with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
 }
 
 impl MarkerIn {
@@ -625,7 +634,127 @@ impl MarkerIn {
             denominator: Some(m.denominator),
             root: key.then_some(m.root),
             scale: key.then_some(m.scale_index),
+            id: (m.id.0 != 0).then_some(m.id.0),
         }
+    }
+
+    /// The marker, starting from the one of `held` its id names (its values not given kept), else made new.
+    pub fn made_from(&self, held: &[os_model::TimeMarker]) -> Result<os_model::TimeMarker, Error> {
+        let Some(was) = self.id.and_then(|i| held.iter().find(|m| m.id.0 == i)) else {
+            let mut m = self.made()?;
+            m.id = Id::NONE;
+            return Ok(m);
+        };
+        ticks("position", self.position)?;
+        let mut m = was.clone();
+        m.position = self.position;
+        if let Some(n) = &self.name {
+            m.name = n.clone();
+        }
+        if let Some(k) = self.kind {
+            m.kind = k;
+        }
+        if let Some(n) = self.numerator {
+            m.numerator = n;
+        }
+        if let Some(d) = self.denominator {
+            m.denominator = d;
+        }
+        if let (Some(r), Some(k)) = (self.root, self.scale) {
+            if (r, k) != (was.root, was.scale_index) {
+                let key = os_model::TimeMarker::key(m.position, r.min(11), k);
+                (m.root, m.scale, m.scale_index, m.flag) = (key.root, key.scale, key.scale_index, key.flag);
+            }
+        }
+        Ok(m)
+    }
+}
+
+/// A playlist clip as commands give it: its place (`track` 1-based), its source (a pattern by its number, which a clip
+/// may name without the project holding that pattern, or an audio or automation clip channel by its id), muted, its
+/// window into the source (start and end, as stored), and the record as stored (`record`: kept for a copy). In
+/// `set_clips`, a clip named by its id keeps its values for what is not given.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipIn {
+    pub track: u16,
+    pub position: u32,
+    pub length: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+    /// `[]` for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
+}
+
+impl ClipIn {
+    /// Clip `c` with everything it has (its channel by id, from `p`).
+    pub fn of(c: &Clip, p: &Project) -> ClipIn {
+        let (pattern, channel) = match c.source {
+            ClipSource::Pattern(n) => (Some(n), None),
+            ClipSource::Channel(i) => (None, p.channels.iter().find(|x| x.index == i).map(|x| x.id.0)),
+        };
+        ClipIn {
+            track: c.track + 1,
+            position: c.position,
+            length: c.length,
+            pattern,
+            channel,
+            muted: Some(c.muted),
+            window: Some(c.window.map_or_else(Vec::new, |(a, b)| vec![a, b])),
+            record: Some(c.raw.to_vec()),
+            id: (c.id.0 != 0).then_some(c.id.0),
+        }
+    }
+
+    /// The clip, starting from the one of `held` its id names, else from a new clip's record.
+    pub fn made(&self, p: &Project, held: &[Clip]) -> Result<Clip, Error> {
+        ticks("position", self.position)?;
+        ticks("length", self.length)?;
+        if self.length == 0 {
+            return Err("a clip's length can't be 0".into());
+        }
+        if self.track == 0 || self.track > crate::edit::playlist::TRACKS {
+            return Err(format!("playlist tracks are 1..={}", crate::edit::playlist::TRACKS));
+        }
+        let was = self.id.and_then(|i| held.iter().find(|c| c.id.0 == i));
+        let source = match (self.pattern, self.channel) {
+            (Some(n), None) if (1..=crate::edit::patterns::MAX).contains(&n) => ClipSource::Pattern(n),
+            (Some(n), None) => return Err(format!("patterns are 1..={}, not {n}", crate::edit::patterns::MAX)),
+            (None, Some(c)) => ClipSource::Channel(p.channels[channel_row(p, c)?].index),
+            (None, None) if was.is_some() => was.map(|c| c.source).unwrap_or(ClipSource::Pattern(1)),
+            _ => return Err("a clip has a pattern or a channel".into()),
+        };
+        let mut c = was.copied().unwrap_or_else(|| Clip::new(self.position, self.length, self.track - 1, source));
+        (c.position, c.length, c.track, c.source) = (self.position, self.length, self.track - 1, source);
+        if was.is_none() {
+            c.id = Id::NONE;
+        }
+        if let Some(m) = self.muted {
+            c.muted = m;
+        }
+        if let Some(w) = &self.window {
+            c.window = match w.as_slice() {
+                [] => None,
+                [a, b] => Some((*a, *b)),
+                _ => return Err("a clip's window is [start, end], or [] for none".into()),
+            };
+        }
+        if let Some(r) = &self.record {
+            if r.len() != c.raw.len() {
+                return Err(format!("a clip's record is {} bytes", c.raw.len()));
+            }
+            c.raw.copy_from_slice(r);
+        }
+        Ok(c)
     }
 }
 
@@ -1096,6 +1225,7 @@ impl Command {
             Command::SetClip { .. } => "Edit clip",
             Command::SetPlaylistTrack { .. } => "Playlist track",
             Command::AddMarker { .. } | Command::SetMarker { .. } | Command::DeleteMarker { .. } => crate::edit::playlist::ARRANGER_EDIT,
+            Command::SetClips { .. } | Command::SetMarkers { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::MoveContent { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::SwapPlaylistTracks { .. } | Command::InsertPlaylistTrack { .. } | Command::DeletePlaylistTrack { .. } | Command::ResetPlaylistTrack { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::SetClipLfo { .. } => "Automation clip LFO",
@@ -1200,6 +1330,8 @@ impl Command {
             | Command::InsertPlaylistTrack { .. }
             | Command::DeletePlaylistTrack { .. }
             | Command::ResetPlaylistTrack { .. }
+            | Command::SetClips { .. }
+            | Command::SetMarkers { .. }
             | Command::AddMarker { .. }
             | Command::SetMarker { .. }
             | Command::DeleteMarker { .. }
@@ -2172,6 +2304,36 @@ impl Command {
                 if let Some(v) = grouped {
                     t.grouped = v && track > 1;
                 }
+                none
+            }
+            Command::SetClips { clips } => {
+                let held: Vec<Clip> = crate::edit::playlist::clips(s).to_vec();
+                let list = clips.iter().map(|c| c.made(&s.project, &held)).collect::<Result<Vec<_>, _>>()?;
+                // Each id once: a second clip naming one is new.
+                let mut seen = std::collections::HashSet::new();
+                let list: Vec<Clip> = list.into_iter().map(|mut c| {
+                    if c.id != Id::NONE && !seen.insert(c.id.0) {
+                        c.id = Id::NONE;
+                    }
+                    c
+                }).collect();
+                crate::edit::playlist::arr_mut(s).clips = list;
+                s.control.settle(s.project.get_mut());
+                s.touched.clips = true;
+                none
+            }
+            Command::SetMarkers { markers } => {
+                let held: Vec<os_model::TimeMarker> = crate::edit::playlist::markers(s).to_vec();
+                let mut list = markers.iter().map(|m| m.made_from(&held)).collect::<Result<Vec<_>, _>>()?;
+                let mut seen = std::collections::HashSet::new();
+                for m in &mut list {
+                    if m.id != Id::NONE && !seen.insert(m.id.0) {
+                        m.id = Id::NONE;
+                    }
+                }
+                list.sort_by_key(|m| m.position);
+                crate::edit::playlist::arr_mut(s).markers = list;
+                s.control.settle(s.project.get_mut());
                 none
             }
             Command::AddMarker { marker } => {

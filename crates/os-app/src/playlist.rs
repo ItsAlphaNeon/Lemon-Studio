@@ -40,6 +40,50 @@ fn arr_apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Optio
     crate::control_ui::command(s, name, None, commands).err()
 }
 
+/// A playlist edit `f` of the interface's own (it works on the shown arrangement's clips and markers) applied as
+/// commands: what it made of them goes in by `set_clips` and `set_markers`, as one undo step named `name` (none when
+/// nothing changed). `f` works on the arrangement, which is put back before the commands apply its result, so the step
+/// holds their undo and a client could have made the same edit. The selection `f` leaves is kept: the commands give
+/// the clips their order.
+pub fn arr_edit<R>(s: &mut State, name: &'static str, f: impl FnOnce(&mut State) -> R) -> R {
+    // A project without an arrangement yet: the first edit makes one, the whole arrangement's step.
+    if s.session.project.arrangement().is_none() {
+        snapshot_as(&mut s.session, name);
+        return f(s);
+    }
+    clip_ids(s);
+    if markers(&s.session).iter().any(|m| m.id == os_model::Id::NONE) {
+        crate::control_ui::settle_ids(s);
+    }
+    let (clips0, markers0) = (clips(&s.session).to_vec(), markers(&s.session).to_vec());
+    let r = f(s);
+    let (clips1, markers1) = (clips(&s.session).to_vec(), markers(&s.session).to_vec());
+    let same = |a: &[Clip], b: &[Clip]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y && x.id.0 == y.id.0);
+    let clips_changed = !same(&clips0, &clips1);
+    let markers_changed = markers0 != markers1;
+    if !clips_changed && !markers_changed {
+        return r;
+    }
+    let sel = s.playlist.sel.clone();
+    let p = &s.session.project;
+    let mut commands = Vec::new();
+    if clips_changed {
+        commands.push(Command::SetClips { clips: clips1.iter().map(|c| crate::control::command::ClipIn::of(c, p)).collect() });
+    }
+    if markers_changed {
+        commands.push(Command::SetMarkers { markers: markers1.iter().map(crate::control::command::MarkerIn::of).collect() });
+    }
+    {
+        let a = arr_mut(&mut s.session);
+        (a.clips, a.markers) = (clips0, markers0);
+    }
+    if let Err(e) = crate::control_ui::command(s, name, None, commands) {
+        s.message = Some(e);
+    }
+    s.playlist.sel = sel;
+    r
+}
+
 /// `Command::SetPlaylistTrack` on track `t` (0-based) setting nothing yet.
 fn track_cmd(t: u16) -> Command {
     Command::SetPlaylistTrack { track: t + 1, name: None, color: None, enabled: None, grouped: None }
@@ -3855,40 +3899,36 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::Cut => {
             copy(s);
-            snapshot(&mut s.session);
             let sel = s.playlist.sel.clone();
-            delete(s, sel);
+            arr_edit(s, ARRANGER_EDIT, |s| delete(s, sel));
             None
         }
         Cmd::Paste => {
-            snapshot(&mut s.session);
-            paste(s);
+            arr_edit(s, ARRANGER_EDIT, paste);
             None
         }
         Cmd::Duplicate => {
-            snapshot(&mut s.session);
-            duplicate(s);
+            arr_edit(s, ARRANGER_EDIT, duplicate);
             None
         }
         Cmd::Delete => {
-            snapshot(&mut s.session);
             let sel = s.playlist.sel.clone();
-            delete(s, sel);
+            arr_edit(s, ARRANGER_EDIT, |s| delete(s, sel));
             None
         }
         Cmd::ShiftTime(d) => {
-            snapshot(&mut s.session);
             let u = grid.map_or(ppq(&s.session), |g| snap_unit(s, PGeom::new(s, g).bar_w)) as i64;
-            let idx = targets(s);
-            let arr = arr_mut(&mut s.session);
-            let min = idx.iter().filter_map(|&i| arr.clips.get(i)).map(|c| i64::from(c.position)).min().unwrap_or(0);
-            let dt = (i64::from(d) * u).max(-min);
-            for &i in &idx {
-                if let Some(c) = arr.clips.get_mut(i) {
-                    c.position = (i64::from(c.position) + dt) as u32;
+            arr_edit(s, ARRANGER_EDIT, |s| {
+                let idx = targets(s);
+                let arr = arr_mut(&mut s.session);
+                let min = idx.iter().filter_map(|&i| arr.clips.get(i)).map(|c| i64::from(c.position)).min().unwrap_or(0);
+                let dt = (i64::from(d) * u).max(-min);
+                for &i in &idx {
+                    if let Some(c) = arr.clips.get_mut(i) {
+                        c.position = (i64::from(c.position) + dt) as u32;
+                    }
                 }
-            }
-            s.session.dirty = true;
+            });
             None
         }
         Cmd::ShiftTracks(d) => {
@@ -3896,15 +3936,15 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::Mute(on) => {
-            snapshot(&mut s.session);
-            let idx = targets(s);
-            let arr = arr_mut(&mut s.session);
-            for i in idx {
-                if let Some(c) = arr.clips.get_mut(i) {
-                    c.muted = on;
+            arr_edit(s, ARRANGER_EDIT, |s| {
+                let idx = targets(s);
+                let arr = arr_mut(&mut s.session);
+                for i in idx {
+                    if let Some(c) = arr.clips.get_mut(i) {
+                        c.muted = on;
+                    }
                 }
-            }
-            s.session.dirty = true;
+            });
             None
         }
         Cmd::MakeUnique => {
@@ -3914,39 +3954,23 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             if made.is_empty() { Some("Make unique: select a pattern clip".into()) } else { None }
         }
         Cmd::InsertSpace => {
-            snapshot(&mut s.session);
-            insert_space(s);
+            arr_edit(s, ARRANGER_EDIT, insert_space);
             None
         }
-        Cmd::GroupClips => {
-            snapshot(&mut s.session);
-            match group_clips(s) {
-                0 => {
-                    crate::history::unrecord(&mut s.session);
-                    Some("Group: select two or more clips first".into())
-                }
-                n => Some(format!("Grouped {n} clips")),
-            }
-        }
-        Cmd::UngroupClips => {
-            snapshot(&mut s.session);
-            match ungroup_clips(s) {
-                0 => {
-                    crate::history::unrecord(&mut s.session);
-                    Some("Ungroup: no grouped clip is selected".into())
-                }
-                n => Some(format!("Ungrouped {n} clips")),
-            }
-        }
+        Cmd::GroupClips => match arr_edit(s, ARRANGER_EDIT, group_clips) {
+            0 => Some("Group: select two or more clips first".into()),
+            n => Some(format!("Grouped {n} clips")),
+        },
+        Cmd::UngroupClips => match arr_edit(s, ARRANGER_EDIT, ungroup_clips) {
+            0 => Some("Ungroup: no grouped clip is selected".into()),
+            n => Some(format!("Ungrouped {n} clips")),
+        },
         Cmd::CycleSnap => {
             s.playlist.snap = next_snap(s.playlist.snap);
             crate::snap::save(s);
             Some(format!("Snap: {}", s.playlist.snap.label()))
         }
-        Cmd::DeleteSpace => {
-            snapshot(&mut s.session);
-            (!delete_space(s)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into())
-        }
+        Cmd::DeleteSpace => (!arr_edit(s, ARRANGER_EDIT, delete_space)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into()),
         Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Reset(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
         Cmd::StretchMode => {
             s.playlist.stretch = !s.playlist.stretch;
@@ -4096,16 +4120,15 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::ClipMute(i) => {
-            snapshot(&mut s.session);
-            if let Some(c) = arr_mut(&mut s.session).clips.get_mut(i) {
-                c.muted = !c.muted;
-            }
-            s.session.dirty = true;
+            arr_edit(s, ARRANGER_EDIT, |s| {
+                if let Some(c) = arr_mut(&mut s.session).clips.get_mut(i) {
+                    c.muted = !c.muted;
+                }
+            });
             None
         }
         Cmd::ClipDelete(i) => {
-            snapshot(&mut s.session);
-            delete(s, vec![i]);
+            arr_edit(s, ARRANGER_EDIT, |s| delete(s, vec![i]));
             None
         }
         Cmd::ClipUnique(i) if clips(&s.session).get(i).is_some_and(|c| source_kind(&s.session, c.source) == PickKind::Audio) => make_unique_audio(s, i),

@@ -119,6 +119,9 @@ fn every_command_undoes_and_redoes() {
     let r = round_trip(&mut a, json!({"op": "add_clip", "track": 3, "position": 384, "pattern": pat}));
     let clip = r[0]["clip"].as_u64().unwrap();
     round_trip(&mut a, json!({"op": "set_clip", "clip": clip, "position": 768, "track": 4, "length": 96, "muted": true}));
+    // The clips as a list, in order: the clip kept by its id, a new one after it; the markers likewise.
+    round_trip(&mut a, json!({"op": "set_clips", "clips": [{"id": clip, "track": 2, "position": 96, "length": 192}, {"track": 5, "position": 0, "length": 96, "pattern": 3, "muted": true, "window": [0.0, 48.0]}]}));
+    round_trip(&mut a, json!({"op": "set_markers", "markers": [{"position": 384, "name": "Verse"}, {"position": 0, "name": "Intro", "kind": 4}]}));
     round_trip(&mut a, json!({"op": "delete_clip", "clip": clip}));
     let pat2 = ids(&a).2.last().copied().unwrap();
     round_trip(&mut a, json!({"op": "delete_pattern", "pattern": pat2}));
