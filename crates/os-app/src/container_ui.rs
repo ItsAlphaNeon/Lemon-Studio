@@ -364,7 +364,7 @@ impl App {
     /// only, an instrument at [`INSTRUMENT_LEVELS`]. Inside the undo step (`mixer::run`).
     pub fn add_member(&mut self, slot: u8, index: usize, instrument: bool) -> Option<String> {
         let t = self.state.selected_mixer;
-        let list = members(&self.state.session, t, slot)?;
+        members(&self.state.session, t, slot)?;
         if instrument && slot != CHANNEL {
             return None;
         }

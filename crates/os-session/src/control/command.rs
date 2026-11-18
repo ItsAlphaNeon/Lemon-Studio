@@ -249,6 +249,9 @@ pub enum Command {
         name: Option<String>,
         #[serde(default)]
         color: Option<String>,
+        /// The input port its sidechain input takes (0: none), for a plugin that has one.
+        #[serde(default)]
+        sidechain: Option<u32>,
     },
 
     // ----- Patterns
@@ -1719,15 +1722,22 @@ impl Command {
                     Some(k) => return Err(format!("slots are 0..=9, not {k}")),
                     None => m.slots.iter().position(Option::is_none).ok_or("the track has no empty slot")?,
                 };
+                let container = plugin == crate::container::CONTAINER;
                 let m = &mut s.project.get_mut().mixer[place];
                 m.slots[k] = Some(crate::plugins::new_slot(&plugin));
+                // A container plays its members from the next tick (`sync_containers`): nothing to host.
+                if container {
+                    m.slots[k] = Some(os_model::SlotPlugin { id: Id::NONE, name: plugin.clone(), state: crate::container::encode(&[]) });
+                }
                 m.slot_on[k] = true;
                 m.slot_mix[k] = 1.0;
                 m.slot_cpu[k] = os_model::PluginCpu::default();
                 (m.slot_names[k], m.slot_colors[k], m.slot_icons[k]) = (None, None, None);
                 s.control.settle(s.project.get_mut());
                 let id = s.project.mixer[place].slots[k].as_ref().map_or(Id::NONE, |x| x.id);
-                s.control.host.push(super::HostReq::Effect { slot: id, plugin });
+                if !container {
+                    s.control.host.push(super::HostReq::Effect { slot: id, plugin });
+                }
                 Ok(id_result("slot", id))
             }
             Command::RemoveEffect { track, slot } => {
@@ -1755,7 +1765,7 @@ impl Command {
                 crate::edit::mixer::swap_slots(s, t, slot, to);
                 none
             }
-            Command::SetSlot { track, slot, enabled, mix, name, color } => {
+            Command::SetSlot { track, slot, enabled, mix, name, color, sidechain } => {
                 let mix = mix.map(|v| unit("mix", v, 0.0, 1.0)).transpose()?;
                 let color = color.map(|c| parse_color(&c)).transpose()?;
                 if slot > 9 {
@@ -1774,6 +1784,12 @@ impl Command {
                 }
                 if let Some(c) = color {
                     m.slot_colors[usize::from(slot)] = c;
+                }
+                if let Some(port) = sidechain {
+                    let t = m.index;
+                    if !crate::project_plugins::set_slot_sidechain(s.project.get_mut(), &s.plugins, t, slot, port as usize) {
+                        return Err("This effect has no sidechain input".into());
+                    }
                 }
                 none
             }

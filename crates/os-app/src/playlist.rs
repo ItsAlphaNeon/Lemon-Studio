@@ -3438,7 +3438,7 @@ pub fn commit_edit(s: &mut State) {
         EditTarget::SlotName(t, k) => {
             crate::mixer::track_ids(s);
             if let Some(m) = s.session.project.mixer.iter().find(|m| m.index == t) {
-                let c = crate::control::command::Command::SetSlot { track: m.id.0, slot: k, enabled: None, mix: None, name: Some(text), color: None };
+                let c = crate::control::command::Command::SetSlot { track: m.id.0, slot: k, enabled: None, mix: None, name: Some(text), color: None, sidechain: None };
                 let _ = crate::control_ui::command(s, "Slot name", None, vec![c]);
             }
         }

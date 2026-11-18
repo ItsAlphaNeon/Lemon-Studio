@@ -551,7 +551,7 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             let t = s.selected_mixer;
             track_ids(s);
             let on = !track(&s.session, t)?.slot_on[usize::from(i)];
-            apply(s, SLOT, vec![Command::SetSlot { track: id_of(s, t)?, slot: i, enabled: Some(on), mix: None, name: None, color: None }])
+            apply(s, SLOT, vec![Command::SetSlot { track: id_of(s, t)?, slot: i, enabled: Some(on), mix: None, name: None, color: None, sidechain: None }])
         }
         MHit::Input => {
             s.playlist.popup = input_menu(s, at.0, at.1 + 10.0);
@@ -742,7 +742,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             track_ids(s);
             if let (Some(m), Some(id)) = (track(&s.session, t), id_of(s, t)) {
                 let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
-                let c = (0..10u8).map(|k| Command::SetSlot { track: id, slot: k, enabled: Some(only || k == i), mix: None, name: None, color: None }).collect();
+                let c = (0..10u8).map(|k| Command::SetSlot { track: id, slot: k, enabled: Some(only || k == i), mix: None, name: None, color: None, sidechain: None }).collect();
                 if let Some(e) = apply(s, SLOT, c) {
                     s.message = Some(e);
                 }
@@ -1484,7 +1484,6 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         // The original's History names (spec: ui/one-click-recording.md §1).
         MCmd::AssignAudio(_) => Some(crate::track_links::ASSIGN_AUDIO),
         MCmd::UnassignAudio(_) => Some(crate::track_links::UNASSIGN_AUDIO),
-        MCmd::AddContainer(_) => Some("Add effect"),
         _ => None,
     };
     // The member edits apply their commands (`container_ui`), the containers' members as their windows left them first:
@@ -1495,11 +1494,6 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     }
     if let Some(name) = step {
         return crate::control_ui::edit_app(app, name, Region::Project, |app| run_now(app, c));
-    }
-    // A slot's sidechain input is the track's own (its slot's saved state).
-    if let MCmd::SlotSidechain(..) = c {
-        let t = app.state.selected_mixer;
-        return crate::control_ui::edit_app(app, "Sidechain input", Region::Track(t), |app| run_now(app, c));
     }
     run_now(app, c)
 }
@@ -1584,7 +1578,7 @@ fn commands_of(s: &State, c: &MCmd) -> Option<(&'static str, Vec<Command>)> {
 
 /// Slot `k` of the current track coloured `col`.
 fn slot_color_cmd(s: &State, k: u8, col: Option<Rgb>) -> Option<Command> {
-    Some(Command::SetSlot { track: id_of(s, s.selected_mixer)?, slot: k, enabled: None, mix: None, name: None, color: Some(color_text(col).unwrap_or_default()) })
+    Some(Command::SetSlot { track: id_of(s, s.selected_mixer)?, slot: k, enabled: None, mix: None, name: None, color: Some(color_text(col).unwrap_or_default()), sidechain: None })
 }
 
 /// Effect `index` (in the plugin list) into slot `k` of the current track: one undo step, "Add effect". The plugin is
@@ -1772,16 +1766,13 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             app.invalidate();
             None
         }
+        // The slot's instance goes as a replaced effect's does; the container plays from the next tick
+        // (`App::sync_containers`).
         MCmd::AddContainer(slot) => {
-            // The slot's instance goes as a replaced effect's does; the container plays from the next tick
-            // (`App::sync_containers`).
+            track_ids(s);
             let t = s.selected_mixer;
-            clear_slot(&mut s.session, t, slot);
-            if let Some(m) = track_mut(&mut s.session, t) {
-                m.slots[usize::from(slot)] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::container::CONTAINER.into(), state: crate::container::encode(&[]) });
-            }
-            changed(&mut s.session);
-            None
+            let c = id_of(s, t).map(|track| Command::AddEffect { track, slot: Some(slot), plugin: crate::container::CONTAINER.into() });
+            c.and_then(|c| apply(s, "Add effect", vec![c]))
         }
         // `run` makes it a step of its own.
         MCmd::Wrap(..) => None,
@@ -1837,14 +1828,12 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             s.session.fx_requests.push(FxReq::Toggle { track: t, slot });
             None
         }
+        // A slot's sidechain input is the track's own (its slot's saved state).
         MCmd::SlotSidechain(slot, port) => {
+            track_ids(s);
             let t = s.selected_mixer;
-            if crate::project_plugins::set_slot_sidechain(s.session.project.get_mut(), &s.session.plugins, t, slot, port) {
-                changed(&mut s.session);
-                None
-            } else {
-                Some("This effect has no sidechain input".into())
-            }
+            let c = id_of(s, t).map(|track| Command::SetSlot { track, slot, enabled: None, mix: None, name: None, color: None, sidechain: Some(port as u32) });
+            c.and_then(|c| apply(s, "Sidechain input", vec![c]))
         }
     };
     app.invalidate();

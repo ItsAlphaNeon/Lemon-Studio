@@ -106,9 +106,9 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_auto_bypass` | `on` | Auto-bypass when silent for every plugin: the slots', the plugin channels' and the containers' members' |
 | `set_send` | `from`, `to`, `level` (optional) | `level` 0..1 routes `from` to `to` (0 = sidechain only); none removes the route |
 | `set_eq` | `track`, `band` (0..2); `gain` (-1800..1800, 0.01 dB), `frequency`, `width` (0..65536) (optional) | The track's three-band equaliser, as stored |
-| `add_effect` | `track`, `plugin`, `slot` (optional) | Into slot 0..9, else the first empty one. Result: `slot` (the slot plugin's id) |
+| `add_effect` | `track`, `plugin`, `slot` (optional) | Into slot 0..9, else the first empty one; `"Container"` puts an empty container there. Result: `slot` (the slot plugin's id) |
 | `remove_effect` | `track`, `slot` | with the name and colour given to the slot |
-| `set_slot` | `track`, `slot`; `enabled`, `mix` (0..1), `name` (empty: the plugin's), `color` (`#rrggbb`, empty: none) (optional) | |
+| `set_slot` | `track`, `slot`; `enabled`, `mix` (0..1), `name` (empty: the plugin's), `color` (`#rrggbb`, empty: none), `sidechain` (an input port, 0: none) (optional) | The sidechain input is for a plugin that has one |
 | `add_pattern` | `name`, `color`, `number` (optional) | Result: `pattern` |
 | `delete_pattern` | `pattern` | Its clips go; later patterns move down a number |
 | `shift_patterns` | `from`, `by` (1 or -1) | patterns from `from` on move by one: 1 opens a gap at `from` (Insert one), -1 closes the empty number below `from` |
