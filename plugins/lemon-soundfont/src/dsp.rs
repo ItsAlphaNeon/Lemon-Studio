@@ -757,7 +757,8 @@ pub struct Engine {
     voices: Vec<Voice>,
     ended: Vec<(u8, Option<i32>)>,
     age: u64,
-    /// Per-voice tuning from the host (semitones), by voice id.
+    /// Tuning from the host (semitones), by voice id and key. An entry without an id is for every voice of its key
+    /// (Lemon Studio sends a note's tuning so: CLAP's note id -1); a voice's own entry comes first.
     tunings: Vec<(Option<i32>, u8, f64)>,
     chorus: Option<crate::effects::Chorus>,
     reverb: Option<crate::effects::Reverb>,
@@ -837,6 +838,7 @@ impl Engine {
             self.ended.push((key, id));
             return;
         }
+        self.pin_key_tuning(key);
         // Exclusive classes cut each other's voices.
         for s in &specs {
             let ex = s.gens[g::EXCLUSIVE_CLASS];
@@ -859,6 +861,25 @@ impl Engine {
             let v = Voice::new(&patch.font, s, key, vel, id, self.rate, self.mode, &self.overrides, &self.controls, self.age);
             self.voices.push(v);
         }
+    }
+
+    /// A new note of `key` starts untuned: the key's tuning so far stays with the voices sounding (a note keeps the
+    /// pitch it started with), each as its own.
+    fn pin_key_tuning(&mut self, key: u8) {
+        let Some(i) = self.tunings.iter().position(|t| t.0.is_none() && t.1 == key) else { return };
+        let (_, _, st) = self.tunings.remove(i);
+        let mut ids: Vec<i32> = self.voices.iter().filter(|v| v.key == key).filter_map(|v| v.id).collect();
+        ids.dedup();
+        for id in ids {
+            if !self.tunings.iter().any(|t| t.0 == Some(id) && t.1 == key) {
+                self.tunings.push((Some(id), key, st));
+            }
+        }
+    }
+
+    fn tuning_of(&self, v: &Voice) -> f64 {
+        let own = self.tunings.iter().find(|t| t.0.is_some() && t.0 == v.id && t.1 == v.key);
+        own.or_else(|| self.tunings.iter().find(|t| t.0.is_none() && t.1 == v.key)).map_or(0.0, |t| t.2 * 100.0)
     }
 
     pub fn note_off(&mut self, key: u8, id: Option<i32>) {
@@ -884,15 +905,17 @@ impl Engine {
         let sounding = !self.voices.is_empty();
         let mut i = 0;
         while i < self.voices.len() {
-            let v = &mut self.voices[i];
-            let tune = self.tunings.iter().find(|t| t.0 == v.id && t.1 == v.key).map_or(0.0, |t| t.2 * 100.0);
-            if v.render(l, r, rate, &c, tune) {
+            let tune = self.tuning_of(&self.voices[i]);
+            if self.voices[i].render(l, r, rate, &c, tune) {
                 i += 1;
             } else {
                 let v = self.voices.remove(i);
                 if !self.voices.iter().any(|o| o.id == v.id && o.key == v.key) {
-                    self.tunings.retain(|t| !(t.0 == v.id && t.1 == v.key));
+                    self.tunings.retain(|t| !(t.0.is_some() && t.0 == v.id && t.1 == v.key));
                     self.ended.push((v.key, v.id));
+                }
+                if !self.voices.iter().any(|o| o.key == v.key) {
+                    self.tunings.retain(|t| !(t.0.is_none() && t.1 == v.key));
                 }
             }
         }
@@ -990,6 +1013,33 @@ mod tests {
         assert!((k.at(0.0) - 1.0).abs() < 1e-6);
         assert!(k.at(1.0).abs() < 2e-3 && k.at(2.0).abs() < 2e-3);
         assert!((k.at(0.5) - 0.5697).abs() < 0.01, "{}", k.at(0.5));
+    }
+
+    /// Lemon Studio tunes a note for every voice of its key (no voice id): a voice started with an id of its own
+    /// follows it, and a later note of that key starts untuned while the first keeps its tuning.
+    #[test]
+    fn a_key_wide_tuning_reaches_voices_with_ids() {
+        let mut d = vec![0i16; 400];
+        d[100] = 16384;
+        let peak = |l: &[f32]| (0..l.len()).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap();
+        // Untuned: one source frame per 10 output frames, the impulse at frame 1000.
+        let mut e = engine(&d, 4410, &[(34, -12000)], Mode::Classic);
+        e.note_on(60, 127.0 / 128.0, Some(7));
+        assert_eq!(peak(&run(&mut e, 2000).0), 1000);
+        // An octave up: at frame 500.
+        let mut e = engine(&d, 4410, &[(34, -12000)], Mode::Classic);
+        e.note_on(60, 127.0 / 128.0, Some(7));
+        e.set_tuning(60, None, 12.0);
+        assert_eq!(peak(&run(&mut e, 2000).0), 500);
+        // A second note of the key: untuned (its impulse 1000 frames after it starts), the first still an octave up.
+        let mut e = engine(&d, 4410, &[(34, -12000)], Mode::Classic);
+        e.note_on(60, 127.0 / 128.0, Some(7));
+        e.set_tuning(60, None, 12.0);
+        let _ = run(&mut e, 100);
+        e.note_on(60, 127.0 / 128.0, Some(8));
+        let (l, _) = run(&mut e, 1900);
+        assert_eq!(peak(&l[..600]), 400, "the first voice keeps its octave");
+        assert_eq!(peak(&l[600..]) + 600, 1000, "the second starts untuned");
     }
 
     /// The release falls 96 dB per release time.
