@@ -124,6 +124,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_groups` | `groups`; `channels` (`[{"channel", "group"}]`), `shown` (optional) | The rack's filter groups: their names in file order ("Unsorted" among them), channels' groups (an index, `null` none), the filter shown (`null` All) |
 | `set_loops` | `pattern`; `mode` (0 off, 1 loop step channels, 2 loop all channels, 3 advanced looping), `loops` (`[{"channel", "value"}]`) (optional) | The step sequencer's loops; a value is a length in steps or a loop point as the file keeps it, `null` none |
 | `set_step` | `pattern`, `channel`, `step`, `on`; `mute` (optional) | A step sequencer click: on adds a step (or unmutes the step's notes), off removes the step's notes, or mutes them with `mute` |
+| `set_controls` | `pattern`, `controls`: `[{"position", "value", "channel" and "param" (0 volume, 1 pan, 4 pitch) or "kind", "id"}]` | The pattern's control events (volume and pan 0..12800, pitch in cents), in this order |
 | `add_notes` | `pattern`, `notes` (without `id`) | Result: `notes` (their ids, in order) |
 | `add_clip` | `track` (1-based), `position`; `length`, and `pattern` or `channel` | A pattern clip, or an audio or automation channel's clip, in the arrangement shown. Result: `clip` |
 | `delete_clip` | `clip` | |

@@ -354,6 +354,9 @@ pub enum Command {
     },
     /// `notes` are added to the pattern.
     AddNotes { pattern: u32, notes: Vec<NoteIn> },
+    /// The pattern's control events (a channel's volume, pan and pitch over the pattern, the event editor's) become
+    /// `controls`, in this order; one named by its id keeps it.
+    SetControls { pattern: u32, controls: Vec<ControlIn> },
     /// The pattern's step sequencer loops (spec: ui/channel-rack.md §15): `mode` 0 off, 1 Loop step channels, 2 Loop all
     /// channels, 3 Advanced looping; each of `loops` sets a channel's loop value as the file keeps it (a length in steps,
     /// a loop point's code, Bar), `null` for none.
@@ -909,6 +912,24 @@ pub struct LockIn {
     pub channel: Option<u32>,
 }
 
+/// A pattern's control event (`Command::SetControls`): at `position`, channel `channel` (an id) and `param` (0
+/// volume, 1 pan, 4 pitch), or the stored `kind` for an event kept as read; `value` volume and pan 0..=12800 (pan
+/// centre 6400), pitch in cents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlIn {
+    pub position: u32,
+    pub value: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
+}
+
 /// A channel's loop value (`Command::SetLoops`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1353,6 +1374,7 @@ impl Command {
             Command::SetPattern { .. } => "Pattern settings",
             Command::SetNotes { .. } | Command::AddNotes { .. } => "Edit notes",
             Command::SetStep { .. } => crate::history::STEP_SEQ_EDIT,
+            Command::SetControls { .. } => "Edit events",
             Command::SetLoops { .. } => crate::history::LOOP_MODE,
             Command::SetGroups { .. } => "Filter groups",
             Command::AddClip { .. } => "Add clip",
@@ -1460,7 +1482,7 @@ impl Command {
             Command::ShiftPatterns { .. } | Command::MovePattern { .. } | Command::ClonePattern { .. } | Command::SplitPattern { .. } | Command::SetPatternSignature { .. } => {
                 Taken::Project(Box::new(Side::of(s)))
             }
-            Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } | Command::SetStep { pattern, .. } | Command::SetLoops { pattern, .. } | Command::TransposePattern { pattern, .. } => {
+            Command::SetPattern { pattern, .. } | Command::SetNotes { pattern, .. } | Command::AddNotes { pattern, .. } | Command::SetStep { pattern, .. } | Command::SetLoops { pattern, .. } | Command::SetControls { pattern, .. } | Command::TransposePattern { pattern, .. } => {
                 Taken::Pattern(Box::new(p.patterns[pattern_place(p, *pattern)?].clone()))
             }
             Command::AddClip { .. }
@@ -2456,6 +2478,25 @@ impl Command {
                     p.channels[r].rack.group = g;
                 }
                 p.current_group = shown;
+                none
+            }
+            Command::SetControls { pattern, controls } => {
+                let place = pattern_place(&s.project, pattern)?;
+                let held: std::collections::HashSet<u32> = s.project.patterns[place].controls.iter().map(|c| c.id.0).filter(|&i| i != 0).collect();
+                let mut seen = std::collections::HashSet::new();
+                let mut list = Vec::with_capacity(controls.len());
+                for c in &controls {
+                    ticks("position", c.position)?;
+                    let kind = match (c.kind, c.channel, c.param) {
+                        (Some(k), None, None) => k,
+                        (None, Some(ch), Some(param)) => u32::from(s.project.channels[channel_row(&s.project, ch)?].index) << 16 | u32::from(param),
+                        _ => return Err("a control names its channel and param, or its kind".into()),
+                    };
+                    let id = c.id.filter(|i| held.contains(i) && seen.insert(*i)).map_or(Id::NONE, Id);
+                    list.push(os_model::ControlPoint { position: c.position, kind, value: c.value, id });
+                }
+                s.project.get_mut().patterns[place].controls = list;
+                s.control.settle(s.project.get_mut());
                 none
             }
             Command::SetLoops { pattern, mode, loops } => {

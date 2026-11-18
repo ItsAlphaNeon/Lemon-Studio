@@ -362,12 +362,16 @@ fn pattern_edits_become_commands() {
     let ch = a.state.session.project.channels[1].index;
     crate::edit::patterns::pat_mut(&mut a.state.session, 1).notes.push(os_model::Note { length: 48, key: 64, ..os_model::Note::step(ch, 96) });
     crate::edit::patterns::pat_mut(&mut a.state.session, 1).length = Some(768);
+    // An event and a loop too.
+    crate::edit::patterns::pat_mut(&mut a.state.session, 1).controls.push(os_model::ControlPoint::new(48, ch, os_model::ControlPoint::PAN, 3200));
+    crate::edit::patterns::pat_mut(&mut a.state.session, 1).loops.push((ch, 8));
     crate::history::settle(&mut a.state.session);
     let after = a.state.session.project.pattern(1).unwrap().clone();
     assert!(a.state.session.history.newest_is_commands(), "a step of commands");
     assert_eq!((after.notes.len(), after.length), (before.len() + 1, Some(768)));
     crate::history_ui::undo(&mut a.state);
-    assert_eq!((&a.state.session.project.pattern(1).unwrap().notes, a.state.session.project.pattern(1).unwrap().length), (&before, None));
+    let p = a.state.session.project.pattern(1).unwrap();
+    assert_eq!((&p.notes, p.length, p.controls.len(), p.loops.len()), (&before, None, 0, 0));
     crate::history_ui::redo(&mut a.state);
     assert_eq!(a.state.session.project.pattern(1).unwrap(), &after);
 }

@@ -438,21 +438,33 @@ pub fn settle(s: &mut crate::session::Session) {
 
 /// An edit of a pattern the interface made on it, step `i` holding the pattern as it was (`Snap::Pattern`), turned
 /// into the commands a client would apply for it: the pattern goes back as it was and `set_notes` and `set_pattern`
-/// bring it to what the edit made, the step holding their undo. Left as it is when the edit changed what no command
-/// sets yet (the pattern's controls or loops) or a note names no channel the rack has.
+/// bring it to what the edit made (with `set_controls` and `set_loops` for its events and loops), the step holding
+/// their undo. Left as it is when a note or a loop names a channel the rack has not.
 fn pattern_to_commands(s: &mut crate::session::Session, i: usize) {
     use crate::control::command::{Command, NoteIn};
     let Snap::Pattern { number, notes, controls, length, loops } = &s.history.steps[i].snap else { return };
     let Some(p) = s.project.pattern(*number) else { return };
-    if p.controls != *controls || (p.loops.clone(), p.loop_mode) != *loops {
-        return;
-    }
     let ids: std::collections::HashMap<u16, u32> = s.project.channels.iter().map(|c| (c.index, c.id.0)).collect();
     if p.id.is_none() || p.notes.iter().any(|n| ids.get(&n.channel).is_none_or(|&id| id == 0)) {
         return;
     }
+    // Loops name channels by index: each one's id, before and after.
+    let loop_channels: std::collections::BTreeSet<u16> = loops.0.iter().chain(&p.loops).map(|l| l.0).collect();
+    if loop_channels.iter().any(|ch| ids.get(ch).is_none_or(|&id| id == 0)) {
+        return;
+    }
     let after = p.clone();
     let mut commands = Vec::new();
+    let same_controls = after.controls.len() == controls.len() && after.controls.iter().zip(controls).all(|(a, b)| a == b && a.id.0 == b.id.0);
+    if !same_controls {
+        let list = after.controls.iter().map(|c| crate::control::command::ControlIn { position: c.position, value: c.value, channel: None, param: None, kind: Some(c.kind), id: (c.id.0 != 0).then_some(c.id.0) }).collect();
+        commands.push(Command::SetControls { pattern: after.id.0, controls: list });
+    }
+    if (after.loops.clone(), after.loop_mode) != *loops {
+        let value = |ch: u16| after.loops.iter().find(|l| l.0 == ch).map(|l| l.1);
+        let list = loop_channels.iter().map(|&ch| crate::control::command::LoopIn { channel: ids[&ch], value: value(ch) }).collect();
+        commands.push(Command::SetLoops { pattern: after.id.0, mode: Some(after.loop_mode.map_or(0, |m| m as u8)), loops: list });
+    }
     let same_notes = after.notes.len() == notes.len() && after.notes.iter().zip(notes).all(|(a, b)| a == b && a.id.0 == b.id.0);
     if !same_notes {
         commands.push(Command::SetNotes { pattern: after.id.0, channel: None, notes: after.notes.iter().map(|n| NoteIn::of(n, ids[&n.channel])).collect() });
