@@ -463,7 +463,9 @@ fn pattern_to_commands(s: &mut crate::session::Session, i: usize) {
     if commands.is_empty() {
         return;
     }
-    // The pattern as it was, then the commands.
+    // The pattern as it was, then the commands. It ends as the edit left it: nothing for the views to follow (the
+    // piano roll keeps its selection), so what the two say they touched is dropped.
+    let touched = std::mem::take(&mut s.touched);
     let snap = std::mem::replace(&mut s.history.steps[i].snap, Snap::Commands(Vec::new()));
     snap.clone().put(s);
     match crate::control::run_in(s, commands) {
@@ -476,6 +478,7 @@ fn pattern_to_commands(s: &mut crate::session::Session, i: usize) {
             s.history.steps[i].snap = snap;
         }
     }
+    s.touched = touched;
 }
 
 /// How long the wheel may rest between notches that make one step. FL joined notches about 120 ms apart and made a
