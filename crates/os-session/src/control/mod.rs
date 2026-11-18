@@ -254,6 +254,7 @@ fn op(c: &Command) -> &'static str {
         Command::SetProject { .. } => "set_project",
         Command::AddChannel { .. } => "add_channel",
         Command::AddAudioClip { .. } => "add_audio_clip",
+        Command::SetAutoCrossfades { .. } => "set_auto_crossfades",
         Command::CloneChannel { .. } => "clone_channel",
         Command::ReplaceInstrument { .. } => "replace_instrument",
         Command::DeleteChannel { .. } => "delete_channel",

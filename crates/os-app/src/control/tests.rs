@@ -73,6 +73,7 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_time_signature", "numerator": 3, "denominator": 4}),
         json!({"op": "set_info", "title": "Song", "author": "Me"}),
         json!({"op": "set_project", "beats": 7, "steps": 2, "signature": false, "panning_law": "triangular", "play_truncated": true, "pdc": false}),
+        json!({"op": "set_auto_crossfades", "on": false}),
         json!({"op": "set_channel", "channel": kick, "name": "Big kick", "color": "#ff8000", "volume": 0.5, "pan": -0.25, "pitch": 100, "track": ins2}),
         json!({"op": "set_channel", "channel": clap, "declick": 3, "swing": 0.25, "truncate_swing": true, "cut": 2, "cut_by": 2}),
         json!({"op": "load_sample", "channel": clap, "path": "/no/such/folder/snare.wav"}),

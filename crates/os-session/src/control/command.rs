@@ -96,6 +96,9 @@ pub enum Command {
         #[serde(default)]
         mixer: Option<u32>,
     },
+    /// Automatic crossfades on or off: on, the audio clips that overlap on a track crossfade there; off, the crossfades
+    /// they made go (spec: audio/audio-clips.md "Automatic crossfades").
+    SetAutoCrossfades { on: bool },
     /// The channel goes, with its notes, its clips and its automation (as the rack's Delete does).
     DeleteChannel { channel: u32 },
     /// The channel moves to rack row `row` (0 = top).
@@ -1340,6 +1343,7 @@ impl Command {
             Command::SetProject { .. } => crate::history::PROJECT_SETTINGS,
             Command::AddChannel { .. } => "Add channel",
             Command::AddAudioClip { .. } => "Add audio clip",
+            Command::SetAutoCrossfades { .. } => "Automatic crossfades",
             Command::CloneChannel { .. } => "Clone channel",
             Command::ReplaceInstrument { .. } => crate::history::REPLACE_CHANNEL,
             Command::WrapEffects { all: false, .. } | Command::WrapInstrument { .. } => crate::container::WRAP,
@@ -1507,6 +1511,8 @@ impl Command {
             Command::SetAutoBypass { .. } | Command::RemoveTracks { .. } | Command::MoveTrack { .. } | Command::MoveEffect { .. } => Taken::Project(Box::new(Side::of(s))),
             // A channel and a clip, and maybe a mixer track's routing.
             Command::AddAudioClip { .. } => Taken::Project(Box::new(Side::of(s))),
+            // Every arrangement's clips.
+            Command::SetAutoCrossfades { .. } => Taken::Project(Box::new(Side::of(s))),
             // The arrangements' list, and which one is shown.
             Command::AddArrangement { .. } | Command::DeleteArrangement { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::SetArrangement { arrangement, .. } => Taken::Arrangement(Box::new(arrangement_of(p, *arrangement)?.clone())),
@@ -1850,6 +1856,12 @@ impl Command {
                 let id = s.project.channels.last().map_or(Id::NONE, |c| c.id);
                 Ok(id_result("channel", id))
             }
+            Command::SetAutoCrossfades { on } => {
+                s.project.get_mut().auto_crossfades = Some(on);
+                crate::edit::playlist::crossfades_switched(s);
+                s.touched.clips = true;
+                none
+            }
             Command::AddAudioClip { path, track, position, mixer } => {
                 ticks("position", position)?;
                 if track == 0 || track > crate::edit::playlist::TRACKS {
@@ -1892,6 +1904,7 @@ impl Command {
                 }
                 if let Some(path) = sample.filter(|p| !p.is_empty()) {
                     crate::edit::rack::auto_name(&s.settings, ch, std::path::Path::new(&path));
+                    crate::edit::rack::read_tags(&s.settings, ch, std::path::Path::new(&path));
                     ch.sample_path = Some(path.clone());
                     s.sample_loads.push((row, path));
                 }

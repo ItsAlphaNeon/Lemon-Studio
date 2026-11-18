@@ -4675,25 +4675,26 @@ impl App {
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
         // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
         let path = crate::data_folder_ui::adopt(s, &path);
-        let row = match row {
-            Some(r) => {
-                crate::history::load_sample(&mut s.session, r);
-                s.session.sample_loads.push((r, path.clone()));
-                crate::rack::auto_name(&crate::settings_file::store(), &mut s.session.project.get_mut().channels[r], std::path::Path::new(&path));
-                r
-            }
+        crate::mixer::track_ids(s);
+        use crate::control::command::Command;
+        let r = match row.and_then(|r| s.session.project.channels.get(r).map(|c| (r, c.id.0))) {
+            Some((r, channel)) => crate::control_ui::command(s, crate::history::LOAD_SAMPLE, None, vec![Command::LoadSample { channel, path }]).map(|_| r),
+            // A new channel named after the file; undone, it goes.
             None => {
-                // The step covers the channel itself: undone, it goes.
-                let row = s.session.project.channels.len();
-                crate::history::load_sample(&mut s.session, row);
-                let r = add_channel(s.session.project.get_mut());
-                s.session.project.get_mut().channels[r].name = stem.clone();
-                r
+                let c = Command::AddChannel { name: stem.clone(), plugin: None, sample: Some(path), track: None, kind: None, color: None, target: None, points: Vec::new(), children: Vec::new() };
+                crate::control_ui::command(s, crate::history::LOAD_SAMPLE, None, vec![c]).map(|r| {
+                    let id = r.first().and_then(|v| v["channel"].as_u64()).unwrap_or(0) as u32;
+                    s.session.project.channels.iter().position(|c| c.id.0 == id).unwrap_or(0)
+                })
             }
         };
-        let ch = &mut s.session.project.get_mut().channels[row];
-        crate::rack::read_tags(&crate::settings_file::store(), ch, std::path::Path::new(&path));
-        ch.sample_path = Some(path);
+        let row = match r {
+            Ok(r) => r,
+            Err(e) => {
+                s.message = Some(e);
+                return self.invalidate();
+            }
+        };
         s.selected_channel = row;
         s.rack.select_only(row);
         s.session.dirty = true;
@@ -5374,10 +5375,9 @@ impl App {
     fn toggle_auto_crossfades(&mut self) {
         let on = !self.state.session.project.auto_crossfades.unwrap_or(false);
         // The whole project: switching sets the clips' crossfades.
-        crate::control_ui::edit(&mut self.state, "Automatic crossfades", crate::control::command::Region::Project, |s| {
-            s.session.project.get_mut().auto_crossfades = Some(on);
-            crate::edit::playlist::crossfades_switched(&mut s.session);
-        });
+        if let Err(e) = crate::control_ui::command(&mut self.state, "Automatic crossfades", None, vec![crate::control::command::Command::SetAutoCrossfades { on }]) {
+            self.state.message = Some(e);
+        }
         self.state.message = Some(format!("Automatic crossfades: {}", if on { "on" } else { "off" }));
     }
 
