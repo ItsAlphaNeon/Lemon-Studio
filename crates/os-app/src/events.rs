@@ -884,7 +884,6 @@ pub fn turn_into_clip(s: &mut State) -> Option<String> {
     let clip = clip_points(&points, s.events.range, ppq, s.events.value, CLIP_TOLERANCE);
     let (target, name) = (s.events.target, s.events.name.clone());
     let row = crate::playlist::automation_channel(s, target, &name, clip);
-    erase(s, 0, u32::MAX);
     close(s);
     let name = s.session.project.channels.get(row).and_then(|c| c.name.clone()).unwrap_or(name);
     Some(format!("Created automation clip \"{name}\""))

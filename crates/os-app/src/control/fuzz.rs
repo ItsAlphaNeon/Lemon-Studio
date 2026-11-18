@@ -69,7 +69,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
     let pa: Vec<u32> = p.patterns.iter().map(|q| q.id.0).collect();
     let clips: Vec<u32> = p.arrangement().map(|x| x.clips.iter().map(|c| c.id.0).collect()).unwrap_or_default();
     let note = |r: &mut Rng, ch: &[u32]| json!({"channel": r.id(ch), "position": r.below(4) * 96, "length": 1 + r.below(96), "key": 36 + r.below(48), "velocity": r.below(128)});
-    match r.below(58) {
+    match r.below(59) {
         0 => json!({"op": "set_tempo", "bpm": 40.0 + r.unit() * 200.0}),
         1 => json!({"op": "set_swing", "swing": r.unit()}),
         2 => json!({"op": "set_main_volume", "volume": r.unit()}),
@@ -116,6 +116,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
         39 => json!({"op": "split_pattern", "pattern": r.id(&pa)}),
         40 => json!({"op": "set_pattern_signature", "pattern": r.id(&pa), "numerator": r.below(8), "denominator": 4}),
         57 => json!({"op": "set_misc", "channel": r.id(&ch), "values": {"arp_dir": r.below(6) as f64, "echo_feed": r.unit(), "time_gate": r.unit()}}),
+        58 => json!({"op": "set_start_value", "target": 0x4000_0001u32 + [0, 1, 4][r.below(3)], "value": (if r.chance(0.3) { Value::Null } else { json!(r.unit()) })}),
         56 => json!({"op": "set_pattern_markers", "pattern": r.id(&pa), "markers": [{"position": r.below(4) * 96, "kind": 8, "numerator": 1 + r.below(8), "denominator": 4}]}),
         41 => json!({"op": "clone_channel", "channel": r.id(&ch)}),
         43 => json!({"op": "set_loops", "pattern": r.id(&pa), "mode": r.below(4), "loops": [{"channel": r.id(&ch), "value": if r.chance(0.5) { Some(1 + r.below(16)) } else { None }}]}),

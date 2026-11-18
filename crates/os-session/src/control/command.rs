@@ -189,6 +189,13 @@ pub enum Command {
     },
     /// A sample file into a sampler channel (empty: none).
     LoadSample { channel: u32, path: String },
+    /// Control `target`'s song start value (an automation target, as `add_channel` takes one) at `value` (0..=1, as the
+    /// control's knob), or (no value) none. A control whose stored units aren't known (a plugin parameter) has none.
+    SetStartValue {
+        target: u32,
+        #[serde(default)]
+        value: Option<f64>,
+    },
     /// Values of the channel's Misc tab, by name (`level_pan`, `arp_dir`, `echo_feed`...), each clamped to its range.
     SetMisc { channel: u32, values: std::collections::BTreeMap<String, f32> },
 
@@ -1043,6 +1050,8 @@ pub enum Taken {
     Swap(Box<os_model::Channel>, u32),
     /// Which channels are zipped, by id (as `Locks`).
     Zips(Vec<(u32, bool)>),
+    /// Control `.0`'s song start value (an automation target), `None` for none.
+    Start(u32, Option<(usize, os_model::InitControl)>),
     /// The filter groups: their names, each channel's group by id, the filter shown.
     Groups(Box<(Vec<String>, Vec<(u32, Option<u32>)>, Option<u32>)>),
     /// Which mixer tracks are on, by id (a client's `set_track` switching one on or off: the step's own undo).
@@ -1395,6 +1404,7 @@ impl Command {
             Command::LoadSample { .. } => crate::history::LOAD_SAMPLE,
             Command::LoadChannelState { .. } => "Load channel state",
             Command::SetMisc { .. } => "Channel settings",
+            Command::SetStartValue { .. } => crate::init::INITIALIZED,
             Command::AddTrack { .. } => "Insert mixer track",
             Command::DeleteTrack { .. } => "Delete mixer track",
             Command::SetTrack { .. } => "Mixer track settings",
@@ -1529,6 +1539,7 @@ impl Command {
             | Command::SetInfo { .. }
             | Command::SetProject { .. } => Taken::Settings(Box::new(Settings::of(s))),
             Command::SetChannel { channel, .. } | Command::LoadSample { channel, .. } | Command::SetMisc { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
+            Command::SetStartValue { target, .. } => Taken::Start(*target, crate::init::placed(s, *target)),
             Command::SetTrack { track, .. } | Command::ResetTrack { track } | Command::SetEq { track, .. } | Command::SetSlot { track, .. } | Command::AddEffect { track, .. } | Command::RemoveEffect { track, .. } => {
                 Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone()))
             }
@@ -1608,6 +1619,7 @@ impl Command {
                 Taken::Mutes(_) => mutes(p),
                 Taken::Locks(_) => locks(p),
                 Taken::Zips(_) => zips(p),
+                Taken::Start(t, _) => Taken::Start(*t, crate::init::placed(s, *t)),
                 Taken::Groups(_) => groups(p),
                 Taken::TracksOn(_) => tracks_on(p),
                 Taken::WithOn(t, _) => {
@@ -1688,6 +1700,7 @@ impl Command {
             | Taken::Mutes(_)
             | Taken::Locks(_)
             | Taken::Zips(_)
+            | Taken::Start(..)
             | Taken::Groups(_)
             | Taken::TracksOn(_)
             | Taken::Links(_)
@@ -1894,7 +1907,7 @@ impl Command {
                     envelopes: Default::default(),
                     rack: Default::default(),
                     misc: Default::default(),
-                    sound: if kind == ChannelKind::AudioClip { os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() } } else { Default::default() },
+                    sound: if kind == ChannelKind::AudioClip && sample.as_deref().is_some_and(|p| !p.is_empty()) { os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() } } else { Default::default() },
                     lemon_icon: None,
                 };
                 s.project.get_mut().channels.push(ch);
@@ -2280,6 +2293,14 @@ impl Command {
                     crate::edit::mixer::renumber(s, &m, n.min(o), n.max(o) + 1, 0);
                     n = o;
                 }
+                none
+            }
+            Command::SetStartValue { target, value } => {
+                let e = match value {
+                    Some(v) => Some(os_model::InitControl::from_unit(target, unit("value", v, 0.0, 1.0)?).ok_or("that control has no start value")?),
+                    None => None,
+                };
+                crate::init::put(s, target, e);
                 none
             }
             Command::SetMisc { channel, values } => {
@@ -3246,6 +3267,7 @@ fn put(s: &mut crate::session::Session, t: Taken) {
             }
             s.dirty = true;
         }
+        Taken::Start(t, e) => crate::init::restore(s, t, e),
         Taken::Locks(on) => {
             for (id, v) in on {
                 if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.id.0 == id) {

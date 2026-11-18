@@ -1792,105 +1792,82 @@ pub fn track_after_used(s: &State) -> u16 {
 /// with the filter on it, as the original's rack shows after every Create automation clip (spec: ui/channel-rack.md
 /// §19, measured 2026-11-02).
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
-    // One undo step, "Create automation clip": the playlist, the rack's side (the channel, its group, the filter and the
-    // selection) and the control's initial value while "Initialize controls automatically" is on (spec:
-    // ui/settings-choices.md "Advanced: Initialize controls automatically").
-    let init = crate::init::automatic(&s.session.settings, tgt, value);
-    arr_mut(&mut s.session);
-    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
-    let mut snaps = vec![crate::history::Snap::Playlist(Box::new(capture(&s.session))), rack];
-    if init.is_some() {
-        snaps.push(crate::history::Snap::Init(tgt, crate::init::entry(&s.session, tgt)));
-    }
-    crate::history::record(&mut s.session, crate::history::CREATE_AUTOMATION, crate::history::Snap::Several(snaps));
+    // One undo step, "Create automation clip": the channel, its group and the filter, the clip and the control's start
+    // value while "Initialize controls automatically" is on (spec: ui/settings-choices.md "Advanced: Initialize
+    // controls automatically").
+    let value = value.clamp(0.0, 1.0);
+    let init = crate::init::automatic(&s.session.settings, tgt, value).is_some();
+    crate::control_ui::settle_ids(s);
     crate::follow::keep_rack_view(s);
-    let name = &unique_channel_name(&s.session, name);
+    let name = unique_channel_name(&s.session, name);
     let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
         Some((r0, r1)) if r1 > r0 => (r0, r1),
         _ => automation_span(s),
     };
     let beats = f64::from(b - a) / f64::from(ppq(&s.session));
-    s.session.project.get_mut().channels.push(Channel {
-        id: os_model::Id::NONE,
-        index,
-        kind: ChannelKind::Automation,
-        name: Some(name.to_string()),
-        plugin: None,
-        plugin_state: None,
-        // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
-        color: Some(s.session.clip_colors.new_channel(index)),
-        enabled: true,
-        // The clip's range 0..1: stored pan 0 (minimum), volume 12800 (maximum), as FL stores a new clip's
-        // (spec: audio/automation.md "Range").
-        volume: 1.0,
-        pan: -1.0,
-        pitch_cents: 0,
-        mixer_track: 0,
-        sample_path: None,
-        layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
-        lemon_icon: None,
-    });
-    s.session.project.get_mut().automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
-    let row = s.session.project.channels.len() - 1;
-    s.selected_channel = row;
-    s.rack.select_only(row);
-    crate::rack::join_group(s, row, "Automation");
+    let points = os_flp::project::new_automation(index, tgt, value, beats).points.iter().map(crate::control::command::PointIn::of).collect();
+    // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
+    let color = crate::control::command::color_text(Some(s.session.clip_colors.new_channel(index)));
+    let first = vec![Command::AddChannel { name: Some(name), plugin: None, sample: None, track: None, kind: Some("automation".into()), color, target: Some(tgt), points, children: Vec::new() }];
     let track = free_track(s, track_after_used(s), a, b);
-    let arr = arr_mut(&mut s.session);
-    arr.clips.push(Clip::new(a, b - a, track, ClipSource::Channel(index)));
-    let n = arr.clips.len();
-    s.playlist.sel = vec![n - 1];
+    let made = crate::control_ui::command_then(s, crate::history::CREATE_AUTOMATION, first, |s, r| {
+        let id = r.first().and_then(|v| v["channel"].as_u64()).map(|id| id as u32);
+        let Some(row) = s.session.project.channels.iter().position(|c| Some(c.id.0) == id) else { return Vec::new() };
+        let mut v: Vec<Command> = crate::rack::join_group_cmd(s, row, "Automation").into_iter().collect();
+        v.push(Command::AddClip { track: track + 1, position: a, length: Some(b - a), pattern: None, channel: id });
+        if init {
+            v.push(Command::SetStartValue { target: tgt, value: Some(value) });
+        }
+        v
+    });
+    if let Err(e) = made {
+        s.message = Some(e);
+        return index;
+    }
+    if let Some(row) = s.session.project.channels.iter().position(|c| c.index == index) {
+        s.selected_channel = row;
+        s.rack.select_only(row);
+    }
+    if let Some(i) = clips(&s.session).iter().rposition(|c| c.source == ClipSource::Channel(index)) {
+        s.playlist.sel = vec![i];
+    }
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Automation;
-    if init.is_some() {
-        crate::init::put(&mut s.session, tgt, init);
-    }
-    s.session.dirty = true;
     index
 }
 
 /// Turn into automation clip (spec: ui/event-editor.md §5): an automation clip channel at the end of the rack named
 /// `name` (made unique), linked to `target`, with `points`, in the rack group "Automation" and the playlist's clip
-/// source, as ADD > Automation clip makes one. One undo step, which also holds the selected pattern (whose events
-/// the caller then takes away). Returns its rack row.
+/// source, as ADD > Automation clip makes one; the control's events leave the selected pattern. One undo step.
+/// Returns its rack row.
 pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os_model::AutoPoint>) -> usize {
-    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(&s.session, s.session.project.channels.len())));
-    let before = crate::history::Snap::Several(vec![rack, crate::history::Snap::pattern(&s.session, s.pattern())]);
-    snapshot_with(&mut s.session, crate::events::TURN_INTO_CLIP, before);
+    crate::control_ui::settle_ids(s);
     crate::follow::keep_rack_view(s);
     let name = unique_channel_name(&s.session, name);
     let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    s.session.project.get_mut().channels.push(Channel {
-        id: os_model::Id::NONE,
-        index,
-        kind: ChannelKind::Automation,
-        name: Some(name),
-        plugin: None,
-        plugin_state: None,
-        color: Some(s.session.clip_colors.new_channel(index)),
-        enabled: true,
-        // The clip's range 0..1, as `create_automation` makes it.
-        volume: 1.0,
-        pan: -1.0,
-        pitch_cents: 0,
-        mixer_track: 0,
-        sample_path: None,
-        layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
-        lemon_icon: None,
+    let color = crate::control::command::color_text(Some(s.session.clip_colors.new_channel(index)));
+    let points = points.iter().map(crate::control::command::PointIn::of).collect();
+    let first = vec![Command::AddChannel { name: Some(name), plugin: None, sample: None, track: None, kind: Some("automation".into()), color, target: Some(target), points, children: Vec::new() }];
+    let n = s.pattern();
+    let made = crate::control_ui::command_then(s, crate::events::TURN_INTO_CLIP, first, |s, r| {
+        let id = r.first().and_then(|v| v["channel"].as_u64()).map(|id| id as u32);
+        let Some(row) = s.session.project.channels.iter().position(|c| Some(c.id.0) == id) else { return Vec::new() };
+        let mut v: Vec<Command> = crate::rack::join_group_cmd(s, row, "Automation").into_iter().collect();
+        // The control's events leave the pattern: the clip drives it now.
+        if let Some(p) = s.session.project.pattern(n).filter(|p| p.controls.iter().any(|c| c.kind == target)) {
+            let kept = p.controls.iter().filter(|c| c.kind != target);
+            let controls = kept.map(|c| crate::control::command::ControlIn { position: c.position, value: c.value, channel: None, param: None, kind: Some(c.kind), id: (c.id.0 != 0).then_some(c.id.0) }).collect();
+            v.push(Command::SetControls { pattern: p.id.0, controls });
+        }
+        v
     });
-    let beats = points.last().map_or(0.0, |p| p.beat);
-    let mut a = os_flp::project::new_automation(index, target, points.first().map_or(0.0, |p| p.value), beats);
-    a.points = points;
-    s.session.project.get_mut().automations.push(a);
-    let row = s.session.project.channels.len() - 1;
-    crate::rack::join_group(s, row, "Automation");
+    if let Err(e) = made {
+        s.message = Some(e);
+    }
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Automation;
-    s.session.dirty = true;
-    row
+    s.session.project.channels.iter().position(|c| c.index == index).unwrap_or(0)
 }
 
 /// Where a new automation clip goes without a time selection (spec: ui/settings-choices.md "Miscellaneous: seven
@@ -4498,14 +4475,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.raise(crate::app::Win::Playlist);
             Some(format!("Created automation clip \"{name}\""))
         }
-        Cmd::InitControl(tgt, v) => {
-            crate::init::init(&mut s.session, tgt, v);
-            None
+        // "Set as song start value": one undo step; "Remove start value": none (FL makes none). Nothing for a control
+        // whose stored units aren't known (a plugin parameter).
+        Cmd::InitControl(tgt, v) if os_model::InitControl::from_unit(tgt, v).is_some() => {
+            let c = Command::SetStartValue { target: tgt, value: Some(v.clamp(0.0, 1.0)) };
+            crate::control_ui::command(s, crate::init::INITIALIZED, None, vec![c]).err()
         }
-        Cmd::DeleteInit(tgt) => {
-            crate::init::delete(&mut s.session, tgt);
-            None
-        }
+        Cmd::InitControl(..) => None,
+        Cmd::DeleteInit(tgt) => crate::control_ui::run(s, vec![Command::SetStartValue { target: tgt, value: None }]).err(),
         Cmd::JumpQuantize(q) => {
             s.playlist.jump_quantize = q;
             None

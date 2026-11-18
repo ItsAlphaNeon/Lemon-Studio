@@ -78,6 +78,8 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_channel", "channel": clap, "declick": 3, "swing": 0.25, "truncate_swing": true, "cut": 2, "cut_by": 2}),
         json!({"op": "load_sample", "channel": clap, "path": "/no/such/folder/snare.wav"}),
         json!({"op": "set_misc", "channel": kick, "values": {"arp_dir": 2.0, "echo_feed": 0.5, "level_pan": 0.25}}),
+        json!({"op": "set_start_value", "target": 0x4000_0001u32, "value": 0.5}),
+        json!({"op": "set_start_value", "target": 0x4000_0001u32}),
         json!({"op": "add_channel", "name": "Sweep", "kind": "automation", "points": [{"beat": 0.0, "value": 0.1}, {"beat": 8.0, "value": 0.9}]}),
         json!({"op": "add_channel", "name": "Both", "kind": "layer", "children": [kick, clap]}),
         json!({"op": "set_track", "track": ins1, "name": "Drums", "color": "#102030", "volume": 0.6, "pan": 0.5, "stereo": -0.5, "polarity": true, "swap": true, "effects_enabled": false}),
