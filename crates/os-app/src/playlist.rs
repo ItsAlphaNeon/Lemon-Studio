@@ -673,17 +673,6 @@ pub fn window_icon(p: &os_model::Project, key: usize) -> Option<crate::icons::Ic
     icon_of(p, icon_owner(p, key)?)
 }
 
-/// The icon `owner` shows: the project's (the channel's, the track's or the slot's `lemon_icon` / `slot_icons`, by
-/// name; kept in `.lemon`).
-pub fn icon_of(p: &os_model::Project, owner: IconOwner) -> Option<crate::icons::Icon> {
-    let name = match owner {
-        IconOwner::Channel(id) => p.channels.iter().find(|c| c.id.0 == id)?.lemon_icon.as_deref()?,
-        IconOwner::Track(t) => p.mixer.iter().find(|m| m.index == t)?.lemon_icon.as_deref()?,
-        IconOwner::Slot(t, k) => p.mixer.iter().find(|m| m.index == t)?.slot_icons.get(usize::from(k))?.as_deref()?,
-    };
-    ICONS.iter().find(|(n, _)| *n == name).map(|&(_, i)| i)
-}
-
 /// Every icon chosen, by owner.
 #[cfg(test)]
 pub fn icons(p: &os_model::Project) -> HashMap<IconOwner, crate::icons::Icon> {

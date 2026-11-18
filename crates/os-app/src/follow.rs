@@ -100,6 +100,11 @@ fn view(s: &mut State, v: crate::session::View) {
         View::Rows(map) => crate::rack::remap_view(s, &map),
         View::RackAutosize => crate::rack::autosize(s),
         View::ClipsCleared => s.playlist.sel.clear(),
+        View::TargetsMoved(moved) => {
+            if let Some(Some(n)) = moved.target(s.events.target) {
+                s.events.target = n;
+            }
+        }
         View::Retimed(from, to) => crate::app::retime_views(s, from, to),
         View::Message(m) => s.message = Some(m),
         View::AudioClipAdded { channel, clip } => {

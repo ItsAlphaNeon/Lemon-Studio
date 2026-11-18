@@ -18,6 +18,17 @@ use os_model::{
     target, AutoMode, AutoPoint, Arrangement, Automation, Channel, ChannelKind, Clip, ClipSource, PlaylistTrack, Rgb, TimeMarker,
 };
 
+/// The icon `owner` shows: the project's (the channel's, the track's or the slot's `lemon_icon` / `slot_icons`, by
+/// name; kept in `.lemon`).
+pub fn icon_of(p: &os_model::Project, owner: IconOwner) -> Option<crate::icon::Icon> {
+    let name = match owner {
+        IconOwner::Channel(id) => p.channels.iter().find(|c| c.id.0 == id)?.lemon_icon.as_deref()?,
+        IconOwner::Track(t) => p.mixer.iter().find(|m| m.index == t)?.lemon_icon.as_deref()?,
+        IconOwner::Slot(t, k) => p.mixer.iter().find(|m| m.index == t)?.slot_icons.get(usize::from(k))?.as_deref()?,
+    };
+    crate::icon::ICONS.iter().find(|(n, _)| *n == name).map(|&(_, i)| i)
+}
+
 /// Sets (`None`: clears) the icon `owner` shows; the project is written only when it changes.
 pub fn put_icon(s: &mut crate::session::Session, owner: IconOwner, icon: Option<crate::icon::Icon>) {
     let name = icon.and_then(|i| ICONS.iter().find(|(_, x)| *x == i)).map(|&(n, _)| n.to_string());

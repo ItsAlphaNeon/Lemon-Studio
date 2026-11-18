@@ -146,6 +146,8 @@ pub enum View {
     ClipsCleared,
     /// The timebase went from `.0` to `.1` ticks per quarter: the views' ticks and the clipboards follow (`app::retime`).
     Retimed(u16, u16),
+    /// Plugins moved into a container (a wrap): the interface's own targets on their parameters follow them.
+    TargetsMoved(crate::container::Moved),
     /// A message for the hint bar.
     Message(String),
     /// Recording wrote notes of `channel` into `pattern`: the piano roll shows them, nothing selected (its time

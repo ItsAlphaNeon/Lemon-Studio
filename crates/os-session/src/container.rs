@@ -387,7 +387,7 @@ pub fn store_members(proj: &mut Project, plugins: &Plugins) {
 
 /// A plugin a wrap moved into a container (Lemon Studio's design, spec: plugins/patcher/README.md §4.5): where it was,
 /// and which member it became.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Move {
     /// Its place before: slot `.1` of mixer track `.0`, or rack row `.0`'s channel for [`CHANNEL`].
     pub from: (u16, u8),
@@ -396,7 +396,7 @@ pub struct Move {
 
 /// The member a moved plugin became: one member's id, or for a container wrapped again (Wrap all) its members' ids, old
 /// and new.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Ids {
     Plugin(u32),
     Members(Vec<(u32, u32)>),
@@ -418,6 +418,7 @@ impl Ids {
 
 /// What a wrap moved into the container at place `to` (a slot, or a rack row's channel of index `index`): the
 /// automation targets and remote control links naming the moved plugins' parameters follow them onto the members.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Moved {
     pub to: (u16, u8),
     /// The channel's index (automation names a channel by it), for a channel's container.

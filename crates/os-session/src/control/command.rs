@@ -430,6 +430,18 @@ pub enum Command {
         #[serde(default)]
         threaded: Option<bool>,
     },
+    /// Wrap in container on slot `slot` of the track (`all`: Wrap all in container, every effect of the track): the
+    /// effects become members of a container in that slot, with their states, and what named their parameters
+    /// (automation, recorded events, links) follows them. The result says what it did.
+    WrapEffects {
+        track: u32,
+        slot: u8,
+        #[serde(default)]
+        all: bool,
+    },
+    /// Wrap in container on the channel's instrument: it becomes the first member of a container on the channel, which
+    /// takes a new id (the result names it).
+    WrapInstrument { channel: u32 },
     /// Member `member` of the container to place `to` (0 = first) of its list.
     MoveMember { container: u32, member: u32, to: usize },
     /// Member `member` goes from the container.
@@ -939,6 +951,8 @@ impl Command {
             Command::AddChannel { .. } => "Add channel",
             Command::CloneChannel { .. } => "Clone channel",
             Command::ReplaceInstrument { .. } => crate::history::REPLACE_CHANNEL,
+            Command::WrapEffects { all: false, .. } | Command::WrapInstrument { .. } => crate::container::WRAP,
+            Command::WrapEffects { all: true, .. } => crate::container::WRAP_ALL,
             Command::DeleteChannel { .. } => "Delete channel",
             Command::MoveChannel { .. } => "Move channel",
             Command::SetChannel { .. } => "Channel settings",
@@ -1075,6 +1089,8 @@ impl Command {
             },
             // A slot moved takes the automation and remote control links on it along (`edit::mixer::follow_places`).
             Command::SetAutoBypass { .. } | Command::RemoveTracks { .. } | Command::MoveTrack { .. } | Command::MoveEffect { .. } => Taken::Project(Box::new(Side::of(s))),
+            // A wrap moves plugins and what names them across the project.
+            Command::WrapEffects { .. } | Command::WrapInstrument { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::LoadTrackState { track, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone())),
             Command::SetClipLfo { channel, .. } => Taken::Lfo(*channel, Box::new(clip_lfo(p, *channel)?.clone())),
             Command::SetMidiOut { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
@@ -2112,6 +2128,21 @@ impl Command {
                     crate::edit::container::set_members(s, t, k, &list);
                 }
                 none
+            }
+            Command::WrapEffects { track, slot, all } => {
+                if slot > 9 {
+                    return Err(format!("slots are 0..=9, not {slot}"));
+                }
+                let t = track_number(&s.project, track)?;
+                let msg = crate::edit::container::wrap_slot_in(s, t, slot, all)?;
+                s.control.settle(s.project.get_mut());
+                Ok(serde_json::json!({ "message": msg }))
+            }
+            Command::WrapInstrument { channel } => {
+                let row = channel_row(&s.project, channel)?;
+                let msg = crate::edit::container::wrap_channel_in(s, row)?;
+                let id = s.project.channels[row].id.0;
+                Ok(serde_json::json!({ "channel": id, "message": msg }))
             }
             Command::MoveMember { container, member, to } => {
                 let (t, k, mut list, i) = member_at(s, container, member)?;

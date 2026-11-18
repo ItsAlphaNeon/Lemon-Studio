@@ -294,6 +294,8 @@ fn op(c: &Command) -> &'static str {
         Command::SetClipLfo { .. } => "set_clip_lfo",
         Command::SetMidiOut { .. } => "set_midi_out",
         Command::SetMember { .. } => "set_member",
+        Command::WrapEffects { .. } => "wrap_effects",
+        Command::WrapInstrument { .. } => "wrap_instrument",
         Command::MoveMember { .. } => "move_member",
         Command::RemoveMember { .. } => "remove_member",
         Command::AddMember { .. } => "add_member",
