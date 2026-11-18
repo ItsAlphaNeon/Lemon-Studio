@@ -262,6 +262,7 @@ fn op(c: &Command) -> &'static str {
         Command::SetChannel { .. } => "set_channel",
         Command::LoadSample { .. } => "load_sample",
         Command::LoadChannelState { .. } => "load_channel_state",
+        Command::SetMisc { .. } => "set_misc",
         Command::AddTrack { .. } => "add_track",
         Command::DeleteTrack { .. } => "delete_track",
         Command::SetTrack { .. } => "set_track",

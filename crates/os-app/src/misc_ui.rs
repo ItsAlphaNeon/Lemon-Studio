@@ -14,10 +14,14 @@ use crate::misc::*;
 /// A Misc tab edit of rack row `row`: the channel model, its hosted Lemon Sampler (root / fine), then playback.
 /// No undo step, as in FL (measured 2026-10-28).
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
-    let Some(ch) = app.state.session.project.get_mut().channels.get_mut(row) else { return };
-    put(&mut ch.misc, m, v);
-    sync(&mut app.state.session, row, &[m]);
-    app.state.session.dirty = true;
+    let s = &mut app.state;
+    crate::mixer::track_ids(s);
+    let Some(channel) = s.session.project.channels.get(row).map(|c| c.id.0) else { return };
+    let c = crate::control::command::Command::SetMisc { channel, values: [(m.key(), v)].into() };
+    if let Err(e) = crate::control_ui::run(s, vec![c]) {
+        s.message = Some(e);
+    }
+    s.session.dirty = true;
     app.invalidate();
 }
 

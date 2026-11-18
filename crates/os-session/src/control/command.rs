@@ -189,6 +189,8 @@ pub enum Command {
     },
     /// A sample file into a sampler channel (empty: none).
     LoadSample { channel: u32, path: String },
+    /// Values of the channel's Misc tab, by name (`level_pan`, `arp_dir`, `echo_feed`...), each clamped to its range.
+    SetMisc { channel: u32, values: std::collections::BTreeMap<String, f32> },
 
     // ----- The mixer
     /// A new insert track at number `at` (later ones move right), else after the last one in use. The result names
@@ -1392,6 +1394,7 @@ impl Command {
             Command::SetChannel { .. } => "Channel settings",
             Command::LoadSample { .. } => crate::history::LOAD_SAMPLE,
             Command::LoadChannelState { .. } => "Load channel state",
+            Command::SetMisc { .. } => "Channel settings",
             Command::AddTrack { .. } => "Insert mixer track",
             Command::DeleteTrack { .. } => "Delete mixer track",
             Command::SetTrack { .. } => "Mixer track settings",
@@ -1525,7 +1528,7 @@ impl Command {
             | Command::SetTimeSignature { .. }
             | Command::SetInfo { .. }
             | Command::SetProject { .. } => Taken::Settings(Box::new(Settings::of(s))),
-            Command::SetChannel { channel, .. } | Command::LoadSample { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
+            Command::SetChannel { channel, .. } | Command::LoadSample { channel, .. } | Command::SetMisc { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
             Command::SetTrack { track, .. } | Command::ResetTrack { track } | Command::SetEq { track, .. } | Command::SetSlot { track, .. } | Command::AddEffect { track, .. } | Command::RemoveEffect { track, .. } => {
                 Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone()))
             }
@@ -2277,6 +2280,16 @@ impl Command {
                     crate::edit::mixer::renumber(s, &m, n.min(o), n.max(o) + 1, 0);
                     n = o;
                 }
+                none
+            }
+            Command::SetMisc { channel, values } => {
+                let row = channel_row(&s.project, channel)?;
+                let ms = values.keys().map(|k| crate::misc::M::of_key(k).ok_or_else(|| format!("no Misc value {k}"))).collect::<Result<Vec<_>, _>>()?;
+                let misc = &mut s.project.get_mut().channels[row].misc;
+                for (&m, v) in ms.iter().zip(values.values()) {
+                    crate::misc::put(misc, m, *v);
+                }
+                crate::misc::sync(s, row, &ms);
                 none
             }
             Command::LoadChannelState { path, name } => {
