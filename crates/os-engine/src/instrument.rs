@@ -101,6 +101,13 @@ pub trait Instrument: Send {
     fn takes_tuning(&self) -> bool {
         false
     }
+    /// True for an instrument that plays `tune` as MIDI pitch bend ([`TuningBend`]: VST 2, and CLAP or VST 3 plugins
+    /// that read MIDI only). Its notes keep their keys and the bend carries the whole of the channel's pitch, as FL's
+    /// wrapper sends a channel's pitch to a VST plugin (measured on FL 12: a channel at -80 cents, with the wrapper's
+    /// range at 12 semitones, played a 2-semitone-range plugin 13 cents flat). Default false.
+    fn tunes_by_bend(&self) -> bool {
+        false
+    }
     /// Renders `left.len()` frames at `rate`, overwriting both buffers.
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
     /// The extra outputs the instrument has besides its main one (a plugin's output buses after the first, each heard

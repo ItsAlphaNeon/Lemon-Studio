@@ -229,11 +229,14 @@ const LATE_START_SECONDS: f64 = 0.005;
 /// started on it. A change of the shift (the main pitch, the pitch knob, automation) retunes those keys, so sounding
 /// notes follow it (spec: audio/voice-levels.md "The main pitch"). `moves`: the instrument ignores a note's tuning
 /// (`Instrument::takes_tuning`), so a plugin channel's notes start on keys moved by their pitch's whole semitones and
-/// are tuned only by what is left; their note offs go to the moved keys.
+/// are tuned only by what is left; their note offs go to the moved keys. `root_move`: an instrument that plays its
+/// tuning as pitch bend (`Instrument::tunes_by_bend`) gets keys moved by the root note alone, as FL sends a VST
+/// plugin its notes, and the bend carries the rest.
 #[derive(Debug, Clone, Copy)]
 struct InstTuning {
     shift: f32,
     moves: bool,
+    root_move: Option<i32>,
     fine: [f32; 128],
     glide: [f32; 128],
     sent: [u8; 128],
@@ -242,7 +245,7 @@ struct InstTuning {
 
 impl Default for InstTuning {
     fn default() -> Self {
-        InstTuning { shift: 0.0, moves: false, fine: [0.0; 128], glide: [0.0; 128], sent: std::array::from_fn(|k| k as u8), keys: 0 }
+        InstTuning { shift: 0.0, moves: false, root_move: None, fine: [0.0; 128], glide: [0.0; 128], sent: std::array::from_fn(|k| k as u8), keys: 0 }
     }
 }
 
@@ -4485,7 +4488,9 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     // pitch, on top of any glide; notes keep the pitch they started with. A plugin channel's instrument that ignores a
     // tuning hears its whole semitones as moved keys instead.
     let shift = ch.hosted_shift();
-    fines.moves = !ch.own_tuning && !inst.takes_tuning();
+    let bends = !ch.own_tuning && !inst.takes_tuning() && inst.tunes_by_bend();
+    fines.moves = !ch.own_tuning && !inst.takes_tuning() && !bends;
+    fines.root_move = bends.then(|| 60 - i32::from(ch.root));
     // A changed channel pitch reaches the notes already sounding.
     if fines.shift != shift {
         fines.shift = shift;
@@ -4820,7 +4825,12 @@ fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, fines: &mut
         notes::Note::Off(key) => inst.note_off(off, fines.sent(key)),
         notes::Note::On { key, vel, start, end, fine, levels, voice } => {
             // An instrument that ignores a tuning plays the note's pitch to the nearest semitone on a moved key.
-            let sent = if fines.moves { (i32::from(key) + (fines.shift + fine).round() as i32).clamp(0, 127) as u8 } else { key };
+            let sent = match (fines.moves, fines.root_move) {
+                (true, _) => (i32::from(key) + (fines.shift + fine).round() as i32).clamp(0, 127) as u8,
+                // A plugin that bends: the root note moves the key, the bend carries the rest.
+                (false, Some(m)) => (i32::from(key) + m).clamp(0, 127) as u8,
+                (false, None) => key,
+            };
             // The note's own pan and mod X / Y go with it (spec: audio/voice-levels.md "The note's own levels").
             match voice {
                 Some(v) => inst.voice_start(off, sent, vel, start, end, levels, v),
@@ -7237,10 +7247,12 @@ mod tests {
         assert_eq!((g.records[Record::VOLUME].flags, g.records[Record::VOLUME].release_tension), (2, 0));
     }
 
-    /// Logs the keys of its notes (true: on) and its tunings; `tunes`: what `takes_tuning` says.
+    /// Logs the keys of its notes (true: on) and its tunings; `tunes`: what `takes_tuning` says, `bends`: what
+    /// `tunes_by_bend` says.
     #[derive(Default)]
     struct TuneLog {
         tunes: bool,
+        bends: bool,
         keys: Vec<(u8, bool)>,
         tuned: Vec<(u8, f32)>,
     }
@@ -7257,6 +7269,9 @@ mod tests {
         }
         fn takes_tuning(&self) -> bool {
             self.tunes
+        }
+        fn tunes_by_bend(&self) -> bool {
+            self.bends
         }
         fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
     }
@@ -7294,6 +7309,18 @@ mod tests {
         // 9.8 semitones: 10 of them move the key, -0.2 is tuned; the note off goes to the moved key.
         let (keys, got) = run(&p, false);
         assert!(keys == [(70, true), (70, false)] && close(&got, 70, -0.2), "{keys:?} {got:?}");
+        // A plugin that plays its tuning as pitch bend: the root note (C4, 12 up) moves the key, the bend carries the
+        // knob and fine tune (-2.2), as FL's wrapper sends them.
+        let bent = |p: &Project| {
+            let mut e = Engine::new(p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+            let log = Arc::new(std::sync::Mutex::new(TuneLog { bends: true, ..TuneLog::default() }));
+            e.set_instrument(0, log.clone());
+            e.render_all(480);
+            let l = log.lock().unwrap();
+            (l.keys.clone(), l.tuned.clone())
+        };
+        let (keys, got) = bent(&p);
+        assert!(keys == [(72, true), (72, false)] && close(&got, 72, -2.2), "{keys:?} {got:?}");
         // Whole semitones only: no tuning.
         (p.channels[0].pitch_cents, p.channels[0].misc.fine) = (0, 0);
         assert_eq!(run(&p, false), (vec![(72, true), (72, false)], vec![]), "root note C4: an octave up");

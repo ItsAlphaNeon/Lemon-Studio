@@ -1149,6 +1149,11 @@ impl os_engine::Instrument for Plugin {
         self.bend.set_range(semitones);
     }
 
+    /// VST 2 has no tuning of a note: always pitch bend.
+    fn tunes_by_bend(&self) -> bool {
+        true
+    }
+
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         self.automate(offset, index, value);
     }

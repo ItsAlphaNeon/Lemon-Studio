@@ -1629,6 +1629,10 @@ impl os_engine::Instrument for Plugin {
         }
     }
 
+    fn tunes_by_bend(&self) -> bool {
+        self.bend.is_some()
+    }
+
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         self.automate(offset, index, value);
     }

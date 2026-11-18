@@ -114,6 +114,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn takes_tuning(&self) -> bool {
         self.look(false, |p| p.takes_tuning())
     }
+    fn tunes_by_bend(&self) -> bool {
+        self.look(false, |p| p.tunes_by_bend())
+    }
     fn set_bend_range(&mut self, semitones: u32) {
         self.run((), |p| p.set_bend_range(semitones))
     }
