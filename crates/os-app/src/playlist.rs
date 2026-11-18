@@ -3482,8 +3482,12 @@ pub fn commit_edit(s: &mut State) {
     if e.target == EditTarget::ArrangementName {
         let h = &s.session.history;
         if added.is_some() && added == h.newest_id() && h.done() == h.steps.len() {
-            if !e.text.trim().is_empty() {
-                arr_mut(&mut s.session).name = Some(e.text.trim().to_string());
+            // Inside the add's step: its undo takes the arrangement away whatever its name.
+            let text = e.text.trim().to_string();
+            if let (false, Some(arrangement)) = (text.is_empty(), s.session.project.arrangement().map(|a| a.id.0)) {
+                if let Err(err) = crate::control_ui::run(s, vec![Command::SetArrangement { arrangement, name: text }]) {
+                    s.message = Some(err);
+                }
                 s.session.dirty = true;
             }
             return;
@@ -3494,8 +3498,10 @@ pub fn commit_edit(s: &mut State) {
     match e.target {
         // Names aren't in the playlist's step (`capture`): their own steps, which drop the empty one above.
         EditTarget::ArrangementName => {
-            if !text.trim().is_empty() {
-                crate::control_ui::edit(s, "Arrangement name", crate::control::command::Region::Arrangement, |s| arr_mut(&mut s.session).name = Some(text.trim().to_string()));
+            if let (false, Some(arrangement)) = (text.trim().is_empty(), s.session.project.arrangement().map(|a| a.id.0)) {
+                if let Err(err) = crate::control_ui::command(s, "Arrangement name", None, vec![Command::SetArrangement { arrangement, name: text.trim().to_string() }]) {
+                    s.message = Some(err);
+                }
             }
         }
         EditTarget::TrackName(t) => {
@@ -4266,43 +4272,54 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::ArrAdd | Cmd::ArrClone => {
-            crate::control_ui::edit(s, "Add arrangement", crate::control::command::Region::Project, |s| {
-            let n = s.session.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
-            let mut a = if cmd_is_clone(&cmd) { arr_mut(&mut s.session).clone() } else { os_flp::project::default_arrangement() };
-            a.number = n;
-            a.name = Some(if cmd_is_clone(&cmd) {
-                format!("{} #2", arrangement_name(&s.session))
+            let copy = if cmd_is_clone(&cmd) {
+                if s.session.project.arrangement().is_some_and(|a| a.id == os_model::Id::NONE) {
+                    crate::control_ui::settle_ids(s);
+                }
+                s.session.project.arrangement().map(|a| a.id.0)
             } else {
-                format!("Arrangement {}", s.session.project.arrangements.len() + 1)
-            });
-            s.session.project.get_mut().arrangements.push(a);
-            show_arrangement(s, n);
-            // FL's "Add one..." / "Clone..." ask for the name.
-            start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
-            });
-            s.playlist.arr_added = s.session.history.newest_id();
-            None
+                None
+            };
+            let name = cmd_is_clone(&cmd).then(|| format!("{} #2", arrangement_name(&s.session)));
+            match crate::control_ui::command(s, "Add arrangement", None, vec![Command::AddArrangement { name, copy }]) {
+                Ok(_) => {
+                    // Shown (no step of its own: an undo of the add shows the one before), then FL's "Add one..." /
+                    // "Clone..." ask for the name.
+                    if let Some(n) = s.session.project.arrangements.last().map(|a| a.number) {
+                        show_arrangement(s, n);
+                    }
+                    start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
+                    s.playlist.arr_added = s.session.history.newest_id();
+                    None
+                }
+                Err(e) => Some(e),
+            }
         }
         Cmd::ArrRename => {
             s.playlist.arr_added = None;
             start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
             None
         }
-        Cmd::ArrDelete if s.session.project.arrangements.len() > 1 => crate::control_ui::edit(s, "Delete arrangement", crate::control::command::Region::Project, |s| {
-            let i = s.session.project.arrangement_index();
-            s.session.project.get_mut().arrangements.remove(i);
-            let n = s.session.project.arrangements[i.saturating_sub(1)].number;
-            show_arrangement(s, n);
-            None
-        }),
+        Cmd::ArrDelete if s.session.project.arrangements.len() > 1 => {
+            if s.session.project.arrangement().is_some_and(|a| a.id == os_model::Id::NONE) {
+                crate::control_ui::settle_ids(s);
+            }
+            let arrangement = s.session.project.arrangement()?.id.0;
+            let r = crate::control_ui::command(s, "Delete arrangement", None, vec![Command::DeleteArrangement { arrangement }]).err();
+            if let Some(n) = s.session.project.arrangement().map(|a| a.number) {
+                show_arrangement(s, n);
+            }
+            r
+        }
         Cmd::ArrDelete => Some("The only arrangement cannot be deleted".into()),
         Cmd::ArrMerge(n) => {
             let Some(other) = s.session.project.arrangements.iter().find(|a| a.number == n).cloned() else { return None };
-            snapshot(&mut s.session);
-            let a = arr_mut(&mut s.session);
-            a.clips.extend(other.clips.iter().copied());
-            a.clips.sort_by_key(|c| c.position);
-            s.session.dirty = true;
+            arr_edit(s, ARRANGER_EDIT, |s| {
+                let a = arr_mut(&mut s.session);
+                // Copies: the other arrangement keeps its clips.
+                a.clips.extend(other.clips.iter().map(|c| Clip { id: os_model::Id::NONE, ..*c }));
+                a.clips.sort_by_key(|c| c.position);
+            });
             Some(format!("Merged the clips of {}", other.name.unwrap_or_else(|| "Arrangement".into())))
         }
         Cmd::TrackUp(t) if t > 0 => {

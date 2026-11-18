@@ -69,7 +69,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
     let pa: Vec<u32> = p.patterns.iter().map(|q| q.id.0).collect();
     let clips: Vec<u32> = p.arrangement().map(|x| x.clips.iter().map(|c| c.id.0).collect()).unwrap_or_default();
     let note = |r: &mut Rng, ch: &[u32]| json!({"channel": r.id(ch), "position": r.below(4) * 96, "length": 1 + r.below(96), "key": 36 + r.below(48), "velocity": r.below(128)});
-    match r.below(54) {
+    match r.below(55) {
         0 => json!({"op": "set_tempo", "bpm": 40.0 + r.unit() * 200.0}),
         1 => json!({"op": "set_swing", "swing": r.unit()}),
         2 => json!({"op": "set_main_volume", "volume": r.unit()}),
@@ -116,7 +116,12 @@ fn command(r: &mut Rng, a: &App) -> Value {
         41 => json!({"op": "clone_channel", "channel": r.id(&ch)}),
         43 => json!({"op": "set_loops", "pattern": r.id(&pa), "mode": r.below(4), "loops": [{"channel": r.id(&ch), "value": if r.chance(0.5) { Some(1 + r.below(16)) } else { None }}]}),
         44 => json!({"op": "set_groups", "groups": ["A", "Unsorted"], "channels": [{"channel": r.id(&ch), "group": if r.chance(0.5) { Some(r.below(2)) } else { None }}], "shown": if r.chance(0.5) { Some(r.below(2)) } else { None }}),
-        51 => json!({"op": "set_clips", "clips": [{"id": r.id(&clips), "track": 1 + r.below(8), "position": r.below(16) * 96, "length": 1 + r.below(384)}, {"track": 1 + r.below(8), "position": r.below(16) * 96, "length": 96, "pattern": 1 + r.below(4)}]}),
+        53 => json!({"op": "add_arrangement", "name": format!("A{}", r.below(9))}),
+        // In position order, as the playlist keeps clips (a list out of order keeps its order, which a file sorts).
+        51 => {
+            let p = r.below(16) * 96;
+            json!({"op": "set_clips", "clips": [{"id": r.id(&clips), "track": 1 + r.below(8), "position": p, "length": 1 + r.below(384)}, {"track": 1 + r.below(8), "position": p + 96 * (1 + r.below(8)), "length": 96, "pattern": 1 + r.below(4)}]})
+        }
         52 => json!({"op": "set_markers", "markers": [{"position": r.below(8) * 384, "name": "A"}, {"position": r.below(8) * 384, "kind": r.below(6)}]}),
         50 => json!({"op": "add_marker", "marker": {"position": r.below(8) * 384, "name": format!("M{}", r.below(9)), "kind": r.below(6)}}),
         46 => json!({"op": "swap_playlist_tracks", "track": 1 + r.below(8), "with": 1 + r.below(8)}),

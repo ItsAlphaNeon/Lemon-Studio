@@ -127,7 +127,10 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `delete_clip` | `clip` | |
 | `set_clip` | `clip`; `position`, `track`, `length`, `muted` (optional) | |
 | `set_playlist_track` | `track`; `name`, `color`, `enabled`, `grouped` (optional) | `grouped`: with the track above (not track 1) |
-| `set_clips` | `clips`: `[{"track", "position", "length", "pattern" (a number) or "channel", "muted", "window" ([start, end], [] none), "record", "id"}]` | The shown arrangement's clips become these, in this order (the order they are drawn in). A clip named by the id of one the playlist holds keeps it and its values not given; the others are new |
+| `add_arrangement` | `name`, `copy` (an arrangement's id) (optional) | After the others; a copy of `copy`, else empty. Result: `arrangement` |
+| `delete_arrangement` | `arrangement` | A project keeps one; the one shown going, the one before it is shown |
+| `set_arrangement` | `arrangement`, `name` | |
+| `set_clips` | `clips`: `[{"track", "position", "length", "pattern" (a number) or "channel", "muted", "window" ([start, end], [] none), "record", "id"}]` | The shown arrangement's clips become these, in this order (the order they are drawn in; a saved file keeps them in position order). A clip named by the id of one the playlist holds keeps it and its values not given; the others are new |
 | `set_markers` | `markers`: `[` a marker as `add_marker` takes one, with its `id` `]` | The markers become these (in position order), kept by id as `set_clips` keeps clips |
 | `add_marker` | `marker`: `position`; `name`, `kind`, `numerator`, `denominator`, `root`, `scale` (optional) | A time marker (`kind`: 0 marker, 1 marker loop, 2 skip, 3 pause, 4 loop, 5 start, 8 time signature, 9 punch in, 10 punch out, 12 key; a key marker by `root` 0..11 and `scale`, a place in the Add key marker list). Result: `marker` |
 | `set_marker` | `marker`; `position`, `name`, `kind`, `numerator`, `denominator` (optional) | |

@@ -369,6 +369,18 @@ pub enum Command {
         #[serde(default)]
         grouped: Option<bool>,
     },
+    /// A new arrangement after the others, a copy of arrangement `copy` when given, else empty; named `name`, else
+    /// "Arrangement N" (a copy: "<name> #2"). The result names its id.
+    AddArrangement {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        copy: Option<u32>,
+    },
+    /// The arrangement goes (a project keeps one); shown, the one before it is shown.
+    DeleteArrangement { arrangement: u32 },
+    /// The arrangement's name.
+    SetArrangement { arrangement: u32, name: String },
     /// The shown arrangement's clips become `clips`, in this order (the order they are drawn in): a clip named by the id
     /// of one the playlist holds keeps it, and its values for what is not given; the others are new.
     SetClips { clips: Vec<ClipIn> },
@@ -756,6 +768,11 @@ impl ClipIn {
         }
         Ok(c)
     }
+}
+
+/// Arrangement `id`.
+fn arrangement_of(p: &Project, id: u32) -> Result<&os_model::Arrangement, Error> {
+    p.arrangements.iter().find(|a| a.id.0 == id).ok_or_else(|| format!("no arrangement {id}"))
 }
 
 /// Marker `id`'s place in the shown arrangement's list.
@@ -1226,6 +1243,9 @@ impl Command {
             Command::SetPlaylistTrack { .. } => "Playlist track",
             Command::AddMarker { .. } | Command::SetMarker { .. } | Command::DeleteMarker { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::SetClips { .. } | Command::SetMarkers { .. } => crate::edit::playlist::ARRANGER_EDIT,
+            Command::AddArrangement { .. } => "Add arrangement",
+            Command::DeleteArrangement { .. } => "Delete arrangement",
+            Command::SetArrangement { .. } => "Arrangement name",
             Command::MoveContent { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::SwapPlaylistTracks { .. } | Command::InsertPlaylistTrack { .. } | Command::DeletePlaylistTrack { .. } | Command::ResetPlaylistTrack { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::SetClipLfo { .. } => "Automation clip LFO",
@@ -1342,6 +1362,9 @@ impl Command {
             },
             // A slot moved takes the automation and remote control links on it along (`edit::mixer::follow_places`).
             Command::SetAutoBypass { .. } | Command::RemoveTracks { .. } | Command::MoveTrack { .. } | Command::MoveEffect { .. } => Taken::Project(Box::new(Side::of(s))),
+            // The arrangements' list, and which one is shown.
+            Command::AddArrangement { .. } | Command::DeleteArrangement { .. } => Taken::Project(Box::new(Side::of(s))),
+            Command::SetArrangement { arrangement, .. } => Taken::Arrangement(Box::new(arrangement_of(p, *arrangement)?.clone())),
             // A wrap moves plugins and what names them across the project.
             Command::WrapEffects { .. } | Command::WrapInstrument { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::LoadTrackState { track, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone())),
@@ -2304,6 +2327,46 @@ impl Command {
                 if let Some(v) = grouped {
                     t.grouped = v && track > 1;
                 }
+                none
+            }
+            Command::AddArrangement { name, copy } => {
+                let n = s.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
+                let mut a = match copy {
+                    Some(id) => arrangement_of(&s.project, id)?.clone(),
+                    None => os_flp::project::default_arrangement(),
+                };
+                let name = match (name, copy) {
+                    (Some(n), _) => n,
+                    (None, Some(_)) => format!("{} #2", a.name.clone().unwrap_or_else(|| "Arrangement".into())),
+                    (None, None) => format!("Arrangement {}", s.project.arrangements.len() + 1),
+                };
+                (a.number, a.name, a.id) = (n, Some(name), Id::NONE);
+                // A copy's things are new.
+                a.clips.iter_mut().for_each(|c| c.id = Id::NONE);
+                a.markers.iter_mut().for_each(|m| m.id = Id::NONE);
+                a.tracks.iter_mut().for_each(|t| t.id = Id::NONE);
+                s.project.get_mut().arrangements.push(a);
+                s.control.settle(s.project.get_mut());
+                let id = s.project.arrangements.last().map_or(Id::NONE, |a| a.id);
+                Ok(id_result("arrangement", id))
+            }
+            Command::DeleteArrangement { arrangement } => {
+                if s.project.arrangements.len() < 2 {
+                    return Err("The only arrangement cannot be deleted".into());
+                }
+                let i = s.project.arrangements.iter().position(|a| a.id.0 == arrangement).ok_or_else(|| format!("no arrangement {arrangement}"))?;
+                let shown = s.project.arrangement_index() == i;
+                s.project.get_mut().arrangements.remove(i);
+                if shown {
+                    let n = s.project.arrangements[i.saturating_sub(1)].number;
+                    s.project.get_mut().current_arrangement = Some(n);
+                }
+                s.touched.clips = true;
+                none
+            }
+            Command::SetArrangement { arrangement, name } => {
+                let i = s.project.arrangements.iter().position(|a| a.id.0 == arrangement).ok_or_else(|| format!("no arrangement {arrangement}"))?;
+                s.project.get_mut().arrangements[i].name = text(&name);
                 none
             }
             Command::SetClips { clips } => {

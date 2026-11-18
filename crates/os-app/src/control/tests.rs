@@ -122,6 +122,12 @@ fn every_command_undoes_and_redoes() {
     // The clips as a list, in order: the clip kept by its id, a new one after it; the markers likewise.
     round_trip(&mut a, json!({"op": "set_clips", "clips": [{"id": clip, "track": 2, "position": 96, "length": 192}, {"track": 5, "position": 0, "length": 96, "pattern": 3, "muted": true, "window": [0.0, 48.0]}]}));
     round_trip(&mut a, json!({"op": "set_markers", "markers": [{"position": 384, "name": "Verse"}, {"position": 0, "name": "Intro", "kind": 4}]}));
+    // Arrangements: one added (a copy of the one shown), renamed and deleted.
+    let shown = a.state.session.project.arrangement().unwrap().id.0;
+    let r = round_trip(&mut a, json!({"op": "add_arrangement", "copy": shown}));
+    let arr = r[0]["arrangement"].as_u64().unwrap();
+    round_trip(&mut a, json!({"op": "set_arrangement", "arrangement": arr, "name": "B side"}));
+    round_trip(&mut a, json!({"op": "delete_arrangement", "arrangement": arr}));
     round_trip(&mut a, json!({"op": "delete_clip", "clip": clip}));
     let pat2 = ids(&a).2.last().copied().unwrap();
     round_trip(&mut a, json!({"op": "delete_pattern", "pattern": pat2}));
