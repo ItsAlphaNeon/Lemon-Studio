@@ -99,7 +99,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `load_sample` | `channel`, `path` | A sampler channel; an empty path clears it |
 | `add_track` | `at` (optional) | A mixer insert, at number `at` or after the last. Result: `track` |
 | `delete_track` | `track` | Later tracks move left; its channels go to the master |
-| `set_track` | `track`; `name`, `color`, `volume` (0..1, 0.8 = unity), `pan`, `stereo` (-1..1), `enabled`, `polarity`, `swap`, `effects_enabled`, `separator`, `dock` (`left`, `middle` or `right`), `threaded`, `latency_in`, `latency_out` (ms, -1000..1000) (optional) | |
+| `set_track` | `track`; `name`, `color`, `volume` (0..1, 0.8 = unity), `pan`, `stereo` (-1..1), `enabled`, `polarity`, `swap`, `effects_enabled`, `separator`, `dock` (`left`, `middle` or `right`), `threaded`, `latency_in`, `latency_out` (ms, -1000..1000), `audio_in`, `audio_out` (place in the device's input or output menu, -1 none), `rec_source` (0 External input only ..= 5 Post track), `monitor` (`off`, `armed` or `on`), `armed` (optional) | |
 | `move_track` | `track`, `to` | the track moves to insert number `to`, the ones between moving over |
 | `remove_tracks` | `tracks` (ids) | the tracks go and the mixer gets shorter (Trim unused tracks); the others close up in order |
 | `load_track_state` | `track`, `path`; `named` (optional) | the saved mixer track state in `path` onto the track, its old effects going; `named`: with its name and colour |

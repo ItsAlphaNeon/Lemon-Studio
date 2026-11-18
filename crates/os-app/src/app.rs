@@ -2217,7 +2217,7 @@ impl App {
             Then::DeleteUnused(files) => self.delete_unused_done(files, &reply),
             Then::ExtInput(t) => {
                 if reply == Reply::Button(Answer::Yes) {
-                    crate::edit::mixer::external_only(&mut self.state.session, t);
+                    crate::mixer::external_only(&mut self.state, t);
                 }
             }
             Then::SavePreset(key) => {

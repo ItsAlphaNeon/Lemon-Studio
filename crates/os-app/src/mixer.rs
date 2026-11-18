@@ -1602,6 +1602,32 @@ fn add_effect_on(s: &mut State, t: u16, k: u8, index: usize, state: Option<Vec<u
     None
 }
 
+/// A monitor mode's name in `Command::SetTrack`.
+fn monitor_name(v: u8) -> &'static str {
+    match v {
+        os_model::MONITOR_OFF => "off",
+        os_model::MONITOR_ON => "on",
+        _ => "armed",
+    }
+}
+
+/// Track `t`'s input, output, record source or monitor mode set by `c` as a step, "Mixer track audio input / output";
+/// whether it changed.
+fn set_io(s: &mut State, t: u16, c: Option<Command>) -> bool {
+    let Some(c) = c else { return false };
+    let before = track(&s.session, t).map(crate::history::track_io_of);
+    let _ = crate::control_ui::command(s, crate::history::MIXER_TRACK_IO, None, vec![c]);
+    track(&s.session, t).map(crate::history::track_io_of) != before
+}
+
+/// Track `t` takes its input alone (the External input question's Yes); no step of its own, as in FL.
+pub fn external_only(s: &mut State, t: u16) {
+    if let Some(c) = set_track!(s, t, rec_source: os_model::REC_EXTERNAL) {
+        let _ = crate::control_ui::run(s, vec![c]);
+        s.session.dirty = true;
+    }
+}
+
 fn run_now(app: &mut App, c: MCmd) -> Option<String> {
     let at = app.mouse;
     let s = &mut app.state;
@@ -1622,21 +1648,21 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::Input(t, v) => {
             // An input chosen where there was none asks whether to record it alone (§1.4).
             let ask = track(&s.session, t).is_some_and(|m| m.audio_in < 0 && v >= 0 && m.rec_source != os_model::REC_EXTERNAL);
-            if set_io(&mut s.session, t, |m| m.audio_in = v) && ask {
+            if set_io(s, t, set_track!(s, t, audio_in: v)) && ask {
                 app.ask_external(t);
             }
             return None;
         }
         MCmd::Output(t, v) => {
-            set_io(&mut s.session, t, |m| m.audio_out = v);
+            set_io(s, t, set_track!(s, t, audio_out: v));
             None
         }
         MCmd::RecSource(t, v) => {
-            set_io(&mut s.session, t, |m| m.rec_source = v);
+            set_io(s, t, set_track!(s, t, rec_source: v));
             None
         }
         MCmd::Monitor(t, v) => {
-            set_io(&mut s.session, t, |m| m.monitor = v);
+            set_io(s, t, set_track!(s, t, monitor: monitor_name(v).to_string()));
             None
         }
         MCmd::Solo(n) => {
@@ -2061,7 +2087,7 @@ impl App {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
         // Settings ▸ Recording's External input question: Ask, Switch to External input only, Keep the record source.
         match crate::prefs::index(&crate::prefs::EXTERNAL_INPUT) {
-            1 => external_only(&mut self.state.session, t),
+            1 => external_only(&mut self.state, t),
             2 => {}
             _ => {
                 let text = "You've selected an external input. Do you want to switch to External input only to avoid recording internal audio on this track?";

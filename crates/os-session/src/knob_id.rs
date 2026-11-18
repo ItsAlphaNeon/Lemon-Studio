@@ -251,7 +251,7 @@ impl KnobId {
         let track = |t: u16| p.mixer.iter().find(|m| m.index == t).map(|m| m.id.0);
         let channel = |row: usize| p.channels.get(row).map(|c| c.id.0);
         let set_track = |t: u16, pan: Option<f64>, stereo: Option<f64>| {
-            Some(Command::SetTrack { track: track(t)?, name: None, color: None, volume: None, pan, stereo, enabled: None, polarity: None, swap: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, effects_enabled: None })
+            Some(Command::SetTrack { track: track(t)?, name: None, color: None, volume: None, pan, stereo, enabled: None, polarity: None, swap: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, effects_enabled: None, audio_in: None, audio_out: None, rec_source: None, monitor: None, armed: None })
         };
         let set_channel = |row: usize, volume: Option<f64>, pan: Option<f64>| {
             let mut c = Command::set_channel(channel(row)?);

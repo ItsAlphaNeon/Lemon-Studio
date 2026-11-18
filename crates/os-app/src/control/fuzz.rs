@@ -101,7 +101,7 @@ fn command(r: &mut Rng, a: &App) -> Value {
         25 => json!({"op": "set_clip_lfo", "channel": r.id(&ch), "on": r.chance(0.5), "amount": r.below(129), "speed": r.below(65537), "tension": r.below(257) as i64 - 128}),
         26 => json!({"op": "set_midi_out", "channel": r.id(&ch), "midi_channel": r.below(16), "patch": r.below(129), "bank": r.below(129) as i64 - 1, "send_levels": r.chance(0.5)}),
         27 => json!({"op": "set_project", "beats": 1 + r.below(32), "steps": 1 + r.below(16), "signature": r.chance(0.5), "panning_law": if r.chance(0.5) { "circular" } else { "triangular" }, "play_truncated": r.chance(0.5), "pdc": r.chance(0.5)}),
-        28 => json!({"op": "set_track", "track": r.id(&tr), "separator": r.chance(0.5), "dock": (["left", "middle", "right"][r.below(3)]), "threaded": r.chance(0.5), "latency_in": r.unit() * 20.0, "latency_out": -r.unit() * 20.0}),
+        28 => json!({"op": "set_track", "track": r.id(&tr), "separator": r.chance(0.5), "dock": (["left", "middle", "right"][r.below(3)]), "threaded": r.chance(0.5), "latency_in": r.unit() * 20.0, "latency_out": -r.unit() * 20.0, "audio_in": r.below(3) as i32 - 1, "audio_out": r.below(3) as i32 - 1, "rec_source": r.below(6), "monitor": (["off", "armed", "on"][r.below(3)]), "armed": r.chance(0.5)}),
         29 => json!({"op": "reset_track", "track": r.id(&tr)}),
         30 => json!({"op": "set_auto_bypass", "on": r.chance(0.5)}),
         31 => json!({"op": "move_track", "track": r.id(&tr), "to": 1 + r.below(8)}),

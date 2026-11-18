@@ -236,6 +236,19 @@ pub enum Command {
         latency_in: Option<f64>,
         #[serde(default)]
         latency_out: Option<f64>,
+        /// The audio device input and output pair by their place in the menus, -1 none.
+        #[serde(default)]
+        audio_in: Option<i32>,
+        #[serde(default)]
+        audio_out: Option<i32>,
+        /// What disk recording takes, 0 (External input only) ..= 5 (Post track).
+        #[serde(default)]
+        rec_source: Option<u8>,
+        /// When the input is heard: `off`, `armed` or `on`.
+        #[serde(default)]
+        monitor: Option<String>,
+        #[serde(default)]
+        armed: Option<bool>,
     },
     /// The track back to a new track's settings, routed to the master; its name, colour, levels... go, its effects stay.
     ResetTrack { track: u32 },
@@ -1426,6 +1439,11 @@ impl Command {
             threaded: None,
             latency_in: None,
             latency_out: None,
+            audio_in: None,
+            audio_out: None,
+            rec_source: None,
+            monitor: None,
+            armed: None,
         }
     }
 
@@ -2107,7 +2125,20 @@ impl Command {
                 crate::edit::mixer::delete_track_in(s, n);
                 none
             }
-            Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled, separator, dock, threaded, latency_in, latency_out } => {
+            Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled, separator, dock, threaded, latency_in, latency_out, audio_in, audio_out, rec_source, monitor, armed } => {
+                let monitor = match monitor.as_deref() {
+                    None => None,
+                    Some("off") => Some(os_model::MONITOR_OFF),
+                    Some("armed") => Some(os_model::MONITOR_ARMED),
+                    Some("on") => Some(os_model::MONITOR_ON),
+                    Some(m) => return Err(format!("monitor must be off, armed or on, not {m}")),
+                };
+                if rec_source.is_some_and(|v| v > 5) {
+                    return Err("rec_source must be 0..=5".into());
+                }
+                if audio_in.into_iter().chain(audio_out).any(|v| v < -1) {
+                    return Err("audio_in and audio_out must be -1 or more".into());
+                }
                 let dock = match dock.as_deref() {
                     None => None,
                     Some("left") => Some(os_model::DOCK_LEFT),
@@ -2165,6 +2196,21 @@ impl Command {
                 }
                 if let Some(v) = latency_out {
                     m.latency_out = v as f32;
+                }
+                if let Some(v) = audio_in {
+                    m.audio_in = v;
+                }
+                if let Some(v) = audio_out {
+                    m.audio_out = v;
+                }
+                if let Some(v) = rec_source {
+                    m.rec_source = v;
+                }
+                if let Some(v) = monitor {
+                    m.monitor = v;
+                }
+                if let Some(v) = armed {
+                    m.armed = v;
                 }
                 none
             }
@@ -3018,9 +3064,10 @@ fn put(s: &mut crate::session::Session, t: Taken) {
         }
         Taken::Track(m) => {
             if let Ok(place) = track_place(&s.project, m.id.0) {
-                let on = s.project.mixer[place].enabled;
+                // Undo leaves its light and its arming as they are (arming is no part of the track, track-io.md §2.3).
+                let (on, armed) = (s.project.mixer[place].enabled, s.project.mixer[place].armed);
                 s.project.get_mut().mixer[place] = *m;
-                s.project.get_mut().mixer[place].enabled = on;
+                (s.project.get_mut().mixer[place].enabled, s.project.get_mut().mixer[place].armed) = (on, armed);
             }
         }
         Taken::Pattern(p) => {

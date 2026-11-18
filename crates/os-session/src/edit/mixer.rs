@@ -227,31 +227,6 @@ pub fn output_label(s: &crate::session::Session, n: u16) -> String {
     choice_label(v, &output_choices(crate::device::last().as_ref()))
 }
 
-/// Track `t` takes its input alone (the External input question's Yes).
-pub fn external_only(s: &mut crate::session::Session, t: u16) {
-    if let Some(m) = track_mut(s, t) {
-        m.rec_source = os_model::REC_EXTERNAL;
-        changed(s);
-    }
-}
-
-/// Sets one of track `t`'s input, output, record source or monitor mode (`f`) as an undoable edit, unless it is so
-/// already.
-pub fn set_io(s: &mut crate::session::Session, t: u16, f: impl Fn(&mut MixerTrack)) -> bool {
-    let Some(m) = track(s, t) else { return false };
-    let mut after = m.clone();
-    f(&mut after);
-    if after == *m {
-        return false;
-    }
-    crate::history::track_io(s, t);
-    if let Some(m) = track_mut(s, t) {
-        f(m);
-    }
-    changed(s);
-    true
-}
-
 /// The group track `n` is in (spec: ui/mixer.md §6.1): the inserts from the nearest one at or before it with Separator
 /// on up to the next one with it; `None` before the first separator, and for the master.
 pub fn group(s: &crate::session::Session, n: u16) -> Option<std::ops::RangeInclusive<u16>> {

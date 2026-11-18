@@ -80,7 +80,7 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "add_channel", "name": "Sweep", "kind": "automation", "points": [{"beat": 0.0, "value": 0.1}, {"beat": 8.0, "value": 0.9}]}),
         json!({"op": "add_channel", "name": "Both", "kind": "layer", "children": [kick, clap]}),
         json!({"op": "set_track", "track": ins1, "name": "Drums", "color": "#102030", "volume": 0.6, "pan": 0.5, "stereo": -0.5, "polarity": true, "swap": true, "effects_enabled": false}),
-        json!({"op": "set_track", "track": ins2, "separator": true, "dock": "right", "threaded": false, "latency_in": 2.5, "latency_out": -1.0}),
+        json!({"op": "set_track", "track": ins2, "separator": true, "dock": "right", "threaded": false, "latency_in": 2.5, "latency_out": -1.0, "audio_in": 1, "audio_out": 0, "rec_source": 0, "monitor": "on"}),
         json!({"op": "reset_track", "track": ins1}),
         json!({"op": "move_track", "track": ins1, "to": 3}),
         json!({"op": "set_send", "from": ins1, "to": ins2, "level": 0.5}),
@@ -811,9 +811,15 @@ fn the_mixer_s_edits_are_undoable() {
     ui_round_trip(&mut a, "Delete mixer track", |a| {
         run(a, MCmd::Trim { non_empty: false });
     });
+    // Arming is no step, and undoing the track's input leaves it armed (track-io.md §2.3).
+    let steps = a.state.session.history.at();
+    run(&mut a, MCmd::ArmTrack(2, true));
+    assert_eq!(a.state.session.history.at(), steps, "arming is no step");
     ui_round_trip(&mut a, crate::history::MIXER_TRACK_IO, |a| {
         run(a, MCmd::Monitor(2, os_model::MONITOR_ON));
     });
+    assert!(crate::mixer::track(&a.state.session, 2).unwrap().armed, "undo and redo leave the arming");
+    run(&mut a, MCmd::ArmTrack(2, false));
     ui_round_trip(&mut a, crate::mixer::LATENCY, |a| {
         crate::mixer::set_latency(&mut a.state, 2, false, 20.0);
     });

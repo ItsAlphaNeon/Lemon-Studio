@@ -66,9 +66,6 @@ pub enum Snap {
     Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32>, loops: (Vec<(u16, u32)>, Option<u32>) },
     /// The playlist (`playlist::capture`).
     Playlist(Box<crate::edit::playlist::Snapshot>),
-    /// Mixer track `.0`'s audio input, output, record source and monitor mode (`MixerTrack::audio_in` ...); its armed
-    /// state is no part of it (spec: audio/track-io.md §2.3).
-    TrackIo(u16, [i32; 4]),
     /// What a sample load changes on channel `row`: its sample, its name ("Name channels after their sample or plugin"), its root note and its
     /// stretch ("Read sample root note" and "Read sample tempo information", `rack::read_tags`) and its sampler flags
     /// (Keep on disk, "Auto keep long audio on disk").
@@ -504,17 +501,9 @@ pub fn load_sample(s: &mut crate::session::Session, row: usize) {
     record(s, LOAD_SAMPLE, snap);
 }
 
-/// A mixer track's input, output, record source and monitor mode, as `Snap::TrackIo` holds them.
+/// A mixer track's input, output, record source and monitor mode.
 pub fn track_io_of(m: &os_model::MixerTrack) -> [i32; 4] {
     [m.audio_in, m.audio_out, i32::from(m.rec_source), i32::from(m.monitor)]
-}
-
-/// Before mixer track `track`'s audio input, output, record source or monitor mode changes: a step, "Mixer track audio
-/// input / output".
-pub fn track_io(s: &mut crate::session::Session, track: u16) {
-    let Some(m) = crate::edit::mixer::track(s, track) else { return };
-    let snap = Snap::TrackIo(track, track_io_of(m));
-    record(s, MIXER_TRACK_IO, snap);
 }
 
 /// Before knob `id` turns: a step unless Undo knob tweaks is off. `wheel`: a mouse-wheel notch, which joins the step
@@ -667,7 +656,6 @@ impl Snap {
             Snap::Pattern { number, .. } => Snap::pattern(s, *number),
             Snap::Playlist(_) => Snap::Playlist(Box::new(crate::edit::playlist::capture(s))),
             // A track gone since is left as the step has it (`put` does nothing then).
-            Snap::TrackIo(t, _) => crate::edit::mixer::track(s, *t).map_or_else(|| self.clone(), |m| Snap::TrackIo(*t, track_io_of(m))),
             // A channel gone since is left as the step has it (`put` does nothing then).
             Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
             Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
@@ -722,7 +710,7 @@ impl Snap {
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
             Snap::Commands(v) => v.iter_mut().for_each(|c| c.rescale(from, to)),
             // A channel or an initial value holds no ticks; a timebase step's are at its own timebase.
-            Snap::TrackIo(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Timebase(_) => {}
+            Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Timebase(_) => {}
         }
     }
 
@@ -737,11 +725,6 @@ impl Snap {
                 s.touched.notes = true;
             }
             Snap::Playlist(p) => crate::edit::playlist::restore(s, *p),
-            Snap::TrackIo(t, [i, o, r, m]) => {
-                if let Some(x) = crate::edit::mixer::track_mut(s, t) {
-                    (x.audio_in, x.audio_out, x.rec_source, x.monitor) = (i, o, r as u8, m as u8);
-                }
-            }
             Snap::Sample { row, path, name, root, stretch, flags } => {
                 if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
                     (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (path.clone(), name, root, stretch);
