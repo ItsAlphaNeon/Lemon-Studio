@@ -7,7 +7,9 @@
 //! channel and its clip in the playlist where playback started, or (Into the audio editor) into Tesla on the master
 //! track (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio").
 
+use crate::control::command::{ClipIn, Command, LinkIn};
 use crate::session::{Session, View};
+use os_model::ClipSource;
 use crate::capture::{self, capture, Input, InputStream, Recorder};
 
 /// The undo step a take is placed with (as FL's History names it).
@@ -158,19 +160,48 @@ fn place_take(s: &mut Session, path: &std::path::Path, frames: u64, rate: u32, s
     let tempo = p.tick_tempo(s.tempo().max(1.0));
     let len = (frames as f64 / f64::from(rate) * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
     let track = crate::edit::playlist::free_track(s, 0, start, start + len.max(1));
-    let text = path.to_string_lossy();
-    let added = s.samples.wave(&s.settings, &text).and_then(|_| {
-        crate::edit::playlist::snapshot_as(s, RECORDED);
-        crate::edit::playlist::add_audio_clip_on(s, &text, track, start, None, lock_len)
-    });
-    match added {
-        Some(i) => {
-            // The take's track becomes an audio track on the take's mixer track, as the original binds the track
-            // it records into to a mixer track (spec: ui/one-click-recording.md §1, ui/playlist.md §6c).
-            crate::track_links::bind_take(s, i);
-            format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())
+    let text = path.to_string_lossy().into_owned();
+    if s.samples.wave(&s.settings, &text).is_none() {
+        return format!("{text} could not be read");
+    }
+    let add = Command::AddAudioClip { path: text.clone(), track: track + 1, position: start, mixer: None };
+    // The take's track becomes an audio track on the take's mixer track, as the original binds the track it records
+    // into to a mixer track (spec: ui/one-click-recording.md §1, ui/playlist.md §6c); a clip of a source the playlist
+    // locks the length of gets that length.
+    let then = move |s: &Session, r: &[serde_json::Value]| -> Vec<Command> {
+        let clip = r.first().and_then(|v| v["clip"].as_u64()).unwrap_or(0) as u32;
+        let Some(c) = crate::edit::playlist::clips(s).iter().find(|c| c.id.0 == clip).copied() else { return Vec::new() };
+        let mut cmds = Vec::new();
+        if let Some((_, n)) = lock_len.filter(|&(l, n)| l == c.source && n != c.length) {
+            let p = &s.project;
+            let list = crate::edit::playlist::clips(s)
+                .iter()
+                .map(|x| {
+                    let mut ci = ClipIn::of(x, p);
+                    if x.id.0 == clip {
+                        ci.length = n;
+                    }
+                    ci
+                })
+                .collect();
+            cmds.push(Command::SetClips { clips: list });
         }
-        None => format!("{text} could not be read"),
+        let ClipSource::Channel(ch) = c.source else { return cmds };
+        let m = s.project.channel(ch).map_or(0, |x| x.mixer_track);
+        if crate::track_links::link(s, c.track).is_none() && m != 0 {
+            if let Some(id) = crate::edit::mixer::track(s, m).map(|t| t.id.0) {
+                let mut l = Command::set_playlist_track(c.track + 1);
+                if let Command::SetPlaylistTrack { link, .. } = &mut l {
+                    *link = Some(LinkIn { mixer: Some(id), channel: None });
+                }
+                cmds.push(l);
+            }
+        }
+        cmds
+    };
+    match crate::control::apply_then_in(s, &crate::control::By::User, RECORDED, vec![add], then) {
+        Ok(_) => format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
+        Err(e) => format!("{text}: {e}"),
     }
 }
 

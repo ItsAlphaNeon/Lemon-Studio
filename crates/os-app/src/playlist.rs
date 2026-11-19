@@ -15,7 +15,7 @@ pub use crate::icon::ICONS;
 use std::path::{Path, PathBuf};
 
 use os_model::{
-    target, AutoMode, AutoPoint, Channel, ChannelKind, Clip, ClipSource, PlaylistTrack, Rgb, TimeMarker,
+    target, AutoMode, AutoPoint, ChannelKind, Clip, ClipSource, PlaylistTrack, Rgb, TimeMarker,
 };
 use os_ui::Rect;
 
@@ -154,21 +154,7 @@ fn auto_edit(s: &mut State, ch: u16, f: impl FnOnce(&mut State)) {
 
 /// `Command::SetPlaylistTrack` on track `t` (0-based) setting nothing yet.
 pub fn track_cmd(t: u16) -> Command {
-    Command::SetPlaylistTrack {
-        track: t + 1,
-        name: None,
-        color: None,
-        enabled: None,
-        grouped: None,
-        motion: None,
-        press: None,
-        trigger_sync: None,
-        position_sync: None,
-        queue: None,
-        tolerant: None,
-        clip_lock: None,
-        link: None,
-    }
+    Command::set_playlist_track(t + 1)
 }
 
 /// Every track's mute state now (a project without an arrangement yet: a new one's, every track on).
@@ -1750,28 +1736,52 @@ pub fn make_unique_sample(s: &mut State, i: usize) -> String {
     if s.session.samples.wave(&s.session.settings, &path).is_none() {
         return format!("Make unique as sample: could not read back {}", file.display());
     }
-    snapshot_new_channel(&mut s.session, "Make unique as sample");
-    // A plain audio clip channel for the new sample, on the old one's mixer track and in its colour.
+    // A plain audio clip channel for the new sample, on the old one's mixer track and in its colour, and the clip
+    // playing all of it: one step.
+    crate::mixer::track_ids(s);
+    clip_ids(s);
     let old = &s.session.project.channels[row];
-    let ch = Channel {
+    let add = Command::AddChannel {
         name: std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()),
-        color: old.color,
-        mixer_track: old.mixer_track,
-        sample_path: Some(path.clone()),
-        ..audio_clip_channel()
+        plugin: None,
+        sample: Some(path.clone()),
+        track: crate::edit::mixer::track(&s.session, old.mixer_track).map(|m| m.id.0),
+        kind: Some("audio_clip".into()),
+        color: crate::control::command::color_text(old.color),
+        target: None,
+        points: Vec::new(),
+        children: Vec::new(),
     };
-    let index = push_channel(&mut s.session, ch);
-    if let Some(cl) = arr_mut(&mut s.session).clips.get_mut(i) {
-        cl.source = ClipSource::Channel(index);
-        cl.window = None;
-        cl.set_gain(1.0);
-        cl.set_fade_in(None);
-        cl.set_fade_out(None);
-        cl.set_fade_in_tension(0.0);
-        cl.set_fade_out_tension(0.0);
+    let clip = clips(&s.session)[i].id.0;
+    let then = move |s: &State, r: &[serde_json::Value]| -> Vec<Command> {
+        let id = r.first().and_then(|v| v["channel"].as_u64()).unwrap_or(0) as u32;
+        let p = &s.session.project;
+        let list = clips(&s.session)
+            .iter()
+            .map(|x| {
+                if x.id.0 != clip {
+                    return crate::control::command::ClipIn::of(x, p);
+                }
+                let mut cl = *x;
+                cl.window = None;
+                cl.set_gain(1.0);
+                cl.set_fade_in(None);
+                cl.set_fade_out(None);
+                cl.set_fade_in_tension(0.0);
+                cl.set_fade_out_tension(0.0);
+                let mut c = crate::control::command::ClipIn::of(&cl, p);
+                (c.pattern, c.channel) = (None, Some(id));
+                c
+            })
+            .collect();
+        vec![Command::SetClips { clips: list }]
+    };
+    if let Err(e) = crate::control_ui::command_then(s, "Make unique as sample", vec![add], then) {
+        return format!("Make unique as sample: {e}");
     }
-    s.playlist.source = Some(ClipSource::Channel(index));
-    s.session.dirty = true;
+    if let Some(index) = s.session.project.channels.last().map(|c| c.index) {
+        s.playlist.source = Some(ClipSource::Channel(index));
+    }
     format!("Made unique as sample: {}", file.display())
 }
 
@@ -4770,22 +4780,43 @@ pub fn consolidate(app: &mut App) -> String {
 /// Places a finished Consolidate's file: the source clips muted and a clip of the render on `track`, one undo step.
 fn consolidate_place(s: &mut State, a: u32, b: u32, used: &[usize], track: u16, file: &Path) -> String {
     let path = file.to_string_lossy().into_owned();
-    snapshot(&mut s.session);
-    for &i in used {
-        if let Some(c) = arr_mut(&mut s.session).clips.get_mut(i) {
-            c.muted = true;
-        }
+    if s.session.samples.wave(&s.session.settings, &path).is_none() {
+        return format!("Consolidate: could not read back {}", file.display());
     }
-    crate::history::unrecord(&mut s.session); // one undo step for the whole consolidation (add_audio_clip snapshots)
-    match add_audio_clip(s, &path, track, a) {
-        Some(i) => {
-            // The render's own length, exactly.
-            if let Some(c) = arr_mut(&mut s.session).clips.get_mut(i) {
-                c.length = b - a;
+    crate::mixer::track_ids(s);
+    clip_ids(s);
+    let p = &s.session.project;
+    let muted = clips(&s.session)
+        .iter()
+        .enumerate()
+        .map(|(k, x)| {
+            let mut c = crate::control::command::ClipIn::of(x, p);
+            if used.contains(&k) {
+                c.muted = Some(true);
             }
-            format!("Consolidated to {}", file.display())
-        }
-        None => format!("Consolidate: could not read back {}", file.display()),
+            c
+        })
+        .collect();
+    let add = Command::AddAudioClip { path, track: track + 1, position: a, mixer: None };
+    // The render's own length, exactly.
+    let then = move |s: &State, r: &[serde_json::Value]| -> Vec<Command> {
+        let clip = r.get(1).and_then(|v| v["clip"].as_u64()).unwrap_or(0) as u32;
+        let p = &s.session.project;
+        let list = clips(&s.session)
+            .iter()
+            .map(|x| {
+                let mut c = crate::control::command::ClipIn::of(x, p);
+                if x.id.0 == clip {
+                    c.length = b - a;
+                }
+                c
+            })
+            .collect();
+        vec![Command::SetClips { clips: list }]
+    };
+    match crate::control_ui::command_then(s, "Arranger edit", vec![Command::SetClips { clips: muted }, add], then) {
+        Ok(_) => format!("Consolidated to {}", file.display()),
+        Err(e) => format!("Consolidate: {e}"),
     }
 }
 

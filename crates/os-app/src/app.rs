@@ -11377,7 +11377,8 @@ mod tests {
             (p.notes, p.length) = (Vec::new(), None);
         }
         let bar = s.session.project.bar_ticks();
-        let last = |s: &State| pl::clips(&s.session).last().map(|c| (c.position / bar, c.end() / bar, c.track)).unwrap();
+        // The clip just made (the playlist keeps clips in position order): the selected one.
+        let last = |s: &State| s.playlist.sel.first().and_then(|&i| pl::clips(&s.session).get(i)).map(|c| (c.position / bar, c.end() / bar, c.track)).unwrap();
         s.session.song_pos = 4 * bar;
         pl::create_automation(s, 0, "Auto", 0.5);
         assert_eq!(last(s), (4, 5, 0), "on, at bar 5");
@@ -12182,12 +12183,12 @@ mod tests {
         };
         let g = app.pl_grid.unwrap();
         // Hovering an automation clip shows its points: onto it and off it again repaints just that clip.
-        crate::playlist::create_automation(&mut app.state, 0, "Auto", 0.5);
+        let ch = crate::playlist::create_automation(&mut app.state, 0, "Auto", 0.5);
         app.state.playlist.sel.clear();
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
         let pg = crate::playlist::PGeom::new(&app.state, g);
-        let auto = *crate::edit::playlist::clips(&app.state.session).last().unwrap();
+        let auto = *crate::edit::playlist::clips(&app.state.session).iter().find(|c| c.source == os_model::ClipSource::Channel(ch)).unwrap();
         let ar = pg.clip_rect(&auto);
         app.mouse_move(ar.x + 20.0, ar.bottom() - 10.0);
         assert!(app.state.playlist.hover_clip.is_some(), "the automation clip is hovered");

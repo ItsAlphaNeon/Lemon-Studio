@@ -176,17 +176,6 @@ pub fn record_track(s: &crate::session::Session, m: u16, a: u32, b: u32) -> u16 
         .unwrap_or_else(|| crate::edit::playlist::free_track(s, 0, a, b))
 }
 
-/// The track of a recorded take (clip `i`) becomes an audio track on the take channel's mixer track, unless it is
-/// linked already.
-pub fn bind_take(s: &mut crate::session::Session, i: usize) {
-    let Some(c) = clips(s).get(i).copied() else { return };
-    let ClipSource::Channel(ch) = c.source else { return };
-    let Some(m) = s.project.channel(ch).map(|x| x.mixer_track) else { return };
-    if link(s, c.track).is_none() && m != 0 {
-        set_link(s, c.track, TrackLink::audio(m));
-    }
-}
-
 /// Select ▸ Channels and playlist tracks routed to this track: the playlist tracks linked to `mixers` (audio tracks)
 /// or to a channel using them (instrument tracks), top to bottom.
 pub fn tracks_routed_to(s: &crate::session::Session, mixers: &[u16]) -> Vec<u16> {

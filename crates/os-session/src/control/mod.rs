@@ -408,6 +408,42 @@ pub fn apply_in(s: &mut crate::session::Session, by: &By, name: Option<&str>, co
     Ok(results)
 }
 
+/// `apply_in` in two parts, one step named `name`: `then` makes the second part's commands from the first part's
+/// results (the ids of what it added). When the second part fails, the first is taken back.
+pub fn apply_then_in(
+    s: &mut crate::session::Session,
+    by: &By,
+    name: &str,
+    first: Vec<Command>,
+    then: impl FnOnce(&crate::session::Session, &[serde_json::Value]) -> Vec<Command>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut ops: Vec<&'static str> = first.iter().map(op).collect();
+    let (mut results, mut undo) = run_in(s, first)?;
+    let more = then(s, &results);
+    ops.extend(more.iter().map(op));
+    match run_in(s, more) {
+        Ok((r, mut u)) => {
+            results.extend(r);
+            u.append(&mut undo);
+            undo = u;
+        }
+        Err(e) => {
+            let _ = take_back_in(s, undo);
+            return Err(e);
+        }
+    }
+    let label: Cow<'static, str> = match by {
+        By::User => name.to_string().into(),
+        By::Client(n) => format!("{n}: {}", lower(name)).into(),
+    };
+    crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
+    crate::history::done_with(s);
+    let tempo = s.tempo();
+    s.control.saw(&s.project, tempo);
+    s.control.event(by, "apply", name.to_string(), ops);
+    Ok(results)
+}
+
 /// Starts a gesture: a change a client streams as it is made (a fader dragged), commands applied in it
 /// (`apply_run_in`) making one undo step, named `name` (by default its first commands' name), until `end_in`. Returns
 /// its number.

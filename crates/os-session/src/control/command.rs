@@ -1460,8 +1460,25 @@ impl Command {
         }
     }
 
-    /// The command that would put back what this one is about to change, as it is now: the undo of a change made in
-    /// steps under one press (a knob's drag takes it at the press, `history::knob`).
+    /// A `SetPlaylistTrack` for playlist track `track` (1-based) that sets nothing yet.
+    pub fn set_playlist_track(track: u16) -> Command {
+        Command::SetPlaylistTrack {
+            track,
+            name: None,
+            color: None,
+            enabled: None,
+            grouped: None,
+            motion: None,
+            press: None,
+            trigger_sync: None,
+            position_sync: None,
+            queue: None,
+            tolerant: None,
+            clip_lock: None,
+            link: None,
+        }
+    }
+
     /// A `SetTrack` for track `track` that sets nothing yet.
     pub fn set_track(track: u32) -> Command {
         Command::SetTrack {
@@ -1488,7 +1505,6 @@ impl Command {
         }
     }
 
-    /// A `SetProject` that sets nothing yet.
     /// `SetChannel` on channel `channel` setting nothing yet.
     pub fn set_channel(channel: u32) -> Command {
         Command::SetChannel {
@@ -1514,6 +1530,7 @@ impl Command {
         }
     }
 
+    /// A `SetProject` that sets nothing yet.
     pub fn set_project() -> Command {
         Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: None, pdc: None }
     }
@@ -1523,6 +1540,8 @@ impl Command {
         matches!(self, Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::LoadChannelState { .. } | Command::AddTrack { .. } | Command::AddPattern { .. } | Command::CopyPattern { .. } | Command::AddClip { .. })
     }
 
+    /// The command that would put back what this one is about to change, as it is now: the undo of a change made in
+    /// steps under one press (a knob's drag takes it at the press, `history::knob`).
     pub fn undo_now(&self, s: &crate::session::Session) -> Result<Command, Error> {
         self.take(s).map(|t| Command::Put(Box::new(t)))
     }
