@@ -166,6 +166,11 @@ pub fn id_of_key(project: &Project, key: usize) -> Option<String> {
 }
 
 /// A hosted native plugin's state into its channel (a plugin channel) or mixer slot.
+/// `store_native` on the session's project.
+pub fn store_native_in(s: &mut crate::session::Session, key: usize, state: Vec<u8>) {
+    store_native(s.project.get_mut(), key, state);
+}
+
 pub fn store_native(proj: &mut Project, key: usize, state: Vec<u8>) {
     match fx_of(key) {
         None => {

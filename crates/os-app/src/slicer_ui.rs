@@ -5,7 +5,6 @@
 //! The interface's side of `crate::slicer` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{Channel, ChannelKind, Note, Project};
 use crate::plugins::{Plugins, FX_KEY};
 #[allow(unused_imports)]

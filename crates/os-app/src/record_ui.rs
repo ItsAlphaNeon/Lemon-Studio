@@ -5,7 +5,6 @@
 //! The interface's side of `crate::record` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::{App, State};
 use crate::session::{Session, View};
 use crate::knobs::KnobId;
@@ -137,18 +136,22 @@ impl App {
             }
             None => false,
         };
-        let snap = crate::history::Snap::pattern(&s.session, pattern);
-        crate::history::record(&mut s.session, crate::score_log::DUMPED, snap);
         let n = new.len();
-        if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
-            if replace {
-                p.notes.clear();
-            }
-            p.notes.extend(new);
-        } else {
-            s.session.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
+        // The pattern (made when it is not there yet), then its notes: the kept ones and the log's after them.
+        use crate::control::command::{Command, NoteIn};
+        crate::mixer::track_ids(s);
+        let first = if s.session.project.pattern(pattern).is_none() { vec![Command::AddPattern { name: None, color: None, number: Some(pattern) }] } else { Vec::new() };
+        let r = crate::control_ui::command_then(s, crate::score_log::DUMPED, first, |s, _| {
+            let p = &s.session.project;
+            let Some(pat) = p.pattern(pattern) else { return Vec::new() };
+            let id = |ch: u16| p.channels.iter().find(|c| c.index == ch).map(|c| c.id.0);
+            let kept = pat.notes.iter().filter(|_| !replace);
+            let list = kept.chain(&new).filter_map(|n| Some(NoteIn::of(n, id(n.channel)?))).collect();
+            vec![Command::SetNotes { pattern: pat.id.0, channel: None, notes: list }]
+        });
+        if let Err(e) = r {
+            return Some(e);
         }
-        s.session.dirty = true;
         Some(format!("Captured {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
     }
 

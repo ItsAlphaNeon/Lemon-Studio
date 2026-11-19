@@ -6,7 +6,6 @@
 //! The interface's side of `crate::project_info` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::time::{Duration, Instant};
 use os_model::{Project, WorkTime};
 use os_ui::{Color, Font, Rect};

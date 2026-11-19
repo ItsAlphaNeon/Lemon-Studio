@@ -7,7 +7,6 @@
 //! transpose, plus the name box and the delete confirmation.
 // spec: ui/pattern-menu.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ClipSource, Rgb};
 #[cfg(test)]
 use os_model::Pattern;

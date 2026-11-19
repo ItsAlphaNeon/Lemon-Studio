@@ -6,7 +6,6 @@
 //! Playlist state and editing: tools, clips, tracks, time markers, automation points, undo.
 // spec: ui/playlist.md; flp/events/playlist.md (clips, windows, markers); flp/events/automation.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::borrow::Cow;
 #[cfg(test)]
 use std::collections::HashMap;
@@ -135,9 +134,7 @@ pub fn auto_commit(s: &mut State) -> bool {
     if same {
         return false;
     }
-    if let Some(a) = s.session.project.get_mut().automation_mut(ch) {
-        a.points = before;
-    }
+    crate::edit::playlist::put_points(&mut s.session, ch, before);
     let c = Command::SetPoints { channel, points: after.iter().map(crate::control::command::PointIn::of).collect() };
     if let Err(e) = crate::control_ui::command(s, name, None, vec![c]) {
         s.message = Some(e);
@@ -1366,9 +1363,7 @@ pub fn store_view(s: &mut State) {
     v.set_left(f64::from(s.playlist_scroll.0) * tpp);
     v.set_scroll_y(s.playlist_scroll.1.max(0.0).round() as u32);
     v.set_height(((s.playlist.row_h.clamp(ROW_MIN, ROW_MAX) - ROW_MIN) / 2.0).round() as u32);
-    if s.session.project.playlist_view != Some(v) {
-        s.session.project.get_mut().playlist_view = Some(v);
-    }
+    crate::edit::playlist::put_view(&mut s.session, v);
 }
 
 /// Shift+Tab: the next of the common snap settings (Line, Cell, Beat, Bar, none); from any other setting, Line.
@@ -1389,9 +1384,7 @@ pub fn stretch_clip(s: &mut State, i: usize, orig: &Clip, pos: u32, len: u32) ->
     let Some(&(_, base)) = s.playlist.stretch_base.iter().find(|b| b.0 == ch) else { return false };
     // Up to Lemon Sampler's longest TIME.
     let beats = (base * f64::from(len) / f64::from(orig.length.max(1))).clamp(1.0 / 192.0, 4096.0);
-    if let Some(c) = s.session.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
-        c.sound.set_stretch_time(beats);
-    }
+    crate::edit::playlist::set_stretch_time(&mut s.session, ch, beats);
     // The length that time allows (clamped), the window unchanged.
     let len = (f64::from(orig.length) * beats / base).round().max(1.0) as u32;
     let end = orig.position + orig.length;
@@ -3103,10 +3096,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             app.hint = Cow::Owned(value_text(&app.state, ch, v));
         }
         PlDrag::Tension { ch, i, y0, t0 } => {
-            if let Some(p) = s.session.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
-                p.tension = (t0 + (y0 - y) / 80.0).clamp(-1.0, 1.0);
-                s.session.dirty = true;
-            }
+            crate::edit::playlist::set_point_tension(&mut s.session, ch, i, t0 + (y0 - y) / 80.0);
         }
         PlDrag::Fade { clip, out } => {
             let Some(c) = clips(&s.session).get(clip).copied() else { return };
@@ -3372,7 +3362,7 @@ fn cmd_is_clone(c: &Cmd) -> bool {
 /// Shows arrangement number `n` (event 100, spec: flp/events/playlist.md): selection and undo belong to the one
 /// left; a playing song continues with the new one.
 pub fn show_arrangement(s: &mut State, n: u16) {
-    s.session.project.get_mut().current_arrangement = Some(n);
+    crate::edit::playlist::show_arrangement_in(&mut s.session, n);
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
     s.playlist.hover_handle = None;
@@ -4360,12 +4350,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::PointMode(ch, i, m) => {
-            auto_edit(s, ch, |s| {
-                if let Some(p) = s.session.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
-                    p.mode = m;
-                    p.flag = if m.has_tension() && !matches!(m, AutoMode::Stairs | AutoMode::SmoothStairs | AutoMode::Pulse | AutoMode::Wave) { 2 } else { 0 };
-                }
-            });
+            auto_edit(s, ch, |s| crate::edit::playlist::set_point_mode(&mut s.session, ch, i, m));
             None
         }
         Cmd::TrackRename(t) => {

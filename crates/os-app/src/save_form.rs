@@ -10,7 +10,6 @@
 //! `views::save_form` paints them.
 // spec: ui/data-folder.md §7
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use os_model::DataFolder;

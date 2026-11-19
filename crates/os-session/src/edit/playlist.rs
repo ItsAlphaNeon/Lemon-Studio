@@ -761,6 +761,36 @@ pub fn move_point(s: &mut crate::session::Session, ch: u16, i: usize, beat: f64,
     s.dirty = true;
 }
 
+/// Point `i`'s tension, -1..1 (a drag's live change; the drag's end applies `set_points`).
+pub fn set_point_tension(s: &mut crate::session::Session, ch: u16, i: usize, t: f32) {
+    if let Some(p) = s.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
+        p.tension = t.clamp(-1.0, 1.0);
+        s.dirty = true;
+    }
+}
+
+/// Point `i`'s mode, its tension flag following (inside an edit `set_points` applies).
+pub fn set_point_mode(s: &mut crate::session::Session, ch: u16, i: usize, m: AutoMode) {
+    if let Some(p) = s.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
+        p.mode = m;
+        p.flag = if m.has_tension() && !matches!(m, AutoMode::Stairs | AutoMode::SmoothStairs | AutoMode::Pulse | AutoMode::Wave) { 2 } else { 0 };
+    }
+}
+
+/// Channel `ch`'s automation points become `points` (an edit's live changes put back before its command).
+pub fn put_points(s: &mut crate::session::Session, ch: u16, points: Vec<AutoPoint>) {
+    if let Some(a) = s.project.get_mut().automation_mut(ch) {
+        a.points = points;
+    }
+}
+
+/// Channel `ch`'s time stretch length in beats (a stretch-mode resize's live change).
+pub fn set_stretch_time(s: &mut crate::session::Session, ch: u16, beats: f64) {
+    if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
+        c.sound.set_stretch_time(beats);
+    }
+}
+
 pub fn delete_point(s: &mut crate::session::Session, ch: u16, i: usize) {
     let Some(a) = s.project.get_mut().automation_mut(ch) else { return };
     // The first and a lone second point stay (a clip needs a curve).
@@ -961,6 +991,30 @@ pub fn tempo_value(bpm: f64) -> f64 {
 }
 
 /// Gives the audio clips of `arrangements` their lengths from `fits` (`fit_audio`). Returns whether one changed.
+/// The playlist's view as the file keeps it (event 242: track height, time zoom, scroll), when it changed.
+pub fn put_view(s: &mut crate::session::Session, v: os_model::PlaylistView) {
+    if s.project.playlist_view != Some(v) {
+        s.project.get_mut().playlist_view = Some(v);
+    }
+}
+
+/// Arrangement number `n` becomes the one shown (event 100), a change of the project with no undo step.
+pub fn show_arrangement_in(s: &mut crate::session::Session, n: u16) {
+    s.project.get_mut().current_arrangement = Some(n);
+    s.dirty = true;
+}
+
+/// The audio clips fitted now (Restretch all), in the project and in its saved copy alike: lengths worked out, not
+/// edited, so no unsaved change. Whether any changed.
+pub fn fit_all(s: &mut crate::session::Session) -> bool {
+    let Some(fits) = audio_fits(s) else { return false };
+    if !s.project.write_if(|p| fit_clips(&mut p.arrangements, &fits)) {
+        return false;
+    }
+    fit_clips(&mut s.saved.0.arrangements, &fits);
+    true
+}
+
 pub fn fit_clips(arrangements: &mut [os_model::Arrangement], fits: &Fits) -> bool {
     let mut changed = false;
     for a in arrangements {

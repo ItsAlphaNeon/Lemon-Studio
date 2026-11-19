@@ -11,7 +11,6 @@
 //! be theirs.
 // spec: ui/plugin-window.md "Channel states", ui/browser.md "Channel presets"
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use crate::app::App;

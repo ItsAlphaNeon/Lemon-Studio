@@ -365,6 +365,11 @@ pub fn label(i: usize, m: &Member) -> String {
 
 /// Before an edit of the containers' lists: each member's state as its instance holds it now, so that the edit (and its
 /// undo) keeps what was set in the members' windows. A save stores them the same way (`project_plugins::store_hosted`).
+/// `store_members` on the session's project.
+pub fn store_members_in(s: &mut crate::session::Session) {
+    store_members(s.project.get_mut(), &s.plugins);
+}
+
 pub fn store_members(proj: &mut Project, plugins: &Plugins) {
     for (&key, live) in &plugins.containers {
         let Some((t, k)) = key_place(key) else { continue };

@@ -5,7 +5,6 @@
 //! The interface's side of `crate::perform` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeMap;
 use os_model::{Clip, PerfSettings, Project, TimeMarker};
 use crate::app::State;

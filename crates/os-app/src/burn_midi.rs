@@ -15,7 +15,6 @@
 //! pattern, which becomes the current one. One undo step either way.
 // spec: ui/channel-rack.md §18 "Burn MIDI to", audio/channel-misc.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::sync::Arc;
 
 use os_model::{Channel, ChannelKind, Note};

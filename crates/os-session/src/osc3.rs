@@ -123,6 +123,12 @@ pub const LOOK_EVERY: Duration = Duration::from_millis(500);
 /// The custom shape's sample of the Lemon Trio on 3x Osc channel `row` becomes the channel's sample (event 196) and,
 /// while Auto name channels is on, its name, unless the channel names that file already (spec: plugins/3x-osc.md §1).
 /// Whether the channel changed. `wait`: lock an instance the audio thread is rendering (a save) or leave it.
+/// `follow_sample` on the session's project (written only when the sample changed).
+pub fn follow_sample_in(s: &mut crate::session::Session, row: usize, wait: bool) -> bool {
+    let (st, plugins) = (&s.settings, &s.plugins);
+    s.project.write_if(|p| follow_sample(st, p, plugins, row, wait))
+}
+
 pub fn follow_sample(st: &crate::settings_file::SettingsStore, proj: &mut Project, plugins: &Plugins, row: usize, wait: bool) -> bool {
     if !proj.channels.get(row).is_some_and(is_osc3) {
         return false;

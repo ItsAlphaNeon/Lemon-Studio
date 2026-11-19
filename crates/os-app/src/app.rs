@@ -9,7 +9,6 @@
 //! Painting is immediate: every frame repaints from `State` and records hit regions. Hover uses
 //! the topmost hit from the previous frame, so occluded controls never highlight.
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::knobs::KnobUi;
 use crate::history::ChannelControl;
 use std::borrow::Cow;
@@ -2613,7 +2612,6 @@ impl App {
         {
             for r in requests {
                 use crate::editor_host::Request;
-                let chans = &mut self.state.session.project.get_mut().channels;
                 match r {
                     Request::Close(_) => continue,
                     Request::Raise(row) => {
@@ -2714,14 +2712,12 @@ impl App {
                     // The channel's controls in a plugin window's strip or card: undo steps, a drag or a run of wheel
                     // notches of one knob one step (`control::run_edit`).
                     Request::ToggleOn(row) => {
-                        let _ = chans;
                         crate::rack::toggle_on(&mut self.state, row)
                     }
                     Request::Volume(row, v) => self.channel_control(row, ChannelControl::Volume, |c| c.volume = v),
                     Request::Pan(row, v) => self.channel_control(row, ChannelControl::Pan, |c| c.pan = v),
                     Request::PitchCents(row, v) => self.channel_control(row, ChannelControl::Pitch, |c| c.pitch_cents = v),
                     Request::PitchRange(row, r) => {
-                        let _ = chans;
                         crate::mixer::track_ids(&mut self.state);
                         if let Some(id) = self.state.session.project.channels.get(row).map(|c| c.id.0) {
                             let mut c = crate::control::command::Command::set_channel(id);
@@ -2734,14 +2730,13 @@ impl App {
                         }
                     }
                     Request::Track(row, t) => {
-                        let _ = chans;
                         let max = crate::mixer::max_insert(&self.state.session.project);
                         self.channel_control(row, ChannelControl::Track, |c| c.mixer_track = t.min(max));
                     }
                     Request::RunEnd => self.state.session.history.end_gesture_run(),
                     Request::ShowTrack(row) => {
                         // As a double click on the channel rack's mixer box (spec: ui/channel-rack.md §12).
-                        if let Some(t) = chans.get(row).map(|c| c.mixer_track) {
+                        if let Some(t) = self.state.session.project.channels.get(row).map(|c| c.mixer_track) {
                             self.state.selected_mixer = t;
                             self.state.raise(Win::Mixer);
                         }
@@ -4721,10 +4716,7 @@ impl App {
             let n = st.slices.len();
             crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
                 let s = &mut app.state;
-                let row = add_plugin_channel(s.session.project.get_mut(), crate::slicer::LEMON_SLICER);
-                let ch = &mut s.session.project.get_mut().channels[row];
-                ch.name = Some(stem.clone());
-                ch.plugin_state = Some(st.to_bytes());
+                let row = crate::projects::add_plugin_channel_in(&mut s.session, crate::slicer::LEMON_SLICER, stem.clone(), st.to_bytes());
                 s.selected_channel = row;
                 s.rack.select_only(row);
                 crate::rack::autosize(s);
@@ -4814,15 +4806,18 @@ impl App {
         let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
         if taken {
             if sampler && row < self.state.session.project.channels.len() {
-                crate::history::load_sample(&mut self.state.session, row);
-            }
-            if let Some(ch) = self.state.session.project.get_mut().channels.get_mut(row).filter(|_| sampler) {
-                crate::rack::auto_name(&self.state.session.settings, ch, std::path::Path::new(path));
-                crate::rack::read_tags(&self.state.session.settings, ch, std::path::Path::new(path));
-                ch.sample_path = Some(path.to_string());
-                // The plugin loads the file itself: it takes what the load read alongside.
-                let set = crate::plugins::tag_params(ch);
-                self.state.session.plugins.set_sampler(row, None, &set);
+                crate::control_ui::settle_ids(&mut self.state);
+                let channel = self.state.session.project.channels[row].id.0;
+                let c = crate::control::command::Command::LoadSample { channel, path: path.to_string() };
+                match crate::control_ui::command(&mut self.state, crate::history::LOAD_SAMPLE, None, vec![c]) {
+                    Ok(_) => {
+                        // The plugin loaded the file itself: it takes what the load read alongside, not the file again.
+                        self.state.session.sample_loads.retain(|(r, p)| !(*r == row && p == path));
+                        let set = crate::plugins::tag_params(&self.state.session.project.channels[row]);
+                        self.state.session.plugins.set_sampler(row, None, &set);
+                    }
+                    Err(e) => self.state.message = Some(e),
+                }
             }
             self.state.message = Some(format!("{} loaded in the plugin", name.unwrap_or_default()));
         } else {
@@ -5936,7 +5931,7 @@ impl App {
                 Drag::Fader { track, y0, v0, level, others } => {
                     let per_px = views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
                     let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
-                    if let Some(t) = self.state.session.project.get_mut().mixer.iter_mut().find(|t| t.index == track) {
+                    if let Some(t) = crate::edit::mixer::track_mut(&mut self.state.session, track) {
                         t.volume = Some(v);
                         self.state.session.dirty = true;
                     }

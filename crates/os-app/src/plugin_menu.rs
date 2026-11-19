@@ -9,7 +9,6 @@
 //! palette (`crate::plugin_palette`), which lists the same plugins and picks the same way.
 // spec: ui/plugin-menu.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeMap;
 
 use crate::app::{App, State};

@@ -5,7 +5,6 @@
 //! The control plane's tests: every command undoes and redoes exactly, transactions are whole, proposals leave the
 //! project alone, ids stay with their things, and the JSON-RPC adapter answers over a real socket.
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use serde_json::{json, Value};
 
 use super::*;

@@ -7,7 +7,6 @@
 //! FILE ▸ Export MIDI... and the piano roll's Export as MIDI file... write one.
 // spec: ui/midi-files.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::cell::RefCell;
@@ -736,9 +735,9 @@ impl App {
             self.leave_project();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;
-            s.session.project = crate::locked::Locked::new(crate::projects::empty_project(&crate::settings_file::store()));
-            s.session.project.get_mut().ppq = ppq;
-            s.session.project.get_mut().tempo = Some(tempo);
+            let mut p = crate::projects::empty_project(&crate::settings_file::store());
+            (p.ppq, p.tempo) = (ppq, Some(tempo));
+            s.session.project = crate::locked::Locked::new(p);
             crate::project_info_ui::created(s);
             s.session.file = None;
             s.session.path = None;

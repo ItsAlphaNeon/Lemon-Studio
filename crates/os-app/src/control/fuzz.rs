@@ -8,7 +8,6 @@
 //! every list gives the project as opened and redoing them the end again; and the end saves and reopens the same.
 //! A seeded generator of our own stands for `arbitrary`: a failure names its seed and list, so it can be run again.
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use serde_json::{json, Value};
 
 use super::*;

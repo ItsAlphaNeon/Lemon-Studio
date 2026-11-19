@@ -6,7 +6,6 @@
 //!
 //! Values are normalised 0..1. Every knob reads and writes the project model.
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::piano_dlg::DlgKnob;
 use os_ui::Rect;
 

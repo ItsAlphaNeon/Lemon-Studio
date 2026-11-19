@@ -6,7 +6,6 @@
 //! folder index, and the menu bar's ways in.
 // spec: ui/browser.md, ui/browser-commands.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ChannelKind, ClipSource};
 use os_ui::Rect;
 

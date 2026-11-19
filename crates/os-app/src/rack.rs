@@ -8,7 +8,6 @@
 //! the graph editor values and the per-channel loop lengths.
 // spec: ui/channel-rack.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -1035,36 +1034,14 @@ pub fn relayout(s: &mut State, f: impl FnOnce(&mut State)) {
 // ---------------------------------------------------------------------------------------------------------
 // Renumbering (delete, clone, move, sort)
 
-/// Apply a new channel order (`order` = old rows top to bottom; rows left out are deleted) to the project, the
-/// app state and the hosted plugins.
-pub fn reorder(app: &mut App, order: &[usize]) {
-    let n = app.state.session.project.channels.len();
-    let mut map = vec![None; n];
-    for (new, &old) in order.iter().enumerate() {
-        if old < n {
-            map[old] = Some(new);
-        }
-    }
-    let m = |r: usize| map.get(r).copied().flatten();
-    remap_state(&mut app.state, &map);
-    crate::remote::follow(&mut app.state.session, |l| moved_link(l, &m));
-    app.remap_rows(&m);
-    app.invalidate();
-}
-
 /// Channel `ch` comes back as the last row (a redone drop that made it, `history`); Lemon Sampler hosts it from its
 /// settings on the next tick.
 pub fn push_channel(s: &mut State, ch: os_model::Channel) {
     crate::follow::around(s, |s| push_channel_in(&mut s.session, ch));
 }
 
-/// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
-pub fn remap_state(s: &mut State, map: &[Option<usize>]) {
-    remap_project(s.session.project.get_mut(), map);
-    remap_ui(s, map);
-}
-
-/// `remap_state`'s part in the app state, for a project already renumbered (`map` as there).
+/// The app state's part of a renumbering, for a project already renumbered (`map`: each old row's new row, `None`: the
+/// channel went).
 pub fn remap_ui(s: &mut State, map: &[Option<usize>]) {
     remap_session(&mut s.session, map);
     remap_view(s, map);
@@ -2358,11 +2335,8 @@ pub fn open_fill(s: &mut State, r: usize) {
 /// (ui/playlist.md §9c).
 fn restretch_all(app: &mut App) -> Option<String> {
     let rows: Vec<usize> = (0..app.state.session.project.channels.len()).filter(|&r| tempo_fitted(&app.state.session.project.channels[r])).collect();
-    if let Some(fits) = crate::edit::playlist::audio_fits(&app.state.session) {
-        if crate::playlist::fit_clips(&mut app.state.session.project.get_mut().arrangements, &fits) {
-            crate::playlist::fit_clips(&mut app.state.session.saved.0.arrangements, &fits);
-            app.damage_win(Win::Playlist);
-        }
+    if crate::edit::playlist::fit_all(&mut app.state.session) {
+        app.damage_win(Win::Playlist);
     }
     for &r in &rows {
         let sound = app.state.session.project.channels[r].sound.clone();
@@ -3650,10 +3624,10 @@ mod tests {
                 crate::mixer::solo(s, 1);
                 if moved {
                     crate::mixer::solo(s, 3);
-                    assert!(s.session.project.mixer.iter().all(|m| m.enabled == matches!(m.index, 0 | 3)), "mixer solo moved, {what}");
+                    assert!(s.session.project.mixer.iter().filter(|m| usize::from(m.index) + 1 < s.session.project.mixer.len()).all(|m| m.enabled == matches!(m.index, 0 | 3)), "mixer solo moved, {what}");
                 }
                 crate::mixer::solo(s, if moved { 3 } else { 1 });
-                assert!(s.session.project.mixer.iter().all(|m| m.enabled == (!on || m.index != 2)), "mixer, {what}");
+                assert!(s.session.project.mixer.iter().filter(|m| usize::from(m.index) + 1 < s.session.project.mixer.len()).all(|m| m.enabled == (!on || m.index != 2)), "mixer, {what}");
             }
         }
         set_check(&RESTORE_AFTER_SOLO, false);

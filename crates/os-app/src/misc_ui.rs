@@ -5,7 +5,6 @@
 //! The interface's side of `crate::misc` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::misc_page::{self as mp};
 use os_model::{Channel, ChannelMisc};
 #[allow(unused_imports)]

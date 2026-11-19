@@ -10,7 +10,6 @@
 //! highlighted, and they only answer "not available yet".
 // spec: ui/menus.md, ui/main-window.md §3
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_ui::{Font, Rect};
 
 use crate::app::{Action, State, Ui, Win};
