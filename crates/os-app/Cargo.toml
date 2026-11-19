@@ -12,7 +12,7 @@ default = [
     "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
     "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder", "stock-limiter",
     "stock-reverb", "stock-delay", "stock-pulp-filter", "stock-press", "stock-parametric-eq-2", "stock-drop",
-    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler",
+    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler", "stock-soundfont",
 ]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-session/vst3"]
@@ -58,6 +58,7 @@ stock-citrus = ["os-session/stock-citrus", "dep:citrus"]
 stock-smith = ["os-session/stock-smith", "dep:smith"]
 stock-slicer = ["os-session/stock-slicer", "dep:lemon-slicer"]
 stock-drum-sampler = ["os-session/stock-drum-sampler", "dep:lemon-drum-sampler"]
+stock-soundfont = ["os-session/stock-soundfont", "dep:lemon-soundfont"]
 
 [dependencies]
 os-session = { path = "../os-session", default-features = false }
@@ -80,6 +81,7 @@ lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", optional = true, features 
 citrus = { path = "../../plugins/citrus", optional = true, features = ["linked", "editor"] }
 smith = { path = "../../plugins/smith", optional = true, features = ["linked", "editor"] }
 lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", optional = true, features = ["linked", "editor"] }
+lemon-soundfont = { path = "../../plugins/lemon-soundfont", optional = true, features = ["linked", "editor"] }
 lemon-limiter = { path = "../../plugins/lemon-limiter", optional = true, features = ["linked", "editor"] }
 lemon-reverb = { path = "../../plugins/lemon-reverb", optional = true, features = ["linked", "editor"] }
 lemon-delay = { path = "../../plugins/lemon-delay", optional = true, features = ["linked", "editor"] }

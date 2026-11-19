@@ -31,12 +31,14 @@ pub struct Guarded<P: Plugin> {
     meter: Arc<Meter>,
     /// The instance's attention count, raised here too when it crashes (the UI then reports the stop).
     attention: Option<Arc<Attention>>,
+    /// A third-party plugin (`Plugin::use_wrapper_levels`).
+    wrapped: bool,
 }
 
 /// Shares `plugin`, code of `module`, as a guarded instance (format crates' `Library::create`).
 pub fn share<P: Plugin + 'static>(plugin: P, module: Arc<Module>) -> SharedPlugin {
     let attention = plugin.attention();
-    Arc::new(Mutex::new(Guarded { inner: ManuallyDrop::new(plugin), module, state: RefCell::new(None), meter: Arc::default(), attention }))
+    Arc::new(Mutex::new(Guarded { inner: ManuallyDrop::new(plugin), module, state: RefCell::new(None), meter: Arc::default(), attention, wrapped: false }))
 }
 
 impl<P: Plugin> Guarded<P> {
@@ -114,6 +116,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn takes_tuning(&self) -> bool {
         self.look(false, |p| p.takes_tuning())
     }
+    fn tunes_by_bend(&self) -> bool {
+        self.look(false, |p| p.tunes_by_bend())
+    }
     fn set_bend_range(&mut self, semitones: u32) {
         self.run((), |p| p.set_bend_range(semitones))
     }
@@ -130,6 +135,26 @@ impl<P: Plugin> Instrument for Guarded<P> {
                 // Silence, also over whatever the crash left half written.
                 left.fill(0.0);
                 right.fill(0.0);
+                self.meter.set_voices(0);
+            }
+        }
+    }
+    fn extra_outputs(&self) -> usize {
+        self.look(0, |p| p.extra_outputs())
+    }
+    fn process_extra(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
+        let t0 = Instant::now();
+        let voices = self.run(None, |p| {
+            p.process_extra(rate, left, right, extra);
+            Some(p.voices())
+        });
+        self.meter.add(t0.elapsed());
+        match voices {
+            Some(n) => self.meter.set_voices(n),
+            None => {
+                left.fill(0.0);
+                right.fill(0.0);
+                extra.fill(0.0);
                 self.meter.set_voices(0);
             }
         }
@@ -159,6 +184,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     }
     fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
         self.run(false, |p| p.channel_levels(levels))
+    }
+    fn wrapper_levels(&self) -> bool {
+        self.wrapped
     }
     fn channel_voicing(&mut self, voicing: &ChannelVoicing) {
         self.run((), |p| p.channel_voicing(voicing))
@@ -267,6 +295,10 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn use_channel_levels(&mut self) -> bool {
         self.run(false, |p| p.use_channel_levels())
     }
+    fn use_wrapper_levels(&mut self) -> bool {
+        self.wrapped = true;
+        true
+    }
     fn use_param_aliases(&mut self, aliases: &'static [(u32, u32)]) {
         self.run((), |p| p.use_param_aliases(aliases))
     }
@@ -305,6 +337,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn puts_out_notes(&self) -> bool {
         self.look(false, |p| p.puts_out_notes())
+    }
+    fn extra_output_names(&self) -> Vec<String> {
+        self.look(Vec::new(), |p| p.extra_output_names())
     }
     fn take_menu(&mut self) -> Option<Menu> {
         self.run(None, |p| p.take_menu())

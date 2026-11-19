@@ -366,6 +366,15 @@ pub enum Tweak {
     Host(Action),
 }
 
+/// The hosted instances moved (`m(old key) = new key`, `None`: gone): "Most recent" and "Second most recent" follow
+/// their plugin's parameter; one whose plugin went is forgotten.
+pub fn remap(last: &mut Vec<Tweak>, m: impl Fn(usize) -> Option<usize>) {
+    last.retain_mut(|t| match t {
+        Tweak::Plugin { key, .. } => m(*key).map(|k| *key = k).is_some(),
+        Tweak::Host(_) => true,
+    });
+}
+
 /// Notes `t` as the last tweaked, newest first: "Most recent", "Second most recent".
 pub fn note(last: &mut Vec<Tweak>, t: Tweak) {
     if last.first() == Some(&t) {

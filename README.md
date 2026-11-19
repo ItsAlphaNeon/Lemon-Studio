@@ -77,12 +77,12 @@ loads your CLAP, VST3 and VST2 plugins.
 
 ### Built-in plugins
 
-Lemon Studio has 29 plugins built in. All but Lemon MIDI Out and Lemon Container also work as free VST3 and CLAP plugins
+Lemon Studio has 30 plugins built in. All but Lemon MIDI Out and Lemon Container also work as free VST3 and CLAP plugins
 in other DAWs. The [catalogue](https://getlemonstudio.app/instruments-and-effects/) says what each one does.
 
 | Kind | Plugins |
 |---|---|
-| Instruments | Lemon Sampler, Lemon Trio, Citrus, Smith, Lemon Slicer, Lemon Drum Sampler |
+| Instruments | Lemon Sampler, Lemon Trio, Citrus, Smith, Lemon Slicer, Lemon Drum Sampler, Lemon SoundFont Player |
 | Effects | Lemon Parametric EQ, Lemon Limiter, Lemon Reverb, Lemon Delay, Lemon Chorus, Lemon Flanger, Lemon Phaser, Lemon Filter, Lemon Vocoder, Lemon Soft Clipper, Lemon Fast Distortion, Lemon Transient Processor, Lemon Balance, Lemon Stereo Enhancer, Lemon Stereo Shaper, Pulp Filter, Press, Lemon Drop |
 | Controllers | Lemon Peak Controller, Lemon Formula Controller |
 | Tools | Tesla, Lemon MIDI Out, Lemon Container |
@@ -104,7 +104,7 @@ yet is kept, not thrown away. This support is still young, so work on copies. Se
 | Piano roll | 🚧 | Note colours, scale and chord helpers, sound for release velocity |
 | Arranger | 🚧 | Per-clip pitch, pan and reverse. Bars are always 4 beats. Consolidate and exporting all tracks leave plugins out |
 | Mixer and routing | ✅ | Other mixer layouts |
-| Plugin hosting | ✅ | 32-bit plugins, Audio Units, outputs past a plugin's main stereo pair |
+| Plugin hosting | ✅ | Audio Units, outputs past a plugin's main stereo pair |
 | Built-in plugins | 🚧 | Some settings of the larger plugins aren't played yet |
 | Automation | 🚧 | Editing a clip's targets, making controller links in the app |
 | Recording | 🚧 | Loop recording and take lanes for audio |

@@ -136,6 +136,9 @@ pub enum View {
     MixerSelect(u16),
     /// Patterns were renumbered: the clip and note selections go.
     PatternsRenumbered,
+    /// Patterns moved: each number's new one (by old number, `None` for one that went). What the interface keeps by
+    /// pattern number follows (the playlist's Draw source).
+    PatternsMoved(Vec<Option<u16>>),
     /// The channels' rows moved: each row's new row, `None` for a channel that went (`rack::remap_state`).
     Rows(Vec<Option<usize>>),
     /// The channel rack's rows changed in number: its height follows (`rack::autosize`).

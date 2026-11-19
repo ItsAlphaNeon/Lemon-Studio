@@ -221,9 +221,14 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
   its default and minimum to maximum), remove an initial value read from a file
 - Not yet in the parameter menu: Init song with this position on a plugin parameter
 - VST2 shells (one file offering several plugins); a VST2 plugin's state is saved in the layout FL Studio's projects use
+- Multi-output instruments (CLAP, VST3, VST2): each extra output plays into a mixer track after the channel's own,
+  picked from the plugin window menu's Outputs ▸, or all at once with Auto map outputs. Saved where FL Studio keeps
+  output ports, and counted by delay compensation. Not yet: effects' extra outputs
 - A plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio. On macOS
   and Linux this is new, and on macOS a crash in a plugin's editor still closes Lemon Studio
-- Not yet: 32-bit plugins, and Intel-only plugins on Apple silicon (they need a bridge)
+- 32-bit VST2 plugins on Windows, through a bridge: each runs in a 32-bit helper process of its own (carried inside
+  the program), with its editor, state, MIDI and automation; one that crashes goes silent and the app carries on
+- Not yet: 32-bit VST3 and CLAP plugins, and Intel-only plugins on Apple silicon (they need a bridge)
 
 ## 🚧 Plugin delay compensation
 
@@ -522,6 +527,13 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   Lemon Sampler's voices with the original's level, pan and tune laws, cut groups, mute, solo and layers taking
   turns, measured from FL Studio 2026's renders; a sample is loaded with LOAD or dropped on a pad. The pads'
   envelopes and the multi-output offsets are kept but not played, and the original's FPC presets aren't listed
+- SoundFont player: a project's Fruity Soundfont Player channels (FL 12's and FL 2026's) open as Lemon SoundFont
+  Player (VST3 and CLAP, Pith editor laid out after the original: font, patch, bank and preset, reverb and chorus,
+  the envelope sliders, LFO, cutoff and modulation) and save back unchanged. It plays SoundFont 2 files in two modes,
+  measured from renders: Classic, the 32-bit player's sound (linear interpolation, its level laws and filter), and
+  Modern, the 64-bit player's (its sinc interpolation, level laws, filter, default vibrato and built-in reverb and
+  chorus). A project's mode follows the player that saved it. HQ rendering and the effects' send-to tracks are kept
+  but not played
 - Formula Controller: a project's Fruity Formula Controller slots open as Lemon Formula Controller (VST3 and CLAP,
   Pith editor with a formula field and its compile status) and save back with their knobs, formula and comments; the
   formula is worked out once per tick and its controller links drive their targets, matching FL Studio 2026's

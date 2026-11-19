@@ -32,6 +32,31 @@ pub fn slot_ports(project: &Project, track: usize, slot: usize) -> (usize, usize
     (port(0), port(1))
 }
 
+/// The output ports a channel's wrapped plugin is saved with, past its main output: for each extra output, the number
+/// of mixer tracks after the channel's own that it plays into, 0 for none (spec: audio/multi-output.md). Empty for a
+/// channel that sets none.
+pub fn channel_outputs(ch: &os_model::Channel) -> Vec<usize> {
+    if ch.kind != os_model::ChannelKind::Plugin || ch.plugin.as_deref() != Some(WRAPPER) {
+        return Vec::new();
+    }
+    let ports = ch.plugin_state.as_deref().map(wrapper::output_ports).unwrap_or_default();
+    let mut out: Vec<usize> = ports.iter().skip(1).map(|&p| usize::try_from(p).unwrap_or(0)).collect();
+    while out.last() == Some(&0) {
+        out.pop();
+    }
+    out
+}
+
+/// Gives `e` every channel's output ports from `project` (`channel_outputs`).
+pub fn attach_outputs(e: &mut os_engine::Engine, project: &Project) {
+    for (c, ch) in project.channels.iter().enumerate() {
+        let ports = channel_outputs(ch);
+        if !ports.is_empty() {
+            e.set_channel_outputs(c, ports);
+        }
+    }
+}
+
 /// Attaches hosted effects to `e`, each with the input ports its slot is saved with in `project`.
 pub fn attach_effects(e: &mut os_engine::Engine, project: &Project, fx: impl IntoIterator<Item = (usize, usize, os_engine::SharedEffect)>) {
     for (t, s, f) in fx {

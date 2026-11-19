@@ -61,7 +61,8 @@ pub fn renumber_in(s: &mut crate::session::Session, map: impl Fn(u16) -> Option<
     }
     pats.sort_by_key(|p| p.number);
     s.project.get_mut().patterns = pats;
-    if let Some(a) = s.project.get_mut().arrangement_mut() {
+    // Patterns are the project's: the clips of every arrangement follow, not only the one shown's.
+    for a in s.project.get_mut().arrangements.iter_mut() {
         a.clips.retain_mut(|c| match c.source {
             ClipSource::Pattern(n) => match map(n) {
                 Some(m) => {
@@ -74,6 +75,7 @@ pub fn renumber_in(s: &mut crate::session::Session, map: impl Fn(u16) -> Option<
         });
     }
     s.touched.views.push(crate::session::View::PatternsRenumbered);
+    s.touched.views.push(crate::session::View::PatternsMoved((0..=MAX).map(&map).collect()));
     s.dirty = true;
 }
 

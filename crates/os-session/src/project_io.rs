@@ -62,6 +62,7 @@ pub fn store_builtin_states(ses: &mut Session) {
     crate::smith::store(ses.project.get_mut(), &ses.plugins);
     crate::slicer::store(ses.project.get_mut(), &ses.plugins);
     crate::drums::store(ses.project.get_mut(), &ses.plugins);
+    crate::soundfont::store(ses.project.get_mut(), &ses.plugins);
 }
 
 /// Writes the project to `target`; `before` is the project before the interface stored its part, `extra` Lemon
@@ -216,6 +217,7 @@ pub fn host_tick(ses: &mut Session) {
         crate::smith::sync_smith(ses);
         crate::slicer::sync_slicer(ses);
         crate::drums::sync_drums(ses);
+        crate::soundfont::sync_soundfont(ses);
         if crate::native::enabled() {
             crate::project_plugins::host_native(ses, false);
         }
