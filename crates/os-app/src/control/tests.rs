@@ -1924,3 +1924,20 @@ fn every_project_knob_turns_through_its_command() {
     a.state.set_knob(KnobId::MixPan(500), 0.2);
     assert_eq!(a.state.session.history.len(), steps);
 }
+
+/// `state` names a channel's plugin as `add_channel` takes it: a Smith channel (stored as the file's Ogun) reads back as
+/// Smith, so a client sees the plugin that plays it.
+#[test]
+fn state_names_a_channels_plugin_as_commands_take_it() {
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::store());
+    let by = By::Client("Names".into());
+    for plugin in [crate::smith::SMITH, crate::citrus::CITRUS, crate::osc3::LEMON_TRIO] {
+        let r = crate::control::apply_in(&mut ses, &by, None, vec![cmd(json!({"op": "add_channel", "plugin": plugin}))]).unwrap();
+        let id = r[0]["channel"].as_u64().unwrap();
+        let row = ses.project.channels.iter().position(|c| u64::from(c.id.0) == id).unwrap();
+        assert_ne!(ses.project.channels[row].plugin.as_deref(), Some(plugin), "{plugin} is stored as the file's plugin");
+        let state = crate::control::query::project_in(&ses, 0);
+        let ch = state["channels"].as_array().unwrap().iter().find(|c| c["id"].as_u64() == Some(id)).unwrap().clone();
+        assert_eq!(ch["plugin"], json!(plugin));
+    }
+}

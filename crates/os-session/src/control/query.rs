@@ -40,7 +40,7 @@ pub fn project_in(s: &crate::session::Session, selected: usize) -> Value {
                 "row": row,
                 "name": crate::edit::rack::channel_name(s, row),
                 "kind": kind(c.kind),
-                "plugin": c.plugin,
+                "plugin": c.plugin.as_deref().map(crate::osc3::label),
                 "sample": c.sample_path,
                 "color": color_text(c.color),
                 "volume": c.volume,

@@ -45,7 +45,7 @@ says that they were. Without a window (`--serve`) the client saves directly.
 | Method | Params | Result |
 |---|---|---|
 | `hello` | `name`, `token` (on a port) | `app`, `version`, `protocol` (1), `name`, `level`. The name labels the client's undo steps and events. |
-| `state` | | The project: settings, `channels`, `mixer` (the tracks in use), `patterns`, `playlist` |
+| `state` | | The project: settings, `channels`, `mixer` (the tracks in use), `patterns`, `playlist`. Plugins are named as `plugins` lists them (a channel playing a project's Ogun as `Smith`) |
 | `notes` | `pattern` | That pattern's notes, with their ids |
 | `plugins` | | The `instruments` and `effects` that `add_channel` and `add_effect` take, by name |
 | `params` | `owner` | The parameters of the plugin playing a channel or a mixer slot: id, name, group, unit, value 0..1, value text, range, default, steps |
