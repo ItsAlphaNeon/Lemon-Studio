@@ -176,11 +176,21 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     let Some(owner) = command::key_owner(&s.session, key) else { return };
     // Known for the undo's other side (`Command::apply`).
     s.session.control.saw_param(owner, param, to);
-    s.session.plugin_edited |= before.is_some_and(|v| v != to);
-    let Some(v) = before.filter(|&v| v != to && crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) else { return };
-    let put = Command::Put(Box::new(command::Taken::Param(owner, param, v)));
-    crate::history::record(&mut s.session, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));
-    crate::history::done_with(&mut s.session);
+    let Some(from) = before.filter(|&v| v != to) else { return };
+    s.session.plugin_edited = true;
+    // The instance has the value already; the command records it as a client's `set_param` would (one step while
+    // Undo knob tweaks is on).
+    let c = Command::SetParam { owner, param, value: to, from: Some(from) };
+    crate::history::settle(&mut s.session);
+    match run(s, vec![c]) {
+        Ok((_, undo)) => {
+            if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
+                crate::history::record(&mut s.session, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(undo));
+                crate::history::done_with(&mut s.session);
+            }
+        }
+        Err(e) => s.message = Some(e),
+    }
 }
 
 /// Applies `commands` to see what they change and takes them back at once: the project is as it was. Returns the
