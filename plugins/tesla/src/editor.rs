@@ -413,6 +413,20 @@ enum Drag {
     CurvePoint(usize),
 }
 
+/// What the host saves that the user changes in the editor (`Logic::take_edit`): the document's version, file and
+/// envelopes, its toggles, the recording settings. Not where the view is (playback scrolls it), not the editor's size,
+/// not the armed switch (the host's record button moves it), not a state the host loaded (`loaded`).
+#[derive(Clone, PartialEq)]
+struct EditMark {
+    version: u64,
+    path: String,
+    env: env::Envs,
+    view: state::View,
+    rec: state::Rec,
+    ignore: (bool, bool),
+    loaded: u64,
+}
+
 pub struct Logic {
     pub shared: Arc<Shared>,
     pub view: ViewState,
@@ -432,6 +446,8 @@ pub struct Logic {
     spectrum: Vec<u32>,
     spectrum_key: Option<(u64, u64, u64, u64, usize, usize, u8, u8)>,
     loaded: u64,
+    /// What the host was last told the editor's edits had made (`take_edit`).
+    told: Option<EditMark>,
 }
 
 impl Logic {
@@ -454,6 +470,7 @@ impl Logic {
             spectrum: Vec::new(),
             spectrum_key: None,
             loaded,
+            told: None,
         }
     }
 
@@ -479,6 +496,27 @@ impl Logic {
 
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    fn edit_mark(&self) -> EditMark {
+        let (version, path, env, mut view) = self.shared.with_doc(|d| (d.version, d.path.clone(), d.env.clone(), d.view.clone()));
+        (view.start, view.len, view.w, view.h) = (0.0, 0.0, 0, 0);
+        let mut rec = self.shared.rec();
+        rec.armed = false;
+        let ignore = (self.shared.ignore_host_sel.load(Ordering::Relaxed), self.shared.ignore_own_sel.load(Ordering::Relaxed));
+        EditMark { version, path, env, view, rec, ignore, loaded: self.shared.loaded.load(Ordering::Acquire) }
+    }
+
+    /// Whether the host is to be told that the user edited what it saves since the last call (host link `Edited`):
+    /// once a drag is let go and no tool panel is open (an effect's preview edits the document and takes it back). A
+    /// state the host loaded is no edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.drag.is_some() || self.view.amp.is_some() {
+            return false;
+        }
+        let now = self.edit_mark();
+        let told = self.told.replace(now.clone());
+        told.is_some_and(|t| t.loaded == now.loaded && t != now)
     }
 
     fn at(&self, x: f32, y: f32) -> Option<Target> {
@@ -2991,6 +3029,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -3386,6 +3427,9 @@ mod gui {
                 self.link.set_hint(&self.logic.hint);
                 self.link.to_host(Cmd::Changed, 0);
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
             // The host's frame was dragged to a new size.
             if let Some((w, h)) = self.link.take_size_request() {
@@ -3651,6 +3695,35 @@ mod tests {
         assert_eq!(l.doc(|d| d.sample.cues[0].name.clone()), "kick");
         l.typed(&Prompt::Tempo, "128");
         assert_eq!(l.doc(|d| d.sample.tempo), 128.0);
+    }
+
+    /// The host hears of what the user changed in what it saves: a tool, a toggle; not zooming or scrolling, not
+    /// while a tool panel previews, not a state it loaded.
+    #[test]
+    fn edits_are_told_to_the_host() {
+        let mut l = logic();
+        load(&mut l, sine(4410));
+        assert!(!l.take_edit(), "the first look only notes what there is");
+        l.pick(&MenuReq::Main(MenuId::Zoom), Cmd::ZoomIn, 0.0, 0.0);
+        assert!(!l.take_edit(), "zooming is no edit");
+        let (x, y) = centre(&l, Target::Tool(1));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert!(l.take_edit(), "Normalize");
+        assert!(!l.take_edit(), "once");
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Amp), 0.0, 0.0);
+        paint(&mut l);
+        l.set_amp_value(AmpCtl::Volume, 1.0);
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::Preview));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(!l.take_edit(), "not while the panel previews");
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(l.view.amp.is_none());
+        assert!(l.take_edit(), "accepted");
+        l.shared.restore(l.shared.saved());
+        l.poll();
+        assert!(!l.take_edit(), "a state the host loaded");
     }
 
     #[test]

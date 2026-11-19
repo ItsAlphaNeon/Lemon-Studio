@@ -613,15 +613,20 @@ fn side(app: &App, key: usize) -> Option<crate::control::command::PluginSide> {
 /// The user changed the state of the instance under `key` in its own window (host link `Edited`: a Lemon plugin's
 /// curve dragged, sample loaded, menu choice): the project counts as changed, and one step, "Plugin edit", puts back
 /// the state the window last knew (`Plugins::take_known`), unless Undo knob tweaks is off (as for parameters moved in a
-/// plugin's window, `control::param_edit`). Lemon Studio's choice: the original has no such plugins.
+/// plugin's window, `control::param_edit`). A state too big to keep (Tesla holding a long sample, which has its own
+/// undo) makes no step. Lemon Studio's choice: the original has no such plugins.
 #[cfg(plugin_windows)]
 pub fn window_edit(app: &mut App, key: usize) {
+    use crate::plugins::WindowEdit;
     let Some(mut before) = side(app, key) else { return };
     let changes = app.state.history.changes();
-    let Some(state) = app.plugins.take_known(key, &before.state, changes) else { return };
+    let edit = app.plugins.take_known(key, &before.state, changes);
+    if edit == WindowEdit::Nothing {
+        return;
+    }
     app.plugins.mark_edited(key);
     app.state.plugin_edited = true;
-    if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
+    if let (WindowEdit::From(state), true) = (edit, crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) {
         before.state = state;
         crate::control::state_edit(&mut app.state, key, crate::control::command::PLUGIN_EDIT, before);
     }
