@@ -349,7 +349,6 @@ pub fn settle_in(s: &mut crate::session::Session) {
 pub fn run_in(s: &mut crate::session::Session, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
     s.control.settle(s.project.get_mut());
     let queues = Queues::of(s);
-    let known = s.control.known.clone();
     let mut undo = Vec::with_capacity(commands.len());
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
@@ -373,7 +372,6 @@ pub fn run_in(s: &mut crate::session::Session, commands: Vec<Command>) -> Result
                 undo.reverse();
                 take_back_in(s, undo);
                 queues.put(s);
-                s.control.known = known;
                 return Err(format!("command {i}: {e}"));
             }
         }
@@ -408,6 +406,12 @@ pub fn apply_in(s: &mut crate::session::Session, by: &By, name: Option<&str>, co
     let ops: Vec<&'static str> = commands.iter().map(op).collect();
     let step = name.map(str::to_string).unwrap_or_else(|| if commands.len() == 1 { commands[0].name().to_string() } else { "Edit".into() });
     let (results, undo) = run_in(s, commands)?;
+    commit(s, by, step, undo, ops);
+    Ok(results)
+}
+
+/// An applied list made one undo step named `step` (after the client for a client's), and told to clients.
+fn commit(s: &mut crate::session::Session, by: &By, step: String, undo: Vec<Command>, ops: Vec<&'static str>) {
     let label: Cow<'static, str> = match by {
         By::User => step.clone().into(),
         By::Client(n) => format!("{n}: {}", lower(&step)).into(),
@@ -417,7 +421,6 @@ pub fn apply_in(s: &mut crate::session::Session, by: &By, name: Option<&str>, co
     let tempo = s.tempo();
     s.control.saw(&s.project, tempo);
     s.control.event(by, "apply", step, ops);
-    Ok(results)
 }
 
 /// `apply_in` in two parts, one step named `name`: `then` makes the second part's commands from the first part's
@@ -444,15 +447,7 @@ pub fn apply_then_in(
             return Err(e);
         }
     }
-    let label: Cow<'static, str> = match by {
-        By::User => name.to_string().into(),
-        By::Client(n) => format!("{n}: {}", lower(name)).into(),
-    };
-    crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
-    crate::history::done_with(s);
-    let tempo = s.tempo();
-    s.control.saw(&s.project, tempo);
-    s.control.event(by, "apply", name.to_string(), ops);
+    commit(s, by, name.to_string(), undo, ops);
     Ok(results)
 }
 
@@ -614,10 +609,13 @@ struct Queues {
     host: usize,
     params: usize,
     states: usize,
+    misc: usize,
     sample_loads: usize,
     fx: usize,
     dirty: bool,
     hosted_rows: Vec<usize>,
+    /// The parameter values known before (`Control::known`).
+    known: HashMap<(u32, u32), f64>,
     written: Option<&'static std::panic::Location<'static>>,
     /// What the views were told before: what a failed list (or a dry run) told them goes.
     touched: crate::session::Touched,
@@ -629,11 +627,13 @@ impl Queues {
             host: s.control.host.len(),
             params: s.control.params.len(),
             states: s.control.states.len(),
+            misc: s.control.misc.len(),
             sample_loads: s.sample_loads.len(),
             fx: s.fx_requests.len(),
             dirty: s.dirty,
             written: s.project.written_at(),
             hosted_rows: s.hosted_rows.clone(),
+            known: s.control.known.clone(),
             touched: s.touched.clone(),
         }
     }
@@ -642,9 +642,11 @@ impl Queues {
         s.control.host.truncate(self.host);
         s.control.params.truncate(self.params);
         s.control.states.truncate(self.states);
+        s.control.misc.truncate(self.misc);
         s.sample_loads.truncate(self.sample_loads);
         s.fx_requests.truncate(self.fx);
         s.hosted_rows = self.hosted_rows;
+        s.control.known = self.known;
         s.dirty = self.dirty;
         s.project.rewind_written(self.written);
         s.touched = self.touched;
@@ -655,13 +657,11 @@ impl Queues {
 /// told nothing.
 pub fn dry_run_in(s: &mut crate::session::Session, commands: Vec<Command>, selected: usize) -> Result<Vec<query::Change>, String> {
     let queues = Queues::of(s);
-    let known = s.control.known.clone();
     let before = query::project_in(s, selected);
     let (_, undo) = run_in(s, commands)?;
     let after = query::project_in(s, selected);
     take_back_in(s, undo);
     queues.put(s);
-    s.control.known = known;
     Ok(query::changes(&before, &after))
 }
 

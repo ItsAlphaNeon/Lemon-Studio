@@ -1809,10 +1809,11 @@ impl Command {
             }
             _ => self.take(s)?,
         };
+        // What an add makes, and the key of its id in the result.
         let added = match &self {
-            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::LoadChannelState { .. } => Some(Thing::Channel as fn(u32) -> Thing),
-            Command::AddTrack { .. } => Some(Thing::Track as fn(u32) -> Thing),
-            Command::AddPattern { .. } | Command::CopyPattern { .. } => Some(Thing::Pattern as fn(u32) -> Thing),
+            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::LoadChannelState { .. } => Some((Thing::Channel as fn(u32) -> Thing, "channel")),
+            Command::AddTrack { .. } => Some((Thing::Track as fn(u32) -> Thing, "track")),
+            Command::AddPattern { .. } | Command::CopyPattern { .. } => Some((Thing::Pattern as fn(u32) -> Thing, "pattern")),
             _ => None,
         };
         let replace = matches!(self, Command::ReplaceInstrument { .. });
@@ -1833,10 +1834,7 @@ impl Command {
         s.dirty = true;
         // An add's undo removes what it made, by the id its result names.
         let taken = match added {
-            Some(thing) => {
-                let id = result.as_object().and_then(|o| o.values().next()).and_then(serde_json::Value::as_u64).ok_or("an add names no id")?;
-                Taken::Gone(thing(id as u32))
-            }
+            Some((thing, key)) => Taken::Gone(thing(result[key].as_u64().ok_or("an add names no id")? as u32)),
             None => match taken {
                 // A replaced channel's new id, from the result.
                 Taken::Swap(c, _) if replace => Taken::Swap(c, result["channel"].as_u64().ok_or("a replace names no id")? as u32),
