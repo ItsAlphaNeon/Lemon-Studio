@@ -453,11 +453,30 @@ pub struct Logic {
     /// Key held in the editor (preview) and its velocity.
     held: Option<(u8, u8)>,
     pub hosted: bool,
+    /// Writes to the state from the editor, and how many of them the host was told of (`take_edit`).
+    made: std::cell::Cell<u64>,
+    told: u64,
     /// TIME knob drags: the position before snapping to whole steps.
     time_drag: f32,
 }
 
 impl Logic {
+    /// The parameters, for a write to the state from the editor: counted for the host (`take_edit`).
+    pub fn raw(&self) -> &Arc<SamplerParams> {
+        self.made.set(self.made.get() + 1);
+        &self.params
+    }
+
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made.get() == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made.get();
+        true
+    }
+
     pub fn new(params: Arc<SamplerParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         Logic {
             vals: Vals::new(&params),
@@ -471,6 +490,8 @@ impl Logic {
             copied: None,
             held: None,
             hosted: false,
+            made: std::cell::Cell::new(0),
+            told: 0,
             time_drag: 0.0,
         }
     }
@@ -1844,6 +1865,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         /// Hover moves repaint only when the look under the mouse could change.
@@ -1931,7 +1955,7 @@ mod win32 {
                         repaint = true;
                     }
                     Act::Clear => {
-                        self.shared.clear(&self.params);
+                        self.shared.clear(self.logic.raw());
                         repaint = true;
                     }
                     Act::Reload => {
@@ -1984,7 +2008,7 @@ mod win32 {
         }
 
         fn load(&mut self, path: &str) {
-            match self.shared.load(path, &self.params) {
+            match self.shared.load(path, self.logic.raw()) {
                 Ok(()) => {
                     super::remember(path);
                     self.logic.view.wave_start = 0.0;
@@ -2668,6 +2692,9 @@ mod gui {
                 self.link.set_hint(&self.logic.hint);
                 self.link.to_host(Cmd::Changed, 0);
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.sync_link();
         }
 
@@ -2760,7 +2787,7 @@ mod gui {
                         self.dirty = true;
                     }
                     Act::Clear => {
-                        self.shared.clear(&self.params);
+                        self.shared.clear(self.logic.raw());
                         self.dirty = true;
                     }
                     Act::Reload => {
@@ -2819,7 +2846,7 @@ mod gui {
         }
 
         fn load(&mut self, path: &str) {
-            match self.shared.load(path, &self.params) {
+            match self.shared.load(path, self.logic.raw()) {
                 Ok(()) => {
                     super::remember(path);
                     self.logic.view.wave_start = 0.0;
