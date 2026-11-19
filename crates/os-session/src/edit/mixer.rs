@@ -94,6 +94,25 @@ pub fn set_slot_label(s: &mut crate::session::Session, t: u16, k: u8, name: Opti
     });
 }
 
+/// The effects in slots `a` and `b` of track `t` change places, with their lights, levels, names, colours and icons;
+/// the automation and remote control links on them go along, and so do the hosted instances.
+pub fn swap_slots(s: &mut crate::session::Session, t: u16, a: u8, b: u8) {
+    let (x, y) = (usize::from(a), usize::from(b));
+    if let Some(m) = track_mut(s, t) {
+        m.slots.swap(x, y);
+        m.slot_on.swap(x, y);
+        m.slot_mix.swap(x, y);
+        m.slot_cpu.swap(x, y);
+        m.slot_names.swap(x, y);
+        m.slot_colors.swap(x, y);
+        m.slot_icons.swap(x, y);
+    }
+    let swap = move |u: u16, k: u8| Some((u, if u != t { k } else if k == a { b } else if k == b { a } else { k }));
+    follow_places(s, &Some, &swap);
+    s.fx_requests.push(FxReq::Remap(vec![((t, a), (t, b)), ((t, b), (t, a))]));
+    changed(s);
+}
+
 /// Colours slot `k` of track `t` (`None`: none).
 pub fn set_slot_color(s: &mut crate::session::Session, t: u16, k: u8, color: Option<Rgb>) {
     s.project.write_if(|p| {
@@ -160,25 +179,38 @@ pub fn changed(s: &mut crate::session::Session) {
 /// plugins inside containers have switches of their own (`crate::container::Member::cpu`) and are switched with them.
 /// No message, as in the original. Returns whether there was a plugin to switch.
 pub fn switch_auto_bypass(s: &mut crate::session::Session) -> bool {
-    let (mut members, mut off) = (0, false);
-    crate::container::each_member_cpu(s.project.get_mut(), |c| {
-        members += 1;
-        off |= !c.smart_disable;
-    });
+    let Some(on) = auto_bypass_switch(s) else { return false };
+    set_auto_bypass(s, on);
+    true
+}
+
+/// What Switch auto-bypass for all plugins sets (see `switch_auto_bypass`): on when one plugin has it off, else off;
+/// `None` when there is no plugin.
+pub fn auto_bypass_switch(s: &crate::session::Session) -> Option<bool> {
+    let mut members = Vec::new();
+    crate::container::each_member_cpu_of(&s.project, |c| members.push(c.smart_disable));
+    let p = &s.project;
+    let slots = p.mixer.iter().flat_map(|m| m.slot_cpu.iter().zip(&m.slots).filter(|(_, p)| p.is_some()).map(|(c, _)| c.smart_disable));
+    let channels = p.channels.iter().filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| c.misc.cpu.smart_disable);
+    let all: Vec<bool> = slots.chain(channels).chain(members).collect();
+    (!all.is_empty()).then(|| all.iter().any(|&on| !on))
+}
+
+/// Auto-bypass when silent set to `on` for every plugin (see `switch_auto_bypass`).
+pub fn set_auto_bypass(s: &mut crate::session::Session, on: bool) {
     let p = s.project.get_mut();
-    let slots = p.mixer.iter_mut().flat_map(|m| m.slot_cpu.iter_mut().zip(&m.slots).filter(|(_, p)| p.is_some()).map(|(c, _)| c));
-    let channels = p.channels.iter_mut().filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| &mut c.misc.cpu);
-    let mut all: Vec<&mut os_model::PluginCpu> = slots.chain(channels).collect();
-    if all.is_empty() && members == 0 {
-        return false;
+    for m in &mut p.mixer {
+        for (c, slot) in m.slot_cpu.iter_mut().zip(&m.slots) {
+            if slot.is_some() {
+                c.smart_disable = on;
+            }
+        }
     }
-    let on = off || all.iter().any(|c| !c.smart_disable);
-    for c in &mut all {
-        c.smart_disable = on;
+    for c in p.channels.iter_mut().filter(|c| c.kind == os_model::ChannelKind::Plugin) {
+        c.misc.cpu.smart_disable = on;
     }
     crate::container::each_member_cpu(s.project.get_mut(), |c| c.smart_disable = on);
     changed(s);
-    true
 }
 
 /// The input combo's text for track `n`, and whether the device has inputs to choose from.
@@ -193,31 +225,6 @@ pub fn input_label(s: &crate::session::Session, n: u16) -> (String, bool) {
 pub fn output_label(s: &crate::session::Session, n: u16) -> String {
     let v = track(s, n).map_or(-1, |m| m.audio_out);
     choice_label(v, &output_choices(crate::device::last().as_ref()))
-}
-
-/// Track `t` takes its input alone (the External input question's Yes).
-pub fn external_only(s: &mut crate::session::Session, t: u16) {
-    if let Some(m) = track_mut(s, t) {
-        m.rec_source = os_model::REC_EXTERNAL;
-        changed(s);
-    }
-}
-
-/// Sets one of track `t`'s input, output, record source or monitor mode (`f`) as an undoable edit, unless it is so
-/// already.
-pub fn set_io(s: &mut crate::session::Session, t: u16, f: impl Fn(&mut MixerTrack)) -> bool {
-    let Some(m) = track(s, t) else { return false };
-    let mut after = m.clone();
-    f(&mut after);
-    if after == *m {
-        return false;
-    }
-    crate::history::track_io(s, t);
-    if let Some(m) = track_mut(s, t) {
-        f(m);
-    }
-    changed(s);
-    true
 }
 
 /// The group track `n` is in (spec: ui/mixer.md §6.1): the inserts from the nearest one at or before it with Separator
@@ -422,11 +429,56 @@ pub fn delete_track_in(s: &mut crate::session::Session, n: u16) -> Option<String
     Some(format!("Deleted {label}"))
 }
 
+/// Deletes the tracks in `gone` (Trim unused tracks): the others close up in order, channels and sends follow them, the
+/// mixer gets shorter (spec: ui/mixer-track-commands.md §4). Returns the map of old track numbers to new ones.
+pub fn remove_tracks_in(s: &mut crate::session::Session, gone: &[u16]) -> std::collections::HashMap<u16, u16> {
+    let mut new_of = std::collections::HashMap::new();
+    let mut k = 0u16;
+    for m in &s.project.mixer {
+        if !gone.contains(&m.index) {
+            new_of.insert(m.index, k);
+            k += 1;
+        }
+    }
+    let m = |t: u16| new_of.get(&t).copied();
+    for &t in gone {
+        for slot in 0..10 {
+            s.fx_requests.push(FxReq::Delete { track: t, slot });
+        }
+    }
+    let mut map = Vec::new();
+    for (&o, &n) in &new_of {
+        if o != n {
+            map.extend((0..10u8).map(|slot| ((o, slot), (n, slot))));
+        }
+    }
+    s.fx_requests.push(FxReq::Remap(map));
+    let old = std::mem::take(&mut s.project.get_mut().mixer);
+    s.project.get_mut().mixer = old
+        .into_iter()
+        .filter_map(|t| {
+            let index = m(t.index)?;
+            let routes = t.routes.iter().filter_map(|&r| m(r)).collect();
+            let send_levels = t.send_levels.iter().filter_map(|&(d, l)| m(d).map(|d| (d, l))).collect();
+            Some(MixerTrack { index, routes, send_levels, ..t })
+        })
+        .collect();
+    s.project.get_mut().mixer.sort_by_key(|t| t.index);
+    for c in s.project.get_mut().channels.iter_mut() {
+        c.mixer_track = m(c.mixer_track).unwrap_or(0);
+    }
+    // Audio tracks follow their mixer track; one whose track goes is unassigned (spec: ui/playlist.md §6c).
+    s.project.get_mut().remap_link_mixers(m);
+    follow_places(s, &m, &|t, k| Some((m(t)?, k)));
+    changed(s);
+    new_of
+}
+
 /// Back to a fresh track (name, colour, levels, slots kept out), routed to the master (§6.1 Reset).
 pub fn reset_track(s: &mut crate::session::Session, n: u16) {
     if let Some(m) = track_mut(s, n) {
-        let (slots, origin) = (m.slots.clone(), m.origin);
-        *m = MixerTrack { slots, origin, ..MixerTrack::new(n) };
+        let (id, slots, origin) = (m.id, m.slots.clone(), m.origin);
+        *m = MixerTrack { id, slots, origin, ..MixerTrack::new(n) };
     }
     changed(s);
 }

@@ -8,7 +8,6 @@
 //! every list gives the project as opened and redoing them the end again; and the end saves and reopens the same.
 //! A seeded generator of our own stands for `arbitrary`: a failure names its seed and list, so it can be run again.
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use serde_json::{json, Value};
 
 use super::*;
@@ -69,14 +68,14 @@ fn command(r: &mut Rng, a: &App) -> Value {
     let pa: Vec<u32> = p.patterns.iter().map(|q| q.id.0).collect();
     let clips: Vec<u32> = p.arrangement().map(|x| x.clips.iter().map(|c| c.id.0).collect()).unwrap_or_default();
     let note = |r: &mut Rng, ch: &[u32]| json!({"channel": r.id(ch), "position": r.below(4) * 96, "length": 1 + r.below(96), "key": 36 + r.below(48), "velocity": r.below(128)});
-    match r.below(26) {
+    match r.below(59) {
         0 => json!({"op": "set_tempo", "bpm": 40.0 + r.unit() * 200.0}),
         1 => json!({"op": "set_swing", "swing": r.unit()}),
         2 => json!({"op": "set_main_volume", "volume": r.unit()}),
         3 => json!({"op": "set_main_pitch", "cents": r.below(2401) as i64 - 1200}),
         4 => json!({"op": "set_time_signature", "numerator": 1 + r.below(16), "denominator": 2u32 << r.below(4)}),
         5 => json!({"op": "set_info", "title": format!("T{}", r.below(100)), "author": "Fuzz"}),
-        6 => json!({"op": "set_channel", "channel": r.id(&ch), "name": format!("C{}", r.below(100)), "color": r.color(), "volume": r.unit(), "pan": r.unit() * 2.0 - 1.0, "pitch": r.below(201) as i64 - 100, "enabled": r.chance(0.5), "track": r.id(&tr)}),
+        6 => json!({"op": "set_channel", "channel": r.id(&ch), "name": format!("C{}", r.below(100)), "color": r.color(), "volume": r.unit(), "pan": r.unit() * 2.0 - 1.0, "pitch": r.below(201) as i64 - 100, "enabled": r.chance(0.5), "track": r.id(&tr), "declick": r.below(6), "swing": r.unit(), "truncate_swing": r.chance(0.5), "cut": r.below(3), "cut_by": r.below(3), "locked": r.chance(0.5)}),
         7 => json!({"op": "set_track", "track": r.id(&tr), "name": format!("M{}", r.below(100)), "color": r.color(), "volume": r.unit(), "pan": r.unit() * 2.0 - 1.0, "stereo": r.unit() * 2.0 - 1.0, "enabled": r.chance(0.5), "polarity": r.chance(0.5), "swap": r.chance(0.5), "effects_enabled": r.chance(0.5)}),
         8 => json!({"op": "set_send", "from": r.id(&tr), "to": r.id(&tr), "level": r.unit()}),
         9 => json!({"op": "set_eq", "track": r.id(&tr), "band": r.below(3), "gain": r.below(3601) as i64 - 1800, "frequency": r.below(65536)}),
@@ -87,6 +86,8 @@ fn command(r: &mut Rng, a: &App) -> Value {
         }
         12 => json!({"op": "add_notes", "pattern": r.id(&pa), "notes": (0..1 + r.below(3)).map(|_| note(r, &ch)).collect::<Vec<_>>()}),
         13 => json!({"op": "set_playlist_track", "track": r.below(8), "name": format!("L{}", r.below(100)), "color": r.color(), "enabled": r.chance(0.5)}),
+        // Linked to an insert (not the master), or not linked.
+        55 => json!({"op": "set_playlist_track", "track": 1 + r.below(8), "link": if r.chance(0.5) && tr.len() > 1 { json!({"mixer": r.id(&tr[1..])}) } else { json!({}) }}),
         14 => json!({"op": "move_channel", "channel": r.id(&ch), "row": r.below(ch.len() + 1)}),
         15 => json!({"op": "delete_channel", "channel": r.id(&ch)}),
         16 => json!({"op": "add_channel", "name": format!("N{}", r.below(100)), "track": r.id(&tr)}),
@@ -98,6 +99,42 @@ fn command(r: &mut Rng, a: &App) -> Value {
         22 => json!({"op": "set_clip", "clip": r.id(&clips), "position": r.below(16) * 96, "track": r.below(8), "length": 1 + r.below(384), "muted": r.chance(0.5)}),
         23 => json!({"op": "delete_clip", "clip": r.id(&clips)}),
         24 => json!({"op": "set_slot", "track": r.id(&tr), "slot": r.below(10), "enabled": r.chance(0.5), "mix": r.unit()}),
+        25 => json!({"op": "set_clip_lfo", "channel": r.id(&ch), "on": r.chance(0.5), "amount": r.below(129), "speed": r.below(65537), "tension": r.below(257) as i64 - 128}),
+        26 => json!({"op": "set_midi_out", "channel": r.id(&ch), "midi_channel": r.below(16), "patch": r.below(129), "bank": r.below(129) as i64 - 1, "send_levels": r.chance(0.5)}),
+        27 => json!({"op": "set_project", "beats": 1 + r.below(32), "steps": 1 + r.below(16), "signature": r.chance(0.5), "panning_law": if r.chance(0.5) { "circular" } else { "triangular" }, "play_truncated": r.chance(0.5), "pdc": r.chance(0.5)}),
+        28 => json!({"op": "set_track", "track": r.id(&tr), "separator": r.chance(0.5), "dock": (["left", "middle", "right"][r.below(3)]), "threaded": r.chance(0.5), "latency_in": r.unit() * 20.0, "latency_out": -r.unit() * 20.0, "audio_in": r.below(3) as i32 - 1, "audio_out": r.below(3) as i32 - 1, "rec_source": r.below(6), "monitor": (["off", "armed", "on"][r.below(3)]), "armed": r.chance(0.5)}),
+        29 => json!({"op": "reset_track", "track": r.id(&tr)}),
+        30 => json!({"op": "set_auto_bypass", "on": r.chance(0.5)}),
+        31 => json!({"op": "move_track", "track": r.id(&tr), "to": 1 + r.below(8)}),
+        32 => json!({"op": "remove_tracks", "tracks": [r.id(&tr), r.id(&tr)]}),
+        33 => json!({"op": "move_effect", "track": r.id(&tr), "slot": r.below(10), "to": r.below(10)}),
+        35 => json!({"op": "shift_patterns", "from": 1 + r.below(6), "by": if r.chance(0.5) { 1 } else { -1 }}),
+        36 => json!({"op": "move_pattern", "from": 1 + r.below(8), "to": 1 + r.below(8)}),
+        37 => json!({"op": "clone_pattern", "pattern": r.id(&pa)}),
+        38 => json!({"op": "transpose_pattern", "pattern": r.id(&pa), "semitones": r.below(25) as i64 - 12, "channels": if r.chance(0.5) { vec![r.id(&ch)] } else { Vec::new() }}),
+        39 => json!({"op": "split_pattern", "pattern": r.id(&pa)}),
+        40 => json!({"op": "set_pattern_signature", "pattern": r.id(&pa), "numerator": r.below(8), "denominator": 4}),
+        57 => json!({"op": "set_misc", "channel": r.id(&ch), "values": {"arp_dir": r.below(6) as f64, "echo_feed": r.unit(), "time_gate": r.unit()}}),
+        58 => json!({"op": "set_start_value", "target": 0x4000_0001u32 + [0, 1, 4][r.below(3)], "value": (if r.chance(0.3) { Value::Null } else { json!(r.unit()) })}),
+        56 => json!({"op": "set_pattern_markers", "pattern": r.id(&pa), "markers": [{"position": r.below(4) * 96, "kind": 8, "numerator": 1 + r.below(8), "denominator": 4}]}),
+        41 => json!({"op": "clone_channel", "channel": r.id(&ch)}),
+        43 => json!({"op": "set_loops", "pattern": r.id(&pa), "mode": r.below(4), "loops": [{"channel": r.id(&ch), "value": if r.chance(0.5) { Some(1 + r.below(16)) } else { None }}]}),
+        44 => json!({"op": "set_groups", "groups": ["A", "Unsorted"], "channels": [{"channel": r.id(&ch), "group": if r.chance(0.5) { Some(r.below(2)) } else { None }}], "shown": if r.chance(0.5) { Some(r.below(2)) } else { None }}),
+        53 => json!({"op": "add_arrangement", "name": format!("A{}", r.below(9))}),
+        // In position order, as the playlist keeps clips (a list out of order keeps its order, which a file sorts).
+        51 => {
+            let p = r.below(16) * 96;
+            json!({"op": "set_clips", "clips": [{"id": r.id(&clips), "track": 1 + r.below(8), "position": p, "length": 1 + r.below(384)}, {"track": 1 + r.below(8), "position": p + 96 * (1 + r.below(8)), "length": 96, "pattern": 1 + r.below(4)}]})
+        }
+        52 => json!({"op": "set_markers", "markers": [{"position": r.below(8) * 384, "name": "A"}, {"position": r.below(8) * 384, "kind": r.below(6)}]}),
+        50 => json!({"op": "add_marker", "marker": {"position": r.below(8) * 384, "name": format!("M{}", r.below(9)), "kind": r.below(6)}}),
+        46 => json!({"op": "swap_playlist_tracks", "track": 1 + r.below(8), "with": 1 + r.below(8)}),
+        47 => json!({"op": "insert_playlist_track", "at": 1 + r.below(8)}),
+        48 => json!({"op": "delete_playlist_track", "track": 1 + r.below(8)}),
+        49 => json!({"op": "reset_playlist_track", "track": 1 + r.below(8)}),
+        45 => json!({"op": "replace_instrument", "channel": r.id(&ch), "plugin": if r.chance(0.5) { Some("MIDI Out") } else { None }}),
+        42 => json!({"op": "set_step", "pattern": r.id(&pa), "channel": r.id(&ch), "step": r.below(32), "on": r.chance(0.5), "mute": r.chance(0.5)}),
+        34 => json!({"op": "set_slot", "track": r.id(&tr), "slot": r.below(10), "name": format!("S{}", r.below(9)), "color": r.color()}),
         _ => json!({"op": "load_sample", "channel": r.id(&ch), "path": "/no/such/folder/snare.wav"}),
     }
 }

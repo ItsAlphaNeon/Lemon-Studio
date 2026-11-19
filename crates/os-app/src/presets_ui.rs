@@ -5,7 +5,6 @@
 //! The interface's side of `crate::presets` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 use crate::app::App;
 use crate::playlist::{Cmd, Mark, PItem, Popup};

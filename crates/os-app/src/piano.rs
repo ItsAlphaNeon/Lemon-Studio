@@ -6,7 +6,6 @@
 //! Piano roll state and note editing (view geometry, selection, undo).
 // spec: ui/piano-roll.md §3, §5, §7a, §7b, §8, §9; flp/events/patterns.md (note records, control points)
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ControlPoint, Note};
 use os_ui::Rect;
 pub use crate::edit::notes::*;

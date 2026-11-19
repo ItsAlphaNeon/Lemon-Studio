@@ -10,7 +10,6 @@
 //! `views::save_form` paints them.
 // spec: ui/data-folder.md §7
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use os_model::DataFolder;
@@ -401,16 +400,10 @@ impl App {
             self.tell(Kind::Error, f.title(), spans(&["", &dir.display().to_string(), &format!(" could not be made: {e}")]));
             return self.dialog_done(Then::SaveProject(f.next), Reply::File(None));
         }
-        // One undo step when the text changed (`control::edit`).
-        crate::control_ui::edit(&mut self.state, crate::control::command::SONG_INFO, crate::control::command::Region::Settings, |s| {
-            let info = &mut s.session.project.get_mut().info;
-            for (value, field) in [&mut info.title, &mut info.author, &mut info.url, &mut info.genre].into_iter().zip(&f.info) {
-                let text = field.text.trim();
-                if value.as_deref().unwrap_or("") != text {
-                    *value = (!text.is_empty()).then(|| text.to_string());
-                }
-            }
-        });
+        // One undo step when the text changed.
+        use crate::views::settings::InfoField;
+        let fields: Vec<_> = [InfoField::Title, InfoField::Author, InfoField::Url, InfoField::Genre].into_iter().zip(&f.info).map(|(k, field)| (k, field.text.trim())).collect();
+        crate::project_info_ui::set_info(&mut self.state, &fields);
         if f.new {
             self.set_timebase(f.ppq);
             self.set_bar(f.num, 16 / f.den.max(1));
@@ -418,7 +411,7 @@ impl App {
         if f.copy {
             self.state.message = Some(self.copy_used_samples_to(&dir));
         }
-        self.state.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default).folder = df::folder_text(&dir);
+        crate::data_folder_ui::put(&mut self.state, None, Some(df::folder_text(&dir)));
         let file = f.file();
         self.dialog_done(Then::SaveProject(f.next), Reply::File(Some(file)));
         crate::data_folder_ui::reread(&self.state);

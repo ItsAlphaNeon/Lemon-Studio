@@ -10,7 +10,6 @@
 // spec: ui/piano-flam.md, ui/piano-claw.md, ui/piano-flip.md, ui/piano-level-scaling.md, ui/piano-limit.md, ui/piano-lfo.md,
 // ui/piano-quantize.md, ui/piano-chop.md, ui/piano-randomize.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{ControlPoint, Note};
 
 use crate::app::State;
@@ -716,8 +715,7 @@ fn restore(s: &mut State) -> bool {
         return false;
     }
     let (base, base_ctl, sel, ch, number) = (se.base.clone(), se.base_ctl.clone(), se.base_sel.clone(), se.channel, se.pattern);
-    let p = &mut s.session.project.get_mut().patterns[i];
-    (p.notes, p.controls) = (base, base_ctl);
+    crate::edit::notes::put_pattern(&mut s.session, number, base, base_ctl);
     if sel.is_empty() {
         s.piano.clear_selection();
     } else {

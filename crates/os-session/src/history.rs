@@ -33,6 +33,11 @@ use crate::prefs;
 /// The history's first entry: the project as opened or reset.
 pub const LAST_RESET: &str = "Last reset";
 /// A step-sequencer step click (FL's name).
+/// The loop icon and the loop type (spec: ui/undo-steps.md).
+pub const LOOP_MODE: &str = "Set pattern loop mode";
+/// A loop box (spec: ui/undo-steps.md).
+pub const LOOP_POINT: &str = "Set advanced looping settings";
+
 pub const STEP_SEQ_EDIT: &str = "Step seq edit";
 /// A sample loaded into a channel (FL's name; spec: ui/settings-choices.md "Undo history: the four checks").
 pub const LOAD_SAMPLE: &str = "Load channel sample(s)";
@@ -61,12 +66,6 @@ pub enum Snap {
     Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32>, loops: (Vec<(u16, u32)>, Option<u32>) },
     /// The playlist (`playlist::capture`).
     Playlist(Box<crate::edit::playlist::Snapshot>),
-    /// A knob's value: the model's own for the channel knobs, else the knob's 0..1; `None` for a send with no level
-    /// record (at unity), so undo leaves none behind.
-    Knob(KnobId, Option<f64>),
-    /// Mixer track `.0`'s audio input, output, record source and monitor mode (`MixerTrack::audio_in` ...); its armed
-    /// state is no part of it (spec: audio/track-io.md §2.3).
-    TrackIo(u16, [i32; 4]),
     /// What a sample load changes on channel `row`: its sample, its name ("Name channels after their sample or plugin"), its root note and its
     /// stretch ("Read sample root note" and "Read sample tempo information", `rack::read_tags`) and its sampler flags
     /// (Keep on disk, "Auto keep long audio on disk").
@@ -155,36 +154,6 @@ pub fn put_rack(s: &mut crate::session::Session, r: RackSide) {
     });
 }
 
-/// The model's value of a knob: the channels' volume and pan as stored (exact), the others as the knob reads them.
-pub fn knob_value(s: &crate::session::Session, id: KnobId) -> Option<f64> {
-    Some(match id {
-        KnobId::ChanVol(i) => s.project.channels.get(i).map_or(0.0, |c| c.volume),
-        KnobId::ChanPan(i) => s.project.channels.get(i).map_or(0.0, |c| c.pan),
-        // The level the container's list holds (the knob shows the chain's, an automated one included).
-        KnobId::Member(t, k, id, wet) => crate::edit::container::level(s, t, k, id, wet).map_or(0.0, f64::from),
-        // A route with no level record: the knob shows unity, and the record is what the step must put back.
-        KnobId::Send(a, b) => return crate::edit::mixer::track(s, a).map_or(Some(0.8), |m| m.send_levels.iter().find(|(d, _)| *d == b).map(|&(_, l)| l)),
-        _ => f64::from(s.knob(id).unwrap_or(0.0)),
-    })
-}
-
-pub fn set_knob_value(s: &mut crate::session::Session, id: KnobId, v: Option<f64>) {
-    let Some(v) = v else {
-        if let KnobId::Send(a, b) = id {
-            if let Some(m) = crate::edit::mixer::track_mut(s, a) {
-                m.send_levels.retain(|&(d, _)| d != b);
-                s.dirty = true;
-            }
-        }
-        return;
-    };
-    match id {
-        KnobId::ChanVol(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.volume = v),
-        KnobId::ChanPan(i) => s.project.get_mut().channels.get_mut(i).into_iter().for_each(|c| c.pan = v),
-        _ => s.set_knob(id, v as f32),
-    }
-}
-
 /// A knob step's name.
 fn knob_name(id: KnobId) -> &'static str {
     match id {
@@ -250,6 +219,12 @@ pub enum Run {
     Member(u16, u8, u32, bool),
     /// A client's gesture (`control::begin_in`).
     Gesture(u64),
+    /// The steps a press in the step sequencer paints, with the drag that follows.
+    Steps,
+    /// A loop box dragged.
+    Loop(usize),
+    /// The graph editor's bars dragged.
+    Graph,
 }
 
 /// A channel control a run of changes goes to (`Run::Channel`).
@@ -281,7 +256,7 @@ impl History {
     /// ends, so the next drag or run of notches is a step of its own, as in FL (spec: ui/undo-steps.md). The tempo
     /// tapper's taps, a plugin's own values, a controller's and a client's gesture run on.
     pub fn end_gesture_run(&mut self) {
-        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..))) {
+        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..) | Run::Steps | Run::Loop(_) | Run::Graph)) {
             self.run = None;
         }
     }
@@ -307,6 +282,11 @@ impl History {
     /// The name of the newest done step.
     pub fn newest_done(&self) -> Option<&str> {
         self.done.checked_sub(1).map(|i| &*self.steps[i].name)
+    }
+
+    /// Whether the newest done step is made of commands (`Snap::Commands`).
+    pub fn newest_is_commands(&self) -> bool {
+        self.done.checked_sub(1).is_some_and(|i| matches!(self.steps[i].snap, Snap::Commands(_)))
     }
 
     /// Forgets every step: the project was opened or made ("Last reset").
@@ -442,11 +422,72 @@ pub fn unrecord(s: &mut crate::session::Session) {
 /// note that did not move it, a knob clicked without a turn).
 pub fn settle(s: &mut crate::session::Session) {
     let h = &s.history;
-    if h.fresh && h.done > 0 && h.done == h.steps.len() && h.steps[h.done - 1].snap.now(s) == h.steps[h.done - 1].snap {
-        unrecord(s);
+    if h.fresh && h.done > 0 && h.done == h.steps.len() {
+        if h.steps[h.done - 1].snap.now(s) == h.steps[h.done - 1].snap {
+            unrecord(s);
+        } else {
+            pattern_to_commands(s, h.done - 1);
+        }
     }
     s.history.fresh = false;
     s.history.end_gesture_run();
+}
+
+/// An edit of a pattern the interface made on it, step `i` holding the pattern as it was (`Snap::Pattern`), turned
+/// into the commands a client would apply for it: the pattern goes back as it was and `set_notes` and `set_pattern`
+/// bring it to what the edit made (with `set_controls` and `set_loops` for its events and loops), the step holding
+/// their undo. Left as it is when a note or a loop names a channel the rack has not.
+fn pattern_to_commands(s: &mut crate::session::Session, i: usize) {
+    use crate::control::command::{Command, NoteIn};
+    let Snap::Pattern { number, notes, controls, length, loops } = &s.history.steps[i].snap else { return };
+    let Some(p) = s.project.pattern(*number) else { return };
+    let ids: std::collections::HashMap<u16, u32> = s.project.channels.iter().map(|c| (c.index, c.id.0)).collect();
+    if p.id.is_none() || p.notes.iter().any(|n| ids.get(&n.channel).is_none_or(|&id| id == 0)) {
+        return;
+    }
+    // Loops name channels by index: each one's id, before and after.
+    let loop_channels: std::collections::BTreeSet<u16> = loops.0.iter().chain(&p.loops).map(|l| l.0).collect();
+    if loop_channels.iter().any(|ch| ids.get(ch).is_none_or(|&id| id == 0)) {
+        return;
+    }
+    let after = p.clone();
+    let mut commands = Vec::new();
+    let same_controls = after.controls.len() == controls.len() && after.controls.iter().zip(controls).all(|(a, b)| a == b && a.id.0 == b.id.0);
+    if !same_controls {
+        let list = after.controls.iter().map(|c| crate::control::command::ControlIn { position: c.position, value: c.value, channel: None, param: None, kind: Some(c.kind), id: (c.id.0 != 0).then_some(c.id.0) }).collect();
+        commands.push(Command::SetControls { pattern: after.id.0, controls: list });
+    }
+    if (after.loops.clone(), after.loop_mode) != *loops {
+        let value = |ch: u16| after.loops.iter().find(|l| l.0 == ch).map(|l| l.1);
+        let list = loop_channels.iter().map(|&ch| crate::control::command::LoopIn { channel: ids[&ch], value: value(ch) }).collect();
+        commands.push(Command::SetLoops { pattern: after.id.0, mode: Some(after.loop_mode.map_or(0, |m| m as u8)), loops: list });
+    }
+    let same_notes = after.notes.len() == notes.len() && after.notes.iter().zip(notes).all(|(a, b)| a == b && a.id.0 == b.id.0);
+    if !same_notes {
+        commands.push(Command::SetNotes { pattern: after.id.0, channel: None, notes: after.notes.iter().map(|n| NoteIn::of(n, ids[&n.channel])).collect() });
+    }
+    if after.length != *length {
+        commands.push(Command::SetPattern { pattern: after.id.0, name: None, color: None, length: Some(after.length.unwrap_or(0)) });
+    }
+    if commands.is_empty() {
+        return;
+    }
+    // The pattern as it was, then the commands. It ends as the edit left it: nothing for the views to follow (the
+    // piano roll keeps its selection), so what the two say they touched is dropped.
+    let touched = std::mem::take(&mut s.touched);
+    let snap = std::mem::replace(&mut s.history.steps[i].snap, Snap::Commands(Vec::new()));
+    snap.clone().put(s);
+    match crate::control::run_in(s, commands) {
+        Ok((_, undo)) => s.history.steps[i].snap = Snap::Commands(undo),
+        Err(_) => {
+            // Not expressible after all: the edit's pattern back, the step as it was.
+            if let Some(place) = s.project.patterns.iter().position(|q| q.number == after.number) {
+                s.project.get_mut().patterns[place] = after;
+            }
+            s.history.steps[i].snap = snap;
+        }
+    }
+    s.touched = touched;
 }
 
 /// How long the wheel may rest between notches that make one step. FL joined notches about 120 ms apart and made a
@@ -460,17 +501,9 @@ pub fn load_sample(s: &mut crate::session::Session, row: usize) {
     record(s, LOAD_SAMPLE, snap);
 }
 
-/// A mixer track's input, output, record source and monitor mode, as `Snap::TrackIo` holds them.
+/// A mixer track's input, output, record source and monitor mode.
 pub fn track_io_of(m: &os_model::MixerTrack) -> [i32; 4] {
     [m.audio_in, m.audio_out, i32::from(m.rec_source), i32::from(m.monitor)]
-}
-
-/// Before mixer track `track`'s audio input, output, record source or monitor mode changes: a step, "Mixer track audio
-/// input / output".
-pub fn track_io(s: &mut crate::session::Session, track: u16) {
-    let Some(m) = crate::edit::mixer::track(s, track) else { return };
-    let snap = Snap::TrackIo(track, track_io_of(m));
-    record(s, MIXER_TRACK_IO, snap);
 }
 
 /// Before knob `id` turns: a step unless Undo knob tweaks is off. `wheel`: a mouse-wheel notch, which joins the step
@@ -484,8 +517,10 @@ pub fn knob(s: &mut crate::session::Session, id: KnobId, wheel: bool) {
     if wheel && h.joins(Run::Wheel(id)) {
         return;
     }
-    let snap = Snap::Knob(id, knob_value(s, id));
-    record(s, knob_name(id), snap);
+    // What the knob's command changes, as it is before the drag (`KnobId::command`); none when what it names is gone.
+    crate::control::settle_in(s);
+    let Some(undo) = id.command(s, 0.0).and_then(|c| c.undo_now(s).ok()) else { return };
+    record(s, knob_name(id), Snap::Commands(vec![undo]));
     if wheel {
         s.history.run = Some(Run::Wheel(id));
     }
@@ -497,6 +532,8 @@ fn swap_step(s: &mut crate::session::Session, i: usize) {
         let other = crate::control::take_back_in(s, v);
         s.history.steps[i].snap = Snap::Commands(other);
         s.dirty = true;
+        // The interface puts back the rack's view it kept for the step, if it kept one.
+        s.touched.rack_step = Some(s.history.steps[i].id);
         return;
     }
     let now = s.history.steps[i].snap.now(s);
@@ -618,9 +655,7 @@ impl Snap {
         match self {
             Snap::Pattern { number, .. } => Snap::pattern(s, *number),
             Snap::Playlist(_) => Snap::Playlist(Box::new(crate::edit::playlist::capture(s))),
-            Snap::Knob(id, _) => Snap::Knob(*id, knob_value(s, *id)),
             // A track gone since is left as the step has it (`put` does nothing then).
-            Snap::TrackIo(t, _) => crate::edit::mixer::track(s, *t).map_or_else(|| self.clone(), |m| Snap::TrackIo(*t, track_io_of(m))),
             // A channel gone since is left as the step has it (`put` does nothing then).
             Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
             Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
@@ -675,7 +710,7 @@ impl Snap {
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
             Snap::Commands(v) => v.iter_mut().for_each(|c| c.rescale(from, to)),
             // A channel or an initial value holds no ticks; a timebase step's are at its own timebase.
-            Snap::Knob(..) | Snap::TrackIo(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Timebase(_) => {}
+            Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Timebase(_) => {}
         }
     }
 
@@ -690,12 +725,6 @@ impl Snap {
                 s.touched.notes = true;
             }
             Snap::Playlist(p) => crate::edit::playlist::restore(s, *p),
-            Snap::Knob(id, v) => set_knob_value(s, id, v),
-            Snap::TrackIo(t, [i, o, r, m]) => {
-                if let Some(x) = crate::edit::mixer::track_mut(s, t) {
-                    (x.audio_in, x.audio_out, x.rec_source, x.monitor) = (i, o, r as u8, m as u8);
-                }
-            }
             Snap::Sample { row, path, name, root, stretch, flags } => {
                 if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
                     (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (path.clone(), name, root, stretch);

@@ -49,10 +49,10 @@ impl Plugins {
         }
     }
 
-    /// Loads loop file `path` into the Lemon Slicer on rack row `row` as its own Load does (a file dropped on its
-    /// window): the file's beats, tempo and slices, the settings kept. The number of slices, or why the file was not
-    /// taken; `None` when the row hosts no Lemon Slicer.
-    pub fn load_slicer_loop(&mut self, row: usize, path: &str) -> Option<Result<usize, String>> {
+    /// The state of the Lemon Slicer on rack row `row` with loop file `path` loaded as its own Load does (a file dropped
+    /// on its window): the file's beats, tempo and slices, the settings kept. The state, in the plugin's own form, and
+    /// the number of slices, or why the file was not taken; `None` when the row hosts no Lemon Slicer.
+    pub fn slicer_loop_state(&self, row: usize, path: &str) -> Option<Result<(Vec<u8>, usize), String>> {
         #[cfg(feature = "stock-slicer")]
         {
             let st = lemon_slicer::state::State::parse(&self.slicer_file_state(row)?)?;
@@ -62,8 +62,7 @@ impl Plugins {
             };
             let state = lemon_slicer::params::plugin_state_from_fl(&st.to_bytes());
             let state = crate::plugins::with_sample_path(&state, path).unwrap_or(state);
-            let loaded = self.hosted.get(&row).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.load_state(&state));
-            Some(if loaded { Ok(st.slices.len()) } else { Err(format!("{path}: the plugin did not take it")) })
+            Some(Ok((state, st.slices.len())))
         }
         #[cfg(not(feature = "stock-slicer"))]
         {

@@ -69,7 +69,7 @@ pub fn after(s: &mut State, b: Before) -> bool {
         s.piano.clear_selection();
     }
     // The step's rack view goes back, and the one before it is kept for the step's way back.
-    if let Some(id) = t.rack_step {
+    if let Some(id) = t.rack_step.filter(|id| s.rack_views.contains_key(id)) {
         if let Some(v) = s.rack_views.insert(id, b.rack) {
             v.put(s);
         }
@@ -100,6 +100,11 @@ fn view(s: &mut State, v: crate::session::View) {
         View::Rows(map) => crate::rack::remap_view(s, &map),
         View::RackAutosize => crate::rack::autosize(s),
         View::ClipsCleared => s.playlist.sel.clear(),
+        View::TargetsMoved(moved) => {
+            if let Some(Some(n)) = moved.target(s.events.target) {
+                s.events.target = n;
+            }
+        }
         View::Retimed(from, to) => crate::app::retime_views(s, from, to),
         View::Message(m) => s.message = Some(m),
         View::AudioClipAdded { channel, clip } => {

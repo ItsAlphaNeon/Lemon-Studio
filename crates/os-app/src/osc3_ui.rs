@@ -5,7 +5,6 @@
 //! The interface's side of `crate::osc3` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::time::{Duration, Instant};
 use os_model::{Channel, ChannelKind, Project};
 use crate::plugins::{Plugins, FX_KEY};
@@ -30,8 +29,7 @@ impl crate::app::App {
         self.osc3_look = Some(now);
         let mut changed = false;
         for row in self.state.session.hosted_rows.clone() {
-            let plugins = &self.state.session.plugins;
-            changed |= self.state.session.project.write_if(|p| follow_sample(&self.state.session.settings, p, plugins, row, false));
+            changed |= crate::osc3::follow_sample_in(&mut self.state.session, row, false);
         }
         if changed {
             self.invalidate();

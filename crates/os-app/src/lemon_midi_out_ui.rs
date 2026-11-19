@@ -5,7 +5,6 @@
 //! The interface's side of `crate::lemon_midi_out` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use crossbeam_queue::ArrayQueue;
@@ -24,17 +23,20 @@ impl crate::app::App {
     /// ADD ▸ MIDI Out (spec §6.2): a MIDI Out channel on the master track, its window open. One undo step, "Add
     /// channel".
     pub fn add_midi_out(&mut self) -> Option<String> {
-        crate::control_ui::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
-            let s = &mut app.state;
-            let row = crate::projects::add_plugin_channel(s.session.project.get_mut(), LEMON_MIDI_OUT);
-            make_midi_out(&mut s.session.project.get_mut().channels[row], &Settings::default());
-            s.session.dirty = true;
-            s.selected_channel = row;
-            s.rack.select_only(row);
-            crate::rack::autosize(s);
-            app.open_channel_window(row);
-            Some("Added a MIDI Out channel (Lemon MIDI Out)".into())
-        })
+        use crate::control::command::Command;
+        let s = &mut self.state;
+        crate::mixer::track_ids(s);
+        let c = Command::AddChannel { name: None, plugin: Some(LEMON_MIDI_OUT.into()), sample: None, track: None, kind: None, color: None, target: None, points: Vec::new(), children: Vec::new() };
+        let id = match crate::control_ui::command(s, crate::history::ADD_CHANNEL, None, vec![c]) {
+            Ok(r) => r.first().and_then(|v| v["channel"].as_u64())? as u32,
+            Err(e) => return Some(e),
+        };
+        let row = s.session.project.channels.iter().position(|c| c.id.0 == id)?;
+        s.selected_channel = row;
+        s.rack.select_only(row);
+        crate::rack::autosize(s);
+        self.open_channel_window(row);
+        Some("Added a MIDI Out channel (Lemon MIDI Out)".into())
     }
 
     /// TOOLS ▸ Set up for MIDI export: the question first (spec: ui/menus.md "Prepare for MIDI export").
@@ -52,30 +54,33 @@ impl crate::app::App {
         if rows.is_empty() {
             return "No channels to set up for MIDI export".into();
         }
-        crate::control_ui::edit_app(self, PREP_LABEL, crate::control::command::Region::Project, |app| {
-            for &row in &rows {
-                app.state.session.plugins.keep(row);
-                app.state.session.plugins.drop_key(row);
-            }
-            app.state.session.hosted_rows.retain(|r| !rows.contains(r));
-            app.state.session.plugins.sampler_failed.retain(|r| !rows.contains(r));
-            app.state.session.plugins.native_failed.retain(|r| !rows.contains(r));
-            app.state.session.plugins.wrap_failed.retain(|r| !rows.contains(r));
-            let s = &mut app.state;
-            let groups = cut_groups(&rows.iter().map(|&r| s.session.project.channels[r].misc.cut).collect::<Vec<_>>());
-            for (i, &row) in rows.iter().enumerate() {
-                let ch = &mut s.session.project.get_mut().channels[row];
-                // A new id at once, before anything is hosted on the row and takes its channel's.
-                ch.id = os_model::Id::NONE;
-                make_midi_out(ch, &Settings { channel: (i % 16) as u8, ..Settings::default() });
-                (ch.misc.cut, ch.misc.cut_by) = (groups[i], groups[i]);
-            }
-            s.session.control.settle(s.session.project.get_mut());
-            s.session.dirty = true;
-            app.sync_midi_outs();
-            app.state.session.transport.set_instruments(app.state.session.plugins.instruments());
-            app.open_channel_window(rows[0]);
-        });
+        use crate::control::command::Command;
+        let s = &mut self.state;
+        crate::mixer::track_ids(s);
+        let groups = cut_groups(&rows.iter().map(|&r| s.session.project.channels[r].misc.cut).collect::<Vec<_>>());
+        let ids: Vec<u32> = rows.iter().map(|&r| s.session.project.channels[r].id.0).collect();
+        let first = ids.iter().map(|&channel| Command::ReplaceInstrument { channel, plugin: Some(LEMON_MIDI_OUT.into()) }).collect();
+        // The replaced channels' new ids, in order: each a MIDI channel of its own and a cut group of its own.
+        let then = |_: &crate::app::State, r: &[serde_json::Value]| {
+            r.iter()
+                .filter_map(|v| v["channel"].as_u64())
+                .enumerate()
+                .flat_map(|(i, id)| {
+                    let channel = id as u32;
+                    let mut cut = Command::set_channel(channel);
+                    if let Command::SetChannel { cut: c, cut_by: b, .. } = &mut cut {
+                        (*c, *b) = (Some(groups[i]), Some(groups[i]));
+                    }
+                    let out = Command::SetMidiOut { channel, midi_channel: Some((i % 16) as u8), port: None, patch: None, bank: None, bank2: None, send_levels: None, map_color: None };
+                    [out, cut]
+                })
+                .collect()
+        };
+        if let Err(e) = crate::control_ui::command_then(s, PREP_LABEL, first, then) {
+            return e;
+        }
+        self.sync_midi_outs();
+        self.open_channel_window(rows[0]);
         let n = rows.len();
         format!("Set up for MIDI export: {n} channel{} now play{} Lemon MIDI Out", if n == 1 { "" } else { "s" }, if n == 1 { "s" } else { "" })
     }

@@ -5,7 +5,6 @@
 //! The interface's side of `crate::project_files` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 use os_model::DataFolder;
 use crate::app::{App, State};
@@ -155,11 +154,8 @@ impl App {
         if crate::prefs::check(&crate::prefs::COPY_USED_SAMPLES) {
             self.copy_used_samples_to(&dir);
         }
-        let df = self.state.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
-        if df.choice == DataFolder::NONE {
-            df.choice = DataFolder::RELATIVE;
-        }
-        df.folder = crate::data_folder::folder_text(&dir);
+        let relative = (crate::data_folder::choice(&self.state.session.project) == DataFolder::NONE).then_some(DataFolder::RELATIVE);
+        crate::data_folder_ui::put(&mut self.state, relative, Some(crate::data_folder::folder_text(&dir)));
         self.save_to(file);
         crate::data_folder_ui::reread(&self.state);
     }

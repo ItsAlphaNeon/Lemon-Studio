@@ -166,6 +166,11 @@ pub fn id_of_key(project: &Project, key: usize) -> Option<String> {
 }
 
 /// A hosted native plugin's state into its channel (a plugin channel) or mixer slot.
+/// `store_native` on the session's project.
+pub fn store_native_in(s: &mut crate::session::Session, key: usize, state: Vec<u8>) {
+    store_native(s.project.get_mut(), key, state);
+}
+
 pub fn store_native(proj: &mut Project, key: usize, state: Vec<u8>) {
     match fx_of(key) {
         None => {
@@ -588,6 +593,18 @@ pub fn remap_rows_in(s: &mut crate::session::Session, m: &dyn Fn(usize) -> Optio
     s.plugins.native_failed = s.plugins.native_failed.iter().filter_map(|&k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) }).collect();
     s.transport.set_instruments(s.plugins.instruments());
     s.dirty = true;
+}
+
+/// Row `row`'s instance goes, its state kept by its channel's id (`Plugins::keep`): a replaced instrument, whose channel
+/// stays.
+pub fn drop_row(s: &mut crate::session::Session, row: usize) {
+    s.plugins.keep(row);
+    s.plugins.drop_key(row);
+    s.hosted_rows.retain(|&r| r != row);
+    s.plugins.sampler_failed.retain(|&r| r != row);
+    s.plugins.native_failed.retain(|&r| r != row);
+    s.plugins.wrap_failed.retain(|&r| r != row);
+    s.transport.set_instruments(s.plugins.instruments());
 }
 
 /// `App::plugin_paste` in the session: row `row` hosts available plugin `index` from saved state `blob`.

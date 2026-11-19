@@ -6,7 +6,6 @@
 //! its parts do, and the export it starts. `views::export_form` paints it; `export` writes the files.
 // spec: audio/export.md §2-3
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::PathBuf;
 
 use crate::keys::{Key, NamedKey};
