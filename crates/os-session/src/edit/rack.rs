@@ -34,17 +34,6 @@ pub fn set_filter(s: &mut crate::session::Session, f: Filter) {
     });
 }
 
-/// Rename filter group: the rack's group `g` named `name`.
-pub fn rename_group(s: &mut crate::session::Session, g: usize, name: &str) {
-    s.project.write_if(|p| match file_group(p, g).and_then(|i| p.groups.get_mut(i as usize)) {
-        Some(n) if n != name => {
-            *n = name.to_string();
-            true
-        }
-        _ => false,
-    });
-}
-
 /// Tests: the groups `groups` in this order, "Unsorted" after them (or at `unsorted_at`), each channel in its first.
 #[cfg(any(test, feature = "test-util"))]
 pub fn set_groups(s: &mut crate::session::Session, groups: &[Group], unsorted_at: Option<usize>) {
@@ -277,24 +266,12 @@ pub fn snapshot(s: &mut crate::session::Session) {
     crate::history::record(s, crate::history::STEP_SEQ_EDIT, snap);
 }
 
-/// Fill each N steps (§18): the row's notes inside the pattern length become steps 1, 1+N, 1+2N, …
-pub fn fill_each(s: &mut crate::session::Session, r: usize, every: u32) {
-    let notes = filled(s, r, every);
-    set_row_notes(s, r, notes);
-}
-
 /// The row's notes `fill_each` leaves.
 pub fn filled(s: &crate::session::Session, r: usize, every: u32) -> Vec<Note> {
     let (len, ps) = (row_len(s, r), per_step(s));
     let mut notes: Vec<Note> = row_notes(s, r).into_iter().filter(|n| n.position >= len * ps).collect();
     notes.extend((0..len).step_by(every.max(1) as usize).map(|k| Note::step(0, k * ps)));
     notes
-}
-
-/// Write a step sequence (Advanced fill's Accept) over the row's notes inside the sequence length.
-pub fn write_sequence(s: &mut crate::session::Session, r: usize, steps: &[bool]) {
-    let notes = sequenced(s, r, steps);
-    set_row_notes(s, r, notes);
 }
 
 /// The row's notes `write_sequence` leaves.
@@ -304,12 +281,6 @@ pub fn sequenced(s: &crate::session::Session, r: usize, steps: &[bool]) -> Vec<N
     let mut notes: Vec<Note> = row_notes(s, r).into_iter().filter(|n| n.position >= len * ps).collect();
     notes.extend(steps.iter().enumerate().filter(|(_, on)| **on).map(|(k, _)| Note::step(0, k as u32 * ps)));
     notes
-}
-
-/// Rotate the row's notes by one step, wrapping inside the pattern length (§18).
-pub fn rotate(s: &mut crate::session::Session, r: usize, dir: i32) {
-    let notes = rotated(s, r, dir);
-    set_row_notes(s, r, notes);
 }
 
 /// The row's notes `rotate` leaves.
@@ -485,17 +456,6 @@ pub fn unused(s: &crate::session::Session) -> BTreeSet<usize> {
         .filter(|(_, c)| !s.project.patterns.iter().any(|p| p.notes.iter().any(|n| n.channel == c.index)) && !used_clip(c.index))
         .map(|(r, _)| r)
         .collect()
-}
-
-/// Chokes itself on a channel's menu (§18), as the original does: ticking gives the channel the lowest cut group no
-/// channel uses yet, as both its cut and cut by; unticking sets both to none (spec: ui/channel-rack.md §18).
-pub fn cut_itself(s: &mut crate::session::Session, r: usize) {
-    let Some(group) = cut_itself_group(s, r) else { return };
-    if let Some(c) = s.project.get_mut().channels.get_mut(r) {
-        c.misc.cut = group;
-        c.misc.cut_by = group;
-    }
-    s.dirty = true;
 }
 
 /// The cut and cut-by group Cut itself gives row `r` (`cut_itself`): none when it cuts itself, else the lowest group

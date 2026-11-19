@@ -1244,7 +1244,7 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
 }
 
 /// Sample `path` (shown as `label`) into the selected channel, which takes the file's name while "Name channels after their sample or plugin"
-/// is on (`rack::auto_name`). One history step (`history::load_sample`).
+/// is on (`rack::auto_name`). One history step (`Command::LoadSample`).
 fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<String> {
     let row = s.selected_channel;
     if !s.session.project.channels.get(row)?.kind.is_sampler() {

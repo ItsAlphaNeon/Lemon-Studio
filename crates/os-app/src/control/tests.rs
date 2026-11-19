@@ -1448,6 +1448,38 @@ fn a_session_without_a_window_serves_clients() {
     assert_eq!(ses.touched, Default::default());
 }
 
+/// Without a window, instances follow their channels too: after a client moves a plugin channel and the session
+/// ticks, every hosted instrument is on its own channel's row, so each plays its own channel's notes.
+#[test]
+fn a_session_without_a_window_moves_instances_with_their_channels() {
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::store());
+    ses.plugins = crate::plugins::Plugins::builtins();
+    let by = By::Client("Headless".into());
+    let add = |ses: &mut crate::session::Session, plugin: &str| {
+        let r = crate::control::apply_in(ses, &by, None, vec![cmd(json!({"op": "add_channel", "name": plugin, "plugin": plugin}))]).unwrap();
+        r[0]["channel"].as_u64().unwrap() as u32
+    };
+    let citrus = add(&mut ses, crate::citrus::CITRUS);
+    let smith = add(&mut ses, crate::smith::SMITH);
+    for _ in 0..4 {
+        crate::control::server::serve_tick(&mut ses);
+    }
+    let owners = |ses: &crate::session::Session| -> Vec<(usize, u32, u32)> {
+        ses.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, h)| (r, h.owner.0, ses.project.channels.get(r).map_or(0, |c| c.id.0))).collect()
+    };
+    let hosted = owners(&ses);
+    assert!(hosted.iter().any(|&(_, o, _)| o == citrus) && hosted.iter().any(|&(_, o, _)| o == smith), "both hosted: {hosted:?}");
+    crate::control::apply_in(&mut ses, &by, None, vec![cmd(json!({"op": "move_channel", "channel": smith, "row": 0}))]).unwrap();
+    for _ in 0..4 {
+        crate::control::server::serve_tick(&mut ses);
+    }
+    for (row, owner, on_row) in owners(&ses) {
+        assert!(owner == 0 || owner == on_row, "row {row}: the instance of channel {owner} under channel {on_row}");
+    }
+    let rows: Vec<usize> = ses.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
+    assert_eq!(ses.hosted_rows.iter().copied().collect::<std::collections::BTreeSet<_>>(), rows.into_iter().collect(), "the rows hosted are the instances'");
+}
+
 /// An add's undo removes what it made, and a move's moves it back, by id (control-plane step 13): what else changed
 /// meanwhile without a step of its own stays, which putting back the whole project would have undone.
 #[test]

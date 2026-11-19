@@ -205,6 +205,9 @@ pub fn read(path: &Path) -> Result<(os_flp::FlpFile, os_model::Project, bool), (
 /// stock plugins kept in step with the project, the mixer's effects and containers, the commands' plugins, samples into
 /// the samplers, and the instances' housekeeping. What it would show is dropped.
 pub fn host_tick(ses: &mut Session) {
+    // Instances follow their channels and slots by id (a client's move, an undo), as the window's tick does first.
+    let plan = crate::control::host::follow_plan(ses, true, true);
+    crate::control::host::follow_apply(ses, plan);
     crate::loading::tick(ses, false);
     crate::lemon_midi_out::sync_midi_outs(ses);
     let _ = crate::edit::mixer::fx_requests_in(ses);

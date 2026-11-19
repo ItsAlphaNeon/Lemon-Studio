@@ -12,6 +12,8 @@ pub enum KnobId {
     /// `Project::main_volume` / `main_pitch`; spec: audio/mixer.md "Main volume", audio/voice-levels.md).
     MasterVol,
     MasterPitch,
+    /// Mixer track `.0`'s fader (model `MixerTrack::volume`, 0..1 as the fader shows it; 0.8 unity).
+    MixVol(u16),
     /// Mixer track pan (model).
     MixPan(u16),
     MixSep(u16),
@@ -60,10 +62,12 @@ pub enum LfoKnob {
 }
 
 impl KnobId {
-    /// What the knob is as a target of the value box and of controller links: a container member's level is its own.
+    /// What the knob is as a target of the value box and of controller links: a container member's level and a mixer
+    /// track's fader are their own.
     pub fn target(self) -> crate::typein::Target {
         match self {
             KnobId::Member(t, k, id, wet) => crate::typein::Target::Member(t, k, id, wet),
+            KnobId::MixVol(t) => crate::typein::Target::Fader(t),
             k => crate::typein::Target::Knob(k),
         }
     }
@@ -250,8 +254,8 @@ impl KnobId {
         let p = &s.project;
         let track = |t: u16| p.mixer.iter().find(|m| m.index == t).map(|m| m.id.0);
         let channel = |row: usize| p.channels.get(row).map(|c| c.id.0);
-        let set_track = |t: u16, pan: Option<f64>, stereo: Option<f64>| {
-            Some(Command::SetTrack { track: track(t)?, name: None, color: None, volume: None, pan, stereo, enabled: None, polarity: None, swap: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, effects_enabled: None, audio_in: None, audio_out: None, rec_source: None, monitor: None, armed: None })
+        let set_track = |t: u16, volume: Option<f64>, pan: Option<f64>, stereo: Option<f64>| {
+            Some(Command::SetTrack { track: track(t)?, name: None, color: None, volume, pan, stereo, enabled: None, polarity: None, swap: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, effects_enabled: None, audio_in: None, audio_out: None, rec_source: None, monitor: None, armed: None })
         };
         let set_channel = |row: usize, volume: Option<f64>, pan: Option<f64>| {
             let mut c = Command::set_channel(channel(row)?);
@@ -265,9 +269,10 @@ impl KnobId {
             KnobId::MasterVol => Some(Command::SetMainVolume { volume: f64::from(v) }),
             KnobId::MasterPitch => Some(Command::SetMainPitch { cents: ((v - 0.5) * 2400.0).round() as i16 }),
             KnobId::Swing => Some(Command::SetSwing { swing: f64::from(v) }),
-            KnobId::MixPan(t) => set_track(t, Some(bipolar), None),
+            KnobId::MixVol(t) => set_track(t, Some(f64::from(v)), None, None),
+            KnobId::MixPan(t) => set_track(t, None, Some(bipolar), None),
             // In 64ths, as the file keeps it and FL's knob sets it (12% merged is 8, a typed 1% is 1).
-            KnobId::MixSep(t) => set_track(t, None, Some((bipolar * 64.0).round() / 64.0)),
+            KnobId::MixSep(t) => set_track(t, None, None, Some((bipolar * 64.0).round() / 64.0)),
             KnobId::SlotMix(t, k) => Some(Command::SetSlot { track: track(t)?, slot: k.min(9), enabled: None, mix: Some(f64::from(v)), name: None, color: None, sidechain: None, auto_bypass: None, threaded: None }),
             KnobId::Send(a, b) => Some(Command::SetSend { from: track(a)?, to: track(b)?, level: Some(f64::from(v)) }),
             KnobId::ChanVol(row) => set_channel(row, Some(f64::from(v)), None),
@@ -323,6 +328,7 @@ impl crate::session::Session {
     /// which are the interface's.
     pub fn knob(&self, id: KnobId) -> Option<f32> {
         Some(match id {
+            KnobId::MixVol(t) => self.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8) as f32,
             KnobId::MixPan(t) => {
                 let pan = self.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.pan).unwrap_or(0.0);
                 (0.5 + pan as f32 / 2.0).clamp(0.0, 1.0)

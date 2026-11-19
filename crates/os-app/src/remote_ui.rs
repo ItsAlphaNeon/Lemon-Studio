@@ -181,10 +181,9 @@ impl App {
                 self.record_knob(k);
             }
             Target::Fader(m) => {
-                if let Some(tr) = crate::edit::mixer::track_mut(&mut self.state.session, m) {
-                    tr.volume = Some(f64::from(v));
-                    self.state.session.dirty = true;
-                }
+                let k = KnobId::MixVol(m);
+                crate::history::knob(&mut self.state.session, k, true);
+                self.state.set_knob(k, v);
                 self.record_control(&crate::app::Action::Fader(m));
             }
             Target::Param(key, index) => {
@@ -435,9 +434,12 @@ mod tests {
         assert_eq!(made.iter().map(|l| l.target).collect::<Vec<_>>(), want);
         assert_eq!(made.iter().map(|l| l.cc).collect::<Vec<_>>(), (20..20 + want.len() as u8).collect::<Vec<_>>());
         assert!(app.state.message.as_deref().is_some_and(|m| m.contains(&crate::edit::mixer::name(&app.state.session, 1))), "{:?}", app.state.message);
-        // The volume follows its controller.
+        // The volume follows its controller, one undo step as a knob's moves are.
+        let before = crate::edit::mixer::track(&app.state.session, 1).and_then(|t| t.volume);
         assert!(app.remote_cc("Test", 0, 20, 127));
         assert_eq!(crate::edit::mixer::track(&app.state.session, 1).and_then(|t| t.volume), Some(1.0));
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(crate::history::MIXER_VOLUME));
+        assert_eq!(crate::edit::mixer::track(&app.state.session, 1).and_then(|t| t.volume), before);
         set_links(&crate::settings_file::store(), &[]);
     }
 

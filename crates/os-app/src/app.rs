@@ -4661,7 +4661,7 @@ impl App {
     /// sampler row it replaces that channel's sample (Lemon Sampler loads it) and renames the channel after the file
     /// while "Name channels after their sample or plugin" is on (`rack::auto_name`); elsewhere it adds a Lemon Sampler channel named after the
     /// file. Either channel reads the file's root note and beats (`rack::read_tags`). One history step, "Load channel
-    /// sample(s)" (`history::load_sample`).
+    /// sample(s)" (`Command::LoadSample`).
     pub fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &self.state;
         let row = views::rack::row_at(s, y).filter(|&r| s.session.project.channels[r].kind.is_sampler());
@@ -7650,13 +7650,17 @@ impl App {
             let v0 = crate::edit::mixer::track(&s.session, t).map(|m| m.volume.unwrap_or(0.8))?;
             let v = (v0 + f64::from(dy.signum()) * views::mixer::FADER_NOTCH).clamp(0.0, 1.0);
             if v != v0 {
-                // One step for a run of notches on the fader (none with Undo knob tweaks off: a fader is a knob here).
-                if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) && !s.session.history.joins(crate::history::Run::Fader(t)) {
-                    crate::control::edit_press(&mut s.session, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t));
-                    s.session.history.set_run(crate::history::Run::Fader(t));
-                }
-                if let Some(m) = crate::edit::mixer::track_mut(&mut s.session, t) {
-                    m.volume = Some(v);
+                // One step for a run of notches on the fader, as on a knob (none with Undo knob tweaks off).
+                crate::history::knob(&mut s.session, crate::knobs::KnobId::MixVol(t), true);
+                crate::mixer::track_ids(s);
+                if let Some(track) = crate::edit::mixer::track(&s.session, t).map(|m| m.id.0) {
+                    let mut c = crate::control::command::Command::set_track(track);
+                    if let crate::control::command::Command::SetTrack { volume, .. } = &mut c {
+                        *volume = Some(v);
+                    }
+                    if let Err(e) = crate::control_ui::run(s, vec![c]) {
+                        s.message = Some(e);
+                    }
                 }
                 s.session.dirty = true;
                 self.record_control(&Action::Fader(t));
