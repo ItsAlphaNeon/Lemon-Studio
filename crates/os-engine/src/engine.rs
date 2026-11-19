@@ -229,11 +229,14 @@ const LATE_START_SECONDS: f64 = 0.005;
 /// started on it. A change of the shift (the main pitch, the pitch knob, automation) retunes those keys, so sounding
 /// notes follow it (spec: audio/voice-levels.md "The main pitch"). `moves`: the instrument ignores a note's tuning
 /// (`Instrument::takes_tuning`), so a plugin channel's notes start on keys moved by their pitch's whole semitones and
-/// are tuned only by what is left; their note offs go to the moved keys.
+/// are tuned only by what is left; their note offs go to the moved keys. `root_move`: an instrument that plays its
+/// tuning as pitch bend (`Instrument::tunes_by_bend`) gets keys moved by the root note alone, as FL sends a VST
+/// plugin its notes, and the bend carries the rest.
 #[derive(Debug, Clone, Copy)]
 struct InstTuning {
     shift: f32,
     moves: bool,
+    root_move: Option<i32>,
     fine: [f32; 128],
     glide: [f32; 128],
     sent: [u8; 128],
@@ -242,7 +245,7 @@ struct InstTuning {
 
 impl Default for InstTuning {
     fn default() -> Self {
-        InstTuning { shift: 0.0, moves: false, fine: [0.0; 128], glide: [0.0; 128], sent: std::array::from_fn(|k| k as u8), keys: 0 }
+        InstTuning { shift: 0.0, moves: false, root_move: None, fine: [0.0; 128], glide: [0.0; 128], sent: std::array::from_fn(|k| k as u8), keys: 0 }
     }
 }
 
@@ -1578,7 +1581,9 @@ impl Engine {
                     start,
                     stop,
                     buf: 0,
-                    shape: n.clip.map(|fx| {
+                    // Every playlist clip has a shape (a plain one without fades or gain), so an instrument that takes
+                    // voice gains gets the channel's clip level on the clips' voices alone (`instrument_job`).
+                    shape: n.cut.map(|_| n.clip.unwrap_or(ClipFx { fade_in: (0.0, 0.0), fade_out: (0.0, 0.0), gain: 1.0 })).map(|fx| {
                         let ms = |v: f32| (f64::from(v.max(0.0)) * f64::from(rate) / 1000.0).round() as u64;
                         let total = Clock::frame_of_tick(rate, ppq, tick_tempo, n.tick + n.len) - Clock::frame_of_tick(rate, ppq, tick_tempo, n.tick);
                         ClipShape {
@@ -3603,7 +3608,9 @@ impl Engine {
                     fine: t.fine,
                     long: t.end.is_some(),
                     glide: 0,
-                    levels: t.levels,
+                    // A hosted plugin gets the note on the MIDI channel of its colour group, as FL sends it (measured on
+                    // FL 12.5.1: notes of colours 1, 2, 13 and 14 reached a VST 2 plugin on those channels).
+                    levels: crate::NoteLevels { channel: t.colour & 15, ..t.levels },
                     cuts: t.cuts,
                     layer: t.via.map(|w| w.layer),
                     porta: t.porta,
@@ -4485,7 +4492,9 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     // pitch, on top of any glide; notes keep the pitch they started with. A plugin channel's instrument that ignores a
     // tuning hears its whole semitones as moved keys instead.
     let shift = ch.hosted_shift();
-    fines.moves = !ch.own_tuning && !inst.takes_tuning();
+    let bends = !ch.own_tuning && !inst.takes_tuning() && inst.tunes_by_bend();
+    fines.moves = !ch.own_tuning && !inst.takes_tuning() && !bends;
+    fines.root_move = bends.then(|| 60 - i32::from(ch.root));
     // A changed channel pitch reaches the notes already sounding.
     if fines.shift != shift {
         fines.shift = shift;
@@ -4551,16 +4560,20 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     let voiced = inst.voice_gains();
     // SAFETY: only this channel's turn touches its clips.
     let shapes = || unsafe { cx.shapes.of_channel(c) };
+    // A playlist clip's own level (the channel's clip level) goes on its voice with its shape, so the channel's
+    // pattern notes play at the level of a sampler's notes (measured on FL 12.5.1, "It's TV Time!": the kick and snare
+    // of two audio clip channels, played by pattern notes, null against FL at -85 dB without it).
+    let cl = ch.clip_level;
     if voiced {
         let step = crate::instrument::VOICE_GAIN_FRAMES;
         for s in shapes() {
             if s.sent.is_none() {
-                let g = s.shape.at(s.age);
+                let g = s.shape.at(s.age) * cl;
                 inst.voice_gain(0, s.voice, g);
                 s.sent = Some(g);
             }
             for off in (0..n as u32).step_by(step as usize) {
-                let g = s.shape.at(s.age + u64::from(off + step));
+                let g = s.shape.at(s.age + u64::from(off + step)) * cl;
                 if s.sent != Some(g) {
                     inst.voice_gain(off, s.voice, g);
                     s.sent = Some(g);
@@ -4591,10 +4604,12 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
         }
     }
     out.active = inst.active();
-    // An audio clip channel's voices are its playlist clips: their own level is on the channel's output, since a
-    // hosted sampler takes velocities only up to 128 (spec: audio/audio-clips.md "Level").
-    let cl = ch.clip_level;
-    let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_after(n as u32, f64::from(cl), layer) };
+    // An instrument without voice gains has its playlist clips' own level on the channel's output (a hosted sampler
+    // takes velocities only up to 128; spec: audio/audio-clips.md "Level"), its pattern notes with them.
+    let cl = if voiced { 1.0 } else { cl };
+    // A third-party plugin gets twice the channel's volume through the pan split, as FL's plugin wrapper gives it.
+    let wrapper = if inst.wrapper_levels() { 2.0 } else { 1.0 };
+    let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_after(n as u32, f64::from(cl) * wrapper, layer) };
     // A level that changed smooths over the tick, as a voice's does: it has arrived when the curve says so (spec:
     // audio/automation.md).
     let (sl, sr) = out.gain.replace((gl, gr)).unwrap_or((gl, gr));
@@ -4820,17 +4835,27 @@ fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, fines: &mut
         notes::Note::Off(key) => inst.note_off(off, fines.sent(key)),
         notes::Note::On { key, vel, start, end, fine, levels, voice } => {
             // An instrument that ignores a tuning plays the note's pitch to the nearest semitone on a moved key.
-            let sent = if fines.moves { (i32::from(key) + (fines.shift + fine).round() as i32).clamp(0, 127) as u8 } else { key };
+            let sent = match (fines.moves, fines.root_move) {
+                (true, _) => (i32::from(key) + (fines.shift + fine).round() as i32).clamp(0, 127) as u8,
+                // A plugin that bends: the root note moves the key, the bend carries the rest.
+                (false, Some(m)) => (i32::from(key) + m).clamp(0, 127) as u8,
+                (false, None) => key,
+            };
+            let k = key & 127;
+            (fines.fine[usize::from(k)], fines.glide[usize::from(k)], fines.sent[usize::from(k)]) = (fine, 0.0, sent);
+            fines.keys |= 1 << k;
+            let tuning = fines.tuning(key);
+            // A plugin that bends has the bend in place before the note starts, as FL's wrapper sends it (a plugin may
+            // take a note's pitch when it starts).
+            if fines.root_move.is_some() {
+                inst.tune(off, sent, tuning);
+            }
             // The note's own pan and mod X / Y go with it (spec: audio/voice-levels.md "The note's own levels").
             match voice {
                 Some(v) => inst.voice_start(off, sent, vel, start, end, levels, v),
                 None => inst.note_start(off, sent, vel, start, levels),
             }
-            let k = key & 127;
-            (fines.fine[usize::from(k)], fines.glide[usize::from(k)], fines.sent[usize::from(k)]) = (fine, 0.0, sent);
-            fines.keys |= 1 << k;
-            let tuning = fines.tuning(key);
-            if tuning.abs() > 1e-3 {
+            if fines.root_move.is_none() && tuning.abs() > 1e-3 {
                 inst.tune(off, sent, tuning);
             }
         }
@@ -5695,6 +5720,49 @@ mod tests {
         assert!((frames[held] - g).abs() < 1e-6, "{} vs {g}", frames[held]);
         // (The probe holds its level for a whole process call; the next span after the note-off is silent.)
         assert_eq!(frames[(off as usize + 1024) * 2], 0.0);
+    }
+
+    /// Plays 1.0 on both sides; `wrapped`: what `Instrument::wrapper_levels` says.
+    struct Steady {
+        wrapped: bool,
+    }
+
+    impl Instrument for Steady {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, left: &mut [f32], right: &mut [f32]) {
+            left.fill(1.0);
+            right.fill(1.0);
+        }
+        fn wrapper_levels(&self) -> bool {
+            self.wrapped
+        }
+    }
+
+    // spec: audio/voice-levels.md "A plugin's output"
+    /// A third-party plugin gets the pan split of twice the channel's volume, as FL's plugin wrapper gives it (measured
+    /// on FL 12.5.1); Lemon Studio's own instruments get the pan split of the volume.
+    #[test]
+    fn a_third_party_plugin_gets_twice_the_channel_volume() {
+        let run = |wrapped: bool, pan: f64| {
+            let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+            p.channels[0].kind = ChannelKind::Plugin;
+            p.channels[0].pan = pan;
+            let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Pattern(1));
+            e.set_instrument(0, Arc::new(std::sync::Mutex::new(Steady { wrapped })));
+            let mut out = vec![0.0f32; 512 * 2];
+            for _ in 0..8 {
+                e.process(&mut out);
+            }
+            (out[0], out[1])
+        };
+        let v = laws::channel_gain(0.78125) as f32;
+        let close = |(l, r): (f32, f32), want: (f32, f32)| (l - want.0).abs() < 1e-5 && (r - want.1).abs() < 1e-5;
+        let c = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(close(run(true, 0.0), (2.0 * v * c, 2.0 * v * c)), "{:?}", run(true, 0.0));
+        assert!(close(run(false, 0.0), (v * c, v * c)), "{:?}", run(false, 0.0));
+        assert!(close(run(true, -1.0), (2.0 * v, 0.0)), "{:?}", run(true, -1.0));
+        assert!(close(run(false, -1.0), (v, 0.0)), "{:?}", run(false, -1.0));
     }
 
     /// Plays 1.0 on both sides and keeps the channel levels it was given; the engine applies volume and pan.
@@ -6914,6 +6982,63 @@ mod tests {
         assert_eq!(log.lock().unwrap().0, [(64, 5), (67, 0), (69, 3)], "the channel's low nibble");
     }
 
+    /// A pattern note reaches a hosted instrument on the MIDI channel of its colour group, as FL sends it (measured on
+    /// FL 12.5.1 with a VST 2 plugin).
+    #[test]
+    fn pattern_notes_carry_their_colour_as_the_midi_channel() {
+        #[derive(Default)]
+        struct Log(Vec<(u8, u8)>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
+                panic!("notes start with their levels");
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn note_start(&mut self, _o: u32, key: u8, _v: f32, _start: f32, levels: crate::NoteLevels) {
+                self.0.push((key, levels.channel));
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        let mut notes = vec![Note { key: 60, ..Note::step(0, 0) }, Note { key: 62, group: 12 | Note::PORTA, ..Note::step(0, 24) }];
+        notes[0].group = 1;
+        let mut p = project(notes, vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Pattern(1));
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        e.set_instrument(0, log.clone());
+        e.render_all(480);
+        assert_eq!(log.lock().unwrap().0, [(60, 1), (62, 12)]);
+    }
+
+    /// A plugin that bends gets the bend before each note starts, at the note's frame, as FL's wrapper has it in place
+    /// before its notes.
+    #[test]
+    fn a_bending_plugin_gets_the_bend_before_the_note() {
+        #[derive(Default)]
+        struct Log(Vec<&'static str>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
+                self.0.push("on");
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn tune(&mut self, _o: u32, _k: u8, _s: f32) {
+                self.0.push("tune");
+            }
+            fn tunes_by_bend(&self) -> bool {
+                true
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        let mut p = project(vec![Note::step(0, 0), Note::step(0, 24)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        p.channels[0].pitch_cents = -80;
+        let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Pattern(1));
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        e.set_instrument(0, log.clone());
+        e.render_all(480);
+        let l = log.lock().unwrap().0.clone();
+        assert_eq!(&l[..4], ["tune", "on", "tune", "on"], "{l:?}");
+    }
+
     /// Records what a layer's child is given, by frame: note ons (velocity), offs, chokes and tunings (semitones); it
     /// outputs 1.0 while a note is held.
     #[derive(Default)]
@@ -7237,10 +7362,12 @@ mod tests {
         assert_eq!((g.records[Record::VOLUME].flags, g.records[Record::VOLUME].release_tension), (2, 0));
     }
 
-    /// Logs the keys of its notes (true: on) and its tunings; `tunes`: what `takes_tuning` says.
+    /// Logs the keys of its notes (true: on) and its tunings; `tunes`: what `takes_tuning` says, `bends`: what
+    /// `tunes_by_bend` says.
     #[derive(Default)]
     struct TuneLog {
         tunes: bool,
+        bends: bool,
         keys: Vec<(u8, bool)>,
         tuned: Vec<(u8, f32)>,
     }
@@ -7257,6 +7384,9 @@ mod tests {
         }
         fn takes_tuning(&self) -> bool {
             self.tunes
+        }
+        fn tunes_by_bend(&self) -> bool {
+            self.bends
         }
         fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
     }
@@ -7294,6 +7424,18 @@ mod tests {
         // 9.8 semitones: 10 of them move the key, -0.2 is tuned; the note off goes to the moved key.
         let (keys, got) = run(&p, false);
         assert!(keys == [(70, true), (70, false)] && close(&got, 70, -0.2), "{keys:?} {got:?}");
+        // A plugin that plays its tuning as pitch bend: the root note (C4, 12 up) moves the key, the bend carries the
+        // knob and fine tune (-2.2), as FL's wrapper sends them.
+        let bent = |p: &Project| {
+            let mut e = Engine::new(p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+            let log = Arc::new(std::sync::Mutex::new(TuneLog { bends: true, ..TuneLog::default() }));
+            e.set_instrument(0, log.clone());
+            e.render_all(480);
+            let l = log.lock().unwrap();
+            (l.keys.clone(), l.tuned.clone())
+        };
+        let (keys, got) = bent(&p);
+        assert!(keys == [(72, true), (72, false)] && close(&got, 72, -2.2), "{keys:?} {got:?}");
         // Whole semitones only: no tuning.
         (p.channels[0].pitch_cents, p.channels[0].misc.fine) = (0, 0);
         assert_eq!(run(&p, false), (vec![(72, true), (72, false)], vec![]), "root note C4: an octave up");
@@ -7999,6 +8141,31 @@ mod tests {
             assert!((second[2 * at(288)] - mid).abs() < 2e-4, "t {t}: {} vs {mid}", second[2 * at(288)]);
             assert!(second[2 * at(100)].abs() < 1e-6, "nothing before the second clip");
         }
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    // spec: audio/audio-clips.md "Level"
+    /// On a hosted sampler that takes voice gains, an audio clip channel's own level reaches its playlist clips' voices
+    /// alone: a clip plays at unity through the channel at its default volume, centred, and a pattern note of the same
+    /// channel at a sampler note's level (measured on FL 12.5.1: "It's TV Time!", whose kick and snare are pattern
+    /// notes on audio clip channels).
+    #[test]
+    fn a_pattern_note_on_an_audio_clip_channel_plays_without_the_clips_level() {
+        use os_model::{Clip, ClipSource};
+        let wav = std::env::temp_dir().join(format!("os-engine-pattern-note-level-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
+        let mut p = song(vec![Note { length: 96, ..Note::step(0, 0) }], vec![Clip::new(0, 96, 0, ClipSource::Channel(0)), Clip::new(384, 192, 0, ClipSource::Pattern(1))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        e.set_instrument(0, Arc::new(std::sync::Mutex::new(VoicedSampler::default())));
+        let out = e.render_all(480);
+        let at = |t: u64| crate::clock::Clock::frame_of_tick(48000, 96, 130.0, t) as usize;
+        // A voice plays 0.5 at its gain; the channel's default volume, centred, is curve(0.78125) * cos(pi / 4).
+        let channel = laws::channel_gain(10000.0 / 12800.0) * std::f64::consts::FRAC_1_SQRT_2;
+        assert!((out[2 * at(48)] - 0.5).abs() < 1e-4, "the clip at unity: {}", out[2 * at(48)]);
+        let note = (0.5 * channel) as f32;
+        assert!((out[2 * at(432)] - note).abs() < 1e-4, "the pattern note: {} vs {note}", out[2 * at(432)]);
         let _ = std::fs::remove_file(&wav);
     }
 

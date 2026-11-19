@@ -645,7 +645,9 @@ impl Plugin {
 
     /// A note on, on MIDI channel `ch` (0..15).
     fn start(&mut self, offset: u32, key: u8, velocity: f32, ch: u8) {
-        let (key, v) = (key.min(127), (velocity.clamp(0.0, 1.0) * 127.0).round().max(1.0) as u8);
+        // The note's own velocity byte (`velocity` is it / 128), 128 sent as 127: what FL 12's wrapper sends (measured:
+        // a note of velocity 93 reached the plugin as 93).
+        let (key, v) = (key.min(127), (velocity.clamp(0.0, 1.0) * 128.0).round().clamp(1.0, 127.0) as u8);
         // The bend is centred for the new note first (it may still hold the last glide's end).
         if let Some(m) = self.bend.note_on(key) {
             os_engine::Instrument::midi(self, offset, m);
@@ -1180,6 +1182,11 @@ impl os_engine::Instrument for Plugin {
 
     fn set_bend_range(&mut self, semitones: u32) {
         self.bend.set_range(semitones);
+    }
+
+    /// VST 2 has no tuning of a note: always pitch bend.
+    fn tunes_by_bend(&self) -> bool {
+        true
     }
 
     fn param(&mut self, offset: u32, index: u32, value: f64) {

@@ -605,6 +605,11 @@ impl Plugins {
         // clips' fades and gain reach Lemon Sampler's voices one by one, so overlapping clips of one sample crossfade
         // (spec: audio/audio-clips.md "Fades and clip gain"); the instruments work the channel's volume and pan into
         // their voices' final levels (spec: audio/voice-levels.md "Final levels").
+        // A third-party plugin gets the channel's levels as FL's plugin wrapper gives them (spec: audio/voice-levels.md
+        // "A plugin's output").
+        if !crate::project_plugins::is_builtin(&a.desc) {
+            p.use_wrapper_levels();
+        }
         if crate::project_plugins::is_builtin(&a.desc) {
             p.use_note_levels();
             if a.desc.name == LEMON_SAMPLER {

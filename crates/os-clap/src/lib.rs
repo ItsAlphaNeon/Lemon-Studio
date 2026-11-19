@@ -2216,6 +2216,10 @@ impl os_engine::Instrument for Plugin {
         }
     }
 
+    fn tunes_by_bend(&self) -> bool {
+        self.bend.is_some()
+    }
+
     /// The engine applies the channel's volume and pan to the output (false), unless the plugin takes them
     /// (`use_channel_levels`, true); the channel's mod X / Y join each note's in its modulation, and sounding voices
     /// are sent their new amounts (spec: audio/voice-levels.md "Changes while a note sounds").
