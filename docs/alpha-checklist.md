@@ -49,6 +49,9 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
 - [x] **Drum sampler (FPC).** A pad-based drum instrument. Lemon Drum Sampler plays projects' FPC channels with their
   pads and samples (layers by velocity, the original's level, pan and tune laws, cut groups) and saves them back
   unchanged
+- [x] **SoundFont player (Fruity Soundfont Player).** Lemon SoundFont Player plays SoundFont 2 files and projects'
+  player channels, with a Classic mode (the 32-bit player's sound) and a Modern mode (the 64-bit player's), and saves
+  the channels back unchanged
 - [x] **Slicer (Slicex, Fruity Slicer).** A loop chopped into slices that the piano roll plays. Lemon Slicer
   recreates Fruity Slicer: it slices a loop by its markers, by beats or by transients, plays slice n on C5 + n, dumps
   the slices to the piano roll, and opens and saves a project's Fruity Slicer channels so the original still opens
