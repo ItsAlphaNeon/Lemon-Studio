@@ -329,7 +329,8 @@ fn op(c: &Command) -> &'static str {
 
 /// Gives ids to what has none (`Control::settle`), so commands can name it.
 pub fn settle_in(s: &mut crate::session::Session) {
-    s.control.settle(s.project.get_mut());
+    let control = &mut s.control;
+    s.project.write_if(|p| control.settle(p));
 }
 
 /// `run` on the session: what the views are to follow is reported (`Session::touched`); a list that fails reports

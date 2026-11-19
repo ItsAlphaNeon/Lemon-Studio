@@ -13,6 +13,32 @@ use crate::dialog::{spans, Answer, Kind, Msg, Reply, Then};
 #[allow(unused_imports)]
 use crate::data_folder::*;
 
+/// The data folder's choice (a `DataFolder` constant) and the folder as the file holds it, set as a change of the
+/// project with no undo step of its own.
+pub fn put(s: &mut State, choice: Option<u32>, folder: Option<String>) {
+    let mut c = crate::control::command::Command::set_project();
+    if let crate::control::command::Command::SetProject { data_folder_use, data_folder, .. } = &mut c {
+        *data_folder_use = choice.map(|c| ["none", "relative", "specified"][c.min(2) as usize].to_string());
+        *data_folder = folder;
+    }
+    if let Err(e) = crate::control_ui::run(s, vec![c]) {
+        s.message = Some(e);
+    }
+}
+
+/// Channel `row`'s sample file becomes `path`, the path alone (the file moved or was found), with no undo step.
+pub fn put_sample_path(s: &mut State, row: usize, path: &str) {
+    crate::control::settle_in(&mut s.session);
+    let Some(id) = s.session.project.channels.get(row).map(|c| c.id.0) else { return };
+    let mut c = crate::control::command::Command::set_channel(id);
+    if let crate::control::command::Command::SetChannel { sample_path, .. } = &mut c {
+        *sample_path = Some(path.to_string());
+    }
+    if let Err(e) = crate::control_ui::run(s, vec![c]) {
+        s.message = Some(e);
+    }
+}
+
 /// The open project's data folder (`resolve`).
 pub fn folder(s: &State) -> Option<PathBuf> {
     resolve(&s.session.project, s.session.path.as_deref())
@@ -98,7 +124,7 @@ impl App {
                     if hosted.is_some_and(|h| h != to) {
                         self.state.session.plugins.load_sample(row, &to);
                     }
-                    self.state.session.project.get_mut().channels[row].sample_path = Some(to);
+                    put_sample_path(&mut self.state, row, &to);
                     copied += 1;
                 }
                 Err(_) => failed += 1,
@@ -124,9 +150,7 @@ impl App {
 
     /// The data folder becomes `dir`, with the choice "Store data in the specified folder" (a change of the project).
     pub fn set_data_folder(&mut self, dir: &Path) {
-        let df = self.state.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
-        df.choice = DataFolder::SPECIFIED;
-        df.folder = folder_text(dir);
+        put(&mut self.state, Some(DataFolder::SPECIFIED), Some(folder_text(dir)));
         self.invalidate();
     }
 
@@ -209,17 +233,17 @@ impl App {
             // The samples inside the folder are found in the renamed one.
             for row in 0..self.state.session.project.channels.len() {
                 let hosted = self.state.session.plugins.sampler_path(row);
-                let ch = &mut self.state.session.project.get_mut().channels[row];
+                let ch = &self.state.session.project.channels[row];
                 let Some(p) = hosted.clone().filter(|p| !p.is_empty()).or_else(|| ch.sample_path.as_deref().map(|p| crate::plugins::resolve_sample(&self.state.session.settings, p))) else { continue };
                 let Ok(rel) = Path::new(&p).strip_prefix(old) else { continue };
                 let moved = new.join(rel).to_string_lossy().into_owned();
-                ch.sample_path = Some(moved.clone());
+                put_sample_path(&mut self.state, row, &moved);
                 if hosted.is_some() {
                     self.state.session.plugins.load_sample(row, &moved);
                 }
             }
-            if let Some(df) = self.state.session.project.get_mut().data_folder.as_mut().filter(|d| d.choice == DataFolder::SPECIFIED) {
-                df.folder = folder_text(new);
+            if choice(&self.state.session.project) == DataFolder::SPECIFIED {
+                put(&mut self.state, None, Some(folder_text(new)));
             }
         }
         if target != file_after {
@@ -257,18 +281,12 @@ impl App {
         let Some(&label) = CHOICES.get(i as usize) else { return None };
         if i != choice(&s.session.project) {
             let now = folder(s);
-            let df = s.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default);
-            df.choice = i;
-            match i {
-                DataFolder::NONE => df.folder.clear(),
-                _ => {
-                    // Relative: the project file's folder; specified: the folder in use, else the one 202 holds.
-                    let dir = if i == DataFolder::RELATIVE { s.session.path.as_deref().and_then(Path::parent).map(Path::to_path_buf) } else { now };
-                    if let Some(d) = dir {
-                        df.folder = folder_text(&d);
-                    }
-                }
-            }
+            let text = match i {
+                DataFolder::NONE => Some(String::new()),
+                // Relative: the project file's folder; specified: the folder in use, else the one 202 holds.
+                _ => if i == DataFolder::RELATIVE { s.session.path.as_deref().and_then(Path::parent).map(Path::to_path_buf) } else { now }.map(|d| folder_text(&d)),
+            };
+            put(s, Some(i), text);
         }
         self.invalidate();
         Some(format!("Data folder: {label}"))

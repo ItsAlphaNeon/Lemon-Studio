@@ -100,7 +100,7 @@ pub fn command_then(s: &mut State, name: &'static str, first: Vec<Command>, then
 /// Every thing in the project has its id (things just added get theirs on the next tick): for an edit that names
 /// them in commands.
 pub fn settle_ids(s: &mut State) {
-    s.session.control.settle(s.session.project.get_mut());
+    crate::control::settle_in(&mut s.session);
 }
 
 /// `command` for a knob-like control (a mute light, a typed fader value): applied without a step while Undo knob tweaks
@@ -172,7 +172,7 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     let Some(param) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
     if command::key_owner(&s.session, key) == Some(0) {
-        s.session.control.settle(s.session.project.get_mut());
+        crate::control::settle_in(&mut s.session);
     }
     let Some(owner) = command::key_owner(&s.session, key) else { return };
     // Known for the undo's other side (`Command::apply`).

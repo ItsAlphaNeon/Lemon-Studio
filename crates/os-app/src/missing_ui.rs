@@ -134,9 +134,9 @@ fn relink(app: &mut App, before: &[(usize, String)]) -> usize {
             continue;
         }
         found += 1;
-        let Some(ch) = app.state.session.project.get_mut().channels.get_mut(*row) else { continue };
-        ch.sample_path = Some(now.clone());
-        if ch.kind.is_sampler() {
+        let Some(sampler) = app.state.session.project.channels.get(*row).map(|c| c.kind.is_sampler()) else { continue };
+        crate::data_folder_ui::put_sample_path(&mut app.state, *row, &now);
+        if sampler {
             app.state.session.sample_loads.push((*row, now));
         }
     }

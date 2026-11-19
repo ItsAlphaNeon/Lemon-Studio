@@ -412,7 +412,7 @@ impl App {
         if f.copy {
             self.state.message = Some(self.copy_used_samples_to(&dir));
         }
-        self.state.session.project.get_mut().data_folder.get_or_insert_with(DataFolder::default).folder = df::folder_text(&dir);
+        crate::data_folder_ui::put(&mut self.state, None, Some(df::folder_text(&dir)));
         let file = f.file();
         self.dialog_done(Then::SaveProject(f.next), Reply::File(Some(file)));
         crate::data_folder_ui::reread(&self.state);

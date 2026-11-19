@@ -455,10 +455,21 @@ fn release_track(s: &mut State, track: u16, now: Option<u32>) {
     }
 }
 
+/// Performance mode on or off, a change of the project with no undo step of its own.
+fn set_performance(s: &mut State, on: bool) {
+    let mut c = crate::control::command::Command::set_project();
+    if let crate::control::command::Command::SetProject { performance, .. } = &mut c {
+        *performance = Some(on);
+    }
+    if let Err(e) = crate::control_ui::run(s, vec![c]) {
+        s.message = Some(e);
+    }
+}
+
 /// Ctrl+P and the Arranger ▸ menu's Performance mode (§1): switching it on switches to SONG. Off, nothing is launched.
 pub fn toggle(s: &mut State) -> String {
     let on = !on(s);
-    s.session.project.get_mut().performance = Some(on);
+    set_performance(s, on);
     if on {
         s.set_song_mode(true);
     } else {
@@ -472,17 +483,21 @@ pub fn toggle(s: &mut State) -> String {
 /// `f.spacing` bars apart from bar 1, a Start marker one bar after the last column, SONG, performance mode on.
 pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
     let (count, spacing) = (u32::from(f.count.max(1)), u32::from(f.spacing.max(1)));
-    crate::playlist::snapshot_as(&mut s.session, "Prepare for performance mode");
     let bar = 4 * ppq(s);
     let start = count * spacing * bar + bar;
-    let a = arr_mut(&mut s.session);
-    a.markers.retain(|m| !(m.kind == TimeMarker::START || (m.kind == TimeMarker::PLAIN && m.position < start)));
-    for k in 0..count {
-        a.markers.push(TimeMarker::new(k * spacing * bar, ""));
+    crate::control_ui::settle_ids(s);
+    let held = s.session.project.arrangement().map(|a| a.markers.clone()).unwrap_or_default();
+    let kept = held.iter().filter(|m| !(m.kind == TimeMarker::START || (m.kind == TimeMarker::PLAIN && m.position < start))).cloned();
+    let made = (0..count).map(|k| TimeMarker::new(k * spacing * bar, "")).chain([TimeMarker { kind: TimeMarker::START, ..TimeMarker::new(start, "Start") }]);
+    let markers = kept.chain(made).map(|m| crate::control::command::MarkerIn::of(&m)).collect();
+    let mut on = crate::control::command::Command::set_project();
+    if let crate::control::command::Command::SetProject { performance, .. } = &mut on {
+        *performance = Some(true);
     }
-    a.markers.push(TimeMarker { kind: TimeMarker::START, ..TimeMarker::new(start, "Start") });
-    a.markers.sort_by_key(|m| m.position);
-    s.session.project.get_mut().performance = Some(true);
+    let cmds = vec![crate::control::command::Command::SetMarkers { markers }, on];
+    if let Err(e) = crate::control_ui::command(s, "Prepare for performance mode", None, cmds) {
+        return e;
+    }
     s.set_song_mode(true);
     s.session.song_pos = start;
     s.session.dirty = true;

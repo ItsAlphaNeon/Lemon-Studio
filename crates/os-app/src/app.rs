@@ -2025,8 +2025,7 @@ impl App {
     /// The project as it is now counts as saved (opened, saved, new).
     pub fn mark_saved(&mut self) {
         // New things get their ids before the copy, so ids alone are no unsaved change.
-        let control = &mut self.state.session.control;
-        self.state.session.project.write_if(|p| control.settle(p));
+        crate::control::settle_in(&mut self.state.session);
         self.state.session.saved = (self.state.session.project.clone(), self.state.tempo(), crate::lemon_state_ui::saved_form(&self.state, &self.state.session.plugins));
         self.state.session.plugin_edited = false;
     }
@@ -5269,6 +5268,9 @@ impl App {
             panning_law: None,
             play_truncated: None,
             pdc: None,
+            performance: None,
+            data_folder_use: None,
+            data_folder: None,
         };
         let r = crate::control_ui::command(&mut self.state, crate::control::command::TIME_SIGNATURE, run, vec![c]);
         self.invalidate();
@@ -5354,6 +5356,9 @@ impl App {
             panning_law: Some(if law == 2 { "triangular" } else { "circular" }.into()),
             play_truncated: None,
             pdc: None,
+            performance: None,
+            data_folder_use: None,
+            data_folder: None,
         };
         let _ = crate::control_ui::command(&mut self.state, "Panning law", None, vec![c]);
         self.invalidate();
@@ -5364,7 +5369,7 @@ impl App {
     /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
     fn toggle_play_truncated(&mut self) {
         let on = !self.state.session.project.play_truncated;
-        let c = crate::control::command::Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: Some(on), pdc: None };
+        let c = crate::control::command::Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: Some(on), pdc: None , performance: None, data_folder_use: None, data_folder: None };
         let _ = crate::control_ui::command(&mut self.state, "Play truncated notes in clips", None, vec![c]);
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
     }

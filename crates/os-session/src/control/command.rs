@@ -57,6 +57,15 @@ pub enum Command {
         /// Automatic plugin delay compensation.
         #[serde(default)]
         pdc: Option<bool>,
+        /// Performance mode.
+        #[serde(default)]
+        performance: Option<bool>,
+        /// The data folder's choice: `"none"`, `"relative"` (to the project file) or `"specified"`.
+        #[serde(default)]
+        data_folder_use: Option<String>,
+        /// The data folder as the file holds it (`""`: none).
+        #[serde(default)]
+        data_folder: Option<String>,
     },
 
     // ----- Channels
@@ -176,6 +185,10 @@ pub enum Command {
         /// The pitch knob's range in semitones, 1..=48; a narrower one takes the knob with it.
         #[serde(default)]
         pitch_range: Option<u8>,
+        /// The channel's sample file, the path alone (`""`: none): a file that moved or was found again, nothing
+        /// loaded or read (`load_sample` loads one).
+        #[serde(default)]
+        sample_path: Option<String>,
     },
     /// The channel rack's filter groups (spec: ui/channel-rack.md §7): `groups` their names in file order ("Unsorted"
     /// among them), `channels` each listed channel's group (an index into `groups`, `null` none), `shown` the filter
@@ -1148,6 +1161,8 @@ pub struct Settings {
     pub panning_law: Option<u8>,
     pub play_truncated: bool,
     pub pdc_off: bool,
+    pub performance: Option<bool>,
+    pub data_folder: Option<os_model::DataFolder>,
 }
 
 impl Settings {
@@ -1164,6 +1179,8 @@ impl Settings {
             panning_law: p.panning_law,
             play_truncated: p.play_truncated,
             pdc_off: p.pdc_off,
+            performance: p.performance,
+            data_folder: p.data_folder.clone(),
         }
     }
 
@@ -1173,6 +1190,7 @@ impl Settings {
         (p.swing, p.main_volume, p.main_pitch, p.bar, p.bar_as_signature, p.info) =
             (self.swing, self.main_volume, self.main_pitch, self.bar, self.bar_as_signature, self.info);
         (p.panning_law, p.play_truncated, p.pdc_off) = (self.panning_law, self.play_truncated, self.pdc_off);
+        (p.performance, p.data_folder) = (self.performance, self.data_folder);
     }
 }
 
@@ -1527,12 +1545,13 @@ impl Command {
             auto_bypass: None,
             threaded: None,
             pitch_range: None,
+            sample_path: None,
         }
     }
 
     /// A `SetProject` that sets nothing yet.
     pub fn set_project() -> Command {
-        Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: None, pdc: None }
+        Command::SetProject { beats: None, steps: None, signature: None, panning_law: None, play_truncated: None, pdc: None, performance: None, data_folder_use: None, data_folder: None }
     }
 
     /// A command that adds a thing: its undo takes it away, so applying it always changes the project.
@@ -1845,7 +1864,7 @@ impl Command {
                 }
                 none
             }
-            Command::SetProject { beats, steps, signature, panning_law, play_truncated, pdc } => {
+            Command::SetProject { beats, steps, signature, panning_law, play_truncated, pdc, performance, data_folder_use, data_folder } => {
                 let (b0, s0) = s.project.bar();
                 let check = |name: &str, v: Option<u16>, now: u16, max: u16| match v {
                     Some(v) if v != now && !(1..=max).contains(&v) => Err(format!("{name} must be 1..={max}, not {v}")),
@@ -1858,7 +1877,26 @@ impl Command {
                     Some("triangular") => Some(2),
                     Some(l) => return Err(format!("panning_law must be circular or triangular, not {l}")),
                 };
+                let choice = match data_folder_use.as_deref() {
+                    None => None,
+                    Some("none") => Some(os_model::DataFolder::NONE),
+                    Some("relative") => Some(os_model::DataFolder::RELATIVE),
+                    Some("specified") => Some(os_model::DataFolder::SPECIFIED),
+                    Some(c) => return Err(format!("data_folder_use must be none, relative or specified, not {c}")),
+                };
                 let p = s.project.get_mut();
+                if let Some(on) = performance {
+                    p.performance = Some(on);
+                }
+                if choice.is_some() || data_folder.is_some() {
+                    let df = p.data_folder.get_or_insert_with(os_model::DataFolder::default);
+                    if let Some(c) = choice {
+                        df.choice = c;
+                    }
+                    if let Some(f) = data_folder {
+                        df.folder = f;
+                    }
+                }
                 if bar != (b0, s0) {
                     p.bar = Some(bar);
                 }
@@ -2073,7 +2111,7 @@ impl Command {
                 crate::edit::rack::remap_in(s, &map);
                 none
             }
-            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch, zipped, auto_bypass, threaded, pitch_range } => {
+            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch, zipped, auto_bypass, threaded, pitch_range, sample_path } => {
                 let track = track.map(|t| track_number(&s.project, t)).transpose()?;
                 if pitch_range.is_some_and(|r| !(1..=48).contains(&r)) {
                     return Err("pitch_range is 1..=48".into());
@@ -2105,6 +2143,9 @@ impl Command {
                 }
                 if let Some(r) = pitch_range {
                     ch.misc.pitch_range = r;
+                }
+                if let Some(path) = sample_path {
+                    ch.sample_path = (!path.is_empty()).then_some(path);
                 }
                 if let Some(v) = pitch {
                     ch.pitch_cents = v;
