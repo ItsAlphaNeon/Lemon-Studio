@@ -3245,6 +3245,7 @@ impl App {
                     Some(m) => *track = Some(m.id.0),
                     None => return,
                 },
+                ChannelControl::Misc(_) => return,
             }
         }
         if let Err(e) = crate::control_ui::knob_command(s, name, Some(run), vec![c]) {
