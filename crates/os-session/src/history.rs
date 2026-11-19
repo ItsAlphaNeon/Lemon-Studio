@@ -107,6 +107,7 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::ChanPan(_) => "Channel panning",
         KnobId::MasterVol => "Main volume",
         KnobId::MasterPitch => "Main pitch",
+        KnobId::MixVol(_) => MIXER_VOLUME,
         KnobId::MixPan(_) => "Mixer track panning",
         KnobId::MixSep(_) => "Mixer track stereo separation",
         KnobId::SlotMix(..) => "Effect mix level",
@@ -151,8 +152,6 @@ pub struct History {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Run {
     Wheel(KnobId),
-    /// Mouse-wheel notches on mixer track `.0`'s volume fader.
-    Fader(u16),
     Tap,
     /// Mouse-wheel notches on Settings > Project's time boxes.
     Bar,
@@ -202,7 +201,7 @@ impl History {
     /// ends, so the next drag or run of notches is a step of its own, as in FL (spec: ui/undo-steps.md). The tempo
     /// tapper's taps, a plugin's own values, a controller's and a client's gesture run on.
     pub fn end_gesture_run(&mut self) {
-        if matches!(self.run, Some(Run::Wheel(_) | Run::Fader(_) | Run::Bar | Run::Channel(..) | Run::Steps | Run::Loop(_) | Run::Graph)) {
+        if matches!(self.run, Some(Run::Wheel(_) | Run::Bar | Run::Channel(..) | Run::Steps | Run::Loop(_) | Run::Graph)) {
             self.run = None;
         }
     }

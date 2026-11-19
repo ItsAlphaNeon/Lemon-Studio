@@ -242,6 +242,7 @@ impl State {
                 c if c > 0 => format!("Master pitch: +{c} cents"),
                 c => format!("Master pitch: {c} cents"),
             },
+            KnobId::MixVol(_) => crate::mixer::level_text("Volume", f64::from(n)),
             KnobId::MixPan(_) => format!("Panning: {}", pan_text(bipolar)),
             // An automation clip's range: the pan knob is its minimum, the volume knob its maximum.
             KnobId::ChanPan(row) if self.is_clip_row(row) => format!("Minimum: {:.0}%", n * 100.0),

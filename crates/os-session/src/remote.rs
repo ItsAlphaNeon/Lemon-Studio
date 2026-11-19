@@ -134,6 +134,7 @@ fn target_text(t: Target) -> String {
         Target::Knob(k) => match k {
             KnobId::MasterVol => "mainvol".into(),
             KnobId::MasterPitch => "mainpitch".into(),
+            KnobId::MixVol(m) => format!("fader:{m}"),
             KnobId::MixPan(m) => format!("mixpan:{m}"),
             KnobId::MixSep(m) => format!("mixsep:{m}"),
             KnobId::SlotMix(m, s) => format!("slotmix:{m}:{s}"),
