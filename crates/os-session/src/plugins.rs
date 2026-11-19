@@ -377,12 +377,14 @@ pub fn builtin() -> Vec<Available> {
     static SMITH: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static DRUMS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static SOUNDFONT: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(stock!("stock-trio", lemon_3x_osc).map(|e| linked(&OSC3, e, crate::osc3::LEMON_TRIO)).unwrap_or_default());
     v.extend(stock!("stock-citrus", citrus).map(|e| linked(&CITRUS, e, crate::citrus::CITRUS)).unwrap_or_default());
     v.extend(stock!("stock-smith", smith).map(|e| linked(&SMITH, e, crate::smith::SMITH)).unwrap_or_default());
     v.extend(stock!("stock-slicer", lemon_slicer).map(|e| linked(&SLICER, e, crate::slicer::LEMON_SLICER)).unwrap_or_default());
     v.extend(stock!("stock-drum-sampler", lemon_drum_sampler).map(|e| linked(&DRUMS, e, crate::drums::LEMON_DRUMS)).unwrap_or_default());
+    v.extend(stock!("stock-soundfont", lemon_soundfont).map(|e| linked(&SOUNDFONT, e, crate::soundfont::LEMON_SOUNDFONT)).unwrap_or_default());
     v
 }
 
@@ -653,6 +655,11 @@ impl Plugins {
         // clips' fades and gain reach Lemon Sampler's voices one by one, so overlapping clips of one sample crossfade
         // (spec: audio/audio-clips.md "Fades and clip gain"); the instruments work the channel's volume and pan into
         // their voices' final levels (spec: audio/voice-levels.md "Final levels").
+        // A third-party plugin gets the channel's levels as FL's plugin wrapper gives them (spec: audio/voice-levels.md
+        // "A plugin's output").
+        if !crate::project_plugins::is_builtin(&a.desc) {
+            p.use_wrapper_levels();
+        }
         if crate::project_plugins::is_builtin(&a.desc) {
             p.use_note_levels();
             if a.desc.name == LEMON_SAMPLER {
@@ -875,6 +882,12 @@ impl Plugins {
         if let Some(h) = self.hosted.get_mut(&key) {
             h.stand_in = false;
         }
+    }
+
+    /// The names of the instance's outputs past its main one (spec: audio/multi-output.md); empty when it has none or
+    /// nothing is hosted under `key`.
+    pub fn extra_output_names(&self, key: usize) -> Vec<String> {
+        self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).map(|p| p.extra_output_names()).unwrap_or_default()
     }
 
     /// Restores a `state` blob into the instance under `key`.

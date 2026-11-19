@@ -189,6 +189,10 @@ pub enum Command {
         /// loaded or read (`load_sample` loads one).
         #[serde(default)]
         sample_path: Option<String>,
+        /// Where its plugin's extra outputs play (spec: audio/multi-output.md): each `[output, tracks]`, output 0 the
+        /// plugin's second, `tracks` the number of mixer tracks after the channel's own (0: none).
+        #[serde(default)]
+        outputs: Option<Vec<(u32, u32)>>,
     },
     /// The channel rack's filter groups (spec: ui/channel-rack.md §7): `groups` their names in file order ("Unsorted"
     /// among them), `channels` each listed channel's group (an index into `groups`, `null` none), `shown` the filter
@@ -1558,6 +1562,7 @@ impl Command {
             threaded: None,
             pitch_range: None,
             sample_path: None,
+            outputs: None,
         }
     }
 
@@ -2136,7 +2141,7 @@ impl Command {
                 crate::edit::rack::remap_in(s, &map);
                 none
             }
-            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch, zipped, auto_bypass, threaded, pitch_range, sample_path } => {
+            Command::SetChannel { channel, name, color, volume, pan, pitch, enabled, track, declick, swing, truncate_swing, cut, cut_by, locked, stretch, zipped, auto_bypass, threaded, pitch_range, sample_path, outputs } => {
                 let track = track.map(|t| track_number(&s.project, t)).transpose()?;
                 if pitch_range.is_some_and(|r| !(1..=48).contains(&r)) {
                     return Err("pitch_range is 1..=48".into());
@@ -2172,6 +2177,13 @@ impl Command {
                 if let Some(path) = sample_path {
                     ch.sample_path = (!path.is_empty()).then_some(path);
                 }
+                if let Some(o) = outputs {
+                    let ports: Vec<(usize, usize)> = o.iter().map(|&(k, p)| (k as usize, p as usize)).collect();
+                    if !crate::project_plugins::set_channel_outputs(s.project.get_mut(), &s.plugins, row, &ports) {
+                        return Err("This channel's plugin has no extra outputs".into());
+                    }
+                }
+                let ch = &mut s.project.get_mut().channels[row];
                 if let Some(v) = pitch {
                     ch.pitch_cents = v;
                 }

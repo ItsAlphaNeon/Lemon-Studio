@@ -2687,6 +2687,17 @@ pub mod target {
         })
     }
 
+    /// Target `t` after channels moved: `ch` gives a channel's new index (channel targets keep the channel in the high
+    /// half, spec: flp/events/automation.md "Targets"); `None`: the channel is gone, and so is the target. The tempo and
+    /// other places stay.
+    pub fn moved_channel(t: u32, ch: impl Fn(u16) -> Option<u16>) -> Option<u32> {
+        let hi = (t >> 16) as u16;
+        if t == TEMPO || hi >= 0x4000 {
+            return Some(t);
+        }
+        ch(hi).map(|n| channel(n, t as u16))
+    }
+
     /// Bipolar targets centre at 0.5.
     pub fn bipolar(t: u32) -> bool {
         matches!(

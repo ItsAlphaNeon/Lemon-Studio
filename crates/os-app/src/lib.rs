@@ -124,6 +124,8 @@ pub use os_session::slicer;
 pub mod slicer_ui;
 pub use os_session::drums;
 pub mod drums_ui;
+pub use os_session::soundfont;
+pub mod soundfont_ui;
 pub use os_session::monitor;
 pub mod motion;
 pub use os_session::params;

@@ -1064,6 +1064,35 @@ pub fn remap_view(s: &mut State, map: &[Option<usize>]) {
     if s.rack.sel.is_empty() && !s.session.project.channels.is_empty() {
         s.rack.select_only(s.selected_channel);
     }
+    // The event editor follows its channel; a channel that goes closes it.
+    match os_model::target::moved_channel(s.events.target, |c| m(usize::from(c)).map(|r| r as u16)) {
+        Some(t) => s.events.target = t,
+        None => s.hide(Win::Events),
+    }
+    // The container window of a channel's container follows its channel, and the palette's row its row; a row that
+    // goes closes them.
+    let (r, k) = s.container.at;
+    if k == crate::container::CHANNEL {
+        match m(usize::from(r)) {
+            Some(n) => s.container.at = (n as u16, k),
+            None => s.hide(Win::Container),
+        }
+    }
+    use crate::plugin_menu::Target as Pick;
+    match s.palette.target {
+        Pick::Gen(Some(r)) | Pick::Replace(r) => match m(r) {
+            Some(n) => s.palette.target = if matches!(s.palette.target, Pick::Replace(_)) { Pick::Replace(n) } else { Pick::Gen(Some(n)) },
+            None => s.hide(Win::PluginPalette),
+        },
+        _ => {}
+    }
+    // The playlist's Draw source and its locked clip length follow their channel; a channel that goes takes them.
+    let follow = |c: os_model::ClipSource| match c {
+        os_model::ClipSource::Channel(ch) => m(usize::from(ch)).map(|r| os_model::ClipSource::Channel(r as u16)),
+        c => Some(c),
+    };
+    s.playlist.source = s.playlist.source.and_then(follow);
+    s.playlist.lock_len = s.playlist.lock_len.and_then(|(c, len)| Some((follow(c)?, len)));
     autosize(s);
 }
 
@@ -1382,6 +1411,11 @@ pub enum RCmd {
     SetBox(crate::typein::Target, f64),
     MixerReset(usize),
     AssignFree(usize),
+    /// Outputs ▸ on a channel's plugin window menu: extra output `.1` of the plugin on row `.0` plays `.2` tracks after the
+    /// channel's own, 0 for none (spec: audio/multi-output.md).
+    Output(usize, usize, usize),
+    /// Outputs ▸ Auto map outputs: each extra output to the next track after the channel's own.
+    AutoMapOutputs(usize),
     /// Edit automation in piano roll (Lemon Studio's design): the piano roll on row `.0` with its event panel on the
     /// channel control lane `.1`.
     EventsInPiano(usize, crate::piano::Lane),
@@ -1978,6 +2012,12 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
     if let RCmd::BurnMidi(r, new) = c {
         return app.burn_midi(r, new);
     }
+    if let RCmd::Output(r, k, port) = c {
+        return set_output(app, r, k, port);
+    }
+    if let RCmd::AutoMapOutputs(r) = c {
+        return auto_map_outputs(app, r);
+    }
     let mouse = app.mouse;
     let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
     match c {
@@ -2303,7 +2343,9 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::Through(_)
         | RCmd::Restretch
         | RCmd::Wrap(_)
-        | RCmd::BurnMidi(..) => None,
+        | RCmd::BurnMidi(..)
+        | RCmd::Output(..)
+        | RCmd::AutoMapOutputs(_) => None,
     };
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
@@ -2643,6 +2685,89 @@ pub fn length_menu(s: &crate::session::Session, x: f32, y: f32) -> Popup {
         items.push(it(label, RCmd::SetLen(Some(bars * bar))).mark(Mark::Radio(cur == Some(bars * bar))));
     }
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Multi-output plugins (spec: audio/multi-output.md)
+
+/// The extra outputs of the plugin on row `r` and where each plays: its name and port (tracks after the channel's
+/// own, 0 for none).
+pub fn outputs(app: &App, r: usize) -> Vec<(String, usize)> {
+    let names = app.state.session.plugins.extra_output_names(r);
+    let ports = app.state.session.project.channels.get(r).map(crate::effect_ports::channel_outputs).unwrap_or_default();
+    names.into_iter().enumerate().map(|(k, n)| (n, ports.get(k).copied().unwrap_or(0))).collect()
+}
+
+/// Outputs ▸ for the plugin window menu of row `r`: Auto map outputs, then each extra output with "None" and the
+/// tracks after the channel's own to pick from. `None` when the plugin has no extra outputs.
+pub fn outputs_menu(app: &App, r: usize) -> Option<PItem> {
+    let s = &app.state.session;
+    let list = outputs(app, r);
+    if list.is_empty() {
+        return None;
+    }
+    let own = s.project.channels.get(r)?.mixer_track;
+    let last = os_session::edit::mixer::inserts(s);
+    let mut items = vec![PItem::new("Auto map outputs", Cmd::Rack(RCmd::AutoMapOutputs(r))), PItem::sep()];
+    for (k, (name, port)) in list.into_iter().enumerate() {
+        let mut picks = vec![PItem::new("None", Cmd::Rack(RCmd::Output(r, k, 0))).mark(Mark::Radio(port == 0))];
+        for t in own.saturating_add(1)..=last {
+            let p = usize::from(t - own);
+            picks.push(PItem::new(format!("{t}. {}", os_session::edit::mixer::name(s, t)), Cmd::Rack(RCmd::Output(r, k, p))).mark(Mark::Radio(port == p)));
+        }
+        // A port the saved state names past the last track plays nowhere; it stays as saved.
+        items.push(PItem::sub(format!("{}. {name}", k + 2), picks));
+    }
+    Some(PItem::sub("Outputs", items))
+}
+
+/// The undo step of Outputs ▸.
+const OUTPUTS: &str = "Channel outputs";
+
+/// Outputs ▸ an output ▸ a track (`RCmd::Output`): one step.
+fn set_output(app: &mut App, r: usize, k: usize, port: usize) -> Option<String> {
+    app.invalidate();
+    let s = &mut app.state;
+    crate::mixer::track_ids(s);
+    let c = set_channel!(s, r, outputs: vec![(k as u32, port as u32)])?;
+    apply(s, OUTPUTS, vec![c])
+}
+
+/// Outputs ▸ Auto map outputs: extra output k to the (k+1)th track after the channel's own, as far as there are tracks.
+/// A destination track with no name takes the output's (Lemon Studio's design), so the mixer says what plays there.
+/// One step.
+fn auto_map_outputs(app: &mut App, r: usize) -> Option<String> {
+    let list = outputs(app, r);
+    app.invalidate();
+    if list.is_empty() {
+        return Some("This channel's plugin has no extra outputs".into());
+    }
+    let s = &mut app.state;
+    let own = s.session.project.channels.get(r).map(|c| c.mixer_track)?;
+    let last = usize::from(os_session::edit::mixer::inserts(&s.session));
+    let fits = list.len().min(last.saturating_sub(usize::from(own)));
+    let ports: Vec<(u32, u32)> = (0..list.len()).map(|k| (k as u32, if k < fits { k as u32 + 1 } else { 0 })).collect();
+    crate::mixer::track_ids(s);
+    let mut cmds: Vec<Command> = set_channel!(s, r, outputs: ports).into_iter().collect();
+    for (k, (name, _)) in list.iter().enumerate().take(fits) {
+        let t = own + 1 + k as u16;
+        let Some(m) = s.session.project.mixer.iter().find(|m| m.index == t) else { continue };
+        if m.name.as_deref().is_none_or(str::is_empty) {
+            let mut c = Command::set_track(m.id.0);
+            if let Command::SetTrack { name: n, .. } = &mut c {
+                *n = Some(name.clone());
+            }
+            cmds.push(c);
+        }
+    }
+    if let Some(e) = apply(s, OUTPUTS, cmds) {
+        return Some(e);
+    }
+    Some(if fits < list.len() {
+        format!("Mapped {fits} of {} outputs: no more tracks after this channel's", list.len())
+    } else {
+        format!("Mapped {fits} outputs to tracks {}-{}", own + 1, usize::from(own) + fits)
+    })
 }
 
 #[cfg(test)]
@@ -3381,6 +3506,65 @@ mod tests {
     }
 
     /// Clone, move and delete renumber the channels' notes so each note keeps its channel (§17-18).
+    /// The container window of a channel's container follows the channel when it moves, and so does the palette
+    /// replacing a row's generator; both close when the row is deleted.
+    #[test]
+    fn the_container_window_follows_its_channel() {
+        let mut app = App::new(None);
+        app.state.container.at = (2, crate::container::CHANNEL);
+        app.state.raise(Win::Container);
+        app.state.palette.target = crate::plugin_menu::Target::Replace(2);
+        app.state.raise(Win::PluginPalette);
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        assert_eq!((app.state.container.at, app.state.palette.target), ((1, crate::container::CHANNEL), crate::plugin_menu::Target::Replace(1)));
+        delete_step(&mut app, &[1]);
+        assert!(!app.state.shown(Win::Container) && !app.state.shown(Win::PluginPalette), "their row went");
+    }
+
+    /// Multilink's controls waiting for their controller follow their channel or mixer track when it moves.
+    #[test]
+    fn multilink_waiting_controls_follow_their_place() {
+        use crate::typein::Target as T;
+        let mut app = App::new(None);
+        app.state.multilink.queue = [T::Knob(KnobId::ChanVol(2)), T::Fader(3)].into();
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        crate::mixer::run(&mut app, crate::mixer::MCmd::MoveLeft(3));
+        assert_eq!(app.state.multilink.queue, [T::Knob(KnobId::ChanVol(1)), T::Fader(2)]);
+    }
+
+    /// The event editor shows its channel's events after the channel moves, and closes when the channel is deleted.
+    #[test]
+    fn the_event_editor_follows_its_channel() {
+        use os_model::target::{channel, CHANNEL_VOLUME};
+        let mut app = App::new(None);
+        app.state.events.target = channel(2, CHANNEL_VOLUME);
+        app.state.raise(Win::Events);
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        assert_eq!(app.state.events.target, channel(1, CHANNEL_VOLUME));
+        delete_step(&mut app, &[1]);
+        assert!(!app.state.shown(Win::Events), "its channel went");
+    }
+
+    /// The playlist's Draw source and its locked clip length, an audio or automation channel's, follow it when it moves
+    /// and go when it is deleted.
+    #[test]
+    fn the_draw_source_follows_its_channel() {
+        let mut app = App::new(None);
+        assert!(app.state.session.project.channels.len() >= 3);
+        app.state.playlist.source = Some(ClipSource::Channel(2));
+        app.state.playlist.lock_len = Some((ClipSource::Channel(2), 96));
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        let s = &app.state;
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (Some(ClipSource::Channel(1)), Some((ClipSource::Channel(1), 96))));
+        delete_step(&mut app, &[1]);
+        let s = &app.state;
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (None, None), "the source went with its channel");
+    }
+
     #[test]
     fn restructuring_keeps_notes_with_their_channel() {
         let mut app = App::new(None);
@@ -4618,5 +4802,120 @@ mod tests {
         run(&mut app, RCmd::ReceiveFrom(2, NoteSrc::Typing));
         app.state.rack.remap(&|r| if r == 2 { None } else { Some(r) });
         assert_eq!(app.state.rack.note_lock[NoteSrc::Typing as usize], None, "removed with its channel");
+    }
+
+    /// A hosted drum instrument with three outputs past its main one.
+    struct Multi(os_host::Descriptor);
+    impl os_engine::Instrument for Multi {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+        fn extra_outputs(&self) -> usize {
+            3
+        }
+    }
+    impl os_engine::HostedEffect for Multi {
+        fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_host::Plugin for Multi {
+        fn desc(&self) -> &os_host::Descriptor {
+            &self.0
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {}
+        fn has_editor(&self) -> bool {
+            false
+        }
+        fn editor_open(&self) -> bool {
+            false
+        }
+        fn open_editor(&mut self, _: *mut std::ffi::c_void, _: f32) -> Result<(u32, u32), String> {
+            Err(String::new())
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            None
+        }
+        fn close_editor(&mut self) {}
+        fn save_state(&self) -> Option<Vec<u8>> {
+            Some(vec![1, 2, 3])
+        }
+        fn load_state(&mut self, _: &[u8]) -> bool {
+            true
+        }
+        fn extra_output_names(&self) -> Vec<String> {
+            ["Kick", "Snare", "Hats"].map(String::from).to_vec()
+        }
+    }
+
+    /// Channel 0 of a test project hosting `Multi` on insert 14, two tracks before the last.
+    fn multi_app() -> App {
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        let desc = os_host::Descriptor {
+            format: os_host::Format::Clap,
+            id: "test.drums".into(),
+            name: "Drums".into(),
+            vendor: String::new(),
+            version: String::new(),
+            features: Vec::new(),
+            kind: os_host::Kind::Instrument,
+            path: "C:/plugins/Drums.clap".into(),
+        };
+        let ch = &mut app.state.session.project.get_mut().channels[0];
+        (ch.kind, ch.plugin, ch.mixer_track) = (ChannelKind::Plugin, Some("Drums".into()), 14);
+        let mut h = crate::plugins::Hosted::new(std::sync::Arc::new(std::sync::Mutex::new(Multi(desc))));
+        h.owner = ch.id;
+        app.state.session.plugins.hosted.insert(0, h);
+        app
+    }
+
+    /// Outputs ▸ lists each extra output by its name with None and the tracks after the channel's own; picking one
+    /// saves its port in the channel's wrapper state, one undo step.
+    #[test]
+    fn outputs_menu_routes_an_extra_output() {
+        let mut app = multi_app();
+        let menu = outputs_menu(&app, 0).expect("an Outputs menu");
+        assert_eq!(menu.label, "Outputs");
+        let labels: Vec<&str> = menu.children.iter().map(|i| &*i.label).collect();
+        assert_eq!(labels[0], "Auto map outputs");
+        assert_eq!(&labels[2..], ["2. Kick", "3. Snare", "4. Hats"]);
+        let snare: Vec<&str> = menu.children[3].children.iter().map(|i| &*i.label).collect();
+        assert_eq!(snare, ["None", "15. Bus 15", "16. Bus 16"]);
+        assert_eq!(menu.children[3].children[0].mark, Mark::Radio(true));
+
+        run(&mut app, RCmd::Output(0, 1, 2));
+        let ch = &app.state.session.project.channels[0];
+        assert_eq!(ch.plugin.as_deref(), Some(os_flp::wrapper::WRAPPER), "saved as a wrapper");
+        assert_eq!(crate::effect_ports::channel_outputs(ch), [0, 2]);
+        assert_eq!(outputs_menu(&app, 0).unwrap().children[3].children[2].mark, Mark::Radio(true), "Snare on track 16");
+        crate::history_ui::undo(&mut app.state);
+        assert!(crate::effect_ports::channel_outputs(&app.state.session.project.channels[0]).is_empty());
+    }
+
+    /// Auto map outputs sends each extra output to the next track, as far as there are tracks, and names the unnamed
+    /// ones after it.
+    #[test]
+    fn auto_map_outputs_fills_the_tracks_after_the_channel() {
+        let mut app = multi_app();
+        os_session::edit::mixer::track_mut(&mut app.state.session, 16).unwrap().name = Some("Mine".into());
+        let msg = run(&mut app, RCmd::AutoMapOutputs(0));
+        assert_eq!(msg.as_deref(), Some("Mapped 2 of 3 outputs: no more tracks after this channel's"));
+        assert_eq!(crate::effect_ports::channel_outputs(&app.state.session.project.channels[0]), [1, 2]);
+        assert_eq!(os_session::edit::mixer::name(&app.state.session, 15), "Kick");
+        assert_eq!(os_session::edit::mixer::name(&app.state.session, 16), "Mine", "a named track keeps its name");
+        crate::history_ui::undo(&mut app.state);
+        assert!(crate::effect_ports::channel_outputs(&app.state.session.project.channels[0]).is_empty());
+        assert_eq!(os_session::edit::mixer::name(&app.state.session, 15), "Bus 15");
+    }
+
+    /// A channel whose plugin has one output gets no Outputs menu.
+    #[test]
+    fn no_outputs_menu_without_extra_outputs() {
+        let mut app = multi_app();
+        app.state.session.plugins.hosted.clear();
+        assert!(outputs_menu(&app, 0).is_none());
+        assert!(run(&mut app, RCmd::AutoMapOutputs(0)).is_some());
     }
 }

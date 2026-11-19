@@ -25,6 +25,7 @@ pub mod device;
 #[cfg(target_os = "linux")]
 pub mod dropout_log;
 pub mod drums;
+pub mod soundfont;
 pub mod edit;
 pub mod effect_ports;
 pub mod enable_groups;

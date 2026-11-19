@@ -553,6 +553,39 @@ mod tests {
         crate::edit::playlist::clips(&s.session).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }).collect()
     }
 
+    /// Patterns are the project's, not one arrangement's: moving or deleting one renumbers the clips of every
+    /// arrangement, not only the one shown.
+    #[test]
+    fn clips_of_every_arrangement_follow_their_pattern() {
+        let mut app = app();
+        let s = &mut app.state;
+        let mut other = s.session.project.arrangement().cloned().expect("an arrangement");
+        other.number += 1;
+        other.clips = vec![Clip::new(0, 384, 0, ClipSource::Pattern(2)), Clip::new(384, 384, 0, ClipSource::Pattern(3))];
+        s.session.project.get_mut().arrangements.push(other);
+        let others = |s: &State| -> Vec<ClipSource> { s.session.project.arrangements[1].clips.iter().map(|c| c.source).collect() };
+        s.set_pattern(2);
+        run(s, Cmd::MoveUp, (0.0, 0.0));
+        assert_eq!(others(s), vec![ClipSource::Pattern(1), ClipSource::Pattern(3)], "pattern 2 moved to 1");
+        s.set_pattern(3);
+        delete_current(s);
+        assert_eq!(others(s), vec![ClipSource::Pattern(1)], "the deleted pattern's clip goes");
+    }
+
+    /// The playlist's Draw source and its locked clip length follow their pattern when it moves, and go with it.
+    #[test]
+    fn the_draw_source_follows_its_pattern() {
+        let mut app = app();
+        let s = &mut app.state;
+        s.playlist.source = Some(ClipSource::Pattern(2));
+        s.playlist.lock_len = Some((ClipSource::Pattern(2), 96));
+        s.set_pattern(2);
+        run(s, Cmd::MoveDown, (0.0, 0.0));
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (Some(ClipSource::Pattern(3)), Some((ClipSource::Pattern(3), 96))));
+        delete_current(s);
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (None, None), "the source went with its pattern");
+    }
+
     #[test]
     fn empty_numbers_and_listing() {
         let mut app = app();
