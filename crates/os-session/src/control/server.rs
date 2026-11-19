@@ -145,6 +145,8 @@ pub struct Flags {
     pub level: Option<Level>,
     /// `--control-token <t>`: the token clients give in `hello` (else a port gets a new one each run, a socket path none).
     pub token: Option<String>,
+    /// `--serve-midi`: a session without a window opens the enabled MIDI inputs (spec: ui/midi-settings.md §2).
+    pub midi: bool,
 }
 
 impl Flags {
@@ -157,6 +159,11 @@ impl Flags {
                 "--control" => &mut f.control,
                 "--serve" => &mut f.serve,
                 "--control-token" => &mut f.token,
+                "--serve-midi" => {
+                    f.midi = true;
+                    args.remove(i);
+                    continue;
+                }
                 "--control-level" => {
                     let v = args.get(i + 1).ok_or("--control-level needs read, propose or edit")?;
                     f.level = Some(Level::parse(v).ok_or_else(|| format!("--control-level: {v} is not read, propose or edit"))?);
@@ -190,7 +197,7 @@ impl Server {
 }
 
 /// `--serve`: the app without a window, `project` opened, answering clients until the process is ended.
-pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Option<std::path::PathBuf>) -> ! {
+pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Option<std::path::PathBuf>, midi: bool) -> ! {
     // A session of its own: no window, no `App` (control-plane step 8).
     // The user folder's settings, as the window's app reads them.
     let settings = crate::settings_file::SettingsStore::user();
@@ -218,6 +225,10 @@ pub fn serve_headless(at: &str, level: Level, token: Option<String>, project: Op
     }
     eprintln!("Lemon Studio: control plane {} ({level:?})", server.describe());
     ses.rpc_server = Some(server);
+    if midi {
+        ses.midi = crate::midi_in::MidiIn::open(&ses.settings, || {});
+        eprintln!("Lemon Studio: MIDI inputs {}", ses.midi.inputs.iter().filter(|i| i.open).map(|i| i.name.as_str()).collect::<Vec<_>>().join(", "));
+    }
     loop {
         serve_tick(&mut ses);
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -241,6 +252,7 @@ pub fn serve_tick(ses: &mut crate::session::Session) {
         ses.rpc_server = Some(server);
     }
     crate::project_io::host_tick(ses);
+    crate::midi_notes::tick_headless(ses);
     if let Some(e) = crate::backup::tick_headless(ses, std::time::Instant::now()) {
         eprintln!("Lemon Studio: {e}");
     }

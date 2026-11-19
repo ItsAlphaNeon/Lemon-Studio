@@ -1973,3 +1973,40 @@ fn knobs_and_switches_reach_a_playing_engine_in_place() {
         assert_eq!(os_engine::live_edits(&mut sent, &new).is_some(), in_place, "{c}");
     }
 }
+
+/// Without a window, a MIDI keyboard plays the channel a client points it at (`midi_target`), the pedal holds its notes,
+/// and the muting channel switches a channel as one undo step.
+#[test]
+fn a_session_without_a_window_plays_midi() {
+    use crate::midi_in::Msg;
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::SettingsStore::memory());
+    crate::control::server::serve_tick(&mut ses);
+    let id = ses.project.channels[2].id.0;
+    let mut client = crate::control::rpc::Client { name: "Keys".into(), level: crate::control::Level::Edit, saves: true, token: None };
+    let mut asks = crate::control::rpc::Asks::default();
+    let call = |ses: &mut crate::session::Session, client: &mut crate::control::rpc::Client, asks: &mut crate::control::rpc::Asks, line: Value| {
+        serde_json::from_str::<Value>(&crate::control::rpc::rpc_line_in(ses, client, &line.to_string(), 0, asks).unwrap()).unwrap()
+    };
+    let a = call(&mut ses, &mut client, &mut asks, json!({"jsonrpc": "2.0", "id": 1, "method": "midi_target", "params": {"channel": 999_999}}));
+    assert!(a.get("error").is_some(), "no such channel: {a}");
+    let a = call(&mut ses, &mut client, &mut asks, json!({"jsonrpc": "2.0", "id": 2, "method": "midi_target", "params": {"channel": id}}));
+    assert_eq!(a["result"], Value::Null, "{a}");
+    ses.midi.arrive("Keys", Msg::On { ch: 0, key: 64, vel: 100 });
+    crate::control::server::serve_tick(&mut ses);
+    assert_eq!(ses.midi_play.lit().collect::<Vec<_>>(), [(2, 64)], "plays the target's row");
+    ses.midi.arrive("Keys", Msg::Cc { ch: 0, n: 64, v: 127 });
+    ses.midi.arrive("Keys", Msg::Off { ch: 0, key: 64, vel: 64 });
+    crate::control::server::serve_tick(&mut ses);
+    assert_eq!(ses.midi_play.held.len(), 1, "the pedal holds it");
+    ses.midi.arrive("Keys", Msg::Cc { ch: 0, n: 64, v: 0 });
+    crate::control::server::serve_tick(&mut ses);
+    assert!(ses.midi_play.held.is_empty());
+    // The muting channel: white key 48 switches the first channel.
+    ses.settings.set_number(&crate::prefs::MUTING_CHANNEL, 4);
+    let was = ses.project.channels[0].enabled;
+    ses.midi.arrive("Keys", Msg::On { ch: 3, key: 48, vel: 90 });
+    crate::control::server::serve_tick(&mut ses);
+    assert_eq!(ses.project.channels[0].enabled, !was);
+    assert_eq!(crate::history::undo_in(&mut ses).as_deref(), Some(crate::midi_notes::MUTE_SOLO));
+    assert_eq!(ses.project.channels[0].enabled, was);
+}

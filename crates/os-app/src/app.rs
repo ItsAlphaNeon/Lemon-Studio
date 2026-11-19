@@ -1428,7 +1428,6 @@ pub struct App {
     /// Velocity of the next key the mouse sounds (a keyboard click sets it from the click's x; back to the default
     /// after use).
     key_velocity: u8,
-    pub midi_play: crate::midi_play::Play,
     pub remote: crate::remote::Remote,
     /// Step edit's chord being collected from the typing keyboard and MIDI notes (`crate::step_edit`).
     pub step_chord: crate::step_edit::Chord,
@@ -1694,7 +1693,6 @@ impl App {
             scrub_notes: Vec::new(),
             cables_at: None,
             key_velocity: TYPING_VELOCITY,
-            midi_play: Default::default(),
             remote: Default::default(),
             step_chord: crate::step_edit::Chord::default(),
             title_click: None,
@@ -8201,7 +8199,7 @@ impl App {
     /// Held typing-keyboard keys and MIDI notes light on the piano roll's keyboard (§4).
     pub fn typing_lit_changed(&mut self) {
         let channels = &self.state.session.project.channels;
-        let midi = self.midi_play.lit().chain(self.state.touch.held.map(|(key, row)| (row, u16::from(key))));
+        let midi = self.state.session.midi_play.lit().chain(self.state.touch.held.map(|(key, row)| (row, u16::from(key))));
         self.state.piano.typed = self.typing_held.iter().map(|&(_, row, key)| (row, key)).chain(midi).filter_map(|(row, key)| Some((channels.get(row)?.index, i32::from(key)))).collect();
         match self.piano_grid {
             Some(g) => self.damage_rect(Rect::new(g.x - 73.0, g.y, 73.0, g.h)),

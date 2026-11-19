@@ -874,7 +874,7 @@ pub fn solo(s: &mut State, r: usize) {
 
 /// The undo step of a channel muted, soloed or switched on or off: a knob tweak's, as in FL (none with "Undo knob
 /// tweaks" off).
-pub const MUTE_SOLO: &str = "Channel mute / solo";
+pub const MUTE_SOLO: &str = crate::midi_notes::MUTE_SOLO;
 
 /// The ON switch of a channel's plugin window: the channel on or off, a mute and solo step.
 pub fn toggle_on(s: &mut State, row: usize) {

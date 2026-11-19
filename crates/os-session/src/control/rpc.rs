@@ -199,6 +199,20 @@ pub fn rpc_in(ses: &mut Session, c: &mut Client, m: &str, params: &Value, select
             }
             Ok(json!({ "step": name }))
         }
+        // Where a controller's notes play in a session without a window (a window's selected channel decides there).
+        "midi_target" => {
+            need(c, Level::Edit)?;
+            let id = match params.get("channel") {
+                None | Some(Value::Null) => None,
+                Some(v) => {
+                    let id = v.as_u64().and_then(|v| u32::try_from(v).ok()).ok_or_else(|| bad("`channel`: a channel's id"))?;
+                    ses.project.channels.iter().any(|ch| ch.id.0 == id).then_some(id).ok_or_else(|| bad(format!("no channel {id}")))?;
+                    Some(id)
+                }
+            };
+            ses.midi_channel = id;
+            Ok(Value::Null)
+        }
         // Writing a file is an effect outside the project: with a window, the user decides (spec:
         // roadmap/control-plane.md "Safety model").
         "save" => {

@@ -265,6 +265,11 @@ impl MidiIn {
         MidiIn { tx, rx, wake: nothing, inputs: Vec::new(), outputs: Vec::new(), conns: Vec::new(), clock: Arc::default(), changed: Arc::default() }
     }
 
+    /// Tests: message `msg` arrives from device `dev`.
+    pub fn arrive(&self, dev: &str, msg: Msg) {
+        let _ = self.tx.send(Ev { dev: Arc::from(dev), msg });
+    }
+
     /// Messages received since the last call, oldest first.
     pub fn poll(&self) -> Vec<Ev> {
         self.rx.try_iter().collect()
