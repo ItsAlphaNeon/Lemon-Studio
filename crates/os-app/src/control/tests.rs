@@ -1941,3 +1941,35 @@ fn state_names_a_channels_plugin_as_commands_take_it() {
         assert_eq!(ch["plugin"], json!(plugin));
     }
 }
+
+/// What a playing engine takes in place (no new engine): the knobs and switches of channels, mixer tracks, slots and
+/// sends. The tempo and notes still build a new one.
+#[test]
+fn knobs_and_switches_reach_a_playing_engine_in_place() {
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::store());
+    let by = By::Client("Live".into());
+    crate::control::apply_in(&mut ses, &by, None, vec![cmd(json!({"op": "set_tempo", "bpm": 141}))]).unwrap();
+    let st = crate::control::query::project_in(&ses, 0);
+    let ch = st["channels"][0]["id"].as_u64().unwrap();
+    let tr = st["channels"][0]["track"].as_u64().unwrap();
+    let master = st["mixer"][0]["id"].as_u64().unwrap();
+    let pat = u64::from(ses.project.patterns[0].id.0);
+    crate::control::apply_in(&mut ses, &by, None, vec![cmd(json!({"op": "add_effect", "track": tr, "plugin": crate::plugins::PULP_FILTER}))]).unwrap();
+    let live = [
+        json!({"op": "set_channel", "channel": ch, "volume": 0.5, "pan": 0.3, "pitch": 200}),
+        json!({"op": "set_channel", "channel": ch, "enabled": false}),
+        json!({"op": "set_track", "track": tr, "volume": 0.5, "pan": -0.2, "stereo": 0.5}),
+        json!({"op": "set_track", "track": tr, "enabled": false}),
+        json!({"op": "set_track", "track": tr, "effects_enabled": false}),
+        json!({"op": "set_slot", "track": tr, "slot": 0, "enabled": false}),
+        json!({"op": "set_slot", "track": tr, "slot": 0, "mix": 0.3}),
+        json!({"op": "set_send", "from": tr, "to": master, "level": 0.2}),
+    ];
+    let rebuilt = [json!({"op": "set_tempo", "bpm": 150}), json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": ch, "position": 48}]})];
+    for (c, in_place) in live.iter().map(|c| (c, true)).chain(rebuilt.iter().map(|c| (c, false))) {
+        let mut sent = crate::edit::rack::play_project_in(&ses);
+        crate::control::apply_in(&mut ses, &by, None, vec![cmd(c.clone())]).unwrap();
+        let new = crate::edit::rack::play_project_in(&ses);
+        assert_eq!(os_engine::live_edits(&mut sent, &new).is_some(), in_place, "{c}");
+    }
+}
