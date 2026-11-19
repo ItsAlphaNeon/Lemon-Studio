@@ -649,6 +649,10 @@ pub enum Command {
         #[serde(default)]
         from: Option<f64>,
     },
+    /// The whole state of the running instance playing channel or slot `owner`, in the plugin's own form (what it
+    /// saves and loads, as a preset holds it): a sample sent to it, a state from a file. The instance takes it on the
+    /// app's next tick; the undo gives it back the state it had. The project's copy follows at save.
+    SetPluginState { owner: u32, state: Vec<u8> },
 
     /// Puts back what a command took (its undo); not offered to clients.
     #[serde(skip)]
@@ -1247,6 +1251,7 @@ pub const TEMPO: &str = "Tempo";
 pub const TIME_SIGNATURE: &str = "Time signature";
 pub const SONG_INFO: &str = "Song info";
 pub const PLUGIN_PARAMETER: &str = "Plugin parameter";
+pub const PLUGIN_STATE: &str = "Plugin state";
 /// A preset loaded into a plugin from its window or dropped on it (`control::state_edit`).
 pub const PLUGIN_PRESET: &str = "Plugin preset";
 
@@ -1480,6 +1485,7 @@ impl Command {
             Command::AddMember { instrument: true, .. } => crate::container::ADD_INSTRUMENT,
             Command::ReplaceMember { .. } => crate::container::REPLACE,
             Command::SetParam { .. } => PLUGIN_PARAMETER,
+            Command::SetPluginState { .. } => PLUGIN_STATE,
             Command::Put(_) => "Undo",
         }
     }
@@ -1641,6 +1647,7 @@ impl Command {
             Command::SetParam { owner, param, from, .. } => {
                 Taken::Param(*owner, *param, from.ok_or("the parameter's value before is not known (the app fills it in)")?)
             }
+            Command::SetPluginState { .. } => return Err("a plugin state's undo is taken by `apply`".into()),
             Command::MoveChannel { channel, .. } => Taken::Row(*channel, channel_row(p, *channel)?),
             // The id it has after is known once it is replaced (`apply`).
             Command::ReplaceInstrument { channel, .. } => Taken::Swap(Box::new(p.channels[channel_row(p, *channel)?].clone()), *channel),
@@ -1786,6 +1793,15 @@ impl Command {
                 }
                 _ => self.take(s)?,
             },
+            // Its other side is the state the instance has, which the app fills in as it puts this one in.
+            Command::SetPluginState { owner, state } => {
+                let name = PluginSide::name_of(s, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
+                if state.is_empty() || !owner_key(s, *owner).is_some_and(|k| s.plugins.hosted.contains_key(&k)) {
+                    return Err(format!("plugin {owner} is not running, or the state is empty"));
+                }
+                let fill = s.control.put_state(*owner, PluginSide { state: state.clone(), preset: None, name: name.clone(), fill: 0 });
+                Taken::Plugin(*owner, Box::new(PluginSide { state: Vec::new(), preset: None, name, fill }))
+            }
             _ => self.take(s)?,
         };
         let added = match &self {
@@ -3194,6 +3210,8 @@ impl Command {
                 crate::edit::container::set_members(s, t, k, &list);
                 none
             }
+            // Queued with its undo (above).
+            Command::SetPluginState { .. } => none,
             Command::SetParam { owner, param, value, .. } => {
                 unit("value", value, 0.0, 1.0)?;
                 owner_key(s, owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;

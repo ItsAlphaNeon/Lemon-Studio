@@ -159,6 +159,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `add_member` | `container`, `plugin`; `instrument` (optional) | At the end, from the plugin's defaults (`plugin`: its identity or name; an instrument in a channel's container only). Result: `member` |
 | `replace_member` | `container`, `member`, `plugin`; `instrument` (optional) | The member keeps its place, id and levels |
 | `set_param` | `owner`, `param`, `value` | A plugin parameter (`params` lists them) to `value` 0..1 |
+| `set_plugin_state` | `owner` (a channel or effect slot), `state` (bytes, in the plugin's own form: what it saves and loads, as a preset holds it) | the running instance takes the whole state; its undo gives back the state it had. An error when the plugin is not running |
 
 A note is `{"channel", "position", "length", "key", "velocity", "pan"}`: `key` is a MIDI number (60 = C5, the
 default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre). Optional too: `fine_pitch` 0..240 (120 = none),

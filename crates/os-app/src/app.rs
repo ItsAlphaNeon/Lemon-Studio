@@ -4853,10 +4853,19 @@ impl App {
         let stem = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
         let path = crate::data_folder_ui::adopt(&mut self.state, path);
-        self.state.message = Some(match self.state.session.plugins.load_slicer_loop(row, &path) {
-            Some(Ok(n)) => {
-                self.state.session.plugin_edited = true;
-                format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER)
+        self.state.message = Some(match self.state.session.plugins.slicer_loop_state(row, &path) {
+            // One undo step, the state the plugin had before as its undo.
+            Some(Ok((state, n))) => {
+                crate::control_ui::settle_ids(&mut self.state);
+                let owner = self.state.session.project.channels[row].id.0;
+                let c = crate::control::command::Command::SetPluginState { owner, state };
+                match crate::control_ui::command(&mut self.state, crate::control::command::PLUGIN_STATE, None, vec![c]) {
+                    Ok(_) => {
+                        self.state.session.plugin_edited = true;
+                        format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER)
+                    }
+                    Err(e) => e,
+                }
             }
             Some(Err(e)) => format!("{}: {e}", crate::slicer::LEMON_SLICER),
             None => return false,

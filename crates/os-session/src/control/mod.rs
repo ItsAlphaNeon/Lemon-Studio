@@ -323,6 +323,7 @@ fn op(c: &Command) -> &'static str {
         Command::AddMember { .. } => "add_member",
         Command::ReplaceMember { .. } => "replace_member",
         Command::SetParam { .. } => "set_param",
+        Command::SetPluginState { .. } => "set_plugin_state",
         Command::Put(_) => "put",
     }
 }

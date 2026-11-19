@@ -59,7 +59,8 @@ pub fn command(s: &mut State, name: &'static str, run: Option<crate::history::Ru
     crate::history::settle(&mut s.session);
     let taken = |s: &State, commands: &[Command]| commands.iter().map(|c| c.undo_now(&s.session).ok()).collect::<Vec<_>>();
     let before = taken(s, &commands);
-    let adds = commands.iter().any(Command::adds);
+    // An add, or a plugin state (its undo is the instance's, read later): a step whatever the project says.
+    let adds = commands.iter().any(|c| c.adds() || matches!(c, Command::SetPluginState { .. }));
     let (results, undo) = crate::follow::around(s, |s| run_in(&mut s.session, commands.clone()))?;
     if adds || taken(s, &commands) != before {
         s.session.dirty = true;
