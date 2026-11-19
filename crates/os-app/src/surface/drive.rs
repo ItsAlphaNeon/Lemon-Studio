@@ -416,7 +416,7 @@ fn plugin_texts(s: &State, pt: &PluginTarget, meter: Option<&os_host::Meter>) ->
         Some(m) => Some(crate::plugins::lock_for_tick(m, meter)?),
         None => None,
     };
-    let t0 = Instant::now();
+    let t0 = crate::dropout_log::Hold::start();
     let texts = std::array::from_fn(|i| {
         let Some((index, _, _, regions)) = &pt.slots[i] else { return String::new() };
         let Some(e) = list.and_then(|l| l.params.get(*index)) else { return String::new() };
@@ -431,7 +431,7 @@ fn plugin_texts(s: &State, pt: &PluginTarget, meter: Option<&os_host::Meter>) ->
         if let Some(m) = meter {
             m.note_hold(t0.elapsed());
         }
-        crate::dropout_log::held(&p.desc().name, "the keyboard's screen", t0.elapsed());
+        crate::dropout_log::held(&p.desc().name, "the keyboard's screen", t0);
     }
     Some(texts)
 }
