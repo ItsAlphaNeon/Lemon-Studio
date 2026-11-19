@@ -2506,10 +2506,7 @@ impl Command {
                 if container {
                     m.slots[k] = Some(os_model::SlotPlugin { id: Id::NONE, name: plugin.clone(), state: crate::container::encode(&[]) });
                 }
-                m.slot_on[k] = true;
-                m.slot_mix[k] = 1.0;
-                m.slot_cpu[k] = os_model::PluginCpu::default();
-                (m.slot_names[k], m.slot_colors[k], m.slot_icons[k]) = (None, None, None);
+                crate::edit::mixer::reset_slot(m, k);
                 s.control.settle(s.project.get_mut());
                 let id = s.project.mixer[place].slots[k].as_ref().map_or(Id::NONE, |x| x.id);
                 if !container {
@@ -2519,19 +2516,10 @@ impl Command {
             }
             Command::RemoveEffect { track, slot } => {
                 let place = track_place(&s.project, track)?;
-                let m = &mut s.project.get_mut().mixer[place];
-                let k = usize::from(slot);
-                if m.slots.get(k).is_none_or(Option::is_none) {
+                if s.project.mixer[place].slots.get(usize::from(slot)).is_none_or(Option::is_none) {
                     return Err(format!("slot {slot} is empty"));
                 }
-                m.slots[k] = None;
-                m.slot_on[k] = true;
-                m.slot_mix[k] = 1.0;
-                m.slot_cpu[k] = os_model::PluginCpu::default();
-                (m.slot_names[k], m.slot_colors[k], m.slot_icons[k]) = (None, None, None);
-                // The instance goes now, its state kept for an undo that brings the slot back.
-                let t = s.project.mixer[place].index;
-                s.fx_requests.push(crate::edit::mixer::FxReq::Delete { track: t, slot });
+                crate::edit::mixer::clear_slot(s, s.project.mixer[place].index, slot);
                 none
             }
             Command::MoveEffect { track, slot, to } => {

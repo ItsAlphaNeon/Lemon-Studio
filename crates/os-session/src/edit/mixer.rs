@@ -136,15 +136,22 @@ pub fn teslas(s: &crate::session::Session) -> Vec<(u16, u8)> {
     s.project.mixer.iter().flat_map(|m| (0..m.slots.len() as u8).map(move |k| (m.index, k))).filter(|&(t, k)| is_tesla(s, t, k)).collect()
 }
 
-/// Empties slot `k` of track `t` and drops its instance (the slot menu's Delete).
+/// Slot `k`'s settings as a new plugin finds them: on, fully wet, default CPU settings, no name, colour or icon of its
+/// own.
+pub fn reset_slot(m: &mut MixerTrack, k: usize) {
+    m.slot_on[k] = true;
+    m.slot_mix[k] = 1.0;
+    m.slot_cpu[k] = os_model::PluginCpu::default();
+    (m.slot_names[k], m.slot_colors[k], m.slot_icons[k]) = (None, None, None);
+}
+
+/// Empties slot `k` of track `t` and drops its instance, its state kept for an undo that brings the slot back (the
+/// slot menu's Delete, `Command::RemoveEffect`).
 pub fn clear_slot(s: &mut crate::session::Session, t: u16, k: u8) {
     if let Some(m) = track_mut(s, t) {
         m.slots[usize::from(k)] = None;
-        m.slot_on[usize::from(k)] = true;
-        m.slot_mix[usize::from(k)] = 1.0;
-        m.slot_cpu[usize::from(k)] = os_model::PluginCpu::default();
+        reset_slot(m, usize::from(k));
     }
-    forget_slot_ui(s, t, k);
     s.fx_requests.push(FxReq::Delete { track: t, slot: k });
 }
 
