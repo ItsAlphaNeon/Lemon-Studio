@@ -210,6 +210,9 @@ pub struct Logic {
     /// The meters, one reading per tick, oldest first.
     pub history: Vec<[[f32; 2]; BANDS]>,
     pub hosted: bool,
+    /// Edits committed, and how many of them the host was told of (`take_edit`).
+    edits: u64,
+    told: u64,
 }
 
 /// The crossover knob's value for a frequency (the inverse of its law).
@@ -232,6 +235,8 @@ impl Logic {
             map_clip: None,
             history: Vec::with_capacity(HISTORY),
             hosted: false,
+            edits: 0,
+            told: 0,
         };
         l.reload();
         l
@@ -262,9 +267,21 @@ impl Logic {
 
     /// An edit: the edited state becomes the plugin's at once and the audio thread plays it.
     fn commit(&mut self) {
-        if !self.params.edited(self.version, self.st.clone()) {
+        if self.params.edited(self.version, self.st.clone()) {
+            self.edits += 1;
+        } else {
             self.reload();
         }
+    }
+
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.edits == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.edits;
+        true
     }
 
     fn b(&self) -> usize {
@@ -932,6 +949,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -988,7 +1008,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes | Cmd::Edited => 0,
             }
         }
 
@@ -1128,6 +1148,9 @@ mod gui {
                 self.link.to_host(Cmd::Changed, 0);
                 self.dirty = true;
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -1235,6 +1258,27 @@ mod tests {
         assert_eq!(saved(&l).params[k], 1000);
         l.wheel(x, y, -1.0, Mods::default());
         assert_eq!(saved(&l).params[k], 937);
+    }
+
+    /// The host hears of an edit once it is done: a drag when let go, as one edit; a click at once; nothing that
+    /// changed nothing.
+    #[test]
+    fn edits_are_told_once_done() {
+        let mut l = logic();
+        assert!(!l.take_edit(), "nothing edited yet");
+        let k = band(MASTER, B_POST);
+        let (x, y) = centre(&l, &Target::Knob(k));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.delta(0.0, -40.0, Mods::default());
+        l.delta(0.0, -40.0, Mods::default());
+        assert!(!l.take_edit(), "not while the drag goes on");
+        l.up(Btn::Left);
+        assert!(l.take_edit(), "the drag, let go");
+        assert!(!l.take_edit(), "told once");
+        l.down(x, y, Btn::Middle, Mods::default(), false);
+        assert!(l.take_edit(), "a reset");
+        l.down(x, y, Btn::Middle, Mods::default(), false);
+        assert!(!l.take_edit(), "a reset that changed nothing");
     }
 
     #[test]

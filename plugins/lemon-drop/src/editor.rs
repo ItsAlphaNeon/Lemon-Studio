@@ -198,6 +198,9 @@ pub struct Logic {
     ptr: Option<(f32, f32)>,
     pub hint: String,
     pub hosted: bool,
+    /// Edits written to the state, and how many of them the host was told of (`take_edit`).
+    made: u64,
+    told: u64,
     l: Vec<f32>,
     r: Vec<f32>,
 }
@@ -231,6 +234,8 @@ impl Logic {
             ptr: None,
             hint: String::new(),
             hosted: false,
+            made: 0,
+            told: 0,
             l: Vec::new(),
             r: Vec::new(),
         }
@@ -255,9 +260,20 @@ impl Logic {
         }
     }
 
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made;
+        true
+    }
+
     fn commit(&mut self) {
         if self.params.edited(self.version, &self.st) {
             self.edits = self.params.edits.load(Ordering::Acquire);
+            self.made += 1;
         } else {
             self.reload();
         }
@@ -858,6 +874,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         /// Carries out what the logic asked for; repaints wait for the tick.
@@ -911,7 +930,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes | Cmd::Edited => 0,
             }
         }
 
@@ -1078,6 +1097,9 @@ mod gui {
                 self.link.to_host(Cmd::Changed, 0);
                 self.dirty = true;
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -1141,9 +1163,13 @@ mod tests {
         let (x, y) = centre(&l, Ctl::Fade);
         l.down(x, y, Btn::Left, Mods::default(), false);
         l.delta(0.0, KNOB_PX / 2.0, Mods::default());
+        assert!(!l.take_edit(), "the host hears of a drag once it is let go");
         l.up(Btn::Left);
+        assert!(l.take_edit());
+        assert!(!l.take_edit(), "once");
         assert!((saved(&l).fade - NEVER / 2).abs() <= 1, "{}", saved(&l).fade);
         l.wheel(x, y, 1.0, Mods::default());
+        assert!(l.take_edit(), "a wheel notch");
         assert!(saved(&l).fade > NEVER / 2);
         l.down(x, y, Btn::Left, Mods::default(), true);
         assert_eq!(saved(&l).fade, NEVER);
