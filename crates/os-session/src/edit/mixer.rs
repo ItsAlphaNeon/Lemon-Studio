@@ -242,9 +242,7 @@ pub fn group(s: &crate::session::Session, n: u16) -> Option<std::ops::RangeInclu
 
 /// The tracks on besides the master are exactly `keep`.
 pub fn audible_set(s: &crate::session::Session, keep: &[u16]) -> bool {
-    // The hidden last track has no mute light: a solo leaves it.
-    let hidden = s.project.mixer.len().saturating_sub(1) as u16;
-    s.project.mixer.iter().all(|m| m.index == 0 || m.index >= hidden || keep.contains(&m.index) == m.enabled)
+    s.project.mixer.iter().all(|m| m.index == 0 || keep.contains(&m.index) == m.enabled)
 }
 
 /// `n` and every track it reaches through sends (`down`), or every track reaching it (`!down`).

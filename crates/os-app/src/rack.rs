@@ -3624,10 +3624,10 @@ mod tests {
                 crate::mixer::solo(s, 1);
                 if moved {
                     crate::mixer::solo(s, 3);
-                    assert!(s.session.project.mixer.iter().filter(|m| usize::from(m.index) + 1 < s.session.project.mixer.len()).all(|m| m.enabled == matches!(m.index, 0 | 3)), "mixer solo moved, {what}");
+                    assert!(s.session.project.mixer.iter().all(|m| m.enabled == matches!(m.index, 0 | 3)), "mixer solo moved, {what}");
                 }
                 crate::mixer::solo(s, if moved { 3 } else { 1 });
-                assert!(s.session.project.mixer.iter().filter(|m| usize::from(m.index) + 1 < s.session.project.mixer.len()).all(|m| m.enabled == (!on || m.index != 2)), "mixer, {what}");
+                assert!(s.session.project.mixer.iter().all(|m| m.enabled == (!on || m.index != 2)), "mixer, {what}");
             }
         }
         set_check(&RESTORE_AFTER_SOLO, false);

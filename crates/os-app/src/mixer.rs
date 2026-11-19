@@ -839,10 +839,9 @@ pub fn solo_with(s: &mut State, n: u16, alt: bool) {
         _ => s.session.project.mixer.iter().map(|m| (m.index, m.enabled)).collect(),
     };
     let back = soloed && in_solo && crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO);
-    // The mute lights, as a click on each sets it (no undo step); the hidden last track has none.
+    // Every track's mute state, the hidden last one's too, as a click on a light sets it (no undo step).
     track_ids(s);
-    let hidden = s.session.project.mixer.len().saturating_sub(1) as u16;
-    let lights: Vec<(u16, bool, bool)> = s.session.project.mixer.iter().filter(|m| m.index < hidden).map(|m| (m.index, m.enabled, if back { before.iter().find(|b| b.0 == m.index).is_none_or(|b| b.1) } else { soloed || keep.contains(&m.index) })).collect();
+    let lights: Vec<(u16, bool, bool)> = s.session.project.mixer.iter().map(|m| (m.index, m.enabled, if back { before.iter().find(|b| b.0 == m.index).is_none_or(|b| b.1) } else { soloed || keep.contains(&m.index) })).collect();
     let cmds = lights.into_iter().filter(|&(_, now, on)| now != on).filter_map(|(t, _, on)| set_track!(s, t, enabled: on)).collect();
     apply_quietly(s, cmds);
     if !soloed {
@@ -2520,7 +2519,7 @@ mod tests {
         hit(&mut a, MHit::Led(4));
         assert!(track(&a.state.session, 4).unwrap().enabled);
         right(&mut a, MHit::Led(6));
-        assert!(a.state.session.project.mixer.iter().filter(|m| usize::from(m.index) + 1 < a.state.session.project.mixer.len()).all(|m| m.enabled == (m.index == 0 || m.index == 6)), "solo: the hidden last track has no light");
+        assert!(a.state.session.project.mixer.iter().all(|m| m.enabled == (m.index == 0 || m.index == 6)), "solo");
         right(&mut a, MHit::Led(6));
         assert!(a.state.session.project.mixer.iter().all(|m| m.enabled), "unsolo");
         a.shift = true;
@@ -2880,15 +2879,15 @@ mod tests {
     fn solo_and_alt_solo() {
         let mut a = app();
         track_mut(&mut a.state.session, 5).unwrap().routes = vec![3];
-        let on = |a: &App| a.state.session.project.mixer.iter().filter(|m| usize::from(m.index) + 1 < a.state.session.project.mixer.len()).filter(|m| m.enabled).map(|m| m.index).collect::<Vec<_>>();
+        let on = |a: &App| a.state.session.project.mixer.iter().filter(|m| m.enabled).map(|m| m.index).collect::<Vec<_>>();
         run(&mut a, MCmd::Solo(3));
         assert_eq!(on(&a), vec![0, 3], "Solo mutes the track sending into 3");
         run(&mut a, MCmd::Solo(3));
-        assert_eq!(on(&a).len(), a.state.session.project.mixer.len() - 1);
+        assert_eq!(on(&a).len(), a.state.session.project.mixer.len());
         run(&mut a, MCmd::AltSolo(3));
         assert_eq!(on(&a), vec![0, 3, 5]);
         run(&mut a, MCmd::AltSolo(3));
-        assert_eq!(on(&a).len(), a.state.session.project.mixer.len() - 1);
+        assert_eq!(on(&a).len(), a.state.session.project.mixer.len());
         run(&mut a, MCmd::Solo(5));
         assert_eq!(on(&a), vec![0, 3, 5], "Solo keeps where 5 sends");
     }

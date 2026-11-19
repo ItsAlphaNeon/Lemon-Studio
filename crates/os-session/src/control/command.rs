@@ -1278,6 +1278,12 @@ pub fn track_number(p: &Project, id: u32) -> Result<u16, Error> {
     track_place(p, id).map(|i| p.mixer[i].index)
 }
 
+/// `track_place`, the hidden last track too: its mute state, which a solo sets as it does every track's (the
+/// interface shows it no light), and the undo of that.
+fn track_place_muted(p: &Project, id: u32) -> Result<usize, Error> {
+    p.mixer.iter().position(|m| m.id.0 == id).ok_or_else(|| format!("no mixer track {id}"))
+}
+
 fn track_place(p: &Project, id: u32) -> Result<usize, Error> {
     let hidden = p.mixer.len().saturating_sub(1) as u16;
     p.mixer.iter().position(|m| m.id.0 == id && (m.index < hidden || p.mixer.len() < 2)).ok_or_else(|| format!("no mixer track {id}"))
@@ -1578,6 +1584,9 @@ impl Command {
             | Command::SetProject { .. } => Taken::Settings(Box::new(Settings::of(s))),
             Command::SetChannel { channel, .. } | Command::LoadSample { channel, .. } | Command::SetMisc { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
             Command::SetStartValue { target, .. } => Taken::Start(*target, crate::init::placed(s, *target)),
+            Command::SetTrack { track, name: None, color: None, volume: None, pan: None, stereo: None, enabled: Some(_), polarity: None, swap: None, effects_enabled: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, audio_in: None, audio_out: None, rec_source: None, monitor: None, armed: None } => {
+                Taken::Track(Box::new(p.mixer[track_place_muted(p, *track)?].clone()))
+            }
             Command::SetTrack { track, .. } | Command::ResetTrack { track } | Command::SetEq { track, .. } | Command::SetSlot { track, .. } | Command::AddEffect { track, .. } | Command::RemoveEffect { track, .. } => {
                 Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone()))
             }
@@ -1644,7 +1653,7 @@ impl Command {
             Command::Put(t) => match &**t {
                 Taken::Settings(_) => Taken::Settings(Box::new(Settings::of(s))),
                 Taken::Channel(c) => Taken::Channel(Box::new(p.channels[channel_row(p, c.id.0)?].clone())),
-                Taken::Track(m) => Taken::Track(Box::new(p.mixer[track_place(p, m.id.0)?].clone())),
+                Taken::Track(m) => Taken::Track(Box::new(p.mixer[track_place_muted(p, m.id.0)?].clone())),
                 Taken::Pattern(q) => Taken::Pattern(Box::new(p.patterns[pattern_place(p, q.id.0)?].clone())),
                 Taken::Lfo(id, _) => Taken::Lfo(*id, Box::new(clip_lfo(p, *id)?.clone())),
                 Taken::Arrangement(a) => {
@@ -2268,7 +2277,8 @@ impl Command {
                 let max = crate::typein::LATENCY_MAX_MS;
                 let latency_in = latency_in.map(|v| unit("latency_in", v, -max, max)).transpose()?;
                 let latency_out = latency_out.map(|v| unit("latency_out", v, -max, max)).transpose()?;
-                let place = track_place(&s.project, track)?;
+                let mute_only = name.is_none() && color.is_none() && volume.is_none() && pan.is_none() && stereo.is_none() && polarity.is_none() && swap.is_none() && effects_enabled.is_none() && separator.is_none() && dock.is_none() && threaded.is_none() && latency_in.is_none() && latency_out.is_none() && audio_in.is_none() && audio_out.is_none() && rec_source.is_none() && monitor.is_none() && armed.is_none();
+                let place = if mute_only { track_place_muted(&s.project, track)? } else { track_place(&s.project, track)? };
                 let m = &mut s.project.get_mut().mixer[place];
                 if let Some(n) = name {
                     m.name = text(&n);
@@ -3241,7 +3251,7 @@ fn put(s: &mut crate::session::Session, t: Taken) {
             }
         }
         Taken::Track(m) => {
-            if let Ok(place) = track_place(&s.project, m.id.0) {
+            if let Ok(place) = track_place_muted(&s.project, m.id.0) {
                 // Undo leaves its light and its arming as they are (arming is no part of the track, track-io.md §2.3).
                 let (on, armed) = (s.project.mixer[place].enabled, s.project.mixer[place].armed);
                 s.project.get_mut().mixer[place] = *m;
