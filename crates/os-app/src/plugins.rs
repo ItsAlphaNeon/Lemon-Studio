@@ -354,9 +354,9 @@ pub struct Plugins {
 const STASH_MAX: usize = 64;
 
 /// Lemon Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
-/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio, Citrus, Smith, Lemon Slicer and Lemon Drum
-/// Sampler likewise (spec: plugins/lemon-3x-osc.md §6, plugins/citrus.md, plugins/smith.md, plugins/lemon-slicer.md §6,
-/// plugins/lemon-drum-sampler.md §4).
+/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio, Citrus, Smith, Lemon Slicer, Lemon Drum
+/// Sampler and Lemon SoundFont Player likewise (spec: plugins/lemon-3x-osc.md §6, plugins/citrus.md, plugins/smith.md,
+/// plugins/lemon-slicer.md §6, plugins/lemon-drum-sampler.md §4, plugins/lemon-soundfont.md §5).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
@@ -365,6 +365,7 @@ pub fn builtin() -> Vec<Available> {
     static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static DRUMS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static ZEST: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static SOUNDFONT: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v.extend(linked(&CITRUS, &citrus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::citrus::CITRUS));
@@ -372,6 +373,7 @@ pub fn builtin() -> Vec<Available> {
     v.extend(linked(&SLICER, &lemon_slicer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::slicer::LEMON_SLICER));
     v.extend(linked(&DRUMS, &lemon_drum_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::drums::LEMON_DRUMS));
     v.extend(linked(&ZEST, &zest_plugin::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, ZEST_NAME));
+    v.extend(linked(&SOUNDFONT, &lemon_soundfont::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::soundfont::LEMON_SOUNDFONT));
     v
 }
 
@@ -626,6 +628,11 @@ impl Plugins {
         // clips' fades and gain reach Lemon Sampler's voices one by one, so overlapping clips of one sample crossfade
         // (spec: audio/audio-clips.md "Fades and clip gain"); the instruments work the channel's volume and pan into
         // their voices' final levels (spec: audio/voice-levels.md "Final levels").
+        // A third-party plugin gets the channel's levels as FL's plugin wrapper gives them (spec: audio/voice-levels.md
+        // "A plugin's output").
+        if !crate::project_plugins::is_builtin(&a.desc) {
+            p.use_wrapper_levels();
+        }
         if crate::project_plugins::is_builtin(&a.desc) {
             p.use_note_levels();
             if a.desc.name == LEMON_SAMPLER {
@@ -836,6 +843,12 @@ impl Plugins {
         let state = p.save_state();
         crate::dropout_log::held(&p.desc().name, "reading its state", t0.elapsed());
         Ok(state)
+    }
+
+    /// The names of the instance's outputs past its main one (spec: audio/multi-output.md); empty when it has none or
+    /// nothing is hosted under `key`.
+    pub fn extra_output_names(&self, key: usize) -> Vec<String> {
+        self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).map(|p| p.extra_output_names()).unwrap_or_default()
     }
 
 
@@ -1405,7 +1418,11 @@ impl Plugins {
             let look = h.due(h.seen);
             let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
             if let Some(mut p) = look.and_then(|_| lock_for_tick(&h.plugin, h.meter.as_deref())) {
-                let t0 = Instant::now();
+                // The dropout log is Linux only; elsewhere the hold is only timed.
+                #[cfg(target_os = "linux")]
+                let t0 = crate::dropout_log::Hold::start();
+                #[cfg(not(target_os = "linux"))]
+                let t0 = std::time::Instant::now();
                 h.seen = look.unwrap_or(h.seen);
                 // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
                 if let (Some(code), false) = (p.stopped(), h.stop_told) {
@@ -1438,7 +1455,7 @@ impl Plugins {
                     m.note_hold(t0.elapsed());
                 }
                 #[cfg(target_os = "linux")]
-                crate::dropout_log::held(&p.desc().name, "the UI's tick", t0.elapsed());
+                crate::dropout_log::held(&p.desc().name, "the UI's tick", t0);
             }
             #[cfg(plugin_windows)]
             if let Some(w) = &h.window {
@@ -2464,6 +2481,36 @@ mod tests {
         capture(hwnd, &dir.join("win_nostrip.bmp"));
     }
 
+    /// A 32-bit VST 2 plugin (`OS_VST2_PLUGIN32`) in its window through the 32-bit bridge: loaded as the app loads any
+    /// plugin file, its editor (in the helper process) inside the app's frame. Needs the helper built for 32-bit Windows
+    /// (`cargo build -p os-vst2-bridge --bin lemonstudio-bridge32 --target i686-pc-windows-msvc`, same profile).
+    /// `OS_SHOT_DIR=.. OS_VST2_PLUGIN32=.. cargo test -p os-app --bin lemonstudio vst2_32_bit_window -- --ignored`
+    #[test]
+    #[ignore]
+    fn vst2_32_bit_window() {
+        let (Some(dir), Some(file)) = (std::env::var_os("OS_SHOT_DIR"), std::env::var_os("OS_VST2_PLUGIN32")) else { return };
+        let dir = std::path::PathBuf::from(dir);
+        // Per-monitor DPI awareness and the monitor's scale, as the app has them (and the helper).
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+            fn GetDpiForSystem() -> u32;
+        }
+        unsafe { SetProcessDpiAwarenessContext(-4) };
+        let scale = unsafe { GetDpiForSystem() } as f32 / 96.0;
+        let lib = load_file(std::path::Path::new(&file), os_host::Format::Vst2).expect("load through the bridge");
+        let desc = lib.plugins()[0].clone();
+        let mut pl = Plugins { available: vec![Available { lib, desc: desc.clone() }], scale, rate: 44100, ..Plugins::default() };
+        pl.create(0, 0).unwrap();
+        let info = ChannelInfo { name: desc.name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 800);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        capture(frame, &dir.join("vst2_32_bit.bmp"));
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
+        assert!(!editor.is_null(), "the plugin's editor is inside the frame");
+    }
+
     /// The built-in Lemon Parametric EQ in a mixer slot window: the frame without a strip, the editor inside it, and a
     /// click on a band's switch reaching the plugin state.
     /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio eq_window_shots -- --ignored`
@@ -2540,6 +2587,47 @@ mod tests {
         pump(&mut pl, 300);
         capture(frame, &b);
         assert_ne!(state(&pl), before, "the knob moved the plugin value");
+        assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
+    }
+
+    /// The built-in Lemon SoundFont Player's editor in its window, a font open (`OS_SF2`, else none): the wheel on the
+    /// envelope's attack slider edits the state the channel saves (spec: plugins/lemon-soundfont.md §4).
+    /// `OS_SHOT_DIR=.. OS_SF2=font.sf2 cargo test -p os-app --bin lemonstudio soundfont_window_edits -- --ignored`
+    #[test]
+    #[ignore]
+    fn soundfont_window_edits() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(crate::soundfont::LEMON_SOUNDFONT).expect("built-in Lemon SoundFont Player");
+        let mut st = lemon_soundfont::state::State::default();
+        if let Some(f) = std::env::var_os("OS_SF2") {
+            st.set_path(&f.to_string_lossy());
+        }
+        pl.create_with(0, index, Some(&crate::soundfont::plugin_state(&st.to_bytes()))).unwrap();
+        let name = crate::soundfont::LEMON_SOUNDFONT;
+        let info = ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 400);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
+        assert!(editor != 0, "the editor is a child of the frame");
+        let mut er: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(editor as HWND, &mut er) };
+        let state = |pl: &Plugins| pl.soundfont_file_state(0).unwrap();
+        let (a, b) = (dir.join("soundfont_before.bmp"), dir.join("soundfont_after.bmp"));
+        capture(frame, &a);
+        let before = state(&pl);
+        let (sx, sy) = (er.left + 51, er.top + 300);
+        for _ in 0..3 {
+            unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
+            pump(&mut pl, 60);
+        }
+        pump(&mut pl, 300);
+        capture(frame, &b);
+        let after = state(&pl);
+        assert_ne!(after, before, "the slider moved the attack");
+        assert_eq!(lemon_soundfont::state::State::parse(&after).unwrap().control(lemon_soundfont::state::Control::Attack), Some(383));
         assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
     }
 

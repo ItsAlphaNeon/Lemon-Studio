@@ -101,8 +101,27 @@ pub trait Instrument: Send {
     fn takes_tuning(&self) -> bool {
         false
     }
+    /// True for an instrument that plays `tune` as MIDI pitch bend ([`TuningBend`]: VST 2, and CLAP or VST 3 plugins
+    /// that read MIDI only). Its notes keep their keys and the bend carries the whole of the channel's pitch, as FL's
+    /// wrapper sends a channel's pitch to a VST plugin (measured on FL 12: a channel at -80 cents, with the wrapper's
+    /// range at 12 semitones, played a 2-semitone-range plugin 13 cents flat). Default false.
+    fn tunes_by_bend(&self) -> bool {
+        false
+    }
     /// Renders `left.len()` frames at `rate`, overwriting both buffers.
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
+    /// The extra outputs the instrument has besides its main one (a plugin's output buses after the first, each heard
+    /// as a stereo pair; spec: audio/multi-output.md). Valid once the instrument is active. Default: none.
+    fn extra_outputs(&self) -> usize {
+        0
+    }
+    /// `process`, also filling the extra outputs: with `n = left.len()`, extra output `k`'s left side goes to
+    /// `extra[2kn..(2k+1)n]` and its right side to `extra[(2k+1)n..(2k+2)n]`, for as many outputs as `extra` holds.
+    /// An output the instrument doesn't have, or doesn't fill, is silence. Default: `process` and silent extras.
+    fn process_extra(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
+        extra.fill(0.0);
+        self.process(rate, left, right);
+    }
     /// True while the instrument still has sound to deliver (ringing voices, a long sample): the engine keeps
     /// processing it instead of stopping after its idle tail. Valid after `process`.
     fn active(&self) -> bool {
@@ -145,6 +164,14 @@ pub trait Instrument: Send {
     /// pan to the output (and the mod X / Y go nowhere).
     fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
         let _ = levels;
+        false
+    }
+    /// True for a third-party plugin, which FL plays through its plugin wrapper: when the engine applies the channel's
+    /// volume and pan to its output (`channel_levels` false), it splits twice the volume (`sqrt(2)` of it on each side
+    /// of a centred channel). Measured on FL 12.5.1: a VST 2 plugin that plays a constant 0.25 came out of a channel
+    /// exactly twice as loud as the pan split of the volume gives. Default false (Lemon Studio's own instruments, which
+    /// stand in for FL's native ones).
+    fn wrapper_levels(&self) -> bool {
         false
     }
     /// The channel's envelopes, LFOs and filter, given before each tick's `process` call, whose first frame starts the
@@ -326,11 +353,13 @@ pub struct TuningBend {
     /// The key the bend follows and its tuning in semitones.
     key: Option<u8>,
     tune: f32,
+    /// The bend was set for `key` ahead of its note (`tune` before `note_on`): the note keeps it.
+    ahead: bool,
 }
 
 impl Default for TuningBend {
     fn default() -> Self {
-        TuningBend { range: DEFAULT_BEND_RANGE, sent: 8192, key: None, tune: 0.0 }
+        TuningBend { range: DEFAULT_BEND_RANGE, sent: 8192, key: None, tune: 0.0, ahead: false }
     }
 }
 
@@ -340,18 +369,23 @@ impl TuningBend {
         self.range = if (1..=48).contains(&semitones) { semitones } else { DEFAULT_BEND_RANGE };
     }
 
-    /// A note of `key` starts: the bend follows it, untuned until its `tune`. The pitch-bend message to send before
-    /// the note, if the bend moves.
+    /// A note of `key` starts: the bend follows it, untuned until its `tune`, unless it was tuned just before
+    /// (the engine tunes a key ahead of its note). The pitch-bend message to send before the note, if the bend moves.
     pub fn note_on(&mut self, key: u8) -> Option<[u8; 3]> {
+        if std::mem::take(&mut self.ahead) && self.key == Some(key) {
+            return None;
+        }
         self.key = Some(key);
         self.tune = 0.0;
         self.bend()
     }
 
-    /// Key `key` is tuned to `semitones`: the message to send, if the bend moves.
+    /// Key `key` is tuned to `semitones`: the message to send, if the bend moves. A note of `key` that starts next
+    /// keeps it.
     pub fn tune(&mut self, key: u8, semitones: f32) -> Option<[u8; 3]> {
         self.key = Some(key);
         self.tune = semitones;
+        self.ahead = true;
         self.bend()
     }
 
@@ -359,6 +393,7 @@ impl TuningBend {
     pub fn reset(&mut self) -> Option<[u8; 3]> {
         self.key = None;
         self.tune = 0.0;
+        self.ahead = false;
         self.bend()
     }
 
@@ -458,5 +493,17 @@ mod tests {
         b.set_range(0);
         assert_eq!(b.tune(64, 3.0), Some([0xE0, 0x00, 0x50]), "an unusable range is the default 12: 10240");
         assert_eq!(b.reset(), Some([0xE0, 0x00, 0x40]));
+    }
+
+    /// A key tuned just before its note keeps the bend when the note starts (nothing is sent); a note of another key,
+    /// or a second note of the key, starts centred.
+    #[test]
+    fn a_bend_set_ahead_of_its_note_stays() {
+        let mut b = TuningBend::default();
+        assert_eq!(b.tune(60, -0.8), Some([0xE0, 94, 59]), "8192 - 0.8 / 12 * 8192 = 7646");
+        assert_eq!(b.note_on(60), None, "kept for its note");
+        assert_eq!(b.note_on(60), Some([0xE0, 0x00, 0x40]), "the next note starts centred");
+        assert_eq!(b.tune(62, -0.8), Some([0xE0, 94, 59]));
+        assert_eq!(b.note_on(64), Some([0xE0, 0x00, 0x40]), "another key starts centred");
     }
 }

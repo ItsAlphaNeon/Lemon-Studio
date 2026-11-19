@@ -52,6 +52,13 @@ impl Rgb {
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Rgb { r, g, b }
     }
+
+    /// As a channel's colour is kept: no component under 0x14, as FL saves channel colours, so a colour set darker
+    /// shows as it will come back.
+    pub const fn for_channel(self) -> Rgb {
+        const MIN: u8 = 0x14;
+        Rgb { r: if self.r < MIN { MIN } else { self.r }, g: if self.g < MIN { MIN } else { self.g }, b: if self.b < MIN { MIN } else { self.b } }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -2647,6 +2654,17 @@ pub mod target {
             }
             _ => t,
         })
+    }
+
+    /// Target `t` after channels moved: `ch` gives a channel's new index (channel targets keep the channel in the high
+    /// half, spec: flp/events/automation.md "Targets"); `None`: the channel is gone, and so is the target. The tempo and
+    /// other places stay.
+    pub fn moved_channel(t: u32, ch: impl Fn(u16) -> Option<u16>) -> Option<u32> {
+        let hi = (t >> 16) as u16;
+        if t == TEMPO || hi >= 0x4000 {
+            return Some(t);
+        }
+        ch(hi).map(|n| channel(n, t as u16))
     }
 
     /// Bipolar targets centre at 0.5.

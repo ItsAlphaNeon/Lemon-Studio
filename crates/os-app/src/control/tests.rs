@@ -56,6 +56,38 @@ fn round_trip(a: &mut App, c: Value) -> Vec<Value> {
     r
 }
 
+/// A client switching a channel or a mixer track off: its undo switches it on again, alone or in a list (the undo of
+/// a channel or track otherwise leaves muting as it is, since an undo of another step does).
+#[test]
+fn a_client_s_enabled_is_undone_with_its_step() {
+    let mut a = app();
+    let (ch, tr, _) = ids(&a);
+    round_trip(&mut a, json!({"op": "set_channel", "channel": ch[1], "enabled": false}));
+    round_trip(&mut a, json!({"op": "set_track", "track": tr[2], "enabled": false}));
+    let before = reading(&a);
+    apply(&mut a.state, &test_client(), None, vec![
+        cmd(json!({"op": "set_channel", "channel": ch[0], "name": "Off", "enabled": false})),
+        cmd(json!({"op": "set_track", "track": tr[1], "name": "Off", "enabled": false})),
+        cmd(json!({"op": "set_tempo", "bpm": 99})),
+    ])
+    .unwrap();
+    crate::history::undo(&mut a.state).unwrap();
+    assert_eq!(reading(&a), before, "the list undone");
+}
+
+/// The mixer's hidden last track, which the `project` query doesn't list, is no track a command can name.
+#[test]
+fn the_hidden_mixer_track_is_not_named() {
+    let mut a = app();
+    let hidden = a.state.project.mixer.last().unwrap().id.0;
+    let first = a.state.project.mixer[1].id.0;
+    assert!(!query::project(&a.state)["mixer"].as_array().unwrap().iter().any(|t| t["id"] == hidden), "not listed");
+    let before = reading(&a);
+    assert!(apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_track", "track": hidden, "name": "Hidden"}))]).is_err());
+    assert!(apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_send", "from": first, "to": hidden}))]).is_err());
+    assert_eq!(reading(&a), before);
+}
+
 #[test]
 fn every_command_undoes_and_redoes() {
     let mut a = app();
@@ -1044,4 +1076,15 @@ fn a_hosted_slots_scaling_and_help() {
     // No instance (an effect the engine plays itself has no editor): greyed.
     a.plugins.hosted.clear();
     assert!(!scaling(&a).enabled);
+}
+
+/// A channel colour darker than FL keeps (a component under 0x14) is kept as the save will write it, so it does not
+/// change after a save and reopen.
+#[test]
+fn a_dark_channel_colour_shows_as_it_is_saved() {
+    let mut a = app();
+    let r = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_channel", "name": "Dark"}))]).unwrap();
+    let ch = r[0]["channel"].as_u64().unwrap() as u32;
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": ch, "color": "#000a40"}))]).unwrap();
+    assert_eq!(a.state.project.channels.last().unwrap().color, Some(os_model::Rgb::new(0x14, 0x14, 0x40)));
 }

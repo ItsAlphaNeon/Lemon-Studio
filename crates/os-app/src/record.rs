@@ -173,12 +173,10 @@ pub struct Extra {
     pub group: Option<u8>,
 }
 
-/// The take being recorded: the pattern's notes as they were before it, the channels it recorded, the span from its
-/// first start to its last end, and its notes.
+/// The take being recorded: the channels it recorded, the span from its first start to its last end, and its notes.
 #[derive(Debug, Clone)]
 struct Take {
     pattern: u16,
-    before: Vec<Note>,
     channels: Vec<u16>,
     span: Option<(u32, u32)>,
     new: Vec<Note>,
@@ -223,6 +221,12 @@ impl Rec {
     /// Notes are held for the take (the piano roll draws them growing).
     pub fn holding(&self) -> bool {
         self.take.is_some() && !self.held.is_empty()
+    }
+
+    /// Another project opens: its take, held notes, count-in and Cancel recording's step go without being written.
+    /// Record stays armed.
+    pub fn forget(&mut self) {
+        *self = Rec { armed: self.armed, audio: self.audio, log: std::mem::take(&mut self.log), ..Rec::default() };
     }
 }
 
@@ -605,8 +609,7 @@ impl App {
             snap
         };
         crate::history::record(s, RECORDED, snap);
-        let before = s.project.pattern(pattern).map(|p| p.notes.clone()).unwrap_or_default();
-        s.rec.take = Some(Take { pattern, before, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new(), clip: None });
+        s.rec.take = Some(Take { pattern, channels: Vec::new(), span: None, new: Vec::new(), controls: Vec::new(), clip: None });
     }
 
     /// The current pattern's tick at playback tick `t`: the tick itself in PAT mode; in SONG mode where a clip of the
@@ -684,23 +687,23 @@ impl App {
             note.group = note.group & !0x0F | g & 0x0F;
         }
         note.release = h.release.unwrap_or(note.release);
-        take.new.push(note);
         let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
         take.span = Some((lo, hi));
         // Blend recorded notes: the earlier notes stay (spec §3).
         let (lo, hi) = if Opt::Blend.on() { (0, 0) } else { (lo, hi) };
-        let notes: Vec<Note> = take
-            .before
-            .iter()
-            .filter(|n| !(take.channels.contains(&n.channel) && n.position >= lo && n.position < hi))
-            .chain(take.new.iter())
-            .cloned()
-            .collect();
-        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pattern) {
-            p.notes = notes;
-        } else {
-            s.project.patterns.push(os_model::Pattern { number: pattern, notes, ..os_model::Pattern::default() });
-        }
+        // The pattern as it is now, so edits made during the take stay: the take's span replaces the other notes on
+        // its channels, and the new note joins.
+        let i = match s.project.patterns.iter().position(|p| p.number == pattern) {
+            Some(i) => i,
+            None => {
+                s.project.patterns.push(os_model::Pattern { number: pattern, ..os_model::Pattern::default() });
+                s.project.patterns.len() - 1
+            }
+        };
+        let p = &mut s.project.patterns[i];
+        p.notes.retain(|n| take.new.contains(n) || !(take.channels.contains(&n.channel) && n.position >= lo && n.position < hi));
+        p.notes.push(note);
+        take.new.push(note);
         // The time selection stays (it may be looping, spec §5).
         let range = s.piano.range;
         s.piano.select(pattern, h.channel, Vec::new());
@@ -889,7 +892,19 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
     let grow = ti >= at + c.length;
     if grow {
         c.length = (ti / bar + 1) * bar - at;
+        let end = at + c.length;
         s.piano.dirty = true;
+        // Grown into another clip on its track: it moves to the first track free over its whole length.
+        let own = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none() && c.track == track && c.position == at;
+        if crate::playlist::clips(s).iter().any(|o| o.track == track && o.position < end && o.end() > at && !own(o)) {
+            let free = crate::playlist::free_track(s, 0, at, end);
+            if let Some(c) = crate::playlist::arr_mut(s).clips.iter_mut().find(|c| own(c)) {
+                c.track = free;
+            }
+            if let Some(k) = s.rec.take.as_mut() {
+                k.clip = Some((free, at));
+            }
+        }
     }
     Some((t - f64::from(at), grow))
 }
@@ -1079,6 +1094,46 @@ mod tests {
         assert!(notes(&app).contains(&(301, 32, 0)), "{:?}", notes(&app));
     }
 
+    /// New forgets what the interface remembered of the old project: a take and its held note go unwritten, the
+    /// selected channel and track, the mixer's solo memory and the windows showing the old project's things.
+    #[test]
+    fn new_forgets_the_old_project() {
+        let mut app = app();
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 30.0, false);
+        assert!(app.state.rec.holding());
+        app.state.selected_channel = 3;
+        app.state.selected_mixer = 7;
+        app.state.mixer.solo = Some((vec![7], vec![(1, true)]));
+        app.state.raise(crate::app::Win::Events);
+        assert!(app.state.z.contains(&crate::app::Win::Events));
+        app.empty_project();
+        app.record_tick();
+        assert!(!app.state.rec.recording() && app.state.rec.armed);
+        assert!(app.state.project.patterns.iter().all(|p| p.notes.is_empty()), "the held note was not written into the new project");
+        assert_eq!((app.state.selected_channel, app.state.selected_mixer), (0, 1));
+        assert!(app.state.mixer.solo.is_none());
+        assert!(!app.state.z.contains(&crate::app::Win::Events));
+    }
+
+    /// An edit made to the pattern during a take stays when the take writes its next note.
+    #[test]
+    fn an_edit_during_a_take_stays() {
+        let mut app = app();
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 30.0, false);
+        key(&mut app, KeyCode::KeyZ, false, 100.0, false);
+        // Drawn while recording, outside the take's span and on another channel.
+        if let Some(p) = app.state.project.patterns.iter_mut().find(|p| p.number == 1) {
+            p.notes.push(Note { length: 24, ..Note::step(0, 600) });
+            p.notes.push(Note { length: 24, ..Note::step(1, 48) });
+        }
+        key(&mut app, KeyCode::KeyX, true, 190.0, false);
+        key(&mut app, KeyCode::KeyX, false, 205.0, false);
+        stop(&mut app);
+        assert_eq!(notes(&app), [(24, 72, 0), (48, 24, 1), (192, 24, 0), (600, 24, 0)]);
+    }
+
     /// MIDI channel through (spec: ui/channel-rack.md §18): a note recorded from a MIDI device takes the MIDI channel it
     /// came on as its colour group; with the entry unticked it keeps the first.
     #[test]
@@ -1144,6 +1199,30 @@ mod tests {
         let clips = crate::playlist::clips(&app.state);
         assert_eq!(clips.len(), 1, "{clips:?}");
         assert_eq!((clips[0].position, clips[0].length), (0, 2 * bar));
+        assert_eq!(notes(&app), [(48, 48, 0), (bar + 48, 24, 0)]);
+    }
+
+    /// SONG mode: the take's clip, placed on the first track free for the pattern's length, grew over a clip further
+    /// along that track. It moves to the first track free over its whole length.
+    #[test]
+    fn a_growing_take_clip_leaves_a_taken_track() {
+        let mut app = app();
+        crate::playlist::arr_mut(&mut app.state).clips.clear();
+        let bar = app.state.project.bar_ticks();
+        let b = f64::from(bar);
+        // Another pattern's clip on track 1 from bar 2.
+        let other = app.state.pattern + 1;
+        crate::playlist::arr_mut(&mut app.state).clips.push(os_model::Clip::new(bar, bar, 0, ClipSource::Pattern(other)));
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 48.0, true);
+        key(&mut app, KeyCode::KeyZ, false, 96.0, true);
+        key(&mut app, KeyCode::KeyX, true, b + 48.0, true);
+        key(&mut app, KeyCode::KeyX, false, b + 72.0, true);
+        stop(&mut app);
+        let clips = crate::playlist::clips(&app.state);
+        let take = clips.iter().find(|c| c.source == ClipSource::Pattern(app.state.pattern)).expect("the take's clip");
+        assert_eq!((take.position, take.length), (0, 2 * bar));
+        assert!(!clips.iter().any(|o| o.track == take.track && o.position < take.end() && o.end() > take.position && o.source != take.source), "{clips:?}");
         assert_eq!(notes(&app), [(48, 48, 0), (bar + 48, 24, 0)]);
     }
 

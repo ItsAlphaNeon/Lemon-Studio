@@ -666,8 +666,7 @@ impl App {
         }
         let parts = imp.parts.len();
         if o.new_project {
-            self.transport.silence();
-            self.reset_hosted();
+            self.leave_project();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;
             s.project = crate::app::empty_project();
@@ -679,13 +678,8 @@ impl App {
             s.tempo = tempo;
             s.pattern = 1;
             s.song_mode = false;
-            s.piano.reset();
-            s.playlist.reset();
-            s.history.reset();
-            s.control.reset();
             s.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
             crate::playlist::load_view(s);
-            s.rack.reset();
             crate::rack::from_model(s);
             // A project with nothing in it counts as saved; the import is its first change.
             self.mark_saved();

@@ -65,6 +65,10 @@ impl App {
         }
         if !fx_map.is_empty() {
             self.plugins.remap_fx(&|t, k| fx_map.get(&(t, k)).copied().unwrap_or(Some((t, k))));
+            self.state.params.remap(|key| match crate::plugins::fx_of(key) {
+                Some(at) => fx_map.get(&at).copied().unwrap_or(Some(at)).map(|(t, k)| crate::plugins::fx_key(t, k)),
+                None => Some(key),
+            });
             self.transport.set_effects(self.plugins.effects());
             self.state.piano.dirty = true;
         }

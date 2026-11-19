@@ -130,11 +130,22 @@ jobs:
       - name: Build the updater
         run: cargo build --release --locked -p updater
 
+      # Windows: the 32-bit bridge's helper, built for 32-bit Windows, which Lemon Studio carries to run 32-bit
+      # plugins (crates/os-vst2/build.rs reads LEMON_BRIDGE32).
+      - name: Build the 32-bit bridge
+        if: runner.os == 'Windows'
+        run: |
+          rustup target add i686-pc-windows-msvc
+          cargo build --release --locked -p os-vst2-bridge --bin lemonstudio-bridge32 --target i686-pc-windows-msvc
+
       - name: Build Lemon Studio
         run: |
           set -euo pipefail
           ext=""; [ "$RUNNER_OS" = Windows ] && ext=.exe
           export LEMON_UPDATER="$GITHUB_WORKSPACE/target/release/lemonstudio-updater$ext"
+          if [ "$RUNNER_OS" = Windows ]; then
+            export LEMON_BRIDGE32="$GITHUB_WORKSPACE/target/i686-pc-windows-msvc/release/lemonstudio-bridge32.exe"
+          fi
           if [ "$RUNNER_OS" = macOS ]; then
             cargo run --release --locked -p bundle-app
           else

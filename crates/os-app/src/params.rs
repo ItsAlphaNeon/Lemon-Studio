@@ -21,7 +21,8 @@ use crate::plugins::{fx_key, fx_of, MEMBER_KEY};
 
 /// The values of an instance's parameters, by id.
 fn read_values(p: &dyn os_host::Plugin, params: &[Entry]) -> BTreeMap<u32, f64> {
-    params.iter().filter_map(|e| Some((e.id, p.param_value(e.id)?))).collect()
+    let ids: Vec<u32> = params.iter().map(|e| e.id).collect();
+    ids.iter().zip(p.param_values(&ids)).filter_map(|(&id, v)| Some((id, v?))).collect()
 }
 
 /// Browser tab of the project tree, and the sections plugin nodes live in (spec: ui/browser.md §2).
@@ -107,6 +108,15 @@ impl ParamUi {
 
     pub fn has_params(&self, key: usize) -> bool {
         self.visible(key).next().is_some()
+    }
+
+    /// The hosted instances moved (`m(old key) = new key`, `None`: gone): "Most recent" and "Second most recent"
+    /// follow their plugin's parameter; one whose plugin went is forgotten.
+    pub fn remap(&mut self, m: impl Fn(usize) -> Option<usize>) {
+        self.last.retain_mut(|t| match t {
+            Tweak::Plugin { key, .. } => m(*key).map(|k| *key = k).is_some(),
+            Tweak::Host(_) => true,
+        });
     }
 
     fn note(&mut self, t: Tweak) {
@@ -407,6 +417,10 @@ impl App {
             let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
             // A plugin's parameters can take a few ms to read (`lock_for_tick`).
             let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };
+            // The dropout log is Linux only; elsewhere the hold is only timed.
+            #[cfg(target_os = "linux")]
+            let t0 = crate::dropout_log::Hold::start();
+            #[cfg(not(target_os = "linux"))]
             let t0 = std::time::Instant::now();
             let weak = Arc::downgrade(&h.plugin);
             let count = p.param_count();
@@ -495,7 +509,7 @@ impl App {
                 m.note_hold(t0.elapsed());
             }
             #[cfg(target_os = "linux")]
-            crate::dropout_log::held(&p.desc().name, "reading its parameters", t0.elapsed());
+            crate::dropout_log::held(&p.desc().name, "reading its parameters", t0);
         }
         // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
         // begin to its end, values sent without one joined while they come in a row.
@@ -717,6 +731,21 @@ mod tests {
         p.note(Tweak::Host(Action::Tempo));
         p.note(Tweak::Plugin { key: 0, index: 0 });
         assert_eq!(p.last, vec![Tweak::Plugin { key: 0, index: 0 }, Tweak::Host(Action::Tempo)]);
+    }
+
+    /// "Most recent" follows its plugin's parameter when the plugin's rack row moves, and is forgotten when the row goes.
+    #[test]
+    fn the_most_recent_parameter_follows_its_row() {
+        let mut app = App::new(None);
+        app.state.params.last = vec![Tweak::Plugin { key: 2, index: 5 }, Tweak::Plugin { key: fx_key(3, 1), index: 2 }];
+        app.remap_rows(&|r| Some(match r {
+            1 => 2,
+            2 => 1,
+            r => r,
+        }));
+        assert_eq!(app.state.params.last, vec![Tweak::Plugin { key: 1, index: 5 }, Tweak::Plugin { key: fx_key(3, 1), index: 2 }]);
+        app.remap_rows(&|r| (r != 1).then_some(r));
+        assert_eq!(app.state.params.last, vec![Tweak::Plugin { key: fx_key(3, 1), index: 2 }], "its row went");
     }
 
     /// The built-in EQ in a mixer slot: "Show all parameters" lists its parameters in the browser, a parameter row makes

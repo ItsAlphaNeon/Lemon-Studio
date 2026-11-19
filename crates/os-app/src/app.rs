@@ -2102,21 +2102,12 @@ impl App {
         }
         match result {
             Ok((file, project)) => {
-                self.transport.silence();
-                self.reset_hosted();
+                self.leave_project();
                 let s = &mut self.state;
                 s.tempo = project.tempo.unwrap_or(130.0);
                 s.pattern = project.current_pattern.unwrap_or(1).max(1);
-                s.selected_channel = 0;
-                s.selected_mixer = 1;
-                s.mixer = Default::default();
-                s.playlist_scroll = (0.0, 0.0);
-                s.rack_scroll = 0.0;
-                s.rack_scroll_x = 0.0;
-                s.rack.reset();
-                s.hide(Win::Plugin);
-                s.mixer_scroll = 0.0;
-                // As saved (event 9); a file without it opens in song mode (spec: flp/engine-events.md "Project").
+                // As saved (event 9); a file without it opens in song mode, as in FL 26 (spec: flp/engine-events.md
+                // "Project").
                 s.song_mode = project.song_mode.unwrap_or(true);
                 s.project = project;
                 // Opening in song mode sets the initial values (spec: flp/engine-events.md "Event 216"); the project
@@ -2134,10 +2125,6 @@ impl App {
                 if converted && s.path.as_deref().is_some_and(crate::project_files::is_flp) {
                     s.message = s.path.take().map(|p| format!("Opened {}, converted from an older version", p.display()));
                 }
-                s.piano.reset();
-                s.playlist.reset();
-                s.history.reset();
-                s.control.reset();
                 s.control.event(&crate::control::By::User, "opened", s.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
                 crate::playlist::load_view(s);
                 s.piano.dirty = true; // live notes use the new project
@@ -2814,10 +2801,34 @@ impl App {
         self.empty_project();
     }
 
-    /// The built-in new project (FILE ▸ New with Empty, New from template ▸ Empty).
-    pub(crate) fn empty_project(&mut self) {
+    /// Another project replaces this one (open, New, a MIDI file opened as a project): playback and the hosted plugins
+    /// stop, and what the interface remembers of the old project goes, so none of it points into the new one.
+    pub(crate) fn leave_project(&mut self) {
         self.transport.silence();
         self.reset_hosted();
+        let s = &mut self.state;
+        s.selected_channel = 0;
+        s.selected_mixer = 1;
+        s.mixer = Default::default();
+        s.playlist_scroll = (0.0, 0.0);
+        s.rack_scroll = 0.0;
+        s.rack_scroll_x = 0.0;
+        s.mixer_scroll = 0.0;
+        s.rack.reset();
+        s.rec.forget();
+        for w in [Win::Plugin, Win::Events, Win::Container, Win::PluginPalette] {
+            s.hide(w);
+        }
+        s.events_back = None;
+        s.piano.reset();
+        s.playlist.reset();
+        s.history.reset();
+        s.control.reset();
+    }
+
+    /// The built-in new project (FILE ▸ New with Empty, New from template ▸ Empty).
+    pub(crate) fn empty_project(&mut self) {
+        self.leave_project();
         let s = &mut self.state;
         s.project = default_project();
         crate::project_info::created(s);
@@ -2827,13 +2838,8 @@ impl App {
         s.pattern = 1;
         // The reference's default template is saved in pattern mode (spec: flp/engine-events.md "Project").
         s.song_mode = false;
-        s.piano.reset();
-        s.playlist.reset();
-        s.history.reset();
-        s.control.reset();
         s.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
         crate::playlist::load_view(s);
-        s.rack.reset();
         crate::rack::from_model(s);
         s.piano.dirty = true;
         s.message = Some("New project".into());
@@ -2889,6 +2895,7 @@ impl App {
         crate::smith::store(&mut self.state.project, &self.plugins);
         crate::slicer::store(&mut self.state.project, &self.plugins);
         crate::drums::store(&mut self.state.project, &self.plugins);
+        crate::soundfont::store(&mut self.state.project, &self.plugins);
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
@@ -2983,6 +2990,7 @@ impl App {
         self.sync_smith();
         self.sync_slicer();
         self.sync_drums();
+        self.sync_soundfont();
         self.sync_native();
         self.host_deadline = None;
         let samplers = self.state.hosted_rows.iter().filter(|&&r| self.state.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
@@ -3127,6 +3135,7 @@ impl App {
             self.sync_smith();
             self.sync_slicer();
             self.sync_drums();
+            self.sync_soundfont();
             self.sync_native();
         }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
@@ -3311,6 +3320,10 @@ impl App {
                         if row < self.state.project.channels.len() {
                             if let Some(i) = menu.items.iter_mut().find(|i| i.label == "Replace") {
                                 *i = crate::playlist::PItem::sub("Replace", crate::plugin_menu::items(&self.state, crate::plugin_menu::Target::Replace(row), true));
+                            }
+                            // Outputs ▸: where a multi-output plugin's extra outputs play (spec: audio/multi-output.md).
+                            if let Some(outs) = crate::rack::outputs_menu(self, row) {
+                                menu.items.push(outs);
                             }
                         }
                         self.state.playlist.popup = Some(menu);
@@ -10809,6 +10822,7 @@ impl App {
     pub(crate) fn remap_rows(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
         self.typing_release_all();
         self.plugins.remap(m);
+        self.state.params.remap(|k| if k >= crate::plugins::FX_KEY { Some(k) } else { m(k) });
         // The rows hosted are the instances' rows.
         self.state.hosted_rows = self.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
         self.sampler_failed = self.sampler_failed.iter().filter_map(|&r| m(r)).collect();

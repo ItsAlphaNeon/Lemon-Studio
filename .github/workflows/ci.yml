@@ -47,6 +47,13 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets --locked
 
+      # The 32-bit bridge's helper as releases build it (for 32-bit Windows); the tests build and run its 64-bit twin.
+      - name: Build the 32-bit bridge
+        if: runner.os == 'Windows'
+        run: |
+          rustup target add i686-pc-windows-msvc
+          cargo build --locked -p os-vst2-bridge --bin lemonstudio-bridge32 --target i686-pc-windows-msvc
+
       # The plugin bundles (VST3 + CLAP): the hosting tests load them, and skip without them.
       - name: Bundle plugins
         run: cargo run -p bundle-plugins --locked
