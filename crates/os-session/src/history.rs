@@ -7,9 +7,8 @@
 //! project as opened or made). An edit records a step holding what it is about to change (`record`); undo and redo
 //! swap that with the project's, so a step always holds the other side of itself: the state before it while it is
 //! done, the state after it while it is undone. Covered: a pattern's notes, control points and length (the piano roll
-//! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`), the
-//! project's initial values (`crate::init`), and with the playlist, PATTERNS > Split by channel's patterns and ADD's
-//! clip channels (`playlist::snapshot_with`). Everything the control plane's commands change (`crate::control`) is
+//! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, and a timebase change with the ticks it
+//! holds (`timebase`). Everything the control plane's commands change (`crate::control`) is
 //! covered too: their steps hold the commands that undo them (`Snap::Commands`), as do the interface's edits that go
 //! through `control::edit` (the mixer and its faders; the rack's channels added, moved and deleted, FILE ▸ Import ▸
 //! MIDI file into the open project among them; the tempo and Settings > Project's values), the plugin parameters
@@ -66,19 +65,6 @@ pub enum Snap {
     Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32>, loops: (Vec<(u16, u32)>, Option<u32>) },
     /// The playlist (`playlist::capture`).
     Playlist(Box<crate::edit::playlist::Snapshot>),
-    /// What a sample load changes on channel `row`: its sample, its name ("Name channels after their sample or plugin"), its root note and its
-    /// stretch ("Read sample root note" and "Read sample tempo information", `rack::read_tags`) and its sampler flags
-    /// (Keep on disk, "Auto keep long audio on disk").
-    Sample { row: usize, path: Option<String>, name: Option<String>, root: u8, stretch: [u32; 4], flags: Option<u32> },
-    /// Channel `row` as a sample dropped below the rack's rows made it (`App::sample_to_rack`); `None` while it
-    /// doesn't exist. Only the last row comes and goes.
-    Channel { row: usize, ch: Option<Box<os_model::Channel>> },
-    /// Control `.0`'s entry in the project's initial values; `None` while it isn't in the list (`crate::init`).
-    Init(u32, Option<os_model::InitControl>),
-    /// All the patterns and the current one (PATTERNS > Split by channel, spec: ui/split-by-channel.md §2).
-    Patterns { patterns: Vec<os_model::Pattern>, current: u16 },
-    /// What ADD > Audio clip / Automation clip changes in the rack (`RackSide`).
-    Rack(Box<RackSide>),
     /// Several of these in one step, put back last first ("Create automation clip": the playlist and the initial
     /// value).
     Several(Vec<Snap>),
@@ -107,51 +93,11 @@ impl Timebase {
     }
 }
 
-/// The rack's side of ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the added channel at `row`
-/// (`None` while it doesn't exist; only the last row comes and goes) and the filter groups. The selection and the
-/// playlist's clip source that go back with it are the interface's (`crate::follow::RackView`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct RackSide {
-    pub row: usize,
-    pub ch: Option<os_model::Channel>,
-    /// The project's filter groups: their names, each channel's group and the filter shown.
-    pub groups: (Vec<String>, Vec<Option<u32>>, Option<u32>),
-}
-
-impl RackSide {
-    /// Row `row`'s side as the rack has it now.
-    pub fn now(s: &crate::session::Session, row: usize) -> RackSide {
-        RackSide {
-            row,
-            ch: s.project.channels.get(row).cloned(),
-            groups: (s.project.groups.clone(), s.project.channels.iter().map(|c| c.rack.group).collect(), s.project.current_group),
-        }
-    }
-}
-
 /// Before the timebase changes (Settings > Project, a new project's Save as form): one step, "Project settings",
 /// holding the timebase and the project's ticks, so an undo brings back the ticks exactly.
 pub fn timebase(s: &mut crate::session::Session) {
     let snap = Snap::Timebase(Box::new(Timebase::now(s)));
     record(s, PROJECT_SETTINGS, snap);
-}
-
-/// Puts the rack's side `r` back (`Snap::Rack`).
-pub fn put_rack(s: &mut crate::session::Session, r: RackSide) {
-    let RackSide { row, ch, groups: (names, of, shown) } = r;
-    match ch {
-        None if row + 1 == s.project.channels.len() => crate::edit::rack::remove_last(s),
-        Some(c) if row == s.project.channels.len() => crate::edit::rack::push_channel_in(s, c),
-        _ => {}
-    }
-    s.project.write_if(|p| {
-        let before = (p.groups.clone(), p.current_group, p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>());
-        (p.groups, p.current_group) = (names, shown);
-        for (c, g) in p.channels.iter_mut().zip(of) {
-            c.rack.group = g;
-        }
-        before != (p.groups.clone(), p.current_group, p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>())
-    });
 }
 
 /// A knob step's name.
@@ -494,13 +440,6 @@ fn pattern_to_commands(s: &mut crate::session::Session, i: usize) {
 /// step of each 2.5 s apart (spec: ui/undo-steps.md); the time between was not measured.
 pub const WHEEL_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Before a sample loads into channel `row` (the file dialog, a drop, the browser's send): one step, "Load channel
-/// sample(s)", holding what the load changes. `row` past the last channel: the load makes that channel.
-pub fn load_sample(s: &mut crate::session::Session, row: usize) {
-    let snap = Snap::sample(s, row).unwrap_or(Snap::Channel { row: s.project.channels.len(), ch: None });
-    record(s, LOAD_SAMPLE, snap);
-}
-
 /// A mixer track's input, output, record source and monitor mode.
 pub fn track_io_of(m: &os_model::MixerTrack) -> [i32; 4] {
     [m.audio_in, m.audio_out, i32::from(m.rec_source), i32::from(m.monitor)]
@@ -538,11 +477,7 @@ fn swap_step(s: &mut crate::session::Session, i: usize) {
     }
     let now = s.history.steps[i].snap.now(s);
     let old = std::mem::replace(&mut s.history.steps[i].snap, now);
-    let rack = old.has_rack();
     old.put(s);
-    if rack {
-        s.touched.rack_step = Some(s.history.steps[i].id);
-    }
 }
 
 /// `undo` in the session.
@@ -643,25 +578,11 @@ impl Snap {
         }
     }
 
-    /// Channel `row`'s side of a sample load as it is now (`Snap::Sample`).
-    pub fn sample(s: &crate::session::Session, row: usize) -> Option<Snap> {
-        let ch = s.project.channels.get(row)?;
-        let (path, name) = (ch.sample_path.clone(), ch.name.clone());
-        Some(Snap::Sample { row, path, name, root: ch.misc.root, stretch: ch.sound.stretch, flags: ch.sound.sampler_flags })
-    }
-
     /// What this covers, as the project has it now.
     fn now(&self, s: &crate::session::Session) -> Snap {
         match self {
             Snap::Pattern { number, .. } => Snap::pattern(s, *number),
             Snap::Playlist(_) => Snap::Playlist(Box::new(crate::edit::playlist::capture(s))),
-            // A track gone since is left as the step has it (`put` does nothing then).
-            // A channel gone since is left as the step has it (`put` does nothing then).
-            Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
-            Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
-            Snap::Init(t, _) => Snap::Init(*t, crate::init::entry(s, *t)),
-            Snap::Patterns { .. } => Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern() },
-            Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(s, r.row))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
             // What each command would put back, as it is now (`swap` applies them).
             Snap::Commands(v) => Snap::Commands(v.iter().map(|c| c.now(s)).collect()),
@@ -670,15 +591,6 @@ impl Snap {
     }
 
     /// Whether this holds the playlist (`forget_playlist`).
-    /// Whether this holds the rack's side of adding a channel (`Snap::Rack`).
-    fn has_rack(&self) -> bool {
-        match self {
-            Snap::Rack(_) => true,
-            Snap::Several(v) => v.iter().any(Snap::has_rack),
-            _ => false,
-        }
-    }
-
     fn has_playlist(&self) -> bool {
         match self {
             Snap::Playlist(_) => true,
@@ -699,18 +611,10 @@ impl Snap {
                 p.0.iter_mut().for_each(|c| c.rescale(from, to));
                 p.1.iter_mut().for_each(|m| m.rescale(from, to));
             }
-            Snap::Patterns { patterns, .. } => {
-                for p in patterns {
-                    p.notes.iter_mut().for_each(|n| n.rescale(from, to));
-                    p.controls.iter_mut().for_each(|c| c.rescale(from, to));
-                    p.markers.iter_mut().for_each(|m| m.rescale(from, to));
-                    p.length = p.length.map(|l| os_model::rescale_length(l, from, to));
-                }
-            }
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
             Snap::Commands(v) => v.iter_mut().for_each(|c| c.rescale(from, to)),
-            // A channel or an initial value holds no ticks; a timebase step's are at its own timebase.
-            Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Timebase(_) => {}
+            // A timebase step's ticks are at its own timebase.
+            Snap::Timebase(_) => {}
         }
     }
 
@@ -725,28 +629,6 @@ impl Snap {
                 s.touched.notes = true;
             }
             Snap::Playlist(p) => crate::edit::playlist::restore(s, *p),
-            Snap::Sample { row, path, name, root, stretch, flags } => {
-                if let Some(ch) = s.project.get_mut().channels.get_mut(row) {
-                    (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (path.clone(), name, root, stretch);
-                    ch.sound.sampler_flags = flags;
-                    // Its Lemon Sampler follows on the next tick: the sample (none: cleared), root note, stretch and
-                    // Keep on disk.
-                    s.sample_loads.push((row, path.unwrap_or_default()));
-                }
-            }
-            // The channel goes or comes back only as the last row: rows below it would move.
-            Snap::Channel { row, ch } => match ch {
-                None if row + 1 == s.project.channels.len() => crate::edit::rack::remove_last(s),
-                Some(c) if row == s.project.channels.len() => crate::edit::rack::push_channel_in(s, *c),
-                _ => {}
-            },
-            Snap::Init(t, e) => crate::init::put(s, t, e),
-            Snap::Patterns { patterns, current } => {
-                s.project.get_mut().patterns = patterns;
-                s.set_pattern(current);
-                s.touched.notes = true;
-            }
-            Snap::Rack(r) => put_rack(s, *r),
             Snap::Several(v) => v.into_iter().rev().for_each(|x| x.put(s)),
             Snap::Commands(v) => {
                 crate::control::take_back_in(s, v);

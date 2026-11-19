@@ -4661,7 +4661,7 @@ impl App {
     /// sampler row it replaces that channel's sample (Lemon Sampler loads it) and renames the channel after the file
     /// while "Name channels after their sample or plugin" is on (`rack::auto_name`); elsewhere it adds a Lemon Sampler channel named after the
     /// file. Either channel reads the file's root note and beats (`rack::read_tags`). One history step, "Load channel
-    /// sample(s)" (`history::load_sample`).
+    /// sample(s)" (`Command::LoadSample`).
     pub fn sample_to_rack(&mut self, path: String, y: f32) {
         let s = &self.state;
         let row = views::rack::row_at(s, y).filter(|&r| s.session.project.channels[r].kind.is_sampler());

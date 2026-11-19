@@ -243,7 +243,17 @@ fn count(p: &os_model::Project) -> [usize; 11] {
     ]
 }
 
+/// The command's `op`, as its JSON names it (checked against serde in debug builds).
 fn op(c: &Command) -> &'static str {
+    let name = op_name(c);
+    #[cfg(debug_assertions)]
+    if let Some(serde) = serde_json::to_value(c).ok().and_then(|v| v["op"].as_str().map(str::to_owned)) {
+        assert_eq!(serde, name, "op of {c:?}");
+    }
+    name
+}
+
+fn op_name(c: &Command) -> &'static str {
     match c {
         Command::SetTempo { .. } => "set_tempo",
         Command::SetSwing { .. } => "set_swing",

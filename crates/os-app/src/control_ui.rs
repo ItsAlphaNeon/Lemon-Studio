@@ -118,37 +118,6 @@ pub fn knob_command(s: &mut State, name: &'static str, run: Option<crate::histor
     Ok(results)
 }
 
-/// `edit` for a knob-like control (a mixer fader's typed value): no step while Undo knob tweaks is off.
-pub fn knob_edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
-    if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
-        edit(s, name, region, f)
-    } else {
-        f(s)
-    }
-}
-
-/// An edit of `region` that joins the step of run `run` just before it (a knob dragged, a box's wheel notches): its
-/// first change records the step holding `region` as it was, the others go into it. `knob`: a knob-like control, no
-/// step while Undo knob tweaks is off.
-pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, run: crate::history::Run, knob: bool, f: impl FnOnce(&mut State) -> R) -> R {
-    if (knob && !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) || s.session.history.joins(run) {
-        return f(s);
-    }
-    s.session.link_moves.clear();
-    // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
-    // its region may name other things (tracks renumbered by a delete).
-    crate::history::settle(&mut s.session);
-    let before = command::Taken::of(&s.session, region);
-    let r = f(s);
-    if let Some(before) = before {
-        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
-            record_edit(&mut s.session, name, before);
-            s.session.history.set_run(run);
-        }
-    }
-    r
-}
-
 /// `edit` for an edit that needs the app (a mixer menu command hosting or dropping plugins).
 pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
     app.state.session.link_moves.clear();

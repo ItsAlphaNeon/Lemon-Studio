@@ -108,8 +108,6 @@ pub struct Session {
 /// did; the interface knows what that means for its selections and windows.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Touched {
-    /// The project was put back whole: the channels' ids by row before, the rows the views pointed at.
-    pub rows: Option<Vec<u32>>,
     /// Clips moved in the playlist's list (the selection is kept by id).
     pub clips: bool,
     /// Mixer tracks may have gone.
@@ -131,7 +129,6 @@ pub enum View {
     /// (what is not listed stays where it is).
     Places { tracks: Vec<Option<u16>>, slots: std::collections::HashMap<(u16, u8), Option<(u16, u8)>> },
     /// The mixer's selection follows tracks renumbered (`tracks` as in `Places`).
-    MixerRenumbered(Vec<Option<u16>>),
     /// Mixer track `.0` becomes the current one, the only one selected.
     MixerSelect(u16),
     /// Patterns were renumbered: the clip and note selections go.

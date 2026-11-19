@@ -2388,7 +2388,7 @@ impl Command {
                 while n != to {
                     let o = if to > n { n + 1 } else { n - 1 };
                     let m = move |t: u16| if t == n { o } else if t == o { n } else { t };
-                    crate::edit::mixer::renumber(s, &m, n.min(o), n.max(o) + 1, 0);
+                    crate::edit::mixer::renumber(s, &m, n.min(o), n.max(o) + 1);
                     n = o;
                 }
                 none
@@ -3436,8 +3436,7 @@ fn put_back(s: &mut crate::session::Session, back: Back) {
 
 /// Channel `c` put back on `row`, the rows from there one down with every index that names them.
 pub(crate) fn put_channel_back(s: &mut crate::session::Session, row: usize, mut c: os_model::Channel) {
-    let old: Vec<u32> = s.project.channels.iter().map(|c| c.id.0).collect();
-    let n = old.len();
+    let n = s.project.channels.len();
     let row = row.min(n);
     // It comes in last, under an index no other channel has, so nothing naming the others is taken for it.
     c.index = n as u16;
@@ -3446,8 +3445,9 @@ pub(crate) fn put_channel_back(s: &mut crate::session::Session, row: usize, mut 
     let map: Vec<Option<usize>> = (0..=n).map(|r| Some(if r == n { row } else if r < row { r } else { r + 1 })).collect();
     crate::edit::rack::remap_project(s.project.get_mut(), &map);
     crate::edit::rack::remap_session(s, &map);
-    // The views follow by id, as after the project put back whole.
-    s.touched.rows.get_or_insert(old);
+    // The views follow, and the clip selection by id.
+    s.touched.views.push(crate::session::View::Rows(map));
+    s.touched.clips = true;
     s.touched.views.push(crate::session::View::RackAutosize);
 }
 
@@ -3523,8 +3523,9 @@ fn restore(s: &mut crate::session::Session, side: Side) {
     s.set_tempo(tempo);
     s.set_pattern(pattern);
     crate::edit::rack::remap_session(s, &map);
-    // The views follow the rows by id (`crate::follow`).
-    s.touched.rows.get_or_insert(old);
+    // The views follow the rows, and the clip selection by id (`crate::follow`).
+    s.touched.views.push(crate::session::View::Rows(map));
+    s.touched.clips = true;
     (s.loop_type, s.loop_type_of) = loop_type;
     // The pattern shown now stays shown, as in FL (an undo leaves the pattern shown); a step that made or removed
     // patterns (a clone, a delete) shows the pattern it showed. Each pattern's loops are its own, put back with it.

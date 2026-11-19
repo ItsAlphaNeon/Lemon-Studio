@@ -173,17 +173,6 @@ pub fn changed(s: &mut crate::session::Session) {
     s.dirty = true;
 }
 
-/// Switch auto-bypass for all plugins (spec: ui/channel-switches.md §5): every plugin's Auto-bypass when silent (the
-/// mixer slots' and the plugin channels', `os_model::PluginCpu::smart_disable`) on when one is off, as the original
-/// does; with all of them on, all off (Lemon Studio's choice: the original's answer there was not observed). The
-/// plugins inside containers have switches of their own (`crate::container::Member::cpu`) and are switched with them.
-/// No message, as in the original. Returns whether there was a plugin to switch.
-pub fn switch_auto_bypass(s: &mut crate::session::Session) -> bool {
-    let Some(on) = auto_bypass_switch(s) else { return false };
-    set_auto_bypass(s, on);
-    true
-}
-
 /// What Switch auto-bypass for all plugins sets (see `switch_auto_bypass`): on when one plugin has it off, else off;
 /// `None` when there is no plugin.
 pub fn auto_bypass_switch(s: &crate::session::Session) -> Option<bool> {
@@ -240,11 +229,6 @@ pub fn group(s: &crate::session::Session, n: u16) -> Option<std::ops::RangeInclu
     Some(first..=end)
 }
 
-/// The tracks on besides the master are exactly `keep`.
-pub fn audible_set(s: &crate::session::Session, keep: &[u16]) -> bool {
-    s.project.mixer.iter().all(|m| m.index == 0 || keep.contains(&m.index) == m.enabled)
-}
-
 /// `n` and every track it reaches through sends (`down`), or every track reaching it (`!down`).
 pub fn reach(s: &crate::session::Session, n: u16, down: bool) -> Vec<u16> {
     let mut seen = vec![n];
@@ -264,22 +248,6 @@ pub fn reach(s: &crate::session::Session, n: u16, down: bool) -> Vec<u16> {
         i += 1;
     }
     seen
-}
-
-/// Names track `t` after channel row `r` and gives it the channel's colour (spec: ui/mixer-track-commands.md §1,
-/// §2). The master keeps its name.
-pub fn name_after(s: &mut crate::session::Session, t: u16, r: usize) {
-    if t == 0 {
-        return;
-    }
-    let nm = crate::edit::rack::channel_name(s, r);
-    let col = s.project.channels.get(r).and_then(|c| c.color);
-    if let Some(m) = track_mut(s, t) {
-        m.name = Some(nm);
-        if col.is_some() {
-            m.color = col;
-        }
-    }
 }
 
 /// The inserts Trim unused tracks deletes (spec: ui/mixer-track-commands.md §4, §6): no channel uses them and (unless
@@ -329,13 +297,12 @@ pub fn add_track_in(s: &mut crate::session::Session, at: Option<u16>) -> u16 {
 /// hosted slot instances. The track at the destination end is overwritten; callers make room first.
 pub fn shift_tracks(s: &mut crate::session::Session, from: u16, to: u16, d: i32) {
     let m = |t: u16| if t >= from && t < to { (i32::from(t) + d) as u16 } else { t };
-    renumber(s, &m, from, to, d);
+    renumber(s, &m, from, to);
 }
 
 /// Renumbers tracks with `m` (a permutation on the touched range).
-pub fn renumber(s: &mut crate::session::Session, m: &dyn Fn(u16) -> u16, from: u16, to: u16, d: i32) {
+pub fn renumber(s: &mut crate::session::Session, m: &dyn Fn(u16) -> u16, from: u16, to: u16) {
     let old: Vec<MixerTrack> = s.project.mixer.clone();
-    let _ = d;
     for t in &old {
         if t.index >= from && t.index < to {
             let n = m(t.index);
@@ -358,8 +325,6 @@ pub fn renumber(s: &mut crate::session::Session, m: &dyn Fn(u16) -> u16, from: u
     }
     s.project.get_mut().remap_link_mixers(|t| Some(m(t)));
     follow_places(s, &|t| Some(m(t)), &|t, k| Some((m(t), k)));
-    let n = s.project.mixer.len() as u16 + 1;
-    s.touched.views.push(crate::session::View::MixerRenumbered((0..n).map(|t| Some(m(t))).collect()));
     let mut map = Vec::new();
     for t in &old {
         for k in 0..10u8 {
