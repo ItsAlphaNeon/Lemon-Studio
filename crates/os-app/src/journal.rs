@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(a.journal.since(mark).0[0]["name"], "Tempo");
         // A note added, then moved: one added; then one removed and one added, with every field.
         let mark = a.journal.since(0).1;
-        let n = os_model::Note { position: 0, length: 24, channel: 0, key: 60, velocity: 100, pan: 64, fine_pitch: 120, mod_x: 128, mod_y: 128, release: 64, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
+        let n = os_model::Note { position: 0, length: 24, channel: 0, key: 60, velocity: 100, pan: 64, fine_pitch: 120, mod_x: 128, mod_y: 128, release: 64, flags: 0x4000, group: 0, unk14: 0, repeat: 0, id: Default::default() };
         crate::patterns::pat_mut(&mut a.state.session, 1).notes.push(n);
         a.journal.touch();
         a.journal.read_at = None;
