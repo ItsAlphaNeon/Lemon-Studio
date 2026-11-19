@@ -46,6 +46,10 @@ pub struct Hosted {
     /// Set while the open editor belongs to a Lemon plugin that joined the strip (host link).
     #[cfg(plugin_windows)]
     pub link: Option<os_hostlink::Link>,
+    /// While a Lemon plugin's editor is linked: the instance's state as last known, and the history's `changes` when it
+    /// was read. An edit in the window (`Request::Edited`) is undone back to it (`Plugins::take_known`).
+    #[cfg(plugin_windows)]
+    known: Option<(Vec<u8>, u64)>,
     /// The app was told that the instance stopped after a crash.
     stop_told: bool,
     /// A native instance started from a project's state that it did not give back byte for byte: a save keeps the
@@ -159,6 +163,8 @@ impl Hosted {
             window: None,
             #[cfg(plugin_windows)]
             link: None,
+            #[cfg(plugin_windows)]
+            known: None,
             stop_told: false,
             keep_file_state: false,
             stand_in: false,
@@ -245,6 +251,9 @@ pub enum Request {
     /// notes.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     Notes(usize, Vec<os_hostlink::NoteOut>),
+    /// The user changed a Lemon plugin's saved state in its own window (host link `Edited`): row.
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
+    Edited(usize),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
     /// The menu arrow was clicked: open the window menu at this screen point.
@@ -1213,7 +1222,31 @@ impl Plugins {
             }
             h.window = None;
             h.link = None;
+            h.known = None;
         }
+    }
+
+    /// The states of the instances whose linked editors are open, read again when the history moved on since (`changes`:
+    /// `History::changes`): a step recorded, undone or redone may have changed them. A window that just opened reads
+    /// its instance's first.
+    #[cfg(plugin_windows)]
+    pub fn refresh_known(&mut self, changes: u64) {
+        for h in self.hosted.values_mut() {
+            if h.link.is_none() || h.known.as_ref().is_some_and(|k| k.1 == changes) {
+                continue;
+            }
+            h.known = h.lock_for_state().and_then(|p| p.save_state()).map(|st| (st, changes));
+        }
+    }
+
+    /// The user edited the instance under `key` in its own window and its state is now `now`: the state it had before,
+    /// when known and different. `now` is known from then on.
+    #[cfg(plugin_windows)]
+    pub fn take_known(&mut self, key: usize, now: &[u8], changes: u64) -> Option<Vec<u8>> {
+        let h = self.hosted.get_mut(&key)?;
+        h.link.as_ref()?;
+        let before = h.known.replace((now.to_vec(), changes)).map(|k| k.0);
+        before.filter(|b| b != now)
     }
 
     /// Row `row`'s open window (native frame handle) and whether it is detached.
@@ -1340,6 +1373,7 @@ impl Plugins {
                 (_, crate::plugin_window::LinkMsg::Audio(_)) => out.extend(os_hostlink::take_audio().into_iter().map(|(p, ch)| Request::Audio(p, ch))),
                 (Some(row), crate::plugin_window::LinkMsg::Notes(token)) => out.push(Request::Notes(row, os_hostlink::take_notes(token))),
                 (None, crate::plugin_window::LinkMsg::Notes(token)) => drop(os_hostlink::take_notes(token)),
+                (Some(row), crate::plugin_window::LinkMsg::Edited) => out.push(Request::Edited(row)),
                 _ => {}
             }
         }
