@@ -189,6 +189,9 @@ pub struct Logic {
     pub hint: String,
     copied: Option<f32>,
     pub hosted: bool,
+    /// Writes to the state from the editor, and how many of them the host was told of (`take_edit`).
+    made: std::cell::Cell<u64>,
+    told: u64,
     /// Wheel notches not yet a whole step (fine wheels and trackpads send fractions), and the control they are for.
     notch: Option<(Target, f32)>,
 }
@@ -221,10 +224,26 @@ pub fn store_view(raw: &mut [u8], v: &ViewState) {
 }
 
 impl Logic {
+    /// The parameters, for a write to the state from the editor: counted for the host (`take_edit`).
+    fn raw(&self) -> &Arc<LimiterParams> {
+        self.made.set(self.made.get() + 1);
+        &self.params
+    }
+
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made.get() == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made.get();
+        true
+    }
+
     pub fn new(params: Arc<LimiterParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
         let view = view_from(&params.raw_copy());
-        let l = Logic { vals, params, shared, view, hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, notch: None };
+        let l = Logic { vals, params, shared, view, hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, made: std::cell::Cell::new(0), told: 0, notch: None };
         l.apply_speed();
         l
     }
@@ -263,7 +282,7 @@ impl Logic {
     /// Editor settings changed: kept in the state image.
     fn save_view(&self) {
         let v = self.view.clone();
-        self.params.edit_raw(|b| store_view(b, &v));
+        self.raw().edit_raw(|b| store_view(b, &v));
         self.apply_speed();
     }
 
@@ -273,7 +292,7 @@ impl Logic {
 
     fn set_sidechain(&self, v: i32) {
         let v = v.clamp(0, i32::from(params::SIDECHAIN_MAX)) as u8;
-        self.params.edit_raw(|b| b[params::SIDECHAIN_BYTE] = v);
+        self.raw().edit_raw(|b| b[params::SIDECHAIN_BYTE] = v);
     }
 
     /// One step of a stepped box.
@@ -296,7 +315,7 @@ impl Logic {
     /// Store: the parameters into the spare bank. Flip: the parameters and the spare bank swap (spec §5).
     fn store(&mut self) {
         let cur = self.values();
-        self.params.edit_raw(|b| params::set_spare(b, &cur));
+        self.raw().edit_raw(|b| params::set_spare(b, &cur));
     }
 
     fn flip(&mut self) {
@@ -308,7 +327,7 @@ impl Logic {
                 self.vals.edit_plain(d.id, spare[k].clamp(lo, hi) as f32);
             }
         }
-        self.params.edit_raw(|b| params::set_spare(b, &cur));
+        self.raw().edit_raw(|b| params::set_spare(b, &cur));
     }
 
     pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, _dbl: bool) -> Vec<Act> {
@@ -504,7 +523,7 @@ impl Logic {
             }
             Cmd::TypeIn(id) => return vec![Act::TypeIn(id, x, y)],
             Cmd::Automate(id) => return params::index(&id).map(Act::Automate).into_iter().collect(),
-            Cmd::Safety => self.params.edit_raw(|b| b[params::FLAGS_BYTE] ^= FLAG_EXACT_CEILING),
+            Cmd::Safety => self.raw().edit_raw(|b| b[params::FLAGS_BYTE] ^= FLAG_EXACT_CEILING),
         }
         vec![Act::Repaint]
     }
@@ -807,6 +826,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -1048,6 +1070,9 @@ mod gui {
                 self.link.to_host(Cmd::Changed, 0);
             }
             // Joined the strip: "Create automation clip" works and the host shows the hint.
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -1338,7 +1363,9 @@ mod tests {
         assert!(l.safety());
         let m = l.menu(&MenuReq::Display);
         assert_eq!(m.find("0.2 dB limiter safety"), Some(Cmd::Safety));
+        assert!(!l.take_edit());
         l.pick(&MenuReq::Display, Cmd::Safety, 0.0, 0.0);
+        assert!(l.take_edit(), "the host hears of it");
         assert!(!l.safety());
         assert_eq!(params::byte(&l.params.raw_copy(), params::FLAGS_BYTE), 1);
         // The display reads 0 dB at half height (of the scale, spec §3).

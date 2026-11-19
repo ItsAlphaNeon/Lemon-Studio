@@ -267,14 +267,33 @@ pub struct Logic {
     pub hint: String,
     copied: Option<f32>,
     pub hosted: bool,
+    /// Writes to the state from the editor, and how many of them the host was told of (`take_edit`).
+    made: std::cell::Cell<u64>,
+    told: u64,
     /// Wheel notches not yet a whole step on a type tab or order mark (fine wheels and trackpads send fractions).
     notch: Option<(Target, f32)>,
 }
 
 impl Logic {
+    /// The parameters, for a write to the state from the editor: counted for the host (`take_edit`).
+    fn raw(&self) -> &Arc<EqParams> {
+        self.made.set(self.made.get() + 1);
+        &self.params
+    }
+
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made.get() == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made.get();
+        true
+    }
+
     pub fn new(params: Arc<EqParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, notch: None }
+        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, made: std::cell::Cell::new(0), told: 0, notch: None }
     }
 
     pub fn dragging(&self) -> bool {
@@ -375,7 +394,7 @@ impl Logic {
     }
 
     fn set_mask(&mut self, m: u8) {
-        self.params.edit_extra(|b| set_byte(b, MASK_BYTE, m & 0x7f));
+        self.raw().edit_extra(|b| set_byte(b, MASK_BYTE, m & 0x7f));
     }
 
     fn mask(&self) -> u8 {
@@ -390,11 +409,11 @@ impl Logic {
             if self.shared.lock_spare.load(Ordering::Relaxed) {
                 return;
             }
-            self.params.edit_extra(|b| fields.iter().enumerate().for_each(|(i, &v)| params::set_field(b, 37 + i, v)));
+            self.raw().edit_extra(|b| fields.iter().enumerate().for_each(|(i, &v)| params::set_field(b, 37 + i, v)));
             return;
         }
         let spare = params::settings_at(&self.params.extra_copy(), 37);
-        self.params.edit_extra(|b| fields.iter().enumerate().for_each(|(i, &v)| params::set_field(b, 37 + i, v)));
+        self.raw().edit_extra(|b| fields.iter().enumerate().for_each(|(i, &v)| params::set_field(b, 37 + i, v)));
         for k in 0..BANDS {
             self.set_band(k, spare.bands[k]);
         }
@@ -473,21 +492,21 @@ impl Logic {
                 self.set_mask(m);
             }
             (Target::Options, Btn::Left) => acts.push(Act::Menu(MenuReq::Options, x, y)),
-            (Target::Lin, Btn::Left) => self.params.edit_extra(|b| toggle(b, params::F_LIN)),
+            (Target::Lin, Btn::Left) => self.raw().edit_extra(|b| toggle(b, params::F_LIN)),
             (Target::Lin, Btn::Right) => acts.push(Act::Menu(MenuReq::Lin, x, y)),
             // HQ on / off: bit 0; the mode in the other bits stays for the next time it is switched on.
-            (Target::Hq, Btn::Left) => self.params.edit_extra(|b| {
+            (Target::Hq, Btn::Left) => self.raw().edit_extra(|b| {
                 let cur = byte(b, params::HQ_BYTE);
                 set_byte(b, params::HQ_BYTE, cur ^ 1);
             }),
             (Target::Hq, Btn::Right) => acts.push(Act::Menu(MenuReq::Hq, x, y)),
-            (Target::Tokens, Btn::Left) => self.params.edit_extra(|b| {
+            (Target::Tokens, Btn::Left) => self.raw().edit_extra(|b| {
                 let v = byte(b, params::TOKENS_BYTE);
                 set_byte(b, params::TOKENS_BYTE, u8::from(v == 0));
             }),
-            (Target::Phones, Btn::Left) => self.params.edit_extra(|b| toggle(b, params::F_SOLO_SHIFT)),
+            (Target::Phones, Btn::Left) => self.raw().edit_extra(|b| toggle(b, params::F_SOLO_SHIFT)),
             (Target::Phones, Btn::Right) => acts.push(Act::Menu(MenuReq::Phones, x, y)),
-            (Target::Monitor(i), Btn::Left) => self.params.edit_extra(|b| set_byte(b, params::MONITOR_BYTE, i)),
+            (Target::Monitor(i), Btn::Left) => self.raw().edit_extra(|b| set_byte(b, params::MONITOR_BYTE, i)),
             (Target::Store, Btn::Left) => self.compare(false),
             (Target::Flip, Btn::Left) => self.compare(true),
             _ => {}
@@ -716,14 +735,14 @@ impl Logic {
             }
             Cmd::TypeIn(id) => return vec![Act::TypeIn(id, x, y)],
             Cmd::Automate(id) => return self.param_index(&id).map(Act::Automate).into_iter().collect(),
-            Cmd::Flag(f) => self.params.edit_extra(|b| toggle(b, f)),
-            Cmd::Opt(o, v) => self.params.edit_extra(|b| params::set_opt(b, o, v)),
-            Cmd::Byte(i, v) => self.params.edit_extra(|b| set_byte(b, i, v)),
-            Cmd::Hq(mode) => self.params.edit_extra(|b| {
+            Cmd::Flag(f) => self.raw().edit_extra(|b| toggle(b, f)),
+            Cmd::Opt(o, v) => self.raw().edit_extra(|b| params::set_opt(b, o, v)),
+            Cmd::Byte(i, v) => self.raw().edit_extra(|b| set_byte(b, i, v)),
+            Cmd::Hq(mode) => self.raw().edit_extra(|b| {
                 set_byte(b, params::HQ_BYTE, if mode == 3 { 3 } else { 1 });
                 set_flag(b, params::F_HQ_ENHANCED, mode == 2);
             }),
-            Cmd::Enhanced => self.params.edit_extra(|b| {
+            Cmd::Enhanced => self.raw().edit_extra(|b| {
                 let off = byte(b, params::ENHANCED_OFF_BYTE);
                 set_byte(b, params::ENHANCED_OFF_BYTE, u8::from(off == 0));
             }),
@@ -1044,6 +1063,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -1316,6 +1338,9 @@ mod gui {
                 self.link.to_host(Cmd::Changed, 0);
             }
             // Joined the strip: "Create automation clip" works.
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -1486,7 +1511,9 @@ mod tests {
         }
         // LIN on and off.
         let (x, y) = centre(&l, Target::Lin);
+        let _ = l.take_edit();
         l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(l.take_edit(), "the host hears of it");
         assert_eq!(opts(&l).mode(), eq::Mode::Lin);
         assert_eq!(opts(&l).latency(44100.0), 1536);
         l.pick(&MenuReq::Lin, Cmd::Byte(params::LIN_PRECISION_BYTE, 4), 0.0, 0.0);

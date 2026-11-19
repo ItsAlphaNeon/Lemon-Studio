@@ -202,6 +202,9 @@ pub struct Logic {
     pub hint: String,
     copied: Option<f32>,
     pub hosted: bool,
+    /// Writes to the state from the editor, and how many of them the host was told of (`take_edit`).
+    made: std::cell::Cell<u64>,
+    told: u64,
     /// The key a click on the well is playing.
     playing: Option<u8>,
     /// The waveform's columns and the kit version they were made for.
@@ -209,9 +212,25 @@ pub struct Logic {
 }
 
 impl Logic {
+    /// The parameters, for a write to the state from the editor: counted for the host (`take_edit`).
+    fn raw(&self) -> &Arc<SlicerParams> {
+        self.made.set(self.made.get() + 1);
+        &self.params
+    }
+
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made.get() == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made.get();
+        true
+    }
+
     pub fn new(params: Arc<SlicerParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, playing: None, peaks: (u64::MAX, Vec::new()) }
+        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, made: std::cell::Cell::new(0), told: 0, playing: None, peaks: (u64::MAX, Vec::new()) }
     }
 
     pub fn dragging(&self) -> bool {
@@ -240,7 +259,7 @@ impl Logic {
 
     /// The loop changed: store it and play it.
     fn commit(&mut self, st: &State) {
-        self.shared.set_state(&self.params, st);
+        self.shared.set_state(self.raw(), st);
     }
 
     fn hint_for(&self, t: Option<&Target>) -> String {
@@ -592,7 +611,7 @@ impl Logic {
     /// Loads a loop (the open dialog's file).
     pub fn load(&mut self, path: &str) {
         self.view.chosen = 0;
-        if let Err(e) = self.shared.load(path, &self.params) {
+        if let Err(e) = self.shared.load(path, self.raw()) {
             self.hint = e;
         }
     }
@@ -897,6 +916,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -1139,6 +1161,9 @@ mod gui {
                 self.link.set_hint(&self.logic.hint);
                 self.link.to_host(Cmd::Changed, 0);
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -1296,7 +1321,9 @@ mod tests {
         // Its key and its reverse switch.
         l.pick(&MenuReq::Key, Cmd::Root(36), 0.0, 0.0);
         let (x, y) = centre(&l, &Target::Rev);
+        let _ = l.take_edit();
         l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(l.take_edit(), "the host hears of it");
         let st = l.state();
         assert_eq!((st.slices[2].root, st.slices[2].reversed()), (36, true));
         assert_eq!(l.shared.kit.lock().unwrap().as_ref().unwrap().keys[36], Some(2));
