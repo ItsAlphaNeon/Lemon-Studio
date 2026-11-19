@@ -6,7 +6,6 @@
 //! The interface's side of `crate::typein` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::State;
 use crate::knobs::KnobId;
 use crate::playlist::EditTarget;
@@ -79,12 +78,17 @@ fn set(s: &mut State, t: Target, v: f64) {
             crate::history::knob(&mut s.session, k, false);
             s.set_knob(k, v as f32);
         }
-        Target::Fader(m) => crate::control_ui::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(m), |s| {
-            if let Some(t) = crate::mixer::track_mut(&mut s.session, m) {
-                t.volume = Some(v.clamp(0.0, 1.0));
-                s.session.dirty = true;
+        Target::Fader(m) => {
+            crate::mixer::track_ids(s);
+            let Some(track) = crate::mixer::track(&s.session, m).map(|t| t.id.0) else { return };
+            let mut c = crate::control::command::Command::set_track(track);
+            if let crate::control::command::Command::SetTrack { volume, .. } = &mut c {
+                *volume = Some(v.clamp(0.0, 1.0));
             }
-        }),
+            if let Err(e) = crate::control_ui::knob_command(s, crate::history::MIXER_VOLUME, None, vec![c]) {
+                s.message = Some(e);
+            }
+        }
         Target::Param(key, index) => {
             let before = crate::params_ui::param_value(s, key, index);
             if crate::params_ui::set_param_value(s, key, index, v) {
@@ -95,16 +99,13 @@ fn set(s: &mut State, t: Target, v: f64) {
         }
         // `v` is in the box's unit.
         Target::Latency(m, input, u) => crate::mixer::set_latency(s, m, input, (v * u.ms(s.tempo())).clamp(-LATENCY_MAX_MS, LATENCY_MAX_MS) as f32),
-        // One undo step, as the box's own menu commands.
+        // One undo step, as the box's own menu commands; none with Undo knob tweaks off, as the box's drag.
         Target::RackTrack(r) => {
             let track = v.round().clamp(0.0, f64::from(crate::mixer::max_insert(&s.session.project))) as u16;
             if s.session.project.channels.get(r).is_some_and(|c| c.mixer_track != track) {
-                crate::control_ui::edit(s, "Channel mixer track", crate::control::command::Region::Channel(r), |s| {
-                    if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-                        c.mixer_track = track;
-                    }
-                });
-                s.session.dirty = true;
+                if let Some(e) = crate::rack::set_mixer_track(s, r, track, None) {
+                    s.message = Some(e);
+                }
             }
         }
         Target::RackLed(r) => {

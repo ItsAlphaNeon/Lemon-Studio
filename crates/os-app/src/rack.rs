@@ -8,7 +8,6 @@
 //! the graph editor values and the per-channel loop lengths.
 // spec: ui/channel-rack.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -21,6 +20,196 @@ use os_model::{target, ClipSource};
 use crate::app::{App, State, Win};
 use crate::knobs::KnobId;
 use crate::playlist::{Cmd, Mark, PItem, Popup};
+
+use crate::control::command::{color_text, Command};
+
+/// The undo step of a channel's mixer track.
+pub const MIXER_TRACK: &str = "Channel mixer track";
+/// The undo step of a channel's colour.
+const COLOR: &str = "Channel color";
+/// The undo step of a channel's Misc and sound settings set from the rack's menus.
+const SETTINGS: &str = "Channel settings";
+
+/// Row `r`'s channel id, for a command.
+fn ch_id(s: &State, r: usize) -> Option<u32> {
+    s.session.project.channels.get(r).map(|c| c.id.0)
+}
+
+/// `Command::SetChannel` for row `r` with the settings given (`set_channel!(s, r, color: c)`); `None` without the row.
+/// The channels need their ids first (`crate::mixer::track_ids`).
+macro_rules! set_channel {
+    ($s:expr, $r:expr, $($f:ident: $v:expr),+ $(,)?) => {{
+        // The values first: the fields' names may be the caller's variables.
+        let values = ($(Some($v),)+);
+        ch_id($s, $r).map(move |id| {
+            let mut c = Command::set_channel(id);
+            if let Command::SetChannel { $($f,)+ .. } = &mut c {
+                ($(*$f,)+) = values;
+            }
+            c
+        })
+    }};
+}
+
+/// The rack's edit made of `commands`: one undo step named `name` (none when nothing changed); the error as the
+/// message.
+fn apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Option<String> {
+    crate::control_ui::command(s, name, None, commands).err()
+}
+
+/// A knob-like edit (the mute lights): a step only with Undo knob tweaks on.
+fn apply_knob(s: &mut State, name: &'static str, commands: Vec<Command>) {
+    if let Err(e) = crate::control_ui::knob_command(s, name, None, commands) {
+        s.message = Some(e);
+    }
+}
+
+/// Each row in `rows` on (`true`) or off, as one mute and solo step.
+fn set_on(s: &mut State, rows: impl IntoIterator<Item = (usize, bool)>) {
+    crate::mixer::track_ids(s);
+    let p = &s.session.project;
+    let changes: Vec<(usize, bool)> = rows.into_iter().filter(|&(r, on)| p.channels.get(r).is_some_and(|c| c.enabled != on)).collect();
+    let commands: Vec<Command> = changes.into_iter().filter_map(|(r, on)| set_channel!(s, r, enabled: on)).collect();
+    if !commands.is_empty() {
+        apply_knob(s, MUTE_SOLO, commands);
+    }
+}
+
+/// Rows `rows` take colours `colors`, one step.
+fn set_colors(s: &mut State, rows: &[usize], colors: impl IntoIterator<Item = Option<Rgb>>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let commands: Vec<Command> = rows.iter().zip(colors).filter_map(|(&r, c)| set_channel!(s, r, color: color_text(c).unwrap_or_default())).collect();
+    apply(s, COLOR, commands)
+}
+
+/// The shown pattern's id, for commands; `None` when the project holds no pattern with its number yet.
+fn shown_id(s: &mut State) -> Option<u32> {
+    if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
+        crate::control_ui::settle_ids(s);
+    }
+    s.session.project.pattern(s.pattern().max(1)).map(|p| p.id.0)
+}
+
+/// The commands `make` builds for the shown pattern (given its id) as one step named `name` (with `run`, joining that
+/// run's step; `quiet`, none: the length box). A pattern number the project holds no pattern for gets one first, in
+/// the same step.
+fn on_pattern(s: &mut State, name: &'static str, run: Option<crate::history::Run>, quiet: bool, make: impl FnOnce(&State, u32) -> Vec<Command>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let n = s.pattern().max(1);
+    let id_of = |r: &[serde_json::Value]| r.first().and_then(|v| v["pattern"].as_u64()).map(|id| id as u32);
+    let add = vec![Command::AddPattern { name: None, color: None, number: Some(n) }];
+    let r = match (shown_id(s), quiet) {
+        (Some(id), true) => crate::control_ui::run(s, make(s, id)).map(drop),
+        (Some(id), false) => {
+            let c = make(s, id);
+            if c.is_empty() {
+                return None;
+            }
+            crate::control_ui::command(s, name, run, c).map(drop)
+        }
+        (None, true) => crate::control_ui::run(s, add).and_then(|(r, _)| match id_of(&r) {
+            Some(id) => crate::control_ui::run(s, make(s, id)).map(drop),
+            None => Ok(()),
+        }),
+        (None, false) => {
+            let r = crate::control_ui::command_then(s, name, add, |s, r| id_of(r).map(|id| make(s, id)).unwrap_or_default()).map(drop);
+            if let (Ok(()), Some(run)) = (&r, run) {
+                s.session.history.set_run(run);
+            }
+            r
+        }
+    };
+    if quiet && r.is_ok() {
+        s.session.dirty = true;
+    }
+    r.err()
+}
+
+/// The shown pattern's loops changed by `c`, one step named `name` (`run`: a loop box's drag), which is no unsaved
+/// change (spec: ui/undo-steps.md).
+fn set_loops(s: &mut State, name: &'static str, run: Option<crate::history::Run>, c: LoopChange) {
+    if c == LoopChange::default() {
+        return;
+    }
+    crate::mixer::track_ids(s);
+    let dirty = s.session.dirty;
+    let make = |s: &State, pattern| {
+        let ids: std::collections::HashMap<u16, u32> = s.session.project.channels.iter().map(|ch| (ch.index, ch.id.0)).collect();
+        let loops = c.loops.iter().filter_map(|&(ch, value)| Some(crate::control::command::LoopIn { channel: *ids.get(&ch)?, value })).collect();
+        vec![Command::SetLoops { pattern, mode: c.mode, loops }]
+    };
+    if let Some(e) = on_pattern(s, name, run, false, make) {
+        s.message = Some(e);
+    }
+    s.session.dirty = dirty;
+}
+
+/// The loop icon: loop mode on or off, one step (the window width follows the loop boxes, `relayout`).
+pub fn toggle_loop_mode(s: &mut State) {
+    relayout(s, |s| {
+        let c = loop_mode_change(&s.session, !loop_mode(&s.session));
+        set_loops(s, crate::history::LOOP_MODE, None, c);
+    });
+}
+
+/// A loop box set to `v` (a drag's moves join the drag's step, `drag`; a wheel notch is a step of its own); the hint.
+pub fn loop_box(s: &mut State, r: usize, v: i32, drag: bool) -> String {
+    let (c, hint) = loop_box_change(&s.session, r, v);
+    let run = drag.then_some(crate::history::Run::Loop(r));
+    set_loops(s, crate::history::LOOP_POINT, run, LoopChange { mode: None, loops: c.into_iter().collect() });
+    hint
+}
+
+/// Rows' notes in the shown pattern replaced (`rows`: each row with its new notes), one step, "Step seq edit".
+fn set_rows_notes(s: &mut State, rows: Vec<(usize, Vec<Note>)>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let rows: Vec<(u32, Vec<Note>)> = rows.into_iter().filter_map(|(r, n)| Some((ch_id(s, r)?, n))).collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let e = on_pattern(s, crate::history::STEP_SEQ_EDIT, None, false, |_, pattern| {
+        rows.into_iter()
+            .map(|(channel, notes)| Command::SetNotes { pattern, channel: Some(channel), notes: notes.iter().map(|n| crate::control::command::NoteIn::of(n, channel)).collect() })
+            .collect()
+    });
+    if let Some(e) = &e {
+        s.message = Some(e.clone());
+    }
+    e
+}
+
+/// The shown pattern's length set to `steps` (`None`: Auto) by its command, with no undo step, as in FL (measured
+/// 2026-10-28).
+pub fn set_length(s: &mut State, steps: Option<u32>) {
+    let (ps, max) = (per_step(&s.session), max_steps(&s.session));
+    let len = steps.filter(|&v| v > 0).map_or(0, |v| v.min(max) * ps);
+    let set = move |_: &State, pattern| vec![Command::SetPattern { pattern, name: None, color: None, length: Some(len) }];
+    if let Some(e) = on_pattern(s, "", None, true, set) {
+        s.message = Some(e);
+    }
+}
+
+/// Before a press in the step sequencer on step `k`: a step past an explicit length grows the pattern to the end of the
+/// pattern's bar holding it (§5, §23), the first change of the press's step.
+pub fn grow_for_step(s: &mut State, k: u32) {
+    s.session.history.end_run_of(crate::history::Run::Steps);
+    if explicit_len(&s.session).is_none_or(|l| k < l) {
+        return;
+    }
+    let (ps, max) = (per_step(&s.session), max_steps(&s.session));
+    let len = s.session.project.pattern_bar_end(s.pattern(), (k + 1) * ps).div_ceil(ps).min(max) * ps;
+    let set = move |_: &State, pattern| vec![Command::SetPattern { pattern, name: None, color: None, length: Some(len) }];
+    if let Some(e) = on_pattern(s, crate::history::STEP_SEQ_EDIT, Some(crate::history::Run::Steps), false, set) {
+        s.message = Some(e);
+    }
+}
+
+/// Rows `rows` with `f` making each one's command (`set_channel!`), one step named `name`.
+fn set_rows(s: &mut State, name: &'static str, rows: &[usize], f: impl Fn(&State, usize) -> Option<Command>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let commands: Vec<Command> = rows.iter().filter_map(|&r| f(s, r)).collect();
+    apply(s, name, commands)
+}
 
 /// Name button width at 100 % (§17): wide enough for a new project's "Lemon Sampler" at every UI scale with every text
 /// engine; Linux's Barlow is the widest (Lemon Studio).
@@ -399,20 +588,83 @@ pub fn euclid(n: usize, k: usize) -> Vec<bool> {
 
 /// Group selected… / Add filter group (§7): a group named `name` after the others, holding `rows`, shown.
 pub fn add_group(s: &mut State, name: &str, rows: &BTreeSet<usize>) {
-    s.session.project.write_if(|p| {
+    groups_edit(s, |p| {
         // Last in the file's list when it has "Unsorted" (after it too); else before the "Unsorted" it gets.
         let at = unsorted_at(p).map(|_| p.groups.len());
         let g = insert_group(p, at, name);
         put_in_group(p, rows.iter().copied(), Some(g));
         p.current_group = Some(g);
-        true
     });
     autosize(s);
 }
 
+/// A filter group edit `f`, made on a copy of the project, applied by `Command::SetGroups`: no undo step and no unsaved
+/// change, as in FL.
+fn groups_edit(s: &mut State, f: impl FnOnce(&mut Project)) {
+    crate::mixer::track_ids(s);
+    let mut p = s.session.project.clone();
+    f(&mut p);
+    let now = &s.session.project;
+    let members = |p: &Project| p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>();
+    if p.groups == now.groups && p.current_group == now.current_group && members(&p) == members(now) {
+        return;
+    }
+    let channels = p.channels.iter().map(|c| crate::control::command::GroupIn { channel: c.id.0, group: c.rack.group }).collect();
+    let c = Command::SetGroups { groups: p.groups, channels, shown: p.current_group };
+    let dirty = s.session.dirty;
+    if let Err(e) = crate::control_ui::run(s, vec![c]) {
+        s.message = Some(e);
+    }
+    s.session.dirty = dirty;
+}
+
+/// `join_group` as the command that makes it (`Command::SetGroups`), for row `r`; `None` when it changes nothing.
+pub fn join_group_cmd(s: &State, r: usize, name: &str) -> Option<Command> {
+    let mut p = s.session.project.clone();
+    let g = match p.groups.iter().position(|g| g == name) {
+        Some(g) => g as u32,
+        None => {
+            let at = unsorted_at(&p).or(Some(p.groups.len()));
+            insert_group(&mut p, at, name)
+        }
+    };
+    put_in_group(&mut p, [r], Some(g));
+    p.current_group = Some(g);
+    let now = &s.session.project;
+    let members = |p: &Project| p.channels.iter().map(|c| c.rack.group).collect::<Vec<_>>();
+    if p.groups == now.groups && p.current_group == now.current_group && members(&p) == members(now) {
+        return None;
+    }
+    let channels = p.channels.iter().map(|c| crate::control::command::GroupIn { channel: c.id.0, group: c.rack.group }).collect();
+    Some(Command::SetGroups { groups: p.groups, channels, shown: p.current_group })
+}
+
+/// The filter shown set to `f` (§7; no step, `groups_edit`).
+pub fn show_filter(s: &mut State, f: Filter) {
+    groups_edit(s, |p| {
+        p.current_group = match f {
+            Filter::All => None,
+            Filter::Group(g) => file_group(p, g),
+            Filter::Unsorted => Some(p.unsorted_group()),
+        };
+    });
+}
+
+/// The rows in `rows` zipped and the others unzipped (no undo step, an unsaved change: `ui/undo-steps.md`).
+pub fn zip_rows(s: &mut State, rows: &BTreeSet<usize>) {
+    crate::mixer::track_ids(s);
+    let changes: Vec<(usize, bool)> = s.session.project.channels.iter().enumerate().filter(|(r, c)| c.rack.zipped != rows.contains(r)).map(|(r, _)| (r, rows.contains(&r))).collect();
+    let commands: Vec<Command> = changes.into_iter().filter_map(|(r, on)| set_channel!(s, r, zipped: on)).collect();
+    if !commands.is_empty() {
+        if let Err(e) = crate::control_ui::run(s, commands) {
+            s.message = Some(e);
+        }
+    }
+}
+
 /// Delete filter group: the rack's group `g` goes, its channels to "Unsorted"; the filter shows All.
 pub fn delete_group(s: &mut State, g: usize) {
-    s.session.project.write_if(|p| {
+    groups_edit(s, |p| {
         if let Some(i) = file_group(p, g) {
             p.groups.remove(i as usize);
             for c in &mut p.channels {
@@ -424,7 +676,6 @@ pub fn delete_group(s: &mut State, g: usize) {
             }
         }
         p.current_group = None;
-        true
     });
     autosize(s);
 }
@@ -478,7 +729,7 @@ pub fn filter_tick(s: &mut State) -> bool {
         return false;
     }
     let f = s.session.project.channels[r].rack.group.and_then(|i| rack_group(&s.session.project, i)).map_or(Filter::Unsorted, Filter::Group);
-    set_filter(&mut s.session, f);
+    show_filter(s, f);
     autosize(s);
     true
 }
@@ -537,10 +788,7 @@ fn cut_rows(s: &mut State, rows: &[usize]) {
         return;
     }
     copy_rows(s, rows);
-    snapshot(&mut s.session);
-    for &r in rows {
-        set_row_notes(&mut s.session, r, Vec::new());
-    }
+    set_rows_notes(s, rows.iter().map(|&r| (r, Vec::new())).collect());
 }
 
 /// Paste (§11): the clipboard's first row replaces row `r`'s notes of the pattern, the next ones those of the rows shown
@@ -549,37 +797,21 @@ fn paste_at(s: &mut State, r: usize) {
     let Some(rows) = s.rack.clipboard.clone() else { return };
     let shown = shown(&s.session);
     let below = shown.iter().position(|&x| x == r).map_or(vec![r], |i| shown[i..].to_vec());
-    snapshot(&mut s.session);
-    for (to, notes) in below.into_iter().zip(rows) {
-        set_row_notes(&mut s.session, to, notes);
-    }
+    // The pasted notes are new ones (the copied ones may still be there).
+    let fresh = |notes: Vec<Note>| notes.into_iter().map(|n| Note { id: os_model::Id::NONE, ..n }).collect();
+    set_rows_notes(s, below.into_iter().zip(rows).map(|(to, notes)| (to, fresh(notes))).collect());
 }
 
 /// Turn step `k` of row `r` on or off.
+/// A press's step and the drag's after it are one undo step, "Step seq edit" (`Run::Steps`).
 pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
-    let Some(ch) = ch_index(&s.session, r) else { return };
-    let ps = per_step(&s.session);
-    let n = s.pattern().max(1);
     let mute = s.rack.opts.contains(MUTE_REMOVED);
-    let p = crate::edit::patterns::pat_mut(&mut s.session, n);
-    let has = step_on(&p.notes, ch, k, ps);
-    let at = |x: &Note| x.channel == ch && x.position / ps == k;
-    if on && !has {
-        // A step removed with Mute removed steps on comes back with its notes (Lemon Studio's design), else a new one.
-        if p.notes.iter().any(at) {
-            p.notes.iter_mut().filter(|x| at(x)).for_each(|x| x.set_muted(false));
-        } else {
-            p.notes.push(Note::step(ch, k * ps));
-            p.notes.sort_by_key(|x| (x.position, x.channel));
-        }
-    } else if !on && has {
-        if mute {
-            p.notes.iter_mut().filter(|x| at(x)).for_each(|x| x.set_muted(true));
-        } else {
-            p.notes.retain(|x| !at(x));
-        }
+    crate::mixer::track_ids(s);
+    let Some(channel) = ch_id(s, r) else { return };
+    let set = move |_: &State, pattern| vec![Command::SetStep { pattern, channel, step: k, on, mute }];
+    if let Some(e) = on_pattern(s, crate::history::STEP_SEQ_EDIT, Some(crate::history::Run::Steps), false, set) {
+        s.message = Some(e);
     }
-    s.session.dirty = true;
 }
 
 /// Toggle step `k` of row `r`; returns its new state (§9).
@@ -595,7 +827,7 @@ pub fn toggle_step(s: &mut State, r: usize, k: u32) -> bool {
 /// Put row `r` into the filter group `name` and show that group (ADD > Audio clip / Automation clip, spec:
 /// ui/add-clip-channels.md §1-3). A missing group is made, before "Unsorted" in the file's order.
 pub fn join_group(s: &mut State, r: usize, name: &str) {
-    s.session.project.write_if(|p| {
+    groups_edit(s, |p| {
         let g = match p.groups.iter().position(|g| g == name) {
             Some(g) => g as u32,
             None => {
@@ -605,23 +837,26 @@ pub fn join_group(s: &mut State, r: usize, name: &str) {
         };
         put_in_group(p, [r], Some(g));
         p.current_group = Some(g);
-        true
     });
     autosize(s);
 }
 
 /// Color selected > Gradient: from the first selected channel's colour to the last one's (a hue sweep when they
 /// match or have none; Lemon Studio's version of the reference's gradient dialog).
-pub fn gradient(s: &mut State) {
+pub fn gradient(s: &mut State) -> Option<String> {
     let rows: Vec<usize> = s.rack.sel.iter().copied().filter(|&r| r < s.session.project.channels.len()).collect();
     if rows.len() < 2 {
-        return;
+        return None;
     }
     let (a, b) = (s.session.project.channels[rows[0]].color, s.session.project.channels[*rows.last().expect("len >= 2")].color);
-    for (c, &r) in gradient_colors(a, b, rows.len()).into_iter().zip(&rows) {
-        s.session.project.get_mut().channels[r].color = Some(c);
-        s.session.project.get_mut().channels[r].rack.stored_color = Some(c);
-    }
+    let colors = gradient_colors(a, b, rows.len());
+    set_colors(s, &rows, colors.into_iter().map(|c| Some(c.for_channel())))
+}
+
+/// Rows `rows` get random colours, `salt` added to each row's own number (`edit::rack::random_color_of`).
+fn random_colors(s: &mut State, rows: &[usize], salt: u64) -> Option<String> {
+    let colors: Vec<Option<Rgb>> = rows.iter().map(|&r| Some(random_color_of(r as u64 + salt))).collect();
+    set_colors(s, rows, colors)
 }
 
 /// `k` (2 or more) colours from `a` to `b`, or a hue sweep when they match or either is missing (`gradient`; the
@@ -646,13 +881,20 @@ pub fn gradient_colors(a: Option<Rgb>, b: Option<Rgb>, k: usize) -> Vec<Rgb> {
 /// with "Restore previous state after solo" on, puts back the states from before the first solo (a solo moved to
 /// another channel keeps them; spec: ui/settings-choices.md "Miscellaneous"). Locked channels keep their state.
 pub fn solo(s: &mut State, r: usize) {
-    crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| solo_now(s, r));
+    let on = solo_now(s, r);
+    set_on(s, on.into_iter().enumerate());
 }
 
 /// The undo step of a channel muted, soloed or switched on or off: a knob tweak's (none with "Undo knob tweaks" off).
 pub const MUTE_SOLO: &str = "Channel mute / solo";
 
-fn solo_now(s: &mut State, r: usize) {
+/// The ON switch of a channel's plugin window: the channel on or off, a mute and solo step.
+pub fn toggle_on(s: &mut State, row: usize) {
+    toggle_mute(s, row);
+}
+
+/// Which channels a solo click on row `r` leaves on, row by row.
+fn solo_now(s: &mut State, r: usize) -> Vec<bool> {
     let locked: BTreeSet<usize> = locked_rows(&s.session.project);
     let soloed_now = solo_of(&s.session, r);
     // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
@@ -661,19 +903,24 @@ fn solo_now(s: &mut State, r: usize) {
         s.rack.pre_solo = Some(s.session.project.channels.iter().map(|c| c.enabled).collect());
     }
     let back = if soloed_now { s.rack.pre_solo.take().filter(|_| in_solo && crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO)) } else { None };
-    for (i, c) in s.session.project.get_mut().channels.iter_mut().enumerate() {
-        if locked.contains(&i) {
-            if i == r {
-                c.enabled = true;
+    let on = s
+        .session
+        .project
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if locked.contains(&i) {
+                c.enabled || i == r
+            } else if let Some(b) = &back {
+                b.get(i).copied().unwrap_or(true)
+            } else {
+                i == r || soloed_now
             }
-        } else if let Some(b) = &back {
-            c.enabled = b.get(i).copied().unwrap_or(true);
-        } else {
-            c.enabled = i == r || soloed_now;
-        }
-    }
+        })
+        .collect();
     s.rack.soloed = (!soloed_now).then_some(r);
-    s.session.dirty = true;
+    on
 }
 
 /// What follows a pattern switch. Run on every tick and before each frame (`App::follow_settings`), so every way of
@@ -700,7 +947,7 @@ impl App {
         if crate::prefs::check(&crate::prefs::AUTO_ZIP_EMPTY) {
             let s = &mut self.state;
             let zipped: BTreeSet<usize> = used.iter().enumerate().filter(|&(_, &u)| !u).map(|(r, _)| r).collect();
-            set_zipped(&mut s.session, &if zipped.len() == used.len() { BTreeSet::new() } else { zipped });
+            zip_rows(s, &if zipped.len() == used.len() { BTreeSet::new() } else { zipped });
             autosize(s);
             self.invalidate();
         }
@@ -726,34 +973,48 @@ pub fn zipped_rows(p: &os_model::Project) -> BTreeSet<usize> {
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
-    crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
-        if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-            c.enabled = !c.enabled;
-            s.session.dirty = true;
-        }
-    });
+    if let Some(on) = s.session.project.channels.get(r).map(|c| !c.enabled) {
+        set_on(s, [(r, on)]);
+    }
+}
+
+/// Lock active / mute state on row `r` on or off: no step, as in FL (an undo leaves the lock as it is).
+pub fn lock(s: &mut State, r: usize) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let on = !is_locked(&s.session, r);
+    let c = set_channel!(s, r, locked: on)?;
+    crate::control_ui::run(s, vec![c]).err()
+}
+
+/// Row `r`'s channel on mixer track `t` (an insert number), one step, "Channel mixer track"; with `run`, a wheel's or
+/// drag's notches join one step. Knob-like: no step while Undo knob tweaks is off.
+pub fn set_mixer_track(s: &mut State, r: usize, t: u16, run: Option<crate::history::Run>) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let track = s.session.project.mixer.iter().find(|m| m.index == t).map(|m| m.id.0)?;
+    let c = set_channel!(s, r, track: track)?;
+    crate::control_ui::knob_command(s, MIXER_TRACK, run, vec![c]).err()
 }
 
 /// Set swing mix for selected (§17): each selected channel's share of the main swing, 0..1 (channel event 97, 0..128;
 /// spec: audio/swing.md).
-pub fn swing_selected(s: &mut State, mix: f32) {
-    let mix = (mix.clamp(0.0, 1.0) * 128.0).round() / 128.0;
-    for &r in &s.rack.sel.clone() {
-        if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-            c.misc.swing = mix;
-        }
-    }
-    s.session.dirty = true;
+pub fn swing_selected(s: &mut State, mix: f32) -> Option<String> {
+    let mix = f64::from(mix.clamp(0.0, 1.0));
+    let rows: Vec<usize> = s.rack.sel.iter().copied().collect();
+    set_rows(s, SETTINGS, &rows, |s, r| set_channel!(s, r, swing: mix))
 }
 
 /// Transpose the selected channels' notes of the current pattern.
-pub fn transpose_selected(s: &mut State, semis: i32) {
-    let chans: Vec<u16> = s.rack.sel.iter().filter_map(|&r| ch_index(&s.session, r)).collect();
-    let n = s.pattern().max(1);
-    for note in crate::edit::patterns::pat_mut(&mut s.session, n).notes.iter_mut().filter(|x| chans.contains(&x.channel)) {
-        note.key = (i32::from(note.key) + semis).clamp(0, 131) as u16;
+pub fn transpose_selected(s: &mut State, semis: i32) -> Option<String> {
+    crate::mixer::track_ids(s);
+    if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
+        crate::control_ui::settle_ids(s);
     }
-    s.session.dirty = true;
+    let channels: Vec<u32> = s.rack.sel.iter().filter_map(|&r| ch_id(s, r)).collect();
+    let pattern = s.session.project.pattern(s.pattern().max(1))?.id.0;
+    if channels.is_empty() {
+        return None;
+    }
+    apply(s, "Transpose", vec![Command::TransposePattern { pattern, semitones: semis, channels }])
 }
 
 /// Window height for Auto resize (§17): Minimum = fit the shown rows; Maximum = down to the screen bottom.
@@ -785,53 +1046,14 @@ pub fn relayout(s: &mut State, f: impl FnOnce(&mut State)) {
 // ---------------------------------------------------------------------------------------------------------
 // Renumbering (delete, clone, move, sort)
 
-/// Apply a new channel order (`order` = old rows top to bottom; rows left out are deleted) to the project, the
-/// app state and the hosted plugins.
-pub fn reorder(app: &mut App, order: &[usize]) {
-    let n = app.state.session.project.channels.len();
-    let mut map = vec![None; n];
-    for (new, &old) in order.iter().enumerate() {
-        if old < n {
-            map[old] = Some(new);
-        }
-    }
-    let m = |r: usize| map.get(r).copied().flatten();
-    remap_state(&mut app.state, &map);
-    crate::remote::follow(&mut app.state.session, |l| moved_link(l, &m));
-    app.remap_rows(&m);
-    app.invalidate();
-}
-
-/// Where remote control link target `l` goes as rack rows move (`m`: a row's new row, `None` for one deleted; spec:
-/// audio/automation.md "Targets follow moves"); `None`: its row went.
-fn moved_link(l: crate::typein::Target, m: &dyn Fn(usize) -> Option<usize>) -> Option<crate::typein::Target> {
-    use crate::typein::Target as T;
-    Some(match l {
-        T::Knob(KnobId::ChanVol(r)) => T::Knob(KnobId::ChanVol(m(r)?)),
-        T::Knob(KnobId::ChanPan(r)) => T::Knob(KnobId::ChanPan(m(r)?)),
-        T::Knob(KnobId::AutoLfo(r, k)) => T::Knob(KnobId::AutoLfo(m(r)?, k)),
-        T::Knob(KnobId::MidiOut(r, k)) => T::Knob(KnobId::MidiOut(m(r)?, k)),
-        T::RackTrack(r) => T::RackTrack(m(r)?),
-        T::RackLed(r) => T::RackLed(m(r)?),
-        // A channel's plugin is hosted by its row.
-        T::Param(key, i) if key < crate::plugins::FX_KEY => T::Param(m(key)?, i),
-        l => l,
-    })
-}
-
 /// Channel `ch` comes back as the last row (a redone drop that made it, `history`); Lemon Sampler hosts it from its
 /// settings on the next tick.
 pub fn push_channel(s: &mut State, ch: os_model::Channel) {
     crate::follow::around(s, |s| push_channel_in(&mut s.session, ch));
 }
 
-/// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
-pub fn remap_state(s: &mut State, map: &[Option<usize>]) {
-    remap_project(s.session.project.get_mut(), map);
-    remap_ui(s, map);
-}
-
-/// `remap_state`'s part in the app state, for a project already renumbered (`map` as there).
+/// The app state's part of a renumbering, for a project already renumbered (`map`: each old row's new row, `None`: the
+/// channel went).
 pub fn remap_ui(s: &mut State, map: &[Option<usize>]) {
     remap_session(&mut s.session, map);
     remap_view(s, map);
@@ -854,48 +1076,58 @@ pub fn remap_view(s: &mut State, map: &[Option<usize>]) {
     if s.rack.sel.is_empty() && !s.session.project.channels.is_empty() {
         s.rack.select_only(s.selected_channel);
     }
+    // The event editor follows its channel; a channel that goes closes it.
+    match os_model::target::moved_channel(s.events.target, |c| m(usize::from(c)).map(|r| r as u16)) {
+        Some(t) => s.events.target = t,
+        None => s.hide(Win::Events),
+    }
+    // The container window of a channel's container follows its channel, and the palette's row its row; a row that
+    // goes closes them.
+    let (r, k) = s.container.at;
+    if k == crate::container::CHANNEL {
+        match m(usize::from(r)) {
+            Some(n) => s.container.at = (n as u16, k),
+            None => s.hide(Win::Container),
+        }
+    }
+    use crate::plugin_menu::Target as Pick;
+    match s.palette.target {
+        Pick::Gen(Some(r)) | Pick::Replace(r) => match m(r) {
+            Some(n) => s.palette.target = if matches!(s.palette.target, Pick::Replace(_)) { Pick::Replace(n) } else { Pick::Gen(Some(n)) },
+            None => s.hide(Win::PluginPalette),
+        },
+        _ => {}
+    }
+    // The playlist's Draw source and its locked clip length follow their channel; a channel that goes takes them.
+    let follow = |c: os_model::ClipSource| match c {
+        os_model::ClipSource::Channel(ch) => m(usize::from(ch)).map(|r| os_model::ClipSource::Channel(r as u16)),
+        c => Some(c),
+    };
+    s.playlist.source = s.playlist.source.and_then(follow);
+    s.playlist.lock_len = s.playlist.lock_len.and_then(|(c, len)| Some((follow(c)?, len)));
     autosize(s);
 }
 
 /// Clone rows (§18): each copy goes right below its channel, named "<name> #2", same settings and mixer track,
-/// no steps; the hosted instrument is copied with its state. The clones become the selection.
+/// no steps; the hosted instrument is copied with its state (`Command::CloneChannel`). One step; the clones become the
+/// selection.
 pub fn clone_rows(app: &mut App, rows: &[usize]) {
-    let n = app.state.session.project.channels.len();
-    let rows: BTreeSet<usize> = rows.iter().copied().filter(|&r| r < n).collect();
-    if rows.is_empty() {
+    let s = &mut app.state;
+    crate::mixer::track_ids(s);
+    let rows: BTreeSet<usize> = rows.iter().copied().filter(|&r| r < s.session.project.channels.len()).collect();
+    let commands: Vec<Command> = rows.iter().filter_map(|&r| ch_id(s, r)).map(|channel| Command::CloneChannel { channel, at_end: false }).collect();
+    if commands.is_empty() {
         return;
     }
-    let mut order = Vec::new();
-    let mut sources = Vec::new();
-    for r in 0..n {
-        order.push(r);
-        if rows.contains(&r) {
-            let name = clone_name(&app.state.session, r);
-            let mut c = app.state.session.project.channels[r].clone();
-            let from = c.index;
-            c.index = app.state.session.project.channels.len() as u16;
-            c.name = Some(name);
-            // The copy starts unlocked and unzipped.
-            (c.rack.locked, c.rack.zipped) = (false, false);
-            // An automation clip's copy has its curve and targets (spec: ui/playlist.md §10a).
-            if let Some(mut a) = app.state.session.project.automation(from).cloned() {
-                a.channel = c.index;
-                app.state.session.project.get_mut().automations.push(a);
-            }
-            app.state.session.project.get_mut().channels.push(c);
-            order.push(app.state.session.project.channels.len() - 1);
-            sources.push(r);
+    let made = match crate::control_ui::command(s, "Clone channel", None, commands) {
+        Ok(r) => r,
+        Err(e) => {
+            s.message = Some(e);
+            return;
         }
-    }
-    let states: Vec<Option<(usize, Vec<u8>)>> = sources.iter().map(|&r| app.plugin_copy(r)).collect();
-    reorder(app, &order);
-    let new_rows: Vec<usize> = order.iter().enumerate().filter(|(_, o)| **o >= n).map(|(i, _)| i).collect();
-    for (row, st) in new_rows.iter().zip(states) {
-        if let Some((index, blob)) = st {
-            app.plugin_paste(*row, index, &blob);
-        }
-    }
-    let s = &mut app.state;
+    };
+    let ids: Vec<u32> = made.iter().filter_map(|v| v["channel"].as_u64()).map(|id| id as u32).collect();
+    let new_rows: Vec<usize> = s.session.project.channels.iter().enumerate().filter(|(_, c)| ids.contains(&c.id.0)).map(|(r, _)| r).collect();
     s.rack.sel = new_rows.iter().copied().collect();
     if let Some(&last) = new_rows.last() {
         s.selected_channel = last;
@@ -935,30 +1167,52 @@ pub fn ask_purge(s: &mut State) -> Option<String> {
     None
 }
 
-/// `delete_rows` as one undo step (their hosted instruments come back with an undo, `control::host`).
+/// Delete rows `rows` as one undo step: the channels, their notes and clips go (`Command::DeleteChannel`; their hosted
+/// instruments come back with an undo, `control::host`).
 pub fn delete_step(app: &mut App, rows: &[usize]) {
-    crate::control_ui::edit_app(app, crate::history::DELETE_CHANNEL, crate::control::command::Region::Project, |app| delete_rows(app, rows));
-}
-
-/// Delete rows now: the channels, their notes and clips go.
-pub fn delete_rows(app: &mut App, rows: &[usize]) {
-    let n = app.state.session.project.channels.len();
-    let order: Vec<usize> = (0..n).filter(|r| !rows.contains(r)).collect();
-    let first = rows.iter().copied().min().unwrap_or(0);
-    reorder(app, &order);
     let s = &mut app.state;
+    crate::mixer::track_ids(s);
+    let commands: Vec<Command> = rows.iter().filter_map(|&r| ch_id(s, r)).map(|channel| Command::DeleteChannel { channel }).collect();
+    if let Some(e) = apply(s, crate::history::DELETE_CHANNEL, commands) {
+        s.message = Some(e);
+        return;
+    }
+    let first = rows.iter().copied().min().unwrap_or(0);
     let r = first.min(s.session.project.channels.len().saturating_sub(1));
     s.rack.select_only(r);
     s.selected_channel = r;
     s.message = Some(if rows.len() == 1 { "Deleted the channel".into() } else { format!("Deleted {} channels", rows.len()) });
 }
 
-/// Move the selected channels one row up (`dir` -1) or down (+1).
-pub fn move_selected(app: &mut App, dir: i32) {
-    let n = app.state.session.project.channels.len();
-    let sel = app.state.rack.sel.clone();
+/// The rows in a new order (`order`: the old rows top to bottom, each once) by `Command::MoveChannel`, one step named
+/// `name`; none when the order is the same.
+fn reorder_step(s: &mut State, name: &'static str, order: &[usize]) -> Option<String> {
+    crate::mixer::track_ids(s);
+    let want: Vec<u32> = order.iter().filter_map(|&r| ch_id(s, r)).collect();
+    let mut now: Vec<u32> = s.session.project.channels.iter().map(|c| c.id.0).collect();
+    if want.len() != now.len() {
+        return None;
+    }
+    let mut commands = Vec::new();
+    for (row, &id) in want.iter().enumerate() {
+        if now[row] != id {
+            let from = now.iter().position(|&x| x == id)?;
+            let c = now.remove(from);
+            now.insert(row, c);
+            commands.push(Command::MoveChannel { channel: id, row });
+        }
+    }
+    if commands.is_empty() {
+        return None;
+    }
+    apply(s, name, commands)
+}
+
+/// The order (old rows top to bottom) that moves the rows in `sel` one row up (`dir` -1) or down (+1), the others
+/// making room; `None` when one of them is at the edge already.
+fn moved_order(n: usize, sel: &BTreeSet<usize>, dir: i32) -> Option<Vec<usize>> {
     if sel.is_empty() || (dir < 0 && sel.contains(&0)) || (dir > 0 && sel.contains(&(n - 1))) {
-        return;
+        return None;
     }
     let mut order: Vec<usize> = (0..n).collect();
     if dir < 0 {
@@ -974,8 +1228,18 @@ pub fn move_selected(app: &mut App, dir: i32) {
             }
         }
     }
-    reorder(app, &order);
+    Some(order)
 }
+
+/// Move the selected channels one row up (`dir` -1) or down (+1), one step, "Move channel".
+pub fn move_selected(app: &mut App, dir: i32) -> Option<String> {
+    let s = &mut app.state;
+    let order = moved_order(s.session.project.channels.len(), &s.rack.sel, dir)?;
+    reorder_step(s, MOVE, &order)
+}
+
+/// The undo step of channels moved or sorted.
+const MOVE: &str = "Move channel";
 
 /// Shift+wheel over channel `r`'s name button (§13): it becomes the only selected channel and moves one row per notch,
 /// up for `notches` > 0. While the mouse stays still, more notches move the same channel, which has left the cursor.
@@ -986,17 +1250,23 @@ pub fn wheel_move(app: &mut App, r: usize, notches: i32) {
         _ => r,
     };
     app.state.rack.select_only(r);
-    // A "Move channel" step, as the menu's and Alt+Up / Down's moves are.
-    crate::control_ui::edit_app(app, "Move channel", crate::control::command::Region::Project, |app| {
-        for _ in 0..notches.unsigned_abs() {
-            move_selected(app, -notches.signum());
-        }
-    });
+    // A "Move channel" step, as the menu's and Alt+Up / Down's moves are: the notches' moves made one order.
+    let n = app.state.session.project.channels.len();
+    let (mut order, mut pos): (Vec<usize>, usize) = ((0..n).collect(), r);
+    for _ in 0..notches.unsigned_abs() {
+        let Some(o) = moved_order(n, &BTreeSet::from([pos]), -notches.signum()) else { break };
+        pos = o.iter().position(|&x| x == pos).unwrap_or(pos);
+        order = o.iter().map(|&x| order[x]).collect();
+    }
+    let s = &mut app.state;
+    if let Some(e) = reorder_step(s, MOVE, &order) {
+        s.message = Some(e);
+    }
     let now = app.state.rack.sel.first().copied().unwrap_or(r);
     app.state.rack.wheel_grab = Some((now, at));
 }
 
-pub fn sort(app: &mut App, by: SortBy) {
+pub fn sort(app: &mut App, by: SortBy) -> Option<String> {
     let s = &app.state;
     let mut order: Vec<usize> = (0..s.session.project.channels.len()).collect();
     let ch = |r: usize| &s.session.project.channels[r];
@@ -1013,7 +1283,7 @@ pub fn sort(app: &mut App, by: SortBy) {
             ChannelKind::Other(k) => 5 + u32::from(k),
         }),
     }
-    reorder(app, &order);
+    reorder_step(&mut app.state, MOVE, &order)
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1048,23 +1318,28 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
     let text = text.trim();
     match b {
         RBox::Channel(r) => {
-            if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-                c.name = (!text.is_empty()).then(|| text.to_string());
+            let name = text.to_string();
+            if let Some(e) = set_rows(s, "Channel name", &[r], |s, r| set_channel!(s, r, name: name.clone())) {
+                s.message = Some(e);
             }
         }
         RBox::GroupSel | RBox::NewGroup if !text.is_empty() => {
             let members = if b == RBox::GroupSel { s.rack.sel.clone() } else { BTreeSet::new() };
             add_group(s, text, &members);
         }
-        RBox::RenameGroup(g) if !text.is_empty() => rename_group(&mut s.session, g, text),
+        RBox::RenameGroup(g) if !text.is_empty() => groups_edit(s, |p| {
+            if let Some(n) = file_group(p, g).and_then(|i| p.groups.get_mut(i as usize)) {
+                *n = text.to_string();
+            }
+        }),
         RBox::Transpose => {
             if let Ok(v) = text.trim_start_matches('+').parse::<i32>() {
-                transpose_selected(s, v);
+                s.message = transpose_selected(s, v).or(s.message.take());
             }
         }
         RBox::SwingMix => {
             if let Ok(v) = text.trim_end_matches('%').trim().parse::<f32>() {
-                swing_selected(s, v / 100.0);
+                s.message = swing_selected(s, v / 100.0).or(s.message.take());
             }
         }
         // The range the dots drag gives.
@@ -1077,6 +1352,21 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
         }
         _ => {}
     }
+}
+
+/// A swatch picked in the rack's name box `b`: the row's colour, or Color selected ▸ All...'s every selected channel
+/// (and that box closes). One step.
+pub fn box_color(s: &mut State, b: RBox, col: Rgb) -> Option<String> {
+    let rows: Vec<usize> = match b {
+        RBox::Channel(r) => vec![r],
+        RBox::ColorSel => {
+            s.pat_ui.name_box = None;
+            s.rack.sel.iter().copied().collect()
+        }
+        _ => return None,
+    };
+    let n = rows.len();
+    set_colors(s, &rows, std::iter::repeat_n(Some(col), n))
 }
 
 /// Open a rack name box at `at`.
@@ -1133,6 +1423,11 @@ pub enum RCmd {
     SetBox(crate::typein::Target, f64),
     MixerReset(usize),
     AssignFree(usize),
+    /// Outputs ▸ on a channel's plugin window menu: extra output `.1` of the plugin on row `.0` plays `.2` tracks after the
+    /// channel's own, 0 for none (spec: audio/multi-output.md).
+    Output(usize, usize, usize),
+    /// Outputs ▸ Auto map outputs: each extra output to the next track after the channel's own.
+    AutoMapOutputs(usize),
     /// Edit automation in piano roll (Lemon Studio's design): the piano roll on row `.0` with its event panel on the
     /// channel control lane `.1`.
     EventsInPiano(usize, crate::piano::Lane),
@@ -1380,26 +1675,16 @@ fn ask_stretch(app: &mut App, all: bool, method: i32, sel: &[usize]) {
 /// Rows `rows` take stretch method `method`, their TIME, PITCH and MUL kept: the channel's sound settings, which the
 /// engine plays and the project saves, and its Lemon Sampler (spec: ui/channel-switches.md §1).
 pub fn set_stretch(app: &mut App, rows: &[usize], method: i32) {
-    for &r in rows {
-        let Some(c) = app.state.session.project.get_mut().channels.get_mut(r) else { continue };
-        c.sound.stretch[3] = method as u32;
-        app.state.session.plugins.set_sampler_stretch(r, &c.sound);
+    let s = &mut app.state;
+    if let Some(e) = set_rows(s, SETTINGS, rows, |s, r| set_channel!(s, r, stretch: method as u32)) {
+        s.message = Some(e);
     }
-    app.state.session.dirty = true;
 }
 
 /// Every selected channel (`rows`) takes declick mode `mode`: the channel's sound settings, which the engine plays, and
 /// a sampler channel's Lemon Sampler, which plays it in their place (spec: audio/declick.md, plugins/lemon-sampler.md §7).
-fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
-    for &r in rows {
-        let Some(c) = app.state.session.project.get_mut().channels.get_mut(r) else { continue };
-        c.sound.declick = mode;
-        if c.kind.is_sampler() {
-            app.state.session.plugins.set_param_named(r, SAMPLER_DECLICK, f64::from(mode));
-            app.state.session.params.reread(r);
-        }
-    }
-    app.state.session.dirty = true;
+fn set_declick(app: &mut App, rows: &[usize], mode: u8) -> Option<String> {
+    set_rows(&mut app.state, SETTINGS, rows, |s, r| set_channel!(s, r, declick: mode))
 }
 
 /// Sources `srcs` play row `row` from now on (`None`: the focused channel). Notes they hold end first, so none hangs
@@ -1414,9 +1699,6 @@ fn lock_notes(app: &mut App, srcs: &[NoteSrc], row: Option<usize>) {
     }
     app.invalidate();
 }
-
-/// Lemon Sampler's declick mode parameter (its index is the mode).
-const SAMPLER_DECLICK: &str = "Click removal";
 
 /// The rows a channel menu command on row `r` acts on: the selection when `r` is in it, else `r` alone.
 fn menu_rows(s: &State, r: usize) -> Vec<usize> {
@@ -1712,36 +1994,15 @@ pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     let s = &mut app.state;
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
     let path = crate::data_folder_ui::adopt(s, &p.to_string_lossy());
-    if r < s.session.project.channels.len() {
-        crate::history::load_sample(&mut s.session, r);
+    crate::mixer::track_ids(s);
+    let Some(channel) = ch_id(s, r) else { return };
+    if let Some(e) = apply(s, crate::history::LOAD_SAMPLE, vec![Command::LoadSample { channel, path }]) {
+        s.message = Some(e);
     }
-    if let Some(ch) = s.session.project.get_mut().channels.get_mut(r) {
-        auto_name(&crate::settings_file::store(), ch, &p);
-        read_tags(&crate::settings_file::store(), ch, &p);
-        ch.sample_path = Some(path.clone());
-    }
-    s.session.sample_loads.push((r, path));
-    s.session.dirty = true;
 }
 
 /// Run a rack menu command. Returns a status message.
 pub fn run(app: &mut App, c: RCmd) -> Option<String> {
-    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md); Cut, Paste, Fill
-    // and Rotate record their own.
-    let step = match c {
-        RCmd::RandomColor(_) | RCmd::ColorGradient | RCmd::ColorRandom => Some("Channel color"),
-        RCmd::Clone(_) | RCmd::CloneSel => Some("Clone channel"),
-        RCmd::MoveSel(_) | RCmd::Sort(_) => Some("Move channel"),
-        RCmd::MixerReset(_) | RCmd::AssignFree(_) | RCmd::AssignFreeSel => Some("Channel mixer track"),
-        RCmd::DeclickSel(_) | RCmd::SwingSel(Some(_)) | RCmd::TruncSel(_) | RCmd::CutItself(_) => Some("Channel settings"),
-        RCmd::AddGroup | RCmd::DeleteGroup | RCmd::GroupSel => Some("Channel group"),
-        RCmd::Burn(_) => Some("Burn loops"),
-        RCmd::AssignInstrument(_) => Some(crate::track_links::ASSIGN_INSTRUMENT),
-        _ => None,
-    };
-    if let Some(name) = step {
-        return crate::control_ui::edit_app(app, name, crate::control::command::Region::Project, |app| run_now(app, c));
-    }
     run_now(app, c)
 }
 
@@ -1763,13 +2024,19 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
     if let RCmd::BurnMidi(r, new) = c {
         return app.burn_midi(r, new);
     }
+    if let RCmd::Output(r, k, port) = c {
+        return set_output(app, r, k, port);
+    }
+    if let RCmd::AutoMapOutputs(r) = c {
+        return auto_map_outputs(app, r);
+    }
     let mouse = app.mouse;
     let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
     match c {
         RCmd::Clone(r) => clone_rows(app, &[r]),
         RCmd::CloneSel => clone_rows(app, &sel),
-        RCmd::MoveSel(d) => move_selected(app, d),
-        RCmd::Sort(by) => sort(app, by),
+        RCmd::MoveSel(d) => return move_selected(app, d),
+        RCmd::Sort(by) => return sort(app, by),
         RCmd::LoadSample(r) => {
             // Starts in the folder of the channel's sample, when it has one.
             let dir = app.state.session.project.channels.get(r).and_then(|c| c.sample_path.as_deref()).map(|p| crate::plugins::resolve_sample(&app.state.session.settings, p)).map(std::path::PathBuf::from);
@@ -1793,7 +2060,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             }
             app.state.raise(Win::PianoRoll);
         }
-        RCmd::DeclickSel(mode) => set_declick(app, &sel, mode),
+        RCmd::DeclickSel(mode) => return set_declick(app, &sel, mode),
         RCmd::ReceiveFrom(r, src) => lock_notes(app, &[src], Some(r)),
         RCmd::Unlock(r) => {
             let held: Vec<NoteSrc> = NoteSrc::ALL.into_iter().filter(|&src| app.state.rack.note_lock[src as usize] == Some(r)).collect();
@@ -1835,10 +2102,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             }
             None
         }
-        RCmd::RandomColor(r) => {
-            random_color(&mut s.session, r, r as u64);
-            None
-        }
+        RCmd::RandomColor(r) => random_colors(s, &[r], 0),
         RCmd::Delete(r) => {
             ask_delete(s, vec![r]);
             None
@@ -1872,27 +2136,22 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Fill(r, n) => {
-            snapshot(&mut s.session);
-            fill_each(&mut s.session, r, n);
-            None
+            let notes = filled(&s.session, r, n);
+            set_rows_notes(s, vec![(r, notes)])
         }
         RCmd::AdvancedFill(r) => {
             open_fill(s, r);
             None
         }
         RCmd::Rotate(r, d) => {
-            snapshot(&mut s.session);
-            rotate(&mut s.session, r, d);
-            None
+            let notes = rotated(&s.session, r, d);
+            set_rows_notes(s, vec![(r, notes)])
         }
         RCmd::Solo(r) => {
             solo(s, r);
             None
         }
-        RCmd::Lock(r) => {
-            toggle_lock(&mut s.session, r);
-            None
-        }
+        RCmd::Lock(r) => lock(s, r),
         RCmd::Reset(k) => {
             s.reset_knob(k);
             None
@@ -1928,14 +2187,11 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             crate::typein_ui::set_value(s, t, v);
             None
         }
+        // The default target: the insert the channel was made with (its own number).
         RCmd::MixerReset(r) => {
-            // The default target: the insert the channel was made with (its own number).
             let max = crate::mixer::max_insert_of(&s.session.project.mixer);
-            if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-                c.mixer_track = (c.index + 1).min(max);
-                s.session.dirty = true;
-            }
-            None
+            let t = s.session.project.channels.get(r).map(|c| (c.index + 1).min(max));
+            t.and_then(|t| set_mixer_track(s, r, t, None))
         }
         // spec: ui/mixer-track-commands.md §1
         RCmd::AssignFree(r) => crate::mixer::route_free(s, &[r]),
@@ -1948,7 +2204,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::SetFilter(f) => {
-            set_filter(&mut s.session, f);
+            show_filter(s, f);
             s.rack_scroll = 0.0;
             autosize(s);
             None
@@ -1974,64 +2230,36 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::SetLen(v) => {
-            set_len(s, v);
+            set_length(s, v);
             None
         }
         RCmd::LoopType(t) => {
-            loop_step(&mut s.session, LOOP_MODE_STEP);
-            set_loop_type(&mut s.session, t);
+            let c = loop_type_change(&mut s.session, t);
+            set_loops(s, crate::history::LOOP_MODE, None, c);
             None
         }
-        RCmd::Burn(all) => {
-            burn(s, all);
-            None
-        }
+        RCmd::Burn(all) => burn(s, all),
         RCmd::SelectUnused => {
             s.rack.sel = unused(&s.session);
             Some(format!("{} unused channel(s) selected", s.rack.sel.len()))
         }
         RCmd::Purge => ask_purge(s),
-        RCmd::ColorGradient => {
-            gradient(s);
-            None
-        }
-        RCmd::ColorRandom => {
-            for &r in &sel {
-                random_color(&mut s.session, r, r as u64 + 1);
-            }
-            None
-        }
+        RCmd::ColorGradient => gradient(s),
+        RCmd::ColorRandom => random_colors(s, &sel, 1),
         RCmd::MuteSel(mute) => {
-            crate::control_ui::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
-                for &r in &sel {
-                    if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-                        c.enabled = !mute;
-                    }
-                }
-                s.session.dirty = true;
-            });
+            set_on(s, sel.iter().map(|&r| (r, !mute)));
             None
         }
         RCmd::TransposeSel => {
             open_box(s, RBox::Transpose, crate::patterns::box_at_mouse(mouse));
             None
         }
-        RCmd::SwingSel(Some(p)) => {
-            swing_selected(s, f32::from(p) / 100.0);
-            Some(format!("Swing mix {p}% for {} channel(s)", sel.len()))
-        }
-        RCmd::TruncSel(on) => {
-            for &r in &sel {
-                if let Some(c) = s.session.project.get_mut().channels.get_mut(r) {
-                    c.misc.truncate_swing = on;
-                }
-            }
-            s.session.dirty = true;
-            Some(format!("Truncate swing notes {} for {} channel(s)", if on { "on" } else { "off" }, sel.len()))
-        }
+        RCmd::SwingSel(Some(p)) => swing_selected(s, f32::from(p) / 100.0).or_else(|| Some(format!("Swing mix {p}% for {} channel(s)", sel.len()))),
+        RCmd::TruncSel(on) => set_rows(s, SETTINGS, &sel, |s, r| set_channel!(s, r, truncate_swing: on))
+            .or_else(|| Some(format!("Truncate swing notes {} for {} channel(s)", if on { "on" } else { "off" }, sel.len()))),
         RCmd::CutItself(r) => {
-            cut_itself(&mut s.session, r);
-            None
+            let group = cut_itself_group(&s.session, r);
+            group.and_then(|g| set_rows(s, SETTINGS, &[r], |s, r| set_channel!(s, r, cut: g, cut_by: g)))
         }
         RCmd::SwingSel(None) => {
             open_box(s, RBox::SwingMix, crate::patterns::box_at_mouse(mouse));
@@ -2056,12 +2284,12 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::ZipSel => {
             let rows: BTreeSet<usize> = zipped_rows(&s.session.project).into_iter().chain(sel.iter().copied()).collect();
-            set_zipped(&mut s.session, &rows);
+            zip_rows(s, &rows);
             autosize(s);
             None
         }
         RCmd::UnzipAll => {
-            set_zipped(&mut s.session, &BTreeSet::new());
+            zip_rows(s, &BTreeSet::new());
             autosize(s);
             None
         }
@@ -2127,7 +2355,9 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::Through(_)
         | RCmd::Restretch
         | RCmd::Wrap(_)
-        | RCmd::BurnMidi(..) => None,
+        | RCmd::BurnMidi(..)
+        | RCmd::Output(..)
+        | RCmd::AutoMapOutputs(_) => None,
     };
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
@@ -2159,11 +2389,8 @@ pub fn open_fill(s: &mut State, r: usize) {
 /// (ui/playlist.md §9c).
 fn restretch_all(app: &mut App) -> Option<String> {
     let rows: Vec<usize> = (0..app.state.session.project.channels.len()).filter(|&r| tempo_fitted(&app.state.session.project.channels[r])).collect();
-    if let Some(fits) = crate::edit::playlist::audio_fits(&app.state.session) {
-        if crate::playlist::fit_clips(&mut app.state.session.project.get_mut().arrangements, &fits) {
-            crate::playlist::fit_clips(&mut app.state.session.saved.0.arrangements, &fits);
-            app.damage_win(Win::Playlist);
-        }
+    if crate::edit::playlist::fit_all(&mut app.state.session) {
+        app.damage_win(Win::Playlist);
     }
     for &r in &rows {
         let sound = app.state.session.project.channels[r].sound.clone();
@@ -2195,19 +2422,32 @@ pub fn play_project(s: &State) -> Project {
 }
 
 /// Loop button > Burn: write the loops into the current pattern's notes and drop the loop lengths.
-fn burn(s: &mut State, all: bool) {
+fn burn(s: &mut State, all: bool) -> Option<String> {
     let looping = loop_rows(&s.session);
     let rows: Vec<usize> = if all { looping } else { s.rack.sel.iter().copied().filter(|r| looping.contains(r)).collect() };
     let mut p = s.session.project.clone();
     expand_loops(&mut p, &s.session, Some(&rows));
-    let n = s.pattern();
-    if let (Some(src), Some(dst)) = (p.pattern(n).cloned(), s.session.project.get_mut().patterns.iter_mut().find(|x| x.number == n)) {
-        dst.notes = src.notes;
-    }
-    for r in rows {
-        put_loop(&mut s.session, r, None);
-    }
-    s.session.dirty = true;
+    let burnt = p.pattern(s.pattern()).map(|q| q.notes.clone()).unwrap_or_default();
+    crate::mixer::track_ids(s);
+    // Each row's notes as the loops played them, and its loop gone.
+    let parts: Vec<(u32, Vec<Note>, Option<(u16, Option<u32>)>)> = rows
+        .iter()
+        .filter_map(|&r| {
+            let ch = s.session.project.channels.get(r)?;
+            Some((ch.id.0, burnt.iter().filter(|n| n.channel == ch.index).copied().collect(), loop_put(&s.session, r, None)))
+        })
+        .collect();
+    on_pattern(s, "Burn loops", None, false, |_, pattern| {
+        let mut c: Vec<Command> = parts
+            .iter()
+            .map(|(channel, notes, _)| Command::SetNotes { pattern, channel: Some(*channel), notes: notes.iter().map(|n| crate::control::command::NoteIn::of(n, *channel)).collect() })
+            .collect();
+        let loops: Vec<crate::control::command::LoopIn> = parts.iter().filter_map(|(channel, _, l)| l.map(|(_, value)| crate::control::command::LoopIn { channel: *channel, value })).collect();
+        if !loops.is_empty() {
+            c.push(Command::SetLoops { pattern, mode: None, loops });
+        }
+        c
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -2313,8 +2553,8 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
 /// Accept in the Advanced fill dialog: write the sequence to the channel.
 pub fn fill_accept(s: &mut State) {
     if let Some(f) = s.rack.fill.take() {
-        snapshot(&mut s.session);
-        write_sequence(&mut s.session, f.row, &f.steps);
+        let notes = sequenced(&s.session, f.row, &f.steps);
+        set_rows_notes(s, vec![(f.row, notes)]);
     }
 }
 
@@ -2403,34 +2643,28 @@ pub const LOOP_POINT_STEP: &str = "Set advanced looping settings";
 /// A press in the graph editor (§14): one undo step for the drag, dropped on release when it changed nothing (spec:
 /// ui/undo-steps.md, "Graph editor change velocity", one per drag). Only the velocity tab's name was measured.
 pub fn graph_step(s: &mut State) {
-    let name = if s.rack.graph_tab == Tab::Vel { "Graph editor change velocity" } else { "Graph editor change" };
-    let snap = crate::history::Snap::pattern(&s.session, s.pattern().max(1));
-    crate::history::record(&mut s.session, name, snap);
+    s.session.history.end_run_of(crate::history::Run::Graph);
 }
 
 /// Graph editor (§14): set step `k`'s value of the focused channel from 0..1; a column without a step edits the
 /// nearest step note to its left.
+/// A press and its drag are one undo step (`Run::Graph`; `graph_step` ends the one before).
 pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
     let r = s.selected_channel;
     let ch = ch_index(&s.session, r)?;
     let ps = per_step(&s.session);
     let tab = s.rack.graph_tab;
-    let n = s.pattern().max(1);
-    let p = crate::edit::patterns::pat_mut(&mut s.session, n);
-    let idx = p
-        .notes
-        .iter()
-        .enumerate()
-        .filter(|(_, x)| x.channel == ch && x.position / ps <= k)
-        .max_by_key(|(_, x)| x.position)
-        .map(|(i, _)| i)?;
-    let note = &mut p.notes[idx];
-    tab.set(note, v, ps);
-    let text = tab.text(note, ps);
-    if tab == Tab::Shift {
-        p.notes.sort_by_key(|x| (x.position, x.channel));
+    let mut notes = row_notes(&s.session, r);
+    let idx = notes.iter().enumerate().filter(|(_, x)| x.channel == ch && x.position / ps <= k).max_by_key(|(_, x)| x.position).map(|(i, _)| i)?;
+    tab.set(&mut notes[idx], v, ps);
+    let text = tab.text(&notes[idx], ps);
+    crate::mixer::track_ids(s);
+    let channel = ch_id(s, r)?;
+    let name = if tab == Tab::Vel { "Graph editor change velocity" } else { "Graph editor change" };
+    let set = move |_: &State, pattern| vec![Command::SetNotes { pattern, channel: Some(channel), notes: notes.iter().map(|n| crate::control::command::NoteIn::of(n, channel)).collect() }];
+    if let Some(e) = on_pattern(s, name, Some(crate::history::Run::Graph), false, set) {
+        s.message = Some(e);
     }
-    s.session.dirty = true;
     Some(text)
 }
 
@@ -2465,6 +2699,89 @@ pub fn length_menu(s: &crate::session::Session, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Multi-output plugins (spec: audio/multi-output.md)
+
+/// The extra outputs of the plugin on row `r` and where each plays: its name and port (tracks after the channel's
+/// own, 0 for none).
+pub fn outputs(app: &App, r: usize) -> Vec<(String, usize)> {
+    let names = app.state.session.plugins.extra_output_names(r);
+    let ports = app.state.session.project.channels.get(r).map(crate::effect_ports::channel_outputs).unwrap_or_default();
+    names.into_iter().enumerate().map(|(k, n)| (n, ports.get(k).copied().unwrap_or(0))).collect()
+}
+
+/// Outputs ▸ for the plugin window menu of row `r`: Auto map outputs, then each extra output with "None" and the
+/// tracks after the channel's own to pick from. `None` when the plugin has no extra outputs.
+pub fn outputs_menu(app: &App, r: usize) -> Option<PItem> {
+    let s = &app.state.session;
+    let list = outputs(app, r);
+    if list.is_empty() {
+        return None;
+    }
+    let own = s.project.channels.get(r)?.mixer_track;
+    let last = os_session::edit::mixer::inserts(s);
+    let mut items = vec![PItem::new("Auto map outputs", Cmd::Rack(RCmd::AutoMapOutputs(r))), PItem::sep()];
+    for (k, (name, port)) in list.into_iter().enumerate() {
+        let mut picks = vec![PItem::new("None", Cmd::Rack(RCmd::Output(r, k, 0))).mark(Mark::Radio(port == 0))];
+        for t in own.saturating_add(1)..=last {
+            let p = usize::from(t - own);
+            picks.push(PItem::new(format!("{t}. {}", os_session::edit::mixer::name(s, t)), Cmd::Rack(RCmd::Output(r, k, p))).mark(Mark::Radio(port == p)));
+        }
+        // A port the saved state names past the last track plays nowhere; it stays as saved.
+        items.push(PItem::sub(format!("{}. {name}", k + 2), picks));
+    }
+    Some(PItem::sub("Outputs", items))
+}
+
+/// The undo step of Outputs ▸.
+const OUTPUTS: &str = "Channel outputs";
+
+/// Outputs ▸ an output ▸ a track (`RCmd::Output`): one step.
+fn set_output(app: &mut App, r: usize, k: usize, port: usize) -> Option<String> {
+    app.invalidate();
+    let s = &mut app.state;
+    crate::mixer::track_ids(s);
+    let c = set_channel!(s, r, outputs: vec![(k as u32, port as u32)])?;
+    apply(s, OUTPUTS, vec![c])
+}
+
+/// Outputs ▸ Auto map outputs: extra output k to the (k+1)th track after the channel's own, as far as there are tracks.
+/// A destination track with no name takes the output's (Lemon Studio's design), so the mixer says what plays there.
+/// One step.
+fn auto_map_outputs(app: &mut App, r: usize) -> Option<String> {
+    let list = outputs(app, r);
+    app.invalidate();
+    if list.is_empty() {
+        return Some("This channel's plugin has no extra outputs".into());
+    }
+    let s = &mut app.state;
+    let own = s.session.project.channels.get(r).map(|c| c.mixer_track)?;
+    let last = usize::from(os_session::edit::mixer::inserts(&s.session));
+    let fits = list.len().min(last.saturating_sub(usize::from(own)));
+    let ports: Vec<(u32, u32)> = (0..list.len()).map(|k| (k as u32, if k < fits { k as u32 + 1 } else { 0 })).collect();
+    crate::mixer::track_ids(s);
+    let mut cmds: Vec<Command> = set_channel!(s, r, outputs: ports).into_iter().collect();
+    for (k, (name, _)) in list.iter().enumerate().take(fits) {
+        let t = own + 1 + k as u16;
+        let Some(m) = s.session.project.mixer.iter().find(|m| m.index == t) else { continue };
+        if m.name.as_deref().is_none_or(str::is_empty) {
+            let mut c = Command::set_track(m.id.0);
+            if let Command::SetTrack { name: n, .. } = &mut c {
+                *n = Some(name.clone());
+            }
+            cmds.push(c);
+        }
+    }
+    if let Some(e) = apply(s, OUTPUTS, cmds) {
+        return Some(e);
+    }
+    Some(if fits < list.len() {
+        format!("Mapped {fits} of {} outputs: no more tracks after this channel's", list.len())
+    } else {
+        format!("Mapped {fits} outputs to tracks {}-{}", own + 1, usize::from(own) + fits)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2483,6 +2800,20 @@ mod tests {
         assert_eq!(a.state.session.history.newest_done(), Some(LOOP_MODE_STEP));
         assert!(loop_mode(&a.state.session) && !a.unsaved());
         assert!(crate::history_ui::undo(&mut a.state).is_some());
+        assert!(!loop_mode(&a.state.session));
+        // The icon and a loop box's drag, through their commands: a step each, no unsaved change.
+        a.mark_saved();
+        let n = a.state.session.history.done;
+        toggle_loop_mode(&mut a.state);
+        assert!(loop_mode(&a.state.session) && !a.unsaved());
+        loop_box(&mut a.state, 0, 3, true);
+        loop_box(&mut a.state, 0, 5, true);
+        assert_eq!(loop_len_of(&a.state.session, 0), Some(5));
+        assert!(!a.unsaved());
+        assert_eq!(a.state.session.history.done, n + 2, "the drag's moves are one step");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(loop_len_of(&a.state.session, 0), None);
+        crate::history_ui::undo(&mut a.state);
         assert!(!loop_mode(&a.state.session));
     }
 
@@ -2655,7 +2986,7 @@ mod tests {
         a.state.session.path = None;
         // A pattern with nothing in it is not saved: pattern 2 gets a note.
         let ch = a.state.session.project.channels[0].index;
-        let note = os_model::Note { position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
+        let note = os_model::Note { id: os_model::Id::NONE, position: 0, length: 96, channel: ch, key: 60, fine_pitch: 120, release: 64, pan: 64, velocity: 100, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
         crate::edit::patterns::pat_mut(&mut a.state.session, 2).notes.push(note);
         a.state.set_pattern(2);
         put_loop(&mut a.state.session, 0, Some(8));
@@ -3187,6 +3518,65 @@ mod tests {
     }
 
     /// Clone, move and delete renumber the channels' notes so each note keeps its channel (§17-18).
+    /// The container window of a channel's container follows the channel when it moves, and so does the palette
+    /// replacing a row's generator; both close when the row is deleted.
+    #[test]
+    fn the_container_window_follows_its_channel() {
+        let mut app = App::new(None);
+        app.state.container.at = (2, crate::container::CHANNEL);
+        app.state.raise(Win::Container);
+        app.state.palette.target = crate::plugin_menu::Target::Replace(2);
+        app.state.raise(Win::PluginPalette);
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        assert_eq!((app.state.container.at, app.state.palette.target), ((1, crate::container::CHANNEL), crate::plugin_menu::Target::Replace(1)));
+        delete_step(&mut app, &[1]);
+        assert!(!app.state.shown(Win::Container) && !app.state.shown(Win::PluginPalette), "their row went");
+    }
+
+    /// Multilink's controls waiting for their controller follow their channel or mixer track when it moves.
+    #[test]
+    fn multilink_waiting_controls_follow_their_place() {
+        use crate::typein::Target as T;
+        let mut app = App::new(None);
+        app.state.multilink.queue = [T::Knob(KnobId::ChanVol(2)), T::Fader(3)].into();
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        crate::mixer::run(&mut app, crate::mixer::MCmd::MoveLeft(3));
+        assert_eq!(app.state.multilink.queue, [T::Knob(KnobId::ChanVol(1)), T::Fader(2)]);
+    }
+
+    /// The event editor shows its channel's events after the channel moves, and closes when the channel is deleted.
+    #[test]
+    fn the_event_editor_follows_its_channel() {
+        use os_model::target::{channel, CHANNEL_VOLUME};
+        let mut app = App::new(None);
+        app.state.events.target = channel(2, CHANNEL_VOLUME);
+        app.state.raise(Win::Events);
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        assert_eq!(app.state.events.target, channel(1, CHANNEL_VOLUME));
+        delete_step(&mut app, &[1]);
+        assert!(!app.state.shown(Win::Events), "its channel went");
+    }
+
+    /// The playlist's Draw source and its locked clip length, an audio or automation channel's, follow it when it moves
+    /// and go when it is deleted.
+    #[test]
+    fn the_draw_source_follows_its_channel() {
+        let mut app = App::new(None);
+        assert!(app.state.session.project.channels.len() >= 3);
+        app.state.playlist.source = Some(ClipSource::Channel(2));
+        app.state.playlist.lock_len = Some((ClipSource::Channel(2), 96));
+        app.state.rack.select_only(2);
+        move_selected(&mut app, -1);
+        let s = &app.state;
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (Some(ClipSource::Channel(1)), Some((ClipSource::Channel(1), 96))));
+        delete_step(&mut app, &[1]);
+        let s = &app.state;
+        assert_eq!((s.playlist.source, s.playlist.lock_len), (None, None), "the source went with its channel");
+    }
+
     #[test]
     fn restructuring_keeps_notes_with_their_channel() {
         let mut app = App::new(None);
@@ -3202,7 +3592,7 @@ mod tests {
         move_selected(&mut app, -1);
         assert_eq!(name(&app, 1), n2);
         assert!(app.state.session.project.patterns[0].notes.iter().any(|x| x.channel == 1), "the note moved with its channel");
-        delete_rows(&mut app, &[1]);
+        delete_step(&mut app, &[1]);
         assert_eq!(app.state.session.project.channels.len(), n);
         assert_eq!(name(&app, 1), n1);
         assert!(app.state.session.project.patterns[0].notes.iter().all(|x| usize::from(x.channel) < n));
@@ -3330,7 +3720,7 @@ mod tests {
         let names: Vec<Option<String>> = app.state.session.project.channels.iter().map(|c| c.name.clone()).collect();
         // Clone channel 0, delete channel 1, then set the rack state on the new rows.
         clone_rows(&mut app, &[0]);
-        delete_rows(&mut app, &[2]);
+        delete_step(&mut app, &[2]);
         let s = &mut app.state;
         s.session.project.get_mut().swing = Some(64);
         toggle_lock(&mut s.session, 1);
@@ -3942,6 +4332,28 @@ mod tests {
 
     /// Undo and redo of a load reach the channel's Lemon Sampler on the next tick: its sample, root note and stretch
     /// match the channel again, back to no sample at all; a channel a drop made loses its instrument and gets it back.
+    /// A clone's instrument is a copy of the original's as it plays now, not one made from the channel's settings: a
+    /// value set only on the instance comes along (`Command::CloneChannel`, hosted from the kept state on the tick).
+    #[test]
+    fn a_clone_copies_the_instrument_state() {
+        let mut app = App::new(None);
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
+        let r = sampler_row(&app);
+        app.plugin_tick();
+        assert!(app.state.session.plugins.set_param_named(r, crate::edit::rack::SAMPLER_DECLICK, 4.0));
+        let params = |app: &App, r: usize| {
+            let st = app.state.session.plugins.state(r).expect("hosted");
+            let (_, json) = crate::plugins::state_json(&st);
+            serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone()
+        };
+        let want = params(&app, r);
+        clone_rows(&mut app, &[r]);
+        app.plugin_tick();
+        assert_eq!(params(&app, r + 1), want, "the clone plays as the original");
+        assert_eq!(app.state.session.project.channels[r + 1].sound.declick, app.state.session.project.channels[r].sound.declick);
+    }
+
     #[test]
     fn the_hosted_sampler_follows_undo_and_redo() {
         use crate::history_ui::ctrl_z;
@@ -4402,5 +4814,120 @@ mod tests {
         run(&mut app, RCmd::ReceiveFrom(2, NoteSrc::Typing));
         app.state.rack.remap(&|r| if r == 2 { None } else { Some(r) });
         assert_eq!(app.state.rack.note_lock[NoteSrc::Typing as usize], None, "removed with its channel");
+    }
+
+    /// A hosted drum instrument with three outputs past its main one.
+    struct Multi(os_host::Descriptor);
+    impl os_engine::Instrument for Multi {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+        fn extra_outputs(&self) -> usize {
+            3
+        }
+    }
+    impl os_engine::HostedEffect for Multi {
+        fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_host::Plugin for Multi {
+        fn desc(&self) -> &os_host::Descriptor {
+            &self.0
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {}
+        fn has_editor(&self) -> bool {
+            false
+        }
+        fn editor_open(&self) -> bool {
+            false
+        }
+        fn open_editor(&mut self, _: *mut std::ffi::c_void, _: f32) -> Result<(u32, u32), String> {
+            Err(String::new())
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            None
+        }
+        fn close_editor(&mut self) {}
+        fn save_state(&self) -> Option<Vec<u8>> {
+            Some(vec![1, 2, 3])
+        }
+        fn load_state(&mut self, _: &[u8]) -> bool {
+            true
+        }
+        fn extra_output_names(&self) -> Vec<String> {
+            ["Kick", "Snare", "Hats"].map(String::from).to_vec()
+        }
+    }
+
+    /// Channel 0 of a test project hosting `Multi` on insert 14, two tracks before the last.
+    fn multi_app() -> App {
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        let desc = os_host::Descriptor {
+            format: os_host::Format::Clap,
+            id: "test.drums".into(),
+            name: "Drums".into(),
+            vendor: String::new(),
+            version: String::new(),
+            features: Vec::new(),
+            kind: os_host::Kind::Instrument,
+            path: "C:/plugins/Drums.clap".into(),
+        };
+        let ch = &mut app.state.session.project.get_mut().channels[0];
+        (ch.kind, ch.plugin, ch.mixer_track) = (ChannelKind::Plugin, Some("Drums".into()), 14);
+        let mut h = crate::plugins::Hosted::new(std::sync::Arc::new(std::sync::Mutex::new(Multi(desc))));
+        h.owner = ch.id;
+        app.state.session.plugins.hosted.insert(0, h);
+        app
+    }
+
+    /// Outputs ▸ lists each extra output by its name with None and the tracks after the channel's own; picking one
+    /// saves its port in the channel's wrapper state, one undo step.
+    #[test]
+    fn outputs_menu_routes_an_extra_output() {
+        let mut app = multi_app();
+        let menu = outputs_menu(&app, 0).expect("an Outputs menu");
+        assert_eq!(menu.label, "Outputs");
+        let labels: Vec<&str> = menu.children.iter().map(|i| &*i.label).collect();
+        assert_eq!(labels[0], "Auto map outputs");
+        assert_eq!(&labels[2..], ["2. Kick", "3. Snare", "4. Hats"]);
+        let snare: Vec<&str> = menu.children[3].children.iter().map(|i| &*i.label).collect();
+        assert_eq!(snare, ["None", "15. Bus 15", "16. Bus 16"]);
+        assert_eq!(menu.children[3].children[0].mark, Mark::Radio(true));
+
+        run(&mut app, RCmd::Output(0, 1, 2));
+        let ch = &app.state.session.project.channels[0];
+        assert_eq!(ch.plugin.as_deref(), Some(os_flp::wrapper::WRAPPER), "saved as a wrapper");
+        assert_eq!(crate::effect_ports::channel_outputs(ch), [0, 2]);
+        assert_eq!(outputs_menu(&app, 0).unwrap().children[3].children[2].mark, Mark::Radio(true), "Snare on track 16");
+        crate::history_ui::undo(&mut app.state);
+        assert!(crate::effect_ports::channel_outputs(&app.state.session.project.channels[0]).is_empty());
+    }
+
+    /// Auto map outputs sends each extra output to the next track, as far as there are tracks, and names the unnamed
+    /// ones after it.
+    #[test]
+    fn auto_map_outputs_fills_the_tracks_after_the_channel() {
+        let mut app = multi_app();
+        os_session::edit::mixer::track_mut(&mut app.state.session, 16).unwrap().name = Some("Mine".into());
+        let msg = run(&mut app, RCmd::AutoMapOutputs(0));
+        assert_eq!(msg.as_deref(), Some("Mapped 2 of 3 outputs: no more tracks after this channel's"));
+        assert_eq!(crate::effect_ports::channel_outputs(&app.state.session.project.channels[0]), [1, 2]);
+        assert_eq!(os_session::edit::mixer::name(&app.state.session, 15), "Kick");
+        assert_eq!(os_session::edit::mixer::name(&app.state.session, 16), "Mine", "a named track keeps its name");
+        crate::history_ui::undo(&mut app.state);
+        assert!(crate::effect_ports::channel_outputs(&app.state.session.project.channels[0]).is_empty());
+        assert_eq!(os_session::edit::mixer::name(&app.state.session, 15), "Bus 15");
+    }
+
+    /// A channel whose plugin has one output gets no Outputs menu.
+    #[test]
+    fn no_outputs_menu_without_extra_outputs() {
+        let mut app = multi_app();
+        app.state.session.plugins.hosted.clear();
+        assert!(outputs_menu(&app, 0).is_none());
+        assert!(run(&mut app, RCmd::AutoMapOutputs(0)).is_some());
     }
 }

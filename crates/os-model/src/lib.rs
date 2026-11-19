@@ -52,6 +52,13 @@ impl Rgb {
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Rgb { r, g, b }
     }
+
+    /// As a channel's colour is kept: no component under 0x14, as FL saves channel colours, so a colour set darker
+    /// shows as it will come back.
+    pub const fn for_channel(self) -> Rgb {
+        const MIN: u8 = 0x14;
+        Rgb { r: if self.r < MIN { MIN } else { self.r }, g: if self.g < MIN { MIN } else { self.g }, b: if self.b < MIN { MIN } else { self.b } }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1351,6 +1358,8 @@ pub struct ControlPoint {
     pub kind: u32,
     /// Volume and pan 0..=12800 (pan centre 6400); pitch in signed cents.
     pub value: i32,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 impl ControlPoint {
@@ -1359,7 +1368,7 @@ impl ControlPoint {
     pub const PITCH: u16 = 4;
 
     pub fn new(position: u32, channel: u16, param: u16, value: i32) -> Self {
-        ControlPoint { position, kind: u32::from(channel) << 16 | u32::from(param), value }
+        ControlPoint { position, kind: u32::from(channel) << 16 | u32::from(param), value, id: Id::NONE }
     }
 
     pub fn channel(&self) -> u16 {
@@ -1400,6 +1409,8 @@ pub struct Note {
     pub unk14: u16,
     /// Note repeat index 0..=14 (byte 17; 0 = off; spec: flp/events/patterns.md).
     pub repeat: u8,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 impl Note {
@@ -1475,7 +1486,7 @@ impl Note {
 
     /// A step-sequencer step with default parameters.
     pub fn step(channel: u16, position: u32) -> Self {
-        Note {
+        Note { id: Id::NONE,
             position,
             length: 0,
             channel,
@@ -1992,6 +2003,8 @@ pub struct TimeMarker {
     pub flag: u8,
     /// Event 168: a key marker's place in [`SCALES`]; −1 Default, −2 Black notes.
     pub scale_index: i32,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 /// The Add key marker list's scales in its order, each with the notes it leaves out at root C in event 101's bits
@@ -2054,7 +2067,7 @@ impl TimeMarker {
     pub const KEY: u8 = 12;
 
     pub fn new(position: u32, name: &str) -> Self {
-        TimeMarker { position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0, root: 0, flag: 0, scale_index: 0 }
+        TimeMarker { id: Id::NONE, position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0, root: 0, flag: 0, scale_index: 0 }
     }
 
     /// The key marker Add key marker ▸ adds (spec: ui/playlist.md §7a): `scale` is a place in [`SCALES`], −1 for
@@ -2106,12 +2119,14 @@ pub struct PlaylistTrack {
     /// The track's link to a mixer track or a channel: the original's audio and instrument tracks (event 238 bytes 49 to
     /// 60; spec: flp/events/playlist.md, ui/playlist.md §6c).
     pub link: TrackLink,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 impl PlaylistTrack {
     /// Track `number` as a new project has it: unnamed, default colour, on, not grouped, not linked.
     pub fn new(number: u32) -> Self {
-        PlaylistTrack {
+        PlaylistTrack { id: Id::NONE,
             number,
             name: None,
             color: None,
@@ -2297,11 +2312,13 @@ pub struct AutoPoint {
     pub mode: AutoMode,
     /// Byte 23 of the record, kept as read.
     pub flag: u8,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 impl AutoPoint {
     pub fn new(beat: f64, value: f64) -> Self {
-        AutoPoint { beat, value, tension: 0.0, mode: AutoMode::Single, flag: 2 }
+        AutoPoint { beat, value, tension: 0.0, mode: AutoMode::Single, flag: 2, id: Id::NONE }
     }
 }
 
@@ -2683,6 +2700,17 @@ pub mod target {
             }
             _ => t,
         })
+    }
+
+    /// Target `t` after channels moved: `ch` gives a channel's new index (channel targets keep the channel in the high
+    /// half, spec: flp/events/automation.md "Targets"); `None`: the channel is gone, and so is the target. The tempo and
+    /// other places stay.
+    pub fn moved_channel(t: u32, ch: impl Fn(u16) -> Option<u16>) -> Option<u32> {
+        let hi = (t >> 16) as u16;
+        if t == TEMPO || hi >= 0x4000 {
+            return Some(t);
+        }
+        ch(hi).map(|n| channel(n, t as u16))
     }
 
     /// Bipolar targets centre at 0.5.

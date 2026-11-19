@@ -303,7 +303,7 @@ fn bgr_from_rgb(c: Rgb, alpha: u8) -> u32 {
 }
 /// Channel colors: FL raises each component to at least 0x14.
 fn clamp_channel_color(c: Rgb) -> Rgb {
-    Rgb::new(c.r.max(0x14), c.g.max(0x14), c.b.max(0x14))
+    c.for_channel()
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1441,7 +1441,7 @@ fn decode_envelopes(block: &[Event]) -> [Envelope; 5] {
 fn decode_note(r: &[u8]) -> Note {
     let u16_at = |o: usize| u16::from_le_bytes([r[o], r[o + 1]]);
     let u32_at = |o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
-    Note {
+    Note { id: os_model::Id::NONE,
         position: u32_at(0),
         channel: u16_at(6),
         length: u32_at(8),
@@ -1467,7 +1467,7 @@ const CONTROL_LEN: usize = 12;
 
 fn decode_controls(data: &[u8]) -> Vec<ControlPoint> {
     data.chunks_exact(CONTROL_LEN)
-        .map(|r| ControlPoint {
+        .map(|r| ControlPoint { id: os_model::Id::NONE,
             position: u32::from_le_bytes(r[0..4].try_into().unwrap()),
             kind: u32::from_le_bytes(r[4..8].try_into().unwrap()),
             value: i32::from_le_bytes(r[8..12].try_into().unwrap()),
@@ -1516,9 +1516,13 @@ fn decode_clip(r: &[u8]) -> Clip {
     let f32_at = |o: usize| f32::from_le_bytes(r[o..o + 4].try_into().unwrap());
     let item = u16_at(6);
     let source = if item >= 0x5000 { ClipSource::Pattern(item - 0x5000) } else { ClipSource::Channel(item) };
-    // Pattern clips: u32 ticks, `ffffffff` = none; others: f32, -1 = none (spec: "Clip offsets").
+    // Pattern clips: u32 ticks, `ffffffff` = none; others: f32, -1 = none (spec: "Clip offsets"). FL 12 also writes
+    // the float -1 (`bf800000`) into pattern clips it never trimmed: none as well.
     let window = match source {
-        ClipSource::Pattern(_) => (u32_at(24) != u32::MAX).then(|| (f64::from(u32_at(24)), f64::from(u32_at(28)))),
+        ClipSource::Pattern(_) => {
+            let none = |v: u32| v == u32::MAX || v == (-1.0f32).to_bits();
+            (!none(u32_at(24)) && !none(u32_at(28))).then(|| (f64::from(u32_at(24)), f64::from(u32_at(28))))
+        }
         ClipSource::Channel(_) => {
             let (a, b) = (f32_at(24), f32_at(28));
             (a != -1.0 && a.is_finite() && b.is_finite()).then(|| (f64::from(a), f64::from(b)))
@@ -1697,7 +1701,7 @@ fn decode_points(d: &[u8]) -> Vec<AutoPoint> {
     d.chunks_exact(AUTO_POINT_LEN)
         .map(|r| {
             beat += f64::from_le_bytes(r[0..8].try_into().unwrap());
-            AutoPoint {
+            AutoPoint { id: os_model::Id::NONE,
                 beat,
                 value: f64::from_le_bytes(r[8..16].try_into().unwrap()),
                 tension: f32::from_le_bytes(r[16..20].try_into().unwrap()),
@@ -1813,7 +1817,7 @@ fn link_event(channel: u16, target: u32) -> Event {
 fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrack {
     let r = events[t.record].data().unwrap_or(&[]);
     let custom = t.color_flag.is_some_and(|i| int(&events[i]) != 0);
-    PlaylistTrack {
+    PlaylistTrack { id: os_model::Id::NONE,
         number: r.get(0..4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap())),
         name: t.name.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)),
         color: r
@@ -6285,6 +6289,19 @@ mod tests {
         assert_eq!(list_clip_len(&encode_clips(&back, CLIP_LEN)), Some(CLIP_LEN));
     }
 
+    /// FL 12 marks some untrimmed pattern clips with the float -1 (`bf800000`), as other clips are marked: the clip
+    /// plays the pattern from its start, and the bytes are written back as read (spec: flp/events/playlist.md "Clip
+    /// offsets").
+    #[test]
+    fn a_pattern_clip_marked_untrimmed_with_float_minus_one_plays_from_the_start() {
+        let mut r = encode_clip(&Clip::new(0, 39168, 0, ClipSource::Pattern(1)));
+        r[24..28].copy_from_slice(&(-1.0f32).to_le_bytes());
+        r[28..32].copy_from_slice(&(-1.0f32).to_le_bytes());
+        let c = decode_clip(&r);
+        assert_eq!((c.source, c.length, c.window), (ClipSource::Pattern(1), 39168, None));
+        assert_eq!(encode_clip(&c)[24..32], r[24..32]);
+    }
+
     /// Lists of older files, 60-byte (FL 21 to 24.1) and 32-byte (up to FL 20) records, are told apart and written
     /// back at their length; 32-byte records have no id (spec: flp/layouts.md, "How to tell the generation").
     #[test]
@@ -6317,7 +6334,7 @@ mod tests {
         auto_ch.kind = ChannelKind::Automation;
         p.channels.push(auto_ch);
         let mut a = new_automation(2, os_model::target::channel(0, 0), 0.78125, 4.0);
-        a.points.insert(1, AutoPoint { beat: 2.0, value: 0.25, tension: -0.5, mode: AutoMode::Stairs, flag: 0 });
+        a.points.insert(1, AutoPoint { id: os_model::Id::NONE, beat: 2.0, value: 0.25, tension: -0.5, mode: AutoMode::Stairs, flag: 0 });
         p.automations.push(a);
         p.arrangements[0].clips.push(Clip::new(0, 384, 1, ClipSource::Channel(2)));
         let file = create(&p).unwrap();

@@ -19,6 +19,7 @@ pub mod command;
 pub mod host;
 pub mod ids;
 pub mod query;
+pub mod removal;
 pub mod rpc;
 pub mod server;
 
@@ -130,10 +131,18 @@ pub struct Control {
     /// A client may be connected (the app listens, `--control` / `--serve`): edits in the interface become events.
     pub watched: bool,
     /// How many things the project had at the last `settle` (`settle_tick`).
-    counted: [usize; 6],
+    counted: [usize; 11],
+    /// Clients' gestures under way (`begin_in`): their number and the name of their step.
+    gestures: std::collections::BTreeMap<u64, Option<String>>,
+    gesture_seq: u64,
 }
 
 impl Control {
+    /// A new id for a note a command makes (it names it in its result; `ids::Ids::part`).
+    pub fn fresh_note(&mut self) -> os_model::Id {
+        self.ids.part()
+    }
+
     /// Gives ids to new things (`ids::settle`).
     pub fn settle(&mut self, p: &mut os_model::Project) -> bool {
         self.counted = count(p);
@@ -209,15 +218,29 @@ impl Control {
         self.states.clear();
         self.known.clear();
         self.proposals.clear();
+        self.gestures.clear();
         self.seen = None;
     }
 }
 
 /// The things `settle` gives ids to, counted.
-fn count(p: &os_model::Project) -> [usize; 6] {
-    let clips = p.arrangements.iter().map(|a| a.clips.len()).sum();
+fn count(p: &os_model::Project) -> [usize; 11] {
+    let arr = |f: fn(&os_model::Arrangement) -> usize| p.arrangements.iter().map(f).sum();
+    let pat = |f: fn(&os_model::Pattern) -> usize| p.patterns.iter().map(f).sum();
     let slots = p.mixer.iter().map(|m| m.slots.iter().flatten().count()).sum();
-    [p.channels.len(), p.patterns.len(), p.mixer.len(), p.arrangements.len(), clips, slots]
+    [
+        p.channels.len(),
+        p.patterns.len(),
+        p.mixer.len(),
+        p.arrangements.len(),
+        arr(|a| a.clips.len()),
+        slots,
+        pat(|q| q.notes.len()),
+        pat(|q| q.controls.len()),
+        arr(|a| a.markers.len()),
+        arr(|a| a.tracks.len()),
+        p.automations.iter().map(|a| a.points.len()).sum(),
+    ]
 }
 
 fn op(c: &Command) -> &'static str {
@@ -228,31 +251,87 @@ fn op(c: &Command) -> &'static str {
         Command::SetMainPitch { .. } => "set_main_pitch",
         Command::SetTimeSignature { .. } => "set_time_signature",
         Command::SetInfo { .. } => "set_info",
+        Command::SetProject { .. } => "set_project",
         Command::AddChannel { .. } => "add_channel",
+        Command::AddAudioClip { .. } => "add_audio_clip",
+        Command::SetAutoCrossfades { .. } => "set_auto_crossfades",
+        Command::CloneChannel { .. } => "clone_channel",
+        Command::ReplaceInstrument { .. } => "replace_instrument",
         Command::DeleteChannel { .. } => "delete_channel",
         Command::MoveChannel { .. } => "move_channel",
         Command::SetChannel { .. } => "set_channel",
         Command::LoadSample { .. } => "load_sample",
+        Command::LoadChannelState { .. } => "load_channel_state",
+        Command::SetMisc { .. } => "set_misc",
+        Command::SetStartValue { .. } => "set_start_value",
         Command::AddTrack { .. } => "add_track",
         Command::DeleteTrack { .. } => "delete_track",
         Command::SetTrack { .. } => "set_track",
+        Command::ResetTrack { .. } => "reset_track",
+        Command::RemoveTracks { .. } => "remove_tracks",
+        Command::MoveTrack { .. } => "move_track",
+        Command::LoadTrackState { .. } => "load_track_state",
+        Command::SetAutoBypass { .. } => "set_auto_bypass",
         Command::SetSend { .. } => "set_send",
         Command::SetEq { .. } => "set_eq",
         Command::AddEffect { .. } => "add_effect",
         Command::RemoveEffect { .. } => "remove_effect",
+        Command::MoveEffect { .. } => "move_effect",
         Command::SetSlot { .. } => "set_slot",
         Command::AddPattern { .. } => "add_pattern",
+        Command::CopyPattern { .. } => "copy_pattern",
+        Command::ShiftPatterns { .. } => "shift_patterns",
+        Command::MovePattern { .. } => "move_pattern",
+        Command::ClonePattern { .. } => "clone_pattern",
+        Command::TransposePattern { .. } => "transpose_pattern",
+        Command::SplitPattern { .. } => "split_pattern",
+        Command::SetPatternSignature { .. } => "set_pattern_signature",
+        Command::SetPatternMarkers { .. } => "set_pattern_markers",
         Command::DeletePattern { .. } => "delete_pattern",
         Command::SetPattern { .. } => "set_pattern",
         Command::SetNotes { .. } => "set_notes",
         Command::AddNotes { .. } => "add_notes",
+        Command::SetStep { .. } => "set_step",
+        Command::SetControls { .. } => "set_controls",
+        Command::SetLoops { .. } => "set_loops",
+        Command::SetGroups { .. } => "set_groups",
         Command::AddClip { .. } => "add_clip",
         Command::DeleteClip { .. } => "delete_clip",
         Command::SetClip { .. } => "set_clip",
         Command::SetPlaylistTrack { .. } => "set_playlist_track",
+        Command::SetPoints { .. } => "set_points",
+        Command::AddArrangement { .. } => "add_arrangement",
+        Command::DeleteArrangement { .. } => "delete_arrangement",
+        Command::SetArrangement { .. } => "set_arrangement",
+        Command::SetClips { .. } => "set_clips",
+        Command::SetMarkers { .. } => "set_markers",
+        Command::AddMarker { .. } => "add_marker",
+        Command::SetMarker { .. } => "set_marker",
+        Command::DeleteMarker { .. } => "delete_marker",
+        Command::MoveContent { .. } => "move_content",
+        Command::SwapPlaylistTracks { .. } => "swap_playlist_tracks",
+        Command::InsertPlaylistTrack { .. } => "insert_playlist_track",
+        Command::DeletePlaylistTrack { .. } => "delete_playlist_track",
+        Command::ResetPlaylistTrack { .. } => "reset_playlist_track",
+        Command::SetClipLfo { .. } => "set_clip_lfo",
+        Command::SetMidiOut { .. } => "set_midi_out",
+        Command::SetMember { .. } => "set_member",
+        Command::WrapEffects { .. } => "wrap_effects",
+        Command::WrapInstrument { .. } => "wrap_instrument",
+        Command::MoveMember { .. } => "move_member",
+        Command::RemoveMember { .. } => "remove_member",
+        Command::AddMember { .. } => "add_member",
+        Command::ReplaceMember { .. } => "replace_member",
         Command::SetParam { .. } => "set_param",
+        Command::SetPluginState { .. } => "set_plugin_state",
         Command::Put(_) => "put",
     }
+}
+
+/// Gives ids to what has none (`Control::settle`), so commands can name it.
+pub fn settle_in(s: &mut crate::session::Session) {
+    let control = &mut s.control;
+    s.project.write_if(|p| control.settle(p));
 }
 
 /// `run` on the session: what the views are to follow is reported (`Session::touched`); a list that fails reports
@@ -264,9 +343,18 @@ pub fn run_in(s: &mut crate::session::Session, commands: Vec<Command>) -> Result
     let mut undo = Vec::with_capacity(commands.len());
     let mut results = Vec::with_capacity(commands.len());
     for (i, c) in commands.into_iter().enumerate() {
+        let on_off = c.on_off_undo(s);
+        s.link_moves.clear();
         match c.apply(s) {
             Ok(done) => {
+                // The remote control links the command moved with what they drive (`remote::follow`) go back after
+                // it is undone.
+                let links: Vec<_> = std::mem::take(&mut s.link_moves).into_iter().map(|(from, to)| (to, from)).collect();
+                if !links.is_empty() {
+                    undo.push(Command::Put(Box::new(command::Taken::Links(links))));
+                }
                 undo.push(done.undo);
+                undo.extend(on_off);
                 results.push(done.result);
                 s.control.settle(s.project.get_mut());
             }
@@ -320,6 +408,118 @@ pub fn apply_in(s: &mut crate::session::Session, by: &By, name: Option<&str>, co
     s.control.saw(&s.project, tempo);
     s.control.event(by, "apply", step, ops);
     Ok(results)
+}
+
+/// `apply_in` in two parts, one step named `name`: `then` makes the second part's commands from the first part's
+/// results (the ids of what it added). When the second part fails, the first is taken back.
+pub fn apply_then_in(
+    s: &mut crate::session::Session,
+    by: &By,
+    name: &str,
+    first: Vec<Command>,
+    then: impl FnOnce(&crate::session::Session, &[serde_json::Value]) -> Vec<Command>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut ops: Vec<&'static str> = first.iter().map(op).collect();
+    let (mut results, mut undo) = run_in(s, first)?;
+    let more = then(s, &results);
+    ops.extend(more.iter().map(op));
+    match run_in(s, more) {
+        Ok((r, mut u)) => {
+            results.extend(r);
+            u.append(&mut undo);
+            undo = u;
+        }
+        Err(e) => {
+            let _ = take_back_in(s, undo);
+            return Err(e);
+        }
+    }
+    let label: Cow<'static, str> = match by {
+        By::User => name.to_string().into(),
+        By::Client(n) => format!("{n}: {}", lower(name)).into(),
+    };
+    crate::history::record_named(s, label, crate::history::Snap::Commands(undo));
+    crate::history::done_with(s);
+    let tempo = s.tempo();
+    s.control.saw(&s.project, tempo);
+    s.control.event(by, "apply", name.to_string(), ops);
+    Ok(results)
+}
+
+/// Starts a gesture: a change a client streams as it is made (a fader dragged), commands applied in it
+/// (`apply_run_in`) making one undo step, named `name` (by default its first commands' name), until `end_in`. Returns
+/// its number.
+pub fn begin_in(s: &mut crate::session::Session, name: Option<&str>) -> u64 {
+    let c = &mut s.control;
+    c.gesture_seq += 1;
+    c.gestures.insert(c.gesture_seq, name.map(str::to_string));
+    c.gesture_seq
+}
+
+/// Applies `commands` in gesture `n` (`begin_in`): they join the gesture's step while it is the newest, keeping what
+/// each region was before the gesture; after any other step (or an undo) they make a new step that the gesture goes on
+/// in.
+pub fn apply_run_in(s: &mut crate::session::Session, by: &By, n: u64, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    let name = s.control.gestures.get(&n).ok_or_else(|| format!("no gesture {n}"))?.clone();
+    if commands.is_empty() {
+        return Ok(Vec::new());
+    }
+    let r = crate::history::Run::Gesture(n);
+    if !s.history.joins(r) {
+        let results = apply_in(s, by, name.as_deref(), commands)?;
+        s.history.set_run(r);
+        return Ok(results);
+    }
+    let ops: Vec<&'static str> = commands.iter().map(op).collect();
+    let (results, undo) = run_in(s, commands)?;
+    crate::history::extend_newest(s, |held| join_undo(held, undo));
+    let tempo = s.tempo();
+    s.control.saw(&s.project, tempo);
+    let step = s.history.newest_done().unwrap_or_default().to_string();
+    s.control.event(by, "apply", step, ops);
+    Ok(results)
+}
+
+/// Ends gesture `n`: the next command is a step of its own.
+pub fn end_in(s: &mut crate::session::Session, n: u64) -> Result<(), String> {
+    s.control.gestures.remove(&n).ok_or_else(|| format!("no gesture {n}"))?;
+    s.history.end_run_of(crate::history::Run::Gesture(n));
+    Ok(())
+}
+
+/// A gesture step's undo commands `held` with the newer `undo` before them: a region the step already puts back is
+/// not taken again (the step puts it back as it was before the gesture), so a long drag keeps one of each.
+fn join_undo(held: &mut Vec<Command>, undo: Vec<Command>) {
+    let keys: std::collections::HashSet<_> = held.iter().filter_map(region_key).collect();
+    let mut v: Vec<Command> = undo.into_iter().filter(|c| region_key(c).is_none_or(|k| !keys.contains(&k))).collect();
+    v.append(held);
+    *held = v;
+}
+
+/// What an undo command puts back, for `join_undo`: two with the same key put back the same thing. `None`: one that
+/// is kept whatever else the step holds (a whole project, links, an add's undo).
+fn region_key(c: &Command) -> Option<(u8, u32, u32)> {
+    use command::Taken;
+    let Command::Put(t) = c else { return None };
+    Some(match &**t {
+        Taken::Settings(_) => (0, 0, 0),
+        Taken::Channel(c) => (1, c.id.0, 0),
+        Taken::Track(m) => (2, m.id.0, 0),
+        Taken::Pattern(p) => (3, p.id.0, 0),
+        Taken::Lfo(id, _) => (10, *id, 0),
+        Taken::Arrangement(a) => (4, a.id.0, 0),
+        Taken::Param(owner, param, _) => (5, *owner, *param),
+        Taken::Plugin(owner, _) => (6, *owner, 0),
+        Taken::Mutes(_) => (7, 0, 0),
+        Taken::Points(ch, _) => (14, *ch, 0),
+        Taken::Locks(_) => (11, 0, 0),
+        Taken::Zips(_) => (12, 0, 0),
+        Taken::Start(t, _) => (15, *t, 0),
+        Taken::Groups(_) => (13, 0, 0),
+        Taken::TracksOn(_) => (9, 0, 0),
+        Taken::Row(id, _) => (8, *id, 0),
+        Taken::Project(_) | Taken::Links(_) | Taken::Gone(_) | Taken::Back(_) | Taken::Removed(_) | Taken::Deleted(..) | Taken::WithOn(..) | Taken::Swap(..) => return None,
+    })
 }
 
 /// Records an interface edit's step. A step of the same press that changed nothing goes first (a text box's playlist

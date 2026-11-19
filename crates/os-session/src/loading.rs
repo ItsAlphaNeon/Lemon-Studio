@@ -234,6 +234,7 @@ fn host_plugins(ses: &mut crate::session::Session, deadline: std::time::Instant,
     crate::smith::sync_smith(ses);
     crate::slicer::sync_slicer(ses);
     crate::drums::sync_drums(ses);
+    crate::soundfont::sync_soundfont(ses);
     if crate::native::enabled() {
         crate::project_plugins::host_native(ses, scanning);
     }

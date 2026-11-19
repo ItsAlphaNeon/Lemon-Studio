@@ -136,6 +136,9 @@ pub enum View {
     MixerSelect(u16),
     /// Patterns were renumbered: the clip and note selections go.
     PatternsRenumbered,
+    /// Patterns moved: each number's new one (by old number, `None` for one that went). What the interface keeps by
+    /// pattern number follows (the playlist's Draw source).
+    PatternsMoved(Vec<Option<u16>>),
     /// The channels' rows moved: each row's new row, `None` for a channel that went (`rack::remap_state`).
     Rows(Vec<Option<usize>>),
     /// The channel rack's rows changed in number: its height follows (`rack::autosize`).
@@ -146,6 +149,8 @@ pub enum View {
     ClipsCleared,
     /// The timebase went from `.0` to `.1` ticks per quarter: the views' ticks and the clipboards follow (`app::retime`).
     Retimed(u16, u16),
+    /// Plugins moved into a container (a wrap): the interface's own targets on their parameters follow them.
+    TargetsMoved(crate::container::Moved),
     /// A message for the hint bar.
     Message(String),
     /// Recording wrote notes of `channel` into `pattern`: the piano roll shows them, nothing selected (its time
@@ -245,6 +250,25 @@ impl Session {
 
     pub fn set_tempo(&mut self, bpm: f64) {
         self.project.write_if(|p| p.tempo.replace(bpm) != Some(bpm));
+    }
+
+    /// Info ▸ Show info on opening, switched for the project and saved with it. No undo step.
+    pub fn set_show_info(&mut self, on: bool) {
+        self.project.write_if(|p| p.show_info.replace(on) != Some(on));
+    }
+
+    /// The project's working time starts now, nothing spent (a new project). No undo step.
+    pub fn start_work_time(&mut self) {
+        self.project.get_mut().work_time = Some(os_flp::project::work_time_now());
+    }
+
+    /// Info ▸ Reset working time: the time spent goes to zero and the start stays. It is a change to the project also
+    /// when the project held no time spent yet: the saved copy then forgets its time so the two differ. No undo step.
+    pub fn reset_work_time(&mut self) {
+        self.project.get_mut().work_time.get_or_insert_with(os_flp::project::work_time_now).spent = 0.0;
+        if self.saved.0.work_time == self.project.work_time {
+            self.saved.0.work_time = None;
+        }
     }
 }
 

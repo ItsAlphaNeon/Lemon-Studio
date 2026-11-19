@@ -6,7 +6,6 @@
 //! The interface's side of `crate::params` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 use os_model::target::{self, Target};
@@ -365,6 +364,15 @@ pub enum Tweak {
     Plugin { key: usize, index: usize },
     /// A host control with an automation target (knob, fader, tempo).
     Host(Action),
+}
+
+/// The hosted instances moved (`m(old key) = new key`, `None`: gone): "Most recent" and "Second most recent" follow
+/// their plugin's parameter; one whose plugin went is forgotten.
+pub fn remap(last: &mut Vec<Tweak>, m: impl Fn(usize) -> Option<usize>) {
+    last.retain_mut(|t| match t {
+        Tweak::Plugin { key, .. } => m(*key).map(|k| *key = k).is_some(),
+        Tweak::Host(_) => true,
+    });
 }
 
 /// Notes `t` as the last tweaked, newest first: "Most recent", "Second most recent".

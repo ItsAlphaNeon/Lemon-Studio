@@ -7,7 +7,6 @@
 //! FILE ▸ Export MIDI... and the piano roll's Export as MIDI file... write one.
 // spec: ui/midi-files.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::cell::RefCell;
@@ -18,7 +17,6 @@ use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, State};
 use crate::dialog::{spans, Answer, Body, Kind, Reply, Then};
-use crate::history::{self, Snap};
 use crate::project_forms::{FHit, Form};
 
 /// The form's caption (spec §2).
@@ -558,45 +556,115 @@ fn stem(path: &Path) -> String {
 
 /// The channels' notes go into pattern `n` with the import's control points and signature markers, the markers into
 /// the playlist; the new channels into a filter group named after the file, which the rack then shows (spec §3, §7).
-fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
+/// One undo step `IMPORT_STEP`, or (`step` false: a new project's first content) none.
+fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16, step: bool) {
+    use crate::control::command::Command;
+    crate::control_ui::settle_ids(s);
     let base = s.session.project.channels.len();
     let max = crate::mixer::max_insert(&s.session.project);
-    for (i, part) in imp.parts.iter().enumerate() {
-        let row = match o.instrument {
-            Instrument::Sampler => crate::projects::add_channel(s.session.project.get_mut()),
-            k => crate::projects::add_plugin_channel(s.session.project.get_mut(), k.label()),
-        };
-        let ch = &mut s.session.project.get_mut().channels[row];
-        ch.name = Some(part.name.clone());
-        ch.mixer_track = if o.mixer { (i as u16 + 1).min(max) } else { 0 };
+    let track_id = |t: u16| crate::edit::mixer::track(&s.session, t).map(|m| m.id.0);
+    let mut first: Vec<Command> = imp
+        .parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| Command::AddChannel {
+            name: Some(part.name.clone()),
+            plugin: (o.instrument != Instrument::Sampler).then(|| o.instrument.label().to_string()),
+            sample: None,
+            track: track_id(if o.mixer { (i as u16 + 1).min(max) } else { 0 }),
+            kind: None,
+            color: None,
+            target: None,
+            points: Vec::new(),
+            children: Vec::new(),
+        })
+        .collect();
+    if s.session.project.pattern(n).is_none() {
+        first.push(Command::AddPattern { name: Some(name.to_string()), color: None, number: Some(n) });
     }
-    let index: Vec<u16> = s.session.project.channels[base..].iter().map(|c| c.index).collect();
-    let old = s.session.project.pattern_length(n);
-    let pat = crate::edit::patterns::pat_mut(&mut s.session, n);
-    if pat.name.is_none() {
-        pat.name = Some(name.to_string());
+    let parts = imp.parts.len();
+    let then = |s: &State, _: &[serde_json::Value]| import_commands(s, &imp, o, name, n, base..base + parts);
+    let r = if step {
+        crate::control_ui::command_then(s, IMPORT_STEP, first, then).map(drop)
+    } else {
+        crate::control_ui::run(s, first).and_then(|_| {
+            let more = then(s, &[]);
+            crate::control_ui::run(s, more).map(drop)
+        })
+    };
+    if let Err(e) = r {
+        s.message = Some(e);
+        return;
     }
-    for (part, &ch) in imp.parts.iter().zip(&index) {
-        pat.notes.extend(part.notes.iter().map(|x| Note { channel: ch, ..*x }));
-        pat.controls.extend(part.controls.iter().map(|c| ControlPoint::new(c.position, ch, c.param(), c.value)));
-    }
-    pat.controls.extend(imp.tempos.iter().copied());
-    pat.notes.sort_by_key(|x| x.position);
-    pat.controls.sort_by_key(|c| c.position);
-    if o.signatures && !imp.signatures.is_empty() {
-        pat.markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
-        pat.markers.extend(imp.signatures.iter().cloned());
-        pat.markers.sort_by_key(|m| m.position);
-        crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
-    }
-    if !imp.markers.is_empty() {
-        crate::edit::playlist::arr_mut(&mut s.session).markers.extend(imp.markers.iter().cloned());
-    }
-    crate::edit::rack::import_group(&mut s.session, name, base..base + index.len());
     s.selected_channel = base;
     s.rack.select_only(base);
     crate::rack::autosize(s);
     s.session.dirty = true;
+}
+
+/// What an import does once its channels (rack rows `rows`) and pattern `n` are there: the pattern's name, notes,
+/// controls and time markers, the playlist's markers and the filter group.
+fn import_commands(s: &State, imp: &Imported, o: &Options, name: &str, n: u16, rows: std::ops::Range<usize>) -> Vec<crate::control::command::Command> {
+    use crate::control::command::{Command, ControlIn, GroupIn, MarkerIn, NoteIn};
+    let p = &s.session.project;
+    let Some(pat) = p.pattern(n) else { return Vec::new() };
+    let id = |ch: u16| p.channels.iter().find(|c| c.index == ch).map(|c| c.id.0);
+    let new: Vec<u32> = p.channels[rows.clone()].iter().map(|c| c.id.0).collect();
+    let mut v = Vec::new();
+    if pat.name.is_none() {
+        v.push(Command::SetPattern { pattern: pat.id.0, name: Some(name.to_string()), color: None, length: None });
+    }
+    // The pattern's notes, then the file's, in position order.
+    let mut notes: Vec<(u32, NoteIn)> = pat.notes.iter().filter_map(|x| Some((x.position, NoteIn::of(x, id(x.channel)?)))).collect();
+    for (part, &ch) in imp.parts.iter().zip(&new) {
+        notes.extend(part.notes.iter().map(|x| (x.position, NoteIn::of(x, ch))));
+    }
+    notes.sort_by_key(|x| x.0);
+    v.push(Command::SetNotes { pattern: pat.id.0, channel: None, notes: notes.into_iter().map(|x| x.1).collect() });
+    if imp.parts.iter().any(|x| !x.controls.is_empty()) || !imp.tempos.is_empty() {
+        let kept = |c: &ControlPoint| ControlIn { position: c.position, value: c.value, channel: None, param: None, kind: Some(c.kind), id: (c.id.0 != 0).then_some(c.id.0) };
+        let mut list: Vec<(u32, ControlIn)> = pat.controls.iter().map(|c| (c.position, kept(c))).collect();
+        for (part, &ch) in imp.parts.iter().zip(&new) {
+            list.extend(part.controls.iter().map(|c| (c.position, ControlIn { position: c.position, value: c.value, channel: Some(ch), param: Some(c.param()), kind: None, id: None })));
+        }
+        list.extend(imp.tempos.iter().map(|c| (c.position, kept(c))));
+        list.sort_by_key(|x| x.0);
+        v.push(Command::SetControls { pattern: pat.id.0, controls: list.into_iter().map(|x| x.1).collect() });
+    }
+    if o.signatures && !imp.signatures.is_empty() {
+        let kept = pat.markers.iter().filter(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
+        let markers = kept.chain(&imp.signatures).map(MarkerIn::of).collect();
+        v.push(Command::SetPatternMarkers { pattern: pat.id.0, markers });
+    }
+    if !imp.markers.is_empty() {
+        let held = p.arrangement().map(|a| a.markers.clone()).unwrap_or_default();
+        v.push(Command::SetMarkers { markers: held.iter().chain(&imp.markers).map(MarkerIn::of).collect() });
+    }
+    let mut q: Project = (**p).clone();
+    crate::edit::rack::import_group_in(&mut q, name, rows);
+    let channels = q.channels.iter().map(|c| GroupIn { channel: c.id.0, group: c.rack.group }).collect();
+    v.push(Command::SetGroups { groups: q.groups, channels, shown: q.current_group });
+    v
+}
+
+/// The piano roll's import into channel `ch` (an index) of pattern `n`: the notes, the imported ones' places in the
+/// new list in `sel`, and the time markers.
+fn piano_commands(s: &State, n: u16, ch: u16, new: &[Note], imp: &Imported, o: &Options, sel: &mut Vec<usize>) -> Vec<crate::control::command::Command> {
+    use crate::control::command::{Command, MarkerIn, NoteIn};
+    let p = &s.session.project;
+    let Some(pat) = p.pattern(n) else { return Vec::new() };
+    let id = |ch: u16| p.channels.iter().find(|c| c.index == ch).map(|c| c.id.0);
+    let mut all: Vec<(&Note, bool)> = pat.notes.iter().filter(|x| o.blend || x.channel != ch).map(|x| (x, false)).collect();
+    all.extend(new.iter().map(|x| (x, true)));
+    all.sort_by_key(|(x, _)| x.position);
+    *sel = all.iter().enumerate().filter(|(_, (_, new))| *new).map(|(i, _)| i).collect();
+    let notes = all.iter().filter_map(|(x, _)| Some(NoteIn::of(x, id(x.channel)?))).collect();
+    let mut v = vec![Command::SetNotes { pattern: pat.id.0, channel: None, notes }];
+    if o.signatures && !imp.signatures.is_empty() {
+        let kept = pat.markers.iter().filter(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
+        v.push(Command::SetPatternMarkers { pattern: pat.id.0, markers: kept.chain(&imp.signatures).map(MarkerIn::of).collect() });
+    }
+    v
 }
 
 impl App {
@@ -667,9 +735,9 @@ impl App {
             self.leave_project();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;
-            s.session.project = crate::locked::Locked::new(crate::projects::empty_project(&crate::settings_file::store()));
-            s.session.project.get_mut().ppq = ppq;
-            s.session.project.get_mut().tempo = Some(tempo);
+            let mut p = crate::projects::empty_project(&crate::settings_file::store());
+            (p.ppq, p.tempo) = (ppq, Some(tempo));
+            s.session.project = crate::locked::Locked::new(p);
             crate::project_info_ui::created(s);
             s.session.file = None;
             s.session.path = None;
@@ -680,14 +748,10 @@ impl App {
             crate::playlist::load_view(s);
             // A project with nothing in it counts as saved; the import is its first change.
             self.mark_saved();
-            place(&mut self.state, imp, o, &name, 1);
+            place(&mut self.state, imp, o, &name, 1, false);
         } else {
-            let s = &mut self.state;
-            // As every playlist step does (`playlist::snapshot_as`), the arrangement exists before the step.
-            crate::edit::playlist::arr_mut(&mut s.session);
-            // One undo step through the control plane, as the rack's other channel adds (`control::edit`).
-            let n = s.pattern();
-            crate::control_ui::edit(s, IMPORT_STEP, crate::control::command::Region::Project, |s| place(s, imp, o, &name, n));
+            let n = self.state.pattern();
+            place(&mut self.state, imp, o, &name, n, true);
         }
         let s = &mut self.state;
         crate::piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
@@ -706,20 +770,13 @@ impl App {
             return self.tell(Kind::Info, TITLE, spans(&["", &file_name(path), " has no notes in the tracks and channels chosen."]));
         }
         let n = s.pattern();
-        let snap = Snap::Patterns { patterns: s.session.project.patterns.clone(), current: n };
-        history::record(&mut s.session, IMPORT_STEP, snap);
-        let old = s.session.project.pattern_length(n);
-        let pat = crate::edit::patterns::pat_mut(&mut s.session, n);
-        let mut all: Vec<(Note, bool)> = std::mem::take(&mut pat.notes).into_iter().filter(|x| o.blend || x.channel != ch).map(|x| (x, false)).collect();
-        all.extend(new.iter().map(|x| (*x, true)));
-        all.sort_by_key(|(x, _)| x.position);
-        let sel = all.iter().enumerate().filter(|(_, (_, new))| *new).map(|(i, _)| i).collect();
-        pat.notes = all.into_iter().map(|(x, _)| x).collect();
-        if o.signatures && !imp.signatures.is_empty() {
-            pat.markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
-            pat.markers.extend(imp.signatures.iter().cloned());
-            pat.markers.sort_by_key(|m| m.position);
-            crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
+        crate::control_ui::settle_ids(s);
+        let first = if s.session.project.pattern(n).is_none() { vec![crate::control::command::Command::AddPattern { name: None, color: None, number: Some(n)}] } else { Vec::new() };
+        let mut sel = Vec::new();
+        let then = |s: &State, _: &[serde_json::Value]| piano_commands(s, n, ch, &new, &imp, o, &mut sel);
+        if let Err(e) = crate::control_ui::command_then(s, IMPORT_STEP, first, then) {
+            s.message = Some(e);
+            return;
         }
         s.piano.select(n, ch, sel);
         s.session.dirty = true;

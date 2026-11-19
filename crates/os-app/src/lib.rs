@@ -8,9 +8,10 @@
 // Plugin windows exist on Windows, Linux and macOS (`plugin_window`): elsewhere what only they reach (the Misc tab, the
 // window and preset menus, their requests) is built but unused. Those builds still report real dead code.
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
-// Only the modules that still write the project directly may call `locked::Locked::get_mut` (each says so with
-// `#![allow(deprecated)]`); a new module that writes it fails to build (control-plane part 2, step 3).
-#![deny(deprecated)]
+// The interface changes the project through commands only (control-plane part 2, steps 3 and 14): a call of
+// `locked::Locked::get_mut` or `write_if` here fails to build. Tests set their projects up directly.
+#![cfg_attr(not(test), deny(deprecated))]
+#![cfg_attr(test, allow(deprecated))]
 
 pub mod anim;
 pub mod app;
@@ -131,6 +132,8 @@ pub use os_session::slicer;
 pub mod slicer_ui;
 pub use os_session::drums;
 pub mod drums_ui;
+pub use os_session::soundfont;
+pub mod soundfont_ui;
 pub use os_session::monitor;
 pub mod motion;
 pub use os_session::params;

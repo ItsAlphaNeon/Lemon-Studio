@@ -5,7 +5,6 @@
 //! The interface's side of `crate::control` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use serde::Serialize;
@@ -44,6 +43,79 @@ pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: im
         }
     }
     r
+}
+
+/// An edit in the interface made of `commands`: applied as one undo step named `name` holding their undo, none when
+/// they changed nothing. With `run`, the edit joins the step of that run just before it (wheel notches on a value box,
+/// the tempo tapper's taps): the first change records the step, the others go into it. An error when the list can't
+/// be applied (nothing changed then).
+pub fn command(s: &mut State, name: &'static str, run: Option<crate::history::Run>, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    if run.is_some_and(|r| s.session.history.joins(r)) {
+        let (results, _) = crate::follow::around(s, |s| run_in(&mut s.session, commands))?;
+        s.session.dirty = true;
+        return Ok(results);
+    }
+    s.session.link_moves.clear();
+    crate::history::settle(&mut s.session);
+    let taken = |s: &State, commands: &[Command]| commands.iter().map(|c| c.undo_now(&s.session).ok()).collect::<Vec<_>>();
+    let before = taken(s, &commands);
+    // An add, or a plugin state (its undo is the instance's, read later): a step whatever the project says.
+    let adds = commands.iter().any(|c| c.adds() || matches!(c, Command::SetPluginState { .. }));
+    let (results, undo) = crate::follow::around(s, |s| run_in(&mut s.session, commands.clone()))?;
+    if adds || taken(s, &commands) != before {
+        s.session.dirty = true;
+        crate::history::record(&mut s.session, name, crate::history::Snap::Commands(undo));
+        crate::history::done_with(&mut s.session);
+        if let Some(r) = run {
+            s.session.history.set_run(r);
+        }
+    }
+    Ok(results)
+}
+
+/// `command` in two parts: `first`, then the commands `then` makes from first's results (the ids of what it added),
+/// as one undo step named `name`. An error takes both back.
+pub fn command_then(s: &mut State, name: &'static str, first: Vec<Command>, then: impl FnOnce(&State, &[serde_json::Value]) -> Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    s.session.link_moves.clear();
+    crate::history::settle(&mut s.session);
+    let (mut results, mut undo) = crate::follow::around(s, |s| run_in(&mut s.session, first))?;
+    let more = then(s, &results);
+    match crate::follow::around(s, |s| run_in(&mut s.session, more)) {
+        Ok((r, mut u)) => {
+            results.extend(r);
+            u.append(&mut undo);
+            undo = u;
+        }
+        Err(e) => {
+            let _ = crate::follow::around(s, |s| take_back_in(&mut s.session, undo));
+            return Err(e);
+        }
+    }
+    s.session.dirty = true;
+    crate::history::record(&mut s.session, name, crate::history::Snap::Commands(undo));
+    crate::history::done_with(&mut s.session);
+    Ok(results)
+}
+
+/// Every thing in the project has its id (things just added get theirs on the next tick): for an edit that names
+/// them in commands.
+pub fn settle_ids(s: &mut State) {
+    crate::control::settle_in(&mut s.session);
+}
+
+/// `command` for a knob-like control (a mute light, a typed fader value): applied without a step while Undo knob tweaks
+/// is off.
+pub fn knob_command(s: &mut State, name: &'static str, run: Option<crate::history::Run>, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
+        return command(s, name, run, commands);
+    }
+    let before: Vec<_> = commands.iter().map(|c| c.undo_now(&s.session).ok()).collect();
+    let check = commands.clone();
+    let (results, _) = crate::follow::around(s, |s| run_in(&mut s.session, commands))?;
+    if check.iter().map(|c| c.undo_now(&s.session).ok()).collect::<Vec<_>>() != before {
+        s.session.dirty = true;
+    }
+    Ok(results)
 }
 
 /// `edit` for a knob-like control (a mixer fader's typed value): no step while Undo knob tweaks is off.
@@ -100,37 +172,26 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     let Some(param) = s.session.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
     if command::key_owner(&s.session, key) == Some(0) {
-        s.session.control.settle(s.session.project.get_mut());
+        crate::control::settle_in(&mut s.session);
     }
     let Some(owner) = command::key_owner(&s.session, key) else { return };
     // Known for the undo's other side (`Command::apply`).
     s.session.control.saw_param(owner, param, to);
-    s.session.plugin_edited |= before.is_some_and(|v| v != to);
-    let Some(v) = before.filter(|&v| v != to && crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) else { return };
-    let put = Command::Put(Box::new(command::Taken::Param(owner, param, v)));
-    crate::history::record(&mut s.session, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));
-    crate::history::done_with(&mut s.session);
-}
-
-/// `edit_app` for a run of changes that make one step (the tempo tapper's taps, wheel notches on a value box): a change
-/// that joins the newest step of run `run` (`History::joins`) records none, as that step holds the region from before
-/// the run.
-pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, run: crate::history::Run, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
-    if app.state.session.history.joins(run) {
-        return f(app);
-    }
-    app.state.session.link_moves.clear();
-    crate::history::settle(&mut app.state.session);
-    let before = command::Taken::of(&app.state.session, region);
-    let r = f(app);
-    let s = &mut app.state;
-    if let Some(before) = before {
-        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
-            record_edit(&mut s.session, name, before);
-            s.session.history.set_run(run);
+    let Some(from) = before.filter(|&v| v != to) else { return };
+    s.session.plugin_edited = true;
+    // The instance has the value already; the command records it as a client's `set_param` would (one step while
+    // Undo knob tweaks is on).
+    let c = Command::SetParam { owner, param, value: to, from: Some(from) };
+    crate::history::settle(&mut s.session);
+    match run(s, vec![c]) {
+        Ok((_, undo)) => {
+            if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
+                crate::history::record(&mut s.session, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(undo));
+                crate::history::done_with(&mut s.session);
+            }
         }
+        Err(e) => s.message = Some(e),
     }
-    r
 }
 
 /// Applies `commands` to see what they change and takes them back at once: the project is as it was. Returns the

@@ -29,12 +29,23 @@ impl App {
     /// Arm selected track(s) / Disarm selected track(s) (the track menu), and the disk-record button: arming turns
     /// Audio on in Record's filter, so the armed tracks record (spec: audio/track-io.md §2.5).
     pub fn arm_tracks(&mut self, tracks: &[u16], on: bool) -> Option<String> {
-        let mut n = 0;
-        for &t in tracks {
-            if let Some(m) = crate::mixer::track_mut(&mut self.state.session, t).filter(|m| m.armed != on) {
-                m.armed = on;
-                n += 1;
-            }
+        // Arming is no undo step (the track is the same armed or not, §1.5).
+        crate::control_ui::settle_ids(&mut self.state);
+        let ses = &self.state.session;
+        let cmds: Vec<_> = tracks
+            .iter()
+            .filter_map(|&t| crate::mixer::track(ses, t).filter(|m| m.armed != on))
+            .map(|m| {
+                let mut c = crate::control::command::Command::set_track(m.id.0);
+                if let crate::control::command::Command::SetTrack { armed, .. } = &mut c {
+                    *armed = Some(on);
+                }
+                c
+            })
+            .collect();
+        let n = cmds.len();
+        if n > 0 {
+            let _ = crate::control_ui::run(&mut self.state, cmds);
         }
         self.state.session.dirty = true;
         self.invalidate();

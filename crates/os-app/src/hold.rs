@@ -169,7 +169,11 @@ impl App {
     fn pick_up_clips(&mut self) {
         let Some(Drag::Pl(PlDrag::Move { x0, y0, orig, fresh: false })) = self.drag.clone() else { return };
         let Some(grid) = self.pl_grid() else { return };
-        crate::history::rename(&mut self.state.session, "Arranger clone clip");
+        // The drag's step under way (`playlist::arr_begin`), else the one recorded at the press.
+        match self.state.playlist.arr_before.as_mut() {
+            Some(b) => b.0 = "Arranger clone clip",
+            None => crate::history::rename(&mut self.state.session, "Arranger clone clip"),
+        }
         let copies = pl::clone_clips(&mut self.state.session, &orig);
         let g = pl::PGeom::new(&self.state, grid);
         let unit = match pl::grid_snap(&self.state) {

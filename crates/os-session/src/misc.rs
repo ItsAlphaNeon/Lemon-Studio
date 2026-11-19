@@ -228,6 +228,23 @@ pub enum M {
 }
 
 impl M {
+    /// The value's name in `Command::SetMisc`: its name in snake case (`ArpDir`: `arp_dir`).
+    pub fn key(self) -> String {
+        let mut k = String::new();
+        for (i, c) in format!("{self:?}").chars().enumerate() {
+            if c.is_ascii_uppercase() && i > 0 {
+                k.push('_');
+            }
+            k.push(c.to_ascii_lowercase());
+        }
+        k
+    }
+
+    /// The value named `key` (`M::key`).
+    pub fn of_key(key: &str) -> Option<M> {
+        M::ALL.into_iter().find(|m| m.key() == key)
+    }
+
     pub const COUNT: usize = M::Fine as usize + 1;
     pub const ALL: [M; M::COUNT] = [
         M::LevelPan,

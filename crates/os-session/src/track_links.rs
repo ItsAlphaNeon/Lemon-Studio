@@ -49,7 +49,12 @@ pub fn set_link(s: &mut crate::session::Session, t: u16, l: TrackLink) {
 /// The track a new audio or instrument track takes: the first one with no clips, no link and no name (measured: the
 /// original skipped a track it had named, one with clips and linked ones).
 pub fn new_track(s: &crate::session::Session) -> Option<u16> {
-    (0..TRACKS).find(|&t| {
+    new_tracks(s).next()
+}
+
+/// The tracks new audio or instrument tracks take, one after the other (`new_track`).
+pub fn new_tracks(s: &crate::session::Session) -> impl Iterator<Item = u16> + '_ {
+    (0..TRACKS).filter(move |&t| {
         let info = track_info(s, t);
         info.is_none_or(|x| x.link.is_none() && x.name.as_deref().is_none_or(str::is_empty)) && !clips(s).iter().any(|c| c.track == t)
     })
@@ -80,20 +85,6 @@ pub fn can_unassign_audio(s: &crate::session::Session, mixers: &[u16]) -> bool {
     mixers.iter().any(|&m| !audio_tracks_of(s, m).is_empty())
 }
 
-/// Unassign from Audio track(s): the audio tracks of `mixers` become plain tracks; names, colours and clips stay.
-pub fn unassign_audio(s: &mut crate::session::Session, mixers: &[u16]) -> Option<String> {
-    let tracks: Vec<u16> = mixers.iter().flat_map(|&m| audio_tracks_of(s, m)).collect();
-    for &t in &tracks {
-        set_link(s, t, TrackLink::NONE);
-    }
-    s.dirty = true;
-    match tracks.as_slice() {
-        [] => Some("No audio track to unassign".into()),
-        [t] => Some(format!("Unassigned {}", crate::edit::playlist::track_name(s, *t))),
-        v => Some(format!("Unassigned {} audio tracks", v.len())),
-    }
-}
-
 /// A channel an instrument track can play: a sampler, plugin or layer channel (not an audio or automation clip's).
 pub fn instrument_kind(k: ChannelKind) -> bool {
     !matches!(k, ChannelKind::AudioClip | ChannelKind::Automation)
@@ -109,29 +100,6 @@ pub fn instrument_rows(s: &crate::session::Session, rows: &[usize]) -> Vec<usize
 
 pub fn can_assign_instrument(s: &crate::session::Session, rows: &[usize]) -> bool {
     !instrument_rows(s, rows).is_empty()
-}
-
-/// Track `t` becomes the instrument track of rack row `r`, named and coloured after the channel.
-pub fn link_instrument(s: &mut crate::session::Session, t: u16, r: usize) {
-    let Some(ch) = s.project.channels.get(r) else { return };
-    let (index, color, mixer) = (ch.index, ch.color, ch.mixer_track);
-    let name = crate::edit::rack::channel_name(s, r);
-    set_link(s, t, TrackLink::instrument(index));
-    let tr = &mut arr_mut(s).tracks[usize::from(t)];
-    tr.name = Some(name.clone());
-    if color.is_some() {
-        tr.color = color;
-    }
-    // The channel's insert takes its name and colour (measured: Assign to new instrument track on 808 Clap wrote both to
-    // Insert 2, events 204 and 149); the master keeps its own.
-    if mixer != 0 {
-        if let Some(m) = crate::edit::mixer::track_mut(s, mixer) {
-            m.name = Some(name);
-            if color.is_some() {
-                m.color = color;
-            }
-        }
-    }
 }
 
 /// The playlist track menu's Track mode ▸ (spec: ui/playlist.md §6c).
@@ -172,14 +140,7 @@ pub fn audio_drop_track(s: &crate::session::Session, t: u16, a: u32, b: u32) -> 
 /// the original reroutes a clip's channel when it lands on an audio track (moving it off again leaves the channel
 /// where it is).
 pub fn route_clips(s: &mut crate::session::Session, idx: &[usize]) {
-    let moves: Vec<(u16, u16)> = idx
-        .iter()
-        .filter_map(|&i| clips(s).get(i))
-        .filter_map(|c| match c.source {
-            ClipSource::Channel(ch) if is_audio_source(s, c.source) => audio_mixer(s, c.track).map(|m| (ch, m)),
-            _ => None,
-        })
-        .collect();
+    let moves = route_moves(s, idx);
     let max = crate::edit::mixer::max_insert(&s.project);
     for (ch, m) in moves {
         if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
@@ -191,6 +152,21 @@ pub fn route_clips(s: &mut crate::session::Session, idx: &[usize]) {
     }
 }
 
+/// What `route_clips` changes: each audio channel (its index) of clips `idx` that lands on an audio track, and that
+/// track's mixer track, where it is another one.
+pub fn route_moves(s: &crate::session::Session, idx: &[usize]) -> Vec<(u16, u16)> {
+    let moves: Vec<(u16, u16)> = idx
+        .iter()
+        .filter_map(|&i| clips(s).get(i))
+        .filter_map(|c| match c.source {
+            ClipSource::Channel(ch) if is_audio_source(s, c.source) => audio_mixer(s, c.track).map(|m| (ch, m)),
+            _ => None,
+        })
+        .collect();
+    let max = crate::edit::mixer::max_insert(&s.project);
+    moves.into_iter().filter(|&(ch, m)| m <= max && s.project.channels.iter().any(|c| c.index == ch && c.mixer_track != m)).collect()
+}
+
 /// The playlist track a take recorded on mixer track `m` over ticks `a..b` goes to: `m`'s first audio track when it
 /// is free over the span (recording into an audio track), else the first track free over it.
 pub fn record_track(s: &crate::session::Session, m: u16, a: u32, b: u32) -> u16 {
@@ -198,17 +174,6 @@ pub fn record_track(s: &crate::session::Session, m: u16, a: u32, b: u32) -> u16 
         .into_iter()
         .find(|&t| !clips(s).iter().any(|c| c.track == t && c.position < b && c.end() > a))
         .unwrap_or_else(|| crate::edit::playlist::free_track(s, 0, a, b))
-}
-
-/// The track of a recorded take (clip `i`) becomes an audio track on the take channel's mixer track, unless it is
-/// linked already.
-pub fn bind_take(s: &mut crate::session::Session, i: usize) {
-    let Some(c) = clips(s).get(i).copied() else { return };
-    let ClipSource::Channel(ch) = c.source else { return };
-    let Some(m) = s.project.channel(ch).map(|x| x.mixer_track) else { return };
-    if link(s, c.track).is_none() && m != 0 {
-        set_link(s, c.track, TrackLink::audio(m));
-    }
 }
 
 /// Select ▸ Channels and playlist tracks routed to this track: the playlist tracks linked to `mixers` (audio tracks)

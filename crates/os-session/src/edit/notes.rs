@@ -82,6 +82,13 @@ pub fn pattern_length(s: &crate::session::Session, n: u16) -> u32 {
 }
 
 /// The current pattern, created if it has no data yet.
+/// Pattern `number`'s notes and control events become `notes` and `controls` (a dialog's preview put back).
+pub fn put_pattern(s: &mut crate::session::Session, number: u16, notes: Vec<os_model::Note>, controls: Vec<os_model::ControlPoint>) {
+    if let Some(p) = s.project.get_mut().patterns.iter_mut().find(|p| p.number == number) {
+        (p.notes, p.controls) = (notes, controls);
+    }
+}
+
 pub fn pattern_mut(s: &mut crate::session::Session) -> &mut Pattern {
     let number = s.pattern();
     match s.project.patterns.iter().position(|p| p.number == number) {

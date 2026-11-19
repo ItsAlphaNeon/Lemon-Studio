@@ -5,7 +5,6 @@
 //! The control plane's tests: every command undoes and redoes exactly, transactions are whole, proposals leave the
 //! project alone, ids stay with their things, and the JSON-RPC adapter answers over a real socket.
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use serde_json::{json, Value};
 
 use super::*;
@@ -72,9 +71,22 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_main_pitch", "cents": -300}),
         json!({"op": "set_time_signature", "numerator": 3, "denominator": 4}),
         json!({"op": "set_info", "title": "Song", "author": "Me"}),
+        json!({"op": "set_project", "beats": 7, "steps": 2, "signature": false, "panning_law": "triangular", "play_truncated": true, "pdc": false}),
+        json!({"op": "set_auto_crossfades", "on": false}),
+        json!({"op": "set_project", "performance": true, "data_folder_use": "specified", "data_folder": "C:\\Data\\"}),
         json!({"op": "set_channel", "channel": kick, "name": "Big kick", "color": "#ff8000", "volume": 0.5, "pan": -0.25, "pitch": 100, "track": ins2}),
+        json!({"op": "set_channel", "channel": clap, "declick": 3, "swing": 0.25, "truncate_swing": true, "cut": 2, "cut_by": 2}),
         json!({"op": "load_sample", "channel": clap, "path": "/no/such/folder/snare.wav"}),
+        json!({"op": "set_channel", "channel": clap, "sample_path": "/moved/snare.wav"}),
+        json!({"op": "set_misc", "channel": kick, "values": {"arp_dir": 2.0, "echo_feed": 0.5, "level_pan": 0.25}}),
+        json!({"op": "set_start_value", "target": 0x4000_0001u32, "value": 0.5}),
+        json!({"op": "set_start_value", "target": 0x4000_0001u32}),
+        json!({"op": "add_channel", "name": "Sweep", "kind": "automation", "points": [{"beat": 0.0, "value": 0.1}, {"beat": 8.0, "value": 0.9}]}),
+        json!({"op": "add_channel", "name": "Both", "kind": "layer", "children": [kick, clap]}),
         json!({"op": "set_track", "track": ins1, "name": "Drums", "color": "#102030", "volume": 0.6, "pan": 0.5, "stereo": -0.5, "polarity": true, "swap": true, "effects_enabled": false}),
+        json!({"op": "set_track", "track": ins2, "separator": true, "dock": "right", "threaded": false, "latency_in": 2.5, "latency_out": -1.0, "audio_in": 1, "audio_out": 0, "rec_source": 0, "monitor": "on"}),
+        json!({"op": "reset_track", "track": ins1}),
+        json!({"op": "move_track", "track": ins1, "to": 3}),
         json!({"op": "set_send", "from": ins1, "to": ins2, "level": 0.5}),
         json!({"op": "set_send", "from": ins1, "to": master}),
         json!({"op": "set_eq", "track": ins1, "band": 1, "gain": 600, "frequency": 30000}),
@@ -82,7 +94,24 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_pattern", "pattern": pat, "name": "Beat", "color": "#00ff00", "length": 384}),
         json!({"op": "set_notes", "pattern": pat, "channel": kick, "notes": [{"channel": kick, "position": 0, "length": 24, "key": 48}]}),
         json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": clap, "position": 96, "velocity": 80}]}),
+        json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": clap, "position": 192, "fine_pitch": 130, "release": 10, "mod_x": 20, "mod_y": 30, "repeat": 2, "slide": true, "muted": true, "color": 5}]}),
+        json!({"op": "set_step", "pattern": pat, "channel": kick, "step": 5, "on": true}),
+        json!({"op": "set_loops", "pattern": pat, "mode": 3, "loops": [{"channel": kick, "value": 8}, {"channel": clap}]}),
+        json!({"op": "set_channel", "channel": kick, "stretch": 2, "zipped": true, "auto_bypass": true, "threaded": false}),
+        json!({"op": "replace_instrument", "channel": ch[4], "plugin": "MIDI Out"}),
+        json!({"op": "set_groups", "groups": ["Drums", "Unsorted"], "channels": [{"channel": kick, "group": 0}, {"channel": clap}], "shown": 0}),
+        json!({"op": "set_step", "pattern": pat, "channel": clap, "step": 4, "on": false, "mute": true}),
         json!({"op": "set_playlist_track", "track": 2, "name": "Lead", "color": "#abcdef", "enabled": false}),
+        json!({"op": "set_playlist_track", "track": 3, "grouped": true}),
+        json!({"op": "set_playlist_track", "track": 4, "motion": 2, "press": 1, "trigger_sync": 3, "position_sync": 1, "queue": true, "tolerant": false, "clip_lock": {"pattern": 2}}),
+        json!({"op": "set_playlist_track", "track": 5, "link": {"mixer": ins2}}),
+        json!({"op": "set_playlist_track", "track": 6, "link": {"channel": kick}}),
+        json!({"op": "reset_playlist_track", "track": 3}),
+        json!({"op": "add_marker", "marker": {"position": 384, "name": "Drop"}}),
+        json!({"op": "add_marker", "marker": {"position": 768, "root": 2, "scale": 0}}),
+        json!({"op": "swap_playlist_tracks", "track": 1, "with": 2}),
+        json!({"op": "insert_playlist_track", "at": 1}),
+        json!({"op": "delete_playlist_track", "track": 2}),
         json!({"op": "move_channel", "channel": kick, "row": 3}),
         json!({"op": "delete_channel", "channel": clap}),
         json!({"op": "add_channel", "name": "Bass", "track": ins2}),
@@ -90,6 +119,9 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "delete_track", "track": ins1}),
         json!({"op": "add_pattern", "name": "Fill", "color": "#112233"}),
         json!({"op": "add_effect", "track": ins2, "plugin": "Fruity Limiter"}),
+        json!({"op": "set_auto_bypass", "on": true}),
+        json!({"op": "move_effect", "track": ins2, "slot": 0, "to": 4}),
+        json!({"op": "set_slot", "track": ins2, "slot": 4, "name": "Limit", "color": "#204060"}),
     ] {
         round_trip(&mut a, c);
     }
@@ -97,12 +129,273 @@ fn every_command_undoes_and_redoes() {
     let r = round_trip(&mut a, json!({"op": "add_clip", "track": 3, "position": 384, "pattern": pat}));
     let clip = r[0]["clip"].as_u64().unwrap();
     round_trip(&mut a, json!({"op": "set_clip", "clip": clip, "position": 768, "track": 4, "length": 96, "muted": true}));
+    // The clips as a list, in order: the clip kept by its id, a new one after it; the markers likewise.
+    round_trip(&mut a, json!({"op": "set_clips", "clips": [{"id": clip, "track": 2, "position": 96, "length": 192}, {"track": 5, "position": 0, "length": 96, "pattern": 3, "muted": true, "window": [0.0, 48.0]}]}));
+    round_trip(&mut a, json!({"op": "set_markers", "markers": [{"position": 384, "name": "Verse"}, {"position": 0, "name": "Intro", "kind": 4}]}));
+    // Arrangements: one added (a copy of the one shown), renamed and deleted.
+    let shown = a.state.session.project.arrangement().unwrap().id.0;
+    let r = round_trip(&mut a, json!({"op": "add_arrangement", "copy": shown}));
+    let arr = r[0]["arrangement"].as_u64().unwrap();
+    round_trip(&mut a, json!({"op": "set_arrangement", "arrangement": arr, "name": "B side"}));
+    round_trip(&mut a, json!({"op": "delete_arrangement", "arrangement": arr}));
     round_trip(&mut a, json!({"op": "delete_clip", "clip": clip}));
     let pat2 = ids(&a).2.last().copied().unwrap();
     round_trip(&mut a, json!({"op": "delete_pattern", "pattern": pat2}));
     let slot = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().flat_map(|t| t["slots"].as_array().unwrap().clone()).next().unwrap();
     let track = crate::control::query_ui::project(&a.state)["mixer"].as_array().unwrap().iter().find(|t| !t["slots"].as_array().unwrap().is_empty()).unwrap()["id"].as_u64().unwrap();
     round_trip(&mut a, json!({"op": "remove_effect", "track": track, "slot": slot["slot"]}));
+}
+
+/// A track added or deleted moves the others and makes or takes away the one before the hidden last track: undo and
+/// redo put the tracks back with their arm switches, and with the lights they have now, a track that was not there
+/// with the light it had, as the whole project's step did (a solo turns off every track).
+#[test]
+fn adding_or_deleting_a_track_keeps_the_lights() {
+    let mut a = app();
+    let tr = ids(&a).1;
+    let n = a.state.session.project.mixer.len();
+    for (i, m) in a.state.session.project.get_mut().mixer.iter_mut().enumerate() {
+        (m.enabled, m.armed) = (i == 0 || i == 3 || i + 2 == n, i == 4);
+    }
+    // `to` with the lights of the tracks in `now` as they are there.
+    let lit = |to: &[os_model::MixerTrack], now: &[os_model::MixerTrack]| -> Vec<os_model::MixerTrack> {
+        to.iter().map(|m| os_model::MixerTrack { enabled: now.iter().find(|x| x.id.0 == m.id.0).map_or(m.enabled, |x| x.enabled), ..m.clone() }).collect()
+    };
+    for c in [json!({"op": "delete_track", "track": tr[2]}), json!({"op": "add_track", "at": 2})] {
+        let before = a.state.session.project.mixer.clone();
+        apply(&mut a.state, &test_client(), None, vec![cmd(c)]).unwrap();
+        // A solo after it, and an arm switch.
+        for m in a.state.session.project.get_mut().mixer.iter_mut().skip(1) {
+            (m.enabled, m.armed) = (!m.enabled, !m.armed);
+        }
+        let after = a.state.session.project.mixer.clone();
+        crate::history_ui::undo(&mut a.state).unwrap();
+        same(&a.state.session.project.mixer, &lit(&before, &after));
+        let undone = a.state.session.project.mixer.clone();
+        crate::history_ui::redo(&mut a.state).unwrap();
+        same(&a.state.session.project.mixer, &lit(&after, &undone));
+    }
+}
+
+#[track_caller]
+fn same<T: std::fmt::Debug + PartialEq>(a: &T, b: &T) {
+    if a != b {
+        let (x, y) = (format!("{a:?}"), format!("{b:?}"));
+        let at = x.chars().zip(y.chars()).take_while(|(p, q)| p == q).count();
+        let from = at.saturating_sub(300);
+        panic!("differs at {at}:\n  now: ...{}\n  was: ...{}", &x[from..(at + 80).min(x.len())], &y[from..(at + 80).min(y.len())]);
+    }
+}
+
+/// The pattern commands the PATTERNS menu and the pattern selector use.
+#[test]
+fn pattern_commands_undo_and_redo() {
+    let mut a = app();
+    let pat = ids(&a).2[0];
+    let kick = ids(&a).0[0];
+    round_trip(&mut a, json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": kick, "position": 0, "length": 24, "key": 60}]}));
+    for c in [
+        json!({"op": "add_pattern", "name": "Twelve", "number": 12}),
+        json!({"op": "shift_patterns", "from": 1, "by": 1}),
+        json!({"op": "shift_patterns", "from": 2, "by": -1}),
+        json!({"op": "move_pattern", "from": 1, "to": 5}),
+        json!({"op": "clone_pattern", "pattern": pat}),
+        json!({"op": "copy_pattern", "from": 1, "to": 40, "name": "Copy"}),
+        json!({"op": "transpose_pattern", "pattern": pat, "semitones": 3}),
+        json!({"op": "set_pattern_signature", "pattern": pat, "numerator": 3, "denominator": 4}),
+        json!({"op": "set_pattern_signature", "pattern": pat, "numerator": 0, "denominator": 4}),
+        json!({"op": "set_pattern_markers", "pattern": pat, "markers": [{"position": 0, "kind": 8, "numerator": 3, "denominator": 4}, {"position": 288, "kind": 8, "numerator": 7, "denominator": 8}]}),
+        json!({"op": "set_pattern_markers", "pattern": pat, "markers": []}),
+    ] {
+        round_trip(&mut a, c);
+    }
+    let bad = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_pattern", "number": 12}))]).unwrap_err();
+    assert!(bad.contains("there already"), "{bad}");
+}
+
+/// The rack's edits apply their commands, each one step that undo and redo take back and put again.
+#[test]
+fn rack_edits_are_one_step_each() {
+    let mut a = app();
+    let steps = |a: &App| a.state.session.history.done;
+    let check = |a: &mut App, what: &str, edit: &dyn Fn(&mut App)| {
+        let (before, n) = (a.state.session.project.channels.clone(), steps(a));
+        edit(a);
+        let after = a.state.session.project.channels.clone();
+        assert_ne!(before, after, "{what} changed nothing");
+        assert_eq!(steps(a), n + 1, "{what}: one step");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(a.state.session.project.channels, before, "{what}: undo");
+        crate::history_ui::redo(&mut a.state);
+        assert_eq!(a.state.session.project.channels, after, "{what}: redo");
+    };
+    check(&mut a, "mute", &|a| crate::rack::toggle_mute(&mut a.state, 0));
+    check(&mut a, "solo", &|a| crate::rack::solo(&mut a.state, 1));
+    a.state.rack.sel = [0, 1].into_iter().collect();
+    check(&mut a, "gradient", &|a| {
+        crate::rack::gradient(&mut a.state);
+    });
+    check(&mut a, "swing", &|a| {
+        crate::rack::swing_selected(&mut a.state, 0.5);
+    });
+    // Two channels on one track: the second one moves to a free one.
+    let t = a.state.session.project.channels[0].mixer_track;
+    a.state.session.project.get_mut().channels[1].mixer_track = t;
+    check(&mut a, "free track", &|a| {
+        crate::rack::run(a, crate::rack::RCmd::AssignFreeSel);
+    });
+    check(&mut a, "cut itself", &|a| {
+        crate::rack::run(a, crate::rack::RCmd::CutItself(0));
+    });
+    check(&mut a, "mixer track", &|a| {
+        let t = a.state.session.project.channels[0].mixer_track + 1;
+        crate::rack::set_mixer_track(&mut a.state, 0, t, None);
+    });
+    // Clone, move, sort and delete: one step each.
+    let rows = |a: &App| a.state.session.project.channels.iter().map(|c| (c.id.0, c.name.clone())).collect::<Vec<_>>();
+    let shape = |a: &mut App, what: &str, edit: &dyn Fn(&mut App)| {
+        let (before, n) = (rows(a), steps(a));
+        edit(a);
+        let after = rows(a);
+        assert_ne!(before, after, "{what} changed nothing");
+        assert_eq!(steps(a), n + 1, "{what}: one step");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(rows(a), before, "{what}: undo");
+        crate::history_ui::redo(&mut a.state);
+        assert_eq!(rows(a).len(), after.len(), "{what}: redo");
+    };
+    shape(&mut a, "clone", &|a| crate::rack::clone_rows(a, &[0, 1]));
+    assert_eq!(a.state.session.project.channels[1].name.as_deref(), Some("Kick #2"));
+    a.state.rack.sel = [1].into_iter().collect();
+    shape(&mut a, "move", &|a| {
+        crate::rack::move_selected(a, 1);
+    });
+    shape(&mut a, "sort", &|a| {
+        crate::rack::sort(a, crate::rack::SortBy::Name);
+    });
+    shape(&mut a, "delete", &|a| crate::rack::delete_step(a, &[1, 2]));
+    // Filter groups and zips: no step; the group shown and its members as asked.
+    let n = steps(&a);
+    a.state.rack.sel = [0].into_iter().collect();
+    crate::rack::add_group(&mut a.state, "Drums", &[0].into_iter().collect());
+    crate::rack::zip_rows(&mut a.state, &[1].into_iter().collect());
+    let p = &a.state.session.project;
+    assert_eq!(p.channels[0].rack.group.map(|g| p.groups[g as usize].as_str()), Some("Drums"));
+    assert_eq!(p.current_group, p.channels[0].rack.group);
+    assert!(p.channels[1].rack.zipped && !p.channels[0].rack.zipped);
+    assert_eq!(steps(&a), n);
+    // The lock makes no step.
+    let n = steps(&a);
+    crate::rack::lock(&mut a.state, 0);
+    assert!(a.state.session.project.channels[0].rack.locked);
+    assert_eq!(steps(&a), n);
+}
+
+/// A remote control link on a rack row follows the row a command moves, and goes back with the undo.
+#[test]
+fn links_follow_rows_moved_by_commands() {
+    use crate::typein::Target;
+    let mut a = app();
+    let (ch, ..) = ids(&a);
+    let st = a.state.session.settings.clone();
+    crate::remote::set_links(&st, &[crate::remote::Link::new(0, 30, Target::RackLed(0))]);
+    let on = |st: &crate::settings_file::SettingsStore| crate::remote::links(st)[0].target;
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "move_channel", "channel": ch[0], "row": 2}))]).unwrap();
+    assert_eq!(on(&st), Target::RackLed(2));
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!(on(&st), Target::RackLed(0));
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!(on(&st), Target::RackLed(2));
+    crate::remote::set_links(&st, &[]);
+}
+
+/// A press in the step sequencer and its drag are one step; a note named by its id keeps what `set_notes` leaves out.
+#[test]
+fn steps_paint_as_one_step_and_notes_keep_their_values() {
+    let mut a = app();
+    a.state.set_pattern(1);
+    let n = a.state.session.history.done;
+    crate::rack::grow_for_step(&mut a.state, 0);
+    crate::rack::set_step(&mut a.state, 0, 0, true);
+    for k in 1..4 {
+        crate::rack::set_step(&mut a.state, 0, k, true);
+    }
+    assert_eq!(a.state.session.history.done, n + 1, "one step");
+    let ch0 = a.state.session.project.channels[0].index;
+    let on = |a: &App| a.state.session.project.pattern(1).map_or(0, |p| p.notes.iter().filter(|x| x.channel == ch0).count());
+    assert_eq!(on(&a), 4);
+    crate::history::settle(&mut a.state.session);
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!(on(&a), 0);
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!(on(&a), 4);
+    // The next press is a step of its own.
+    crate::rack::grow_for_step(&mut a.state, 6);
+    crate::rack::set_step(&mut a.state, 0, 6, true);
+    assert_eq!(a.state.session.history.done, n + 2);
+    // set_notes with only the id, position and key keeps the rest.
+    let p = &a.state.session.project;
+    let pat = p.pattern(1).unwrap().id.0;
+    let mut first = p.pattern(1).unwrap().notes[0];
+    first.fine_pitch = 100;
+    first.release = 9;
+    a.state.session.project.get_mut().patterns.iter_mut().find(|q| q.number == 1).unwrap().notes[0] = first;
+    let kick = a.state.session.project.channels[0].id.0;
+    let notes: Vec<Value> = a.state.session.project.pattern(1).unwrap().notes.iter().filter(|x| x.channel == ch0).map(|x| json!({"channel": kick, "position": x.position + 24, "key": x.key, "id": x.id.0})).collect();
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_notes", "pattern": pat, "channel": kick, "notes": notes}))]).unwrap();
+    let moved = a.state.session.project.pattern(1).unwrap().notes.iter().find(|x| x.id == first.id).copied().unwrap();
+    assert_eq!((moved.position, moved.fine_pitch, moved.release), (first.position + 24, 100, 9));
+}
+
+/// An automation clip's points set as a list, undone and redone.
+#[test]
+fn automation_points_undo_and_redo() {
+    let mut a = app();
+    let pts = vec![os_model::AutoPoint::new(0.0, 0.2), os_model::AutoPoint::new(4.0, 0.8)];
+    let row = crate::playlist::automation_channel(&mut a.state, os_model::target::TEMPO, "Tempo", pts);
+    a.state.session.control.settle(a.state.session.project.get_mut());
+    let ch = a.state.session.project.channels[row].id.0;
+    round_trip(&mut a, json!({"op": "set_points", "channel": ch, "points": [{"beat": 0.0, "value": 0.5}, {"beat": 2.0, "value": 1.0, "tension": 0.5}, {"beat": 8.0, "value": 0.0, "mode": 2}]}));
+    let bad = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_points", "channel": ch, "points": [{"beat": 0.0, "value": 0.5}]}))]).unwrap_err();
+    assert!(bad.contains("two points"), "{bad}");
+}
+
+/// A pattern edit the interface makes on the pattern (a snapshot step) turns into the commands that make it when the
+/// button comes up: the pattern as it was, then `set_notes` and `set_pattern`, undone and redone as theirs.
+#[test]
+fn pattern_edits_become_commands() {
+    let mut a = app();
+    a.state.set_pattern(1);
+    let before = a.state.session.project.pattern(1).unwrap().notes.clone();
+    crate::piano::snapshot(&mut a.state.session);
+    let ch = a.state.session.project.channels[1].index;
+    crate::edit::patterns::pat_mut(&mut a.state.session, 1).notes.push(os_model::Note { length: 48, key: 64, ..os_model::Note::step(ch, 96) });
+    crate::edit::patterns::pat_mut(&mut a.state.session, 1).length = Some(768);
+    // An event and a loop too.
+    crate::edit::patterns::pat_mut(&mut a.state.session, 1).controls.push(os_model::ControlPoint::new(48, ch, os_model::ControlPoint::PAN, 3200));
+    crate::edit::patterns::pat_mut(&mut a.state.session, 1).loops.push((ch, 8));
+    crate::history::settle(&mut a.state.session);
+    let after = a.state.session.project.pattern(1).unwrap().clone();
+    assert!(a.state.session.history.newest_is_commands(), "a step of commands");
+    assert_eq!((after.notes.len(), after.length), (before.len() + 1, Some(768)));
+    crate::history_ui::undo(&mut a.state);
+    let p = a.state.session.project.pattern(1).unwrap();
+    assert_eq!((&p.notes, p.length, p.controls.len(), p.loops.len()), (&before, None, 0, 0));
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!(a.state.session.project.pattern(1).unwrap(), &after);
+}
+
+#[test]
+fn set_project_checks_its_values() {
+    let mut a = app();
+    let mut bad = |v: Value| apply(&mut a.state, &test_client(), None, vec![cmd(v)]).unwrap_err();
+    assert!(bad(json!({"op": "set_project", "beats": 0})).contains("beats"));
+    assert!(bad(json!({"op": "set_project", "steps": 17})).contains("steps"));
+    assert!(bad(json!({"op": "set_project", "panning_law": "square"})).contains("panning_law"));
+    // A bar value the project already has is kept, even out of the range.
+    a.state.session.project.get_mut().bar = Some((40, 4));
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_project", "beats": 40, "steps": 2}))]).unwrap();
+    assert_eq!(a.state.session.project.bar(), (40, 2));
 }
 
 #[test]
@@ -291,7 +584,36 @@ fn rpc_requests_and_errors() {
     let pat = a.state.session.project.patterns[0].id.0;
     call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 11, "method": "apply", "params": {"command": {"op": "set_notes", "pattern": pat, "notes": [{"channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64}]}}}));
     let n = call(&mut a, &mut c, json!({"jsonrpc": "2.0", "id": 12, "method": "notes", "params": {"pattern": pat}}));
-    assert_eq!(n["result"]["notes"], json!([{"channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64}]));
+    let id = n["result"]["notes"][0]["id"].clone();
+    assert!(id.as_u64().is_some_and(|i| i > 0), "the note has an id");
+    assert_eq!(
+        n["result"]["notes"],
+        json!([{"id": id, "channel": kick, "position": 0, "length": 48, "key": 36, "velocity": 90, "pan": 64, "fine_pitch": 120, "release": 64, "mod_x": 128, "mod_y": 128, "repeat": 0, "slide": false, "muted": false, "color": 0, "porta": false, "raw": [16384, 0, 0]}])
+    );
+}
+
+/// Notes a command makes name their ids in its result, the notes query shows them, and writing the notes back keeps
+/// them; `add_notes` takes no id.
+#[test]
+fn notes_name_their_ids() {
+    let mut a = app();
+    let (ch, _, pa) = ids(&a);
+    let s = &mut a.state.session;
+    s.control.settle(s.project.get_mut());
+    let r = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_notes", "pattern": pa[0], "notes": [{"channel": ch[0], "position": 0}, {"channel": ch[1], "position": 96}]}))]).unwrap();
+    let made: Vec<u32> = r[0]["notes"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+    assert_eq!(made.len(), 2);
+    assert!(made.iter().all(|&i| i != 0) && made[0] != made[1]);
+    let q = |a: &App| crate::control::query::notes(&a.state.session, pa[0]).unwrap()["notes"].clone();
+    let listed: Vec<u32> = q(&a).as_array().unwrap().iter().map(|n| n["id"].as_u64().unwrap() as u32).collect();
+    assert!(made.iter().all(|i| listed.contains(i)), "the query names them");
+    // Read back and written again (one velocity changed): the same ids.
+    let mut notes = q(&a);
+    notes[0]["velocity"] = json!(50);
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_notes", "pattern": pa[0], "notes": notes}))]).unwrap();
+    let again: Vec<u32> = q(&a).as_array().unwrap().iter().map(|n| n["id"].as_u64().unwrap() as u32).collect();
+    assert_eq!(again, listed);
+    assert!(apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_notes", "pattern": pa[0], "notes": [{"channel": ch[0], "position": 0, "id": made[0]}]}))]).is_err());
 }
 
 #[test]
@@ -497,9 +819,15 @@ fn the_mixer_s_edits_are_undoable() {
     ui_round_trip(&mut a, "Delete mixer track", |a| {
         run(a, MCmd::Trim { non_empty: false });
     });
+    // Arming is no step, and undoing the track's input leaves it armed (track-io.md §2.3).
+    let steps = a.state.session.history.at();
+    run(&mut a, MCmd::ArmTrack(2, true));
+    assert_eq!(a.state.session.history.at(), steps, "arming is no step");
     ui_round_trip(&mut a, crate::history::MIXER_TRACK_IO, |a| {
         run(a, MCmd::Monitor(2, os_model::MONITOR_ON));
     });
+    assert!(crate::mixer::track(&a.state.session, 2).unwrap().armed, "undo and redo leave the arming");
+    run(&mut a, MCmd::ArmTrack(2, false));
     ui_round_trip(&mut a, crate::mixer::LATENCY, |a| {
         crate::mixer::set_latency(&mut a.state, 2, false, 20.0);
     });
@@ -1126,4 +1454,449 @@ fn a_session_without_a_window_serves_clients() {
     let _ = std::fs::remove_file(&path);
     crate::control::server::serve_tick(&mut ses);
     assert_eq!(ses.touched, Default::default());
+}
+
+/// An add's undo removes what it made, and a move's moves it back, by id (control-plane step 13): what else changed
+/// meanwhile without a step of its own stays, which putting back the whole project would have undone.
+#[test]
+fn adds_and_moves_undo_by_their_inverse() {
+    let mut a = app();
+    let kick = ids(&a).0[0];
+    let length = |a: &App| a.state.session.project.patterns[0].length;
+    for c in [
+        json!({"op": "add_channel", "name": "Bass"}),
+        json!({"op": "add_track", "at": 2}),
+        json!({"op": "add_pattern", "name": "Fill"}),
+        json!({"op": "move_channel", "channel": kick, "row": 2}),
+    ] {
+        let what = c.to_string();
+        let before = ids(&a);
+        let r = apply(&mut a.state, &test_client(), None, vec![cmd(c)]).unwrap();
+        a.state.session.control.settle(a.state.session.project.get_mut());
+        let after = ids(&a);
+        // The pattern length box makes no step (`ui/undo-steps.md`).
+        let l = Some(length(&a).unwrap_or(0) + 96);
+        a.state.session.project.get_mut().patterns[0].length = l;
+        crate::history_ui::undo(&mut a.state).unwrap();
+        assert_eq!(ids(&a), before, "{what} undone");
+        assert_eq!(length(&a), l, "{what}: its undo leaves the pattern's length");
+        crate::history_ui::redo(&mut a.state).unwrap();
+        assert_eq!(ids(&a), after, "{what} redone with the same ids");
+        if let Some(id) = r[0].as_object().and_then(|o| o.values().next()).and_then(Value::as_u64) {
+            assert!(after.0.contains(&(id as u32)) || after.1.contains(&(id as u32)) || after.2.contains(&(id as u32)), "{what}: its id is back");
+        }
+    }
+}
+
+/// An added channel's instrument goes with its undo and is hosted again with its redo.
+#[test]
+fn an_added_channel_s_instrument_follows_its_undo_and_redo() {
+    let mut a = app();
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.available = crate::plugins::builtin();
+    a.plugin_tick();
+    a.plugin_tick();
+    let rows = |a: &App| a.state.session.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, h)| (r, h.owner.0)).collect::<Vec<_>>();
+    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false, token: None };
+    let before = rows(&a);
+    a.rpc(&mut c, "apply", &json!({"command": {"op": "add_channel", "name": "Bass"}})).ok().unwrap();
+    a.plugin_tick();
+    a.plugin_tick();
+    let added = rows(&a);
+    assert_eq!(added.len(), before.len() + 1, "the new sampler is hosted");
+    a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
+    a.plugin_tick();
+    assert_eq!(rows(&a), before, "its instance goes with the undo");
+    a.rpc(&mut c, "redo", &Value::Null).ok().unwrap();
+    a.plugin_tick();
+    a.plugin_tick();
+    assert_eq!(rows(&a), added, "and is hosted again for its channel");
+}
+
+/// A client's gesture (control-plane step 13): the commands applied between `begin` and `end` are one step that puts
+/// back what was there before the gesture; a step in between starts a new one; an ended gesture takes no more.
+#[test]
+fn a_gesture_is_one_step() {
+    let mut a = app();
+    let kick = ids(&a).0[0];
+    let mut c = rpc::Client { name: "Test".into(), level: Level::Edit, saves: false, token: None };
+    let volume = |a: &App| a.state.session.project.channels[0].volume;
+    let (v0, t0) = (volume(&a), a.state.tempo());
+    let steps = a.state.session.history.at();
+    let g = a.rpc(&mut c, "begin", &json!({"name": "Fader drag"})).ok().unwrap()["gesture"].as_u64().unwrap();
+    for v in [0.3, 0.4, 0.5] {
+        a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_channel", "channel": kick, "volume": v}})).ok().unwrap();
+    }
+    assert_eq!(a.state.session.history.at(), steps + 1, "one step for the gesture");
+    assert_eq!(a.state.session.history.newest_done(), Some("Test: fader drag"));
+    a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
+    assert_eq!(volume(&a), v0, "the undo puts back the value before the gesture");
+    a.rpc(&mut c, "redo", &Value::Null).ok().unwrap();
+    assert_eq!(volume(&a), 0.5, "the redo gives the last");
+    // After the undo and redo the gesture goes on in a step of its own.
+    a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_channel", "channel": kick, "volume": 0.6}})).ok().unwrap();
+    a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_tempo", "bpm": 99.0}})).ok().unwrap();
+    assert_eq!(a.state.session.history.at(), steps + 2);
+    a.rpc(&mut c, "undo", &Value::Null).ok().unwrap();
+    assert_eq!((volume(&a), a.state.tempo()), (0.5, t0), "both regions back as they were before the step");
+    a.rpc(&mut c, "end", &json!({"gesture": g})).ok().unwrap();
+    assert!(a.rpc(&mut c, "apply", &json!({"gesture": g, "command": {"op": "set_tempo", "bpm": 98.0}})).is_err(), "an ended gesture is gone");
+    assert!(a.rpc(&mut c, "end", &json!({"gesture": g})).is_err());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// FL's measured undo history (spec: ui/undo-steps.md), the rows control-plane step 13 found the app differing on.
+
+/// Wheel notches about 120 ms apart are one step; after a pause of 2.5 s the next notch starts another.
+#[test]
+fn a_pause_in_the_wheel_starts_a_new_step() {
+    let mut a = app();
+    let id = crate::knob_id::KnobId::ChanVol(0);
+    let t0 = std::time::Instant::now();
+    let steps = a.state.session.history.at();
+    let mut notch = |a: &mut App, ms: u64| {
+        a.wheel_pause(t0 + std::time::Duration::from_millis(ms));
+        crate::history::knob(&mut a.state.session, id, true);
+        let v = a.state.knob(id) - 0.03;
+        a.state.set_knob(id, v);
+    };
+    for ms in [0, 120, 240] {
+        notch(&mut a, ms);
+    }
+    assert_eq!(a.state.session.history.at(), steps + 1, "notches 120 ms apart");
+    notch(&mut a, 2740);
+    notch(&mut a, 2860);
+    assert_eq!(a.state.session.history.at(), steps + 2, "2.5 s later, a step of its own");
+}
+
+/// Two drags of one control are two steps (the rack's mixer track box, a plugin window's strip knob), one drag one.
+#[test]
+fn each_drag_of_a_control_is_a_step() {
+    use crate::history::ChannelControl;
+    let mut a = app();
+    let steps = a.state.session.history.at();
+    for t in [3, 4] {
+        a.channel_control(0, ChannelControl::Track, |c| c.mixer_track = t);
+    }
+    a.mouse_up();
+    assert_eq!(a.state.session.history.at(), steps + 1, "one drag");
+    a.channel_control(0, ChannelControl::Track, |c| c.mixer_track = 5);
+    assert_eq!(a.state.session.history.at(), steps + 2, "the next drag");
+    // A strip knob's release in a plugin window ends its run the same way (`FrameEvent::RunEnd`).
+    for v in [0.3, 0.4] {
+        a.channel_control(0, ChannelControl::Volume, |c| c.volume = v);
+    }
+    a.state.session.history.end_gesture_run();
+    a.channel_control(0, ChannelControl::Volume, |c| c.volume = 0.5);
+    assert_eq!(a.state.session.history.at(), steps + 4);
+}
+
+/// Undo knob tweaks covers every "Knob tweak" step, the mixer track box's and the tempo's drag too.
+#[test]
+fn undo_knob_tweaks_off_covers_the_mixer_track_box_and_the_tempo() {
+    let mut a = app();
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, false);
+    let steps = a.state.session.history.at();
+    a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 3);
+    let mut press = App::new(None);
+    press.act(crate::app::Action::Tempo);
+    let none = press.state.session.history.len() == 0;
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, true);
+    assert_eq!(a.state.session.project.channels[0].mixer_track, 3);
+    assert_eq!(a.state.session.history.at(), steps, "the mixer track box");
+    assert!(none, "the tempo's press records no step");
+}
+
+/// Group selected (Alt+G, a name typed, Enter) and performance mode switched on are no undo step.
+#[test]
+fn a_filter_group_and_performance_mode_are_no_step() {
+    let mut a = app();
+    let steps = a.state.session.history.at();
+    a.state.rack.sel = [0, 1].into();
+    crate::rack::run(&mut a, crate::rack::RCmd::GroupSel);
+    a.state.pat_ui.name_box.as_mut().expect("the name box").text = "Drums".into();
+    crate::patterns::accept(&mut a.state);
+    assert_eq!(crate::rack::groups(&a.state.session.project).len(), 1, "the group is made");
+    crate::playlist::run(&mut a, crate::playlist::Cmd::PerfToggle);
+    assert!(crate::perform_ui::on(&a.state));
+    assert_eq!(a.state.session.history.at(), steps);
+}
+
+/// An effect slot's colour, random or chosen, is one step ("Name/color/icon effect").
+#[test]
+fn an_effect_slot_colour_is_a_step() {
+    let mut a = app();
+    a.state.selected_mixer = 2;
+    let red = os_model::Rgb::new(0xc8, 0x50, 0x4a);
+    ui_round_trip(&mut a, "Effect slot color", |a| {
+        crate::mixer::run(a, crate::mixer::MCmd::SlotColor(0, Some(red)));
+    });
+    ui_round_trip(&mut a, "Effect slot color", |a| {
+        crate::mixer::run(a, crate::mixer::MCmd::SlotRandomColor(1));
+    });
+}
+
+/// Loop type ▸ Advanced looping turns loop mode on, one step ("Set pattern loop mode").
+#[test]
+fn advanced_looping_turns_loop_mode_on() {
+    let mut a = app();
+    assert!(!crate::edit::rack::loop_mode(&a.state.session));
+    let steps = a.state.session.history.at();
+    crate::rack::run(&mut a, crate::rack::RCmd::LoopType(2));
+    a.mouse_up();
+    assert!(crate::edit::rack::loop_mode(&a.state.session), "loop mode on");
+    assert_eq!(crate::edit::rack::loop_type(&a.state.session), 2);
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    crate::history_ui::undo(&mut a.state).unwrap();
+    assert!(!crate::edit::rack::loop_mode(&a.state.session), "undone");
+}
+
+/// Arrangement ▸ Add one… with a name typed is one step, as Clone…; a rename is one of its own.
+#[test]
+fn an_arrangement_added_and_named_is_one_step() {
+    let mut a = app();
+    for cmd in [crate::playlist::Cmd::ArrAdd, crate::playlist::Cmd::ArrClone] {
+        let steps = a.state.session.history.at();
+        let count = a.state.session.project.arrangements.len();
+        crate::playlist::run(&mut a, cmd.clone());
+        a.state.playlist.edit.as_mut().expect("the name box").text = "Verse".into();
+        crate::playlist::commit_edit(&mut a.state);
+        assert_eq!(a.state.session.history.at(), steps + 1, "{cmd:?}");
+        assert_eq!(crate::edit::playlist::arrangement_name(&a.state.session), "Verse");
+        crate::history_ui::undo(&mut a.state).unwrap();
+        assert_eq!(a.state.session.project.arrangements.len(), count, "{cmd:?} undone, name and all");
+        crate::history_ui::redo(&mut a.state).unwrap();
+        assert_eq!(crate::edit::playlist::arrangement_name(&a.state.session), "Verse", "{cmd:?} redone with its name");
+    }
+    let steps = a.state.session.history.at();
+    crate::playlist::run(&mut a, crate::playlist::Cmd::ArrRename);
+    a.state.playlist.edit.as_mut().unwrap().text = "Chorus".into();
+    crate::playlist::commit_edit(&mut a.state);
+    assert_eq!(a.state.session.history.at(), steps + 1, "a rename");
+}
+
+/// The newest step's name.
+fn newest(a: &App) -> String {
+    let e = a.state.session.history.entries(&crate::settings_file::SettingsStore::memory());
+    e.last().map(|e| e.1.to_string()).unwrap_or_default()
+}
+
+/// A LED's right click ▸ Solo and a plugin window's ON switch: one mute and solo step each, which undo takes back.
+#[test]
+fn the_led_menu_s_solo_and_the_on_switch_are_one_step_each() {
+    let mut a = app();
+    let steps = a.state.session.history.at();
+    crate::rack::run(&mut a, crate::rack::RCmd::Solo(0));
+    assert_eq!(a.state.session.history.at(), steps + 1, "Solo");
+    assert_eq!(newest(&a), crate::rack::MUTE_SOLO);
+    assert!(!a.state.session.project.channels[1].enabled, "the others muted");
+    crate::history_ui::undo(&mut a.state);
+    assert!(a.state.session.project.channels.iter().all(|c| c.enabled), "undone");
+    crate::rack::toggle_on(&mut a.state, 1);
+    assert_eq!(a.state.session.history.at(), steps + 1, "ON switch");
+    assert_eq!(newest(&a), crate::rack::MUTE_SOLO);
+    assert!(!a.state.session.project.channels[1].enabled);
+    crate::history_ui::undo(&mut a.state);
+    assert!(a.state.session.project.channels[1].enabled, "undone");
+}
+
+/// A playlist track's LED: a click (mute) and a Ctrl+click (solo) are one step each, whatever Undo knob tweaks says,
+/// and undo takes them back.
+#[test]
+fn a_playlist_track_s_mute_and_solo_are_one_step_each() {
+    let mut a = app();
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, false);
+    let steps = a.state.session.history.at();
+    let on = |a: &App| a.state.session.project.arrangement().expect("an arrangement").tracks.iter().take(3).map(|t| t.enabled).collect::<Vec<_>>();
+    crate::playlist::press_led(&mut a, 1, false);
+    let muted = on(&a);
+    a.ctrl = true;
+    crate::playlist::press_led(&mut a, 2, false);
+    a.ctrl = false;
+    let soloed = on(&a);
+    let at = a.state.session.history.at();
+    crate::history_ui::undo(&mut a.state);
+    let after_one = on(&a);
+    crate::history_ui::undo(&mut a.state);
+    let after_two = on(&a);
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, true);
+    assert_eq!(muted, [true, false, true]);
+    assert_eq!(soloed, [false, false, true]);
+    assert_eq!(at, steps + 2);
+    assert_eq!(after_one, muted, "the solo undone");
+    assert_eq!(after_two, [true, true, true], "the mute undone");
+}
+
+/// A note added with a click in the piano roll is one step, "Piano roll add note".
+#[test]
+fn a_note_added_in_the_piano_roll_is_one_step() {
+    let mut a = app();
+    let mut c = os_ui::Canvas::new(1600, 1000, 1.0).expect("a canvas");
+    a.state.z = vec![crate::app::Win::PianoRoll];
+    a.paint(&mut c, None);
+    let g = a.piano_geom().expect("piano roll shown").grid;
+    a.mouse_move(g.x + g.w / 3.0, g.y + g.h / 2.0);
+    let notes = crate::piano::notes(&a.state.session).len();
+    let steps = a.state.session.history.at();
+    a.mouse_down();
+    a.mouse_up();
+    assert_eq!(crate::piano::notes(&a.state.session).len(), notes + 1);
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    assert_eq!(newest(&a), "Piano roll add note");
+}
+
+/// A clip placed with one click in the playlist is one step.
+#[test]
+fn a_clip_painted_with_one_click_is_one_step() {
+    let mut a = app();
+    let mut c = os_ui::Canvas::new(1600, 1000, 1.0).expect("a canvas");
+    a.state.z = vec![crate::app::Win::Playlist];
+    a.paint(&mut c, None);
+    let g = a.pl_grid().expect("the arranger");
+    a.mouse_move(g.x + g.w / 2.0, g.y + 30.0);
+    let clips = crate::playlist::clips(&a.state.session).len();
+    let steps = a.state.session.history.at();
+    a.mouse_down();
+    a.mouse_up();
+    assert_eq!(crate::playlist::clips(&a.state.session).len(), clips + 1, "a clip placed");
+    assert_eq!(a.state.session.history.at(), steps + 1);
+    assert_eq!(newest(&a), "Arranger fill paint clip");
+}
+
+/// A channel colour darker than FL keeps (a component under 0x14) is kept as the save will write it, so it does not
+/// change after a save and reopen.
+#[test]
+fn a_dark_channel_colour_shows_as_it_is_saved() {
+    let mut a = app();
+    let r = apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_channel", "name": "Dark"}))]).unwrap();
+    let ch = r[0]["channel"].as_u64().unwrap() as u32;
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": ch, "color": "#000a40"}))]).unwrap();
+    assert_eq!(a.state.session.project.channels.last().unwrap().color, Some(os_model::Rgb::new(0x14, 0x14, 0x40)));
+}
+
+/// The undo of a delete puts back what the delete took, where it was and with its ids: a channel's notes in each
+/// pattern, its clips and its place among another channel's layer children; a pattern's clips. Redoing a pattern's
+/// delete gives the patterns it makes to fill the numbers the ids they had.
+#[test]
+fn a_delete_s_undo_puts_back_what_it_took_with_its_ids() {
+    let mut a = app();
+    for name in ["Two", "Three"] {
+        apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_pattern", "name": name}))]).unwrap();
+    }
+    let (ch, _, pa) = ids(&a);
+    assert!(pa.len() >= 3);
+    let s = &mut a.state.session;
+    s.control.settle(s.project.get_mut());
+    s.project.get_mut().channels[0].layer_children = vec![1, 2];
+    for &p in &pa[..2] {
+        let notes = json!([{"channel": ch[0], "position": 0}, {"channel": ch[1], "position": 48}, {"channel": ch[2], "position": 96}, {"channel": ch[1], "position": 144}]);
+        apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_notes", "pattern": p, "notes": notes}))]).unwrap();
+    }
+    for (track, pattern) in [(1, pa[0]), (2, pa[1]), (3, pa[1])] {
+        apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "add_clip", "track": track, "position": 0, "pattern": pattern}))]).unwrap();
+    }
+    let notes = |a: &App| -> Vec<Vec<(u32, u16, u32)>> {
+        a.state.session.project.patterns.iter().map(|q| q.notes.iter().map(|n| (n.id.0, n.channel, n.position)).collect()).collect()
+    };
+    let clips = |a: &App| -> Vec<(u32, u16, os_model::ClipSource)> { crate::edit::playlist::clips(&a.state.session).iter().map(|c| (c.id.0, c.track, c.source)).collect() };
+    let whole = |a: &App| (notes(a), clips(a), ids(a), a.state.session.project.channels[0].layer_children.clone());
+    let before = whole(&a);
+
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "delete_channel", "channel": ch[1]}))]).unwrap();
+    assert_eq!(a.state.session.project.channels[0].layer_children, vec![1], "the layer's other child moved up");
+    assert!(notes(&a).iter().flatten().all(|&(_, c, _)| c != 2), "its notes went");
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!(whole(&a), before, "a channel's delete undone");
+
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "delete_pattern", "pattern": pa[1]}))]).unwrap();
+    let deleted = whole(&a);
+    assert_eq!(clips(&a).len(), 1, "its clips went");
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!(whole(&a), before, "a pattern's delete undone");
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!(whole(&a), deleted, "and redone");
+    crate::history_ui::undo(&mut a.state);
+
+    // A mixer track with a send into it and a channel going to it; the tracks after it move down.
+    let tr = ids(&a).1;
+    let to = |a: &App, i: usize| a.state.session.project.mixer[i].clone();
+    apply(&mut a.state, &test_client(), None, vec![
+        cmd(json!({"op": "set_send", "from": tr[1], "to": tr[3], "level": 0.5})),
+        cmd(json!({"op": "set_send", "from": tr[4], "to": tr[3]})),
+        cmd(json!({"op": "set_channel", "channel": ch[2], "track": tr[3]})),
+        cmd(json!({"op": "set_channel", "channel": ch[0], "track": tr[4]})),
+    ])
+    .unwrap();
+    let mixer = |a: &App| -> Vec<(u32, u16, Vec<u16>, Vec<(u16, f64)>)> {
+        a.state.session.project.mixer.iter().map(|m| (m.id.0, m.index, m.routes.clone(), m.send_levels.clone())).collect()
+    };
+    let outs = |a: &App| -> Vec<u16> { a.state.session.project.channels.iter().map(|c| c.mixer_track).collect() };
+    let before = (mixer(&a), outs(&a), to(&a, 3));
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "delete_track", "track": tr[3]}))]).unwrap();
+    let deleted = (mixer(&a), outs(&a));
+    assert_eq!(a.state.session.project.channels[0].mixer_track, 3, "the channel on the next track follows it down");
+    assert_eq!(a.state.session.project.channels[2].mixer_track, 0, "the deleted track's channel goes to the master");
+    crate::history_ui::undo(&mut a.state);
+    assert_eq!((mixer(&a), outs(&a), to(&a, 3)), before, "a mixer track's delete undone");
+    crate::history_ui::redo(&mut a.state);
+    assert_eq!((mixer(&a), outs(&a)), deleted, "and redone, the empty track it makes with the id it had");
+}
+
+/// Every kind of project knob turns through its command (control-plane step 14): a drag is one step named for the
+/// knob, its undo gives the project back as it was and its redo as the drag left it, and a knob whose thing is gone
+/// makes no step.
+#[test]
+fn every_project_knob_turns_through_its_command() {
+    use crate::knobs::{KnobId, LfoKnob};
+    use crate::lemon_midi_out::MoKnob;
+    let mut a = App::new(None);
+    a.add_midi_out();
+    let out = a.state.session.project.channels.len() - 1;
+    // Row 0 as an automation clip, with its clip.
+    let ch = a.state.session.project.channels[0].index;
+    a.state.session.project.get_mut().channels[0].kind = os_model::ChannelKind::Automation;
+    a.state.session.project.get_mut().automations.push(os_flp::project::untargeted_automation(ch, 0.5, 4.0));
+    let t = a.state.session.project.mixer.iter().position(|m| m.index == 1).unwrap();
+    a.state.session.project.get_mut().mixer[t].routes = vec![0];
+    let knobs = [
+        KnobId::MasterVol,
+        KnobId::MasterPitch,
+        KnobId::Swing,
+        KnobId::MixPan(1),
+        KnobId::MixSep(1),
+        KnobId::SlotMix(1, 2),
+        KnobId::Send(1, 0),
+        KnobId::ChanVol(1),
+        KnobId::ChanPan(1),
+        KnobId::Eq(1, 1, 0),
+        KnobId::Eq(1, 2, 2),
+        KnobId::AutoLfo(0, LfoKnob::Amount),
+        KnobId::AutoLfo(0, LfoKnob::On),
+        KnobId::AutoLfo(0, LfoKnob::Skew),
+        KnobId::MidiOut(out, MoKnob::Patch),
+        KnobId::MidiOut(out, MoKnob::Bank2),
+        KnobId::MidiOut(out, MoKnob::SendLevels),
+    ];
+    for id in knobs {
+        let before = a.state.session.project.clone();
+        let steps = a.state.session.history.len();
+        crate::history::knob(&mut a.state.session, id, false);
+        // Through the middle, to the far side from where it starts (a check flips).
+        let far = if a.state.knob(id) >= 0.5 { 0.1 } else { 0.9 };
+        a.state.set_knob(id, 0.45);
+        a.state.set_knob(id, far);
+        a.state.session.history.end_gesture_run();
+        let after = a.state.session.project.clone();
+        assert_ne!(after, before, "{id:?} changes the project");
+        assert_eq!(a.state.session.history.len(), steps + 1, "{id:?}: one step");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(a.state.session.project, before, "{id:?} undone");
+        crate::history_ui::redo(&mut a.state);
+        assert_eq!(a.state.session.project, after, "{id:?} redone");
+    }
+    // A knob on a track that isn't there.
+    let steps = a.state.session.history.len();
+    crate::history::knob(&mut a.state.session, KnobId::MixPan(500), false);
+    a.state.set_knob(KnobId::MixPan(500), 0.2);
+    assert_eq!(a.state.session.history.len(), steps);
 }

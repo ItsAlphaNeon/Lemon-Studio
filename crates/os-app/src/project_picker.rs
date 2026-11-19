@@ -6,7 +6,6 @@
 //! project's patterns and channels; a pick makes a pattern current or opens a channel's window.
 // spec: ui/project-picker.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::ChannelKind;
 
 use crate::app::{App, State};

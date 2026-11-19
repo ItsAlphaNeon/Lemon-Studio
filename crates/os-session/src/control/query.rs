@@ -159,7 +159,10 @@ pub fn notes(s: &crate::session::Session, id: u32) -> Result<Value, String> {
         .iter()
         .map(|n| {
             let ch = p.channels.iter().find(|c| c.index == n.channel).map(|c| c.id.0);
-            json!({ "channel": ch, "position": n.position, "length": n.length, "key": n.key, "velocity": n.velocity, "pan": n.pan })
+            let mut v = serde_json::to_value(crate::control::command::NoteIn::of(n, ch.unwrap_or(0))).unwrap_or_default();
+            v["id"] = json!(n.id.0);
+            v["channel"] = json!(ch);
+            v
         })
         .collect();
     Ok(json!({ "pattern": id, "notes": notes }))

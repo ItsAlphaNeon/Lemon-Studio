@@ -474,6 +474,27 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
 }
 
 /// The placeholders of sample paths: the FL Studio install folder and its `Data` folder (spec: flp/sample-paths.md).
+/// `%NAME%` placeholders read from the environment (FL writes files in the user's folder as `%USERPROFILE%\...`); a
+/// name the environment does not have, and the rest of the path from it on, is kept as written.
+pub fn expand_env(path: &str) -> String {
+    let mut out = String::new();
+    let mut rest = path;
+    while let Some(a) = rest.find('%') {
+        let Some(b) = rest[a + 1..].find('%') else { break };
+        let name = &rest[a + 1..a + 1 + b];
+        match std::env::var(name) {
+            Ok(v) if !name.is_empty() && !v.is_empty() => {
+                out.push_str(&rest[..a]);
+                out.push_str(&v);
+                rest = &rest[a + 2 + b..];
+            }
+            _ => break,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 const FACTORY: &str = "%FLStudioFactoryData%";
 const DATA: &str = "%FLStudioData%";
 
@@ -716,7 +737,7 @@ impl SampleLibrary {
         } else if let Some(rest) = strip_prefix_ignoring_case(project_path, DATA) {
             self.factory_dir.as_ref()?.join("Data").join(rel(rest))
         } else {
-            Self::local_path(project_path)
+            Self::local_path(&expand_env(project_path))
         };
         if !reachable(&path) {
             return Some(by_name(&path).unwrap_or(path));
@@ -1054,6 +1075,28 @@ mod tests {
         assert_eq!(wav_tags(&path), WavTags { unity_note: Some(67), beats: Some(4) });
         let _ = std::fs::remove_file(&path);
         assert_eq!(wav_tags(&path), none);
+    }
+
+    /// FL writes a file in the user's folder as `%USERPROFILE%\...`: the placeholder is read from the environment; an
+    /// unknown one is kept as written.
+    #[test]
+    fn environment_placeholders_are_read() {
+        let (name, home) = if cfg!(windows) { ("USERPROFILE", std::env::var("USERPROFILE")) } else { ("HOME", std::env::var("HOME")) };
+        let home = home.expect("a home folder");
+        assert_eq!(expand_env(&format!(r"%{name}%\Downloads\kik.wav")), format!(r"{home}\Downloads\kik.wav"));
+        assert_eq!(expand_env(r"%NO_SUCH_VARIABLE_HERE%\a.wav"), r"%NO_SUCH_VARIABLE_HERE%\a.wav");
+        assert_eq!(expand_env(r"C:\50% off\a.wav"), r"C:\50% off\a.wav");
+        #[cfg(windows)]
+        {
+            let dir = std::env::temp_dir();
+            let file = format!("os_engine_env_{}.wav", std::process::id());
+            std::fs::write(dir.join(&file), wav(&[])).unwrap();
+            let var = if std::env::var("TEMP").is_ok_and(|t| dir.starts_with(&t)) { "TEMP" } else { "TMP" };
+            let lib = SampleLibrary::new(None);
+            let got = lib.resolve(&format!(r"%{var}%\{file}")).unwrap();
+            assert!(got.exists(), "{got:?}");
+            let _ = std::fs::remove_file(dir.join(&file));
+        }
     }
 
     /// Sample paths are matched without regard to case, placeholders included, and take either slash (spec:

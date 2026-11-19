@@ -63,8 +63,29 @@ impl fmt::Write for Fnv {
 
 fn hash(v: &impl fmt::Debug) -> u64 {
     let mut h = Fnv::new();
-    let _ = write!(h, "{v:?}");
+    let _ = write!(h, "{}", without_new_ids(&format!("{v:?}")));
     h.0
+}
+
+/// `text` without the ids step 12 gave notes, control points, time markers, playlist tracks and automation points (their
+/// last field, `, id: Id(n) }`): a build without them, a baseline's, has no such field. No other kind's id comes last.
+fn without_new_ids(text: &str) -> String {
+    const KEY: &str = ", id: Id(";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(KEY) {
+        let after = &rest[i + KEY.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && after[digits..].starts_with(") }") {
+            out.push_str(&rest[..i]);
+            rest = &after[digits + 1..];
+        } else {
+            out.push_str(&rest[..i + KEY.len()]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The project without what `side` holds (the tempo, the pattern shown, the song mode, the rack's groups, locks, zips
@@ -114,7 +135,7 @@ fn project_hash(p: &os_model::Project) -> u64 {
     // Step 5 renamed a pattern's `loop_off` (cleared above) to `loop_mode`: the text keeps the name it was recorded with.
     let out = out.replace(", loop_mode: None, ", ", loop_off: None, ");
     let mut h = Fnv::new();
-    let _ = write!(h, "{out}");
+    let _ = write!(h, "{}", without_new_ids(&out));
     h.0
 }
 
@@ -448,7 +469,10 @@ impl Rig {
             let dir = traces_dir().join("dumps");
             let _ = std::fs::create_dir_all(&dir);
             let n = std::fs::read_dir(&dir).map_or(0, |d| d.count());
-            let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}", self.app.state.session.project, side(&self.app)));
+            let s = &self.app.state.session;
+            let steps: Vec<&str> = s.history.entries(&crate::settings_file::store()).into_iter().map(|e| e.1).collect();
+            let ids = format!("next id {}\nundo steps {steps:?}", s.control.ids.next());
+            let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}\n{ids}", s.project, side(&self.app)));
         }
         if self.id_fault.is_none() {
             self.id_fault = ids_fault(&self.app.state.session.project).map(|f| format!("step {}: {f}", self.step));
@@ -709,8 +733,9 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
     p
 }
 
-/// Whether every channel, pattern, mixer track, slot plugin, arrangement and clip has an id and no two share one (the
-/// session gives them out from one counter, `control::ids`): what is wrong, if anything.
+/// Whether every channel, pattern, mixer track, slot plugin, arrangement, clip, note, control point, time marker,
+/// playlist track and automation point has an id and no two share one (the session gives them out from one counter,
+/// `control::ids`): what is wrong, if anything.
 fn ids_fault(p: &os_model::Project) -> Option<String> {
     let mut all: Vec<(&str, os_model::Id)> = Vec::new();
     all.extend(p.channels.iter().map(|c| ("channel", c.id)));
@@ -719,6 +744,11 @@ fn ids_fault(p: &os_model::Project) -> Option<String> {
     all.extend(p.mixer.iter().flat_map(|m| m.slots.iter().flatten()).map(|x| ("slot", x.id)));
     all.extend(p.arrangements.iter().map(|a| ("arrangement", a.id)));
     all.extend(p.arrangements.iter().flat_map(|a| &a.clips).map(|c| ("clip", c.id)));
+    all.extend(p.patterns.iter().flat_map(|q| &q.notes).map(|n| ("note", n.id)));
+    all.extend(p.patterns.iter().flat_map(|q| &q.controls).map(|c| ("control point", c.id)));
+    all.extend(p.arrangements.iter().flat_map(|a| &a.markers).map(|m| ("time marker", m.id)));
+    all.extend(p.arrangements.iter().flat_map(|a| &a.tracks).map(|t| ("playlist track", t.id)));
+    all.extend(p.automations.iter().flat_map(|a| &a.points).map(|q| ("automation point", q.id)));
     if let Some((kind, _)) = all.iter().find(|(_, id)| id.is_none()) {
         return Some(format!("a {kind} without an id"));
     }
@@ -786,6 +816,10 @@ fn leaves(text: &str) -> Vec<(String, String)> {
 /// `rounding` takes numbers within 1e-4 as equal (what the file format keeps of them).
 fn difference(a: &impl fmt::Debug, b: &impl fmt::Debug, rounding: bool) -> Option<String> {
     let diff = differences(a, b, rounding);
+    // `OS_EQUIV_ALL=1`: every difference, on stderr, to see what a finding's count is made of.
+    if std::env::var_os("OS_EQUIV_ALL").is_some() && !diff.is_empty() {
+        eprintln!("differences: {diff:#?}");
+    }
     diff.first().map(|d| format!("{d}(+{})", diff.len() - 1))
 }
 

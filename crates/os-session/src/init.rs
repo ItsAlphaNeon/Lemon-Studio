@@ -17,7 +17,6 @@
 use os_model::target::{self, Target};
 use os_model::InitControl;
 
-use crate::history::{self, Snap};
 
 /// The undo step of "Set as song start value".
 pub const INITIALIZED: &str = "Initialized control";
@@ -34,6 +33,20 @@ pub fn listed(s: &crate::session::Session, t: u32) -> bool {
     entry(s, t).is_some()
 }
 
+/// Control `t`'s entry and its place in the list (what an undo puts back).
+pub fn placed(s: &crate::session::Session, t: u32) -> Option<(usize, InitControl)> {
+    s.project.init_controls.iter().enumerate().find(|(_, c)| c.target == t).map(|(i, c)| (i, *c))
+}
+
+/// Puts back what [`placed`] took: the entry at its old place, or none.
+pub fn restore(s: &mut crate::session::Session, t: u32, e: Option<(usize, InitControl)>) {
+    put(s, t, None);
+    if let Some((i, c)) = e {
+        let list = &mut s.project.get_mut().init_controls;
+        list.insert(i.min(list.len()), c);
+    }
+}
+
 /// Puts control `t`'s entry in the list (`None`: takes it out). An entry already there keeps its place.
 pub fn put(s: &mut crate::session::Session, t: u32, e: Option<InitControl>) {
     let list = &mut s.project.get_mut().init_controls;
@@ -46,20 +59,6 @@ pub fn put(s: &mut crate::session::Session, t: u32, e: Option<InitControl>) {
     }
     // Playback gets the list (the engine sets it where a song loops).
     s.dirty = true;
-}
-
-/// "Set as song start value": control `t`, at its value `v` (0..1), goes in the list, replacing an earlier value.
-/// One undo step, "Initialized control". Nothing for a control whose stored units aren't known (a plugin parameter).
-pub fn init(s: &mut crate::session::Session, t: u32, v: f64) {
-    let Some(c) = InitControl::from_unit(t, v) else { return };
-    let snap = Snap::Init(t, entry(s, t));
-    history::record(s, INITIALIZED, snap);
-    put(s, t, Some(c));
-}
-
-/// "Remove start value": control `t` leaves the list. No undo step.
-pub fn delete(s: &mut crate::session::Session, t: u32) {
-    put(s, t, None);
 }
 
 /// What "Create automation clip" on control `t` (value `v`) puts in the list: its entry while "Initialize controls

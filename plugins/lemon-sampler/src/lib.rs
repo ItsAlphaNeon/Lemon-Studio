@@ -62,6 +62,61 @@ struct SummarySlot {
     summary: Option<Arc<stream::Summary>>,
 }
 
+/// A played sample built once for every instance that plays it: `sample` is shared.
+#[derive(Clone)]
+struct SharedBuilt {
+    sample: Arc<Sample>,
+    looped: Option<(usize, usize)>,
+    per_file_frame: f64,
+}
+
+/// One built played sample, by what it was built from: the decode (the file's one shared copy), what the steps know
+/// of the file, and the settings. Kept while an instance plays it.
+struct BuiltEntry {
+    raw: std::sync::Weak<Sample>,
+    source: fx::Source,
+    key: FxKey,
+    sample: std::sync::Weak<Sample>,
+    looped: Option<(usize, usize)>,
+    per_file_frame: f64,
+}
+
+/// **(Lemon Studio)** Every played sample built in this process. Channels that play the same file with the same
+/// settings share one copy, and a played sample that comes out as the file's frames unchanged is the decode itself
+/// (a project with many channels on one sample would otherwise hold it once per channel).
+static BUILT: Mutex<Vec<BuiltEntry>> = Mutex::new(Vec::new());
+
+fn find_built(list: &[BuiltEntry], raw: &Arc<Sample>, source: &fx::Source, key: &FxKey) -> Option<SharedBuilt> {
+    list.iter().filter(|e| std::ptr::eq(e.raw.as_ptr(), Arc::as_ptr(raw)) && e.source == *source && e.key == *key).find_map(|e| {
+        Some(SharedBuilt { sample: e.sample.upgrade()?, looped: e.looped, per_file_frame: e.per_file_frame })
+    })
+}
+
+/// `fx::build`, shared with the other instances (`BUILT`). Built outside the lock; when another instance built the
+/// same meanwhile, its copy is taken and this one let go.
+fn shared_build(raw: &Arc<Sample>, source: &fx::Source, key: &FxKey) -> SharedBuilt {
+    if let Some(b) = find_built(&BUILT.lock().unwrap_or_else(|e| e.into_inner()), raw, source, key) {
+        return b;
+    }
+    let b = fx::build(raw, source, key);
+    let sample = if b.sample == **raw { raw.clone() } else { Arc::new(b.sample) };
+    let mine = SharedBuilt { sample, looped: b.looped, per_file_frame: b.per_file_frame };
+    let mut list = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(theirs) = find_built(&list, raw, source, key) {
+        return theirs;
+    }
+    list.retain(|e| e.sample.strong_count() > 0 && e.raw.strong_count() > 0);
+    list.push(BuiltEntry {
+        raw: Arc::downgrade(raw),
+        source: *source,
+        key: *key,
+        sample: Arc::downgrade(&mine.sample),
+        looped: mine.looped,
+        per_file_frame: mine.per_file_frame,
+    });
+    mine
+}
+
 /// State shared by the audio thread, the background task and the editor.
 pub struct Shared {
     /// The loaded file decoded, while the played sample comes from memory (none while it plays from disk).
@@ -435,10 +490,10 @@ impl Shared {
             return;
         }
         let raw = self.decoded(version, &path);
-        let built = raw.map(|r| (fx::build(&r, &source, &key), r.frames()));
+        let built = raw.map(|r| (shared_build(&r, &source, &key), r.frames()));
         params.frames.store(built.as_ref().map_or(0, |(b, _)| b.sample.frames() as u32), Ordering::Relaxed);
         let (sample, looped, file_frames) = match built {
-            Some((b, raw_frames)) => (Some(Arc::new(b.sample)), b.looped, raw_frames as f64 * b.per_file_frame),
+            Some((b, raw_frames)) => (Some(b.sample), b.looped, raw_frames as f64 * b.per_file_frame),
             None => (None, None, 0.0),
         };
         self.store(Processed { version, key, disk_key: dk, serial: 0, sample, disk: None, looped, file_frames });
@@ -855,6 +910,27 @@ os_plugkit::linked_clap_entry!(LemonSampler);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Instances that play the same file with the same settings share one played sample; one that is the file's
+    /// frames unchanged is the decode itself; other settings build another.
+    #[test]
+    fn instances_share_the_played_sample() {
+        let raw = Arc::new(Sample { rate: 44100, left: (0..1000).map(|i| (i as f32 * 0.01).sin()).collect(), right: vec![0.25; 1000] });
+        let src = fx::Source::default();
+        let plain = FxKey::neutral();
+        let a = super::shared_build(&raw, &src, &plain);
+        assert!(Arc::ptr_eq(&a.sample, &raw), "unchanged frames are the decode");
+        let mut rev = FxKey::neutral();
+        rev.fx.flags |= os_model::SampleFx::REVERSE;
+        let b = super::shared_build(&raw, &src, &rev);
+        let c = super::shared_build(&raw, &src, &rev);
+        assert!(!Arc::ptr_eq(&b.sample, &raw));
+        assert!(Arc::ptr_eq(&b.sample, &c.sample), "the same settings share one build");
+        assert_eq!(*b.sample, fx::build(&raw, &src, &rev).sample);
+        drop((b, c));
+        let d = super::shared_build(&raw, &src, &rev);
+        assert_eq!(*d.sample, fx::build(&raw, &src, &rev).sample, "built again once no one held it");
+    }
 
     /// A plugin at 48 kHz playing a sine of `hz` (half scale), with its parameters' defaults.
     fn plugin(hz: f64) -> LemonSampler {

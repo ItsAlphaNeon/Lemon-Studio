@@ -18,6 +18,17 @@ use os_model::{
     target, AutoMode, AutoPoint, Arrangement, Automation, Channel, ChannelKind, Clip, ClipSource, PlaylistTrack, Rgb, TimeMarker,
 };
 
+/// The icon `owner` shows: the project's (the channel's, the track's or the slot's `lemon_icon` / `slot_icons`, by
+/// name; kept in `.lemon`).
+pub fn icon_of(p: &os_model::Project, owner: IconOwner) -> Option<crate::icon::Icon> {
+    let name = match owner {
+        IconOwner::Channel(id) => p.channels.iter().find(|c| c.id.0 == id)?.lemon_icon.as_deref()?,
+        IconOwner::Track(t) => p.mixer.iter().find(|m| m.index == t)?.lemon_icon.as_deref()?,
+        IconOwner::Slot(t, k) => p.mixer.iter().find(|m| m.index == t)?.slot_icons.get(usize::from(k))?.as_deref()?,
+    };
+    crate::icon::ICONS.iter().find(|(n, _)| *n == name).map(|&(_, i)| i)
+}
+
 /// Sets (`None`: clears) the icon `owner` shows; the project is written only when it changes.
 pub fn put_icon(s: &mut crate::session::Session, owner: IconOwner, icon: Option<crate::icon::Icon>) {
     let name = icon.and_then(|i| ICONS.iter().find(|(_, x)| *x == i)).map(|&(n, _)| n.to_string());
@@ -469,8 +480,11 @@ pub fn to_src(s: &crate::session::Session, src: ClipSource, ticks: f64) -> f64 {
 
 /// Undo snapshot of everything the playlist edits: a step of the project's undo history (`crate::history`).
 pub fn snapshot(s: &mut crate::session::Session) {
-    snapshot_as(s, "Arranger edit");
+    snapshot_as(s, ARRANGER_EDIT);
 }
+
+/// The undo step of most playlist edits.
+pub const ARRANGER_EDIT: &str = "Arranger edit";
 
 /// `snapshot`, the step named `name` (as the browser's History lists it; spec: ui/settings-choices.md "Undo history:
 /// the four checks (2026-10-16)").
@@ -667,6 +681,24 @@ pub fn swap_tracks(s: &mut crate::session::Session, a: u16, b: u16) {
     s.dirty = true;
 }
 
+/// Delete track `t` with its clips (the rest move up; an empty track comes in last).
+pub fn delete_track_in(s: &mut crate::session::Session, t: u16) {
+    let arr = arr_mut(s);
+    arr.clips.retain(|c| c.track != t);
+    for c in &mut arr.clips {
+        if c.track > t {
+            c.track -= 1;
+        }
+    }
+    let n = arr.tracks.len();
+    for k in usize::from(t)..n - 1 {
+        let next = arr.tracks[k + 1].clone();
+        arr.tracks[k] = PlaylistTrack { number: arr.tracks[k].number, ..next };
+    }
+    arr.tracks[n - 1] = PlaylistTrack::new(n as u32);
+    s.dirty = true;
+}
+
 /// Insert an empty track at `t` (the rest move down; the last track's clips stay on it).
 pub fn insert_track(s: &mut crate::session::Session, t: u16) {
     let arr = arr_mut(s);
@@ -710,7 +742,7 @@ pub fn add_point(s: &mut crate::session::Session, ch: u16, beat: f64, value: f64
     // A new point takes the mode / tension of the segment it splits ("new segments use the last tension").
     let (mode, tension) = a.points.get(i).map_or((AutoMode::Single, 0.0), |q| (q.mode, q.tension));
     let flag = if mode.has_tension() { 2 } else { 0 };
-    a.points.insert(i, AutoPoint { beat: beat.max(0.0), value: value.clamp(0.0, 1.0), tension, mode, flag });
+    a.points.insert(i, AutoPoint { id: os_model::Id::NONE, beat: beat.max(0.0), value: value.clamp(0.0, 1.0), tension, mode, flag });
     s.dirty = true;
     Some(i)
 }
@@ -727,6 +759,36 @@ pub fn move_point(s: &mut crate::session::Session, ch: u16, i: usize, beat: f64,
     a.points[i].beat = if i == 0 { 0.0 } else { beat.clamp(lo, hi) };
     a.points[i].value = value.clamp(0.0, 1.0);
     s.dirty = true;
+}
+
+/// Point `i`'s tension, -1..1 (a drag's live change; the drag's end applies `set_points`).
+pub fn set_point_tension(s: &mut crate::session::Session, ch: u16, i: usize, t: f32) {
+    if let Some(p) = s.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
+        p.tension = t.clamp(-1.0, 1.0);
+        s.dirty = true;
+    }
+}
+
+/// Point `i`'s mode, its tension flag following (inside an edit `set_points` applies).
+pub fn set_point_mode(s: &mut crate::session::Session, ch: u16, i: usize, m: AutoMode) {
+    if let Some(p) = s.project.get_mut().automation_mut(ch).and_then(|a| a.points.get_mut(i)) {
+        p.mode = m;
+        p.flag = if m.has_tension() && !matches!(m, AutoMode::Stairs | AutoMode::SmoothStairs | AutoMode::Pulse | AutoMode::Wave) { 2 } else { 0 };
+    }
+}
+
+/// Channel `ch`'s automation points become `points` (an edit's live changes put back before its command).
+pub fn put_points(s: &mut crate::session::Session, ch: u16, points: Vec<AutoPoint>) {
+    if let Some(a) = s.project.get_mut().automation_mut(ch) {
+        a.points = points;
+    }
+}
+
+/// Channel `ch`'s time stretch length in beats (a stretch-mode resize's live change).
+pub fn set_stretch_time(s: &mut crate::session::Session, ch: u16, beats: f64) {
+    if let Some(c) = s.project.get_mut().channels.iter_mut().find(|c| c.index == ch) {
+        c.sound.set_stretch_time(beats);
+    }
 }
 
 pub fn delete_point(s: &mut crate::session::Session, ch: u16, i: usize) {
@@ -929,6 +991,30 @@ pub fn tempo_value(bpm: f64) -> f64 {
 }
 
 /// Gives the audio clips of `arrangements` their lengths from `fits` (`fit_audio`). Returns whether one changed.
+/// The playlist's view as the file keeps it (event 242: track height, time zoom, scroll), when it changed.
+pub fn put_view(s: &mut crate::session::Session, v: os_model::PlaylistView) {
+    if s.project.playlist_view != Some(v) {
+        s.project.get_mut().playlist_view = Some(v);
+    }
+}
+
+/// Arrangement number `n` becomes the one shown (event 100), a change of the project with no undo step.
+pub fn show_arrangement_in(s: &mut crate::session::Session, n: u16) {
+    s.project.get_mut().current_arrangement = Some(n);
+    s.dirty = true;
+}
+
+/// The audio clips fitted now (Restretch all), in the project and in its saved copy alike: lengths worked out, not
+/// edited, so no unsaved change. Whether any changed.
+pub fn fit_all(s: &mut crate::session::Session) -> bool {
+    let Some(fits) = audio_fits(s) else { return false };
+    if !s.project.write_if(|p| fit_clips(&mut p.arrangements, &fits)) {
+        return false;
+    }
+    fit_clips(&mut s.saved.0.arrangements, &fits);
+    true
+}
+
 pub fn fit_clips(arrangements: &mut [os_model::Arrangement], fits: &Fits) -> bool {
     let mut changed = false;
     for a in arrangements {

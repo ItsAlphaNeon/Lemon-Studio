@@ -6,7 +6,6 @@
 //! The interface's side of `crate::project_plugins` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 
 use os_flp::wrapper::{self, WRAPPER};
 use os_host::{Descriptor, Format};
@@ -69,7 +68,7 @@ impl crate::app::App {
         for &key in &swap {
             if self.state.session.plugins.descriptor(key).is_some_and(|d| d.format == Format::Native) && !self.state.session.plugins.hosted[&key].keep_file_state {
                 if let Some(state) = self.state.session.plugins.state(key) {
-                    store_native(self.state.session.project.get_mut(), key, state);
+                    crate::project_plugins::store_native_in(&mut self.state.session, key, state);
                 }
             }
         }

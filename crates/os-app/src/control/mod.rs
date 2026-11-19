@@ -12,3 +12,5 @@ pub mod host_ui;
 pub mod query_ui;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod fuzz;

@@ -15,12 +15,13 @@
 //! pattern, which becomes the current one. One undo step either way.
 // spec: ui/channel-rack.md §18 "Burn MIDI to", audio/channel-misc.md
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::sync::Arc;
 
 use os_model::{Channel, ChannelKind, Note};
 
 use crate::app::{App, State};
+use crate::control::command::{Command, NoteIn};
+use crate::misc::M;
 
 /// The undo step.
 pub const STEP: &str = "Burn MIDI";
@@ -710,25 +711,31 @@ impl App {
         };
         let index = ch.index;
         let count = notes.iter().filter(|n| !n.muted() && !n.slide()).count();
-        let msg = crate::control_ui::edit_app(self, STEP, crate::control::command::Region::Project, |app| {
-            let s = &mut app.state;
-            let to = if new { crate::edit::patterns::next_empty(&s.session, cur) } else { cur };
-            let p = crate::edit::patterns::pat_mut(&mut s.session, to);
-            if new {
-                p.notes.extend(notes.iter().filter(|n| !n.muted() && !n.slide()).copied());
-            } else {
-                p.notes.retain(|n| n.channel != index);
-                p.notes.extend(notes.iter().copied());
-            }
-            p.notes.sort_by_key(|n| n.position);
+        let s = &mut self.state;
+        let to = if new { crate::edit::patterns::next_empty(&s.session, cur) } else { cur };
+        crate::mixer::track_ids(s);
+        let channel = s.session.project.channels[row].id.0;
+        let first = if s.session.project.pattern(to).is_none() { vec![Command::AddPattern { name: None, color: None, number: Some(to) }] } else { Vec::new() };
+        let r = crate::control_ui::command_then(s, STEP, first, |s, _| {
+            let p = &s.session.project;
+            let Some(pat) = p.pattern(to) else { return Vec::new() };
+            let id = |ch: u16| p.channels.iter().find(|c| c.index == ch).map(|c| c.id.0);
+            // The pattern's other notes, then the burnt ones, in position order.
+            let mut all: Vec<&Note> = pat.notes.iter().filter(|n| new || n.channel != index).collect();
+            all.extend(notes.iter().filter(|n| !new || (!n.muted() && !n.slide())));
+            all.sort_by_key(|n| n.position);
+            let list = all.into_iter().filter_map(|n| Some(NoteIn::of(n, id(n.channel)?))).collect();
             // The channel's own generators are off now: the notes are not made twice.
-            let m = &mut s.session.project.get_mut().channels[row].misc;
-            m.arp.direction = 0;
-            m.echo.feed = 0.0;
-            s.set_pattern(to);
-            s.session.dirty = true;
-            if new { format!("{count} notes of {name} burnt to {}", crate::edit::patterns::name_of(&s.session, to)) } else { format!("{count} notes of {name} burnt") }
+            let off = Command::SetMisc { channel, values: [(M::ArpDir.key(), 0.0), (M::EchoFeed.key(), 0.0)].into() };
+            vec![Command::SetNotes { pattern: pat.id.0, channel: None, notes: list }, off]
         });
+        let msg = match r {
+            Err(e) => e,
+            Ok(_) => {
+                s.set_pattern(to);
+                if new { format!("{count} notes of {name} burnt to {}", crate::edit::patterns::name_of(&s.session, to)) } else { format!("{count} notes of {name} burnt") }
+            }
+        };
         self.invalidate();
         Some(msg)
     }

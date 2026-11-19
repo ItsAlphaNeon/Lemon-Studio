@@ -320,6 +320,17 @@ pub fn pct(v: f32) -> i32 {
 
 /// Every container member's CPU switches in project `p`, for `f` to read or change (Switch auto-bypass for all plugins,
 /// `mixer::switch_auto_bypass`); a container whose members `f` changed is written again.
+/// `each_member_cpu` reading: `f` sees each member's CPU settings.
+pub fn each_member_cpu_of(p: &Project, mut f: impl FnMut(&os_model::PluginCpu)) {
+    let slots = p.mixer.iter().flat_map(|m| m.slots.iter().flatten()).filter(|s| s.name == CONTAINER).map(|s| &s.state);
+    let channels = p.channels.iter().filter(|c| is_container_channel(c)).filter_map(|c| c.plugin_state.as_ref());
+    for b in slots.chain(channels) {
+        for m in decode(b).unwrap_or_default() {
+            f(&m.cpu);
+        }
+    }
+}
+
 pub fn each_member_cpu(p: &mut Project, mut f: impl FnMut(&mut os_model::PluginCpu)) {
     let slots = p.mixer.iter_mut().flat_map(|m| m.slots.iter_mut().flatten()).filter(|s| s.name == CONTAINER).map(|s| &mut s.state);
     let channels = p.channels.iter_mut().filter(|c| is_container_channel(c)).filter_map(|c| c.plugin_state.as_mut());
@@ -354,6 +365,11 @@ pub fn label(i: usize, m: &Member) -> String {
 
 /// Before an edit of the containers' lists: each member's state as its instance holds it now, so that the edit (and its
 /// undo) keeps what was set in the members' windows. A save stores them the same way (`project_plugins::store_hosted`).
+/// `store_members` on the session's project.
+pub fn store_members_in(s: &mut crate::session::Session) {
+    store_members(s.project.get_mut(), &s.plugins);
+}
+
 pub fn store_members(proj: &mut Project, plugins: &Plugins) {
     for (&key, live) in &plugins.containers {
         let Some((t, k)) = key_place(key) else { continue };
@@ -376,7 +392,7 @@ pub fn store_members(proj: &mut Project, plugins: &Plugins) {
 
 /// A plugin a wrap moved into a container (Lemon Studio's design, spec: plugins/patcher/README.md §4.5): where it was,
 /// and which member it became.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Move {
     /// Its place before: slot `.1` of mixer track `.0`, or rack row `.0`'s channel for [`CHANNEL`].
     pub from: (u16, u8),
@@ -385,7 +401,7 @@ pub struct Move {
 
 /// The member a moved plugin became: one member's id, or for a container wrapped again (Wrap all) its members' ids, old
 /// and new.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Ids {
     Plugin(u32),
     Members(Vec<(u32, u32)>),
@@ -407,6 +423,7 @@ impl Ids {
 
 /// What a wrap moved into the container at place `to` (a slot, or a rack row's channel of index `index`): the
 /// automation targets and remote control links naming the moved plugins' parameters follow them onto the members.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Moved {
     pub to: (u16, u8),
     /// The channel's index (automation names a channel by it), for a channel's container.

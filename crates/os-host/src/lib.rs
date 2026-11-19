@@ -275,6 +275,12 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         false
     }
 
+    /// Marks the instance as a third-party plugin, which gets the channel's levels as FL's plugin wrapper gives them
+    /// (`Instrument::wrapper_levels`; UI thread). False when the instance is not guarded.
+    fn use_wrapper_levels(&mut self) -> bool {
+        false
+    }
+
     /// Automation of index `.0` of each pair reaches parameter `.1`: a project file's indexes for the plugin this one
     /// stands in for (UI thread). Ignored where the format has no such list.
     fn use_param_aliases(&mut self, _aliases: &'static [(u32, u32)]) {}
@@ -298,6 +304,11 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     fn param_value(&self, id: u32) -> Option<f64> {
         let _ = id;
         None
+    }
+    /// [`Plugin::param_value`] of each of `ids`, in one call (a wrapper such as the crash guard enters the plugin
+    /// once for them all).
+    fn param_values(&self, ids: &[u32]) -> Vec<Option<f64>> {
+        ids.iter().map(|&id| self.param_value(id)).collect()
     }
     /// The plugin's text for normalized `value` of parameter `id` ("-6.0 dB").
     fn param_text(&self, id: u32, value: f64) -> Option<String> {
@@ -358,6 +369,12 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     /// to plays only those through a pass. Default: none.
     fn puts_out_notes(&self) -> bool {
         false
+    }
+    /// The names of the plugin's extra outputs ([`Instrument::extra_outputs`]), in order (UI thread, active): its
+    /// output buses' names after the main one's, or numbers where it names none (spec: audio/multi-output.md).
+    /// Default: none.
+    fn extra_output_names(&self) -> Vec<String> {
+        Vec::new()
     }
     /// The notes put out during the `process` calls since the last call, oldest first, while capturing.
     fn take_notes_out(&mut self) -> Vec<NoteOut> {

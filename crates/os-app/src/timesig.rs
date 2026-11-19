@@ -37,19 +37,22 @@ pub enum SongSig {
 
 /// Accept on a song marker: a time signature marker named after its signature ("3/4"), one undo step.
 pub fn set_song(s: &mut State, at: SongSig, num: u8, den: u8) {
-    crate::edit::playlist::snapshot(&mut s.session);
+    use crate::control::command::{Command, MarkerIn};
     let name = format!("{num}/{den}");
-    match at {
-        SongSig::At(t) => {
-            crate::edit::playlist::add_marker(&mut s.session, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) });
-        }
+    let c = match at {
+        SongSig::At(t) => Command::AddMarker { marker: MarkerIn::of(&TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) }) },
         SongSig::Marker(i) => {
-            if let Some(m) = crate::edit::playlist::arr_mut(&mut s.session).markers.get_mut(i) {
-                *m = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, name, ..m.clone() };
+            let Some(m) = crate::edit::playlist::markers(&s.session).get(i) else { return };
+            if m.id.is_none() {
+                crate::control_ui::settle_ids(s);
             }
+            let marker = crate::edit::playlist::markers(&s.session)[i].id.0;
+            Command::SetMarker { marker, position: None, name: Some(name), kind: Some(TimeMarker::SIGNATURE), numerator: Some(num), denominator: Some(den) }
         }
+    };
+    if let Err(e) = crate::control_ui::command(s, crate::edit::playlist::ARRANGER_EDIT, None, vec![c]) {
+        s.message = Some(e);
     }
-    s.session.dirty = true;
 }
 
 /// Index of pattern `n`'s time-signature marker at its start.
@@ -61,28 +64,37 @@ pub fn start_marker(s: &State, n: u16) -> Option<usize> {
 /// after the signature as FL names it ("3/8", §4-5). The pattern's bars follow it, and so do its clips that kept their
 /// natural length. One undo step.
 pub fn set_start(s: &mut State, n: u16, num: u8, den: u8) {
-    crate::control_ui::edit(s, STEP, crate::control::command::Region::Project, |s| set_start_now(s, n, num, den));
+    signature(s, n, num, den);
+}
+
+/// Pattern `n`'s signature at its start set (`num` 0: taken away) by its command, one undo step; a pattern number the
+/// project has no pattern for gets one.
+fn signature(s: &mut State, n: u16, num: u8, den: u8) {
+    use crate::control::command::Command;
+    if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
+        crate::control_ui::settle_ids(s);
+    }
+    let r = match s.session.project.pattern(n).map(|p| p.id.0) {
+        Some(pattern) => crate::control_ui::command(s, STEP, None, vec![Command::SetPatternSignature { pattern, numerator: num, denominator: den }]),
+        None => crate::control_ui::command_then(s, STEP, vec![Command::AddPattern { name: None, color: None, number: Some(n) }], |_, r| {
+            r.first().and_then(|v| v["pattern"].as_u64()).map(|p| Command::SetPatternSignature { pattern: p as u32, numerator: num, denominator: den }).into_iter().collect()
+        }),
+    };
+    if let Err(e) = r {
+        s.message = Some(e);
+    }
 }
 
 /// The pattern time signature's undo step.
 const STEP: &str = "Pattern time signature";
 
-fn set_start_now(s: &mut State, n: u16, num: u8, den: u8) {
-    let old = s.session.project.pattern_length(n);
-    let markers = &mut crate::edit::patterns::pat_mut(&mut s.session, n).markers;
-    markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && m.position == 0));
-    markers.insert(0, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(0, &format!("{num}/{den}")) });
-    crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
-}
 
 /// Yes to the conflict question took the start marker away: the pattern's bars are the project's again (§3).
 pub fn remove_start(s: &mut State, n: u16) {
-    let Some(i) = start_marker(s, n) else { return };
-    crate::control_ui::edit(s, STEP, crate::control::command::Region::Project, |s| {
-        let old = s.session.project.pattern_length(n);
-        crate::edit::patterns::pat_mut(&mut s.session, n).markers.remove(i);
-        crate::edit::playlist::refit_pattern_clips(&mut s.session, n, old);
-    });
+    if start_marker(s, n).is_none() {
+        return;
+    }
+    signature(s, n, 0, 0);
 }
 
 /// The time signature dialog is the top dialog.

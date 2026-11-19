@@ -12,7 +12,7 @@ default = [
     "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
     "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder", "stock-limiter",
     "stock-reverb", "stock-delay", "stock-pulp-filter", "stock-press", "stock-parametric-eq-2", "stock-drop",
-    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler", "stock-zest",
+    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler", "stock-zest", "stock-soundfont",
 ]
 # Hosting VST 3 and VST 2 plugins (off: CLAP and the stock plugins only).
 vst3 = ["dep:os-vst3"]
@@ -62,6 +62,7 @@ stock-smith = ["dep:smith"]
 stock-slicer = ["dep:lemon-slicer"]
 stock-drum-sampler = ["dep:lemon-drum-sampler"]
 stock-zest = ["dep:zest-plugin"]
+stock-soundfont = ["dep:lemon-soundfont"]
 
 [dependencies]
 os-model.workspace = true
@@ -81,6 +82,7 @@ lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", optional = true, default-f
 citrus = { path = "../../plugins/citrus", optional = true, default-features = false, features = ["linked"] }
 smith = { path = "../../plugins/smith", optional = true, default-features = false, features = ["linked"] }
 lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", optional = true, default-features = false, features = ["linked"] }
+lemon-soundfont = { path = "../../plugins/lemon-soundfont", optional = true, default-features = false, features = ["linked"] }
 lemon-limiter = { path = "../../plugins/lemon-limiter", optional = true, default-features = false, features = ["linked"] }
 lemon-reverb = { path = "../../plugins/lemon-reverb", optional = true, default-features = false, features = ["linked"] }
 lemon-delay = { path = "../../plugins/lemon-delay", optional = true, default-features = false, features = ["linked"] }

@@ -6,7 +6,6 @@
 //! The interface's side of `crate::history` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::borrow::Cow;
 use os_model::{ControlPoint, Note};
 use crate::app::State;
@@ -88,6 +87,13 @@ mod tests {
     use super::*;
     use crate::app::App;
 
+    /// Step `k` of row `r` on or off in the shown pattern with no step of its own: the edit a step recorded before it
+    /// holds.
+    fn raw_step(s: &mut crate::app::State, r: usize, k: u32, on: bool) {
+        let (n, ch) = (s.pattern().max(1), s.session.project.channels[r].index);
+        crate::edit::rack::set_step_in(&mut s.session, n, ch, k, on, false);
+    }
+
     /// A fader's value in dB.
     fn db(v: f64) -> f64 {
         20.0 * os_engine::laws::fader_gain(v).log10()
@@ -117,7 +123,7 @@ mod tests {
         for k in 0..2 {
             let snap = Snap::pattern(&s.session, s.pattern());
             record(&mut s.session, STEP_SEQ_EDIT, snap);
-            crate::rack::set_step(s, 0, 10 + k, true);
+            raw_step(s, 0, 10 + k, true);
         }
         assert_eq!(note_count(s), start + 2);
         assert_eq!((undo(s).as_deref(), note_count(s)), (Some(STEP_SEQ_EDIT), start + 1));
@@ -128,7 +134,7 @@ mod tests {
         // A new action: the undone step is gone.
         let snap = Snap::pattern(&s.session, s.pattern());
         record(&mut s.session, "Piano roll add note", snap);
-        crate::rack::set_step(s, 0, 14, true);
+        raw_step(s, 0, 14, true);
         assert_eq!(s.session.history.entries(&crate::settings_file::store()).iter().map(|e| e.1).collect::<Vec<_>>(), [LAST_RESET, STEP_SEQ_EDIT, "Piano roll add note"]);
         assert_eq!(redo(s), None);
         // Three levels kept: the oldest go.
@@ -136,7 +142,7 @@ mod tests {
         for k in 0..3 {
             let snap = Snap::pattern(&s.session, s.pattern());
             record(&mut s.session, "Piano roll edit", snap);
-            crate::rack::set_step(s, 0, 20 + k, true);
+            raw_step(s, 0, 20 + k, true);
         }
         assert_eq!(s.session.history.len(), 3);
         assert!(s.session.history.entries(&crate::settings_file::store()).iter().skip(1).all(|e| e.1 == "Piano roll edit"), "{:?}", s.session.history.entries(&crate::settings_file::store()));
@@ -158,9 +164,9 @@ mod tests {
         assert_eq!(s.session.history.len(), 0, "nothing changed");
         let snap = Snap::pattern(&s.session, s.pattern());
         record(&mut s.session, "Piano roll edit", snap);
-        crate::rack::set_step(s, 0, 9, !crate::rack::row_steps(&s.session, 0, 10)[9]);
+        raw_step(s, 0, 9, !crate::rack::row_steps(&s.session, 0, 10)[9]);
         settle(&mut s.session);
-        crate::rack::set_step(s, 0, 9, !crate::rack::row_steps(&s.session, 0, 10)[9]);
+        raw_step(s, 0, 9, !crate::rack::row_steps(&s.session, 0, 10)[9]);
         settle(&mut s.session);
         assert_eq!(s.session.history.len(), 1, "an earlier press's step stays");
         s.session.history.reset();

@@ -16,7 +16,7 @@ default = [
     "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
     "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder", "stock-limiter",
     "stock-reverb", "stock-delay", "stock-pulp-filter", "stock-press", "stock-parametric-eq-2", "stock-drop",
-    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler", "stock-zest",
+    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler", "stock-zest", "stock-soundfont",
 ]
 # Hosting VST 3 and VST 2 plugins (the session's features).
 vst3 = ["os-app/vst3"]
@@ -63,6 +63,7 @@ stock-smith = ["os-app/stock-smith"]
 stock-slicer = ["os-app/stock-slicer"]
 stock-drum-sampler = ["os-app/stock-drum-sampler"]
 stock-zest = ["os-app/stock-zest"]
+stock-soundfont = ["os-app/stock-soundfont"]
 
 [dependencies]
 os-app = { path = "../os-app", default-features = false }

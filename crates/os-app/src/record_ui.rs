@@ -5,7 +5,6 @@
 //! The interface's side of `crate::record` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::app::{App, State};
 use crate::session::{Session, View};
 use crate::knobs::KnobId;
@@ -137,18 +136,22 @@ impl App {
             }
             None => false,
         };
-        let snap = crate::history::Snap::pattern(&s.session, pattern);
-        crate::history::record(&mut s.session, crate::score_log::DUMPED, snap);
         let n = new.len();
-        if let Some(p) = s.session.project.get_mut().patterns.iter_mut().find(|p| p.number == pattern) {
-            if replace {
-                p.notes.clear();
-            }
-            p.notes.extend(new);
-        } else {
-            s.session.project.get_mut().patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
+        // The pattern (made when it is not there yet), then its notes: the kept ones and the log's after them.
+        use crate::control::command::{Command, NoteIn};
+        crate::mixer::track_ids(s);
+        let first = if s.session.project.pattern(pattern).is_none() { vec![Command::AddPattern { name: None, color: None, number: Some(pattern) }] } else { Vec::new() };
+        let r = crate::control_ui::command_then(s, crate::score_log::DUMPED, first, |s, _| {
+            let p = &s.session.project;
+            let Some(pat) = p.pattern(pattern) else { return Vec::new() };
+            let id = |ch: u16| p.channels.iter().find(|c| c.index == ch).map(|c| c.id.0);
+            let kept = pat.notes.iter().filter(|_| !replace);
+            let list = kept.chain(&new).filter_map(|n| Some(NoteIn::of(n, id(n.channel)?))).collect();
+            vec![Command::SetNotes { pattern: pat.id.0, channel: None, notes: list }]
+        });
+        if let Err(e) = r {
+            return Some(e);
         }
-        s.session.dirty = true;
         Some(format!("Captured {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
     }
 
@@ -935,6 +938,30 @@ mod tests {
 
     /// SONG mode: one clip per take; when playback runs past its end the clip is made longer to the bar's end instead
     /// of a second clip being placed (spec §2 Taking notes).
+    /// SONG mode: the take's clip, placed on the first track free for the pattern's length, grew over a clip further
+    /// along that track. It moves to the first track free over its whole length.
+    #[test]
+    fn a_growing_take_clip_leaves_a_taken_track() {
+        let mut app = app();
+        crate::playlist::arr_mut(&mut app.state.session).clips.clear();
+        let bar = app.state.session.project.bar_ticks();
+        let b = f64::from(bar);
+        // Another pattern's clip on track 1 from bar 2.
+        let other = app.state.pattern() + 1;
+        crate::playlist::arr_mut(&mut app.state.session).clips.push(os_model::Clip::new(bar, bar, 0, ClipSource::Pattern(other)));
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyZ, true, 48.0, true);
+        key(&mut app, KeyCode::KeyZ, false, 96.0, true);
+        key(&mut app, KeyCode::KeyX, true, b + 48.0, true);
+        key(&mut app, KeyCode::KeyX, false, b + 72.0, true);
+        stop(&mut app);
+        let clips = crate::playlist::clips(&app.state.session);
+        let take = clips.iter().find(|c| c.source == ClipSource::Pattern(app.state.pattern())).expect("the take's clip");
+        assert_eq!((take.position, take.length), (0, 2 * bar));
+        assert!(!clips.iter().any(|o| o.track == take.track && o.position < take.end() && o.end() > take.position && o.source != take.source), "{clips:?}");
+        assert_eq!(notes(&app), [(48, 48, 0), (bar + 48, 24, 0)]);
+    }
+
     #[test]
     fn extends_the_take_clip_in_song_mode() {
         let mut app = app();

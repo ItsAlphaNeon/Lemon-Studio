@@ -5,7 +5,6 @@
 //! The interface's side of `crate::misc` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::misc_page::{self as mp};
 use os_model::{Channel, ChannelMisc};
 #[allow(unused_imports)]
@@ -14,17 +13,15 @@ use crate::misc::*;
 /// A Misc tab edit of rack row `row`: the channel model, its hosted Lemon Sampler (root / fine), then playback.
 /// An undo step; a slider's drag or wheel notches one step (`control::run_edit`).
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
-    if app.state.session.project.channels.get(row).is_none() {
-        return;
+    let s = &mut app.state;
+    crate::mixer::track_ids(s);
+    let Some(channel) = s.session.project.channels.get(row).map(|c| c.id.0) else { return };
+    let c = crate::control::command::Command::SetMisc { channel, values: [(m.key(), v)].into() };
+    let run = Some(crate::history::Run::Channel(row, crate::history::ChannelControl::Misc(m)));
+    let done = if mp::draggable(m) { crate::control_ui::knob_command(s, "Channel settings", run, vec![c]) } else { crate::control_ui::command(s, "Channel settings", run, vec![c]) };
+    if let Err(e) = done {
+        s.message = Some(e);
     }
-    let run = crate::history::Run::Channel(row, crate::history::ChannelControl::Misc(m));
-    crate::control_ui::run_edit(&mut app.state, "Channel settings", crate::control::command::Region::Channel(row), run, mp::draggable(m), |s| {
-        if let Some(ch) = s.session.project.get_mut().channels.get_mut(row) {
-            put(&mut ch.misc, m, v);
-        }
-    });
-    sync(&mut app.state.session, row, &[m]);
-    app.state.session.dirty = true;
     app.invalidate();
 }
 

@@ -392,6 +392,9 @@ pub enum FrameEvent {
     /// A detached window moved to a monitor with another DPI: the app redraws it at this scale (spec: ui/ui-scaling.md §3).
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     Dpi(f32),
+    /// A strip knob or box was let go after a drag, or the wheel over it paused (`history::WHEEL_PAUSE`): its next
+    /// change is an undo step of its own.
+    RunEnd,
     /// A greyed-out control was clicked: the app says it is not available yet.
     NotAvailable(&'static str),
     /// A file was dropped on the frame (from the desktop): a preset loads, a sample goes to a sampler (spec:
@@ -485,6 +488,8 @@ pub struct State {
     pub maxed_at_press: Option<((i32, i32), (f32, f32))>,
     pub events: Vec<FrameEvent>,
     pub drag: Option<(Knob, f32, f32)>,
+    /// When the wheel last turned a strip knob or box: after a pause its run ends (`FrameEvent::RunEnd`).
+    wheel_at: Option<std::time::Instant>,
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
     /// move loop (HTCAPTION) blocks the UI thread, which would freeze all drawing while a window moves.
     pub moving: Option<(i32, i32, i32, i32)>,
@@ -526,6 +531,7 @@ impl State {
             maxed_at_press: None,
             events: Vec::new(),
             drag: None,
+            wheel_at: None,
             moving: None,
             armed: None,
             detached,
@@ -1452,7 +1458,9 @@ impl State {
     /// button is let go without acting.
     pub fn release(&mut self) {
         self.armed = None;
-        self.drag = None;
+        if self.drag.take().is_some() {
+            self.events.push(FrameEvent::RunEnd);
+        }
         self.sizing = None;
         self.moving = None;
         self.misc_ui.drag = None;
@@ -1477,6 +1485,9 @@ impl State {
             os_clap::wake();
             return Reply::None;
         }
+        if matches!(part, Some(Part::Knob(_) | Part::Range | Part::Track)) && notches != 0.0 {
+            self.wheel_pause(crate::time::now());
+        }
         if let Some(Part::Knob(i)) = part {
             let k = KNOBS[usize::from(i)];
             let v = self.knob_value(k) + notches / 64.0;
@@ -1491,6 +1502,14 @@ impl State {
             return Reply::Repaint;
         }
         Reply::None
+    }
+
+    /// A wheel notch over a strip control at `now`: after a pause (`history::WHEEL_PAUSE`) the run before ends.
+    fn wheel_pause(&mut self, now: std::time::Instant) {
+        if self.wheel_at.is_some_and(|t| now.duration_since(t) >= crate::history::WHEEL_PAUSE) {
+            self.events.push(FrameEvent::RunEnd);
+        }
+        self.wheel_at = Some(now);
     }
 
     /// A button press over the Misc page; `None` when the page does not take it.
@@ -1866,14 +1885,16 @@ mod tests {
         st.motion(tx, y - 30.0, false);
         st.left_up(tx, y - 30.0);
         assert_eq!((st.info.track, st.info.target.as_str()), (3, "Bus 3"));
+        assert_eq!(st.events.last(), Some(&FrameEvent::RunEnd), "the drag's run ends with its release");
         st.wheel(tx, y, 100.0);
         assert_eq!(st.info.track, 4, "one per notch");
         st.left_down(tx, y, false, &screen);
         st.motion(tx, y - 10_000.0, false);
         st.left_up(tx, y);
         assert_eq!(st.info.track, 20, "the highest insert");
+        st.events.clear();
         st.wheel(tx, y, 1.0);
-        assert_eq!(st.events.last(), Some(&FrameEvent::Track(20)), "no event at the limit");
+        assert!(!st.events.iter().any(|e| matches!(e, FrameEvent::Track(_))), "no event at the limit");
         st.motion(tx, y, false);
         assert!(st.box_text(Knob::Track).starts_with("Target mixer track: Bus 20"));
         st.left_down(tx, y, true, &screen);

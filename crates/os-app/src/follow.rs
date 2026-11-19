@@ -69,7 +69,7 @@ pub fn after(s: &mut State, b: Before) -> bool {
         s.piano.clear_selection();
     }
     // The step's rack view goes back, and the one before it is kept for the step's way back.
-    if let Some(id) = t.rack_step {
+    if let Some(id) = t.rack_step.filter(|id| s.rack_views.contains_key(id)) {
         if let Some(v) = s.rack_views.insert(id, b.rack) {
             v.put(s);
         }
@@ -87,6 +87,27 @@ fn view(s: &mut State, v: crate::session::View) {
             if let Some(t) = os_model::target::moved(s.events.target, &track, &slot) {
                 s.events.target = t;
             }
+            // "Most recent" parameters, and Multilink's controls waiting for their controller, follow what they drive.
+            crate::params_ui::remap(&mut s.tweaks, |key| match os_session::plugins::fx_of(key) {
+                Some((t, k)) => slot(t, k).map(|(t, k)| os_session::plugins::fx_key(t, k)),
+                None => Some(key),
+            });
+            s.multilink.queue.retain_mut(|l| os_session::edit::mixer::moved_link(*l, &track, &slot).map(|n| *l = n).is_some());
+            // The container window follows its slot, and the palette the track a container's pick goes to; a place that
+            // goes closes them.
+            let (t, k) = s.container.at;
+            if k != crate::container::CHANNEL {
+                match slot(t, k) {
+                    Some(at) => s.container.at = at,
+                    None => s.hide(crate::app::Win::Container),
+                }
+            }
+            if let Some(t) = s.palette.track {
+                match track(t) {
+                    Some(n) => s.palette.track = Some(n),
+                    None => s.hide(crate::app::Win::PluginPalette),
+                }
+            }
         }
         View::MixerRenumbered(tracks) => {
             let m = |t: u16| at(&tracks, t).unwrap_or(t);
@@ -97,9 +118,19 @@ fn view(s: &mut State, v: crate::session::View) {
             s.mixer.sel.clear();
             s.selected_mixer = n;
         }
-        View::Rows(map) => crate::rack::remap_view(s, &map),
+        View::Rows(map) => {
+            crate::rack::remap_view(s, &map);
+            let m = |r: usize| map.get(r).copied().flatten();
+            crate::params_ui::remap(&mut s.tweaks, |key| if key >= os_session::plugins::FX_KEY { Some(key) } else { m(key) });
+            s.multilink.queue.retain_mut(|l| os_session::edit::rack::moved_link(*l, &m).map(|n| *l = n).is_some());
+        }
         View::RackAutosize => crate::rack::autosize(s),
         View::ClipsCleared => s.playlist.sel.clear(),
+        View::TargetsMoved(moved) => {
+            if let Some(Some(n)) = moved.target(s.events.target) {
+                s.events.target = n;
+            }
+        }
         View::Retimed(from, to) => crate::app::retime_views(s, from, to),
         View::Message(m) => s.message = Some(m),
         View::AudioClipAdded { channel, clip } => {
@@ -113,6 +144,15 @@ fn view(s: &mut State, v: crate::session::View) {
             s.piano.range = range;
         }
         View::MemberLevel { t, k, id, wet, v } => crate::container_ui::show_level(s, t, k, id, wet, v),
+        View::PatternsMoved(map) => {
+            // The playlist's Draw source and its locked clip length follow their pattern; a pattern that goes takes them.
+            let follow = |c: os_model::ClipSource| match c {
+                os_model::ClipSource::Pattern(n) => map.get(usize::from(n)).copied().unwrap_or(Some(n)).map(os_model::ClipSource::Pattern),
+                c => Some(c),
+            };
+            s.playlist.source = s.playlist.source.and_then(follow);
+            s.playlist.lock_len = s.playlist.lock_len.and_then(|(c, len)| Some((follow(c)?, len)));
+        }
         View::PatternsRenumbered => {
             s.playlist.sel.clear();
             s.playlist.hover_clip = None;

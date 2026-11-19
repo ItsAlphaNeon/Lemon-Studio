@@ -6,7 +6,6 @@
 //!
 //! Values are normalised 0..1. Every knob reads and writes the project model.
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use crate::piano_dlg::DlgKnob;
 use os_ui::Rect;
 
@@ -290,21 +289,29 @@ impl crate::app::App {
             }
             Control::Fader(t) => {
                 let v = os_model::MixerTrack::new(t).volume.unwrap_or(0.8);
-                crate::control_ui::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t), |s| {
-                    if let Some(m) = crate::edit::mixer::track_mut(&mut s.session, t) {
-                        m.volume = Some(v);
-                        s.session.dirty = true;
+                crate::mixer::track_ids(s);
+                if let Some(track) = crate::edit::mixer::track(&s.session, t).map(|m| m.id.0) {
+                    let mut c = crate::control::command::Command::set_track(track);
+                    if let crate::control::command::Command::SetTrack { volume, .. } = &mut c {
+                        *volume = Some(v);
                     }
-                });
+                    if let Err(e) = crate::control_ui::knob_command(s, crate::history::MIXER_VOLUME, None, vec![c]) {
+                        s.message = Some(e);
+                    }
+                }
                 self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
             }
             Control::ChanPitch(row) => {
-                crate::control_ui::edit(s, "Channel pitch", crate::control::command::Region::Channel(row), |s| {
-                    if let Some(ch) = s.session.project.get_mut().channels.get_mut(row) {
-                        ch.pitch_cents = 0;
-                        s.session.dirty = true;
+                crate::mixer::track_ids(s);
+                if let Some(id) = s.session.project.channels.get(row).map(|c| c.id.0) {
+                    let mut c = crate::control::command::Command::set_channel(id);
+                    if let crate::control::command::Command::SetChannel { pitch, .. } = &mut c {
+                        *pitch = Some(0);
                     }
-                });
+                    if let Err(e) = crate::control_ui::command(s, "Channel pitch", None, vec![c]) {
+                        s.message = Some(e);
+                    }
+                }
             }
             Control::Slider(label) => {
                 if let Some(sl) = crate::prefs::find_slider(label) {

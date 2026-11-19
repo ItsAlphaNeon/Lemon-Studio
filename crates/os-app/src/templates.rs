@@ -15,7 +15,6 @@
 //! program setting too; one that is missing or does not load gives the Default template).
 // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project", "General"
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use crate::app::App;

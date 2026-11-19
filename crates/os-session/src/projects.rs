@@ -44,6 +44,16 @@ pub fn retime_in(s: &mut crate::session::Session, from: u16, to: u16) {
     s.dirty = true;
 }
 
+/// `add_plugin_channel` in the session's project, named `name` and starting from plugin state `state` (a plugin
+/// state's command comes with control-plane step 15). Returns its rack row.
+pub fn add_plugin_channel_in(s: &mut crate::session::Session, plugin: &str, name: String, state: Vec<u8>) -> usize {
+    let p = s.project.get_mut();
+    let row = add_plugin_channel(p, plugin);
+    (p.channels[row].name, p.channels[row].plugin_state) = (Some(name), Some(state));
+    s.dirty = true;
+    row
+}
+
 /// A generator-plugin channel played by a hosted instrument, routed like `add_channel`. Returns its rack row.
 pub fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);

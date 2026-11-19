@@ -207,3 +207,161 @@ pub fn relink(s: &mut crate::session::Session, name: &str, moved: &Moved) {
     let back = pairs.into_iter().map(|(a, b)| (b, a)).collect();
     crate::history::extend_newest(s, |cmds| cmds.push(crate::control::Command::Put(Box::new(crate::control::command::Taken::Links(back)))));
 }
+
+/// Points the project's automation clips, recorded pattern events, controller links and initial values on the moved
+/// plugins' parameters at the members, and the remote control links (their moves go back with an undo, as a command's
+/// do: `Session::link_moves`); the interface's own targets follow (`View::TargetsMoved`). Returns how many different
+/// targets could not move (parameters past a member's room), which stay as they are.
+pub fn retarget_in(moved: &Moved, s: &mut crate::session::Session) -> usize {
+    let mut stuck = std::collections::BTreeSet::new();
+    let mut f = |t: &mut u32| match moved.target(*t) {
+        Some(Some(n)) => *t = n,
+        Some(None) => {
+            stuck.insert(*t);
+        }
+        None => {}
+    };
+    let p = s.project.get_mut();
+    p.automations.iter_mut().flat_map(|a| a.targets.iter_mut()).for_each(&mut f);
+    p.patterns.iter_mut().flat_map(|q| q.controls.iter_mut()).for_each(|c| f(&mut c.kind));
+    for l in &mut p.controller_links {
+        let mut t = l.target();
+        f(&mut t);
+        l.set_target(t);
+    }
+    p.init_controls.iter_mut().for_each(|c| f(&mut c.target));
+    crate::remote::follow(s, |l| Some(moved.link(l).unwrap_or(l)));
+    s.touched.views.push(crate::session::View::TargetsMoved(moved.clone()));
+    stuck.len()
+}
+
+/// Wrap in container (`all` = false) and Wrap all in container on slot `slot` of track `t` (spec: plugins/patcher/
+/// README.md §3.3, §4.5; `Command::WrapEffects`). The slot's effect, or every effect of the track in slot order, becomes
+/// a member with the levels its slot blended it at and its slot's CPU switches; the container takes the slot, switched
+/// on at full mix, and keeps the slot's name, colour and icon; the other wrapped slots are emptied, their names,
+/// colours and icons going to their members. A slot whose plugin is not hosted stays where it is (it has no state to
+/// move); a container wrapped by Wrap all brings its members, renumbered. The automation clips, recorded pattern events,
+/// controller links, initial values and remote control links on the wrapped plugins' parameters (and on a wrapped
+/// container's members) are pointed at the members. Wrap in container on a slot whose own switch or mix a clip or link
+/// drives keeps the slot's switch and mix, its effect starting at wet 100 %, dry 0 %, so the clip blends it as before.
+/// The message.
+pub fn wrap_slot_in(s: &mut crate::session::Session, t: u16, slot: u8, all: bool) -> Result<String, String> {
+    let track = crate::edit::mixer::track(s, t).ok_or("no such track")?;
+    let slots: Vec<u8> = if all { (0..10u8).filter(|&k| track.slots[usize::from(k)].is_some()).collect() } else { vec![slot] };
+    // A single slot whose switch or mix is driven keeps them: they blend the container as they blended the effect.
+    let keep_mix = !all && (driven(s, target::slot(t, slot, target::SLOT_MIX)) || driven(s, target::slot(t, slot, target::SLOT_ON)));
+    let kept = (track.slot_mix[usize::from(slot)], track.slot_on[usize::from(slot)]);
+    let mut list = Vec::new();
+    let mut taken = Vec::new();
+    let mut left = Vec::new();
+    let mut moves = Vec::new();
+    for k in slots {
+        let (mix, on) = (track.slot_mix[usize::from(k)], track.slot_on[usize::from(k)]);
+        if let Some(inner) = members(s, t, k) {
+            let first = list.len() as u32 + 1;
+            moves.push(Move { from: (t, k), ids: Ids::Members(inner.iter().zip(first..).map(|(m, new)| (m.id, new)).collect()) });
+            list.extend(inner);
+            taken.push(k);
+            continue;
+        }
+        let Some(h) = s.plugins.hosted.get(&fx_key(t, k)) else {
+            left.push(k);
+            continue;
+        };
+        let Ok(p) = h.plugin.lock() else {
+            left.push(k);
+            continue;
+        };
+        let (wet, dry) = if keep_mix { (1.0, 0.0) } else { levels(mix, on) };
+        let mut m = Member { uid: p.desc().uid(), name: p.desc().name.clone(), wet, dry, state: p.save_state().unwrap_or_default(), ..Member::default() };
+        m.cpu = track.slot_cpu[usize::from(k)];
+        // An emptied slot's name, colour and icon go with its effect; the container's slot keeps its own.
+        if k != slot {
+            m.label = crate::edit::mixer::slot_label(s, t, k);
+            m.color = crate::edit::mixer::slot_color(s, t, k);
+            m.icon = crate::edit::playlist::icon_of(&s.project, crate::edit::playlist::IconOwner::Slot(t, k));
+        }
+        moves.push(Move { from: (t, k), ids: Ids::Plugin(list.len() as u32 + 1) });
+        list.push(m);
+        taken.push(k);
+    }
+    if !taken.contains(&slot) {
+        return Err("This slot's plugin is not hosted: nothing to wrap".into());
+    }
+    if list.len() > MEMBER_IDS as usize {
+        return Err(format!("A container holds at most {MEMBER_IDS} effects"));
+    }
+    for (i, m) in list.iter_mut().enumerate() {
+        m.id = i as u32 + 1;
+    }
+    let n = list.len();
+    // The slot's name, colour and icon go with the container (`clear_slot` forgets them).
+    let name = crate::edit::mixer::slot_label(s, t, slot);
+    let color = crate::edit::mixer::slot_color(s, t, slot);
+    let icon = crate::edit::playlist::icon_of(&s.project, crate::edit::playlist::IconOwner::Slot(t, slot));
+    for &k in &taken {
+        // The hosted instances go with an undo kept, the slots' names, colours and icons too.
+        crate::edit::mixer::clear_slot(s, t, k);
+    }
+    if let Some(m) = crate::edit::mixer::track_mut(s, t) {
+        m.slots[usize::from(slot)] = Some(SlotPlugin { id: Id::NONE, name: CONTAINER.into(), state: encode(&list) });
+        if keep_mix {
+            (m.slot_mix[usize::from(slot)], m.slot_on[usize::from(slot)]) = kept;
+        }
+    }
+    let moved = Moved { to: (t, slot), index: 0, moves };
+    let stuck = retarget_in(&moved, s);
+    if name.is_some() {
+        crate::edit::mixer::set_slot_label(s, t, slot, name);
+    }
+    if color.is_some() {
+        crate::edit::mixer::set_slot_color(s, t, slot, color);
+    }
+    if icon.is_some() {
+        crate::edit::playlist::put_icon(s, crate::edit::playlist::IconOwner::Slot(t, slot), icon);
+    }
+    let mut msg = format!("{} effect{} in a container", n, if n == 1 { "" } else { "s" });
+    if !left.is_empty() {
+        let list: Vec<String> = left.iter().map(|k| (k + 1).to_string()).collect();
+        msg += &format!("; not hosted, left in place: slot {}", list.join(", "));
+    }
+    msg += &stuck_text(stuck);
+    Ok(msg)
+}
+
+/// The channel menu's Wrap in container (the original's Patcherize on a channel; spec: plugins/patcher/README.md §3.3,
+/// §4.4; `Command::WrapInstrument`): rack row `row`'s instrument becomes the first member of a container on the channel,
+/// at [`INSTRUMENT_LEVELS`], with its state; the channel keeps its name, colour, notes, steps, mixer track and settings,
+/// which act on the container's output. The channel takes a new id, so the instrument kept under the old one
+/// (`Plugins::keep`) comes back with an undo, as Replace's does. The clips, recorded pattern events and links on the
+/// instrument's parameters follow it onto its member (spec §4.5); those on the channel's own settings stay. The message.
+pub fn wrap_channel_in(s: &mut crate::session::Session, row: usize) -> Result<String, String> {
+    let ch = s.project.channels.get(row).ok_or("no such channel")?;
+    let wrappable = ch.kind == os_model::ChannelKind::Plugin && !is_container_channel(ch) && s.hosted_rows.contains(&row);
+    if !wrappable || !s.plugins.hosted.contains_key(&row) {
+        return Err("This channel's plugin is not hosted: nothing to wrap".into());
+    }
+    let member = s
+        .plugins
+        .hosted
+        .get(&row)
+        .and_then(|h| {
+            let p = h.plugin.lock().ok()?;
+            let (wet, dry) = INSTRUMENT_LEVELS;
+            Some(Member { id: 1, instrument: true, uid: p.desc().uid(), name: p.desc().name.clone(), wet, dry, state: p.save_state().unwrap_or_default(), ..Member::default() })
+        })
+        .ok_or("This channel's plugin is not hosted: nothing to wrap")?;
+    let t = u16::try_from(row).map_err(|_| "no such channel")?;
+    let index = s.project.channels[row].index;
+    let moved = Moved { to: (t, CHANNEL), index, moves: vec![Move { from: (t, CHANNEL), ids: Ids::Plugin(1) }] };
+    let name = member.name.clone();
+    crate::project_plugins::drop_row(s, row);
+    let ch = &mut s.project.get_mut().channels[row];
+    // A new id at once, before the container plays the channel.
+    ch.id = Id::NONE;
+    ch.plugin = Some(CONTAINER.into());
+    ch.plugin_state = Some(encode(&[member]));
+    s.control.settle(s.project.get_mut());
+    let stuck = retarget_in(&moved, s);
+    Ok(format!("{name} in a container{}", stuck_text(stuck)))
+}

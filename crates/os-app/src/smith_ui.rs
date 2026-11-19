@@ -5,7 +5,6 @@
 //! The interface's side of `crate::smith` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 use os_model::{Channel, ChannelKind, Project};
 use crate::plugins::{Plugins, FX_KEY};

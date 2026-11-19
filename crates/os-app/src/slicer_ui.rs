@@ -5,7 +5,6 @@
 //! The interface's side of `crate::slicer` (step 9: the session's side stays there).
 
 #![allow(unused_imports)]
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use os_model::{Channel, ChannelKind, Note, Project};
 use crate::plugins::{Plugins, FX_KEY};
 #[allow(unused_imports)]
@@ -186,12 +185,22 @@ mod tests {
         let dropped = loop_file("dropped");
         a.state.session.plugin_edited = false;
         a.file_on_plugin_window(row, dropped.clone());
+        // The state goes in on the next tick, as a command's does.
+        a.host_commands();
         let st = loaded(&a);
         assert_eq!(st.path(), dropped.to_string_lossy());
         assert!(!st.slices.is_empty() && st.slices.iter().all(|s| s.name() != "Part 2"), "sliced anew");
         assert_eq!(a.state.session.project.channels.len(), channels, "no new channel");
         assert!(a.state.message.as_deref().is_some_and(|m| m.contains("loaded in Lemon Slicer")), "{:?}", a.state.message);
         assert!(a.state.session.plugin_edited, "the project counts as changed");
+        // One undo step: the loop before comes back, and redo brings the dropped one again.
+        assert_eq!(a.state.session.history.newest_done(), Some(crate::control::command::PLUGIN_STATE));
+        crate::history_ui::undo(&mut a.state);
+        a.host_commands();
+        assert_eq!(loaded(&a).path(), first.to_string_lossy(), "undone");
+        crate::history_ui::redo(&mut a.state);
+        a.host_commands();
+        assert_eq!(loaded(&a).path(), dropped.to_string_lossy(), "redone");
 
         let bad = std::env::temp_dir().join(format!("openstudio-drop-slicer-{}.wav.txt", std::process::id()));
         std::fs::write(&bad, b"not audio").unwrap();

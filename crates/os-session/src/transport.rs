@@ -1536,6 +1536,7 @@ fn engine(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayM
     lemon_sampler::set_host_ticks(project.ppq);
     let mut e = Engine::with_instruments(project, library, rate, mode, &list);
     crate::effect_ports::attach_effects(&mut e, project, fx);
+    crate::effect_ports::attach_outputs(&mut e, project);
     e
 }
 

@@ -295,7 +295,7 @@ impl Plugins {
         let mut stopped = None;
         let mut menu = None;
         if let Some(mut p) = look.and_then(|_| lock_for_tick(&h.plugin, h.meter.as_deref())) {
-            let t0 = Instant::now();
+            let t0 = crate::dropout_log::Hold::start();
             h.seen = look.unwrap_or(h.seen);
             // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
             if let (Some(code), false) = (p.stopped(), h.stop_told) {
@@ -318,7 +318,7 @@ impl Plugins {
                 m.note_hold(t0.elapsed());
             }
             #[cfg(target_os = "linux")]
-            crate::dropout_log::held(&p.desc().name, "the UI's tick", t0.elapsed());
+            crate::dropout_log::held(&p.desc().name, "the UI's tick", t0);
         }
         (stopped, menu)
     }
@@ -378,6 +378,7 @@ pub fn builtin() -> Vec<Available> {
     static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static DRUMS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static ZEST: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static SOUNDFONT: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(stock!("stock-trio", lemon_3x_osc).map(|e| linked(&OSC3, e, crate::osc3::LEMON_TRIO)).unwrap_or_default());
     v.extend(stock!("stock-citrus", citrus).map(|e| linked(&CITRUS, e, crate::citrus::CITRUS)).unwrap_or_default());
@@ -385,6 +386,7 @@ pub fn builtin() -> Vec<Available> {
     v.extend(stock!("stock-slicer", lemon_slicer).map(|e| linked(&SLICER, e, crate::slicer::LEMON_SLICER)).unwrap_or_default());
     v.extend(stock!("stock-drum-sampler", lemon_drum_sampler).map(|e| linked(&DRUMS, e, crate::drums::LEMON_DRUMS)).unwrap_or_default());
     v.extend(stock!("stock-zest", zest_plugin).map(|e| linked(&ZEST, e, ZEST_NAME)).unwrap_or_default());
+    v.extend(stock!("stock-soundfont", lemon_soundfont).map(|e| linked(&SOUNDFONT, e, crate::soundfont::LEMON_SOUNDFONT)).unwrap_or_default());
     v
 }
 
@@ -671,6 +673,11 @@ impl Plugins {
         // clips' fades and gain reach Lemon Sampler's voices one by one, so overlapping clips of one sample crossfade
         // (spec: audio/audio-clips.md "Fades and clip gain"); the instruments work the channel's volume and pan into
         // their voices' final levels (spec: audio/voice-levels.md "Final levels").
+        // A third-party plugin gets the channel's levels as FL's plugin wrapper gives them (spec: audio/voice-levels.md
+        // "A plugin's output").
+        if !crate::project_plugins::is_builtin(&a.desc) {
+            p.use_wrapper_levels();
+        }
         if crate::project_plugins::is_builtin(&a.desc) {
             p.use_note_levels();
             if a.desc.name == LEMON_SAMPLER {
@@ -748,6 +755,18 @@ impl Plugins {
         if let Some(h) = self.hosted.remove(&key) {
             self.keep_hosted(&h, key >= FX_KEY);
             self.hosted.insert(key, h);
+        }
+    }
+
+    /// The state of the instance under `key` kept in `stash` for `owner` too (a cloned channel, hosted from it on the
+    /// next tick as a channel back from an undo is: `control::host::follow_apply`).
+    pub fn stash_copy(&mut self, key: usize, owner: os_model::Id) {
+        let Some(h) = self.hosted.get(&key).filter(|h| !h.stopped()) else { return };
+        let Some((uid, state)) = h.lock_for_state().and_then(|p| Some((p.desc().uid(), p.save_state()?))) else { return };
+        self.stash.retain(|e| e.0 .0 != owner.0);
+        self.stash.push((owner, key >= FX_KEY, uid, state));
+        if self.stash.len() > STASH_MAX {
+            self.stash.remove(0);
         }
     }
 
@@ -892,6 +911,12 @@ impl Plugins {
         if let Some(h) = self.hosted.get_mut(&key) {
             h.stand_in = false;
         }
+    }
+
+    /// The names of the instance's outputs past its main one (spec: audio/multi-output.md); empty when it has none or
+    /// nothing is hosted under `key`.
+    pub fn extra_output_names(&self, key: usize) -> Vec<String> {
+        self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).map(|p| p.extra_output_names()).unwrap_or_default()
     }
 
     /// Restores a `state` blob into the instance under `key`.

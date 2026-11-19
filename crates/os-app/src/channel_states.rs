@@ -11,7 +11,6 @@
 //! be theirs.
 // spec: ui/plugin-window.md "Channel states", ui/browser.md "Channel presets"
 
-#![allow(deprecated)] // writes the project directly (`crate::locked`; control-plane step 14 removes this)
 use std::path::{Path, PathBuf};
 
 use crate::app::App;
@@ -116,31 +115,25 @@ pub fn state_bytes(app: &mut App, row: usize) -> Result<Vec<u8>, String> {
 
 /// The channel a channel state file holds.
 pub fn read(path: &Path) -> Result<os_model::Channel, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let file = os_flp::FlpFile::parse(&bytes).map_err(|e| e.to_string())?;
-    let p = os_flp::project::load(&file).map_err(|e| e.to_string())?;
-    p.channels.into_iter().next().ok_or_else(|| "it holds no channel".into())
+    crate::edit::rack::read_channel_state(path)
 }
 
 /// A channel state file dropped or added: its channel becomes the rack's last row, selected, one undo step ("Load
 /// channel state"); its plugin starts on the next tick, from the state the file holds. Returns the status message.
 pub fn add(app: &mut App, path: &Path) -> Option<String> {
+    use crate::control::command::Command;
     let shown = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut ch = match read(path) {
-        Ok(c) => c,
-        Err(e) => return Some(format!("Channel state {shown} not loaded: {e}")),
-    };
-    ch.id = os_model::Id::NONE;
-    if ch.name.as_deref().is_none_or(str::is_empty) {
-        ch.name = Some(shown.clone());
-    }
     let s = &mut app.state;
-    let row = s.session.project.channels.len();
-    crate::history::record(&mut s.session, LOAD, crate::history::Snap::Channel { row, ch: None });
-    crate::rack::push_channel(s, ch);
+    crate::control_ui::settle_ids(s);
+    let c = Command::LoadChannelState { path: path.to_string_lossy().into_owned(), name: None };
+    let r = match crate::control_ui::command(s, LOAD, None, vec![c]) {
+        Ok(r) => r,
+        Err(e) => return Some(format!("Channel state {shown} not loaded: {}", e.rsplit(": ").next().unwrap_or(&e))),
+    };
+    let id = r.first().and_then(|v| v["channel"].as_u64());
+    let row = s.session.project.channels.iter().position(|c| Some(u64::from(c.id.0)) == id)?;
     s.selected_channel = row;
     s.rack.select_only(row);
-    s.session.dirty = true;
     app.invalidate();
     Some(format!("Loaded channel state {shown}"))
 }

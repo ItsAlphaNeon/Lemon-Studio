@@ -381,6 +381,13 @@ impl Instrument for Chain {
         all.unwrap_or(false)
     }
 
+    /// Only when every instrument inside bends: otherwise the keys move.
+    fn tunes_by_bend(&self) -> bool {
+        let mut all = None;
+        self.instruments(|i| all = Some(all.unwrap_or(true) && i.tunes_by_bend()));
+        all.unwrap_or(false)
+    }
+
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
