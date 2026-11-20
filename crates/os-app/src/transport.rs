@@ -2955,6 +2955,20 @@ mod tests {
         std::thread::sleep(Duration::from_millis(ms));
     }
 
+    /// The song position once a pause has taken hold. The audio thread applies it, and on a slow machine (a shared CI
+    /// runner) that can take longer than a fixed wait: two reads 60 ms apart must agree (at most 3 s).
+    fn settled(t: &Transport) -> f64 {
+        let mut last = t.tick();
+        wait_for(|| {
+            sleep(60);
+            let now = t.tick();
+            let same = now == last;
+            last = now;
+            same
+        });
+        last
+    }
+
     /// Play, Stop, a live note, an editor opened, Pause and Resume with it open, a preview, Stop again: all on one
     /// stream that stays on the device, which opens once (on the simulated device: no sound card needed).
     #[test]
@@ -2980,8 +2994,7 @@ mod tests {
         wait_for(|| t.seconds() > 0.2);
         assert!(t.playing() && t.seconds() > 0.2, "playing again: {}", t.seconds());
         t.pause();
-        sleep(100);
-        let held = t.tick();
+        let held = settled(&t);
         sleep(200);
         assert!(t.paused() && t.tick() == held, "paused at {held}: {}", t.tick());
         t.resume();
@@ -3540,9 +3553,8 @@ mod tests {
         wait_for(|| t.seconds() >= 0.2);
         assert!(t.seconds() >= 0.2, "playing: {}", t.seconds());
         t.pause();
-        std::thread::sleep(Duration::from_millis(100));
+        let tick = settled(&t);
         let at = t.seconds();
-        let tick = t.tick();
         std::thread::sleep(Duration::from_millis(400));
         assert!(t.paused() && (t.seconds() - at).abs() < 1e-9 && (t.tick() - tick).abs() < 1e-9, "position held");
         assert_eq!(t.peaks(), (0.0, 0.0), "silent");
@@ -3665,8 +3677,7 @@ mod tests {
         assert_eq!(t.streams(), 1, "the playback only");
         // Paused, it fails and comes back paused, at the same place.
         t.pause();
-        std::thread::sleep(Duration::from_millis(150));
-        let at = t.tick();
+        let at = settled(&t);
         t.fail_device();
         std::thread::sleep(Duration::from_millis(300));
         assert!(t.paused(), "paused stays paused");
@@ -3817,8 +3828,7 @@ mod tests {
         assert_eq!(t.opened().map(|o| o.fixed), Some(Some(2048)));
         // Paused: the new stream holds the same position, silent.
         t.pause();
-        std::thread::sleep(Duration::from_millis(100));
-        let held = t.tick();
+        let held = settled(&t);
         crate::audio_cfg::AudioCfg::default().apply();
         t.reopen();
         std::thread::sleep(Duration::from_millis(300));
