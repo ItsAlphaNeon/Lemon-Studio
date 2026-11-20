@@ -491,7 +491,7 @@ mod tests {
         let mut app = app();
         let steps = app.state.session.history.len();
         let dev: std::sync::Arc<str> = std::sync::Arc::from("Launchkey MK4 61:Launchkey MK4 61 MIDI In 24:0");
-        let bend = |v| Ev { dev: dev.clone(), msg: Msg::Bend { ch: 0, v } };
+        let bend = |v| Ev { dev: dev.clone(), msg: Msg::Bend { ch: 0, v }, at: Instant::now() };
         app.state.session.dirty = false;
         app.midi_events(vec![bend(16383)]);
         assert_eq!(app.state.session.project.channels[0].pitch_cents, 200, "full up: the range, 2 semitones");

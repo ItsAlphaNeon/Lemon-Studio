@@ -936,17 +936,12 @@ impl App {
                 s.set_knob(k, v as f32);
                 self.record_knob(k);
             }
+            // A mixer fader is a knob for undo (`KnobId::MixVol`), as a controller link's is.
             Target::Fader(m) => {
-                let run = crate::history::Run::Fader(m);
-                if first {
-                    crate::history::settle(&mut s.session);
-                }
-                crate::control_ui::run_edit(s, crate::history::MIXER_VOLUME, Region::Track(m), run, true, |s| {
-                    if let Some(tr) = crate::mixer::track_mut(&mut s.session, m) {
-                        tr.volume = Some(v);
-                        s.session.dirty = true;
-                    }
-                });
+                let k = crate::knobs::KnobId::MixVol(m);
+                crate::history::knob(&mut s.session, k, !first);
+                s.set_knob(k, v as f32);
+                self.record_knob(k);
             }
             Target::Param(key, i) => {
                 let before = crate::params_ui::param_value(s, key, i);
