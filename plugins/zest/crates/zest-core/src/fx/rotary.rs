@@ -8,7 +8,7 @@
 use super::shared::trunc_i64;
 use crate::dsp::F4;
 use crate::params::id;
-use core::arch::x86_64::*;
+use crate::simd::*;
 use std::f64::consts::PI;
 
 const CURVES: &str = include_str!("../../data/rotary-curves.tsv");

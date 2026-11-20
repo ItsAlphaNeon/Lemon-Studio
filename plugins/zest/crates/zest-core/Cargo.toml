@@ -5,5 +5,9 @@ version.workspace = true
 edition = "2021"
 license.workspace = true
 
+[features]
+# The plain-Rust lanes on x86-64 too (other processors always have them): the same samples, for checking them there.
+portable = []
+
 [dependencies]
 zest-preset = { path = "../zest-preset" }
