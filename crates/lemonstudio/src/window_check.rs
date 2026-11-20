@@ -23,7 +23,7 @@ use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
 use winit::window::WindowId;
 
-use super::{load_file, Available, Plugins};
+use os_app::plugins::{load_file, Available, Plugins};
 use os_app::plugin_window::ChannelInfo;
 
 /// Nothing to handle: the frames are not winit windows.
@@ -108,7 +108,9 @@ pub fn run(args: &[String]) -> i32 {
         };
         let Some(desc) = lib.plugins().first().cloned() else { continue };
         let name = desc.name.clone();
-        let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 2.0, ..Plugins::default() };
+        let mut pl = Plugins::default();
+        pl.available = vec![Available { lib, desc }];
+        pl.scale = 2.0;
         let mut host = os_app::editor_host::EditorHost::default();
         if let Err(e) = pl.create(0, 0) {
             println!("{name}: {e}");
