@@ -453,6 +453,8 @@ pub const SONG_INFO: &str = "Song info";
 pub const PLUGIN_PARAMETER: &str = "Plugin parameter";
 /// A preset loaded into a plugin from its window or dropped on it (`control::state_edit`).
 pub const PLUGIN_PRESET: &str = "Plugin preset";
+/// A Lemon plugin's state changed in its own window, with no parameter the host sees (`presets::window_edit`).
+pub const PLUGIN_EDIT: &str = "Plugin edit";
 
 /// A command that can't be applied: an id that names nothing, a value out of range.
 pub type Error = String;

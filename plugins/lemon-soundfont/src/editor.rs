@@ -147,11 +147,30 @@ pub struct Logic {
     patch_drag: Option<f32>,
     pub hint: String,
     pub hosted: bool,
+    /// Writes to the state from the editor, and how many of them the host was told of (`take_edit`).
+    made: std::cell::Cell<u64>,
+    told: u64,
 }
 
 impl Logic {
+    /// The parameters, for a write to the state from the editor: counted for the host (`take_edit`).
+    pub fn raw(&self) -> &Arc<FontParams> {
+        self.made.set(self.made.get() + 1);
+        &self.params
+    }
+
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made.get() == self.told || self.dragging() {
+            return false;
+        }
+        self.told = self.made.get();
+        true
+    }
+
     pub fn new(params: Arc<FontParams>, shared: Arc<Shared>) -> Self {
-        Logic { params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, patch_drag: None, hint: String::new(), hosted: false }
+        Logic { params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, patch_drag: None, hint: String::new(), hosted: false, made: std::cell::Cell::new(0), told: 0 }
     }
 
     pub fn dragging(&self) -> bool {
@@ -167,7 +186,7 @@ impl Logic {
     }
 
     fn commit(&self, st: &State) {
-        self.params.set_raw(st.to_bytes());
+        self.raw().set_raw(st.to_bytes());
         self.shared.rebuild(&self.params);
     }
 
@@ -191,7 +210,7 @@ impl Logic {
     fn choose(&mut self, i: usize) {
         let n = self.preset_count();
         if n > 0 {
-            self.shared.choose(&self.params, i.min(n - 1));
+            self.shared.choose(self.raw(), i.min(n - 1));
         }
     }
 
@@ -290,7 +309,7 @@ impl Logic {
                 st.set_built_in(*fx, !on);
                 self.commit(&st);
             }
-            (Target::Mode(md), Btn::Left) => self.shared.set_mode(&self.params, *md),
+            (Target::Mode(md), Btn::Left) => self.shared.set_mode(self.raw(), *md),
             (Target::Logo, Btn::Left | Btn::Right) => acts.push(Act::Menu(MenuReq::About, x, y)),
             _ => {}
         }
@@ -439,7 +458,7 @@ impl Logic {
 
     /// Opens font file `path`.
     pub fn load(&mut self, path: &str) {
-        if let Err(e) = self.shared.load(&self.params, path) {
+        if let Err(e) = self.shared.load(self.raw(), path) {
             self.hint = e;
         }
     }
@@ -714,6 +733,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -947,6 +969,9 @@ mod gui {
                 self.link.set_hint(&self.logic.hint);
                 self.link.to_host(Cmd::Changed, 0);
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -1051,7 +1076,9 @@ mod tests {
         // The mode buttons choose the mode.
         paint(&mut l);
         let (x, y) = centre(&l, &Target::Mode(Mode::Modern));
+        let _ = l.take_edit();
         l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(l.take_edit(), "the host hears of it");
         assert_eq!(l.params.mode(), Mode::Modern);
     }
 

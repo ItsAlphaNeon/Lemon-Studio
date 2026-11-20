@@ -46,6 +46,10 @@ pub struct Hosted {
     /// Set while the open editor belongs to a Lemon plugin that joined the strip (host link).
     #[cfg(plugin_windows)]
     pub link: Option<os_hostlink::Link>,
+    /// While a Lemon plugin's editor is linked: the instance's state as last known (`Plugins::refresh_known`). An edit
+    /// in the window (`Request::Edited`) is undone back to it.
+    #[cfg(plugin_windows)]
+    known: Option<Known>,
     /// The app was told that the instance stopped after a crash.
     stop_told: bool,
     /// A native instance started from a project's state that it did not give back byte for byte: a save keeps the
@@ -162,6 +166,8 @@ impl Hosted {
             window: None,
             #[cfg(plugin_windows)]
             link: None,
+            #[cfg(plugin_windows)]
+            known: None,
             stop_told: false,
             keep_file_state: false,
             stand_in: false,
@@ -225,6 +231,33 @@ impl Hosted {
     }
 }
 
+/// The state of a linked editor's instance as the host last read it (`Hosted::known`).
+#[cfg(plugin_windows)]
+#[derive(Debug)]
+enum Known {
+    /// The state, and the history's `changes` when it was read.
+    State(Vec<u8>, u64),
+    /// Over `KNOWN_MAX` bytes (Tesla holding a long sample): not read again while the window stays open, as every step
+    /// would read it.
+    TooBig,
+}
+
+/// The largest state a linked editor's instance has kept for its edits' undo.
+#[cfg(plugin_windows)]
+const KNOWN_MAX: usize = 1 << 20;
+
+/// What an edit in a linked editor's window changed (`Plugins::take_known`).
+#[cfg(plugin_windows)]
+#[derive(Debug, PartialEq)]
+pub enum WindowEdit {
+    /// Nothing the host can see.
+    Nothing,
+    /// The state, from this one.
+    From(Vec<u8>),
+    /// The state, from one too big to keep.
+    Unknown,
+}
+
 /// What a plugin window asks of the app.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
@@ -250,6 +283,9 @@ pub enum Request {
     /// notes.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     Notes(usize, Vec<os_hostlink::NoteOut>),
+    /// The user changed a Lemon plugin's saved state in its own window (host link `Edited`): row.
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
+    Edited(usize),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
     /// The menu arrow was clicked: open the window menu at this screen point.
@@ -1264,6 +1300,37 @@ impl Plugins {
             }
             h.window = None;
             h.link = None;
+            h.known = None;
+        }
+    }
+
+    /// The states of the instances whose linked editors are open, read again when the history moved on since (`changes`:
+    /// `History::changes`): a step recorded, undone or redone may have changed them. A window that just opened reads
+    /// its instance's first.
+    #[cfg(plugin_windows)]
+    pub fn refresh_known(&mut self, changes: u64) {
+        for h in self.hosted.values_mut() {
+            if h.link.is_none() || matches!(h.known, Some(Known::TooBig)) || matches!(h.known, Some(Known::State(_, c)) if c == changes) {
+                continue;
+            }
+            h.known = h.lock_for_state().and_then(|p| p.save_state()).map(|st| if st.len() > KNOWN_MAX { Known::TooBig } else { Known::State(st, changes) });
+        }
+    }
+
+    /// The user edited the instance under `key` in its own window and its state is now `now`: what changed. `now` is
+    /// known from then on.
+    #[cfg(plugin_windows)]
+    pub fn take_known(&mut self, key: usize, now: &[u8], changes: u64) -> WindowEdit {
+        let Some(h) = self.hosted.get_mut(&key).filter(|h| h.link.is_some()) else { return WindowEdit::Nothing };
+        if matches!(h.known, Some(Known::TooBig)) || now.len() > KNOWN_MAX {
+            h.known = Some(Known::TooBig);
+            return WindowEdit::Unknown;
+        }
+        match h.known.replace(Known::State(now.to_vec(), changes)) {
+            Some(Known::State(before, _)) if before != now => WindowEdit::From(before),
+            Some(Known::State(..)) => WindowEdit::Nothing,
+            // Not read yet (the window opened on this tick): the project may have changed.
+            _ => WindowEdit::Unknown,
         }
     }
 
@@ -1411,6 +1478,7 @@ impl Plugins {
                 (_, crate::plugin_window::LinkMsg::Audio(_)) => out.extend(os_hostlink::take_audio().into_iter().map(|(p, ch)| Request::Audio(p, ch))),
                 (Some(row), crate::plugin_window::LinkMsg::Notes(token)) => out.push(Request::Notes(row, os_hostlink::take_notes(token))),
                 (None, crate::plugin_window::LinkMsg::Notes(token)) => drop(os_hostlink::take_notes(token)),
+                (Some(row), crate::plugin_window::LinkMsg::Edited) => out.push(Request::Edited(row)),
                 _ => {}
             }
         }

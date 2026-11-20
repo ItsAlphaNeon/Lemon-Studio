@@ -144,12 +144,31 @@ pub struct Logic {
     /// Hint text (a tab before the right-aligned part).
     pub hint: String,
     pub hosted: bool,
+    /// Writes to the state from the editor, and how many of them the host was told of (`take_edit`).
+    made: std::cell::Cell<u64>,
+    told: u64,
     lit: Vec<u8>,
 }
 
 impl Logic {
+    /// The parameters, for a write to the state from the editor: counted for the host (`take_edit`).
+    fn raw(&self) -> &Arc<DrumParams> {
+        self.made.set(self.made.get() + 1);
+        &self.params
+    }
+
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made.get() == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made.get();
+        true
+    }
+
     pub fn new(params: Arc<DrumParams>, shared: Arc<Shared>) -> Self {
-        Logic { params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), hosted: false, lit: vec![0; state::PADS] }
+        Logic { params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), hosted: false, made: std::cell::Cell::new(0), told: 0, lit: vec![0; state::PADS] }
     }
 
     pub fn dragging(&self) -> bool {
@@ -191,7 +210,7 @@ impl Logic {
             Field::LayerPan => st.set_layer(p, l, state::L_PAN, v),
             Field::LayerTune => st.set_layer(p, l, state::L_TUNE, v),
         }
-        self.shared.set_state(&self.params, &st);
+        self.shared.set_state(self.raw(), &st);
     }
 
     /// A field's default (a new pad's).
@@ -376,7 +395,7 @@ impl Logic {
                 let mut st = self.state();
                 st.set_sample(self.view.pad, "");
                 st.set_name(self.view.pad, "");
-                self.shared.set_state(&self.params, &st);
+                self.shared.set_state(self.raw(), &st);
             }
         }
         vec![Act::Repaint]
@@ -412,7 +431,7 @@ impl Logic {
         let n = n.unwrap_or(self.view.pad);
         self.view.pad = n;
         self.view.layer = 0;
-        if let Err(e) = self.shared.load(&self.params, n, path) {
+        if let Err(e) = self.shared.load(self.raw(), n, path) {
             self.hint = e;
         }
     }
@@ -769,6 +788,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -1005,6 +1027,9 @@ mod gui {
                 self.link.set_hint(&self.logic.hint);
                 self.link.to_host(Cmd::Changed, 0);
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -1097,7 +1122,9 @@ mod tests {
         let wav = crate::tests::wav("drop", 0.5);
         let (x, y) = centre(&l, &Target::Pad(2));
         let at = l.pad_at(x, y);
+        let _ = l.take_edit();
         l.load(at, &wav.to_string_lossy());
+        assert!(l.take_edit(), "the host hears of the load");
         assert_eq!(l.view.pad, 2);
         assert_eq!(l.state().pad(2).unwrap().layers[0].path, wav.to_string_lossy());
         assert!(l.shared.loaded(2, 0));
