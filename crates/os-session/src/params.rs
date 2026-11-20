@@ -229,7 +229,11 @@ pub fn params_in(ses: &mut crate::session::Session) -> Tick {
         let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen), editor) else { continue };
         // A plugin's parameters can take a few ms to read (`lock_for_tick`).
         let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };
+        // The dropout log is Linux only; elsewhere the hold is only timed.
+        #[cfg(target_os = "linux")]
         let t0 = crate::dropout_log::Hold::start();
+        #[cfg(not(target_os = "linux"))]
+        let t0 = std::time::Instant::now();
         let weak = Arc::downgrade(&h.plugin);
         let count = p.param_count();
         let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));

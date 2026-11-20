@@ -32,7 +32,11 @@ fn looks(s: &State) -> Looks<'_> {
     .iter()
     .filter(|(on, _)| *on)
     .fold(0, |f, (_, bit)| f | bit);
-    Looks { waveforms: s.mixer.waveforms, extra: s.mixer.extra, wave_preview: &s.rack.wave_preview, through_off: &s.rack.through_off, performance, note_lock: s.rack.note_lock }
+    #[cfg(any(windows, target_os = "macos"))]
+    let editor_keys = editor_keys();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let editor_keys = true;
+    Looks { waveforms: s.mixer.waveforms, extra: s.mixer.extra, wave_preview: &s.rack.wave_preview, through_off: &s.rack.through_off, performance, note_lock: s.rack.note_lock, editor_keys }
 }
 
 /// The bytes [`events`] would write: a change to them is an unsaved change, as an edit of the project is. Set keyboard
