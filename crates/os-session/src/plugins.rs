@@ -894,8 +894,11 @@ impl Plugins {
     pub fn state_if_free(&self, key: usize) -> Result<Option<Vec<u8>>, ()> {
         let Some(h) = self.hosted.get(&key) else { return Ok(None) };
         let Some(p) = h.lock_between_blocks() else { return Err(()) };
+        // The dropout log is Linux only.
+        #[cfg(target_os = "linux")]
         let t0 = crate::dropout_log::Hold::start();
         let state = p.save_state();
+        #[cfg(target_os = "linux")]
         crate::dropout_log::held(&p.desc().name, "reading its state", t0);
         Ok(state)
     }
