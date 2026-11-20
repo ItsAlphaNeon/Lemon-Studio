@@ -184,7 +184,7 @@ pub struct ZestEditor {
     scope: Arc<crate::scope::Scope>,
     /// DPI scale as f32 bits.
     scale: AtomicU32,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     slot: os_plugkit::gui::Slot,
 }
 
@@ -195,13 +195,13 @@ impl ZestEditor {
             pending,
             scope,
             scale: AtomicU32::new(1f32.to_bits()),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             slot: Default::default(),
         }
     }
 
     fn notify(&self) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         os_plugkit::gui::notify(&self.slot);
     }
 
@@ -221,6 +221,11 @@ impl Editor for ZestEditor {
         match parent {
             #[cfg(target_os = "linux")]
             ParentWindowHandle::X11Window(window) => Box::new(gui::open(window, scale, self.params.clone(), self.pending.clone(), self.scope.clone(), context, &self.slot)),
+            #[cfg(target_os = "macos")]
+            ParentWindowHandle::AppKitNsView(v) => {
+                let scale = os_plugkit::gui::backing_scale(v as usize);
+                Box::new(gui::open(v as usize, scale, self.params.clone(), self.pending.clone(), self.scope.clone(), context, &self.slot))
+            }
             _ => {
                 let _ = (context, scale);
                 Box::new(())
@@ -249,7 +254,7 @@ impl Editor for ZestEditor {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod gui {
     use std::path::PathBuf;
     use std::sync::Arc;
