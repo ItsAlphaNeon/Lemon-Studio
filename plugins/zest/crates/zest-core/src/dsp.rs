@@ -6,7 +6,7 @@
 //! fast 2^x, the soft clip, and the generators of `pages/voice.md`. Rust does not contract or reorder float operations, so an
 //! expression here means what the page writes.
 
-use core::arch::x86_64::*;
+use crate::simd::*;
 use core::ops::{Add, BitAnd, Mul, Neg, Sub};
 
 /// The CPU's approximate reciprocal.
@@ -273,9 +273,11 @@ pub fn chain_step<const M: usize>(s: &mut [F4; M], c: &[F4], w: F4) -> F4 {
 }
 
 /// Flush-to-zero and denormals-are-zero for the life of the guard, restoring the old modes after.
-pub struct DenormalGuard(u32);
+pub struct DenormalGuard(u64);
 
 impl DenormalGuard {
+    /// x86-64: MXCSR's FTZ and DAZ (the plain-Rust lanes too, so they give the SSE lanes' bits).
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     pub fn new() -> DenormalGuard {
         let mut old = 0u32;
@@ -284,14 +286,41 @@ impl DenormalGuard {
             let new = old | (1 << 15) | (1 << 6);
             core::arch::asm!("ldmxcsr [{}]", in(reg) &new, options(nostack));
         }
+        DenormalGuard(old as u64)
+    }
+
+    /// AArch64: FPCR's FZ, which flushes subnormal arguments and results alike, as FTZ and DAZ together do.
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    pub fn new() -> DenormalGuard {
+        let old: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, fpcr", out(reg) old, options(nomem, nostack));
+            core::arch::asm!("msr fpcr, {}", in(reg) old | (1 << 24), options(nomem, nostack));
+        }
         DenormalGuard(old)
+    }
+
+    /// Elsewhere the processor's own modes stay.
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[inline]
+    pub fn new() -> DenormalGuard {
+        DenormalGuard(0)
     }
 }
 
 impl Drop for DenormalGuard {
     #[inline]
     fn drop(&mut self) {
-        unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &self.0, options(nostack)) };
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let old = self.0 as u32;
+            core::arch::asm!("ldmxcsr [{}]", in(reg) &old, options(nostack))
+        };
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("msr fpcr, {}", in(reg) self.0, options(nomem, nostack))
+        };
     }
 }
 

@@ -7,7 +7,7 @@
 use super::shared::{lfo_hz, load2, lowpass_coefficients, store2, trunc_i32, tri, zeros, Down4, Frame, Up4, WetLp};
 use crate::dsp::{exp2, pmax, pmin, F4};
 use crate::params::id;
-use core::arch::x86_64::*;
+use crate::simd::*;
 
 const SIZE: usize = 8192;
 

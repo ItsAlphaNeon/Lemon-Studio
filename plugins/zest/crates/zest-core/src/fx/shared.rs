@@ -9,7 +9,7 @@
 //! branch O left, branch O right). Every lane is the page's float32 chain step, so the order of operations per value is unchanged.
 
 use crate::dsp::{chain_step, exp2, F4};
-use core::arch::x86_64::*;
+use crate::simd::*;
 
 const UE: [f32; 2] = [0.12073212, 0.66320205];
 const UO: [f32; 2] = [0.39036217, 0.8907868];

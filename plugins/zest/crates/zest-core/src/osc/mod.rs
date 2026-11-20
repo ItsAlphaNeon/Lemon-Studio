@@ -314,7 +314,7 @@ fn point_p(x: &OscCtx, p: &PitchIn, j: usize) -> F4 {
 #[inline(always)]
 fn all_eq(a: F4, b: F4) -> bool {
     unsafe {
-        use core::arch::x86_64::*;
+        use crate::simd::*;
         _mm_movemask_ps(_mm_cmpeq_ps(a.0, b.0)) == 15
     }
 }

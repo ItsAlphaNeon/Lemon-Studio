@@ -10,7 +10,7 @@ use super::{os_coefs, tuning_column, FilterCtx, FilterIo, OsConst, Resamplers, V
 use super::solver::Solver;
 use crate::dsp::{rcpn, F4};
 use crate::settings::{VcaSet, VcfSet};
-use core::arch::x86_64::*;
+use crate::simd::*;
 
 pub const KNOBS: usize = 121;
 

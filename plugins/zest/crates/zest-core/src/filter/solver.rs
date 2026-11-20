@@ -9,7 +9,7 @@
 use super::{os_coefs, FilterCtx, FilterIo, OsConst, Resamplers, Tuning, Vca};
 use crate::dsp::{rcpn, tclip, F4};
 use crate::settings::VcfSet;
-use core::arch::x86_64::*;
+use crate::simd::*;
 
 // Indices of the model's state in `Model::st` and of an evaluation's lanes.
 const U: usize = 0;
@@ -466,6 +466,7 @@ mod w4 {
 }
 
 /// Eight lanes under AVX: two voices.
+#[cfg(zest_sse)]
 mod w8 {
     use super::*;
 
@@ -999,6 +1000,7 @@ impl SolverFilter {
 ///
 /// # Safety
 /// The CPU has AVX.
+#[cfg(zest_sse)]
 #[target_feature(enable = "avx")]
 unsafe fn run_pair_avx(p: &mut SolverFilter, q: &mut SolverFilter, x: &FilterCtx, iop: &mut FilterIo, ioq: &mut FilterIo, casc: bool) {
     let c = SolverFilter::call_c(x, casc);
@@ -1081,9 +1083,13 @@ unsafe fn run_pair_avx(p: &mut SolverFilter, q: &mut SolverFilter, x: &FilterCtx
 
 /// Two filters together when the CPU can, else one after the other: the same samples either way.
 pub fn run_pair(p: &mut SolverFilter, q: &mut SolverFilter, x: &FilterCtx, iop: &mut FilterIo, ioq: &mut FilterIo, casc: bool, avx: bool) {
+    #[cfg(zest_sse)]
     if avx {
-        unsafe { run_pair_avx(p, q, x, iop, ioq, casc) }
-    } else {
+        return unsafe { run_pair_avx(p, q, x, iop, ioq, casc) };
+    }
+    #[cfg(not(zest_sse))]
+    let _ = avx;
+    {
         p.run(x, iop, casc);
         q.run(x, ioq, casc);
     }

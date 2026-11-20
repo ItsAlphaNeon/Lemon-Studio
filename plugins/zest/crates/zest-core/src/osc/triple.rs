@@ -426,7 +426,7 @@ impl Triple {
                 last = p;
             }
             let same = !init && unsafe {
-                use core::arch::x86_64::*;
+                use crate::simd::*;
                 _mm_movemask_ps(_mm_cmpeq_ps(p.0, pm.0)) == 15
             };
             let incs = if same {

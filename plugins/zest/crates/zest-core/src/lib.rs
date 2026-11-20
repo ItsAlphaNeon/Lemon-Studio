@@ -5,6 +5,7 @@
 //! Zest's engine. The signatures here are what the plugin (`crates/zest-plugin`) and the renderer
 //! (`src/bin/zest-render.rs`) call: keep them. Everything behind them comes from `pages/`.
 
+pub mod simd;
 pub mod arp;
 pub mod dsp;
 pub mod envelope;
@@ -20,6 +21,16 @@ pub mod settings;
 pub mod slop;
 pub mod tables;
 pub mod voice;
+
+/// The processor runs AVX (two voices' filters in one evaluation, `filter::solver::run_pair`).
+#[cfg(zest_sse)]
+fn avx_here() -> bool {
+    std::is_x86_feature_detected!("avx")
+}
+#[cfg(not(zest_sse))]
+fn avx_here() -> bool {
+    false
+}
 
 use dsp::{Lcg, MWC_SEED};
 use filter::{FilterCtx, FilterTables};
@@ -152,7 +163,7 @@ impl Engine {
             values,
             settings,
             offline: false,
-            avx: std::is_x86_feature_detected!("avx"),
+            avx: cfg!(zest_sse) && avx_here(),
             voices,
             sh: Box::new(Shared {
                 rng: MWC_SEED,
@@ -852,7 +863,7 @@ mod tests {
             e.process(&[on(48), on(60)], &Transport::default(), &mut l, &mut r);
             (l, r)
         };
-        if std::is_x86_feature_detected!("avx") {
+        if cfg!(zest_sse) && avx_here() {
             assert_eq!(render(true), render(false));
         }
     }
