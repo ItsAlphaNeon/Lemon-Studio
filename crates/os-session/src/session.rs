@@ -57,8 +57,13 @@ pub struct Session {
     pub pending_open: Option<usize>,
     /// The hosted plugins' parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
-    /// MIDI controller input, and its held notes: (key, rack row they started on).
+    /// MIDI controller input.
     pub midi: crate::midi_in::MidiIn,
+    /// What the controllers' notes hold sounding (`crate::midi_notes`).
+    pub midi_play: crate::midi_notes::Play,
+    /// Without a window: the channel (its id) the controllers' notes play, as a client sets it (`midi_target`). The
+    /// window's selected channel decides with one.
+    pub midi_channel: Option<u32>,
     pub midi_out: crate::midi_out::MidiOut,
     /// The control plane's socket (`--control`), when it listens.
     pub rpc_server: Option<crate::control::server::Server>,
@@ -197,6 +202,8 @@ impl Session {
             pending_open: None,
             params: Default::default(),
             midi: crate::midi_in::MidiIn::none(),
+            midi_play: Default::default(),
+            midi_channel: None,
             midi_out: crate::midi_out::MidiOut::none(),
             loading: None,
             missing: Default::default(),

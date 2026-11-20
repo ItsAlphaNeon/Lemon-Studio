@@ -154,6 +154,8 @@ pub struct Extra {
     /// The colour group a recorded note takes: the MIDI channel it came on, on a channel with MIDI channel through
     /// ticked (spec: ui/channel-rack.md §18).
     pub group: Option<u8>,
+    /// When it arrived from its device: recorded where it was played, not where playback was when it was handled.
+    pub at: Option<std::time::Instant>,
 }
 
 /// The take being recorded: the channels it recorded, the span from its first start to its last end, and its notes.
@@ -258,7 +260,8 @@ pub fn down_in(s: &mut Session, src: Src, key: u16, velocity: u8, channel: u16, 
     if song && s.rec.punched_out {
         return;
     }
-    let start = s.transport.tick();
+    let ppq = s.project.ppq;
+    let start = extra.at.map_or_else(|| s.transport.tick(), |t| s.transport.tick_at(t, ppq));
     open_take_in(s, song);
     let Some(at) = rec_pattern_tick_in(s, start, song) else { return };
     let r = &mut s.rec;
@@ -270,12 +273,15 @@ pub fn down_in(s: &mut Session, src: Src, key: u16, velocity: u8, channel: u16, 
 }
 
 /// A note went up: written when it was being recorded.
-pub fn up_in(s: &mut Session, src: Src, release: Option<u8>) {
+/// `at`: when it arrived from its device.
+pub fn up_in(s: &mut Session, src: Src, release: Option<u8>, at: Option<std::time::Instant>) {
+    let ppq = s.project.ppq;
     let r = &mut s.rec;
     let Some(i) = r.held.iter().position(|h| h.src == src) else { return };
     let mut h = r.held.remove(i);
     h.release = release;
-    let now = if s.transport.playing() && !s.transport.paused() { Some(s.transport.tick()) } else { r.last };
+    let playing = s.transport.playing() && !s.transport.paused();
+    let now = if playing { Some(at.map_or_else(|| s.transport.tick(), |t| s.transport.tick_at(t, ppq))) } else { r.last };
     write_held_in(s, h, now);
 }
 

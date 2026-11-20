@@ -13,11 +13,10 @@ use std::time::{Duration, Instant};
 
 use crate::app::App;
 use crate::session::Session;
-use crate::midi_cfg::{self as cfg, CurveOf, Offset, Switch};
+use crate::midi_cfg::{self as cfg, Offset, Switch};
 use crate::midi_in::{Ev, InPort, Msg};
+use crate::midi_notes::{self, Then, To};
 use crate::prefs;
-use crate::record::Extra;
-use crate::step_edit::Src;
 use crate::views::midi_page::{CurveEdit, MAct};
 
 /// What Settings > MIDI shows of the devices, kept up to date by `App::midi_tick`.
@@ -44,89 +43,6 @@ impl Page {
     }
 }
 
-/// A note held from an input device.
-#[derive(Debug, Clone, Copy)]
-struct Held {
-    /// The device's key.
-    key: u8,
-    src: Src,
-    /// The rack row sounding and the key it sounds at (key 60 for an omni preview).
-    row: usize,
-    play: u16,
-    /// Released while the foot pedal holds it: its release velocity.
-    up: Option<u8>,
-}
-
-/// The input side's state.
-#[derive(Debug, Default)]
-pub struct Play {
-    held: Vec<Held>,
-    /// The foot pedal is down.
-    pedal: bool,
-    /// The row bent by pitch bend, while off centre.
-    bend_row: Option<usize>,
-    /// Generator muting keys held with Toggle on release on: (key, row).
-    muted: Vec<(u8, usize)>,
-}
-
-impl Play {
-    /// Rows and keys sounding from the devices (the piano roll's keyboard lights them).
-    pub fn lit(&self) -> impl Iterator<Item = (usize, u16)> + '_ {
-        self.held.iter().filter(|h| h.up.is_none()).map(|h| (h.row, h.play))
-    }
-}
-
-/// The 0-based MIDI channel set in value box `n` (1..16; "---" = none).
-fn channel_of(n: &prefs::Number) -> Option<u8> {
-    match prefs::number(n) {
-        0 => None,
-        v => Some((v - 1) as u8),
-    }
-}
-
-/// The white key's place from MIDI key 48 up: 48 → 0, 50 → 1, 52 → 2, 53 → 3... (spec §3); black keys and keys under
-/// 48 have none.
-pub fn white_index(key: u8) -> Option<usize> {
-    let rel = key.checked_sub(48)?;
-    let place = [0, 2, 4, 5, 7, 9, 11].iter().position(|&w| w == rel % 12)?;
-    Some(usize::from(rel / 12) * 7 + place)
-}
-
-/// Velocity `v` (1..127) through curve `of`, 1..127.
-fn curved(of: CurveOf, v: u8) -> u8 {
-    let c = cfg::curve(&crate::settings_file::store(), of);
-    if c.is_line() {
-        return v;
-    }
-    (c.map(f32::from(v) / 127.0) * 127.0).round().clamp(1.0, 127.0) as u8
-}
-
-/// A Mod X / Mod Y value for velocity `v` (spec §3): twice the velocity up to 64 (the centre, 128), then the 63
-/// velocities above it spread over 129..253.
-pub fn mod_of(v: u8) -> u8 {
-    let v = u32::from(v.min(127));
-    if v <= 64 { (2 * v) as u8 } else { (128 + ((v - 64) * 125 + 31) / 63) as u8 }
-}
-
-/// What a note's velocity gives (spec §3): the velocity it plays at, and its Mod X / Mod Y.
-pub fn linked(v: u8) -> (u8, Extra) {
-    let v = curved(CurveOf::Velocity, v);
-    match prefs::index(&prefs::VELOCITY_LINK) {
-        0 => (100, Extra::default()),
-        2 => (100, Extra { mod_x: Some(mod_of(v)), ..Extra::default() }),
-        3 => (100, Extra { mod_y: Some(mod_of(v)), ..Extra::default() }),
-        _ => (v, Extra::default()),
-    }
-}
-
-/// A note-off's release velocity (spec §3).
-pub fn release_of(v: u8) -> u8 {
-    match prefs::index(&prefs::RELEASE_LINK) {
-        0 => 64,
-        _ => curved(CurveOf::Release, v.max(1)),
-    }
-}
-
 /// The external tempo is applied when it moved more than this, at most every `TEMPO_EVERY` (spec §8).
 const TEMPO_STEP: f64 = 0.05;
 const TEMPO_EVERY: Duration = Duration::from_millis(250);
@@ -142,11 +58,7 @@ impl App {
         self.midi_pending();
         self.ext_sync_tick();
         self.remote_tick();
-        // The bent row returns to the centre when another is selected (spec §4).
-        if let Some(row) = self.midi_play.bend_row.filter(|&r| r != self.state.selected_channel) {
-            self.midi_play.bend_row = None;
-            self.state.session.live(crate::session::Live::Midi { row, bytes: [0xe0, 0, 64], bend_cents: 200.0 });
-        }
+        midi_notes::unbend_in(&mut self.state.session, self.state.selected_channel);
         self.midi_out_tick();
     }
 
@@ -182,128 +94,68 @@ impl App {
         &self.state.midi
     }
 
-    /// Messages received, oldest first (spec §3, §4, §8). With Enable MIDI remote control off, all are ignored.
+    /// Where the devices' notes go: the selected channel.
+    fn midi_to(&self) -> To {
+        let row = self.state.selected_channel;
+        To { row, through: crate::rack::through(&self.state, row) }
+    }
+
+    /// Messages received, oldest first (spec §3, §4, §8): the session plays them (`crate::midi_notes`), and what else
+    /// they do happens here. With Enable MIDI remote control off, all are ignored.
     pub fn midi_events(&mut self, evs: Vec<Ev>) {
         if evs.is_empty() || !Switch::Remote.on(&self.state.session.settings) {
             return;
         }
-        let ext = cfg::ext_sync(&self.state.session.settings);
-        let mut notes = false;
-        for ev in evs {
-            match ev.msg {
-                Msg::Start | Msg::Continue | Msg::Stop | Msg::Spp(_) => {
-                    if ext.as_deref() == Some(&*ev.dev) {
-                        self.ext_message(ev.msg);
-                    }
-                }
-                Msg::On { ch, key, vel } => {
-                    notes = true;
-                    self.midi_note_on(ch, key, vel);
-                }
-                Msg::Off { ch, key, vel } => {
-                    notes = true;
-                    self.midi_note_off(ch, key, vel);
-                }
-                Msg::Cc { n: 64, v, .. } if prefs::check(&prefs::FOOT_PEDAL) => {
-                    notes = true;
-                    self.midi_pedal(v >= 64);
-                }
-                Msg::Cc { ch, n, v } => {
-                    if !self.remote_cc(&ev.dev, ch, n, v) {
-                        self.midi_forward(ev.msg);
-                    }
-                }
-                Msg::Bend { .. } => {
-                    let row = self.state.selected_channel;
-                    if row < self.state.session.project.channels.len() {
-                        self.sync_live();
-                        if let Some(b) = ev.msg.bytes() {
-                            self.state.session.live(crate::session::Live::Midi { row, bytes: b, bend_cents: 200.0 });
-                        }
-                        self.midi_play.bend_row = Some(row);
-                    }
-                }
-                Msg::Pressure { .. } | Msg::Poly { .. } | Msg::Program { .. } => self.midi_forward(ev.msg),
-            }
+        let pedal = prefs::check(&prefs::FOOT_PEDAL);
+        let notes = evs.iter().any(|e| matches!(e.msg, Msg::On { .. } | Msg::Off { .. }) || pedal && matches!(e.msg, Msg::Cc { n: 64, .. }));
+        if evs.iter().any(|e| matches!(e.msg, Msg::On { .. })) {
+            self.key_tap();
         }
+        if std::env::var_os("OS_DEBUG").is_some() {
+            let waited = evs.iter().map(|e| e.at.elapsed()).max().unwrap_or_default();
+            eprintln!("[midi] {} message(s), the oldest waited {:.2} ms for the window", evs.len(), waited.as_secs_f64() * 1000.0);
+        }
+        let to = self.midi_to();
+        let then = midi_notes::events_in(&mut self.state.session, evs, to);
+        self.midi_then(then);
         if notes {
             self.typing_lit_changed();
         }
     }
 
+    /// What the messages do besides sounding: recording and step input, marker jumps, Performance mode, the muting
+    /// channel, controller links, external sync.
+    fn midi_then(&mut self, then: Vec<Then>) {
+        let ext = cfg::ext_sync(&self.state.session.settings);
+        for t in then {
+            match t {
+                Then::Down { src, key, velocity, extra } => self.step_edit_down_with(src, key, velocity, extra),
+                Then::Up { src, release, at } => self.step_edit_up_with(src, Some(release), Some(at)),
+                Then::Marker(i) => self.marker_jump(i),
+                Then::Perform { key, velocity, down } => self.perform_note(key, velocity, down),
+                Then::Mute(row) => {
+                    crate::rack::toggle_mute(&mut self.state, row);
+                    self.invalidate();
+                }
+                Then::Cc { dev, ch, n, v } => {
+                    if !self.remote_cc(&dev, ch, n, v) {
+                        midi_notes::forward_in(&mut self.state.session, Msg::Cc { ch, n, v }, self.state.selected_channel);
+                    }
+                }
+                Then::Transport { dev, msg } => {
+                    if ext.as_deref() == Some(&*dev) {
+                        self.ext_message(msg);
+                    }
+                }
+            }
+        }
+    }
+
     /// Tests: messages from a device named "Test".
-        #[cfg(test)]
+    #[cfg(test)]
     pub fn midi_notes(&mut self, msgs: Vec<Msg>) {
         let dev: std::sync::Arc<str> = std::sync::Arc::from("Test");
-        self.midi_events(msgs.into_iter().map(|msg| Ev { dev: dev.clone(), msg }).collect());
-    }
-
-    /// A message for the selected channel's hosted instrument, on MIDI channel 1 (spec §4).
-    fn midi_forward(&mut self, m: Msg) {
-        let row = self.state.selected_channel;
-        let Some(b) = m.bytes().filter(|_| row < self.state.session.project.channels.len()) else { return };
-        self.sync_live();
-        self.state.session.live(crate::session::Live::Midi { row, bytes: b, bend_cents: 200.0 });
-    }
-
-    fn midi_note_on(&mut self, ch: u8, key: u8, vel: u8) {
-        self.key_tap();
-        let n = self.state.session.project.channels.len();
-        let (vel, mut extra) = linked(vel);
-        // The channels set on Settings > MIDI (spec §3): their notes are not played on the selected channel.
-        if Some(ch) == channel_of(&prefs::OMNI_CHANNEL) {
-            let Some(row) = white_index(key).filter(|&r| r < n) else { return };
-            extra.channel = Some(self.state.session.project.channels[row].index);
-            return self.midi_start(Src::Omni(key), key, row, 60, vel, extra, 0);
-        }
-        if Some(ch) == channel_of(&prefs::MARKER_CHANNEL) {
-            if let Some(i) = white_index(key) {
-                self.marker_jump(i);
-            }
-            return;
-        }
-        if Some(ch) == channel_of(&prefs::PERFORMANCE_CHANNEL) {
-            return self.perform_note(key, vel, true);
-        }
-        if Some(ch) == channel_of(&prefs::MUTING_CHANNEL) {
-            if let Some(row) = white_index(key).filter(|&r| r < n) {
-                crate::rack::toggle_mute(&mut self.state, row);
-                if prefs::check(&prefs::TOGGLE_ON_RELEASE) {
-                    self.midi_play.muted.push((key, row));
-                }
-                self.invalidate();
-            }
-            return;
-        }
-        let row = self.state.selected_channel;
-        if row >= n {
-            return;
-        }
-        // MIDI channel through (spec: ui/channel-rack.md §18): the plugin gets the note on the channel it came on, and a
-        // recorded note takes that channel as its colour; unticked, channel 1.
-        let midi = if crate::rack::through(&self.state, row) { ch & 15 } else { 0 };
-        if midi > 0 {
-            extra.group = Some(midi);
-        }
-        self.midi_start(Src::Midi(key), key, row, u16::from(key), vel, extra, midi);
-    }
-
-    /// Starts a note, on MIDI channel `midi` for a hosted plugin; a key the pedal still holds ends its earlier note
-    /// first (spec §3).
-    fn midi_start(&mut self, src: Src, key: u8, row: usize, play: u16, vel: u8, extra: Extra, midi: u8) {
-        while let Some(i) = self.midi_play.held.iter().position(|h| h.src == src) {
-            let h = self.midi_play.held.remove(i);
-            self.midi_end(h, h.up.unwrap_or(64));
-        }
-        self.sync_live();
-        self.state.session.live(crate::session::Live::NoteOn { row, key: play, velocity: vel, midi });
-        self.midi_play.held.push(Held { key, src, row, play, up: None });
-        self.step_edit_down_with(src, play, vel, extra);
-    }
-
-    fn midi_end(&mut self, h: Held, release: u8) {
-        self.state.session.live(crate::session::Live::NoteOff { row: h.row, key: h.play });
-        self.step_edit_up_with(h.src, Some(release));
+        self.midi_events(msgs.into_iter().map(|msg| Ev { dev: dev.clone(), msg, at: Instant::now() }).collect());
     }
 
     /// A key of the Performance mode MIDI channel (spec: ui/performance-mode.md §3).
@@ -315,49 +167,10 @@ impl App {
         self.invalidate();
     }
 
-    fn midi_note_off(&mut self, ch: u8, key: u8, vel: u8) {
-        if Some(ch) == channel_of(&prefs::PERFORMANCE_CHANNEL) {
-            return self.perform_note(key, vel, false);
-        }
-        if Some(ch) == channel_of(&prefs::MUTING_CHANNEL) {
-            while let Some(i) = self.midi_play.muted.iter().position(|m| m.0 == key) {
-                let (_, row) = self.midi_play.muted.remove(i);
-                crate::rack::toggle_mute(&mut self.state, row);
-                self.invalidate();
-            }
-            return;
-        }
-        let src = if Some(ch) == channel_of(&prefs::OMNI_CHANNEL) { Src::Omni(key) } else { Src::Midi(key) };
-        let release = release_of(vel);
-        let pedal = self.midi_play.pedal && prefs::check(&prefs::FOOT_PEDAL);
-        let Some(i) = self.midi_play.held.iter().position(|h| h.src == src && h.key == key && h.up.is_none()) else { return };
-        if pedal {
-            self.midi_play.held[i].up = Some(release);
-        } else {
-            let h = self.midi_play.held.remove(i);
-            self.midi_end(h, release);
-        }
-    }
-
-    /// The foot pedal (controller 64 with Foot pedal controls note off): up ends the notes it held (spec §3).
-    fn midi_pedal(&mut self, down: bool) {
-        self.midi_play.pedal = down;
-        if down {
-            return;
-        }
-        let (ended, kept): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.midi_play.held).into_iter().partition(|h| h.up.is_some());
-        self.midi_play.held = kept;
-        for h in ended {
-            self.midi_end(h, h.up.unwrap_or(64));
-        }
-    }
-
     /// Every device note ends (the device list changed, remote control switched off).
     pub fn midi_release_all(&mut self) {
-        self.midi_play.pedal = false;
-        for h in std::mem::take(&mut self.midi_play.held) {
-            self.midi_end(h, 64);
-        }
+        let then = midi_notes::release_all_in(&mut self.state.session);
+        self.midi_then(then);
         self.typing_lit_changed();
     }
 
@@ -622,24 +435,6 @@ impl App {
 mod tests {
     use super::*;
 
-    #[test]
-    fn white_keys_from_48() {
-        assert_eq!([48, 50, 52, 53, 55, 57, 59, 60].map(white_index), [0, 1, 2, 3, 4, 5, 6, 7].map(Some));
-        assert_eq!((white_index(49), white_index(47), white_index(62)), (None, None, Some(8)));
-    }
-
-    #[test]
-    fn velocity_links() {
-        assert_eq!([1, 32, 64, 100, 127].map(mod_of), [2, 64, 128, 199, 253]);
-        assert_eq!(linked(90), (90, Extra::default()), "Velocity is the default");
-        prefs::set_choice(&prefs::VELOCITY_LINK, 2);
-        assert_eq!(linked(64), (100, Extra { mod_x: Some(128), ..Extra::default() }));
-        prefs::set_choice(&prefs::VELOCITY_LINK, 0);
-        assert_eq!(linked(20).0, 100);
-        prefs::set_choice(&prefs::RELEASE_LINK, 0);
-        assert_eq!(release_of(10), 64);
-    }
-
     fn on(key: u8) -> Msg {
         Msg::On { ch: 0, key, vel: 100 }
     }
@@ -664,18 +459,18 @@ mod tests {
     fn the_foot_pedal_holds_released_keys() {
         let mut app = app();
         app.midi_notes(vec![on(60), off(60)]);
-        assert!(app.midi_play.held.is_empty());
+        assert!(app.state.session.midi_play.held.is_empty());
         app.midi_notes(vec![cc(64, 127), on(60), off(60)]);
-        assert_eq!(app.midi_play.held.len(), 1, "held by the pedal");
-        assert_eq!(app.midi_play.lit().count(), 0, "not lit: the key is up");
+        assert_eq!(app.state.session.midi_play.held.len(), 1, "held by the pedal");
+        assert_eq!(app.state.session.midi_play.lit().count(), 0, "not lit: the key is up");
         app.midi_notes(vec![on(60)]);
-        assert_eq!(app.midi_play.held.len(), 1, "struck again: the earlier note ended");
+        assert_eq!(app.state.session.midi_play.held.len(), 1, "struck again: the earlier note ended");
         app.midi_notes(vec![off(60), cc(64, 0)]);
-        assert!(app.midi_play.held.is_empty(), "the pedal's release ends it");
+        assert!(app.state.session.midi_play.held.is_empty(), "the pedal's release ends it");
         // Off: the pedal goes to the instrument and the keys end at once.
         prefs::set_check(&prefs::FOOT_PEDAL, false);
         app.midi_notes(vec![cc(64, 127), on(62), off(62)]);
-        assert!(app.midi_play.held.is_empty());
+        assert!(app.state.session.midi_play.held.is_empty());
     }
 
     /// spec §3: the omni preview and generator muting channels.
@@ -684,10 +479,10 @@ mod tests {
         let mut app = app();
         prefs::set_number(&prefs::OMNI_CHANNEL, 3);
         app.midi_notes(vec![Msg::On { ch: 2, key: 50, vel: 90 }]);
-        let h = app.midi_play.held[0];
+        let h = app.state.session.midi_play.held[0];
         assert_eq!((h.row, h.play), (1, 60), "white key 50 previews channel 2 at C5");
         app.midi_notes(vec![Msg::Off { ch: 2, key: 50, vel: 64 }, Msg::On { ch: 2, key: 49, vel: 90 }]);
-        assert!(app.midi_play.held.is_empty(), "black keys do nothing");
+        assert!(app.state.session.midi_play.held.is_empty(), "black keys do nothing");
         prefs::set_number(&prefs::MUTING_CHANNEL, 4);
         let was = app.state.session.project.channels[0].enabled;
         app.midi_notes(vec![Msg::On { ch: 3, key: 48, vel: 90 }, Msg::Off { ch: 3, key: 48, vel: 64 }]);
@@ -697,7 +492,7 @@ mod tests {
         assert_eq!(app.state.session.project.channels[0].enabled, was);
         app.midi_notes(vec![Msg::Off { ch: 3, key: 48, vel: 64 }]);
         assert_eq!(app.state.session.project.channels[0].enabled, !was, "momentary");
-        assert!(app.midi_play.held.is_empty(), "nothing played on the selected channel");
+        assert!(app.state.session.midi_play.held.is_empty(), "nothing played on the selected channel");
     }
 
     /// spec §5: remote control off ignores every message.
@@ -706,10 +501,10 @@ mod tests {
         let mut app = app();
         app.toggle_midi_switch(Switch::Remote);
         app.midi_notes(vec![on(60)]);
-        assert!(app.midi_play.held.is_empty());
+        assert!(app.state.session.midi_play.held.is_empty());
         app.toggle_midi_switch(Switch::Remote);
         app.midi_notes(vec![on(60)]);
-        assert_eq!(app.midi_play.held.len(), 1);
+        assert_eq!(app.state.session.midi_play.held.len(), 1);
     }
 
     /// ui/remote-control.md: the box's auto accept, a link driving its knob, pickup, Multilink.

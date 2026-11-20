@@ -384,6 +384,9 @@ struct Pace {
     rate: u32,
 }
 
+/// How far back `Transport::tick_at` reaches: a message older than this is placed this far back.
+const MAX_BACK: Duration = Duration::from_millis(500);
+
 impl Pace {
     /// How far through the block the device is by `now`, 0..1.
     fn share(&self, now: Instant) -> f64 {
@@ -933,6 +936,15 @@ impl Transport {
     /// into the device's last block as it has played by now (`Pace`).
     pub fn tick(&self) -> f64 {
         self.paced().map_or_else(|| f64::from_bits(self.shared.tick.load(Ordering::Relaxed)), |p| p.at(Instant::now()).1)
+    }
+
+    /// The position heard at `then`, a moment just past (a MIDI note's arrival): the position now, less the time since
+    /// at the tempo playing (`ppq` ticks a beat), at most `MAX_BACK` and never before 0. While stopped, the position.
+    pub fn tick_at(&self, then: Instant, ppq: u16) -> f64 {
+        let now = self.tick();
+        let Some(tempo) = self.tempo() else { return now };
+        let back = Instant::now().saturating_duration_since(then).min(MAX_BACK).as_secs_f64();
+        (now - back * tempo / 60.0 * f64::from(ppq.max(1))).max(0.0)
     }
 
     pub fn seconds(&self) -> f64 {

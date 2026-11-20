@@ -101,6 +101,8 @@ pub struct Looks<'a> {
     pub performance: u8,
     /// The rack's note locks (`rack::NoteSrc` order).
     pub note_lock: [Option<usize>; 2],
+    /// TOOLS > Set keyboard focus of all plugins to ▸ (saved on Windows and macOS, where it applies).
+    pub editor_keys: bool,
 }
 
 static NO_CHANNELS: BTreeSet<u32> = BTreeSet::new();
@@ -108,7 +110,7 @@ static NO_CHANNELS: BTreeSet<u32> = BTreeSet::new();
 impl Looks<'static> {
     /// Without an interface (`--serve`): the choices an interface starts with.
     pub fn none() -> Looks<'static> {
-        Looks { waveforms: false, extra: true, wave_preview: &NO_CHANNELS, through_off: &NO_CHANNELS, performance: CLIP_PROGRESS | VELOCITY_SUBCLIPS, note_lock: [None; 2] }
+        Looks { waveforms: false, extra: true, wave_preview: &NO_CHANNELS, through_off: &NO_CHANNELS, performance: CLIP_PROGRESS | VELOCITY_SUBCLIPS, note_lock: [None; 2], editor_keys: true }
     }
 }
 
@@ -116,7 +118,7 @@ impl Looks<'static> {
 pub fn events_in(s: &crate::session::Session, plugins: &Plugins, looks: &Looks) -> Vec<Event> {
     let mut v = vec![icons(s), slot_names(s), slot_colors(s), performance(looks), mixer(s, looks), scaling(s, plugins), channel_checks(s, looks)];
     #[cfg(any(windows, target_os = "macos"))]
-    v.push(Event::new(lemon::KEY_FOCUS, Value::var([LAYOUT, u8::from(editor_keys())])));
+    v.push(Event::new(lemon::KEY_FOCUS, Value::var([LAYOUT, u8::from(looks.editor_keys)])));
     v.push(track_locks(s));
     v.push(note_locks(looks));
     v.push(features(s));
@@ -429,11 +431,6 @@ impl<'a> Reader<'a> {
 #[cfg(any(test, feature = "test-util"))]
 mod tests {
 
-
-    std::thread_local! {
-        /// This test thread's Set keyboard focus of all plugins to ▸ (`editor_keys`).
-        pub(super) static KEYS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-    }
 
     fn dir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("os_lemon_state_{name}_{}", std::process::id()));

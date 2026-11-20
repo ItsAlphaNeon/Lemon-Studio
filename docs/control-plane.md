@@ -16,6 +16,7 @@ The design is in the specs repository's `roadmap/control-plane.md`.
 |---|---|
 | `--control <socket>` | The app listens beside its window. `<socket>` is a Unix socket path (Linux, macOS) or a port number (any platform; Windows takes ports only). The hint bar says where it listens. |
 | `--serve <socket> [project.flp]` | No window: the app opens the project (or a new one) and answers clients until the process ends. |
+| `--serve-midi` | With `--serve`: the enabled MIDI inputs (Settings > MIDI) are opened, and their notes play the channel `midi_target` names. |
 | `--control-level read\|propose\|edit` | What clients may do; `edit` by default. |
 | `--control-token <token>` | The token clients give in `hello`. A port gets a new random one each run without it (the hint bar and the terminal show it); a socket path needs none unless one is given. |
 
@@ -35,7 +36,7 @@ lemonstudio --serve 7777 --control-level propose song.flp
 |---|---|
 | `read` | `hello`, `state`, `notes`, `plugins`, `params`, `history`, `events`, `proposals` |
 | `propose` | the above, and `propose`: the app asks the user to Apply or Discard each proposal |
-| `edit` | everything, including `apply`, `begin`, `end`, `accept`, `discard`, `undo`, `redo` and `save` |
+| `edit` | everything, including `apply`, `begin`, `end`, `accept`, `discard`, `undo`, `redo`, `save` and `midi_target` |
 
 `save` writes a file, an effect outside the project: with a window the user is asked first, and the answer only
 says that they were. Without a window (`--serve`) the client saves directly.
@@ -45,7 +46,7 @@ says that they were. Without a window (`--serve`) the client saves directly.
 | Method | Params | Result |
 |---|---|---|
 | `hello` | `name`, `token` (on a port) | `app`, `version`, `protocol` (1), `name`, `level`. The name labels the client's undo steps and events. |
-| `state` | | The project: settings, `channels`, `mixer` (the tracks in use), `patterns`, `playlist` |
+| `state` | | The project: settings, `channels`, `mixer` (the tracks in use), `patterns`, `playlist`. Plugins are named as `plugins` lists them (a channel playing a project's Ogun as `Smith`) |
 | `notes` | `pattern` | That pattern's notes, with their ids |
 | `plugins` | | The `instruments` and `effects` that `add_channel` and `add_effect` take, by name |
 | `params` | `owner` | The parameters of the plugin playing a channel or a mixer slot: id, name, group, unit, value 0..1, value text, range, default, steps |
@@ -59,6 +60,7 @@ says that they were. Without a window (`--serve`) the client saves directly.
 | `accept`, `discard` | `proposal` | The commands' `results`; nothing |
 | `undo`, `redo` | | The `step` undone or redone (`null`: none) |
 | `save` | `path` (else the project's file) | `saved` or `asked`, with the path |
+| `midi_target` | `channel` (`null`: none) | Nothing. Without a window, the channel the MIDI inputs' notes play (with one, its selected channel decides) |
 
 Errors use JSON-RPC's codes (-32700 parse error, -32600 invalid request, -32601 no such method, -32602 invalid
 params) and two of their own: -32000 when a command fails (an id that names nothing, a value out of range; nothing is

@@ -322,7 +322,7 @@ impl App {
     pub fn record_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: Extra) {
         let target = extra.channel.or_else(|| crate::piano::channel(&self.state));
         if let Some(channel) = target {
-            self.state.session.rec.log.down(src, key, velocity, channel, std::time::Instant::now());
+            self.state.session.rec.log.down(src, key, velocity, channel, extra.at.unwrap_or_else(std::time::Instant::now));
         }
         self.start_on_input(Opt::Notes);
         if !self.rec_live(Opt::Notes) {
@@ -333,10 +333,11 @@ impl App {
     }
 
     /// A note went up: written when it was being recorded.
-    pub fn record_up_with(&mut self, src: Src, release: Option<u8>) {
-        self.state.session.rec.log.up(src, std::time::Instant::now());
+    /// `at`: when it arrived from its device.
+    pub fn record_up_with(&mut self, src: Src, release: Option<u8>, at: Option<std::time::Instant>) {
+        self.state.session.rec.log.up(src, at.unwrap_or_else(std::time::Instant::now));
         self.state.session.rec.unit = unit(&self.state);
-        self.host(|ses| up_in(ses, src, release));
+        self.host(|ses| up_in(ses, src, release, at));
     }
 
     /// The take ends: the notes still held end where playback last was.
@@ -792,7 +793,7 @@ mod tests {
         down_in(&mut ses, Src::Midi(60), 60, 100, 0, Extra::default());
         ses.transport.pretend_at(100.0, false);
         assert!(!tick_in(&mut ses, None));
-        up_in(&mut ses, Src::Midi(60), None);
+        up_in(&mut ses, Src::Midi(60), None, None);
         ses.transport.stop();
         tick_in(&mut ses, None);
         let notes: Vec<(u32, u32, u16)> = ses.project.pattern(1).map(|p| p.notes.iter().map(|n| (n.position, n.length, n.key)).collect()).unwrap_or_default();
