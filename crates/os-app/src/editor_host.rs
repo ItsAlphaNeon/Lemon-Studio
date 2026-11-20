@@ -512,7 +512,7 @@ impl EditorHost {
     /// Redraws row `row`'s window at `scale`: the frame resizes and the editor is reopened, since plugins take their
     /// scale when the editor opens (on macOS its sizes are measured at it). The plugin's page is kept.
     #[cfg(any(windows, target_os = "macos"))]
-    fn rescale_window(&mut self, pl: &mut Plugins, row: usize, scale: f32) {
+    pub fn rescale_window(&mut self, pl: &mut Plugins, row: usize, scale: f32) {
         self.sync(pl);
         let (Some(Hosted { plugin, .. }), Some(Editor { window: Some(w), link, .. })) = (pl.hosted.get(&row), self.editors.get_mut(&row)) else { return };
         if w.scale() == scale {

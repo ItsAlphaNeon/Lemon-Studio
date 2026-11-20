@@ -1752,7 +1752,7 @@ pub fn run() {
     // Plugin editors in real plugin windows, checked from the main thread (`plugins::window_check`).
     #[cfg(target_os = "macos")]
     if args.first().map(String::as_str) == Some("--plugin-window-check") {
-        std::process::exit(plugins::window_check::run(&args[1..]));
+        std::process::exit(window_check::run(&args[1..]));
     }
     app::move_old_settings();
     // From here on a panic is kept in the user folder's Logs (`panic_log`).
