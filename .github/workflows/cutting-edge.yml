@@ -1,4 +1,4 @@
-# The cutting-edge branch: Linux only (it puts Wayland first; Windows and macOS are not tested on every push here).
+# The cutting-edge branch: Linux on every push (it puts Wayland first); other platforms are not tested on every push here.
 # Run the three-platform CI by hand (workflow_dispatch) when a change needs it.
 name: CI (cutting-edge)
 
