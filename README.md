@@ -7,8 +7,8 @@ plus what is listed here. For everything else (building, using, contributing, li
 > change or be removed without notice, and nothing here is promised to reach `main`. Don't build on it, and keep
 > copies of what you make with it (`.lemon` files included).
 
-> **Linux only, Wayland first, for now.** This branch is built, tested and used on Linux under Wayland (Hyprland).
-> X11 still works (`OPENSTUDIO_WAYLAND=0`). Windows and macOS may build, but nothing added here is tested there, and
+> **Wayland first, not tested on every platform.** This branch is used daily on Linux under Wayland (Hyprland); X11
+> still works (`OPENSTUDIO_WAYLAND=0`). Other platforms may work, but not everything added here is tested on each, and
 > some of it is Linux-only (plugin editors drawn in the app's window, the Hyprland plugin-window handling).
 
 `main` is merged into this branch with `tools/merge-main.sh`, which keeps this README and `docs/` to this branch's
@@ -28,8 +28,8 @@ own content. Side branches are named `cutting-edge-<topic>`.
   unsaved changes go to a backup, which the next start offers. A second Ctrl+C ends the program at once.
 
 - **Wayland first.** On Linux the main window is native Wayland in a Wayland session; plugin windows open detached.
-  `OPENSTUDIO_WAYLAND=0` brings back the X11 window, where plugin windows dock. CI runs on Linux only
-  (`.github/workflows/cutting-edge.yml`); Windows and macOS are not tested on every push.
+  `OPENSTUDIO_WAYLAND=0` brings back the X11 window, where plugin windows dock. CI runs on Linux on every push
+  (`.github/workflows/cutting-edge.yml`); other platforms are not tested on every push.
 - **Resizable plugin windows (Linux).** Besides Lemon's own resizable plugins, any plugin whose editor lets the host
   resize it (CLAP `gui.can_resize`, VST3 `IPlugView::canResize`) gets the frame's edges and maximize button. The
   editor is asked for the new size and the frame takes the size it accepts. Such an editor larger than the monitor's
