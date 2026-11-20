@@ -204,7 +204,8 @@ impl Frame for NativeFrame {
     }
 }
 
-#[cfg(all(test, windows))]
+// The Windows window tests use the default build's parts (VST hosting, FL Studio's native plugins, the stock synths).
+#[cfg(all(test, windows, feature = "plugin-windows", feature = "vst3", feature = "vst2", feature = "fl-native", feature = "stock-trio", feature = "stock-citrus", feature = "stock-smith", feature = "stock-parametric-eq-2"))]
 mod win_tests;
 
 #[cfg(test)]
