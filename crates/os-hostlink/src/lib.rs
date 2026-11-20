@@ -79,6 +79,10 @@ pub enum Cmd {
     /// channel's notes there. `lparam` = the token [`post_notes`] gave; the host takes the notes with [`take_notes`]
     /// and answers 1; 0 = not handled (the plugin takes them back).
     Notes = 14,
+    /// Plugin -> host, `lparam` 0: the user changed the plugin's saved state in its own window without a parameter
+    /// the host sees (a curve dragged, a sample loaded, a menu choice). Sent once per edit, when it is done (a drag at
+    /// its release). The host makes it an undo step and counts the project as changed, and answers 1; 0 = not handled.
+    Edited = 15,
 }
 
 impl Cmd {
@@ -98,6 +102,7 @@ impl Cmd {
             12 => Cmd::Resizable,
             13 => Cmd::SetSize,
             14 => Cmd::Notes,
+            15 => Cmd::Edited,
             _ => return None,
         })
     }
@@ -438,7 +443,7 @@ mod local {
             self.wanted.lock().ok().and_then(|mut w| w.take())
         }
 
-        /// Plugin -> host (`Changed`, `Note`, `Automate`): queued for the host's next tick, which is woken. 1 when a host
+        /// Plugin -> host (`Changed`, `Note`, `Automate`, `Edited`): queued for the host's next tick, which is woken. 1 when a host
         /// is there, 0 otherwise (as unanswered messages on Windows).
         pub fn to_host(&self, cmd: Cmd, arg: isize) -> isize {
             if !self.hosted() {
@@ -590,6 +595,7 @@ mod tests {
         assert_eq!(Cmd::from_usize(10), Some(Cmd::Automate));
         assert_eq!(Cmd::from_usize(13), Some(Cmd::SetSize));
         assert_eq!(Cmd::from_usize(14), Some(Cmd::Notes));
+        assert_eq!(Cmd::from_usize(15), Some(Cmd::Edited));
         assert_eq!(PageIcon::from_id(99), PageIcon::Plugin);
         assert_eq!(unpack_note(pack_note(67, 100, true)), (67, 100, true));
         assert_eq!(unpack_note(pack_note(0, 0, false)), (0, 0, false));

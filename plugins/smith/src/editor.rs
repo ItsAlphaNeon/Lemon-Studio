@@ -259,6 +259,9 @@ pub struct Logic {
     /// The random preset last made.
     random: u32,
     pub hosted: bool,
+    /// Edits written to the state, and how many of them the host was told of (`take_edit`).
+    made: u64,
+    told: u64,
     /// The keyboard hidden, as the host asks for the editor's size.
     no_keys: Arc<AtomicBool>,
 }
@@ -281,6 +284,8 @@ impl Logic {
             curve_clip: None,
             random: 1,
             hosted: false,
+            made: 0,
+            told: 0,
             no_keys,
         };
         l.reload();
@@ -317,6 +322,16 @@ impl Logic {
     }
 
     /// An edit: the edited state becomes the plugin's and the audio thread plays it; during a drag on the next tick.
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made;
+        true
+    }
+
     fn commit(&mut self) {
         self.pending = true;
         if self.drag.is_none() {
@@ -331,6 +346,8 @@ impl Logic {
         // The state was replaced meanwhile: show that one.
         if !self.params.stored(self.version, self.st.to_bytes()) || !self.params.play(self.version, Patch::new(self.st.clone())) {
             self.reload();
+        } else {
+            self.made += 1;
         }
     }
 
@@ -1199,6 +1216,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -1280,7 +1300,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes | Cmd::Edited => 0,
             }
         }
 
@@ -1423,6 +1443,9 @@ mod gui {
                 self.link.to_host(Cmd::Changed, 0);
                 self.dirty = true;
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -1551,7 +1574,10 @@ mod tests {
         l.poll();
         assert!(l.params.edit.lock().unwrap().is_some());
         l.delta(0.0, 25.0, Mods::default());
+        assert!(!l.take_edit(), "the host hears of a drag once it is let go");
         l.up(Btn::Left);
+        assert!(l.take_edit());
+        assert!(!l.take_edit(), "once");
         assert_eq!(saved(&l).ints[CUT], l.st.ints[CUT]);
         assert_eq!(l.params.edit.lock().unwrap().as_ref().unwrap().1.st.ints[CUT], l.st.ints[CUT]);
     }

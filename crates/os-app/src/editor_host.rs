@@ -40,7 +40,26 @@ pub struct Editor {
     /// When its open window opened (`Plugins::opens`): the limit on open editors closes the earliest first.
     #[cfg(plugin_windows)]
     opened: u64,
+    /// While a Lemon plugin's editor is linked: the instance's state as last known (`EditorHost::refresh_known`). An
+    /// edit in the window (`Request::Edited`) is undone back to it.
+    #[cfg(plugin_windows)]
+    known: Option<Known>,
 }
+
+/// The state of a linked editor's instance as the host last read it (`Editor::known`).
+#[cfg(plugin_windows)]
+#[derive(Debug)]
+enum Known {
+    /// The state, and the history's `changes` when it was read.
+    State(Vec<u8>, u64),
+    /// Over `KNOWN_MAX` bytes (Tesla holding a long sample): not read again while the window stays open, as every step
+    /// would read it.
+    TooBig,
+}
+
+/// The largest state a linked editor's instance has kept for its edits' undo.
+#[cfg(plugin_windows)]
+const KNOWN_MAX: usize = 1 << 20;
 
 impl Editor {
     /// Its window is open.
@@ -69,6 +88,7 @@ impl Editor {
             }
             self.window = None;
             self.link = None;
+            self.known = None;
         }
     }
 }
@@ -107,6 +127,9 @@ pub enum Request {
     /// notes.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     Notes(usize, Vec<os_hostlink::NoteOut>),
+    /// The user changed a Lemon plugin's saved state in its own window (host link `Edited`): row.
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
+    Edited(usize),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
     /// The menu arrow was clicked: open the window menu at this screen point.
@@ -240,6 +263,38 @@ impl Default for EditorHost {
 }
 
 impl EditorHost {
+    /// The states of the instances whose linked editors are open, read again when the history moved on since (`changes`:
+    /// `History::changes`): a step recorded, undone or redone may have changed them. A window that just opened reads
+    /// its instance's first.
+    #[cfg(plugin_windows)]
+    pub fn refresh_known(&mut self, pl: &Plugins, changes: u64) {
+        for (key, e) in &mut self.editors {
+            if !e.linked() || matches!(e.known, Some(Known::TooBig)) || matches!(e.known, Some(Known::State(_, c)) if c == changes) {
+                continue;
+            }
+            let Some(h) = pl.hosted.get(key) else { continue };
+            e.known = h.lock_for_state().and_then(|p| p.save_state()).map(|st| if st.len() > KNOWN_MAX { Known::TooBig } else { Known::State(st, changes) });
+        }
+    }
+
+    /// The user edited the instance under `key` in its own window and its state is now `now`: what changed. `now` is
+    /// known from then on.
+    #[cfg(plugin_windows)]
+    pub fn take_known(&mut self, key: usize, now: &[u8], changes: u64) -> crate::presets::WindowEdit {
+        use crate::presets::WindowEdit;
+        let Some(e) = self.editors.get_mut(&key).filter(|e| e.linked()) else { return WindowEdit::Nothing };
+        if matches!(e.known, Some(Known::TooBig)) || now.len() > KNOWN_MAX {
+            e.known = Some(Known::TooBig);
+            return WindowEdit::Unknown;
+        }
+        match e.known.replace(Known::State(now.to_vec(), changes)) {
+            Some(Known::State(before, _)) if before != now => WindowEdit::From(before),
+            Some(Known::State(..)) => WindowEdit::Nothing,
+            // Not read yet (the window opened on this tick): the project may have changed.
+            _ => WindowEdit::Unknown,
+        }
+    }
+
     /// Replays what the host did to its instances since the last call (`Plugins::editor_events`).
     pub fn sync(&mut self, pl: &mut Plugins) {
         for e in std::mem::take(&mut pl.editor_events) {
@@ -605,6 +660,7 @@ impl EditorHost {
                 (_, crate::plugin_window::LinkMsg::Audio(_)) => out.extend(os_hostlink::take_audio().into_iter().map(|(p, ch)| Request::Audio(p, ch))),
                 (Some(row), crate::plugin_window::LinkMsg::Notes(token)) => out.push(Request::Notes(row, os_hostlink::take_notes(token))),
                 (None, crate::plugin_window::LinkMsg::Notes(token)) => drop(os_hostlink::take_notes(token)),
+                (Some(row), crate::plugin_window::LinkMsg::Edited) => out.push(Request::Edited(row)),
                 _ => {}
             }
         }
