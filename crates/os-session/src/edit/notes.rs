@@ -89,15 +89,10 @@ pub fn put_pattern(s: &mut crate::session::Session, number: u16, notes: Vec<os_m
     }
 }
 
+/// The pattern shown, added (in number order) when the project has none with its number.
 pub fn pattern_mut(s: &mut crate::session::Session) -> &mut Pattern {
     let number = s.pattern();
-    match s.project.patterns.iter().position(|p| p.number == number) {
-        Some(i) => &mut s.project.get_mut().patterns[i],
-        None => {
-            s.project.get_mut().patterns.push(Pattern { number, ..Pattern::default() });
-            s.project.get_mut().patterns.last_mut().expect("pushed")
-        }
-    }
+    crate::edit::patterns::pat_mut(s, number)
 }
 
 pub fn notes(s: &crate::session::Session) -> &[Note] {

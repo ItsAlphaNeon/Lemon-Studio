@@ -49,18 +49,12 @@ pub fn after(s: &mut State, b: Before) -> bool {
     for v in t.views {
         view(s, v);
     }
-    let whole = t.rows.is_some();
-    if let Some(old) = t.rows {
-        let row: std::collections::HashMap<u32, usize> = s.session.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
-        let map: Vec<Option<usize>> = old.iter().map(|id| row.get(id).copied()).collect();
-        crate::rack::remap_view(s, &map);
-    }
     if t.tracks {
         let tracks = crate::edit::mixer::inserts(&s.session);
         s.selected_mixer = s.selected_mixer.min(tracks);
         s.mixer.sel.retain(|&t| t <= tracks);
     }
-    if whole || t.clips {
+    if t.clips {
         let clips = crate::edit::playlist::clips(&s.session);
         s.playlist.sel = clips.iter().enumerate().filter(|(_, c)| b.clips.contains(&c.id.0)).map(|(i, _)| i).collect();
         s.playlist.hover_clip = None;
@@ -84,6 +78,9 @@ fn view(s: &mut State, v: crate::session::View) {
         View::Places { tracks, slots } => {
             let track = |t: u16| at(&tracks, t);
             let slot = |t: u16, k: u8| slots.get(&(t, k)).copied().unwrap_or(Some((t, k)));
+            // The mixer's selection follows its tracks; a selected track that went leaves track 1 selected.
+            s.selected_mixer = track(s.selected_mixer).unwrap_or(1);
+            s.mixer.sel = s.mixer.sel.iter().filter_map(|&t| track(t)).collect();
             if let Some(t) = os_model::target::moved(s.events.target, &track, &slot) {
                 s.events.target = t;
             }
@@ -108,11 +105,6 @@ fn view(s: &mut State, v: crate::session::View) {
                     None => s.hide(crate::app::Win::PluginPalette),
                 }
             }
-        }
-        View::MixerRenumbered(tracks) => {
-            let m = |t: u16| at(&tracks, t).unwrap_or(t);
-            s.selected_mixer = m(s.selected_mixer);
-            s.mixer.sel = s.mixer.sel.iter().map(|&t| m(t)).collect();
         }
         View::MixerSelect(n) => {
             s.mixer.sel.clear();

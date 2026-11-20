@@ -1,0 +1,19 @@
+[package]
+name = "lemon-monitor"
+description = "A window that shows what a running Lemon Studio session holds and does, through its control socket only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lemon-monitor"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+os-ui = { path = "../../crates/os-ui" }
+winit = "0.30"
+softbuffer = "0.4"

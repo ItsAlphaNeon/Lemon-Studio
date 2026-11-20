@@ -886,7 +886,7 @@ pub fn solo(s: &mut State, r: usize) {
 }
 
 /// The undo step of a channel muted, soloed or switched on or off: a knob tweak's (none with "Undo knob tweaks" off).
-pub const MUTE_SOLO: &str = "Channel mute / solo";
+pub const MUTE_SOLO: &str = crate::midi_notes::MUTE_SOLO;
 
 /// The ON switch of a channel's plugin window: the channel on or off, a mute and solo step.
 pub fn toggle_on(s: &mut State, row: usize) {
@@ -1045,19 +1045,6 @@ pub fn relayout(s: &mut State, f: impl FnOnce(&mut State)) {
 
 // ---------------------------------------------------------------------------------------------------------
 // Renumbering (delete, clone, move, sort)
-
-/// Channel `ch` comes back as the last row (a redone drop that made it, `history`); Lemon Sampler hosts it from its
-/// settings on the next tick.
-pub fn push_channel(s: &mut State, ch: os_model::Channel) {
-    crate::follow::around(s, |s| push_channel_in(&mut s.session, ch));
-}
-
-/// The app state's part of a renumbering, for a project already renumbered (`map`: each old row's new row, `None`: the
-/// channel went).
-pub fn remap_ui(s: &mut State, map: &[Option<usize>]) {
-    remap_session(&mut s.session, map);
-    remap_view(s, map);
-}
 
 /// `remap_ui`'s part in the interface: the rack's state, the selections and the plugin window follow their rows.
 pub fn remap_view(s: &mut State, map: &[Option<usize>]) {
@@ -1989,7 +1976,7 @@ fn box_at_row(s: &State, r: usize, mouse: (f32, f32)) -> (f32, f32) {
 }
 
 /// The sample chosen in Load sample...: row `r`'s channel takes it (and its name, `auto_name`, and what the file says,
-/// `read_tags`), one history step (`history::load_sample`).
+/// `read_tags`), one history step (`Command::LoadSample`).
 pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
     let s = &mut app.state;
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).

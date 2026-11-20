@@ -57,8 +57,13 @@ pub struct Session {
     pub pending_open: Option<usize>,
     /// The hosted plugins' parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
-    /// MIDI controller input, and its held notes: (key, rack row they started on).
+    /// MIDI controller input.
     pub midi: crate::midi_in::MidiIn,
+    /// What the controllers' notes hold sounding (`crate::midi_notes`).
+    pub midi_play: crate::midi_notes::Play,
+    /// Without a window: the channel (its id) the controllers' notes play, as a client sets it (`midi_target`). The
+    /// window's selected channel decides with one.
+    pub midi_channel: Option<u32>,
     pub midi_out: crate::midi_out::MidiOut,
     /// The control plane's socket (`--control`), when it listens.
     pub rpc_server: Option<crate::control::server::Server>,
@@ -108,8 +113,6 @@ pub struct Session {
 /// did; the interface knows what that means for its selections and windows.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Touched {
-    /// The project was put back whole: the channels' ids by row before, the rows the views pointed at.
-    pub rows: Option<Vec<u32>>,
     /// Clips moved in the playlist's list (the selection is kept by id).
     pub clips: bool,
     /// Mixer tracks may have gone.
@@ -131,7 +134,6 @@ pub enum View {
     /// (what is not listed stays where it is).
     Places { tracks: Vec<Option<u16>>, slots: std::collections::HashMap<(u16, u8), Option<(u16, u8)>> },
     /// The mixer's selection follows tracks renumbered (`tracks` as in `Places`).
-    MixerRenumbered(Vec<Option<u16>>),
     /// Mixer track `.0` becomes the current one, the only one selected.
     MixerSelect(u16),
     /// Patterns were renumbered: the clip and note selections go.
@@ -200,6 +202,8 @@ impl Session {
             pending_open: None,
             params: Default::default(),
             midi: crate::midi_in::MidiIn::none(),
+            midi_play: Default::default(),
+            midi_channel: None,
             midi_out: crate::midi_out::MidiOut::none(),
             loading: None,
             missing: Default::default(),

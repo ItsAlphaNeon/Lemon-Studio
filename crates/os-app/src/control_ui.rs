@@ -4,10 +4,6 @@
 
 //! The interface's side of `crate::control` (step 9: the session's side stays there).
 
-#![allow(unused_imports)]
-use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
-use serde::Serialize;
 use crate::app::State;
 pub use command::Command;
 #[allow(unused_imports)]
@@ -15,14 +11,13 @@ use crate::control::*;
 
 /// Applies `commands` in order, all or none; returns each one's result and the commands that undo them all (in the
 /// order to apply them). Records nothing.
-#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
 pub fn run(s: &mut State, commands: Vec<Command>) -> Result<(Vec<serde_json::Value>, Vec<Command>), String> {
     crate::follow::around(s, |s| run_in(&mut s.session, commands))
 }
 
 /// The one entry point: applies `commands` as one transaction (see `run`) and records it as one step of the undo
 /// history, named `name` (else the single command's name), after the client for a client's changes.
-#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
+#[cfg(test)]
 pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
     crate::follow::around(s, |s| apply_in(&mut s.session, by, name, commands))
 }
@@ -30,6 +25,7 @@ pub fn apply(s: &mut State, by: &By, name: Option<&str>, commands: Vec<Command>)
 /// An edit in the interface: `region` is taken, `f` changes it, and the change is one undo step named `name` (none
 /// when nothing changed). The interface's edits thus have the commands' undo: what was taken is put back by
 /// `Command::Put`, as a command's own undo is.
+#[cfg(test)]
 pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
     s.session.link_moves.clear();
     // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
@@ -118,37 +114,6 @@ pub fn knob_command(s: &mut State, name: &'static str, run: Option<crate::histor
     Ok(results)
 }
 
-/// `edit` for a knob-like control (a mixer fader's typed value): no step while Undo knob tweaks is off.
-pub fn knob_edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
-    if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
-        edit(s, name, region, f)
-    } else {
-        f(s)
-    }
-}
-
-/// An edit of `region` that joins the step of run `run` just before it (a knob dragged, a box's wheel notches): its
-/// first change records the step holding `region` as it was, the others go into it. `knob`: a knob-like control, no
-/// step while Undo knob tweaks is off.
-pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, run: crate::history::Run, knob: bool, f: impl FnOnce(&mut State) -> R) -> R {
-    if (knob && !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) || s.session.history.joins(run) {
-        return f(s);
-    }
-    s.session.link_moves.clear();
-    // A pressed step that changed nothing goes before this edit, judged on the project as it is now: after the edit
-    // its region may name other things (tracks renumbered by a delete).
-    crate::history::settle(&mut s.session);
-    let before = command::Taken::of(&s.session, region);
-    let r = f(s);
-    if let Some(before) = before {
-        if command::Taken::of(&s.session, region).as_ref() != Some(&before) {
-            record_edit(&mut s.session, name, before);
-            s.session.history.set_run(run);
-        }
-    }
-    r
-}
-
 /// `edit` for an edit that needs the app (a mixer menu command hosting or dropping plugins).
 pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: command::Region, f: impl FnOnce(&mut crate::app::App) -> R) -> R {
     app.state.session.link_moves.clear();
@@ -196,14 +161,14 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
 
 /// Applies `commands` to see what they change and takes them back at once: the project is as it was. Returns the
 /// changes; an error when the list can't be applied.
-#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
+#[cfg(test)]
 pub fn dry_run(s: &mut State, commands: Vec<Command>) -> Result<Vec<query::Change>, String> {
     let selected = s.selected_channel;
     dry_run_in(&mut s.session, commands, selected)
 }
 
 /// A proposal: `commands` checked by a dry run and kept for `accept` or `discard`. Returns its number and changes.
-#[cfg_attr(not(test), allow(dead_code))] // the interface's own, used by tests
+#[cfg(test)]
 pub fn propose(s: &mut State, by: &By, name: &str, commands: Vec<Command>) -> Result<(u64, Vec<query::Change>), String> {
     let selected = s.selected_channel;
     crate::follow::around(s, |s| propose_in(&mut s.session, by, name, commands, selected))

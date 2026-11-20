@@ -1821,7 +1821,7 @@ pub fn run() {
     });
     let level = control.level.unwrap_or(control::Level::Edit);
     if let Some(at) = &control.serve {
-        control::server::serve_headless(at, level, control.token.clone(), args.first().map(std::path::PathBuf::from));
+        control::server::serve_headless(at, level, control.token.clone(), args.first().map(std::path::PathBuf::from), control.midi);
     }
     // Run from source: Lemon Studio's own plugins are rebuilt and installed before the plugin scan looks for them.
     plugin_rebuild::run();

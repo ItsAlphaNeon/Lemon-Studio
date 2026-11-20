@@ -86,17 +86,6 @@ pub fn start_marker(s: &crate::session::Session) -> Option<u32> {
     markers(s).iter().filter(|m| m.kind == TimeMarker::START).map(|m| m.position).max()
 }
 
-/// Place loop (§7a): a Loop marker named with one space at `tick`; one already there goes instead.
-pub fn place_loop(s: &mut crate::session::Session, tick: u32) {
-    let list = &mut arr_mut(s).markers;
-    let before = list.len();
-    list.retain(|m| !(m.kind == TimeMarker::LOOP && m.position == tick));
-    if list.len() == before {
-        add_marker(s, TimeMarker { kind: TimeMarker::LOOP, ..TimeMarker::new(tick, " ") });
-    }
-    s.dirty = true;
-}
-
 /// Move content right / left (§7a): marker `i`'s section (from it to the next marker) trades places with the section
 /// after it (to the marker after that, or the song's end), or with the one before it (from the previous marker). The
 /// clips that start in the two sections move, automation clips too, and so do the markers at their starts. False
@@ -165,34 +154,6 @@ pub fn track_on(s: &crate::session::Session, t: u16) -> bool {
 
 pub fn track_name(s: &crate::session::Session, t: u16) -> String {
     track_info(s, t).and_then(|t| t.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("Track {}", t + 1))
-}
-
-/// TOOLS ▸ Lock all tracks to their clips (Lemon Studio's design; spec: ui/playlist.md "Locking tracks to their
-/// clips"): each track of the arrangement whose clips all share one source is locked to it; a track without clips or
-/// with clips of several sources is left as it is. Returns (tracks locked, tracks skipped for mixed sources).
-pub fn lock_tracks(s: &mut crate::session::Session) -> (usize, usize) {
-    let mut one: std::collections::BTreeMap<u16, Option<ClipSource>> = std::collections::BTreeMap::new();
-    for c in clips(s) {
-        one.entry(c.track).and_modify(|e| if *e != Some(c.source) { *e = None }).or_insert(Some(c.source));
-    }
-    let tracks = &mut arr_mut(s).tracks;
-    let (mut locked, mut mixed) = (0, 0);
-    for (t, src) in one {
-        match (src, tracks.get_mut(usize::from(t))) {
-            (Some(src), Some(tr)) => {
-                tr.clip_lock = Some(src);
-                locked += 1;
-            }
-            (None, Some(_)) => mixed += 1,
-            _ => {}
-        }
-    }
-    (locked, mixed)
-}
-
-/// TOOLS ▸ Unlock all tracks from their clips: clears every lock of the arrangement; returns how many there were.
-pub fn unlock_tracks(s: &mut crate::session::Session) -> usize {
-    arr_mut(s).tracks.iter_mut().filter_map(|t| t.clip_lock.take()).count()
 }
 
 pub fn ppq(s: &crate::session::Session) -> u32 {
@@ -491,14 +452,6 @@ pub const ARRANGER_EDIT: &str = "Arranger edit";
 pub fn snapshot_as(s: &mut crate::session::Session, name: &'static str) {
     arr_mut(s);
     let snap = crate::history::Snap::Playlist(Box::new(capture(s)));
-    crate::history::record(s, name, snap);
-}
-
-/// `snapshot_as` for a command that changes more than the playlist: one step named `name`, holding the playlist
-/// and `extra`, what the command changes beyond it.
-pub fn snapshot_with(s: &mut crate::session::Session, name: &'static str, extra: crate::history::Snap) {
-    arr_mut(s);
-    let snap = crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(capture(s))), extra]);
     crate::history::record(s, name, snap);
 }
 
@@ -1077,22 +1030,6 @@ pub fn audio_clip_channel() -> Channel {
         sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
         lemon_icon: None,
     }
-}
-
-/// One undo step named `name` for an edit that changes the playlist and adds a channel at the end of the rack.
-pub fn snapshot_new_channel(s: &mut crate::session::Session, name: &'static str) {
-    arr_mut(s);
-    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
-    crate::history::record(s, name, crate::history::Snap::Several(vec![crate::history::Snap::Playlist(Box::new(capture(s))), rack]));
-}
-
-/// A new channel at the end of the rack: `ch` under the next free index. Returns its index.
-pub fn push_channel(s: &mut crate::session::Session, mut ch: Channel) -> u16 {
-    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    ch.id = os_model::Id::NONE;
-    ch.index = index;
-    s.project.get_mut().channels.push(ch);
-    index
 }
 
 /// `add_audio_clip_in` on the session (`lock_len` as `place_in` takes it): the playlist's clip source becomes the new

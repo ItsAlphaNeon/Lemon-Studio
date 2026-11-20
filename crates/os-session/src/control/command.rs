@@ -1812,10 +1812,11 @@ impl Command {
             }
             _ => self.take(s)?,
         };
+        // What an add makes, and the key of its id in the result.
         let added = match &self {
-            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::LoadChannelState { .. } => Some(Thing::Channel as fn(u32) -> Thing),
-            Command::AddTrack { .. } => Some(Thing::Track as fn(u32) -> Thing),
-            Command::AddPattern { .. } | Command::CopyPattern { .. } => Some(Thing::Pattern as fn(u32) -> Thing),
+            Command::AddChannel { .. } | Command::CloneChannel { .. } | Command::LoadChannelState { .. } => Some((Thing::Channel as fn(u32) -> Thing, "channel")),
+            Command::AddTrack { .. } => Some((Thing::Track as fn(u32) -> Thing, "track")),
+            Command::AddPattern { .. } | Command::CopyPattern { .. } => Some((Thing::Pattern as fn(u32) -> Thing, "pattern")),
             _ => None,
         };
         let replace = matches!(self, Command::ReplaceInstrument { .. });
@@ -1836,10 +1837,7 @@ impl Command {
         s.dirty = true;
         // An add's undo removes what it made, by the id its result names.
         let taken = match added {
-            Some(thing) => {
-                let id = result.as_object().and_then(|o| o.values().next()).and_then(serde_json::Value::as_u64).ok_or("an add names no id")?;
-                Taken::Gone(thing(id as u32))
-            }
+            Some((thing, key)) => Taken::Gone(thing(result[key].as_u64().ok_or("an add names no id")? as u32)),
             None => match taken {
                 // A replaced channel's new id, from the result.
                 Taken::Swap(c, _) if replace => Taken::Swap(c, result["channel"].as_u64().ok_or("a replace names no id")? as u32),
@@ -2391,7 +2389,7 @@ impl Command {
                 while n != to {
                     let o = if to > n { n + 1 } else { n - 1 };
                     let m = move |t: u16| if t == n { o } else if t == o { n } else { t };
-                    crate::edit::mixer::renumber(s, &m, n.min(o), n.max(o) + 1, 0);
+                    crate::edit::mixer::renumber(s, &m, n.min(o), n.max(o) + 1);
                     n = o;
                 }
                 none
@@ -2509,10 +2507,7 @@ impl Command {
                 if container {
                     m.slots[k] = Some(os_model::SlotPlugin { id: Id::NONE, name: plugin.clone(), state: crate::container::encode(&[]) });
                 }
-                m.slot_on[k] = true;
-                m.slot_mix[k] = 1.0;
-                m.slot_cpu[k] = os_model::PluginCpu::default();
-                (m.slot_names[k], m.slot_colors[k], m.slot_icons[k]) = (None, None, None);
+                crate::edit::mixer::reset_slot(m, k);
                 s.control.settle(s.project.get_mut());
                 let id = s.project.mixer[place].slots[k].as_ref().map_or(Id::NONE, |x| x.id);
                 if !container {
@@ -2522,19 +2517,10 @@ impl Command {
             }
             Command::RemoveEffect { track, slot } => {
                 let place = track_place(&s.project, track)?;
-                let m = &mut s.project.get_mut().mixer[place];
-                let k = usize::from(slot);
-                if m.slots.get(k).is_none_or(Option::is_none) {
+                if s.project.mixer[place].slots.get(usize::from(slot)).is_none_or(Option::is_none) {
                     return Err(format!("slot {slot} is empty"));
                 }
-                m.slots[k] = None;
-                m.slot_on[k] = true;
-                m.slot_mix[k] = 1.0;
-                m.slot_cpu[k] = os_model::PluginCpu::default();
-                (m.slot_names[k], m.slot_colors[k], m.slot_icons[k]) = (None, None, None);
-                // The instance goes now, its state kept for an undo that brings the slot back.
-                let t = s.project.mixer[place].index;
-                s.fx_requests.push(crate::edit::mixer::FxReq::Delete { track: t, slot });
+                crate::edit::mixer::clear_slot(s, s.project.mixer[place].index, slot);
                 none
             }
             Command::MoveEffect { track, slot, to } => {
@@ -3439,8 +3425,7 @@ fn put_back(s: &mut crate::session::Session, back: Back) {
 
 /// Channel `c` put back on `row`, the rows from there one down with every index that names them.
 pub(crate) fn put_channel_back(s: &mut crate::session::Session, row: usize, mut c: os_model::Channel) {
-    let old: Vec<u32> = s.project.channels.iter().map(|c| c.id.0).collect();
-    let n = old.len();
+    let n = s.project.channels.len();
     let row = row.min(n);
     // It comes in last, under an index no other channel has, so nothing naming the others is taken for it.
     c.index = n as u16;
@@ -3449,8 +3434,9 @@ pub(crate) fn put_channel_back(s: &mut crate::session::Session, row: usize, mut 
     let map: Vec<Option<usize>> = (0..=n).map(|r| Some(if r == n { row } else if r < row { r } else { r + 1 })).collect();
     crate::edit::rack::remap_project(s.project.get_mut(), &map);
     crate::edit::rack::remap_session(s, &map);
-    // The views follow by id, as after the project put back whole.
-    s.touched.rows.get_or_insert(old);
+    // The views follow, and the clip selection by id.
+    s.touched.views.push(crate::session::View::Rows(map));
+    s.touched.clips = true;
     s.touched.views.push(crate::session::View::RackAutosize);
 }
 
@@ -3526,8 +3512,9 @@ fn restore(s: &mut crate::session::Session, side: Side) {
     s.set_tempo(tempo);
     s.set_pattern(pattern);
     crate::edit::rack::remap_session(s, &map);
-    // The views follow the rows by id (`crate::follow`).
-    s.touched.rows.get_or_insert(old);
+    // The views follow the rows, and the clip selection by id (`crate::follow`).
+    s.touched.views.push(crate::session::View::Rows(map));
+    s.touched.clips = true;
     (s.loop_type, s.loop_type_of) = loop_type;
     // The pattern shown now stays shown, as in FL (an undo leaves the pattern shown); a step that made or removed
     // patterns (a clone, a delete) shows the pattern it showed. Each pattern's loops are its own, put back with it.

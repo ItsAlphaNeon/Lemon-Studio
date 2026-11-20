@@ -52,12 +52,12 @@ impl App {
 
     /// A note was released: the release of the last held one writes the chord.
     pub fn step_edit_up(&mut self, src: Src) {
-        self.step_edit_up_with(src, None);
+        self.step_edit_up_with(src, None, None);
     }
 
-    /// `step_edit_up` with the note's release velocity, when it has one.
-    pub fn step_edit_up_with(&mut self, src: Src, release: Option<u8>) {
-        self.record_up_with(src, release);
+    /// `step_edit_up` with the note's release velocity and when it arrived, when it has them.
+    pub fn step_edit_up_with(&mut self, src: Src, release: Option<u8>, at: Option<std::time::Instant>) {
+        self.record_up_with(src, release, at);
         let Some(keys) = self.step_chord.up(src) else { return };
         if self.step_edit_live() && !keys.is_empty() {
             self.step_edit_write(&keys);

@@ -2084,6 +2084,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-monitor"
+version = "0.0.1"
+dependencies = [
+ "os-ui",
+ "serde_json",
+ "softbuffer",
+ "winit",
+]
+
+[[package]]
 name = "lemon-parametric-eq-2"
 version = "0.0.1"
 dependencies = [

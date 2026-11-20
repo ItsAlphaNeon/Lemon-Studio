@@ -1456,6 +1456,38 @@ fn a_session_without_a_window_serves_clients() {
     assert_eq!(ses.touched, Default::default());
 }
 
+/// Without a window, instances follow their channels too: after a client moves a plugin channel and the session
+/// ticks, every hosted instrument is on its own channel's row, so each plays its own channel's notes.
+#[test]
+fn a_session_without_a_window_moves_instances_with_their_channels() {
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::store());
+    ses.plugins = crate::plugins::Plugins::builtins();
+    let by = By::Client("Headless".into());
+    let add = |ses: &mut crate::session::Session, plugin: &str| {
+        let r = crate::control::apply_in(ses, &by, None, vec![cmd(json!({"op": "add_channel", "name": plugin, "plugin": plugin}))]).unwrap();
+        r[0]["channel"].as_u64().unwrap() as u32
+    };
+    let citrus = add(&mut ses, crate::citrus::CITRUS);
+    let smith = add(&mut ses, crate::smith::SMITH);
+    for _ in 0..4 {
+        crate::control::server::serve_tick(&mut ses);
+    }
+    let owners = |ses: &crate::session::Session| -> Vec<(usize, u32, u32)> {
+        ses.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, h)| (r, h.owner.0, ses.project.channels.get(r).map_or(0, |c| c.id.0))).collect()
+    };
+    let hosted = owners(&ses);
+    assert!(hosted.iter().any(|&(_, o, _)| o == citrus) && hosted.iter().any(|&(_, o, _)| o == smith), "both hosted: {hosted:?}");
+    crate::control::apply_in(&mut ses, &by, None, vec![cmd(json!({"op": "move_channel", "channel": smith, "row": 0}))]).unwrap();
+    for _ in 0..4 {
+        crate::control::server::serve_tick(&mut ses);
+    }
+    for (row, owner, on_row) in owners(&ses) {
+        assert!(owner == 0 || owner == on_row, "row {row}: the instance of channel {owner} under channel {on_row}");
+    }
+    let rows: Vec<usize> = ses.plugins.hosted.range(..crate::plugins::FX_KEY).map(|(&r, _)| r).collect();
+    assert_eq!(ses.hosted_rows.iter().copied().collect::<std::collections::BTreeSet<_>>(), rows.into_iter().collect(), "the rows hosted are the instances'");
+}
+
 /// An add's undo removes what it made, and a move's moves it back, by id (control-plane step 13): what else changed
 /// meanwhile without a step of its own stays, which putting back the whole project would have undone.
 #[test]
@@ -1899,4 +1931,90 @@ fn every_project_knob_turns_through_its_command() {
     crate::history::knob(&mut a.state.session, KnobId::MixPan(500), false);
     a.state.set_knob(KnobId::MixPan(500), 0.2);
     assert_eq!(a.state.session.history.len(), steps);
+}
+
+/// `state` names a channel's plugin as `add_channel` takes it: a Smith channel (stored as the file's Ogun) reads back as
+/// Smith, so a client sees the plugin that plays it.
+#[test]
+fn state_names_a_channels_plugin_as_commands_take_it() {
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::store());
+    let by = By::Client("Names".into());
+    for plugin in [crate::smith::SMITH, crate::citrus::CITRUS, crate::osc3::LEMON_TRIO] {
+        let r = crate::control::apply_in(&mut ses, &by, None, vec![cmd(json!({"op": "add_channel", "plugin": plugin}))]).unwrap();
+        let id = r[0]["channel"].as_u64().unwrap();
+        let row = ses.project.channels.iter().position(|c| u64::from(c.id.0) == id).unwrap();
+        assert_ne!(ses.project.channels[row].plugin.as_deref(), Some(plugin), "{plugin} is stored as the file's plugin");
+        let state = crate::control::query::project_in(&ses, 0);
+        let ch = state["channels"].as_array().unwrap().iter().find(|c| c["id"].as_u64() == Some(id)).unwrap().clone();
+        assert_eq!(ch["plugin"], json!(plugin));
+    }
+}
+
+/// What a playing engine takes in place (no new engine): the knobs and switches of channels, mixer tracks, slots and
+/// sends. The tempo and notes still build a new one.
+#[test]
+fn knobs_and_switches_reach_a_playing_engine_in_place() {
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::store());
+    let by = By::Client("Live".into());
+    crate::control::apply_in(&mut ses, &by, None, vec![cmd(json!({"op": "set_tempo", "bpm": 141}))]).unwrap();
+    let st = crate::control::query::project_in(&ses, 0);
+    let ch = st["channels"][0]["id"].as_u64().unwrap();
+    let tr = st["channels"][0]["track"].as_u64().unwrap();
+    let master = st["mixer"][0]["id"].as_u64().unwrap();
+    let pat = u64::from(ses.project.patterns[0].id.0);
+    crate::control::apply_in(&mut ses, &by, None, vec![cmd(json!({"op": "add_effect", "track": tr, "plugin": crate::plugins::PULP_FILTER}))]).unwrap();
+    let live = [
+        json!({"op": "set_channel", "channel": ch, "volume": 0.5, "pan": 0.3, "pitch": 200}),
+        json!({"op": "set_channel", "channel": ch, "enabled": false}),
+        json!({"op": "set_track", "track": tr, "volume": 0.5, "pan": -0.2, "stereo": 0.5}),
+        json!({"op": "set_track", "track": tr, "enabled": false}),
+        json!({"op": "set_track", "track": tr, "effects_enabled": false}),
+        json!({"op": "set_slot", "track": tr, "slot": 0, "enabled": false}),
+        json!({"op": "set_slot", "track": tr, "slot": 0, "mix": 0.3}),
+        json!({"op": "set_send", "from": tr, "to": master, "level": 0.2}),
+    ];
+    let rebuilt = [json!({"op": "set_tempo", "bpm": 150}), json!({"op": "add_notes", "pattern": pat, "notes": [{"channel": ch, "position": 48}]})];
+    for (c, in_place) in live.iter().map(|c| (c, true)).chain(rebuilt.iter().map(|c| (c, false))) {
+        let mut sent = crate::edit::rack::play_project_in(&ses);
+        crate::control::apply_in(&mut ses, &by, None, vec![cmd(c.clone())]).unwrap();
+        let new = crate::edit::rack::play_project_in(&ses);
+        assert_eq!(os_engine::live_edits(&mut sent, &new).is_some(), in_place, "{c}");
+    }
+}
+
+/// Without a window, a MIDI keyboard plays the channel a client points it at (`midi_target`), the pedal holds its notes,
+/// and the muting channel switches a channel as one undo step.
+#[test]
+fn a_session_without_a_window_plays_midi() {
+    use crate::midi_in::Msg;
+    let mut ses = crate::session::Session::new(crate::projects::test_project(), crate::transport::Transport::new(None), crate::settings_file::SettingsStore::memory());
+    crate::control::server::serve_tick(&mut ses);
+    let id = ses.project.channels[2].id.0;
+    let mut client = crate::control::rpc::Client { name: "Keys".into(), level: crate::control::Level::Edit, saves: true, token: None };
+    let mut asks = crate::control::rpc::Asks::default();
+    let call = |ses: &mut crate::session::Session, client: &mut crate::control::rpc::Client, asks: &mut crate::control::rpc::Asks, line: Value| {
+        serde_json::from_str::<Value>(&crate::control::rpc::rpc_line_in(ses, client, &line.to_string(), 0, asks).unwrap()).unwrap()
+    };
+    let a = call(&mut ses, &mut client, &mut asks, json!({"jsonrpc": "2.0", "id": 1, "method": "midi_target", "params": {"channel": 999_999}}));
+    assert!(a.get("error").is_some(), "no such channel: {a}");
+    let a = call(&mut ses, &mut client, &mut asks, json!({"jsonrpc": "2.0", "id": 2, "method": "midi_target", "params": {"channel": id}}));
+    assert_eq!(a["result"], Value::Null, "{a}");
+    ses.midi.arrive("Keys", Msg::On { ch: 0, key: 64, vel: 100 });
+    crate::control::server::serve_tick(&mut ses);
+    assert_eq!(ses.midi_play.lit().collect::<Vec<_>>(), [(2, 64)], "plays the target's row");
+    ses.midi.arrive("Keys", Msg::Cc { ch: 0, n: 64, v: 127 });
+    ses.midi.arrive("Keys", Msg::Off { ch: 0, key: 64, vel: 64 });
+    crate::control::server::serve_tick(&mut ses);
+    assert_eq!(ses.midi_play.held.len(), 1, "the pedal holds it");
+    ses.midi.arrive("Keys", Msg::Cc { ch: 0, n: 64, v: 0 });
+    crate::control::server::serve_tick(&mut ses);
+    assert!(ses.midi_play.held.is_empty());
+    // The muting channel: white key 48 switches the first channel.
+    ses.settings.set_number(&crate::prefs::MUTING_CHANNEL, 4);
+    let was = ses.project.channels[0].enabled;
+    ses.midi.arrive("Keys", Msg::On { ch: 3, key: 48, vel: 90 });
+    crate::control::server::serve_tick(&mut ses);
+    assert_eq!(ses.project.channels[0].enabled, !was);
+    assert_eq!(crate::history::undo_in(&mut ses).as_deref(), Some(crate::midi_notes::MUTE_SOLO));
+    assert_eq!(ses.project.channels[0].enabled, was);
 }

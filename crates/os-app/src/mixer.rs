@@ -988,21 +988,10 @@ fn remove_tracks(s: &mut State, gone: &[u16]) -> Option<String> {
     }
     track_ids(s);
     let tracks = gone.iter().filter_map(|&t| id_of(s, t)).collect();
-    // The numbers the kept tracks get, for the selection.
-    let mut k = 0u16;
-    let mut new_of = std::collections::HashMap::new();
-    for m in &s.session.project.mixer {
-        if !gone.contains(&m.index) {
-            new_of.insert(m.index, k);
-            k += 1;
-        }
-    }
+    // The selection follows the tracks (`View::Places`).
     if let Some(e) = apply(s, "Delete mixer track", vec![Command::RemoveTracks { tracks }]) {
         return Some(e);
     }
-    let m = |t: u16| new_of.get(&t).copied();
-    s.selected_mixer = m(s.selected_mixer).unwrap_or(1).min(inserts(&s.session));
-    s.mixer.sel = s.mixer.sel.iter().filter_map(|&t| m(t)).collect();
     Some(format!("Removed {} unused mixer track(s)", gone.len()))
 }
 

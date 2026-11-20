@@ -21,6 +21,7 @@ pub mod audio_log_ui;
 pub mod help_links;
 pub mod diagnostics;
 pub use os_session::audio_cfg;
+pub use os_session::midi_notes;
 pub mod auto_close;
 pub mod crash;
 pub use os_session::autoscroll;
