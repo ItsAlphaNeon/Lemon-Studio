@@ -432,9 +432,9 @@ pub fn builtin_effects() -> Vec<Available> {
     LIBS.iter().zip(entries).zip(names).filter_map(|((lib, entry), name)| Some(linked(lib, entry?, name))).flatten().collect()
 }
 
-/// Whether `plugin` is one compiled into Lemon Studio, whose editor is drawn in the app's own window (Linux;
+/// Whether `plugin` is one compiled into Lemon Studio, whose editor is drawn in the app's own window (Linux and macOS;
 /// `plugin_window::EmbedFrame`). `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives them windows of their own again.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn embeds(plugin: &SharedPlugin) -> bool {
     static IDS: OnceLock<HashSet<String>> = OnceLock::new();
     if std::env::var_os("LEMONSTUDIO_PLUGIN_WINDOWS").is_some_and(|v| v == "1") {

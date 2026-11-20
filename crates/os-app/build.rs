@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Sets `cfg(plugin_windows)` where plugin windows exist, and `cfg(lemon_updater)` when `LEMON_UPDATER` names the
+//! Sets `cfg(plugin_windows)` where plugin windows exist, `cfg(lemon_cards)` where built-in editors are drawn in the app, and `cfg(lemon_updater)` when `LEMON_UPDATER` names the
 //! updater to carry (release builds, `crate::update`). The program's icon and version resource are `lemonstudio`'s.
 
 use std::path::PathBuf;
@@ -28,5 +28,12 @@ fn main() {
     let os = matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows" | "linux" | "macos"));
     if os && std::env::var_os("CARGO_FEATURE_PLUGIN_WINDOWS").is_some() {
         println!("cargo::rustc-cfg=plugin_windows");
+    }
+    // `lemon_cards`: the plugins compiled into Lemon Studio draw their editors in its own window, as Lemon cards
+    // (`plugin_window::EmbedFrame`), and several of one plugin join as tabs (`plugin_tabs`). Linux and macOS; Windows is
+    // next.
+    println!("cargo::rustc-check-cfg=cfg(lemon_cards)");
+    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("linux" | "macos")) {
+        println!("cargo::rustc-cfg=lemon_cards");
     }
 }

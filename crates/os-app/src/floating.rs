@@ -92,7 +92,7 @@ pub fn floats(w: Win) -> bool {
 /// The frame of floating window `w`, when it is one (a plugin window drawn in the app's: while it is open).
 pub fn rect(s: &State, w: Win) -> Option<Rect> {
     match w {
-        #[cfg(target_os = "linux")]
+        #[cfg(lemon_cards)]
         Win::Hosted(row) => s.embeds.get(&row).map(|e| e.rect()),
         w => placed(w).map(|p| (p.rect)(s)),
     }
@@ -102,7 +102,7 @@ pub fn rect(s: &State, w: Win) -> Option<Rect> {
 pub fn paint_area(s: &State, w: Win) -> Option<Rect> {
     match w {
         // With the row of tabs on top of its frame.
-        #[cfg(target_os = "linux")]
+        #[cfg(lemon_cards)]
         Win::Hosted(row) => s.embeds.get(&row).map(|e| e.paint_rect()),
         w => placed(w).map(|p| (p.paint)(s)),
     }
@@ -111,7 +111,7 @@ pub fn paint_area(s: &State, w: Win) -> Option<Rect> {
 /// What a repaint of floating window `w` covers.
 pub fn bounds(s: &State, w: Win) -> Option<Rect> {
     match w {
-        #[cfg(target_os = "linux")]
+        #[cfg(lemon_cards)]
         Win::Hosted(row) => s.embeds.get(&row).map(|e| e.paint_rect()),
         w => placed(w).map(|p| (p.bounds)(s)),
     }

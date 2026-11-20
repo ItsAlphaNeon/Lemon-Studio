@@ -21,7 +21,7 @@ pub mod vals;
 pub mod win;
 #[cfg(all(feature = "gui", target_os = "linux"))]
 pub mod x11;
-#[cfg(all(feature = "gui", target_os = "linux"))]
+#[cfg(all(feature = "gui", any(target_os = "linux", target_os = "macos")))]
 pub mod embed;
 #[cfg(all(feature = "gui", target_os = "macos"))]
 pub mod mac;

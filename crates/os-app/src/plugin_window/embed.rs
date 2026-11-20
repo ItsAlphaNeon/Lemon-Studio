@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! A plugin window drawn inside Lemon Studio's own window (Linux): the frame (`super`) painted on the app's canvas, the
+//! A plugin window drawn inside Lemon Studio's own window (Linux and macOS): the frame (`super`) painted on the app's canvas, the
 //! plugin's editor painted from what it hands over (`os_plugkit::embed`). For the plugins compiled into Lemon Studio,
 //! whose editors draw in-process; other plugins keep a window of their own (`x11`).
 //!
@@ -280,6 +280,8 @@ impl EmbedFrame {
         let st = State::new(info, editor, false);
         let size = ((editor.0 * k).round() as u32, (editor.1 * k).round() as u32);
         let surface = os_plugkit::embed::offer(size, os_clap::wake);
+        // macOS editors ask for the scale they are drawn at (`os_plugkit::gui::backing_scale`), as hosts there set none.
+        surface.set_scale(k);
         let (w, h) = st.size();
         let chrome = Canvas::new(dev(w, k).max(1) as u32, dev(h, k).max(1) as u32, k)?;
         let inner = Inner {
@@ -504,6 +506,7 @@ impl EmbedFrame {
         if i.k != k {
             i.k = k;
             i.chrome_dirty = true;
+            i.surface.set_scale(k);
         }
         // The Lemon design draws it as a card (`State::card`); the Classic one keeps its frame. A theme change paints
         // it again.

@@ -144,6 +144,27 @@ impl Waker {
         self.0.quit.store(true, Ordering::Release);
         self.wake();
     }
+
+    pub(crate) fn quitting(&self) -> bool {
+        self.0.quitting()
+    }
+
+    /// Waits up to `ms` for a wake (an embedded editor's input, a parameter, the close); whether there was one.
+    pub(crate) fn wait(&self, ms: i32) -> bool {
+        let Ok(mut st) = self.0.state.lock() else { return false };
+        let end = Instant::now() + Duration::from_millis(ms.max(0) as u64);
+        while !st.woke && !self.0.quitting() {
+            let now = Instant::now();
+            if now >= end {
+                break;
+            }
+            st = match self.0.cv.wait_timeout(st, end - now) {
+                Ok((g, _)) => g,
+                Err(_) => return false,
+            };
+        }
+        std::mem::take(&mut st.woke)
+    }
 }
 
 /// Where an editor keeps its open window's waker, for parameter notifications (`Editor::param_value_changed` runs on
@@ -193,6 +214,10 @@ impl Drop for EditorThread {
 /// The backing scale of the host's view (its window's, else the main screen's): the editor's scale, as macOS hosts
 /// never set one (sizes are points there). Main thread.
 pub fn backing_scale(parent: Parent) -> f32 {
+    // An editor Lemon Studio draws in its own window: the scale it draws at.
+    if let Some(k) = u32::try_from(parent).ok().and_then(crate::embed::scale_of) {
+        return k;
+    }
     let Some(mtm) = MainThreadMarker::new() else { return 1.0 };
     // SAFETY: the host passes a valid NSView (or null).
     let view = unsafe { (parent as *const NSView).as_ref() };
@@ -203,6 +228,14 @@ pub fn backing_scale(parent: Parent) -> f32 {
 /// Opens an editor view of `size` device px (at [`backing_scale`]) in the host's view `parent` and runs `run` with it
 /// on a thread of its own. Main thread; `None` elsewhere.
 pub fn spawn(parent: Parent, size: (u32, u32), slot: &Slot, run: impl FnOnce(Window) + Send + 'static) -> Option<EditorThread> {
+    // Lemon Studio drawing the editor in its own window: no view at all (`embed`). Its tokens lie below 2^32, where no
+    // NSView does.
+    if let Some(s) = u32::try_from(parent).ok().and_then(crate::embed::claim) {
+        let shared = Shared::new();
+        let scale = s.scale();
+        let card = crate::embed::Window::new(s, Waker(shared.clone()));
+        return start(shared, 0, scale, slot, Some(card), run);
+    }
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("plugin editor: not opened on the main thread");
         return None;
@@ -218,11 +251,11 @@ pub fn spawn(parent: Parent, size: (u32, u32), slot: &Slot, run: impl FnOnce(Win
     parent_view.addSubview(&view);
     place(&view);
     let id = register(view, None, &shared, scale);
-    start(shared, id, scale, slot, run)
+    start(shared, id, scale, slot, None, run)
 }
 
-/// The GUI thread of surface `id`, running `run`.
-fn start(shared: Arc<Shared>, id: u64, scale: f32, slot: &Slot, run: impl FnOnce(Window) + Send + 'static) -> Option<EditorThread> {
+/// The GUI thread of surface `id` (0 and `card` for an editor drawn in Lemon Studio's window), running `run`.
+fn start(shared: Arc<Shared>, id: u64, scale: f32, slot: &Slot, card: Option<crate::embed::Window>, run: impl FnOnce(Window) + Send + 'static) -> Option<EditorThread> {
     let waker = Waker(shared.clone());
     let win = Window {
         shared: shared.clone(),
@@ -235,6 +268,7 @@ fn start(shared: Arc<Shared>, id: u64, scale: f32, slot: &Slot, run: impl FnOnce
         next_tick: Instant::now() + TICK,
         raw: VecDeque::new(),
         queue: VecDeque::new(),
+        card,
     };
     let Ok(thread) = std::thread::Builder::new().name("plugin editor".into()).spawn(move || run(win)) else {
         on_main(move |_| close_all(&shared));
@@ -884,21 +918,33 @@ pub struct Window {
     raw: VecDeque<Raw>,
     /// Inputs made, not handed out yet.
     queue: VecDeque<Input>,
+    /// Drawn in Lemon Studio's own window (`embed`): no view, `id` 0. The calls go to it; a floating window it opens is
+    /// a panel of its own all the same, and the file dialogs and the clipboard are the main thread's either way.
+    card: Option<crate::embed::Window>,
 }
 
 impl Window {
     /// No input is waiting: a good moment to paint (once per burst of events).
     pub fn idle(&self) -> bool {
+        if let Some(c) = &self.card {
+            return c.idle();
+        }
         self.queue.is_empty()
     }
 
     /// Ctrl, Shift, Alt held at the last event (Command counts as Ctrl).
     pub fn mods(&self) -> (bool, bool, bool) {
+        if let Some(c) = &self.card {
+            return c.mods();
+        }
         self.mods
     }
 
     /// The next input, waiting for it; `None` when the editor closes.
     pub fn next(&mut self) -> Option<Input> {
+        if let Some(c) = &mut self.card {
+            return c.next();
+        }
         loop {
             if self.shared.quitting() {
                 return None;
@@ -1034,11 +1080,17 @@ impl Window {
 
     /// Copies `px` (XRGB rows of `w`) into the window at (0, 0).
     pub fn blit(&self, px: &[u32], w: u32, h: u32) {
+        if let Some(c) = &self.card {
+            return c.blit(px, w, h);
+        }
         show_frame(self.id, px, w, h, false);
     }
 
     /// How often `next` gives `Input::Tick`.
     pub fn set_tick(&mut self, every: Duration) {
+        if let Some(c) = &mut self.card {
+            return c.set_tick(every);
+        }
         self.tick = every;
         self.next_tick = Instant::now() + every;
     }
@@ -1050,6 +1102,9 @@ impl Window {
 
     /// The pointer on the screen at the last event (device px).
     pub fn pointer(&self) -> (i32, i32) {
+        if let Some(c) = &self.card {
+            return c.pointer();
+        }
         self.pointer
     }
 
@@ -1060,7 +1115,7 @@ impl Window {
         let shared = Shared::new();
         let (me, sh) = (self.id, shared.clone());
         let (id, scale) = self.call(move |mtm| make_floating(mtm, r, view_of(me).and_then(|v| v.window()).and_then(|w| w.screen()), &sh)).flatten()?;
-        start(shared, id, scale, &Slot::default(), run)
+        start(shared, id, scale, &Slot::default(), None, run)
     }
 
     /// A floating window: where it is (see `floating`); `None` when it closes meanwhile.
@@ -1117,13 +1172,28 @@ impl Window {
         show_frame(self.id, px, w, h, true);
     }
 
+    /// Whether a text field of the editor has the keyboard: Lemon Studio then sends it the keys (an editor drawn in its
+    /// window; a view of its own takes them itself).
+    pub fn set_wants_keys(&self, on: bool) {
+        if let Some(c) = &self.card {
+            c.set_wants_keys(on);
+        }
+    }
+
     /// The cursor for sizing (`on`) or the plain one.
     pub fn sizing_cursor(&self, on: bool) {
+        // An editor drawn in Lemon Studio's window: the app's cursor.
+        if self.card.is_some() {
+            return;
+        }
         on_main(move |_| if on { grip_cursor() } else { NSCursor::arrowCursor() }.set());
     }
 
     /// Resizes the window (device px).
     pub fn resize(&self, w: u32, h: u32) {
+        if let Some(c) = &self.card {
+            return c.resize(w, h);
+        }
         let (id, s) = (self.id, f64::from(self.scale));
         on_main(move |_| {
             if let Some(v) = view_of(id) {
@@ -1135,6 +1205,9 @@ impl Window {
 
     /// A window point on the screen (device px).
     pub fn to_root(&self, x: i32, y: i32) -> (i32, i32) {
+        if let Some(c) = &self.card {
+            return c.to_root(x, y);
+        }
         let (id, s) = (self.id, f64::from(self.scale));
         let r = self.call(move |_| {
             let v = view_of(id)?;
@@ -1192,11 +1265,17 @@ impl Window {
     }
 
     pub fn locked(&self) -> bool {
+        if let Some(c) = &self.card {
+            return c.locked();
+        }
         self.locked
     }
 
     /// Hides the cursor and holds it where it is: movement arrives as `Input::Delta`.
     pub fn lock(&mut self) {
+        if let Some(c) = &mut self.card {
+            return c.lock();
+        }
         if self.locked {
             return;
         }
@@ -1207,6 +1286,9 @@ impl Window {
 
     /// Shows the cursor again where the drag started.
     pub fn unlock(&mut self) {
+        if let Some(c) = &mut self.card {
+            return c.unlock();
+        }
         if !self.locked {
             return;
         }
@@ -1248,11 +1330,17 @@ impl Window {
 
     /// Shows a menu at screen (`x`, `y`); the picked entry's command.
     pub fn popup<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32) -> Option<C> {
+        if let Some(c) = &mut self.card {
+            return c.popup(x, y, def, pal, scale);
+        }
         self.popup_live(x, y, def, pal, scale, &mut |_| {})
     }
 
     /// `popup`, with `live` called on each tick while the menu is open (a picture that keeps moving under its menu).
     pub fn popup_live<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32, live: &mut dyn FnMut(&Window)) -> Option<C> {
+        if let Some(c) = &mut self.card {
+            return { let _ = live; c.popup(x, y, def, pal, scale) };
+        }
         if crate::no_modal() {
             return None;
         }
@@ -1383,6 +1471,9 @@ impl Window {
     // "Type in value": a one-line box at a screen point. Enter accepts, Esc or a click elsewhere cancels.
 
     pub fn type_in(&mut self, x: i32, y: i32, text: &str, scale: f32) -> Option<String> {
+        if let Some(c) = &mut self.card {
+            return c.type_in(x, y, text, scale);
+        }
         if crate::no_modal() {
             return None;
         }

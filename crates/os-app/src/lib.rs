@@ -161,7 +161,7 @@ pub mod plugin_palette;
 pub mod plugin_popup;
 pub use os_session::plugin_scan;
 pub mod plugin_scan_ui;
-#[cfg(all(target_os = "linux", plugin_windows))]
+#[cfg(all(lemon_cards, plugin_windows))]
 pub mod plugin_tabs;
 pub mod plugin_window;
 pub mod plugins;

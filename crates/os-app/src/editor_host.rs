@@ -38,7 +38,7 @@ pub struct Editor {
     #[cfg(plugin_windows)]
     pub placed: Option<(i32, i32)>,
     /// Linux: where its window drawn in the app's was when it last closed (canvas px): it reopens there.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     pub embed_at: Option<(f32, f32)>,
     /// When its open window opened (`Plugins::opens`): the limit on open editors closes the earliest first.
     #[cfg(plugin_windows)]
@@ -392,7 +392,7 @@ impl EditorHost {
         if let Some(e) = self.editors.get_mut(&row) {
             if let Some(w) = &e.window {
                 e.detached = w.detached();
-                #[cfg(target_os = "linux")]
+                #[cfg(lemon_cards)]
                 if let Some(em) = w.embed() {
                     let r = em.rect();
                     e.embed_at = Some((r.x, r.y));
@@ -497,13 +497,13 @@ impl EditorHost {
         };
         // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size. On
         // Linux a plugin compiled into Lemon Studio draws its editor in the app's own window (`EmbedFrame`).
-        #[cfg(target_os = "linux")]
+        #[cfg(lemon_cards)]
         let w: FrameWindow = if embeds(&h.plugin) {
             Box::new(crate::plugin_window::EmbedFrame::new(info, (560.0, 437.0), scale, e.embed_at, self.frames.main_to_screen())?)
         } else {
             self.frames.open(owner, info, (560.0, 437.0), scale, pos, e.detached)?
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(lemon_cards))]
         let w = self.frames.open(owner, info, (560.0, 437.0), scale, pos, e.detached)?;
         // Mixer effects have no channel strip (spec: ui/mixer.md §7).
         if row >= FX_KEY {
@@ -599,7 +599,7 @@ impl EditorHost {
             // and startup").
             if let Some(w) = &e.window {
                 e.detached = w.detached();
-                #[cfg(target_os = "linux")]
+                #[cfg(lemon_cards)]
                 if let Some(em) = w.embed() {
                     let r = em.rect();
                     e.embed_at = Some((r.x, r.y));
@@ -659,7 +659,7 @@ impl EditorHost {
     }
 
     /// Linux: the open plugin windows drawn in the app's, by key.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     pub fn embeds(&self) -> BTreeMap<usize, crate::plugin_window::EmbedFrame> {
         self.editors.iter().filter_map(|(&r, e)| Some((r, e.window.as_ref()?.embed()?.clone()))).collect()
     }

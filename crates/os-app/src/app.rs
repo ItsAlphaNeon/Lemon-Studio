@@ -1267,13 +1267,13 @@ pub struct State {
     pub veil: [f32; 3],
     /// The plugin windows drawn in the app's (Linux), by `Plugins::hosted` key: painted as `Win::Hosted` (kept by
     /// `App::sync_embeds`).
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     pub embeds: std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>,
     /// Those of one plugin as tabs of one window.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     pub plugin_tabs: crate::plugin_tabs::Tabs,
     /// A plugin window held over another's title shows what letting go gives.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     pub tab_preview: Option<crate::plugin_tabs::Preview>,
     /// Each layout's windows while the other is in use (classic, Lemon): the playlist, mixer and piano roll's states
     /// and the ones open, back to front (`App::set_tiling_layout`).
@@ -1556,24 +1556,24 @@ pub struct App {
     pub canvas_off: (i32, i32),
     /// Linux: what each plugin window drawn in the app's showed at the last tick (serials, place, menus), to repaint it
     /// where it changed (`sync_embeds`).
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     embed_seen: std::collections::HashMap<usize, ((u64, u64), Rect, Option<Rect>)>,
     /// Linux: the plugin window drawn in the app's that has the mouse: pressed on (the button), or hovered.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     embed_press: Option<(usize, os_plugkit::input::Button)>,
     /// Linux: that press was on its frame's maximize or minimize button: the window comes to the front at the release.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     embed_raise: Option<usize>,
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     embed_hover: Option<usize>,
     /// Linux: the virtual pointer at the last move while an embedded editor holds the cursor (`App::embed_move`).
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     embed_virt: Option<(f32, f32)>,
     /// Linux: a tab pressed (`plugin_tabs`): where, and once it has been dragged out, the mouse's offset in its window.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     tab_press: Option<(usize, (f32, f32), Option<(f32, f32)>)>,
     /// Linux: the window being dragged rests over another of its plugin (`plugin_tabs::Held`).
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     tab_held: Option<crate::plugin_tabs::Held>,
     /// Linux: a tab's little x pressed.
     tab_close_press: Option<usize>,
@@ -1867,11 +1867,11 @@ impl App {
                 float_layer: Default::default(),
                 surface_marks: Default::default(),
                 veil: [0.0; 3],
-                #[cfg(target_os = "linux")]
+                #[cfg(lemon_cards)]
                 embeds: Default::default(),
-                #[cfg(all(target_os = "linux", plugin_windows))]
+                #[cfg(all(lemon_cards, plugin_windows))]
                 plugin_tabs: Default::default(),
-                #[cfg(all(target_os = "linux", plugin_windows))]
+                #[cfg(all(lemon_cards, plugin_windows))]
                 tab_preview: None,
                 layout_wins: Default::default(),
                 pat_ui: Default::default(),
@@ -1897,19 +1897,19 @@ impl App {
             screens: Vec::new(),
             native: Vec::new(),
             canvas_off: (0, 0),
-            #[cfg(target_os = "linux")]
+            #[cfg(lemon_cards)]
             embed_seen: std::collections::HashMap::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(lemon_cards)]
             embed_press: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(lemon_cards)]
             embed_raise: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(lemon_cards)]
             embed_hover: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(lemon_cards)]
             embed_virt: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(lemon_cards)]
             tab_press: None,
-            #[cfg(all(target_os = "linux", plugin_windows))]
+            #[cfg(all(lemon_cards, plugin_windows))]
             tab_held: None,
             tab_close_press: None,
             popup_lift: None,
@@ -2360,9 +2360,9 @@ impl App {
     /// window drawn in the app's (Linux), or a placed floating window.
     fn closes_first(&self, w: Win) -> bool {
         match w {
-            #[cfg(target_os = "linux")]
+            #[cfg(lemon_cards)]
             Win::Hosted(r) => self.state.embeds.contains_key(&r),
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(lemon_cards))]
             Win::Hosted(_) => false,
             w => crate::floating::placed(w).is_some(),
         }
@@ -2373,9 +2373,9 @@ impl App {
         match w {
             // All its tabs, as its × closes them.
             Win::Hosted(row) => {
-                #[cfg(all(target_os = "linux", plugin_windows))]
+                #[cfg(all(lemon_cards, plugin_windows))]
                 let rows = self.state.plugin_tabs.group_of(row).map_or(vec![row], |g| g.rows.clone());
-                #[cfg(all(not(target_os = "linux"), plugin_windows))]
+                #[cfg(all(not(lemon_cards), plugin_windows))]
                 let rows = vec![row];
                 #[cfg(plugin_windows)]
                 for r in rows {
@@ -2950,7 +2950,7 @@ impl App {
                 use crate::editor_host::Request;
                 match r {
                     // The window's own close: all its tabs (a tab's little x closes only that one).
-                    #[cfg(target_os = "linux")]
+                    #[cfg(lemon_cards)]
                     Request::Close(row) => {
                         let others: Vec<usize> = self.state.plugin_tabs.group_of(row).map_or(Vec::new(), |g| g.rows.iter().copied().filter(|&o| o != row).collect());
                         for o in others {
@@ -2958,7 +2958,7 @@ impl App {
                         }
                         continue;
                     }
-                    #[cfg(not(target_os = "linux"))]
+                    #[cfg(not(lemon_cards))]
                     Request::Close(_) => continue,
                     Request::Raise(row) => {
                         // A click in a plugin window closes an open app popup and the Song info box, as a click elsewhere
@@ -3001,7 +3001,7 @@ impl App {
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
                         // A plugin window drawn in the app's own (Linux, a plugin compiled into Lemon Studio) stays in it.
-                        #[cfg(target_os = "linux")]
+                        #[cfg(lemon_cards)]
                         if self.state.embeds.contains_key(&row) {
                             if let Some(i) = menu.items.iter_mut().find(|i| matches!(i.cmd, crate::playlist::Cmd::PluginDetach(..))) {
                                 *i = i.clone().off();
@@ -3141,7 +3141,7 @@ impl App {
                 self.invalidate();
             }
             self.clip_docked();
-            #[cfg(target_os = "linux")]
+            #[cfg(lemon_cards)]
             self.sync_embeds();
             // What the linked editors' instances hold now, for their next edit's undo.
             #[cfg(plugin_windows)]
@@ -3150,7 +3150,7 @@ impl App {
     }
 
     /// Linux: the windows of one plugin as tabs of one window: each has its row of tabs and the group's place.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn sync_plugin_tabs(&mut self, frames: &std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>) {
         let open: Vec<(usize, String)> = frames.keys().map(|&r| (r, self.state.session.plugins.descriptor(r).map_or(String::new(), |d| d.name.clone()))).collect();
         let tabs = &mut self.state.plugin_tabs;
@@ -3174,7 +3174,7 @@ impl App {
 
     /// Linux: the plugin windows drawn in the app's (`plugin_window::EmbedFrame`) go into `State::embeds` to be painted,
     /// follow the canvas and the workspace, and are repainted where they or their editors changed.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn sync_embeds(&mut self) {
         let k = self.state.ui_scale.max(0.1);
         let canvas = ((self.state.screen.0 * k).round() as u32, (self.state.screen.1 * k).round() as u32);
@@ -3332,7 +3332,7 @@ impl App {
         // A hidden tab brought forward (from the rack, say) shows; the others stay out of the stack. Then the groups
         // take in the windows opened and closed since the last look: a window closed (its button in the rack clicked
         // again) would otherwise still be the tab showing, and the one left would leave the stack until the next tick.
-        #[cfg(target_os = "linux")]
+        #[cfg(lemon_cards)]
         {
             if let Some(&Win::Hosted(r)) = self.state.z.last() {
                 self.state.plugin_tabs.activate(r);
@@ -4411,12 +4411,12 @@ impl App {
     }
 
     /// A dragged plugin window is waiting out its hold over another (`plugin_tabs::Held`).
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn tab_holding(&self) -> bool {
         self.tab_held.is_some_and(|h| !h.ripe)
     }
 
-    #[cfg(not(all(target_os = "linux", plugin_windows)))]
+    #[cfg(not(all(lemon_cards, plugin_windows)))]
     fn tab_holding(&self) -> bool {
         false
     }
@@ -4462,7 +4462,7 @@ impl App {
         }
         self.veils_tick(now);
         self.float_layer_tick(now);
-        #[cfg(all(target_os = "linux", plugin_windows))]
+        #[cfg(all(lemon_cards, plugin_windows))]
         self.tab_hold_tick(now);
     }
 
@@ -6406,7 +6406,7 @@ impl App {
     /// Mouse moved; returns whether a repaint is needed.
     pub fn mouse_move(&mut self, x: f32, y: f32) -> bool {
         self.mouse = (x, y);
-        #[cfg(all(target_os = "linux", plugin_windows))]
+        #[cfg(all(lemon_cards, plugin_windows))]
         if self.embed_move(x, y) {
             return true;
         }
@@ -6910,7 +6910,7 @@ impl App {
             for (a, r) in [(&self.hover, self.hover_rect), (&hover, rect)] {
                 if let (Some(a), Some(r)) = (a, r) {
                     // A plugin tab's hit is one thin band of it, and its neighbours lie over each other: the whole row.
-                    #[cfg(all(target_os = "linux", plugin_windows))]
+                    #[cfg(all(lemon_cards, plugin_windows))]
                     if let Action::PluginTab(t) | Action::PluginTabClose(t) = a
                         && let Some(e) = self.state.plugin_tabs.group_of(*t).and_then(|g| self.state.embeds.get(&g.active))
                     {
@@ -7052,7 +7052,7 @@ impl App {
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
         self.invalidate();
-        #[cfg(all(target_os = "linux", plugin_windows))]
+        #[cfg(all(lemon_cards, plugin_windows))]
         if self.embed_down(os_plugkit::input::Button::Left) {
             return;
         }
@@ -7264,19 +7264,19 @@ impl App {
     }
 
     /// Linux: Ctrl, Shift and Alt for a plugin editor drawn in the app's window.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     fn embed_mods(&self) -> (bool, bool, bool) {
         (self.ctrl, self.shift, self.alt)
     }
 
     /// Linux: the plugin window drawn in the app's whose editor has a menu or box open: every input goes to it.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     fn embed_modal(&self) -> Option<usize> {
         self.state.embeds.iter().find(|(_, e)| e.modal()).map(|(&r, _)| r)
     }
 
     /// Linux: the plugin window drawn in the app's that is on top at (`x`, `y`).
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     fn embed_at(&self, x: f32, y: f32) -> Option<usize> {
         match self.top_hit(x, y)?.action {
             Action::Embed(r) => Some(r),
@@ -7286,7 +7286,7 @@ impl App {
 
     /// Linux: a press on a plugin window drawn in the app's (or anywhere while its editor's menu is open) goes to it,
     /// and brings it to the front. Whether it took the press.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn embed_down(&mut self, btn: os_plugkit::input::Button) -> bool {
         if self.modal_open() || self.state.menu_open.is_some() {
             return false;
@@ -7327,7 +7327,7 @@ impl App {
 
     /// Linux: the mouse moved: to the plugin window drawn in the app's that was pressed on (as the distance moved while
     /// its editor holds the cursor), whose menu is open, or that it is over. Whether that window took it alone.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn embed_move(&mut self, x: f32, y: f32) -> bool {
         if let Some((row, from, apart)) = self.tab_press {
             let Some(e) = self.state.embeds.get(&row).cloned() else {
@@ -7392,7 +7392,7 @@ impl App {
     }
 
     /// Linux: the button went up: to the plugin window drawn in the app's that had the press (or the open menu).
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn embed_up(&mut self) -> bool {
         if self.tab_press.take().is_some() {
             self.tab_hold_finish();
@@ -7430,7 +7430,7 @@ impl App {
 
     /// Linux: the window of another of `row`'s plugin whose title the mouse is near (`plugin_tabs::join_zone`), with
     /// nothing lying over it there.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn tab_target(&self, row: usize, x: f32, y: f32) -> Option<usize> {
         if !crate::prefs::check(&crate::prefs::PLUGIN_TABS) {
             return None;
@@ -7461,7 +7461,7 @@ impl App {
     }
 
     /// Linux: a window dragged to (`x`, `y`): the hold over another window starts, goes on or ends.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn tab_hold_track(&mut self, row: usize, x: f32, y: f32) {
         let now = std::time::Instant::now();
         match (self.tab_target(row, x, y), &mut self.tab_held) {
@@ -7477,7 +7477,7 @@ impl App {
         }
     }
 
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn tab_preview_off(&mut self) {
         if self.state.tab_preview.take().is_some() {
             self.invalidate();
@@ -7485,7 +7485,7 @@ impl App {
     }
 
     /// Linux: the hold's time is up: the held window shows the group it would make.
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn tab_hold_tick(&mut self, now: std::time::Instant) {
         let Some(mut h) = self.tab_held else { return };
         if !self.state.embeds.contains_key(&h.row) || !self.state.embeds.contains_key(&h.into) {
@@ -7503,7 +7503,7 @@ impl App {
 
     /// Linux: the button came up: a held window that was showing the group makes it, where it was let go (the other
     /// window comes to it).
-    #[cfg(all(target_os = "linux", plugin_windows))]
+    #[cfg(all(lemon_cards, plugin_windows))]
     fn tab_hold_finish(&mut self) {
         let held = self.tab_held.take();
         self.tab_preview_off();
@@ -7515,7 +7515,7 @@ impl App {
     }
 
     /// Linux: the wheel over a plugin window drawn in the app's (or with its editor's menu open) turns there.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     fn embed_wheel(&mut self, dy: f32) -> bool {
         let (x, y) = self.mouse;
         let Some(row) = self.embed_modal().or_else(|| self.embed_at(x, y)) else { return false };
@@ -7527,7 +7527,7 @@ impl App {
 
     /// Linux: keys go to a plugin editor drawn in the app's window while its menu or box is open, or while a text
     /// field of it has the keyboard and its window is in front. Whether it took the key.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     fn embed_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
         // a text field of the editor in front has the keyboard
         let typing = match self.state.z.last() {
@@ -7611,7 +7611,7 @@ impl App {
     /// True while a drag moves a value rather than the cursor (knobs, the tempo, scroll-bar right-drags): the shell
     /// hides the cursor and keeps it where the drag started, feeding relative movement.
     pub fn cursor_locked(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(lemon_cards)]
         if self.embed_press.is_some_and(|(r, _)| self.state.embeds.get(&r).is_some_and(|e| e.locked())) {
             return true;
         }
@@ -7764,7 +7764,7 @@ impl App {
     pub fn mouse_down_middle(&mut self) {
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
-        #[cfg(all(target_os = "linux", plugin_windows))]
+        #[cfg(all(lemon_cards, plugin_windows))]
         if self.embed_down(os_plugkit::input::Button::Middle) {
             self.invalidate();
             return;
@@ -7812,7 +7812,7 @@ impl App {
         self.right_down = true;
         // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
         self.state.overlay_on = self.state.surface;
-        #[cfg(all(target_os = "linux", plugin_windows))]
+        #[cfg(all(lemon_cards, plugin_windows))]
         if self.embed_down(os_plugkit::input::Button::Right) {
             self.invalidate();
             return;
@@ -8047,7 +8047,7 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
-        #[cfg(all(target_os = "linux", plugin_windows))]
+        #[cfg(all(lemon_cards, plugin_windows))]
         if self.embed_up() {
             return;
         }
@@ -8512,7 +8512,7 @@ impl App {
         if self.modal_open() {
             return self.dialog_wheel(dy);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(lemon_cards)]
         if self.embed_wheel(dy) {
             return;
         }
@@ -8948,7 +8948,7 @@ impl App {
             return self.dialog_key(key, ctrl, alt);
         }
         // So does a plugin editor's menu or box drawn in the app's window (Linux).
-        #[cfg(target_os = "linux")]
+        #[cfg(lemon_cards)]
         if self.embed_key(key, ctrl, alt) {
             return;
         }
@@ -11011,7 +11011,7 @@ fn pattern_shortcut(key: &crate::keys::Key, ctrl: bool, shift: bool) -> Option<c
 }
 
 /// A key as an X11 key symbol and the character it types, for a plugin editor drawn in the app's window (Linux).
-#[cfg(target_os = "linux")]
+#[cfg(lemon_cards)]
 fn keysym_of(key: &crate::keys::Key) -> Option<(u32, Option<char>)> {
     use os_plugkit::input::keysym;
     use crate::keys::{Key, NamedKey};
@@ -11264,7 +11264,7 @@ mod tests {
 
     /// Two windows of one plugin apart: one dragged onto the other and held shows the group in its own row of tabs, the
     /// other unchanged; moved away the row goes, and held again and let go they are one window.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     fn tabs_go_back_together(app: &mut App, c: &mut Canvas) {
         use std::time::{Duration, Instant};
         let (e0, e1) = (app.state.embeds[&0].clone(), app.state.embeds[&1].clone());
@@ -11319,7 +11319,7 @@ mod tests {
     /// As `tabs_go_back_together`, through the shell's own calls and clock: presses, motion in steps, the hold waited
     /// out in real time with frames between, the release. Then a tab dragged out of the group and, in the same drag,
     /// held over the window it came from goes back.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     fn tabs_rejoin_as_the_shell_drives_it(app: &mut App, c: &mut Canvas) {
         use std::time::Duration;
         let (e0, e1) = (app.state.embeds[&0].clone(), app.state.embeds[&1].clone());
@@ -12765,7 +12765,7 @@ mod tests {
     /// "Play truncated notes on transport" is on and "Reset plugins on transport" off by default; a click switches
     /// each (kept as a program setting), and the next start of playback goes by them.
     /// Two windows of one plugin are one window with tabs; a tab shows on a press, and a drag takes it out.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     #[test]
     fn windows_of_one_plugin_are_tabs() {
         use crate::plugin_window::ChannelInfo;
@@ -12836,7 +12836,7 @@ mod tests {
 
     /// The tab showing closed from the instrument rack (its window button clicked again), over and over: the window
     /// left is in the stack and painted at the very next tick, every time.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     #[test]
     fn a_tab_closed_from_the_rack_leaves_the_other_showing() {
         use crate::plugin_window::ChannelInfo;
@@ -12877,7 +12877,7 @@ mod tests {
     }
 
     /// A tab's little x closes that tab; the window's close closes them all, in either layout.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     #[test]
     fn a_tab_closes_alone_and_the_window_closes_all() {
         use crate::plugin_window::ChannelInfo;
@@ -13523,7 +13523,7 @@ mod tests {
     /// The tiling layout's split gaps drag only where no floating window lies over them: over a floating window, its
     /// own clicks and cursor come first.
     /// Zest, compiled in, draws its editor in the app's window as the stock plugins do.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     #[test]
     fn zest_draws_in_the_app() {
         use crate::plugin_window::ChannelInfo;
@@ -14083,7 +14083,7 @@ mod tests {
 
     /// A plugin window drawn in the app's over the playlist stays put while the playlist scrolls under it: its pixels
     /// do not move with the playlist's, and the result equals a full repaint (no jitter, no old copies left behind).
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     #[test]
     fn playlist_scroll_leaves_in_app_plugin_windows_in_place() {
         use crate::playlist as pl;
@@ -15726,7 +15726,7 @@ mod tests {
     /// A plugin compiled into Lemon Studio draws its editor in the app's own window (Linux): no window of its own and
     /// no display needed. Its frame joins the window stack, the editor's pixels show on the canvas, a click in the
     /// editor goes to it, and the frame's close button closes it.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     #[test]
     fn built_in_editors_draw_in_the_app() {
         use crate::plugin_window::ChannelInfo;
@@ -15830,7 +15830,7 @@ mod tests {
     }
 
     // The editors drawn in the app's window (`State::embeds`) are Linux's.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     #[test]
     fn built_in_editors_are_lemon_cards() {
         use crate::plugin_window::ChannelInfo;
@@ -15889,7 +15889,7 @@ mod tests {
     /// Buttons that act on their release bring their window forward then too, so nothing shows half done while the
     /// button is held: the channel's name button over its open plugin window raises the rack and hides the window at
     /// the release, and the plugin window's close button with the rack in front never brings the window forward.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     #[test]
     fn release_buttons_raise_their_window_at_the_release() {
         use crate::plugin_window::ChannelInfo;
@@ -15954,7 +15954,7 @@ mod tests {
 
     /// Closed and opened again, a plugin window drawn in the app's comes back where it was, and the channel window
     /// where it was last moved (before it is moved, next to the rack; spec: ui/channel-rack.md "Left click").
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     #[test]
     fn windows_reopen_where_they_were() {
         use crate::plugin_window::ChannelInfo;

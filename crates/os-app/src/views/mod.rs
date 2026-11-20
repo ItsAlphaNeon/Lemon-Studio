@@ -389,7 +389,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     let n = paint_rest(ui, s, f, w);
     // The menus and boxes of plugin editors drawn in the app's window (Linux), above everything.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     for (&row, e) in &s.embeds {
         e.paint_overlays(ui.c);
         if let Some(r) = e.overlays_rect() {
@@ -418,7 +418,7 @@ pub fn paint_float_layer(ui: &mut Ui, s: &State, f: &FrameInfo) {
 
 /// The row of tabs of plugin window `row`, when it is one of several (`crate::plugin_tabs`): on top of its frame, the
 /// tabs alone, with nothing drawn between or past them.
-#[cfg(all(target_os = "linux", plugin_windows))]
+#[cfg(all(lemon_cards, plugin_windows))]
 fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_window::EmbedFrame) {
     // A window held over another shows the group it would make (`plugin_tabs::Preview`).
     // Its own tab is then only outlined, dashed, and no tab is lit: the group is not made yet.
@@ -491,13 +491,13 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
 }
 
 /// A tab's outline (`plugin_tabs::Tab::outline`: bottom left, top left, top right, bottom right) moved `d` inwards.
-#[cfg(target_os = "linux")]
+#[cfg(lemon_cards)]
 fn inset_outline(o: [(f32, f32); 4], d: f32) -> [(f32, f32); 4] {
     [(o[0].0 + d, o[0].1 - d), (o[1].0 + d, o[1].1 + d), (o[2].0 - d, o[2].1 + d), (o[3].0 - d, o[3].1 - d)]
 }
 
 /// A dashed line from `a` to `b`: 3 px dashes, 3 px apart.
-#[cfg(target_os = "linux")]
+#[cfg(lemon_cards)]
 fn dashed(ui: &mut Ui, a: (f32, f32), b: (f32, f32), c: os_theme::Color) {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let len = dx.hypot(dy);
@@ -537,7 +537,7 @@ fn paint_window(ui: &mut Ui, s: &State, win: Win, r: Rect, a: Rect, f: &FrameInf
             Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
             // A plugin window drawn in the app's (Linux): its frame and editor; every click on it goes to it.
-            #[cfg(all(target_os = "linux", plugin_windows))]
+            #[cfg(all(lemon_cards, plugin_windows))]
             Win::Hosted(row) => {
                 if let Some(e) = s.embeds.get(&row) {
                     ui.part(Seg::Win(win), a, |ui| {
@@ -701,7 +701,7 @@ pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
 pub fn paint_area(s: &State, w: Win) -> Rect {
     match w {
         Win::Mixer => s.mixer_hang().map_or(s.win_rect(Win::Mixer), |h| s.win_rect(Win::Mixer).union(&h)),
-        #[cfg(target_os = "linux")]
+        #[cfg(lemon_cards)]
         Win::Hosted(_) => crate::floating::paint_area(s, w).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)),
         w => crate::floating::paint_area(s, w).unwrap_or_else(|| s.win_rect(w)),
     }

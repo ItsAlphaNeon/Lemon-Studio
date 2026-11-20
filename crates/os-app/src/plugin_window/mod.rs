@@ -36,9 +36,9 @@ pub struct KeyMsg {
     pub alt: bool,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(lemon_cards)]
 mod embed;
-#[cfg(target_os = "linux")]
+#[cfg(lemon_cards)]
 pub use embed::EmbedFrame;
 
 /// Settings key of Theme ▸ Options ▸ "Stock plugins follow the theme" (on unless turned off): the stock plugins'
@@ -88,7 +88,7 @@ pub trait Frame {
     /// An event as if the frame had made it (tests: a drag of its edges).
     fn push_event(&self, _e: FrameEvent) {}
     /// The frame drawn in the app's window, if this is one.
-    #[cfg(target_os = "linux")]
+    #[cfg(lemon_cards)]
     fn embed(&self) -> Option<&EmbedFrame> {
         None
     }

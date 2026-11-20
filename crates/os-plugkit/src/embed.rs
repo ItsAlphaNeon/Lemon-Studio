@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Editors drawn inside Lemon Studio's own window (Linux): no window of the editor's own, no X11.
+//! Editors drawn inside Lemon Studio's own window (Linux and macOS): no window of the editor's own.
 //!
 //! The plugins compiled into Lemon Studio share this crate with the app, so the two meet in-process, as the host link's
 //! peers do (`os_hostlink`). The app offers a [`Surface`] under a token ([`offer`]) and hands the token to the plugin as
-//! the X11 window to open its editor in. The editor's [`spawn`](crate::x11::spawn) claims it ([`claim`]) instead of
+//! the window to open its editor in (an X11 window id, an `NSView` on macOS: the tokens lie below 2^32, where no view
+//! does). The editor's [`spawn`](crate::gui::spawn) claims it ([`claim`]) instead of
 //! opening a window: its [`Window`] then takes its input from the app ([`Surface::push`]) and hands it its pixels
 //! ([`Window::blit`]); menus and the type-in box are overlays the app draws above everything, with every input going to
 //! the editor while one is up ([`Surface::view`]). A copy of a plugin loaded from a file has its own registry and never
@@ -24,10 +25,10 @@ use os_ui::kit::menu as kmenu;
 use os_ui::{Canvas, Font, Rect};
 
 use crate::input::{keysym, keysym_char, Button, Input};
-use crate::x11::Waker;
+use crate::gui::Waker;
 use crate::{MenuDef, Opener};
 
-/// The editor's polling period, as the X11 editors' (`x11::TICK`).
+/// The editor's polling period, as the window editors' (`TICK`), until it sets its own (`Window::set_tick`).
 const TICK: Duration = Duration::from_millis(30);
 
 /// An editor's pixels: XRGB rows of `w`.
@@ -70,6 +71,9 @@ struct Inner {
     editor: Mutex<Option<Waker>>,
     /// Wakes the app's loop: there is something new to show.
     host: Box<dyn Fn() + Send + Sync>,
+    /// The scale the app draws the editor at (f32 bits; 0 until `Surface::set_scale`): macOS editors ask for it, as
+    /// hosts there set none (`gui::backing_scale`).
+    scale: AtomicU32,
 }
 
 #[derive(Default)]
@@ -99,15 +103,21 @@ pub fn offer(size: (u32, u32), wake: impl Fn() + Send + Sync + 'static) -> Surfa
     static NEXT: AtomicU32 = AtomicU32::new(0xe000_0000);
     let token = NEXT.fetch_add(1, Ordering::Relaxed);
     let state = State { view: View { size, ..View::default() }, room: [i32::MIN / 2, i32::MIN / 2, i32::MAX / 2, i32::MAX / 2], ..State::default() };
-    let s = Surface(Arc::new(Inner { token, state: Mutex::new(state), editor: Mutex::new(None), host: Box::new(wake) }));
+    let s = Surface(Arc::new(Inner { token, state: Mutex::new(state), editor: Mutex::new(None), host: Box::new(wake), scale: AtomicU32::new(0) }));
     offers().insert(token, s.clone());
     s
 }
 
 /// Editor side: whether the host offered a surface under `token` (the window it gave): the editor will be an embedded
-/// one (`claim`, which `x11::spawn` does).
+/// one (`claim`, which `gui::spawn` does).
 pub fn offered(token: u32) -> bool {
     offers().contains_key(&token)
+}
+
+/// Editor side: the scale the app draws the editor offered under `token` at, once it said (`Surface::set_scale`).
+pub fn scale_of(token: u32) -> Option<f32> {
+    let k = f32::from_bits(offers().get(&token)?.0.scale.load(Ordering::Relaxed));
+    (k > 0.0).then_some(k)
 }
 
 /// Editor side: the surface offered under `token` (the window the host gave), if any; taking it makes the editor an
@@ -132,7 +142,17 @@ impl Surface {
         (self.0.host)();
     }
 
-    /// The token the editor is opened with (as an X11 window id).
+    /// The scale the app draws the editor at (device px per logical px), for the editors that ask (`scale_of`).
+    pub fn set_scale(&self, k: f32) {
+        self.0.scale.store(k.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The scale the editor was offered at (`set_scale`; 1 before).
+    pub fn scale(&self) -> f32 {
+        Some(f32::from_bits(self.0.scale.load(Ordering::Relaxed))).filter(|k| *k > 0.0).unwrap_or(1.0)
+    }
+
+    /// The token the editor is opened with (as the window it gets).
     pub fn token(&self) -> u32 {
         self.0.token
     }
@@ -182,20 +202,21 @@ impl Surface {
     }
 }
 
-/// An editor drawn in the app's window: the embedded counterpart of the X11 editor window, with the same calls.
+/// An editor drawn in the app's window: the embedded counterpart of the editor window, with the same calls.
 pub struct Window {
     s: Surface,
     waker: Waker,
     mods: (bool, bool, bool),
     /// The pointer at the last input (device px from the editor's top-left): menus pick where a release happens.
     pointer: (i32, i32),
+    tick: Duration,
     next_tick: Instant,
 }
 
 impl Window {
     pub(crate) fn new(s: Surface, waker: Waker) -> Window {
         *s.0.editor.lock().unwrap_or_else(|e| e.into_inner()) = Some(waker.clone());
-        Window { s, waker, mods: (false, false, false), pointer: (0, 0), next_tick: Instant::now() + TICK }
+        Window { s, waker, mods: (false, false, false), pointer: (0, 0), tick: TICK, next_tick: Instant::now() + TICK }
     }
 
     /// A good moment to paint: no input waiting, and the window shows (`Surface::set_shown`).
@@ -229,7 +250,7 @@ impl Window {
             }
             let now = Instant::now();
             if now >= self.next_tick {
-                self.next_tick = now + TICK;
+                self.next_tick = now + self.tick;
                 return Some(Input::Tick);
             }
             let ms = (self.next_tick - now).as_millis() as i32 + 1;
@@ -251,6 +272,17 @@ impl Window {
             }
             self.waker.wait(100);
         }
+    }
+
+    /// How often `next` gives `Input::Tick`.
+    pub fn set_tick(&mut self, every: Duration) {
+        self.tick = every;
+        self.next_tick = Instant::now() + every;
+    }
+
+    /// The pointer at the last input (device px from the editor's top-left, where menus are placed from).
+    pub fn pointer(&self) -> (i32, i32) {
+        self.pointer
     }
 
     /// The editor's new frame.
@@ -325,7 +357,7 @@ impl Window {
     }
 
     // ---------------------------------------------------------------------------------------------------------------
-    // Popup menus, as the X11 editors' (`x11::Window::popup`), drawn as overlays.
+    // Popup menus, as the window editors' (`gui::Window::popup`), drawn as overlays.
 
     /// Shows a menu at (`x`, `y`); the picked entry's command.
     pub fn popup<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32) -> Option<C> {
@@ -447,7 +479,7 @@ impl Window {
     }
 
     // ---------------------------------------------------------------------------------------------------------------
-    // "Type in value", as the X11 editors' (`x11::Window::type_in`), drawn as an overlay.
+    // "Type in value", as the window editors' (`gui::Window::type_in`), drawn as an overlay.
 
     pub fn type_in(&mut self, x: i32, y: i32, text: &str, scale: f32) -> Option<String> {
         if crate::no_modal() {
@@ -585,10 +617,10 @@ mod tests {
     #[test]
     fn a_hidden_window_does_not_paint() {
         let (s, _) = editor((40, 30));
-        let slot = crate::x11::Slot::default();
+        let slot = crate::gui::Slot::default();
         let (tx, rx) = std::sync::mpsc::channel();
         let (go, wait) = std::sync::mpsc::channel::<()>();
-        let t = crate::x11::spawn(s.token(), (40, 30), &slot, move |win| {
+        let t = crate::gui::spawn(s.token() as crate::gui::Parent, (40, 30), &slot, move |win| {
             // The editor's own test before it paints.
             while wait.recv().is_ok() {
                 tx.send(win.idle()).unwrap();
@@ -613,10 +645,10 @@ mod tests {
     fn frames_and_input_go_both_ways() {
         let (s, woken) = editor((40, 30));
         assert!(!s.claimed());
-        let slot = crate::x11::Slot::default();
+        let slot = crate::gui::Slot::default();
         let got = Arc::new(Mutex::new(Vec::new()));
         let g = got.clone();
-        let t = crate::x11::spawn(s.token(), (40, 30), &slot, move |mut win| {
+        let t = crate::gui::spawn(s.token() as crate::gui::Parent, (40, 30), &slot, move |mut win| {
             win.blit(&vec![0x00ff_0000; 40 * 30], 40, 30);
             while let Some(i) = win.next() {
                 if i != Input::Tick {
@@ -654,10 +686,10 @@ mod tests {
     #[test]
     fn menus_are_overlays() {
         let (s, _) = editor((200, 100));
-        let slot = crate::x11::Slot::default();
+        let slot = crate::gui::Slot::default();
         let picked = Arc::new(Mutex::new(None));
         let p = picked.clone();
-        let t = crate::x11::spawn(s.token(), (200, 100), &slot, move |mut win| {
+        let t = crate::gui::spawn(s.token() as crate::gui::Parent, (200, 100), &slot, move |mut win| {
             let mut def = MenuDef::new(MenuStyle::List);
             def.add(MenuItem::item("One"), 1);
             def.add(MenuItem::item("Two"), 2);
