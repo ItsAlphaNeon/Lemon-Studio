@@ -3121,6 +3121,11 @@ impl App {
                         self.notes_from_plugin(row, &notes);
                         continue;
                     }
+                    Request::Edited(row) => {
+                        crate::presets_ui::window_edit(self, row);
+                        self.invalidate();
+                        continue;
+                    }
                     Request::NotAvailable(name) => {
                         self.state.message = Some(off_text(name));
                         self.invalidate();
@@ -3138,6 +3143,9 @@ impl App {
             self.clip_docked();
             #[cfg(target_os = "linux")]
             self.sync_embeds();
+            // What the linked editors' instances hold now, for their next edit's undo.
+            #[cfg(plugin_windows)]
+            self.state.editor_host.refresh_known(&self.state.session.plugins, self.state.session.history.changes());
         }
     }
 
@@ -11504,6 +11512,57 @@ mod tests {
         assert_eq!(a.state.session.plugins.maximus_file_state(key), Some(max.clone()));
         a.store_builtin_states();
         assert_eq!(a.state.session.project.mixer[1].slots[3].clone().unwrap().state, max);
+    }
+
+    /// A Lemon plugin's state changed in its own window (host link `Edited`, Press's curves and knobs): the project
+    /// counts as changed and one step, "Plugin edit", puts back the state the window knew before; an edit that changed
+    /// nothing makes none. Lemon Studio's choice.
+    #[cfg(all(plugin_windows, not(windows)))]
+    #[test]
+    fn window_edits_of_a_plugins_state_are_steps() {
+        use crate::control::command::PLUGIN_EDIT;
+        use crate::plugins::{fx_key, MAXIMUS_FILE_NAME};
+        use os_engine::effects::maximus::state::{P_LMH_MIX, State};
+        let mut a = App::new(None);
+        a.state.session.project = crate::locked::Locked::new(test_project());
+        a.reset_hosted();
+        a.state.session.plugins.effects = crate::plugins::builtin_effects();
+        let first = State::new_default().to_bytes();
+        a.state.session.project.get_mut().mixer[1].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: MAXIMUS_FILE_NAME.into(), state: first.clone() });
+        a.sync_effects();
+        a.follow_ids(false, false);
+        let key = fx_key(1, 3);
+        // Its editor linked, as an open window's is (the link found by the window the host gave it).
+        let area = 0x5eed_0001_u64;
+        let peer = os_hostlink::Peer::register(area, vec![os_hostlink::PageIcon::Plugin], (100, 100), || {});
+        a.state.editor_host.editors.entry(key).or_default().link = os_hostlink::Link::connect(area as isize);
+        let known = |a: &mut App| {
+            let changes = a.state.session.history.changes();
+            a.state.editor_host.refresh_known(&a.state.session.plugins, changes);
+        };
+        known(&mut a);
+        a.state.session.history.reset();
+        a.state.session.plugin_edited = false;
+        // The editor writes a new state, as Press's `commit` does, then tells the host.
+        let mut st = State::new_default();
+        st.params[P_LMH_MIX] = 500;
+        assert!(a.state.session.plugins.set_state(key, &press::plugin_state_from_fl(&st.to_bytes())));
+        crate::presets_ui::window_edit(&mut a, key);
+        assert!(a.state.session.plugin_edited, "the project counts as changed");
+        assert_eq!(a.state.session.history.newest_done(), Some(PLUGIN_EDIT));
+        known(&mut a);
+        crate::history_ui::undo(&mut a.state);
+        a.host_commands();
+        assert_eq!(a.state.session.plugins.maximus_file_state(key), Some(first.clone()), "undone to the state before the edit");
+        crate::history_ui::redo(&mut a.state);
+        a.host_commands();
+        assert_eq!(a.state.session.plugins.maximus_file_state(key), Some(st.to_bytes()));
+        // Told again with nothing changed: no step.
+        known(&mut a);
+        a.state.session.history.reset();
+        crate::presets_ui::window_edit(&mut a, key);
+        assert_eq!(a.state.session.history.newest_done(), None);
+        peer.unregister();
     }
 
     /// A project's Fruity Reeverb 2, Balance and Chorus slots (user report 2026-10-26: "This slot's plugin is not

@@ -146,6 +146,8 @@ pub struct History {
     fresh: bool,
     /// The number the next step gets (`Step::id`).
     next_id: u64,
+    /// Counts steps recorded, joined, undone and redone (`changes`).
+    changes: u64,
 }
 
 /// A run of changes that make one step (`History::run`).
@@ -185,6 +187,12 @@ pub enum ChannelControl {
 }
 
 impl History {
+    /// Moves on with every step recorded, joined, undone or redone: what a plugin window last knew of its instance's
+    /// state is read again then (`EditorHost::refresh_known`).
+    pub fn changes(&self) -> u64 {
+        self.changes
+    }
+
     /// Whether a change of run `r` joins the newest step: the step is of that run and nothing came after it.
     pub fn joins(&self, r: Run) -> bool {
         self.run == Some(r) && self.done == self.steps.len()
@@ -319,6 +327,7 @@ pub fn record_named(s: &mut crate::session::Session, name: Cow<'static, str>, sn
     h.undid = false;
     h.run = None;
     h.fresh = true;
+    h.changes += 1;
     h.trim(&s.settings);
 }
 
@@ -326,6 +335,7 @@ pub fn record_named(s: &mut crate::session::Session, name: Cow<'static, str>, sn
 /// and holds commands.
 pub fn extend_newest(s: &mut crate::session::Session, f: impl FnOnce(&mut Vec<crate::control::Command>)) {
     let h = &mut s.history;
+    h.changes += 1;
     if h.done > 0 && h.done == h.steps.len() {
         if let Snap::Commands(c) = &mut h.steps[h.done - 1].snap {
             f(c);
@@ -500,6 +510,7 @@ pub fn undo_in(s: &mut crate::session::Session) -> Option<String> {
     }
     h.done -= 1;
     (h.undid, h.run, h.fresh) = (true, None, false);
+    h.changes += 1;
     let i = h.done;
     swap_step(s, i);
     Some(s.history.steps[i].name.to_string())
@@ -516,6 +527,7 @@ pub fn redo_in(s: &mut crate::session::Session) -> Option<String> {
     let h = &mut s.history;
     h.done += 1;
     (h.undid, h.run, h.fresh) = (false, None, false);
+    h.changes += 1;
     Some(h.steps[i].name.to_string())
 }
 

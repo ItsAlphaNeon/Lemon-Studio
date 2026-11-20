@@ -631,3 +631,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// The user changed the state of the instance under `key` in its own window (host link `Edited`): what changed since
+/// its window last knew it (`EditorHost::take_known`) goes to the session, which makes it a step
+/// (`presets::window_edit_in`).
+#[cfg(plugin_windows)]
+pub fn window_edit(app: &mut App, key: usize) {
+    let Some(now) = app.state.session.plugins.state(key) else { return };
+    let changes = app.state.session.history.changes();
+    let edit = app.state.editor_host.take_known(key, &now, changes);
+    window_edit_in(&mut app.state.session, key, edit);
+}

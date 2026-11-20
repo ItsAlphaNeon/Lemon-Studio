@@ -182,6 +182,9 @@ pub struct Logic {
     /// A parameter the host turned (`reveal`): when its hint goes, and the views it was found on, by parameter.
     revealed: Option<(std::time::Instant, String)>,
     found: std::collections::HashMap<String, Option<(u8, u8)>>,
+    /// Writes to the state from the editor, and how many of them the host was told of (`take_edit`).
+    made: std::cell::Cell<u64>,
+    told: u64,
 }
 
 /// The knobs an envelope node edits: horizontal first.
@@ -197,9 +200,25 @@ fn env_point_ids(p: &str, i: u8) -> Vec<String> {
 }
 
 impl Logic {
+    /// The parameters, for a write to the state from the editor: counted for the host (`take_edit`).
+    pub fn raw(&self) -> &Arc<Osc3Params> {
+        self.made.set(self.made.get() + 1);
+        &self.params
+    }
+
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made.get() == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made.get();
+        true
+    }
+
     pub fn new(params: Arc<Osc3Params>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        let mut l = Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false , revealed: None, found: std::collections::HashMap::new() };
+        let mut l = Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, made: std::cell::Cell::new(0), told: 0, revealed: None, found: std::collections::HashMap::new() };
         l.sync_sample();
         l
     }
@@ -215,7 +234,7 @@ impl Logic {
     /// Loads `path` as the custom shape's sample (the file dialog's pick); the hint says how it went.
     pub fn load(&mut self, path: &str) {
         let name = view::file_name(path).to_string();
-        self.hint = match self.shared.load(path, &self.params) {
+        self.hint = match self.shared.load(path, self.raw()) {
             Ok(()) => format!("Custom shape sample: {name}"),
             Err(_) => format!("Custom shape sample: {name} could not be read"),
         };
@@ -802,6 +821,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -884,7 +906,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes | Cmd::Edited => 0,
             }
         }
 
@@ -1128,6 +1150,9 @@ mod gui {
                 // The host shows the hint in its title bar (hosted mode).
                 self.link.set_hint(&self.logic.hint);
                 self.link.to_host(Cmd::Changed, 0);
+            }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
             }
             self.sync_link();
         }
@@ -1448,7 +1473,9 @@ mod tests {
         assert_eq!(l.hint, "Osc 1 shape");
         // The dialog's pick: a period of a square, 8 points.
         let path = wav("square.wav", &[16384, 16384, 16384, 16384, -16384, -16384, -16384, -16384]);
+        let _ = l.take_edit();
         l.load(&path);
+        assert!(l.take_edit(), "the host hears of the sample");
         assert_eq!(l.hint, "Custom shape sample: square.wav");
         assert_eq!(*l.params.sample_path.read().unwrap(), path);
         assert_eq!(l.view.sample.path, path);

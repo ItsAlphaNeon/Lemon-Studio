@@ -456,6 +456,36 @@ fn side(ses: &crate::session::Session, key: usize) -> Option<crate::control::com
     Some(crate::control::command::PluginSide { state: ses.plugins.state(key)?, preset: ses.plugins.presets.get(&key).cloned(), name, fill: 0 })
 }
 
+/// What an edit in a Lemon plugin's own window changed, as the window last knew the instance's state
+/// (`EditorHost::take_known`).
+#[derive(Debug, PartialEq)]
+pub enum WindowEdit {
+    /// Nothing the host can see.
+    Nothing,
+    /// The state, from this one.
+    From(Vec<u8>),
+    /// The state, from one too big to keep or not read yet.
+    Unknown,
+}
+
+/// The user changed the state of the instance under `key` in its own window (host link `Edited`: a Lemon plugin's
+/// curve dragged, sample loaded, menu choice): the project counts as changed, and one step, "Plugin edit", puts back
+/// the state the window last knew, unless Undo knob tweaks is off (as for parameters moved in a plugin's window,
+/// `control::param_edit`). A state too big to keep (Tesla holding a long sample, which has its own undo) makes no
+/// step. Lemon Studio's choice: the original has no such plugins.
+pub fn window_edit_in(ses: &mut crate::session::Session, key: usize, edit: WindowEdit) {
+    if edit == WindowEdit::Nothing {
+        return;
+    }
+    ses.plugins.mark_edited(key);
+    ses.plugin_edited = true;
+    if let (WindowEdit::From(state), true) = (edit, ses.settings.check(&crate::prefs::UNDO_KNOB_TWEAKS)) {
+        let Some(mut before) = side(ses, key) else { return };
+        before.state = state;
+        crate::control::state_edit(ses, key, crate::control::command::PLUGIN_EDIT, before);
+    }
+}
+
 /// `load_into`; `step`: an undo step for it (none for a preset that goes into an instance just made for it, part of
 /// the step that made it).
 pub fn load_with(ses: &mut crate::session::Session, key: usize, path: &Path, step: bool) -> Option<String> {
