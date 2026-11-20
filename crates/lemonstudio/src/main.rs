@@ -16,7 +16,7 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod menu_bar;
 mod splash;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "plugin-windows"))]
 mod window_check;
 mod winit_keys;
 
@@ -1750,9 +1750,9 @@ pub fn run() {
         splash::child_main();
     }
     // Plugin editors in real plugin windows, checked from the main thread (`plugins::window_check`).
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "plugin-windows"))]
     if args.first().map(String::as_str) == Some("--plugin-window-check") {
-        std::process::exit(plugins::window_check::run(&args[1..]));
+        std::process::exit(window_check::run(&args[1..]));
     }
     app::move_old_settings();
     // From here on a panic is kept in the user folder's Logs (`panic_log`).

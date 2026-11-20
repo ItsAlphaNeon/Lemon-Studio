@@ -2586,7 +2586,7 @@ impl App {
         }
         self.state.session.transport.listen(listen);
         // Keys pressed while a plugin window has the focus still play the typing keyboard.
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(all(plugin_windows, any(windows, target_os = "macos")))]
         for k in self.state.editor_host.frames.take_keys() {
             let code = k.code;
             if code != KeyCode::Unidentified {
@@ -4785,8 +4785,10 @@ impl App {
             let mut pt = POINT { x: 0, y: 0 };
             (unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt) } != 0).then_some((pt.x, pt.y))
         }
-        #[cfg(target_os = "macos")]
-        self.state.editor_host.frames.pointer()
+        #[cfg(all(target_os = "macos", plugin_windows))]
+        return self.state.editor_host.frames.pointer();
+        #[cfg(all(target_os = "macos", not(plugin_windows)))]
+        None
     }
 
     /// The hosted key whose plugin window is under the mouse pointer (docked or detached).
