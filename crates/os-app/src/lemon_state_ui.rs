@@ -258,7 +258,7 @@ mod tests {
         assert!(back.unsaved(), "a Scaling ▸ change is an unsaved change");
         #[cfg(any(windows, target_os = "macos"))]
         {
-            back.plugins.editor_scales.insert(0, 1.5);
+            back.state.session.plugins.editor_scales.insert(0, 1.5);
             set_editor_keys(true);
             assert!(!back.unsaved(), "the keyboard focus switch is not");
         }
