@@ -721,18 +721,18 @@ fn vst2_editor_scales() {
         GetWindowRect(h, &mut r);
         (r.right - r.left, r.bottom - r.top)
     };
-    let handles = |pl: &Plugins| {
+    let handles = |host: &os_app::editor_host::EditorHost, pl: &Plugins| {
         let w = host.editors[&0].window.as_ref().unwrap();
         let area = w.area() as HWND;
         (w.hwnd() as HWND, area, unsafe { GetWindow(area, GW_CHILD) })
     };
-    let shot = |pl: &Plugins, tag: &str| {
+    let shot = |host: &os_app::editor_host::EditorHost, pl: &Plugins, tag: &str| {
         if let Some(d) = &dir {
             let stem = name.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
-            capture(handles(pl).0 as isize, &d.join(format!("vst2_{stem}_{tag}.bmp")));
+            capture(handles(host, pl).0 as isize, &d.join(format!("vst2_{stem}_{tag}.bmp")));
         }
     };
-    let (frame, _, editor) = handles(&pl);
+    let (frame, _, editor) = handles(&host, &pl);
     assert!(!editor.is_null(), "the editor is a child of the frame's editor area");
     // A drag at the monitor's scale: what the editor reports is what "last tweaked" and automation recording hear.
     let (ew, eh) = size(editor);
@@ -760,7 +760,7 @@ fn vst2_editor_scales() {
     pump(&mut host, &mut pl, 200);
     let edits = pl.hosted[&0].plugin.lock().unwrap().take_param_events();
     println!("{name}: opened at the monitor's {monitor} as {ew} x {eh}; a drag at ({x}, {y}) gave {} edits, starting {:?}", edits.len(), &edits[..edits.len().min(3)]);
-    shot(&pl, "monitor");
+    shot(&host, &pl, "monitor");
     if drag.is_some() {
         assert!(!edits.is_empty(), "the drag reached no parameter");
     }
@@ -768,12 +768,12 @@ fn vst2_editor_scales() {
     for k in [1.0f32, 1.5, 2.0] {
         host.rescale_window(&mut pl, 0, k);
         pump(&mut host, &mut pl, 600);
-        let (_, area, editor) = handles(&pl);
+        let (_, area, editor) = handles(&host, &pl);
         let (e, a) = (size(editor), size(area));
         let reported = pl.hosted[&0].plugin.lock().unwrap().editor_size();
         let b = *base.get_or_insert(e);
         println!("{name} at {k}: editor window {e:?} ({:.2} x its size at 1), editor area {a:?}, reported {reported:?}", e.0 as f32 / b.0 as f32);
-        shot(&pl, &format!("{}", (k * 100.0) as u32));
+        shot(&host, &pl, &format!("{}", (k * 100.0) as u32));
         assert_eq!(a, e, "at {k} the editor area fits the editor's window");
     }
 }
@@ -2049,7 +2049,7 @@ fn editor_limit_and_reopen_place() {
         let (t, s) = fx_of(k).unwrap();
         pl.create_effect(t, s, index, None).unwrap();
     }
-    let open = |pl: &Plugins| host.editors.values().filter(|e| e.window.is_some()).count();
+    let open = |host: &os_app::editor_host::EditorHost, pl: &Plugins| host.editors.values().filter(|e| e.window.is_some()).count();
     // Without a main window every frame is detached.
     host.open_window(&mut pl, keys[0], info(1)).unwrap();
     let hwnd = host.window_of(keys[0]).unwrap().0;
@@ -2063,13 +2063,13 @@ fn editor_limit_and_reopen_place() {
         host.open_window(&mut pl, k, info(fx_of(k).unwrap().0)).unwrap();
         pump(&mut host, &mut pl, 10);
     }
-    assert_eq!(open(&pl), 25);
+    assert_eq!(open(&host, &pl), 25);
     host.open_window(&mut pl, keys[25], info(4)).unwrap();
-    assert_eq!(open(&pl), 25, "the 26th closed the earliest first");
+    assert_eq!(open(&host, &pl), 25, "the 26th closed the earliest first");
     assert!(host.editors[&keys[0]].window.is_none() && pl.hosted.contains_key(&keys[0]), "closed, its plugin kept");
     os_app::prefs::set_check(&os_app::prefs::LIMIT_EDITORS, false);
     host.open_window(&mut pl, keys[0], info(1)).unwrap();
-    assert_eq!(open(&pl), 26, "no limit");
+    assert_eq!(open(&host, &pl), 26, "no limit");
     for &k in &keys {
         pl.drop_key(k);
     }
