@@ -5,7 +5,8 @@
 //! The editor's window glue: Lemon Studio's plugin editor window (`os_plugkit::gui`, a child of the host's window on
 //! its own GUI thread) painting `zest_ui` with the os-ui canvas; the parameters as `zest_ui::Model` (`os_plugkit`'s
 //! values with the editor's pending edits, heard at once through the params' `LiveEdits`); preset files loaded and
-//! saved; the host link (the three pages as tabs in Lemon Studio's plugin strip); host-driven resizing.
+//! saved; the host link (one plug tab in Lemon Studio's plugin strip, as Citrus has: the editor keeps its own row of page
+//! tabs, and its hint line goes to the host's title row); host-driven resizing.
 //!
 //! Everything else of the editor (pages, painting, input, the library) is `zest_ui`, which does not know zest-core.
 
@@ -272,8 +273,9 @@ mod gui {
     use super::{PluginModel, ZestParams};
     use crate::PendingSlop;
 
-    /// The page tabs the host shows: Main (plug), Effects (waveform), Advanced (node graph).
-    const PAGE_ICONS: [PageIcon; 3] = [PageIcon::Plugin, PageIcon::Sample, PageIcon::Envelope];
+    /// The tabs the host shows: the plug alone, as for Citrus. The pages are the editor's own row of tabs (MAIN,
+    /// EFFECTS, ADVANCED), named in full.
+    const PAGE_ICONS: [PageIcon; 1] = [PageIcon::Plugin];
 
     struct Ed {
         win: Window,
@@ -317,8 +319,8 @@ mod gui {
         let (w, h) = super::clamp_size(memo.w, memo.h);
         let dev = ((w as f32 * scale).round() as u32, (h as f32 * scale).round() as u32);
         let wake = slot.clone();
-        // Joined to Lemon Studio's strip, the editor is what lies below its own tab row.
-        let link = Peer::register(parent as u64, PAGE_ICONS.to_vec(), (w, h - view::STRIP as u32), move || px::notify(&wake));
+        // Joined to Lemon Studio's strip, the editor's foot leaves the hint line to the host's title row.
+        let link = Peer::register(parent as u64, PAGE_ICONS.to_vec(), (w, h - (view::BASE_H - view::base_h(true)) as u32), move || px::notify(&wake));
         let peer = link.clone();
         let thread = px::spawn(parent, dev, slot, move |win| {
             let Ok(canvas) = Canvas::new(dev.0, dev.1, scale) else { return };
@@ -332,7 +334,6 @@ mod gui {
             if let Some(p) = &memo.preset {
                 ui.set_current(Some(std::path::Path::new(p)), None);
             }
-            peer.set_page(ui.page);
             let mut ed = Ed {
                 win,
                 canvas,
@@ -488,22 +489,15 @@ mod gui {
                 self.link.set_hint(&self.last_hint);
                 self.link.to_host(Cmd::Changed, 0);
             }
-            // Joined Lemon Studio's strip: the editor leaves its tab row and foot to the host and shrinks by them.
+            // Joined Lemon Studio's strip: the editor leaves its hint line to the host and shrinks by it.
             if self.link.hosted() && !self.ui.hosted {
                 self.ui.hosted = true;
                 let (w, h) = self.asked;
                 self.resize(w, h - (view::BASE_H - view::base_h(true)) as u32);
             }
-            let page = self.link.page();
-            if page != self.last_page {
-                self.ui.set_page(page);
-                self.last_page = page;
-                self.remember();
-                self.dirty = true;
-            } else if self.ui.page != page {
+            // A page picked in the editor's own row of tabs: kept for the next time it opens.
+            if self.ui.page != self.last_page {
                 self.last_page = self.ui.page;
-                self.link.set_page(self.last_page);
-                self.link.to_host(Cmd::Changed, 0);
                 self.remember();
             }
             // The host resized the window (set_size).

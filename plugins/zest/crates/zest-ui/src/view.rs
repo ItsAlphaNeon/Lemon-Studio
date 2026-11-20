@@ -24,7 +24,7 @@ pub const BASE_H: f32 = 560.0;
 /// The smallest window the host may make.
 pub const MIN_W: f32 = 760.0;
 pub const MIN_H: f32 = 460.0;
-/// The editor's own page tabs (left out when the host shows them in its strip).
+/// The editor's own row of page tabs.
 pub const STRIP: f32 = 30.0;
 /// The foot (hint well, wordmark).
 pub const FOOT: f32 = 34.0;
@@ -52,11 +52,11 @@ const HINT: Font = Font::new(11);
 const MARK_BIG: Font = Font::condensed(22, 0).bold();
 const MARK_SMALL: Font = Font::condensed(10, 0).bold();
 
-/// The base height: the standalone editor with its tab strip and foot, or hosted without the strip and the hint well:
-/// the host's title row has the page tabs and the hint line.
+/// The base height: the editor with its row of page tabs and its foot; hosted, the foot without the hint well (the
+/// host's title row has the hint line).
 pub fn base_h(hosted: bool) -> f32 {
     if hosted {
-        BASE_H - STRIP - FOOT + HOSTED_FOOT
+        BASE_H - FOOT + HOSTED_FOOT
     } else {
         BASE_H
     }
@@ -202,10 +202,8 @@ pub fn paint(c: &mut Canvas, v: &ViewIn, m: &dyn Model) -> ViewOut {
     p.c.begin_frame(None);
     p.c.clear(plug::BG);
     let (w, h) = v.size;
-    let top = if v.hosted { 0.0 } else { STRIP };
-    if !v.hosted {
-        strip(&mut p, w);
-    }
+    let top = STRIP;
+    strip(&mut p, w);
     let area = Rect::span(M, w - M, top, h - if v.hosted { HOSTED_FOOT } else { FOOT });
     match v.page {
         pages::EFFECTS => effects_page(&mut p, area),

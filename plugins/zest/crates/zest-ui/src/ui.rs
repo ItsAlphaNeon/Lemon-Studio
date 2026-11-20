@@ -1067,7 +1067,7 @@ mod tests {
     #[test]
     fn layout_fits() {
         let mut f = fixture("fit");
-        for (w, h, hosted) in [(view::BASE_W, view::BASE_H, false), (760.0, 460.0, false), (view::BASE_W, view::BASE_H - view::STRIP, true), (1400.0, 900.0, false)] {
+        for (w, h, hosted) in [(view::BASE_W, view::BASE_H, false), (760.0, 460.0, false), (view::BASE_W, view::base_h(true), true), (1400.0, 900.0, false)] {
             f.ui.hosted = hosted;
             let (_, lw, lh) = view::fit(w, h, hosted);
             assert!(lw >= view::BASE_W - 0.01 && lh >= view::base_h(hosted) - 0.01);
