@@ -7543,16 +7543,22 @@ impl App {
         true
     }
 
-    /// Linux: keys go to a plugin editor drawn in the app's window while its menu or box is open, or while a text
-    /// field of it has the keyboard and its window is in front. Whether it took the key.
+    /// The plugin editor drawn in the app's window that takes the keys: one with its menu or box open, or the one in
+    /// front while a text field of it has the keyboard.
     #[cfg(lemon_cards)]
-    fn embed_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
-        // a text field of the editor in front has the keyboard
+    fn embed_keys_to(&self) -> Option<usize> {
         let typing = match self.state.z.last() {
             Some(&Win::Hosted(r)) if !self.state.no_focus && self.state.embeds.get(&r).is_some_and(|e| e.view().wants_keys) => Some(r),
             _ => None,
         };
-        let Some(row) = self.embed_modal().or(typing) else { return false };
+        self.embed_modal().or(typing)
+    }
+
+    /// Linux: keys go to a plugin editor drawn in the app's window while its menu or box is open, or while a text
+    /// field of it has the keyboard and its window is in front. Whether it took the key.
+    #[cfg(lemon_cards)]
+    fn embed_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+        let Some(row) = self.embed_keys_to() else { return false };
         let Some((sym, text)) = keysym_of(key) else { return true };
         if let Some(e) = self.state.embeds.get(&row) {
             e.key(sym, text, (ctrl, self.shift, alt));
@@ -9312,6 +9318,11 @@ impl App {
         }
         // So does a box of the settings window's Info page, and a browser folder cell.
         if pressed && (self.info_editing() || self.folder_cell_editing() || self.name_editing()) {
+            return false;
+        }
+        // So does a plugin editor drawn in the app's window while its search or other text field has the keyboard.
+        #[cfg(lemon_cards)]
+        if pressed && self.embed_keys_to().is_some() {
             return false;
         }
         if !pressed {

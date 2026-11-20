@@ -436,6 +436,9 @@ mod gui {
                     }
                     Input::Drop { .. } => {}
                 }
+                // Drawn in Lemon Studio's window, the keys come to the editor only while its search box has the focus
+                // (the app plays the typing keyboard otherwise). Sent only when it changes.
+                self.win.set_wants_keys(self.ui.search_focus);
                 if self.dirty && self.win.idle() {
                     self.paint();
                 }
