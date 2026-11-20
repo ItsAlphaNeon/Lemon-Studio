@@ -10,6 +10,7 @@
 // spec: ui/midi-settings.md
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::midi_cfg::{self as cfg, CurveOf};
 use crate::midi_in::{Ev, Msg};
@@ -64,8 +65,8 @@ pub struct To {
 pub enum Then {
     /// A note started sounding (recording and step input take it).
     Down { src: Src, key: u16, velocity: u8, extra: Extra },
-    /// A note stopped, with its release velocity.
-    Up { src: Src, release: u8 },
+    /// A note stopped, with its release velocity and when its message arrived.
+    Up { src: Src, release: u8, at: Instant },
     /// Song marker jump channel: the `i`-th time marker (spec §3).
     Marker(usize),
     /// A key of the Performance mode channel (spec: ui/performance-mode.md §3).
@@ -139,9 +140,9 @@ pub fn events_in(s: &mut Session, evs: Vec<Ev>, to: To) -> Vec<Then> {
     for ev in evs {
         match ev.msg {
             Msg::Start | Msg::Continue | Msg::Stop | Msg::Spp(_) => then.push(Then::Transport { dev: ev.dev, msg: ev.msg }),
-            Msg::On { ch, key, vel } => note_on(s, ch, key, vel, to, &mut then),
-            Msg::Off { ch, key, vel } => note_off(s, ch, key, vel, &mut then),
-            Msg::Cc { n: 64, v, .. } if s.settings.check(&prefs::FOOT_PEDAL) => pedal(s, v >= 64, &mut then),
+            Msg::On { ch, key, vel } => note_on(s, ch, key, vel, to, ev.at, &mut then),
+            Msg::Off { ch, key, vel } => note_off(s, ch, key, vel, ev.at, &mut then),
+            Msg::Cc { n: 64, v, .. } if s.settings.check(&prefs::FOOT_PEDAL) => pedal(s, v >= 64, ev.at, &mut then),
             Msg::Cc { ch, n, v } => then.push(Then::Cc { dev: ev.dev, ch, n, v }),
             Msg::Bend { .. } => {
                 if to.row < s.project.channels.len() {
@@ -214,20 +215,22 @@ pub const MUTE_SOLO: &str = "Channel mute / solo";
 pub fn release_all_in(s: &mut Session) -> Vec<Then> {
     s.midi_play.pedal = false;
     let mut then = Vec::new();
+    let now = Instant::now();
     for h in std::mem::take(&mut s.midi_play.held) {
-        end(s, h, 64, &mut then);
+        end(s, h, 64, now, &mut then);
     }
     then
 }
 
-fn note_on(s: &mut Session, ch: u8, key: u8, vel: u8, to: To, then: &mut Vec<Then>) {
+fn note_on(s: &mut Session, ch: u8, key: u8, vel: u8, to: To, at: Instant, then: &mut Vec<Then>) {
     let n = s.project.channels.len();
     let (vel, mut extra) = linked(&s.settings, vel);
+    extra.at = Some(at);
     // The channels set on Settings > MIDI (spec §3): their notes are not played on the selected channel.
     if Some(ch) == channel_of(&s.settings, &prefs::OMNI_CHANNEL) {
         let Some(row) = white_index(key).filter(|&r| r < n) else { return };
         extra.channel = Some(s.project.channels[row].index);
-        return start(s, Src::Omni(key), key, row, 60, vel, extra, 0, then);
+        return start(s, Src::Omni(key), key, row, 60, vel, extra, 0, at, then);
     }
     if Some(ch) == channel_of(&s.settings, &prefs::MARKER_CHANNEL) {
         if let Some(i) = white_index(key) {
@@ -256,16 +259,16 @@ fn note_on(s: &mut Session, ch: u8, key: u8, vel: u8, to: To, then: &mut Vec<The
     if midi > 0 {
         extra.group = Some(midi);
     }
-    start(s, Src::Midi(key), key, to.row, u16::from(key), vel, extra, midi, then);
+    start(s, Src::Midi(key), key, to.row, u16::from(key), vel, extra, midi, at, then);
 }
 
 /// Starts a note, on MIDI channel `midi` for a hosted plugin; a key the pedal still holds ends its earlier note first
 /// (spec §3).
 #[allow(clippy::too_many_arguments)]
-fn start(s: &mut Session, src: Src, key: u8, row: usize, play: u16, vel: u8, extra: Extra, midi: u8, then: &mut Vec<Then>) {
+fn start(s: &mut Session, src: Src, key: u8, row: usize, play: u16, vel: u8, extra: Extra, midi: u8, at: Instant, then: &mut Vec<Then>) {
     while let Some(i) = s.midi_play.held.iter().position(|h| h.src == src) {
         let h = s.midi_play.held.remove(i);
-        end(s, h, h.up.unwrap_or(64), then);
+        end(s, h, h.up.unwrap_or(64), at, then);
     }
     s.sync_live();
     s.live(Live::NoteOn { row, key: play, velocity: vel, midi });
@@ -273,12 +276,12 @@ fn start(s: &mut Session, src: Src, key: u8, row: usize, play: u16, vel: u8, ext
     then.push(Then::Down { src, key: play, velocity: vel, extra });
 }
 
-fn end(s: &mut Session, h: Held, release: u8, then: &mut Vec<Then>) {
+fn end(s: &mut Session, h: Held, release: u8, at: Instant, then: &mut Vec<Then>) {
     s.live(Live::NoteOff { row: h.row, key: h.play });
-    then.push(Then::Up { src: h.src, release });
+    then.push(Then::Up { src: h.src, release, at });
 }
 
-fn note_off(s: &mut Session, ch: u8, key: u8, vel: u8, then: &mut Vec<Then>) {
+fn note_off(s: &mut Session, ch: u8, key: u8, vel: u8, at: Instant, then: &mut Vec<Then>) {
     if Some(ch) == channel_of(&s.settings, &prefs::PERFORMANCE_CHANNEL) {
         return then.push(Then::Perform { key, velocity: vel, down: false });
     }
@@ -297,12 +300,12 @@ fn note_off(s: &mut Session, ch: u8, key: u8, vel: u8, then: &mut Vec<Then>) {
         s.midi_play.held[i].up = Some(release);
     } else {
         let h = s.midi_play.held.remove(i);
-        end(s, h, release, then);
+        end(s, h, release, at, then);
     }
 }
 
 /// The foot pedal (controller 64 with Foot pedal controls note off): up ends the notes it held (spec §3).
-fn pedal(s: &mut Session, down: bool, then: &mut Vec<Then>) {
+fn pedal(s: &mut Session, down: bool, at: Instant, then: &mut Vec<Then>) {
     s.midi_play.pedal = down;
     if down {
         return;
@@ -310,7 +313,7 @@ fn pedal(s: &mut Session, down: bool, then: &mut Vec<Then>) {
     let (ended, kept): (Vec<Held>, Vec<Held>) = std::mem::take(&mut s.midi_play.held).into_iter().partition(|h| h.up.is_some());
     s.midi_play.held = kept;
     for h in ended {
-        end(s, h, h.up.unwrap_or(64), then);
+        end(s, h, h.up.unwrap_or(64), at, then);
     }
 }
 

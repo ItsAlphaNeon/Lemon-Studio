@@ -81,6 +81,8 @@ impl Msg {
 pub struct Ev {
     pub dev: Arc<str>,
     pub msg: Msg,
+    /// When it arrived, on the driver's thread: a recorded note lands where it was played, however late it is handled.
+    pub at: Instant,
 }
 
 /// An input device as Settings > MIDI lists it.
@@ -267,7 +269,7 @@ impl MidiIn {
 
     /// Tests: message `msg` arrives from device `dev`.
     pub fn arrive(&self, dev: &str, msg: Msg) {
-        let _ = self.tx.send(Ev { dev: Arc::from(dev), msg });
+        let _ = self.tx.send(Ev { dev: Arc::from(dev), msg, at: Instant::now() });
     }
 
     /// Messages received since the last call, oldest first.
@@ -322,7 +324,7 @@ impl MidiIn {
                 return;
             }
             if let Some(msg) = parse(bytes) {
-                if tx.send(Ev { dev: dev.clone(), msg }).is_ok() {
+                if tx.send(Ev { dev: dev.clone(), msg, at: Instant::now() }).is_ok() {
                     wake();
                 }
             }

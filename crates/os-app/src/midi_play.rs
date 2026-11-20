@@ -111,6 +111,10 @@ impl App {
         if evs.iter().any(|e| matches!(e.msg, Msg::On { .. })) {
             self.key_tap();
         }
+        if std::env::var_os("OS_DEBUG").is_some() {
+            let waited = evs.iter().map(|e| e.at.elapsed()).max().unwrap_or_default();
+            eprintln!("[midi] {} message(s), the oldest waited {:.2} ms for the window", evs.len(), waited.as_secs_f64() * 1000.0);
+        }
         let to = self.midi_to();
         let then = midi_notes::events_in(&mut self.state.session, evs, to);
         self.midi_then(then);
@@ -126,7 +130,7 @@ impl App {
         for t in then {
             match t {
                 Then::Down { src, key, velocity, extra } => self.step_edit_down_with(src, key, velocity, extra),
-                Then::Up { src, release } => self.step_edit_up_with(src, Some(release)),
+                Then::Up { src, release, at } => self.step_edit_up_with(src, Some(release), Some(at)),
                 Then::Marker(i) => self.marker_jump(i),
                 Then::Perform { key, velocity, down } => self.perform_note(key, velocity, down),
                 Then::Mute(row) => {
@@ -151,7 +155,7 @@ impl App {
     #[cfg(test)]
     pub fn midi_notes(&mut self, msgs: Vec<Msg>) {
         let dev: std::sync::Arc<str> = std::sync::Arc::from("Test");
-        self.midi_events(msgs.into_iter().map(|msg| Ev { dev: dev.clone(), msg }).collect());
+        self.midi_events(msgs.into_iter().map(|msg| Ev { dev: dev.clone(), msg, at: Instant::now() }).collect());
     }
 
     /// A key of the Performance mode MIDI channel (spec: ui/performance-mode.md §3).
