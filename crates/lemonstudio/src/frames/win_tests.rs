@@ -85,7 +85,7 @@ fn plugin_editors_follow_the_scale() {
         GetWindowRect(h as HWND, &mut r);
         (r.right - r.left, r.bottom - r.top)
     };
-    let mut pl = Plugins { available: builtin(), scale: 1.5, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.5; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
     pl.create_with(0, index, None).unwrap();
@@ -119,7 +119,7 @@ fn plugin_window_shots() {
     let dir = std::path::PathBuf::from(dir);
     let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
     let desc = lib.plugins[0].clone();
-    let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = vec![Available { lib, desc }]; p.scale = 1.0; p };
     let mut host = native_host();
     pl.create(0, 0).unwrap();
     let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
@@ -147,7 +147,7 @@ fn plugin_window_shots() {
 fn eq_window_shots() {
     let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
     let dir = std::path::PathBuf::from(dir);
-    let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.effects = builtin_effects(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
     pl.create_effect(1, 0, index, None).unwrap();
@@ -176,7 +176,7 @@ fn eq_window_shots() {
 fn osc3_window_redraws() {
     let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
     let dir = std::path::PathBuf::from(dir);
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(os_app::osc3::LEMON_TRIO).expect("built-in Lemon Trio");
     pl.create_with(0, index, None).unwrap();
@@ -230,7 +230,7 @@ fn osc3_window_redraws() {
 fn citrus_window_edits() {
     let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
     let dir = std::path::PathBuf::from(dir);
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(os_app::citrus::CITRUS).expect("built-in Citrus");
     pl.create_with(0, index, None).unwrap();
@@ -272,7 +272,7 @@ fn citrus_window_edits() {
 fn smith_window_edits() {
     let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
     let dir = std::path::PathBuf::from(dir);
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(os_app::smith::SMITH).expect("built-in Smith");
     pl.create_with(0, index, None).unwrap();
@@ -315,7 +315,7 @@ fn plugin_editor_stress() {
     unsafe { std::env::set_var("LEMONSAMPLER_NO_MODAL", "1") };
     let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
     let desc = lib.plugins[0].clone();
-    let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = vec![Available { lib, desc }]; p.scale = 1.0; p };
     let mut host = native_host();
     pl.create(0, 0).unwrap();
     let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
@@ -407,7 +407,7 @@ fn plugin_knob_drag_holds_the_cursor() {
     let Some(clap) = std::env::var_os("OS_CLAP") else { return };
     let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
     let desc = lib.plugins[0].clone();
-    let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = vec![Available { lib, desc }]; p.scale = 1.0; p };
     let mut host = native_host();
     pl.create(0, 0).unwrap();
     let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
@@ -482,7 +482,7 @@ fn plugin_knob_edit_changes_the_sound() {
     let Some(clap) = std::env::var_os("OS_CLAP") else { return };
     let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
     let desc = lib.plugins[0].clone();
-    let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = vec![Available { lib, desc }]; p.scale = 1.0; p };
     let mut host = native_host();
     pl.create(0, 0).unwrap();
     let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
@@ -566,7 +566,7 @@ fn app_hears_plugin_knob_edits() {
     let Some(clap) = std::env::var_os("OS_CLAP") else { return };
     let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
     let desc = lib.plugins[0].clone();
-    let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = vec![Available { lib, desc }]; p.scale = 1.0; p };
     let mut host = native_host();
     pl.create(0, 0).unwrap();
     let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
@@ -653,7 +653,7 @@ fn keys_in_a_plugin_window_reach_the_app() {
     let lib = load_file(std::path::Path::new(&file), format).expect("load");
     let desc = lib.plugins()[0].clone();
     let name = desc.name.clone();
-    let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = vec![Available { lib, desc }]; p.scale = 1.0; p };
     let mut host = native_host();
     pl.create(0, 0).unwrap();
     let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
@@ -710,7 +710,7 @@ fn vst2_editor_scales() {
     let lib = load_file(std::path::Path::new(&file), os_host::Format::Vst2).expect("load");
     let desc = lib.plugins()[0].clone();
     let name = desc.name.clone();
-    let mut pl = Plugins { available: vec![Available { lib, desc }], scale: monitor, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = vec![Available { lib, desc }]; p.scale = monitor; p.rate = 48000; p };
     let mut host = native_host();
     pl.create(0, 0).unwrap();
     let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
@@ -790,7 +790,7 @@ fn swing_reaches_hosted_sampler() {
     let click: Vec<f32> = (0..48000).flat_map(|i| { let v = if i < 200 { 0.8 } else { 0.0 }; [v, v] }).collect();
     os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &click).unwrap();
     let onsets = |swing: u8| -> Vec<usize> {
-        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
         let mut host = native_host();
         let index = pl.index_of(LEMON_SAMPLER).unwrap();
         let mut p = os_app::projects::test_project();
@@ -838,7 +838,7 @@ fn swing_reaches_hosted_sampler() {
 /// touching its other settings.
 #[test]
 fn builtin_lemon_sampler_takes_a_sample() {
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
     let mut ch = os_app::projects::test_project().channels.remove(0);
@@ -871,7 +871,7 @@ fn builtin_lemon_sampler_takes_a_sample() {
 #[test]
 fn builtin_synths_follow_the_hosts_tuning() {
     for name in [os_app::osc3::LEMON_TRIO, os_app::citrus::CITRUS] {
-        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
         let mut host = native_host();
         let index = pl.index_of(name).unwrap();
         pl.create_with(0, index, None).unwrap();
@@ -907,7 +907,7 @@ fn builtin_synths_follow_the_hosts_tuning() {
 // spec: audio/note-rules.md "Portamento", audio/channel-voices.md
 #[test]
 fn lemon_trio_glides_on_a_mono_portamento_channel() {
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     pl.create_with(0, pl.index_of(os_app::osc3::LEMON_TRIO).unwrap(), None).unwrap();
     let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
@@ -947,7 +947,7 @@ fn lemon_trio_glides_on_a_mono_portamento_channel() {
 /// counts reach `Plugins::voices` through the instances' meters, without locking them.
 #[test]
 fn hosted_instrument_voices_follow_the_plugins() {
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let sampler = pl.index_of(LEMON_SAMPLER).unwrap();
     pl.create_with(0, sampler, None).unwrap();
@@ -1000,7 +1000,7 @@ fn hosted_instrument_voices_follow_the_plugins() {
 /// in Stretch, twice as long with the pitch moved by PITCH alone.
 #[test]
 fn builtin_lemon_sampler_takes_the_stretch_settings() {
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
     let wav = std::env::temp_dir().join(format!("os-app-sampler-stretch-{}.wav", std::process::id()));
@@ -1060,7 +1060,7 @@ fn builtin_lemon_sampler_takes_the_stretch_settings() {
 fn builtin_lemon_sampler_takes_the_sample_settings() {
     use lemon_sampler::params::fx_from_text;
     use os_model::SampleFx;
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
     let saved = |pl: &Plugins, row| {
@@ -1139,7 +1139,7 @@ fn lemon_sampler_root_page_edits_give_the_channel_settings() {
 /// none: a note plays nothing.
 #[test]
 fn lemon_sampler_state_without_a_sample_plays_nothing() {
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
     let wav = std::env::temp_dir().join(format!("os-app-sampler-cleared-{}.wav", std::process::id()));
@@ -1171,7 +1171,7 @@ fn lemon_sampler_state_without_a_sample_plays_nothing() {
 /// inverse of `stretch_params`): what the app does with the editor's edits (spec: ui/playlist.md §9c).
 #[test]
 fn lemon_sampler_stretch_parameters_give_the_channel_settings() {
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
     let mut ch = os_app::projects::test_project().channels.remove(0);
@@ -1202,7 +1202,7 @@ fn lemon_sampler_stretch_parameters_give_the_channel_settings() {
 #[cfg(feature = "stock-parametric-eq-2")]
 fn builtin_parametric_eq_takes_and_gives_the_file_state() {
     use lemon_parametric_eq_2::params::{default_state, field, plugin_state_from_fl, set_field};
-    let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.effects = builtin_effects(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
     // Band 4 (default frequency: the middle of the scale) at +12 dB.
@@ -1239,7 +1239,7 @@ fn builtin_parametric_eq_takes_and_gives_the_file_state() {
 /// (per-note modulation of the start offset) and a choke ends it at once.
 #[test]
 fn lemon_sampler_starts_late_and_chokes() {
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.index_of(LEMON_SAMPLER).unwrap();
     pl.create_with(0, index, None).unwrap();
@@ -1278,7 +1278,7 @@ fn lemon_sampler_starts_late_and_chokes() {
 #[ignore]
 fn drop_on_plugin_window_loads_the_sample() {
     use windows_sys::Win32::Foundation::RECT;
-    let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.available = builtin(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     pl.create(0, pl.index_of(LEMON_SAMPLER).unwrap()).unwrap();
     let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
@@ -1321,15 +1321,10 @@ fn vst3_plugins_host_like_clap_ones() {
         let lib = load(p).unwrap();
         Available { desc: lib.plugins()[0].clone(), lib }
     };
-    let mut pl = Plugins {
-        available: vec![
+    let mut pl = { let mut p = Plugins::default(); p.available = vec![
             available(&clap, |p| os_clap::Library::load(p).map(|l| l as Arc<dyn Library>)),
             available(&vst3, |p| os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>)),
-        ],
-        scale: 1.0,
-        rate: 48000,
-        ..Plugins::default()
-    };
+        ]; p.scale = 1.0; p.rate = 48000; p };
     assert_eq!(pl.index_of("Lemon Sampler"), Some(0), "a name finds the first");
     pl.create(0, 1).unwrap();
     let d = pl.descriptor(0).unwrap();
@@ -1432,7 +1427,7 @@ fn vst3_window_shots() {
         let lib = os_vst3::Module::load(&path).unwrap();
         let a = Available { desc: lib.plugins()[0].clone(), lib };
         let name = a.desc.name.clone();
-        let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+        let mut pl = { let mut p = Plugins::default(); p.scale = 1.0; p.rate = 48000; p };
         let mut host = native_host();
         let key = if effect {
             pl.effects = vec![a];
@@ -1472,7 +1467,7 @@ fn native_window_shots() {
         let Some(dll) = os_native::find_plugin(&fl, name) else { continue };
         let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
         let a = Available { desc: lib.plugins()[0].clone(), lib };
-        let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
+        let mut pl = { let mut p = Plugins::default(); p.scale = 1.0; p.rate = 48000; p.effects = vec![a]; p };
         let mut host = native_host();
         pl.create_effect(1, 0, 0, None).unwrap();
         let key = fx_key(1, 0);
@@ -1516,7 +1511,7 @@ fn native_effect_lifecycle() {
     let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
     let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
     let a = Available { desc: lib.plugins()[0].clone(), lib };
-    let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.scale = 1.0; p.rate = 48000; p.effects = vec![a]; p };
     let mut host = native_host();
     let key = fx_key(1, 0);
     eprintln!("STEP create");
@@ -1708,7 +1703,7 @@ fn native_generator_lifecycle() {
     let dll = os_native::find_plugin(&fl, &name).expect("plugin installed");
     let lib = os_native::NativeLibrary::load(&dll).unwrap() as Arc<dyn Library>;
     let a = Available { desc: lib.plugins()[0].clone(), lib };
-    let mut pl = Plugins { scale: 1.0, rate: 48000, available: vec![a], ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.scale = 1.0; p.rate = 48000; p.available = vec![a]; p };
     let mut host = native_host();
     eprintln!("STEP create");
     if let Err(e) = pl.create(0, 0) {
@@ -1866,7 +1861,7 @@ fn removed_plugins_are_destroyed_on_the_ui_thread() {
     let gone = Arc::new(Mutex::new(None));
     let desc = builtin()[0].desc.clone();
     let plugin: SharedPlugin = Arc::new(Mutex::new(Tracked(desc, gone.clone())));
-    let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     pl.hosted.insert(3, Hosted::new(plugin));
     let engine = pl.instruments();
@@ -1936,7 +1931,7 @@ fn a_crashed_plugin_is_stopped_and_reported_once() {
     let mut desc = builtin_effects()[0].desc.clone();
     desc.name = "Faulty".into();
     let plugin = os_host::share(Faulty(desc, fault.clone()), Arc::new(os_host::guard::Module::default()));
-    let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let key = fx_key(1, 0);
     pl.hosted.insert(key, Hosted::new(plugin));
@@ -1971,7 +1966,7 @@ fn effect_churn() {
             Available { lib, desc }
         })
         .collect();
-    let mut pl = Plugins { effects, scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.effects = ; p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let project = os_app::projects::test_project();
     let transport = os_app::transport::Transport::new(None);
@@ -2005,7 +2000,7 @@ fn effect_churn() {
 fn new_plugins_take_the_detach_check() {
     use os_app::prefs::{check, DETACHED_WITH_MAIN, DETACH_NEW, LIMIT_EDITORS, TYPING_PRIORITY_OFF};
     assert_eq!((check(&DETACH_NEW), check(&DETACHED_WITH_MAIN), check(&TYPING_PRIORITY_OFF), check(&LIMIT_EDITORS)), (false, false, false, true));
-    let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.effects = builtin_effects(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
     pl.create_effect(1, 0, index, None).unwrap();
@@ -2040,7 +2035,7 @@ fn the_earliest_editor_closes_past_the_limit() {
 #[test]
 #[ignore]
 fn editor_limit_and_reopen_place() {
-    let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
+    let mut pl = { let mut p = Plugins::default(); p.effects = builtin_effects(); p.scale = 1.0; p.rate = 48000; p };
     let mut host = native_host();
     let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
     let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Bus {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, max_track: 125, misc: None, icon: None };
