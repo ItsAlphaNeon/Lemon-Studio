@@ -3283,14 +3283,18 @@ impl Engine {
                 self.held = self.fade_out == 0;
                 if self.held {
                     self.marker_paused = self.pause_at.take().or(self.marker_paused);
-                    // Held from here: the hosted instruments are let go of what they hold and ring on.
-                    self.release_instruments();
                 }
             } else {
                 self.fade_in = self.fade_in.saturating_sub(len as u32);
             }
         }
         self.instruments_out(len);
+        // Held from here: the hosted instruments are let go of what they hold and ring on. After `instruments_out`, which
+        // files the notes of this tick an instrument busy elsewhere missed: a note on among them is dropped with the
+        // others it missed, or it would reach the instrument after its note off and sound on through the pause.
+        if self.held {
+            self.release_instruments();
+        }
         for ch in &mut self.channels {
             ch.advance(len as u32);
         }
@@ -7213,6 +7217,44 @@ mod tests {
             e.next_tick();
         }
         all_ended(&recs[0], "missed");
+    }
+
+    /// The same for a note due on the very tick the pause's fade ends, where the instrument is let go of its notes: a
+    /// riff of back-to-back notes (a note off and the next note on every tick, as a mono or legato line plays them) on
+    /// an instrument busy through the pause. That tick's note on, missed, must not reach it after the pause's note
+    /// offs: a synth with a full sustain would hold it for as long as the playback stays paused.
+    #[test]
+    fn a_note_missed_on_the_tick_the_pause_holds_does_not_start_after_it() {
+        let riff = (0..24).map(|i| Note { channel: 1, key: 60 + (i % 2) as u16 * 2, ..long_note(i, 1, 0) }).collect();
+        let mut p = project(riff, vec![]);
+        p.channels.push(Channel { index: 1, kind: ChannelKind::Plugin, ..channel() });
+        let (mut e, recs) = recorded(&p);
+        e.busy_wait = Duration::ZERO;
+        for _ in 0..3 {
+            e.next_tick();
+        }
+        // Held elsewhere from the pause through the end of its fade.
+        let rec = recs[0].clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _g = rec.lock().unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        rx.recv().unwrap();
+        e.pause();
+        for _ in 0..10 {
+            if e.held() {
+                break;
+            }
+            e.next_tick();
+        }
+        assert!(e.held(), "held");
+        holder.join().unwrap();
+        for _ in 0..4 {
+            e.next_tick();
+        }
+        all_ended(&recs[0], "missed on the hold");
     }
 
     /// Flag 4: one child per note in turn, from the first; flag 1: one at random, drawn from the project's generator
