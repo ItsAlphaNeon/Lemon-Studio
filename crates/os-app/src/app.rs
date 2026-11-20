@@ -16242,6 +16242,8 @@ mod tests {
         assert!(app.state.shown(Win::Playlist), "the other stays");
     }
 
+    // The editors drawn in the app's window (`State::embeds`) are Linux's.
+    #[cfg(target_os = "linux")]
     #[test]
     fn built_in_editors_are_lemon_cards() {
         use crate::plugin_window::ChannelInfo;
