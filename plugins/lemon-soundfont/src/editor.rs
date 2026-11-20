@@ -391,7 +391,7 @@ impl Logic {
                 m.head(if *fx == 0 { "Reverb send" } else { "Chorus send" }, Cmd::None);
                 m.add(MenuItem::item("None").mark(os_ui::kit::menu::Mark::Radio(cur < 0)), Cmd::Send(*fx, -1));
                 for t in 0..=125 {
-                    let label = if t == 0 { "Master".to_string() } else { format!("Insert {t}") };
+                    let label = if t == 0 { "Master".to_string() } else { format!("Bus {t}") };
                     m.add(MenuItem::item(&label).mark(os_ui::kit::menu::Mark::Radio(cur == t)), Cmd::Send(*fx, t));
                 }
             }
