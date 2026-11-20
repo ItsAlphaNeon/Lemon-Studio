@@ -1,3 +1,7 @@
+// Copyright (C) 2026 thacer13
+// SPDX-License-Identifier: GPL-3.0-or-later
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+
 //! The switches of the native-plugin host (`os-native`: FL Studio's native plugins, spec plugins/fruity-abi.md),
 //! for the whole program. Without the `fl-native` feature the host is not in this build: it is never on, and
 //! turning it on does nothing.
