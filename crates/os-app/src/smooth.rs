@@ -262,7 +262,7 @@ impl App {
     }
 
     fn ppq(&self) -> f64 {
-        f64::from(self.state.project.ppq.max(4))
+        f64::from(self.state.session.project.ppq.max(4))
     }
 
     /// The grid `w`'s time is drawn in, at the last paint.
@@ -283,7 +283,7 @@ impl App {
     }
 
     /// The zoom a notch of the wheel in `w` multiplies on from: where its zoom ease is going, else the zoom drawn.
-    pub(crate) fn zoom_from(&self, w: TimeZoom) -> f32 {
+    pub fn zoom_from(&self, w: TimeZoom) -> f32 {
         self.smooth.zooms.iter().find(|e| e.win == w).map_or(self.time_view(w).0, |e| e.target.0)
     }
 
@@ -304,7 +304,7 @@ impl App {
     /// anchors at the mouse again; a scroll of that time axis ends it where it is. A time zoom at once, or a track or
     /// key row height (Alt+wheel: not eased), keeps `f`'s values for the axes it moves, and their eases end.
     // spec: ui/animations.md §4.4
-    pub(crate) fn eased<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
+    pub fn eased<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
         self.zooms_moved();
         let before = AXES.map(|a| self.axis_get(a));
         let zooms = self.zooms();
@@ -358,7 +358,7 @@ impl App {
     }
 
     /// The tick: every ease moves on by the time since it last moved.
-    pub(crate) fn ease_tick(&mut self, now: Instant) {
+    pub fn ease_tick(&mut self, now: Instant) {
         let Some(at) = self.smooth.at else { return };
         self.smooth.at = Some(now);
         self.ease_step(now.saturating_duration_since(at).as_secs_f64() * 1000.0);
@@ -367,7 +367,7 @@ impl App {
     /// One frame of `dt_ms` for every ease, and the damage it leaves: the playlist moves its pixels
     /// (`playlist_scrolled`, or is repainted where that can't be exact), the other windows repaint, and so does a
     /// window whose zoom moved.
-    pub(crate) fn ease_step(&mut self, dt_ms: f64) {
+    pub fn ease_step(&mut self, dt_ms: f64) {
         let value = f64::from(smoothing());
         let pl = self.state.playlist_scroll;
         let blit = f64::from(self.playlist_blit_step().unwrap_or(1.0).max(1.0));
@@ -430,7 +430,7 @@ impl App {
 
     /// Tests: every ease at its end.
     #[cfg(test)]
-    pub(crate) fn ease_to_end(&mut self) {
+    pub fn ease_to_end(&mut self) {
         for _ in 0..10_000 {
             if !self.smooth.running() {
                 return;
@@ -785,7 +785,7 @@ mod tests {
         assert_eq!(app.time_view(w), mid);
         let target = app.smooth.zoom(w).expect("still easing").target;
         assert_eq!(target.0, two.0, "a notch on from the target");
-        let ppt = two.0 / f32::from(app.state.project.ppq.max(4));
+        let ppt = two.0 / f32::from(app.state.session.project.ppq.max(4));
         assert!((target.1 - two.1).abs() * ppt <= 1.0, "the tick under the mouse stays: {target:?}, {two:?}");
         zoom_eases(&mut app, w);
         assert_eq!(app.time_view(w), target);

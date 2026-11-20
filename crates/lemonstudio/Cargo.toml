@@ -1,0 +1,110 @@
+[package]
+name = "lemonstudio"
+description = "Lemon Studio: the program (its windows, around the interface and the session)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lemonstudio"
+path = "src/main.rs"
+
+[features]
+default = [
+    "vst3", "vst2", "export-flac", "export-mp3", "export-ogg", "midi-io", "device", "fl-native", "rpc", "plugin-windows",
+    "stock-soft-clipper", "stock-fast-distortion", "stock-balance", "stock-stereo-enhancer",
+    "stock-transient-processor", "stock-chorus", "stock-stereo-shaper", "stock-filter", "stock-flanger",
+    "stock-phaser", "stock-peak-controller", "stock-formula-controller", "stock-vocoder", "stock-limiter",
+    "stock-reverb", "stock-delay", "stock-pulp-filter", "stock-press", "stock-parametric-eq-2", "stock-drop",
+    "stock-trio", "stock-citrus", "stock-smith", "stock-slicer", "stock-drum-sampler", "stock-soundfont",
+]
+# Hosting VST 3 and VST 2 plugins (the session's features).
+vst3 = ["os-app/vst3"]
+vst2 = ["os-app/vst2"]
+# The export encoders (the session's features).
+export-flac = ["os-app/export-flac"]
+export-mp3 = ["os-app/export-mp3"]
+export-ogg = ["os-app/export-ogg"]
+# The system's MIDI ports.
+midi-io = ["os-app/midi-io"]
+# The system's audio devices.
+device = ["os-app/device"]
+# FL Studio's native plugins (and the child process that tries one before its first load).
+fl-native = ["os-app/fl-native", "dep:os-native"]
+# Listening for control-plane clients.
+rpc = ["os-app/rpc"]
+# Plugin editors in Lemon Studio's own frame windows.
+plugin-windows = ["os-app/plugin-windows"]
+# Stock plugins (on by default: every build offers them; leaving one out is for forks). Off: it is not listed, and
+# a project's slot holding it opens as a missing plugin.
+stock-soft-clipper = ["os-app/stock-soft-clipper"]
+stock-fast-distortion = ["os-app/stock-fast-distortion"]
+stock-balance = ["os-app/stock-balance"]
+stock-stereo-enhancer = ["os-app/stock-stereo-enhancer"]
+stock-transient-processor = ["os-app/stock-transient-processor"]
+stock-chorus = ["os-app/stock-chorus"]
+stock-stereo-shaper = ["os-app/stock-stereo-shaper"]
+stock-filter = ["os-app/stock-filter"]
+stock-flanger = ["os-app/stock-flanger"]
+stock-phaser = ["os-app/stock-phaser"]
+stock-peak-controller = ["os-app/stock-peak-controller"]
+stock-formula-controller = ["os-app/stock-formula-controller"]
+stock-vocoder = ["os-app/stock-vocoder"]
+stock-limiter = ["os-app/stock-limiter"]
+stock-reverb = ["os-app/stock-reverb"]
+stock-delay = ["os-app/stock-delay"]
+stock-pulp-filter = ["os-app/stock-pulp-filter"]
+stock-press = ["os-app/stock-press"]
+stock-parametric-eq-2 = ["os-app/stock-parametric-eq-2"]
+stock-drop = ["os-app/stock-drop"]
+stock-trio = ["os-app/stock-trio"]
+stock-citrus = ["os-app/stock-citrus"]
+stock-smith = ["os-app/stock-smith"]
+stock-slicer = ["os-app/stock-slicer"]
+stock-drum-sampler = ["os-app/stock-drum-sampler"]
+stock-soundfont = ["os-app/stock-soundfont"]
+
+[dependencies]
+os-app = { path = "../os-app", default-features = false }
+os-session = { path = "../os-session", default-features = false }
+os-model.workspace = true
+os-engine.workspace = true
+os-host.workspace = true
+os-hostlink.workspace = true
+os-native = { path = "../os-native", optional = true }
+os-clap = { path = "../os-clap" }
+os-paths.workspace = true
+os-ui = { path = "../os-ui" }
+os-theme = { path = "../os-theme" }
+winit = "0.30"
+softbuffer = "0.4"
+tiny-skia = "0.11"
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_System_DataExchange", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_System_SystemInformation"] }
+
+# The Windows window tests (`frames/win_tests.rs`) open the stock plugins' editors themselves.
+[target.'cfg(windows)'.dev-dependencies]
+lemon-sampler = { path = "../../plugins/lemon-sampler", default-features = false, features = ["linked"] }
+lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", default-features = false, features = ["linked"] }
+lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", default-features = false, features = ["linked"] }
+citrus = { path = "../../plugins/citrus", default-features = false, features = ["linked"] }
+smith = { path = "../../plugins/smith", default-features = false, features = ["linked"] }
+os-vst3.workspace = true
+os-flp.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["randr", "resource_manager", "shape"] }
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSGeometry", "NSObjCRuntime", "NSString", "NSURL", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "NSApplication", "NSColor", "NSCursor", "NSEvent", "NSCell", "NSGraphics", "NSMenu", "NSMenuItem", "NSPanel", "NSPasteboard", "NSResponder", "NSScreen", "NSTrackingArea", "NSView", "NSWindow"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFDate", "CFRunLoop"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "objc2", "CGColorSpace", "CGDataProvider", "CGImage", "CGPath"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "CALayer", "CAShapeLayer", "CATransaction"] }

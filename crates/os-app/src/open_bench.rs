@@ -5,7 +5,7 @@
 //! UI-thread load of opening a real project: opens it as the app does, then ticks and paints until it has loaded and
 //! settled, and prints every tick or paint that held the UI thread for long, with how long the open itself took.
 //!
-//! `OS_OPEN_BENCH=<project.flp or .zip> cargo test -p os-app --bin lemonstudio open_load -- --ignored --nocapture`
+//! `OS_OPEN_BENCH=<project.flp or .zip> cargo test -p os-app --lib open_load -- --ignored --nocapture`
 
 use std::time::{Duration, Instant};
 
@@ -22,9 +22,9 @@ fn open_load() {
         return;
     };
     let mut app = crate::app::App::new(None);
-    app.plugins = crate::plugins::Plugins::default();
-    app.plugins.available = crate::plugins::builtin();
-    app.plugins.effects = crate::plugins::builtin_effects();
+    app.state.session.plugins = crate::plugins::Plugins::default();
+    app.state.session.plugins.available = crate::plugins::builtin();
+    app.state.session.plugins.effects = crate::plugins::builtin_effects();
     let mut canvas = Canvas::new(1920, 1080, 1.0).unwrap();
     let t0 = Instant::now();
     app.open(path.into());
@@ -66,7 +66,7 @@ fn open_load() {
     let Some(out) = std::env::var_os("OS_OPEN_BENCH_ZIP") else { return };
     app.state.dialogs.clear();
     let t0 = Instant::now();
-    crate::zipped::export(&mut app, out.into());
+    crate::zipped_ui::export(&mut app, out.into());
     let mut worst = t0.elapsed();
     while app.loading() && t0.elapsed() < Duration::from_secs(300) {
         let t = Instant::now();

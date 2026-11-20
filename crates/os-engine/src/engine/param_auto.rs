@@ -310,7 +310,7 @@ mod tests {
         let mut p = project(0);
         p.automations.clear();
         p.arrangements.clear();
-        let point = |position: u32, kind: u32, value: i32| ControlPoint { position, kind, value };
+        let point = |position: u32, kind: u32, value: i32| ControlPoint { id: os_model::Id::NONE, position, kind, value };
         let controls = vec![
             point(0, target::slot_param(1, 3, 0), 32),
             point(96, target::slot_param(1, 3, 0), -64),
@@ -346,6 +346,7 @@ mod tests {
             rack: Default::default(),
             plugin_state: None,
             misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         }
     }
 

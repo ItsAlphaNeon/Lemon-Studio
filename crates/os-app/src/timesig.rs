@@ -37,52 +37,64 @@ pub enum SongSig {
 
 /// Accept on a song marker: a time signature marker named after its signature ("3/4"), one undo step.
 pub fn set_song(s: &mut State, at: SongSig, num: u8, den: u8) {
-    crate::playlist::snapshot(s);
+    use crate::control::command::{Command, MarkerIn};
     let name = format!("{num}/{den}");
-    match at {
-        SongSig::At(t) => {
-            crate::playlist::add_marker(s, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) });
-        }
+    let c = match at {
+        SongSig::At(t) => Command::AddMarker { marker: MarkerIn::of(&TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) }) },
         SongSig::Marker(i) => {
-            if let Some(m) = crate::playlist::arr_mut(s).markers.get_mut(i) {
-                *m = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, name, ..m.clone() };
+            let Some(m) = crate::edit::playlist::markers(&s.session).get(i) else { return };
+            if m.id.is_none() {
+                crate::control_ui::settle_ids(s);
             }
+            let marker = crate::edit::playlist::markers(&s.session)[i].id.0;
+            Command::SetMarker { marker, position: None, name: Some(name), kind: Some(TimeMarker::SIGNATURE), numerator: Some(num), denominator: Some(den) }
         }
+    };
+    if let Err(e) = crate::control_ui::command(s, crate::edit::playlist::ARRANGER_EDIT, None, vec![c]) {
+        s.message = Some(e);
     }
-    s.piano.dirty = true;
 }
 
 /// Index of pattern `n`'s time-signature marker at its start.
 pub fn start_marker(s: &State, n: u16) -> Option<usize> {
-    s.project.pattern(n)?.markers.iter().position(|m| m.kind == TimeMarker::SIGNATURE && m.position == 0)
+    s.session.project.pattern(n)?.markers.iter().position(|m| m.kind == TimeMarker::SIGNATURE && m.position == 0)
 }
 
 /// Accept: pattern `n` gets `num` / `den` at its start, first among its markers (they stay sorted by position), named
 /// after the signature as FL names it ("3/8", §4-5). The pattern's bars follow it, and so do its clips that kept their
 /// natural length. One undo step.
 pub fn set_start(s: &mut State, n: u16, num: u8, den: u8) {
-    crate::control::edit(s, STEP, crate::control::command::Region::Project, |s| set_start_now(s, n, num, den));
+    signature(s, n, num, den);
+}
+
+/// Pattern `n`'s signature at its start set (`num` 0: taken away) by its command, one undo step; a pattern number the
+/// project has no pattern for gets one.
+fn signature(s: &mut State, n: u16, num: u8, den: u8) {
+    use crate::control::command::Command;
+    if s.session.project.patterns.iter().any(|p| p.id.is_none()) {
+        crate::control_ui::settle_ids(s);
+    }
+    let r = match s.session.project.pattern(n).map(|p| p.id.0) {
+        Some(pattern) => crate::control_ui::command(s, STEP, None, vec![Command::SetPatternSignature { pattern, numerator: num, denominator: den }]),
+        None => crate::control_ui::command_then(s, STEP, vec![Command::AddPattern { name: None, color: None, number: Some(n) }], |_, r| {
+            r.first().and_then(|v| v["pattern"].as_u64()).map(|p| Command::SetPatternSignature { pattern: p as u32, numerator: num, denominator: den }).into_iter().collect()
+        }),
+    };
+    if let Err(e) = r {
+        s.message = Some(e);
+    }
 }
 
 /// The pattern time signature's undo step.
 const STEP: &str = "Pattern time signature";
 
-fn set_start_now(s: &mut State, n: u16, num: u8, den: u8) {
-    let old = s.project.pattern_length(n);
-    let markers = &mut crate::patterns::pat_mut(s, n).markers;
-    markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && m.position == 0));
-    markers.insert(0, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(0, &format!("{num}/{den}")) });
-    crate::playlist::refit_pattern_clips(s, n, old);
-}
 
 /// Yes to the conflict question took the start marker away: the pattern's bars are the project's again (§3).
 pub fn remove_start(s: &mut State, n: u16) {
-    let Some(i) = start_marker(s, n) else { return };
-    crate::control::edit(s, STEP, crate::control::command::Region::Project, |s| {
-        let old = s.project.pattern_length(n);
-        crate::patterns::pat_mut(s, n).markers.remove(i);
-        crate::playlist::refit_pattern_clips(s, n, old);
-    });
+    if start_marker(s, n).is_none() {
+        return;
+    }
+    signature(s, n, 0, 0);
 }
 
 /// The time signature dialog is the top dialog.
@@ -110,8 +122,8 @@ impl App {
 
     /// PATTERNS > Set time signature... on the current pattern: the conflict question when it has a signature at its
     /// start (§3), else the dialog.
-    pub(crate) fn ask_time_signature(&mut self) {
-        let n = self.state.pattern.max(1);
+    pub fn ask_time_signature(&mut self) {
+        let n = self.state.pattern().max(1);
         if start_marker(&self.state, n).is_none() {
             return self.open_time_signature(n);
         }
@@ -120,7 +132,7 @@ impl App {
     }
 
     /// Yes to the conflict question: the start marker goes at once, then the dialog opens (§3).
-    pub(crate) fn replace_signature(&mut self, n: u16) {
+    pub fn replace_signature(&mut self, n: u16) {
         remove_start(&mut self.state, n);
         self.open_time_signature(n);
     }
@@ -132,14 +144,14 @@ impl App {
     }
 
     /// The dialog for a song time signature marker, at 4 / 4 (spec: ui/playlist.md §7a).
-    pub(crate) fn open_song_signature(&mut self, at: SongSig) {
+    pub fn open_song_signature(&mut self, at: SongSig) {
         self.state.playlist.popup = None;
-        let n = self.state.pattern.max(1);
+        let n = self.state.pattern().max(1);
         self.show_form(Body::TimeSig(SigForm { pattern: n, num: 4, den: 4, song: Some(at) }));
     }
 
     /// A click on a value box: its list, the app's popup, under the box, the current value marked (§1).
-    pub(crate) fn sig_list(&mut self, den: bool) {
+    pub fn sig_list(&mut self, den: bool) {
         let Some(f) = self.sig_form().copied() else { return };
         let Some(r) = self.hits.iter().rev().find(|h| h.action == Action::Dlg(DHit::SigValue(den))).map(|h| h.rect) else { return };
         let (cur, values): (u8, Vec<u8>) = if den { (f.den, DENOMINATORS.to_vec()) } else { (f.num, NUMERATORS.collect()) };
@@ -149,7 +161,7 @@ impl App {
     }
 
     /// A pick in a value list sets its box.
-    pub(crate) fn sig_pick(&mut self, den: bool, v: u8) {
+    pub fn sig_pick(&mut self, den: bool, v: u8) {
         if let Some(f) = self.sig_form() {
             if den {
                 f.den = v;

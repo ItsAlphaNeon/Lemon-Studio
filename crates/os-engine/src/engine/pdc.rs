@@ -680,6 +680,7 @@ mod tests {
             rack: Default::default(),
             misc: Default::default(),
             sound: Default::default(),
+            lemon_icon: None,
         }
     }
 

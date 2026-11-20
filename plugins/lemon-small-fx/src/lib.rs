@@ -20,6 +20,7 @@
 
 pub mod balance;
 pub mod chorus;
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod fast_distortion;
 pub mod filter;
@@ -277,6 +278,7 @@ impl<K: Kind> Plugin for SmallFx<K> {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::FxEditor::new(K::SPEC, self.params.clone(), self.shared.clone())))
     }
@@ -450,12 +452,12 @@ mod tests {
         assert_eq!(p.settings()[0], 0);
     }
 
-    /// The factory presets (`crates/os-app/factory-presets/<name>/`, one level of category folders) list every
+    /// The factory presets (`crates/os-session/factory-presets/<name>/`, one level of category folders) list every
     /// parameter by its name, as its step count from the minimum, and hold FL's presets (spec
     /// plugins/factory-presets.md).
     #[test]
     fn factory_presets_list_every_parameter_and_hold_fls_states() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-session/factory-presets");
         // Every preset of a plugin, as `[category/]name`.
         let all = |spec: &Spec| -> Vec<String> {
             let mut names = Vec::new();

@@ -205,7 +205,7 @@ pub struct SettingsUi {
     pub info_edit: Option<InfoEdit>,
     /// The File page's Browser extra search folders cell being typed into.
     pub folder_edit: Option<crate::search_folders::CellEdit>,
-    /// The Plugins page shows the experimental native host toggles: `os_native::settings_shown()` at startup.
+    /// The Plugins page shows the experimental native host toggles: `os_session::native::settings_shown()` at startup.
     pub native: bool,
     /// Project ▸ Time settings: the last bar (beats per bar, steps per beat) of each "Set as" mode, indexed by
     /// `signature as usize` (0 = time division), kept while the program runs; `None` = 4/4 (spec:
@@ -699,7 +699,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         RECORDING => {
             use crate::prefs as p;
             // Where takes go now: the project's data folder's Recorded folder, else the user folder's.
-            let folder = crate::track_rec::folder(s).display().to_string();
+            let folder = crate::track_rec::folder(&s.session).display().to_string();
             vec![
                 g("Recording filter", vec![Check2(p::REC_NOTES.label, true, p::REC_AUTOMATION.label, true), Check(p::REC_AUDIO.label, false)]),
                 g("Options", vec![
@@ -844,9 +844,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // The native host toggle appears only with `OPENSTUDIO_NATIVE_SETTINGS`, the second one only while the
             // native host is on too.
             if st.native {
-                scanning.push(Check(NATIVE_HOST_CHECK, os_native::enabled()));
-                if os_native::enabled() {
-                    scanning.push(Check(NATIVE_FIRST_CHECK, os_native::prefer_native()));
+                scanning.push(Check(NATIVE_HOST_CHECK, os_session::native::enabled()));
+                if os_session::native::enabled() {
+                    scanning.push(Check(NATIVE_FIRST_CHECK, os_session::native::prefer_native()));
                 }
             }
             scanning.push(Buttons(vec![("Scan for new plugins", 130.0), ("Rescan all", 100.0)]));
@@ -882,7 +882,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // The project's data folder (events 167 and 202) and two program settings (spec: ui/data-folder.md §1);
             // drawn by `super::data_folder`.
             g(super::data_folder::GROUP, vec![
-                combo(crate::data_folder::choice_text(&s.project), 306.0, crate::data_folder::COMBO),
+                combo(crate::data_folder::choice_text(&s.session.project), 306.0, crate::data_folder::COMBO),
                 DataFolder,
                 combo(crate::prefs::choice(&crate::prefs::ASK_DATA_FOLDER), 444.0, crate::prefs::ASK_DATA_FOLDER.label),
                 Check(crate::prefs::COPY_USED_SAMPLES.label, false),
@@ -890,10 +890,10 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("Time settings", {
                 // The bar as the project holds it (4/4 when the file has none), in the mode of event 35: a time
                 // signature's two combos or a time division's two value boxes (spec: ui/settings-choices.md "Project").
-                let (beats, steps) = s.project.bar();
-                let sig = s.project.bar_is_signature();
+                let (beats, steps) = s.session.project.bar();
+                let sig = s.session.project.bar_is_signature();
                 let mut rows = vec![
-                    combo(&s.project.ppq.to_string(), 44.0, TIMEBASE),
+                    combo(&s.session.project.ppq.to_string(), 44.0, TIMEBASE),
                     combo(if sig { SET_AS_SIGNATURE } else { SET_AS_DIVISION }, 196.0, SET_AS),
                 ];
                 if sig {
@@ -908,15 +908,15 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // The panning law (event 23) and the check show what the engine plays. Fast declick shows the project's
             // value, greyed: its sound is not played yet (event 40; spec: flp/engine-events.md "Project").
             gf("Advanced", true, vec![
-                combo(&panning_text(s.project.panning_law), 82.0, PANNING_LAW),
-                Check(TRUNCATED_CHECK, s.project.play_truncated),
-                Check("Fast fade for choke groups", s.project.fast_declick.unwrap_or(false)),
+                combo(&panning_text(s.session.project.panning_law), 82.0, PANNING_LAW),
+                Check(TRUNCATED_CHECK, s.session.project.play_truncated),
+                Check("Fast fade for choke groups", s.session.project.fast_declick.unwrap_or(false)),
             ]),
             // The project's automatic crossfades (event 44; off when the file has none) and the program setting new
             // projects take it from (`prefs::AUTO_CROSSFADES_NEW`, which the check shows).
             gf("Arranger", false, vec![Check2(
                 CROSSFADES_CHECK,
-                s.project.auto_crossfades.unwrap_or(false),
+                s.session.project.auto_crossfades.unwrap_or(false),
                 crate::prefs::AUTO_CROSSFADES_NEW.label,
                 true,
             )]),
@@ -927,7 +927,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         INFO => {
             vec![g("Project credits", vec![
                 Text("Title".into(), true),
-                pair(Edit(InfoField::Title, 288.0), Check(SHOW_INFO_CHECK, s.project.show_info.unwrap_or(false))),
+                pair(Edit(InfoField::Title, 288.0), Check(SHOW_INFO_CHECK, s.session.project.show_info.unwrap_or(false))),
                 Text("Author".into(), true),
                 Edit(InfoField::Author, 0.0),
                 Text("Genre".into(), true),
@@ -938,16 +938,16 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Edit(InfoField::Url, 0.0),
                 Gap(8.0),
                 // FL's footer (spec: ui/settings-choices.md "Info").
-                InfoFooter(crate::project_info::footer(s, std::time::Instant::now())),
+                InfoFooter(crate::project_info_ui::footer(s, std::time::Instant::now())),
             ])]
         }
         DEBUG => {
             let mut lines = vec![
                 format!("Lemon Studio {}", crate::version::text()),
-                format!("Project: {}", s.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
-                format!("Saved by: {}", s.project.saved_by),
-                format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo),
-                format!("Channels {}, patterns {}, mixer tracks {}", s.project.channels.len(), s.project.patterns.len(), s.project.mixer.len()),
+                format!("Project: {}", s.session.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
+                format!("Saved by: {}", s.session.project.saved_by),
+                format!("PPQ {}, tempo {:.3}", s.session.project.ppq, s.tempo()),
+                format!("Channels {}, patterns {}, mixer tracks {}", s.session.project.channels.len(), s.session.project.patterns.len(), s.session.project.mixer.len()),
                 format!("Output device: {}", st.device),
                 format!("Device rate: {:?}", st.rate),
                 format!("Instruments listed: {}, effects listed: {}", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()),
@@ -1783,7 +1783,7 @@ const ASIO_LOGO_H: f32 = 40.0;
 
 /// The ASIO Compatible Logo from the ASIO SDK (`asiosdk/logo`, unchanged), decoded once.
 #[cfg(windows)]
-pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+pub fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
     static LOGO: std::sync::OnceLock<Option<(usize, usize, Vec<u32>)>> = std::sync::OnceLock::new();
     LOGO.get_or_init(|| os_ui::Canvas::decode_png(include_bytes!("../../asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png")))
         .as_ref()
@@ -1791,7 +1791,7 @@ pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
 
 /// Builds without ASIO show no logo.
 #[cfg(not(windows))]
-pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+pub fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
     None
 }
 
@@ -1815,7 +1815,7 @@ fn info_box(ui: &mut Ui, s: &State, field: InfoField, b: Rect) {
     let hov = ui.hit(b, Action::Settings(SAct::Info(field)), hint);
     let well = if edit.is_some() { t.s(0x141516) } else if hov { t.s(0x1d1f21) } else { t.s(0x191b1c) };
     kit::sunken(ui.c, t, b, well);
-    let shown = field.get(&s.project.info).as_deref().unwrap_or("");
+    let shown = field.get(&s.session.project.info).as_deref().unwrap_or("");
     let (text, caret, all) = match edit {
         Some(e) => (e.text.as_str(), Some(e.caret), e.all && !e.text.is_empty()),
         None => (shown, None, false),
@@ -1866,7 +1866,7 @@ fn byte_at(s: &str, i: usize) -> usize {
 
 /// The lines `text` shows in `w` px: (first character, characters) of each, in characters. A line longer than `w`
 /// breaks after its last space that fits, else where it is full; the line break itself belongs to no line.
-pub(crate) fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
+pub fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut base = 0;
     for para in text.split('\n') {

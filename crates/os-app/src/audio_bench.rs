@@ -6,7 +6,7 @@
 //! song tick by tick and prints how long each second of audio took to render, as a share of one core. Ticks render the
 //! same way during playback, so a second near 100 % here is a second that drops out live.
 //!
-//! `OS_AUDIO_BENCH=<project.flp> cargo test -p os-app --bin lemonstudio audio_load -- --ignored --nocapture`
+//! `OS_AUDIO_BENCH=<project.flp> cargo test -p os-app --lib audio_load -- --ignored --nocapture`
 //! (`OS_AUDIO_BENCH_SECS=n` stops after n seconds of song; `OS_MIX_THREADS=n` renders on n mixing workers beside the
 //! rendering thread, spec: audio/multicore.md, where the time is still the rendering thread's wall clock;
 //! `OS_MIX_AUTO=1` uses them only when needed, as playing live does).
@@ -121,9 +121,9 @@ fn audio_load() {
     os_engine::parallel::configure_auto(std::env::var_os("OS_MIX_AUTO").is_some());
     let limit: f64 = std::env::var("OS_AUDIO_BENCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(f64::MAX);
     let mut app = crate::app::App::new(None);
-    app.plugins = crate::plugins::Plugins::default();
-    app.plugins.available = crate::plugins::builtin();
-    app.plugins.effects = crate::plugins::builtin_effects();
+    app.state.session.plugins = crate::plugins::Plugins::default();
+    app.state.session.plugins.available = crate::plugins::builtin();
+    app.state.session.plugins.effects = crate::plugins::builtin_effects();
     app.open(path.into());
     eprintln!("{}", app.state.message.clone().unwrap_or_default());
     let t0 = Instant::now();
@@ -139,11 +139,11 @@ fn audio_load() {
     eprintln!("loaded in {:.1} s", t0.elapsed().as_secs_f64());
     let rate = crate::transport::Transport::device_rate().unwrap_or(48000);
     let project = crate::rack::play_project(&app.state);
-    let mut library = SampleLibrary::new(crate::factory_folder::dir());
+    let mut library = SampleLibrary::new(crate::factory_folder::dir(&crate::settings_file::store()));
     library.resample_stretches = true;
     let mut e = Engine::new(&project, &mut library, rate, PlayMode::Song);
-    let inst = app.plugins.instruments();
-    let fx = app.plugins.effects();
+    let inst = app.state.session.plugins.instruments();
+    let fx = app.state.session.plugins.effects();
     eprintln!("{} hosted instruments, {} hosted effects, {} Hz", inst.len(), fx.len(), rate);
     // OS_AUDIO_BENCH_SKIP=inst|fx leaves those out, to see what each costs.
     let skip = std::env::var("OS_AUDIO_BENCH_SKIP").unwrap_or_default();

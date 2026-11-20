@@ -8,25 +8,28 @@
 //! `x11` on Linux, `mac` on macOS). Linux and macOS share one API and input type ([`gui`]), so a plugin's editor loop
 //! is the same on both. A Lemon instrument takes the channel's volume and pan as [`levels::Levels`].
 //!
+//! The native parts are the `gui` feature (on by default): without it a plugin built on this crate has no editor
+//! window, as the session with no interface hosts the stock plugins.
+//!
 // spec: plugins/lemon-sampler.md §4 (edits apply at once, menus), plugins/lemon-parametric-eq-2.md, plugins/plugin-formats.md
 
 pub mod levels;
 pub mod linked;
 pub mod live;
 pub mod vals;
-#[cfg(windows)]
+#[cfg(all(feature = "gui", windows))]
 pub mod win;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "gui", target_os = "linux"))]
 pub mod x11;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "gui", target_os = "macos"))]
 pub mod mac;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "gui", any(target_os = "linux", target_os = "macos")))]
 pub mod input;
 
 /// The editor window of this platform where it runs the plugins' shared editor loop: `x11` on Linux, `mac` on macOS.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "gui", target_os = "linux"))]
 pub use x11 as gui;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "gui", target_os = "macos"))]
 pub use mac as gui;
 
 use os_theme::design::Design;

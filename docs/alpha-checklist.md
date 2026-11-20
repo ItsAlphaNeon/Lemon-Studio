@@ -73,7 +73,7 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   colour and icon. Its window (the slot menu's Container ▸ Edit list..., or opening the slot) opens each effect's
   plugin window, turns and types in its wet and dry levels on knobs that follow automation, and removes, moves and
   adds effects, one undo step each
-  ([container.rs](../crates/os-app/src/container.rs), [chain.rs](../crates/os-engine/src/chain.rs)). Containers are
+  ([container.rs](../crates/os-session/src/container.rs), [chain.rs](../crates/os-engine/src/chain.rs)). Containers are
   saved in Lemon Studio's projects. The effects inside are automated and linked as a slot's effect is, their wet and
   dry levels too (clips and controller links name the member by its container's slot and its id, so they follow it
   when it moves and are saved with the project), and their windows have their presets, a slot effect's menu
@@ -115,7 +115,7 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   controls), the track and slot menus' Change icon..., the slot menu's Link all parameters... and its Patcherize and
   Patcherize all (Wrap in container, Wrap all in container: see Patcher), Mixer options ▸ Detached (the mixer in a
   native window of its own), and last Assign to new / Unassign from Audio track(s) and Select ▸ Channels and playlist
-  tracks routed to this track (audio tracks, [track_links.rs](../crates/os-app/src/track_links.rs)) were enabled.
+  tracks routed to this track (audio tracks, [track_links.rs](../crates/os-session/src/track_links.rs)) were enabled.
   Scaling ▸ is greyed for a slot without a hosted plugin, "(no saved states)" when none is saved. Not counted: the
   layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs)). Still greyed as of 2026-11-08: the
   latency menus' Adjust position of recorded audio, Set from, Delay audio output and Bypass track latency compensation,

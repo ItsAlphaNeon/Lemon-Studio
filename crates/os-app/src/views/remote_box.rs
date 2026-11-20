@@ -40,8 +40,8 @@ pub fn paint(ui: &mut Ui, s: &State, b: &LinkBox) {
     ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.tx(0xffffff) } else { t.text });
     // The target's name.
     let name = match b.target {
-        _ if all => format!("{}: {} parameters", crate::remote::group_name(s, b), b.all.len()),
-        t => crate::typein::caption(s, t),
+        _ if all => format!("{}: {} parameters", crate::remote_ui::group_name(s, b), b.all.len()),
+        t => crate::typein_ui::caption(s, t),
     };
     let field = Rect::new(r.x + 10.0, r.y + 32.0, r.w - 20.0, 22.0);
     kit::sunken(ui.c, t, field, t.s(0x141516));

@@ -30,7 +30,7 @@ pub const LEVEL_NOTCH: f32 = 3.0 / 64.0;
 /// The shortest note the Pattern section writes, in ticks (§3; Lemon Studio keeps it at every PPQ, §6).
 pub const MIN_LEN: u32 = 4;
 /// The highest key: higher picks become it.
-const TOP_KEY: u16 = 131;
+const TOP_KEY: u16 = crate::piano::TOP_KEY as u16;
 /// Random portamento's odds (a Lemon Studio choice near FL's measured one in eight, §6).
 const PORTA_ODDS: f64 = 1.0 / 8.0;
 

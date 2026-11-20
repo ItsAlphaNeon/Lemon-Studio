@@ -12,14 +12,18 @@
 
 pub mod analysis;
 pub mod display;
+#[cfg(feature = "editor")]
 pub mod editor;
 #[cfg(windows)]
+#[cfg(feature = "editor")]
 pub mod float;
 #[cfg(target_os = "macos")]
 #[path = "float_mac.rs"]
+#[cfg(feature = "editor")]
 pub mod float;
 #[cfg(target_os = "linux")]
 #[path = "float_x11.rs"]
+#[cfg(feature = "editor")]
 pub mod float;
 pub mod state;
 pub mod view;
@@ -120,7 +124,7 @@ pub struct Shared {
     /// The floating display window (Win32: its HWND; macOS: see `float_mac`; X11: 1 while its thread runs, -1 when it could not open; 0 = none).
     pub float: AtomicIsize,
     /// The floating display's GUI thread; dropping it closes the window (macOS, X11).
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(all(feature = "editor", any(target_os = "macos", target_os = "linux")))]
     pub float_thread: Mutex<Option<os_plugkit::gui::EditorThread>>,
 }
 
@@ -131,7 +135,7 @@ impl Default for Shared {
             rate: AtomicU32::new(44100),
             viewers: AtomicUsize::new(0),
             float: AtomicIsize::new(0),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(all(feature = "editor", any(target_os = "macos", target_os = "linux")))]
             float_thread: Mutex::new(None),
         }
     }
@@ -217,7 +221,7 @@ impl LemonDrop {
 impl Drop for LemonDrop {
     fn drop(&mut self) {
         // The floating display outlives the editor, not the plugin.
-        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+        #[cfg(all(feature = "editor", any(windows, target_os = "macos", target_os = "linux")))]
         float::close(&self.shared);
     }
 }
@@ -240,6 +244,7 @@ impl Plugin for LemonDrop {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::DropEditor::new(self.params.clone(), self.shared.clone())))
     }
@@ -309,11 +314,11 @@ mod tests {
         assert_eq!(p.current().1.gain, 0);
     }
 
-    /// Every factory preset (`crates/os-app/factory-presets/Lemon Drop/`, spec: plugins/lemon-drop.md "Presets") holds
+    /// Every factory preset (`crates/os-session/factory-presets/Lemon Drop/`, spec: plugins/lemon-drop.md "Presets") holds
     /// the plugin's saved state with a version 9 state that reads and writes back as it is; Default is a new Lemon Drop.
     #[test]
     fn factory_presets_hold_readable_states() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets/Lemon Drop");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-session/factory-presets/Lemon Drop");
         let (mut n, mut walk) = (0, vec![root.clone()]);
         while let Some(d) = walk.pop() {
             for e in std::fs::read_dir(&d).unwrap() {

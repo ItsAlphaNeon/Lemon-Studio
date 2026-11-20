@@ -11,6 +11,7 @@
 pub mod ctl;
 pub use os_dsp::curve;
 pub mod edit;
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod engine;
 pub mod filter;
@@ -332,6 +333,7 @@ impl Plugin for CitrusPlugin {
         true
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::CitrusEditor::new(self.params.clone())))
     }
