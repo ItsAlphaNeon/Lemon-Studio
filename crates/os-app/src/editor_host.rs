@@ -402,8 +402,16 @@ impl EditorHost {
     /// The hosted row whose plugin window is at screen point (x, y).
     #[cfg(target_os = "macos")]
     pub fn row_at_screen(&self, x: i32, y: i32) -> Option<usize> {
-        let frame = self.frames.row_window_at(x, y)?;
-        self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|f| f.hwnd() == frame)).map(|(&r, _)| r)
+        #[cfg(not(plugin_windows))]
+        return {
+            let _ = (x, y);
+            None
+        };
+        #[cfg(plugin_windows)]
+        {
+            let frame = self.frames.row_window_at(x, y)?;
+            self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|f| f.hwnd() == frame)).map(|(&r, _)| r)
+        }
     }
 
     /// Drops file `path` on row `row`'s plugin window: macOS plugins take files only from a drag session of their own,
@@ -488,7 +496,7 @@ impl EditorHost {
             Some(k) => pl.editor_scales.insert(row, k),
             None => pl.editor_scales.remove(&row),
         };
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(all(plugin_windows, any(windows, target_os = "macos")))]
         if self.editors.get(&row).is_some_and(|e| e.window.is_some()) {
             let k = pl.scale_for(row, pl.scale);
             self.rescale_window(pl, row, k);
@@ -503,7 +511,7 @@ impl EditorHost {
             return;
         }
         pl.scale = scale;
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(all(plugin_windows, any(windows, target_os = "macos")))]
         for row in self.docked() {
             self.rescale_window(pl, row, pl.scale_for(row, scale));
         }
@@ -511,7 +519,7 @@ impl EditorHost {
 
     /// Redraws row `row`'s window at `scale`: the frame resizes and the editor is reopened, since plugins take their
     /// scale when the editor opens (on macOS its sizes are measured at it). The plugin's page is kept.
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(all(plugin_windows, any(windows, target_os = "macos")))]
     pub fn rescale_window(&mut self, pl: &mut Plugins, row: usize, scale: f32) {
         self.sync(pl);
         let (Some(Hosted { plugin, .. }), Some(Editor { window: Some(w), link, .. })) = (pl.hosted.get(&row), self.editors.get_mut(&row)) else { return };
@@ -648,7 +656,7 @@ impl EditorHost {
         }
         let mut out = Vec::new();
         let mut close: Vec<usize> = Vec::new();
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(all(plugin_windows, any(windows, target_os = "macos")))]
         let mut rescale: Vec<(usize, f32)> = Vec::new();
         // Plugin -> host link messages (a woken tick polls the link below anyway; notes become requests).
         #[cfg(plugin_windows)]
@@ -774,7 +782,7 @@ impl EditorHost {
         for row in close {
             self.close_window(pl, row);
         }
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(all(plugin_windows, any(windows, target_os = "macos")))]
         for (row, k) in rescale {
             self.rescale_window(pl, row, pl.scale_for(row, k));
         }
