@@ -93,6 +93,8 @@ lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", default-
 lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", default-features = false, features = ["linked"] }
 citrus = { path = "../../plugins/citrus", default-features = false, features = ["linked"] }
 smith = { path = "../../plugins/smith", default-features = false, features = ["linked"] }
+os-vst3.workspace = true
+os-flp.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["randr", "resource_manager", "shape"] }

@@ -5,10 +5,15 @@
 
 //! Plugin windows on Windows, with real frames (moved from `os_app::plugins` with the frames, control-plane step 10).
 
+use os_app::editor_host::Request;
+use os_app::plugin_window::ChannelInfo;
 use os_app::plugins::*;
 use crate::frames::NativeFrames;
+use os_engine::instrument::{SharedEffect, SharedInstrument};
+use os_host::{Library, SharedPlugin};
 use std::ffi::c_void;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -329,20 +334,20 @@ fn plugin_editor_stress() {
     let state = |pl: &Plugins| pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap();
     let send = |msg: u32, wp: usize, x: i32, y: i32| unsafe { SendMessageW(editor as HWND, msg, wp, (x | (y << 16)) as isize) };
     // Probe on the sample page: the "Normalize" radio must change the plugin state, twice (on, off).
-    let probe = |pl: &mut Plugins| -> bool {
+    let probe = |host: &mut os_app::editor_host::EditorHost, pl: &mut Plugins| -> bool {
         host.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(0);
-        pump(pl, 40);
+        pump(host, pl, 40);
         let before = state(pl);
         send(WM_LBUTTONDOWN, 1, 298, 149);
         send(WM_LBUTTONUP, 0, 298, 149);
-        pump(pl, 40);
+        pump(host, pl, 40);
         let changed = state(pl) != before;
         send(WM_LBUTTONDOWN, 1, 298, 149);
         send(WM_LBUTTONUP, 0, 298, 149);
-        pump(pl, 40);
+        pump(host, pl, 40);
         changed
     };
-    assert!(probe(&mut pl), "the probe does not work on a fresh editor");
+    assert!(probe(&mut host, &mut pl), "the probe does not work on a fresh editor");
     let mut failed = None;
     for i in 0..4000 {
         // Not the File row (y < 45): its open button pops a modal file dialog.
@@ -384,7 +389,7 @@ fn plugin_editor_stress() {
         if i % 20 == 0 {
             pump(&mut host, &mut pl, 15);
         }
-        if i % 100 == 99 && !probe(&mut pl) && failed.is_none() {
+        if i % 100 == 99 && !probe(&mut host, &mut pl) && failed.is_none() {
             failed = Some(i);
         }
     }
@@ -586,22 +591,22 @@ fn app_hears_plugin_knob_edits() {
     transport.update(&project);
     transport.set_instruments(pl.instruments());
     // Hold a note 400 ms, keep the UI side ticking, return the loudest output peak.
-    let level = |pl: &mut Plugins| -> f32 {
+    let level = |host: &mut os_app::editor_host::EditorHost, pl: &mut Plugins| -> f32 {
         transport.take_peaks();
         transport.note_on(0, 60, 100);
         let mut peak = 0.0f32;
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_millis(400) {
-            pump(pl, 20);
+            pump(host, pl, 20);
             let (l, r) = transport.take_peaks();
             peak = peak.max(l.max(r));
         }
         transport.note_off(0, 60);
-        pump(pl, 300);
+        pump(host, pl, 300);
         peak
     };
-    level(&mut pl);
-    let before = level(&mut pl);
+    level(&mut host, &mut pl);
+    let before = level(&mut host, &mut pl);
     println!("level before {before}");
     assert!(before > 0.05, "the note is heard");
     host.editors.get_mut(&0).unwrap().link.as_mut().unwrap().set_page(1);
@@ -630,7 +635,7 @@ fn app_hears_plugin_knob_edits() {
     let state = String::from_utf8_lossy(&pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap()).to_string();
     let i = state.find("\"f_cut\"").unwrap_or(0);
     println!("state: {}", &state[i..(i + 40).min(state.len())]);
-    let after = level(&mut pl);
+    let after = level(&mut host, &mut pl);
     println!("level after {after}");
     assert!(after < before * 0.5, "MOD X down did not change what the app plays ({before} -> {after})");
 }
@@ -792,7 +797,7 @@ fn swing_reaches_hosted_sampler() {
         p.channels.truncate(1);
         p.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note::step(0, 0), os_model::Note::step(0, 24)], ..Default::default() }];
         p.swing = Some(swing);
-        pl.create_with(0, index, Some(&sampler_state(&p.channels[0]))).unwrap();
+        pl.create_with(0, index, Some(&sampler_state(&os_app::settings_file::store(), &p.channels[0]))).unwrap();
         assert!(pl.load_sample(0, &wav.to_string_lossy()));
         let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
         let mut lib = os_engine::SampleLibrary::default();
@@ -839,7 +844,7 @@ fn builtin_lemon_sampler_takes_a_sample() {
     let mut ch = os_app::projects::test_project().channels.remove(0);
     ch.envelopes[1].enabled = true;
     ch.envelopes[1].attack = 65536 / 2;
-    pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
+    pl.create_with(0, index, Some(&sampler_state(&os_app::settings_file::store(), &ch))).unwrap();
     assert_eq!(pl.sampler_path(0).as_deref(), Some(""));
     let mp3 = fixture_mp3();
     assert!(pl.load_sample(0, &mp3));
@@ -1009,7 +1014,7 @@ fn builtin_lemon_sampler_takes_the_stretch_settings() {
     let mut ch = os_app::projects::test_project().channels.remove(0);
     // Stretch (a realtime method), twice as long, 300 cents up.
     ch.sound.stretch = [0, 300, 10000, (-1i32) as u32];
-    pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
+    pl.create_with(0, index, Some(&sampler_state(&os_app::settings_file::store(), &ch))).unwrap();
     assert!(pl.load_sample(0, &wav.to_string_lossy()));
     let params = |pl: &Plugins| {
         let st = pl.hosted[&0].plugin.lock().unwrap().save_state().unwrap();
@@ -1076,7 +1081,7 @@ fn builtin_lemon_sampler_takes_the_sample_settings() {
     };
     ch.sound.fx = fx;
     (ch.sound.cutoff, ch.sound.resonance, ch.sound.filter_type, ch.sound.declick, ch.sound.sampler_flags) = (128, 64, 3, 2, Some(2));
-    pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
+    pl.create_with(0, index, Some(&sampler_state(&os_app::settings_file::store(), &ch))).unwrap();
     let v = saved(&pl, 0);
     let p = &v["params"];
     assert_eq!((&p["fx_reverse"], &p["fx_swap"], &p["fx_normalize"]), (&serde_json::json!({"bool": true}), &serde_json::json!({"bool": true}), &serde_json::json!({"bool": true})));
@@ -1096,7 +1101,7 @@ fn builtin_lemon_sampler_takes_the_sample_settings() {
     os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
     let mut ch = os_app::projects::test_project().channels.remove(0);
     ch.sound.fx = SampleFx { flags: SampleFx::REVERSE | SampleFx::SWAP, ..SampleFx::default() };
-    pl.create_with(1, index, Some(&sampler_state(&ch))).unwrap();
+    pl.create_with(1, index, Some(&sampler_state(&os_app::settings_file::store(), &ch))).unwrap();
     assert!(pl.load_sample(1, &wav.to_string_lossy()));
     let inst = pl.hosted[&1].plugin.clone() as SharedInstrument;
     let mut i = inst.lock().unwrap();
@@ -1179,7 +1184,7 @@ fn lemon_sampler_stretch_parameters_give_the_channel_settings() {
     };
     // Stretch, x2, +300 cents.
     ch.sound.stretch = [0, 300, 10000, (-1i32) as u32];
-    pl.create_with(0, index, Some(&sampler_state(&ch))).unwrap();
+    pl.create_with(0, index, Some(&sampler_state(&os_app::settings_file::store(), &ch))).unwrap();
     assert_eq!(read(&pl), ch.sound.stretch);
     // A time of 4 beats (768 / 192), the multiplier back at 1; e2 speech, -1200 cents.
     ch.sound.stretch = [768f32.to_bits(), (-1200i32) as u32, 0, 9];
@@ -1333,7 +1338,7 @@ fn vst3_plugins_host_like_clap_ones() {
     let wav = std::env::temp_dir().join(format!("os-app-vst3-{}.wav", std::process::id()));
     os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
     // A VST3 instance takes a bare component state too (here Lemon Sampler's JSON with the sample).
-    let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
+    let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_text(&json_text(&wav.to_string_lossy())));
     assert!(pl.set_state(0, json.as_bytes()), "the sample reaches the VST3 instance");
     let state = pl.state(0).unwrap();
     assert!(os_vst3::fl_state::FlState::parse(&state).is_some(), "state bytes are in FL Studio's wrapper layout");
@@ -1369,7 +1374,7 @@ fn vst3_plugins_save_and_reopen() {
     let row = os_app::projects::add_plugin_channel(a.state.session.project.get_mut(), "Lemon Sampler");
     a.state.session.plugins.create(row, 0).unwrap();
     a.state.session.hosted_rows.push(row);
-    let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
+    let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_text(&json_text(&wav.to_string_lossy())));
     assert!(a.state.session.plugins.set_state(row, json.as_bytes()));
     a.state.session.project.get_mut().mixer[3].slots[2] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Lemon Parametric EQ".into(), state: Vec::new() });
     a.state.session.plugins.create_effect(3, 2, 0, None).unwrap();
@@ -1412,7 +1417,7 @@ fn vst3_plugins_save_and_reopen() {
     assert_eq!(b.state.session.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
     assert_eq!(b.state.session.plugins.state(row).as_deref(), Some(&ch_state[..]));
     assert_eq!(b.state.session.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
-    assert_eq!(os_app::edit::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ"));
+    assert_eq!(os_app::edit::mixer::slot_name(&b.state.session, 3, 2).as_deref(), Some("Lemon Parametric EQ"));
 }
 
 /// VST3 editors inside Lemon Studio's plugin frame, moved off every screen and captured with PrintWindow:
@@ -1834,24 +1839,24 @@ impl os_host::Plugin for Tracked {
 }
 
 /// The UI locks an instance for its per-tick jobs only when it has work: its attention count moved, its editor is
-/// open, or `LOOK_EVERY` passed; an instance without a count is looked at on every tick (spec:
+/// open, or `PLUGIN_LOOK_EVERY` passed; an instance without a count is looked at on every tick (spec:
 /// audio/implementing.md "Playing live").
 #[test]
 fn instances_are_looked_at_when_they_ask() {
     let fx = &builtin_effects()[0];
     let h = Hosted::new(fx.lib.clone().create(&fx.desc.id).unwrap());
     let a = h.attention.clone().expect("a built-in plugin has a count");
-    let first = h.due(Look::never()).expect("a new instance is looked at");
-    assert!(h.due(first).is_none(), "nothing new: left alone");
+    let first = h.due(Look::never(), false).expect("a new instance is looked at");
+    assert!(h.due(first, false).is_none(), "nothing new: left alone");
     a.raise();
-    let next = h.due(first).expect("it asked");
+    let next = h.due(first, false).expect("it asked");
     assert!(next.count > first.count);
-    assert!(h.due(next).is_none());
-    assert!(h.due(Look { at: next.at - LOOK_EVERY, ..next }).is_some(), "looked at after a while anyway");
+    assert!(h.due(next, false).is_none());
+    assert!(h.due(Look { at: next.at - PLUGIN_LOOK_EVERY, ..next }, false).is_some(), "looked at after a while anyway");
     let untracked = Hosted::new(Arc::new(Mutex::new(Tracked(fx.desc.clone(), Arc::new(Mutex::new(None))))));
     assert!(untracked.attention.is_none());
-    let seen = untracked.due(Look::never()).unwrap();
-    assert!(untracked.due(seen).is_some(), "no count: every tick");
+    let seen = untracked.due(Look::never(), false).unwrap();
+    assert!(untracked.due(seen, false).is_some(), "no count: every tick");
 }
 
 /// A removed instance the engine still plays is destroyed on the UI thread once the engine lets go of it on its own
@@ -2005,11 +2010,13 @@ fn new_plugins_take_the_detach_check() {
     let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
     pl.create_effect(1, 0, index, None).unwrap();
     assert!(!host.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "a project's instance opens docked");
-    pl.added(fx_key(1, 0));
+    pl.added(&os_app::settings_file::store(), fx_key(1, 0));
+    host.idle(&mut pl, |_| None);
     assert!(!host.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "check off: docked");
     os_app::prefs::set_check(&DETACH_NEW, true);
     pl.create_effect(1, 1, index, None).unwrap();
-    pl.added(fx_key(1, 1));
+    pl.added(&os_app::settings_file::store(), fx_key(1, 1));
+    host.idle(&mut pl, |_| None);
     assert!(host.editors.get(&fx_key(1, 1)).is_some_and(|e| e.detached), "check on: detached");
     assert!(!host.editors.get(&fx_key(1, 0)).is_some_and(|e| e.detached), "an existing plugin keeps its mode");
 }
@@ -2075,3 +2082,11 @@ fn native_host() -> os_app::editor_host::EditorHost {
     host.frames = Box::new(NativeFrames);
     host
 }
+
+/// A JSON string literal of `s` (as the session writes plugin fields).
+fn json_text(s: &str) -> String {
+    serde_json::to_string(s).unwrap()
+}
+
+/// How long an instance without news is left alone (`os_session::plugins`, private there).
+const PLUGIN_LOOK_EVERY: Duration = Duration::from_millis(250);
