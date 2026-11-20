@@ -445,13 +445,15 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
         let face = match (on, hover) {
             (true, false) => t.brand_lit(os_theme::design::lemon::MAIN),
             (true, true) => t.brand_lit(os_theme::design::lemon::MAIN).mix(t.brand_lit(os_theme::design::lemon::HIGHLIGHT), 0.35),
-            (false, false) => t.button,
-            (false, true) => t.button_hi,
+            // A title bar's hover tone: a shade above the card (`window_body`), as the interface's other bars.
+            (false, false) => t.window_title_hi,
+            (false, true) => t.button,
         };
         // Stacked, each tab further down is a little darker.
         let face = face.mix(t.sunken, (0.22 * tab.depth as f32).min(0.66));
-        let edge = t.button.mix(t.text_dim, 0.5);
-        let outline = tab.outline();
+        // The card's own border (`plugin_window::paint_card`).
+        let edge = t.window_border;
+        let outline = snapped(tab.outline(), ui.c.scale);
         if joining {
             ui.c.fill_polygon(&outline, t.sunken);
             let lemon = t.brand_lit(os_theme::design::lemon::MAIN);
@@ -461,11 +463,12 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
                 dashed(ui, a, b, lemon);
             }
         } else {
-            ui.c.fill_polygon(&outline, face);
-            for k in 0..3 {
-                let (a, b) = (outline[k], outline[k + 1]);
-                ui.c.line(a.0, a.1, b.0, b.1, 1.2, edge);
-            }
+            // One device pixel on every side, the slanted ones as the top (as `lemon::outlined` draws the card's): the
+            // outline in the border's colour, the face over it moved in by that pixel square to each edge. The bottom
+            // lies over the frame's top edge, which is the border there.
+            let k = ui.c.scale;
+            ui.c.fill_polygon(&outline, edge);
+            ui.c.fill_polygon(&inset_sides(outline, k.round().max(1.0) / k), face);
         }
         let name = s.embeds.get(&r).map_or(String::new(), |f| f.name());
         let ink = if on { lk::ink_on_lit(t) } else if joining { t.text } else { t.text_dim };
@@ -488,6 +491,42 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
         }
     }
     ui.c.pop_clip();
+}
+
+/// A tab's outline with its corners on device pixels (`scale` device px per logical px), as the card's are.
+#[cfg(lemon_cards)]
+fn snapped(o: [(f32, f32); 4], scale: f32) -> [(f32, f32); 4] {
+    let snap = |v: f32| (v * scale).round() / scale;
+    o.map(|(x, y)| (snap(x), snap(y)))
+}
+
+/// A tab's outline (bottom left, top left, top right, bottom right) with its left, top and right sides moved `d` in,
+/// square to each side (a slanted side keeps the top's width); the bottom stays.
+#[cfg(lemon_cards)]
+fn inset_sides(o: [(f32, f32); 4], d: f32) -> [(f32, f32); 4] {
+    let [bl, tl, tr, br] = o;
+    // A side's line moved `d` towards the inside: a point on it and its direction.
+    let moved = |a: (f32, f32), b: (f32, f32), toward: (f32, f32)| {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt().max(1e-6);
+        let (mut nx, mut ny) = (-dy / len, dx / len);
+        if nx * (toward.0 - a.0) + ny * (toward.1 - a.1) < 0.0 {
+            (nx, ny) = (-nx, -ny);
+        }
+        ((a.0 + nx * d, a.1 + ny * d), (dx, dy))
+    };
+    let meet = |(p, u): ((f32, f32), (f32, f32)), (q, v): ((f32, f32), (f32, f32))| {
+        let den = u.0 * v.1 - u.1 * v.0;
+        if den.abs() < 1e-6 {
+            return p;
+        }
+        let t = ((q.0 - p.0) * v.1 - (q.1 - p.1) * v.0) / den;
+        (p.0 + u.0 * t, p.1 + u.1 * t)
+    };
+    let mid = ((bl.0 + br.0 + tl.0 + tr.0) / 4.0, (bl.1 + br.1 + tl.1 + tr.1) / 4.0);
+    let (left, top, right) = (moved(bl, tl, mid), moved(tl, tr, mid), moved(tr, br, mid));
+    let bottom = (bl, (br.0 - bl.0, br.1 - bl.1));
+    [meet(left, bottom), meet(left, top), meet(top, right), meet(right, bottom)]
 }
 
 /// A tab's outline (`plugin_tabs::Tab::outline`: bottom left, top left, top right, bottom right) moved `d` inwards.
