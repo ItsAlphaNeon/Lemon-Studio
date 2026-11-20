@@ -1575,6 +1575,10 @@ pub struct App {
     /// Linux: the window being dragged rests over another of its plugin (`plugin_tabs::Held`).
     #[cfg(all(lemon_cards, plugin_windows))]
     tab_held: Option<crate::plugin_tabs::Held>,
+    /// The selected channel at the last look (`clip_docked`): when it changes to one whose window is a tab not showing,
+    /// that tab shows. `None` until the first look.
+    #[cfg(all(lemon_cards, plugin_windows))]
+    tab_follow: Option<usize>,
     /// Linux: a tab's little x pressed.
     tab_close_press: Option<usize>,
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
@@ -1911,6 +1915,8 @@ impl App {
             tab_press: None,
             #[cfg(all(lemon_cards, plugin_windows))]
             tab_held: None,
+            #[cfg(all(lemon_cards, plugin_windows))]
+            tab_follow: None,
             tab_close_press: None,
             popup_lift: None,
             plugin_menu: None,
@@ -3334,6 +3340,18 @@ impl App {
         // again) would otherwise still be the tab showing, and the one left would leave the stack until the next tick.
         #[cfg(lemon_cards)]
         {
+            // The selected channel changed (Select up/down, a pad, a click in the rack) to one whose window is a tab
+            // not showing: that tab shows, in the window's place among the others (it is not raised).
+            let sel = self.state.selected_channel;
+            if self.tab_follow.replace(sel).is_some_and(|was| was != sel)
+                && let Some(showing) = self.state.plugin_tabs.group_of(sel).map(|g| g.active).filter(|&a| a != sel)
+            {
+                self.state.plugin_tabs.activate(sel);
+                for w in self.state.z.iter_mut().filter(|w| **w == Win::Hosted(showing)) {
+                    *w = Win::Hosted(sel);
+                }
+                self.invalidate();
+            }
             if let Some(&Win::Hosted(r)) = self.state.z.last() {
                 self.state.plugin_tabs.activate(r);
             }
@@ -12830,6 +12848,56 @@ mod tests {
         assert_eq!(a.h, alone.h, "no row of tabs");
         tabs_go_back_together(&mut app, &mut c);
         tabs_rejoin_as_the_shell_drives_it(&mut app, &mut c);
+        app.state.editor_host.close_window(&mut app.state.session.plugins, 0);
+        app.state.editor_host.close_window(&mut app.state.session.plugins, 1);
+    }
+
+    /// The selected channel changing (Select up/down, a pad, the rack) to one whose window is a tab not showing shows
+    /// that tab, in the window's place: a window in front of it stays in front. A channel with no window changes nothing.
+    #[cfg(lemon_cards)]
+    #[test]
+    fn the_tab_showing_follows_the_selected_channel() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.session.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins.scale = 1.0;
+        for _ in 0..2 {
+            app.state.session.project.get_mut().channels.push(os_model::Channel::default());
+        }
+        frame(&mut app, &mut c, None);
+        let index = app.state.session.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        let info = |name: &str| ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        for (row, name) in [(0, "One"), (1, "Two")] {
+            app.state.session.plugins.create_with(row, index, None).unwrap();
+            app.state.editor_host.open_window(&mut app.state.session.plugins, row, info(name)).unwrap();
+        }
+        let t0 = Instant::now();
+        while ![0, 1].iter().all(|r| app.state.embeds.get(r).is_some_and(|e| e.claimed())) && t0.elapsed() < Duration::from_secs(3) {
+            app.plugin_tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.state.selected_channel = 1;
+        app.plugin_tick();
+        assert!(app.state.plugin_tabs.hidden(0) && !app.state.plugin_tabs.hidden(1), "the newer one shows");
+        // Another window in front of the plugin window.
+        app.state.raise(Win::Mixer);
+        let at = |app: &App, w: Win| app.state.z.iter().position(|&o| o == w);
+        let place = at(&app, Win::Hosted(1)).expect("in the stack");
+        app.state.selected_channel = 0;
+        app.plugin_tick();
+        assert!(!app.state.plugin_tabs.hidden(0) && app.state.plugin_tabs.hidden(1), "the selected channel's tab shows");
+        assert_eq!(at(&app, Win::Hosted(0)), Some(place), "in the window's place");
+        assert_eq!(app.state.z.last(), Some(&Win::Mixer), "not raised");
+        assert_eq!(at(&app, Win::Hosted(1)), None);
+        // A channel with no window: the tab showing stays.
+        app.state.selected_channel = 2;
+        app.plugin_tick();
+        assert!(!app.state.plugin_tabs.hidden(0) && app.state.plugin_tabs.hidden(1));
+        app.state.selected_channel = 1;
+        app.plugin_tick();
+        assert!(app.state.plugin_tabs.hidden(0) && !app.state.plugin_tabs.hidden(1), "and back");
         app.state.editor_host.close_window(&mut app.state.session.plugins, 0);
         app.state.editor_host.close_window(&mut app.state.session.plugins, 1);
     }
