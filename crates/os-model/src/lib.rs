@@ -1667,7 +1667,18 @@ pub const DOCK_RIGHT: u8 = 2;
 /// A new track's equaliser: flat, at the default frequencies and widths.
 pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 55825, 17500]];
 
+/// The range a track's latency setting takes, in ms, either sign (spec: audio/delay-compensation.md "Settings").
+pub const LATENCY_MAX_MS: f64 = 1000.0;
+
 impl MixerTrack {
+    /// The output and input latency settings in their range: a file can hold any value (an infinite one, a NaN), and
+    /// the delay compensation counts in samples with them.
+    pub fn latency(&self) -> (f32, f32) {
+        let max = LATENCY_MAX_MS as f32;
+        let ok = |v: f32| if v.is_finite() { v.clamp(-max, max) } else { 0.0 };
+        (ok(self.latency_out), ok(self.latency_in))
+    }
+
     /// A default track: unnamed, enabled, unity volume, centred, empty slots, routed to the master (except the master).
     pub fn new(index: u16) -> Self {
         MixerTrack {
