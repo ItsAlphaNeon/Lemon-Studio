@@ -30,6 +30,22 @@ lemonstudio --control /tmp/lemon.sock song.flp
 lemonstudio --serve 7777 --control-level propose song.flp
 ```
 
+A Unix socket path is limited by the system: on macOS it can be at most 103 bytes long (104 with the terminating
+zero; 107 on Linux), and a longer one fails to listen with an error that the path is too long. A path inside the user
+folder (below) or a deep project folder easily passes that on macOS; a short one such as `/tmp/lemon.sock` is safest.
+
+`--serve` with `--control-level read` is a read-only way to inspect a project: nothing a client can send changes it,
+the project's file is never written (`save` needs `edit`), and Autosave copies only a project that changed.
+
+```bash
+lemonstudio --serve /tmp/inspect.sock --control-level read song.flp
+```
+
+Without a window, the app reads the user folder's settings (Settings > MIDI's enabled inputs for `--serve-midi`, the
+Autosave timer) and the plugins of the last scan as the window's app would. The user folder is
+`~/Library/Application Support/Lemon Studio/` on macOS, `~/.config/Lemon Studio/` on Linux (`$XDG_CONFIG_HOME` when
+set) and `%APPDATA%\Lemon Studio\` on Windows; `OPENSTUDIO_USER_DIR` overrides it.
+
 ## Levels
 
 | Level | Allows |
@@ -49,12 +65,12 @@ says that they were. Without a window (`--serve`) the client saves directly.
 | `state` | | The project: settings, `channels`, `mixer` (the tracks in use), `patterns`, `playlist`. Plugins are named as `plugins` lists them (a channel playing a project's Ogun as `Smith`) |
 | `notes` | `pattern` | That pattern's notes, with their ids |
 | `plugins` | | The `instruments` and `effects` that `add_channel` and `add_effect` take, by name |
-| `params` | `owner` | The parameters of the plugin playing a channel or a mixer slot: id, name, group, unit, value 0..1, value text, range, default, steps |
-| `history` | | The undo history (`steps` with `name`, `undone`) and `at`, where the project is in it |
+| `params` | `owner` | `owner`, `plugin` (its name) and `params`: the parameters of the plugin playing a channel or a mixer slot, each with `id`, `name`, `group`, `unit`, `value` (0..1), `text`, `min`, `max`, `default` (0..1), `steps`, `list`, `automatable`, `read_only`. See [Parameters](#parameters) |
+| `history` | | The undo history (`steps`, each with its `step` number, `name` and `undone`) and `at`, where the project is in it |
 | `events` | `since` | What changed after event `since` (0: all kept), and `last`, the newest event's number |
-| `apply` | `commands` (or `command`), `name`, `gesture` | Each command's `results`. The list is one undo step named `name` (else the command's own name), applied whole or not at all. With `gesture`, it joins that gesture's step |
-| `begin` | `name` | `gesture` (its number): the lists applied with it until `end` make one undo step named `name`, as a fader drag does |
-| `end` | `gesture` | Nothing. The next list is a step of its own |
+| `apply` | `commands` (or `command`), `name`, `gesture` | Each command's `results`, in order (see [Results](#results)). The list is one undo step named `name` (else the command's own name for one command, "Edit" for several), applied whole or not at all. With `gesture`, it joins that gesture's step and `name` is not used |
+| `begin` | `name` | `gesture` (its number): the lists applied with it (`apply` with `gesture`) until `end` make one undo step named `name`, as a fader drag does. Nothing is applied or recorded until the first list |
+| `end` | `gesture` | Nothing (`null`). The next list is a step of its own; the gesture's number names nothing after it |
 | `propose` | `commands`, `name` | `proposal` (its number) and `changes` (what it would change). The project is not changed |
 | `proposals` | | The proposals waiting |
 | `accept`, `discard` | `proposal` | The commands' `results`; nothing |
@@ -167,15 +183,58 @@ A note is `{"channel", "position", "length", "key", "velocity", "pan"}`: `key` i
 default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre). Optional too: `fine_pitch` 0..240 (120 = none),
 `release`, `mod_x`, `mod_y` 0..128, `repeat` 0..14 (0 = off), `slide`, `muted`, `porta`, `color` (a colour group 0..15), `raw` (the stored record's other bits, `[flags, byte 19, bytes 14-15]`, kept for a copy; the values above go over them).
 
+### Results
+
+`apply` and `accept` answer `{"results": [...]}`, one entry per command in the order given. A command that adds
+something answers the new thing's id under its kind; the others answer `null`.
+
+| op | Result |
+|---|---|
+| `add_channel`, `clone_channel`, `replace_instrument`, `load_channel_state` | `{"channel": id}` (`replace_instrument`: the channel's new id) |
+| `add_audio_clip` | `{"channel": id, "clip": id}` |
+| `add_track` | `{"track": id}` |
+| `add_effect` | `{"slot": id}` (the slot plugin's id: `params` and `set_param` take it as `owner`) |
+| `add_pattern`, `clone_pattern`, `copy_pattern` | `{"pattern": id}` |
+| `add_notes`, `set_notes` | `{"notes": [id, ...]}`, the notes' ids in the order given |
+| `add_clip` | `{"clip": id}` |
+| `add_arrangement` | `{"arrangement": id}` |
+| `add_marker` | `{"marker": id}` |
+| `add_member` | `{"member": id}` |
+| `wrap_effects` | `{"message": text}` |
+| `wrap_instrument` | `{"channel": id, "message": text}` (the channel's new id) |
+
+```json
+{"jsonrpc": "2.0", "id": 2, "result": {"results": [null, {"channel": 7}, {"pattern": 12}]}}
+```
+
+### Parameters
+
+`params` lists a hosted plugin's parameters (hidden ones left out) in the plugin's own order, and `set_param` takes a
+parameter by its `id`.
+
+- `value`, `default` and what `set_param` takes are normalized, 0 to 1, whatever the plugin's own range (`min` and
+  `max`, for display only).
+- A parameter with `steps` above 0 is stepped: it has `steps + 1` values, `index / steps` for index 0 to `steps` (a
+  switch has 1 step: 0 or 1; a four-way list has 3: 0, 1/3, 2/3, 1). `list` says its values have names.
+- The mapping from 0..1 to what the plugin shows is the plugin's and is often not linear (decibels, frequencies, time):
+  after setting a value, read `params` again and look at `text` ("-6.0 dB") rather than working it out.
+- Names are not unique: a plugin can have several parameters of the same name (one per band, oscillator or envelope),
+  told apart by `group` and their place in the list. Match them by their order in the list, or keep their ids, not by
+  name alone.
+- A `set_param` is an undo step like any other command; the value before it is read from the plugin.
+
 ## Undo, proposals and events
 
-- Every `apply` is one step in the project's undo history, named after the client ("Beat bot: build a beat"). The
-  user can undo it like any other step, and Ctrl+Z after it works as usual.
-- A gesture (`begin`, `apply` with `gesture`, `end`) is one step however many lists it applies: its undo puts back
-  what each thing was before the gesture. After another step, an undo or a redo, the gesture goes on in a new step.
+- Every `apply` is one step in the project's undo history. Its name is the client's name (from `hello`), a colon,
+  and the step's name with its first letter lowered: `apply` with `name` "Build a beat" from client "Beat bot" is
+  "Beat bot: build a beat". So `name` should say what the step does without repeating the client's name. The user
+  can undo it like any other step, and Ctrl+Z after it works as usual.
+- A gesture (`begin`, `apply` with `gesture`, `end`) is one step however many lists it applies, named after the
+  client and `begin`'s `name` as above: its undo puts back what each thing was before the gesture. After another
+  step, an undo or a redo, the gesture goes on in a new step.
 - An add's undo removes what it added (a channel, mixer track or pattern) by its id, and its redo puts it back with
-  the same id; a move's undo moves the channel back. Nothing else changes with them. A delete's undo puts the
-  project back as it was.
+  the same id; a move's undo moves the channel back. Nothing else changes with them. A delete's undo puts back what
+  the delete took (the thing with its id, and what went with it), not the whole project.
 - The interface's own edits use the same path: mixer edits (faders dragged or typed, polarity, routing,
   colours, names, effect slots and their sidechain input, adding, moving and deleting tracks), channels added (the
   plugin picker, F8, ADD, a browser drop), coloured, named, cloned, moved and deleted, FILE ▸ Import ▸ MIDI file into
@@ -225,16 +284,13 @@ call("apply", commands=[
 
 ## Not yet
 
-- Live commands that reach the playing engine without a rebuild (each change rebuilds it, as edits in the interface
-  do); parameter changes go straight to the plugin.
-- A native project format: projects are read and saved as FL Studio projects.
-- Undo steps for: replacing a plugin's whole state (loading a preset, adding a Tesla), the graph editor, note fields
-  edited in place (fine pitch, release, Mod X/Y, slide and porta flags), the Lemon Sampler editor's channel side,
-  clip groups, and Make unique / audio clips added (partly undone). Locking, collapsing and loop lengths in the
-  channel rack are view state and stay out of history.
-- Commands for what the interface edits but clients can't yet: channel envelopes, groups, clip channels; note
-  fields; mixer track moves, slot moves, sidechains and Tesla; clip offsets, groups, markers and playlist tracks;
-  automation clips and points; project settings beyond tempo, signature and song info; plugin state and presets;
-  sample tags.
+- Most changes reach a playing song by building its engine again, as edits in the interface do. Volume, pan and
+  pitch, a channel's or mixer track's switch, a track's effects switch, a slot's switch and mix, and send levels reach
+  it in place; parameter changes go straight to the plugin.
+- Ids are not saved in project files (`.flp`, or `.lemon`, an FLP with Lemon Studio's own state), so an opened
+  project gets new ones.
+- Some plugin states the interface stores are written outside commands: a container's members', FL Studio's native
+  plugins' and 3x Osc's sample. `set_plugin_state` replaces a running plugin's whole state.
+- Commands for channel envelopes, loading a preset by name and sample tags.
 - Rendering through the control plane, and pushing events to clients (they poll `events`). A parameter changed in a
   plugin's window is an undo step but not an `edit` event.
