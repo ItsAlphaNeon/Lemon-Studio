@@ -1969,9 +1969,10 @@ fn burn_sel(s: &State) -> PItem {
     if s.rack.loop_mode && s.rack.sel.iter().any(|r| rows.contains(r)) { i } else { i.off() }
 }
 
-/// The Automation / Remote control / Value groups shared by knob and LED menus (§19). `other` is the mixer box or the
-/// LED when `knob` is `None`: its Value group works on it (Lemon Studio's design).
-fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Target>, auto: Option<(u32, String, f64)>) -> Vec<PItem> {
+/// The Automation / Remote control / Value groups shared by knob and LED menus (§19). `other` is the mixer box, the
+/// LED or the tempo display (`crate::tempo_menu`) when `knob` is `None`: its Value group works on it (Lemon Studio's
+/// design).
+pub(crate) fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Target>, auto: Option<(u32, String, f64)>) -> Vec<PItem> {
     // spec: ui/settings-choices.md "Advanced: Initialize controls automatically". Every control here has a target
     // (`App::automation_target`), the swing knob, the mixer box and the LED included (measured 2026-11-02, §19).
     let control = auto.as_ref().map(|a| (a.0, a.2));
@@ -2039,14 +2040,18 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
     v
 }
 
-/// The "Set..." submenu of the mixer box and the LED (Lemon Studio's design, after the knobs' `set_items`): the default
-/// (the insert Reset gives; on), then the mixer box's master, 25 %, 50 %, 75 % and last insert, or the LED's Off and
-/// On, each with the box's text at that value. The current value has the radio mark.
+/// The "Set..." submenu of the mixer box, the LED and the tempo display (Lemon Studio's design, after the knobs'
+/// `set_items`): the default (the insert Reset gives; on; a new project's tempo), then the mixer box's master, 25 %,
+/// 50 %, 75 % and last insert, the tempo's 10 BPM to 522 BPM in the same steps, or the LED's Off and On, each with the
+/// box's text at that value. The current value has the radio mark.
 fn box_set_items(s: &State, t: crate::typein::Target) -> Vec<PItem> {
     use crate::typein::{at_position, get, Target};
     let now = get(s, t);
     let item = |name: &str, v: f64| {
-        let text = crate::views::rack::insert_name(v as u16);
+        let text = match t {
+            Target::Tempo => format!("{v:.3} BPM"),
+            _ => crate::views::rack::insert_name(v as u16),
+        };
         let label = match t {
             Target::RackLed(_) if name == "Default" => "Default (On)".to_string(),
             Target::RackLed(_) => name.to_string(),
@@ -2055,12 +2060,13 @@ fn box_set_items(s: &State, t: crate::typein::Target) -> Vec<PItem> {
         it(label, RCmd::SetBox(t, v)).mark(Mark::Radio(now == Some(v)))
     };
     let default = match t {
-        Target::RackTrack(r) => s.project.channels.get(r).map_or(0, |c| (c.index + 1).min(crate::mixer::max_insert(&s.project))),
-        _ => 1,
+        Target::RackTrack(r) => f64::from(s.project.channels.get(r).map_or(0, |c| (c.index + 1).min(crate::mixer::max_insert(&s.project)))),
+        Target::Tempo => crate::typein::TEMPO_DEFAULT,
+        _ => 1.0,
     };
-    let mut v = vec![item("Default", f64::from(default)), PItem::sep()];
+    let mut v = vec![item("Default", default), PItem::sep()];
     match t {
-        Target::RackTrack(_) => v.extend([("Minimum", 0.0), ("25%", 0.25), ("50%", 0.5), ("75%", 0.75), ("Maximum", 1.0)].map(|(name, p)| item(name, at_position(s, t, p)))),
+        Target::RackTrack(_) | Target::Tempo => v.extend([("Minimum", 0.0), ("25%", 0.25), ("50%", 0.5), ("75%", 0.75), ("Maximum", 1.0)].map(|(name, p)| item(name, at_position(s, t, p)))),
         _ => v.extend([item("Off", 0.0), item("On", 1.0)]),
     }
     v
