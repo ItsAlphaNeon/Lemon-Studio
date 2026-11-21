@@ -11,6 +11,10 @@
 //! `OPENSTUDIO_TEXT=cuprum` for the portable engine). Elsewhere (and on Windows with `OPENSTUDIO_TEXT=portable`) the portable
 //! engine draws grayscale text with fontdue on GDI's metrics model: the same cell height and
 //! baseline, condensed widths by squeezing glyphs, synthetic bold and italic.
+//!
+//! A character the UI face does not have (Chinese, Japanese, Korean, Greek, ...) is drawn in a face of the system that
+//! has it, on the same baseline: GDI tries a list of Windows' own UI faces; the outline engine tries Cuprum, then the
+//! system's fonts (`fallback.rs`). A string the UI face covers is drawn exactly as before.
 // spec: ui/main-window.md §10 (typography)
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -207,14 +211,42 @@ mod gdi {
         })
     }
 
+    /// Windows' faces a character the UI face lacks is drawn in, the first that has it: the UI face (Latin, Greek,
+    /// Cyrillic, Arabic, Hebrew, ...), then Chinese, Japanese, Korean, traditional Chinese, Indic, Thai and Lao, African
+    /// scripts, Cherokee and Canadian syllabics, historic scripts, symbols.
+    const FALLBACK: [&str; 11] = [
+        "Segoe UI",
+        "Microsoft YaHei UI",
+        "Yu Gothic UI",
+        "Malgun Gothic",
+        "Microsoft JhengHei UI",
+        "Nirmala UI",
+        "Leelawadee UI",
+        "Ebrima",
+        "Gadugi",
+        "Segoe UI Historic",
+        "Segoe UI Symbol",
+    ];
+    /// Characters past the Basic Multilingual Plane (emoji, rare CJK) can't be looked up glyph by glyph here: the emoji
+    /// face draws them.
+    const ASTRAL: &str = "Segoe UI Emoji";
+
+    /// Which face draws a character: 0 the requested face, `1 + i` the fallback face `i` (`FALLBACK`, then `ASTRAL`).
+    type Fb = u8;
+
     pub struct Gdi {
         dc: HDC,
         dib: HBITMAP,
         old_bmp: HGDIOBJ,
         bits: *mut u8,
         cap: (i32, i32),
-        fonts: HashMap<(Font, u32, bool), HFONT>,
-        names: [Vec<u16>; 2],
+        fonts: HashMap<(Font, u32, bool, Fb), HFONT>,
+        /// The faces' names: the UI face, the light face, then `FALLBACK` and `ASTRAL`.
+        names: Vec<Vec<u16>>,
+        /// The face that draws a character of a requested face (`Fb`), found once.
+        faces: HashMap<(Face, char), Fb>,
+        /// A face's average character width at a size, for condensing a fallback face as much as the face it stands in for.
+        avg: HashMap<(Font, u32, Fb), i32>,
         metrics: HashMap<(Font, u32), (i32, i32)>,
         /// Text extents by (font, scale, string) hash: views measure the same labels every frame.
         extents: HashMap<u64, (i32, i32), BuildHasherDefault<Id>>,
@@ -244,7 +276,14 @@ mod gdi {
                 bits: std::ptr::null_mut(),
                 cap: (0, 0),
                 fonts: HashMap::new(),
-                names: [Face::Ui, Face::Light].map(|f| f.gdi_name().encode_utf16().chain(Some(0)).collect()),
+                names: [Face::Ui.gdi_name(), Face::Light.gdi_name()]
+                    .into_iter()
+                    .chain(FALLBACK)
+                    .chain(Some(ASTRAL))
+                    .map(|n| n.encode_utf16().chain(Some(0)).collect())
+                    .collect(),
+                faces: HashMap::new(),
+                avg: HashMap::new(),
                 metrics: HashMap::new(),
                 extents: HashMap::default(),
                 drawn: Lru::new(32 << 20),
@@ -292,18 +331,33 @@ mod gdi {
         }
 
         fn font(&mut self, f: Font, scale: f32, vertical: bool) -> HFONT {
-            let key = (f, scale.to_bits(), vertical);
+            self.font_in(0, f, scale, vertical)
+        }
+
+        /// The font for request `f` in face `fb` (0: the requested face itself).
+        fn font_in(&mut self, fb: Fb, f: Font, scale: f32, vertical: bool) -> HFONT {
+            let key = (f, scale.to_bits(), vertical, fb);
             if let Some(h) = self.fonts.get(&key) {
                 return *h;
             }
             let px = |v: u16| (f32::from(v) * scale).round() as i32;
+            // A condensed request condenses a fallback face by the same factor: GDI's width is an average character
+            // width, which differs from face to face.
+            let width = if fb != 0 && f.width != 0 {
+                let natural = Font { width: 0, ..f };
+                let (own, theirs) = (self.avg_width(0, natural, scale), self.avg_width(fb, natural, scale));
+                if own > 0 { (px(f.width) * theirs + own / 2) / own } else { px(f.width) }
+            } else {
+                px(f.width)
+            };
+            let name = if fb == 0 { f.face as usize } else { 1 + usize::from(fb) };
             let esc = if vertical { 900 } else { 0 };
             let quality = if f.natural { CLEARTYPE_NATURAL_QUALITY } else { u32::from(CLEARTYPE_QUALITY) };
             // SAFETY: the face name is NUL-terminated UTF-16.
             let h = unsafe {
                 CreateFontW(
                     -px(f.size),
-                    px(f.width),
+                    width,
                     esc,
                     esc,
                     match (f.face, f.bold) {
@@ -319,7 +373,7 @@ mod gdi {
                     u32::from(CLIP_DEFAULT_PRECIS),
                     quality,
                     u32::from(DEFAULT_PITCH),
-                    self.names[f.face as usize].as_ptr(),
+                    self.names[name].as_ptr(),
                 )
             };
             if !h.is_null() {
@@ -327,6 +381,87 @@ mod gdi {
             }
             self.fonts.insert(key, h);
             h
+        }
+
+        /// Face `fb`'s average character width (px) at request `f`'s size, natural width.
+        fn avg_width(&mut self, fb: Fb, f: Font, scale: f32) -> i32 {
+            let key = (f, scale.to_bits(), fb);
+            if let Some(a) = self.avg.get(&key) {
+                return *a;
+            }
+            let font = self.font_in(fb, f, scale, false);
+            let mut tm: TEXTMETRICW = unsafe { std::mem::zeroed() };
+            // SAFETY: dc and font are valid; tm is a valid out-pointer.
+            unsafe {
+                SelectObject(self.dc, font);
+                GetTextMetricsW(self.dc, &mut tm);
+            }
+            self.avg.insert(key, tm.tmAveCharWidth);
+            tm.tmAveCharWidth
+        }
+
+        /// The face that draws `c` for a request in `face`: the requested face when it has the character (or no face
+        /// does), else the first fallback face that has it.
+        fn face_of(&mut self, face: Face, c: char) -> Fb {
+            if c.is_control() || c.is_whitespace() {
+                return 0;
+            }
+            if u32::from(c) > 0xFFFF {
+                return FALLBACK.len() as Fb + 1;
+            }
+            if let Some(fb) = self.faces.get(&(face, c)) {
+                return *fb;
+            }
+            let probe = Font { face, size: 16, width: 0, bold: false, italic: false, natural: true };
+            let unit = [c as u16];
+            let fb = (0..=FALLBACK.len() as Fb)
+                .find(|&fb| {
+                    let font = self.font_in(fb, probe, 1.0, false);
+                    let mut glyph = 0u16;
+                    // SAFETY: valid dc and font; one UTF-16 unit in, one glyph index out.
+                    let n = unsafe {
+                        SelectObject(self.dc, font);
+                        GetGlyphIndicesW(self.dc, unit.as_ptr(), 1, &mut glyph, GGI_MARK_NONEXISTING_GLYPHS)
+                    };
+                    n == 1 && glyph != 0xFFFF
+                })
+                .unwrap_or(0);
+            self.faces.insert((face, c), fb);
+            fb
+        }
+
+        /// `s` split into runs of one face each, as (face, byte range); `None` when the requested face draws all of it.
+        /// Combining marks stay in the run before them.
+        fn runs(&mut self, face: Face, s: &str) -> Option<Vec<(Fb, std::ops::Range<usize>)>> {
+            if s.is_ascii() {
+                return None;
+            }
+            let mut runs: Vec<(Fb, std::ops::Range<usize>)> = Vec::new();
+            for (i, c) in s.char_indices() {
+                let end = i + c.len_utf8();
+                let fb = match runs.last() {
+                    Some(&(prev, _)) if super::joins(c) => prev,
+                    _ => self.face_of(face, c),
+                };
+                match runs.last_mut() {
+                    Some((prev, r)) if *prev == fb => r.end = end,
+                    _ => runs.push((fb, i..end)),
+                }
+            }
+            (runs.len() > 1 || runs.first().is_some_and(|r| r.0 != 0)).then_some(runs)
+        }
+
+        /// Horizontal width (px) of `s` in face `fb`.
+        fn width_in(&mut self, fb: Fb, f: Font, scale: f32, s: &str) -> i32 {
+            let font = self.font_in(fb, f, scale, false);
+            let w: Vec<u16> = s.encode_utf16().collect();
+            let mut sz = SIZE { cx: 0, cy: 0 };
+            // SAFETY: valid dc, font and buffer.
+            unsafe {
+                SelectObject(self.dc, font);
+                GetTextExtentPoint32W(self.dc, w.as_ptr(), w.len() as i32, &mut sz);
+            }
+            sz.cx
         }
 
         pub fn metrics(&mut self, f: Font, scale: f32) -> (i32, i32) {
@@ -355,14 +490,23 @@ mod gdi {
             if let Some(e) = self.extents.get(&key) {
                 return *e;
             }
-            let font = self.font(f, scale, false);
-            let w: Vec<u16> = s.encode_utf16().collect();
-            let mut sz = SIZE { cx: 0, cy: 0 };
-            // SAFETY: valid dc, font and buffer.
-            unsafe {
-                SelectObject(self.dc, font);
-                GetTextExtentPoint32W(self.dc, w.as_ptr(), w.len() as i32, &mut sz);
-            }
+            let sz = match self.runs(f.face, s) {
+                Some(runs) => {
+                    let cx = runs.into_iter().map(|(fb, r)| self.width_in(fb, f, scale, &s[r])).sum();
+                    SIZE { cx, cy: self.metrics(f, scale).0 }
+                }
+                None => {
+                    let font = self.font(f, scale, false);
+                    let w: Vec<u16> = s.encode_utf16().collect();
+                    let mut sz = SIZE { cx: 0, cy: 0 };
+                    // SAFETY: valid dc, font and buffer.
+                    unsafe {
+                        SelectObject(self.dc, font);
+                        GetTextExtentPoint32W(self.dc, w.as_ptr(), w.len() as i32, &mut sz);
+                    }
+                    sz
+                }
+            };
             if self.extents.len() > 100_000 {
                 self.extents.clear();
             }
@@ -437,15 +581,43 @@ mod gdi {
                     d[3] = 0;
                 }
             }
-            let font = self.font(f, scale, vertical);
-            let ws: Vec<u16> = s.encode_utf16().collect();
-            // SAFETY: valid dc/font; the string buffer outlives the call.
-            unsafe {
-                SelectObject(self.dc, font);
-                SetTextColor(self.dc, u32::from(c.r) | (u32::from(c.g) << 8) | (u32::from(c.b) << 16));
-                ExtTextOutW(self.dc, x - x0, y - y0, 0, std::ptr::null(), ws.as_ptr(), ws.len() as u32, std::ptr::null());
-                GdiFlush();
+            // SAFETY: valid dc.
+            unsafe { SetTextColor(self.dc, u32::from(c.r) | (u32::from(c.g) << 8) | (u32::from(c.b) << 16)) };
+            match self.runs(f.face, s) {
+                None => {
+                    let font = self.font(f, scale, vertical);
+                    let ws: Vec<u16> = s.encode_utf16().collect();
+                    // SAFETY: valid dc/font; the string buffer outlives the call.
+                    unsafe {
+                        SelectObject(self.dc, font);
+                        ExtTextOutW(self.dc, x - x0, y - y0, 0, std::ptr::null(), ws.as_ptr(), ws.len() as u32, std::ptr::null());
+                    }
+                }
+                // Each run in its face, on the requested face's baseline.
+                Some(runs) => {
+                    let asc = self.metrics(f, scale).1;
+                    let mut pen = 0;
+                    // SAFETY: valid dc.
+                    unsafe { SetTextAlign(self.dc, TA_BASELINE | TA_LEFT) };
+                    for (fb, r) in runs {
+                        let run = &s[r];
+                        let advance = self.width_in(fb, f, scale, run);
+                        let font = self.font_in(fb, f, scale, vertical);
+                        let ws: Vec<u16> = run.encode_utf16().collect();
+                        let (ox, oy) = if vertical { (x - x0 + asc, y - y0 - pen) } else { (x - x0 + pen, y - y0 + asc) };
+                        // SAFETY: valid dc/font; the string buffer outlives the call.
+                        unsafe {
+                            SelectObject(self.dc, font);
+                            ExtTextOutW(self.dc, ox, oy, 0, std::ptr::null(), ws.as_ptr(), ws.len() as u32, std::ptr::null());
+                        }
+                        pen += advance;
+                    }
+                    // SAFETY: valid dc.
+                    unsafe { SetTextAlign(self.dc, TA_TOP | TA_LEFT) };
+                }
             }
+            // SAFETY: plain flush.
+            unsafe { GdiFlush() };
             let a = u32::from(c.a);
             for row in 0..h as usize {
                 let dst = &mut data[(y0 as usize + row) * pstride + x0 as usize * 4..][..w as usize * 4];
@@ -475,6 +647,54 @@ mod gdi {
         }
     }
 
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Pixels of `s` drawn white on black: how many differ from the background.
+        fn inked(g: &mut Gdi, f: Font, s: &str) -> usize {
+            let mut pix = Pixmap::new(400, 60).unwrap();
+            pix.fill(tiny_skia::Color::BLACK);
+            g.draw(&mut pix, (0, 0, 400, 60), f, 1.0, 4, 10, Color::rgb(0xffffff), s, false);
+            pix.pixels().iter().filter(|p| p.red() > 40 || p.green() > 40 || p.blue() > 40).count()
+        }
+
+        #[test]
+        fn latin_and_cyrillic_stay_in_the_ui_face_and_cjk_falls_back() {
+            let Ok(mut g) = Gdi::new() else { return };
+            assert!(g.runs(Face::Ui, "Pattern 1").is_none());
+            assert!(g.runs(Face::Ui, "Червона Рута.mid").is_none(), "Cuprum has Cyrillic");
+            let runs = g.runs(Face::Ui, "Червона 三角符文 ok").expect("CJK needs another face");
+            assert_eq!(runs.len(), 3);
+            assert_eq!(runs[0].0, 0);
+            assert_ne!(runs[1].0, 0);
+            assert_eq!(&"Червона 三角符文 ok"[runs[1].1.clone()], "三角符文", "spaces are the UI face's");
+            assert_eq!(runs[2].0, 0);
+            // A combining accent stays with its letter.
+            assert!(g.runs(Face::Ui, "e\u{301}").is_none());
+        }
+
+        #[test]
+        fn fallback_text_has_width_and_ink() {
+            let Ok(mut g) = Gdi::new() else { return };
+            let f = Font::new(16);
+            let cjk = g.extent(f, 1.0, "三角符文第四章");
+            assert!(cjk.0 > 7 * 8, "seven ideographs about an em each: {cjk:?}");
+            assert_eq!(cjk.1, g.metrics(f, 1.0).0, "the cell stays the UI face's");
+            // Distinct ideographs draw distinct shapes, unlike seven identical missing-glyph boxes.
+            let (a, b) = (inked(&mut g, f, "三"), inked(&mut g, f, "符"));
+            assert!(a > 0 && b > a, "{a} {b}");
+            // Condensed requests condense the fallback face too.
+            assert!(g.extent(Font::condensed(16, 5), 1.0, "三角符文").0 < g.extent(f, 1.0, "三角符文").0);
+            // Mixed strings measure as the sum of their runs.
+            let mixed = g.extent(f, 1.0, "ab三角").0;
+            assert_eq!(mixed, g.extent(f, 1.0, "ab").0 + g.extent(f, 1.0, "三角").0);
+            // Vertical text and emoji draw without panicking.
+            let mut pix = Pixmap::new(60, 200).unwrap();
+            g.draw(&mut pix, (0, 0, 60, 200), f, 1.0, 2, 190, Color::rgb(0xffffff), "Рута 三角 🎵", true);
+        }
+    }
+
     impl Drop for Gdi {
         fn drop(&mut self) {
             // SAFETY: objects were created by this struct and are no longer selected when deleted.
@@ -496,9 +716,24 @@ mod gdi {
     }
 }
 
-#[cfg(unix)]
+/// Whether `c` stays in the face of the character before it: combining marks (accents written after their letter),
+/// variation selectors and joiners, so a mark is drawn by the face that draws its letter.
+#[cfg(windows)]
+fn joins(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F | 0x200C | 0x200D
+    )
+}
+
+// The outline engine also builds on Windows for its tests.
+#[cfg(any(unix, test))]
 #[path = "text_sw.rs"]
 mod sw;
+
+#[cfg(any(unix, test))]
+#[path = "fallback.rs"]
+mod fallback;
 
 mod portable {
     use std::collections::HashMap;
