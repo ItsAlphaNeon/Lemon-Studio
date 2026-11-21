@@ -67,7 +67,7 @@ serde = { version = "1", features = ["derive"] }
 # Export encoders (`export::encode`): FLAC (pure Rust), MP3 (LAME, built from source) and Ogg Vorbis (libvorbis, built
 # from source).
 flacenc = "0.5"
-mp3lame-encoder = "0.2"
+mp3lame-encoder = "0.3"
 vorbis_rs = "0.5"
 zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
