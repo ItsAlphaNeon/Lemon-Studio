@@ -4448,6 +4448,11 @@ impl App {
                 self.transport.update(&crate::rack::play_project(&self.state));
             }
         }
+        // Another pattern made current while a pattern plays: playback goes on with it at once, from where it is (spec:
+        // audio/transport.md "Switching patterns while playing"). After the edits, so a new pattern is there to play.
+        if !self.state.song_mode {
+            self.transport.switch_pattern(self.state.pattern);
+        }
         self.playback_damage();
         self.has_damage()
     }
