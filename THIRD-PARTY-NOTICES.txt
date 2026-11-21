@@ -366,20 +366,20 @@ whose text is in section 1.
 11. LAME (GNU LGPL, version 2 or later)
 -------------------------------------------------------------------------------
 
-LAME 3.100 (https://lame.sourceforge.io), the MP3 encoder of Lemon Studio's MP3
+LAME 4.0 (https://lame.sourceforge.io), the MP3 encoder of Lemon Studio's MP3
 export, compiled into the program by the mp3lame-sys crate (section 12) from
 its unchanged source. LAME was originally developed by Mike Cheng, later by
 Mark Taylor, and is maintained by The LAME Project; the files built name as
 copyright holders Mark Taylor, Takehiro Tominaga, Robert Hegemann, Gabriel
 Bouvigne, Alexander Leidinger, Naoki Shibata, Albert L. Faber, Olcios,
 Jonathan Dee, John Dahlstrom, Don Melton, David Robinson and Glen Sawyer, Ron
-Mayer and The LAME Project.
+Mayer, Robert Kausch and The LAME Project.
 
 LAME is free software; you can redistribute it and/or modify it under the
 terms of the GNU Library General Public License as published by the Free
 Software Foundation; either version 2 of the License, or (at your option) any
-later version. Its source, as built, is in the mp3lame-sys 0.1.11 crate on
-crates.io (lame-3.100), and the complete source of Lemon Studio is available
+later version. Its source, as built, is in the mp3lame-sys 0.2.0 crate on
+crates.io (lame-4.0), and the complete source of Lemon Studio is available
 under the GNU General Public License. The licence, as in LAME's COPYING:
 
 		  GNU LIBRARY GENERAL PUBLIC LICENSE
@@ -915,7 +915,6 @@ listed too.
   atomic_refcell 0.1.14 (Apache-2.0 OR MIT)
   atty 0.2.14 (MIT)
   autocfg 1.5.1 (Apache-2.0 OR MIT)
-  autotools 0.2.7 (MIT)
   backtrace 0.3.76 (MIT OR Apache-2.0)
   base64 0.23.1 (MIT OR Apache-2.0)
   bindgen 0.70.1 (BSD-3-Clause)
@@ -1092,8 +1091,8 @@ listed too.
   miniz_oxide 0.8.9 (MIT OR Zlib OR Apache-2.0)
   miniz_oxide 0.9.1 (MIT OR Zlib OR Apache-2.0)
   mio 1.2.3 (MIT)
-  mp3lame-encoder 0.2.5 (LGPL-3.0)
-  mp3lame-sys 0.1.11 (LGPL-3.0)
+  mp3lame-encoder 0.3.0 (LGPL-3.0)
+  mp3lame-sys 0.2.0 (LGPL-3.0)
   ndk 0.9.0 (MIT OR Apache-2.0)
   ndk-context 0.1.1 (MIT OR Apache-2.0)
   ndk-sys 0.6.0+11769913 (MIT OR Apache-2.0)
@@ -3829,8 +3828,8 @@ Permission to use, copy, modify, and/or distribute this software for any purpose
 THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
---- GNU Lesser General Public License v3.0 only: mp3lame-encoder 0.2.5,
-    mp3lame-sys 0.1.11
+--- GNU Lesser General Public License v3.0 only: mp3lame-encoder 0.3.0,
+    mp3lame-sys 0.2.0
 
 GNU LESSER GENERAL PUBLIC LICENSE
 Version 3, 29 June 2007
@@ -5613,35 +5612,6 @@ DEALINGS IN THE SOFTWARE.
 --- MIT License: autocfg 1.5.1
 
 Copyright (c) 2018 Josh Stone
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
---- MIT License: autotools 0.2.7
-
-Copyright (c) 2018 Luca Barbato
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
