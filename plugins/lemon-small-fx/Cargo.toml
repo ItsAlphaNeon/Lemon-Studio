@@ -8,12 +8,18 @@ license.workspace = true
 [lib]
 doctest = false
 
+[features]
+default = ["editor"]
+# The effects' editor and the windows it opens in (off: effects with no editor, as a session with no interface hosts
+# them).
+editor = ["os-plugkit/gui"]
+
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
 os-dsp.workspace = true
 os-engine.workspace = true
 os-hostlink.workspace = true
-os-plugkit = { path = "../../crates/os-plugkit" }
+os-plugkit = { path = "../../crates/os-plugkit", default-features = false }
 os-ui = { path = "../../crates/os-ui" }
 os-theme = { path = "../../crates/os-theme" }
 serde_json = "1"

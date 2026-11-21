@@ -144,11 +144,14 @@ to install Lemon Studio with its icon and menu entry.
 ```bash
 git clone https://github.com/ItsAlphaNeon/Lemon-Studio.git
 cd Lemon-Studio
-cargo run -p os-app --release
+cargo run -p lemonstudio --release
 ```
 
 The first run takes a while. It also builds Lemon Studio's plugins and installs them as VST3 and CLAP plugins for your
 other DAWs. A copy built from source never updates itself: to update it, run `git pull` and build it again.
+
+To install it as `lemonstudio` in Cargo's `bin` folder, run `cargo install --path crates/lemonstudio`. If you installed
+it from `crates/os-app` before it moved, add `--force` once to replace that copy.
 
 ### Learn to use it
 

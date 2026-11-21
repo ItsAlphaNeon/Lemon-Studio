@@ -7,7 +7,7 @@
 //! on macOS, ad-hoc signed like the VST3 one so Apple silicon loads them); `--install` copies them to the per-user
 //! plugin folders (no admin rights needed): `%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}` on Windows, `~/.vst3` and `~/.clap` on Linux,
 //! `~/Library/Audio/Plug-Ins/{VST3,CLAP}` on macOS. A plugin whose installed copy is already this build is left as it
-//! is, so the run from source (`cargo run -p os-app --release`, which installs them before it starts) costs little when
+//! is, so the run from source (`cargo run -p lemonstudio --release`, which installs them before it starts) costs little when
 //! nothing changed, and the plugin scan has nothing new to look at.
 //!
 // spec: plugins/plugin-formats.md (bundles and install folders)

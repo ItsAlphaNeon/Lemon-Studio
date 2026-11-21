@@ -9,7 +9,7 @@
 use os_model::Note;
 
 use crate::chords;
-use crate::views::piano::TOP_KEY;
+use crate::piano::TOP_KEY;
 
 /// The Key box's names (§1).
 pub const KEYS: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];

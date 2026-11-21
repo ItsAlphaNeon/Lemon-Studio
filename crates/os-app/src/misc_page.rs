@@ -11,6 +11,7 @@
 //! same frame of reference as Lemon Sampler's pages: the page's top-left is FL (4, 72).
 // spec: ui/plugin-window.md (Misc tab), plugins/lemon-sampler.md §9 (Misc page layout)
 
+pub use crate::misc::{default_of, range_of, MiscVals, CHORD_ENTRIES, M};
 use os_theme::design::lemon as brand;
 use os_theme::{Color, Palette};
 use os_ui::kit::lemon::{self as lk, plug};
@@ -24,151 +25,6 @@ const OY: f32 = 72.0;
 /// Page size (the joined Lemon Sampler editor's size).
 pub const PAGE_W: f32 = 560.0;
 pub const PAGE_H: f32 = 390.0;
-
-/// The page's values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum M {
-    LevelPan,
-    LevelVol,
-    LevelModX,
-    LevelModY,
-    PolyMax,
-    PolySlide,
-    Porta,
-    Mono,
-    TimeGate,
-    TimeShift,
-    TimeSwing,
-    FullPorta,
-    /// Tracking, volume page.
-    VolMid,
-    VolPan,
-    VolModX,
-    VolModY,
-    /// Tracking, key page.
-    KeyMid,
-    KeyPan,
-    KeyModX,
-    KeyModY,
-    Cut,
-    CutBy,
-    ArpDir,
-    ArpTime,
-    ArpGate,
-    ArpRange,
-    ArpRepeat,
-    ArpSlide,
-    ArpChord,
-    EchoFeed,
-    EchoPan,
-    EchoModX,
-    EchoModY,
-    EchoPitch,
-    EchoTime,
-    Echoes,
-    PingPong,
-    FatMode,
-    Root,
-    MainPitch,
-    AddKey,
-    Fine,
-}
-
-impl M {
-    pub const COUNT: usize = M::Fine as usize + 1;
-    pub const ALL: [M; M::COUNT] = [
-        M::LevelPan,
-        M::LevelVol,
-        M::LevelModX,
-        M::LevelModY,
-        M::PolyMax,
-        M::PolySlide,
-        M::Porta,
-        M::Mono,
-        M::TimeGate,
-        M::TimeShift,
-        M::TimeSwing,
-        M::FullPorta,
-        M::VolMid,
-        M::VolPan,
-        M::VolModX,
-        M::VolModY,
-        M::KeyMid,
-        M::KeyPan,
-        M::KeyModX,
-        M::KeyModY,
-        M::Cut,
-        M::CutBy,
-        M::ArpDir,
-        M::ArpTime,
-        M::ArpGate,
-        M::ArpRange,
-        M::ArpRepeat,
-        M::ArpSlide,
-        M::ArpChord,
-        M::EchoFeed,
-        M::EchoPan,
-        M::EchoModX,
-        M::EchoModY,
-        M::EchoPitch,
-        M::EchoTime,
-        M::Echoes,
-        M::PingPong,
-        M::FatMode,
-        M::Root,
-        M::MainPitch,
-        M::AddKey,
-        M::Fine,
-    ];
-
-    /// Hint label (Lemon Studio wording).
-    pub fn label(self) -> &'static str {
-        match self {
-            M::LevelPan => "Panning adjustment",
-            M::LevelVol => "Volume adjustment",
-            M::LevelModX => "Mod A adjustment",
-            M::LevelModY => "Mod B adjustment",
-            M::PolyMax => "Maximum polyphony",
-            M::PolySlide => "Slide time",
-            M::Porta => "Portamento",
-            M::Mono => "Mono",
-            M::TimeGate => "Note gate",
-            M::TimeShift => "Note time shift",
-            M::TimeSwing => "Note time swing",
-            M::FullPorta => "Always glide",
-            M::VolMid | M::KeyMid => "Tracking middle point",
-            M::VolPan | M::KeyPan => "Tracking to panning",
-            M::VolModX | M::KeyModX => "Tracking to Mod A",
-            M::VolModY | M::KeyModY => "Tracking to Mod B",
-            M::Cut => "Choke group",
-            M::CutBy => "Choked by group",
-            M::ArpDir => "Arpeggio direction",
-            M::ArpTime => "Arpeggio time",
-            M::ArpGate => "Arpeggio gate",
-            M::ArpRange => "Arpeggio range (octaves)",
-            M::ArpRepeat => "Arpeggio note repeat",
-            M::ArpSlide => "Arpeggio slide",
-            M::ArpChord => "Arpeggio chord",
-            M::EchoFeed => "Echo feedback",
-            M::EchoPan => "Echo panning",
-            M::EchoModX => "Echo Mod A",
-            M::EchoModY => "Echo Mod B",
-            M::EchoPitch => "Echo pitch",
-            M::EchoTime => "Echo time",
-            M::Echoes => "Number of echoes",
-            M::PingPong => "Ping pong echoes",
-            M::FatMode => "Thicken",
-            M::Root => "Root note",
-            M::MainPitch => "Affected by the main pitch",
-            M::AddKey => "Add root note to the key",
-            M::Fine => "Fine tuning",
-        }
-    }
-}
-
-/// Entries of FL 24.1's chords file, which the stored arpeggio chord `k >= 1` names (spec: audio/channel-misc.md
-/// "Settings", "The chords file").
-pub const CHORD_ENTRIES: i32 = 88;
 
 /// The name of arpeggio chord `k` (`M::ArpChord`): -1 = the held notes, 0 = the note alone, `k >= 1` = entry `k` of
 /// the chords file. Only entries 1, 7, 10 and 72 are known (their intervals 4,3 / 4,4 / 4,3,2 / 3,2,2,3); the others
@@ -185,35 +41,6 @@ pub fn chord_name(k: i32) -> String {
     }
 }
 
-/// Values of the page, indexed by `M`. Knobs are 0..1 (bipolar knobs centred at 0.5), switches 0 / 1, boxes and
-/// lists whole numbers (0 = `---` for boxes that can be off), `Root` a MIDI key (60 = C5), `Fine` cents ±100,
-/// `*Mid` MIDI keys.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MiscVals {
-    pub v: [f32; M::COUNT],
-    /// A sampler channel: "Add to key" reaches the sound (Lemon Sampler plays it; the engine has no such setting).
-    pub sampler: bool,
-}
-
-impl Default for MiscVals {
-    /// A new channel (measured on FL's default Sampler channel).
-    fn default() -> Self {
-        let mut v = [0.0; M::COUNT];
-        for m in M::ALL {
-            v[m as usize] = default_of(m);
-        }
-        MiscVals { v, sampler: true }
-    }
-}
-
-impl MiscVals {
-    pub fn get(&self, m: M) -> f32 {
-        self.v[m as usize]
-    }
-    pub fn set(&mut self, m: M, v: f32) {
-        self.v[m as usize] = v;
-    }
-}
 
 /// Whether value `m` reaches the sound today: the level adjustments; polyphony, slide, porta / mono, swing and cut
 /// groups (the engine's note rules); root note, fine tuning and main pitch (the channel's pitch); "Add to key" when
@@ -240,46 +67,9 @@ pub fn off_name(h: Hit, v: &MiscVals) -> Option<&'static str> {
     }
 }
 
-/// The default of one value (middle click resets to it).
-pub fn default_of(m: M) -> f32 {
-    match m {
-        M::LevelPan | M::LevelVol | M::LevelModX | M::LevelModY => 0.5,
-        M::VolPan | M::VolModX | M::VolModY | M::KeyPan | M::KeyModX | M::KeyModY => 0.5,
-        M::EchoPan | M::EchoModX | M::EchoModY | M::EchoPitch => 0.5,
-        M::TimeGate | M::TimeSwing | M::ArpGate => 1.0,
-        M::ArpTime => os_model::Arpeggio::TIME_DEFAULT,
-        M::EchoTime => os_model::Echo::TIME_DEFAULT,
-        M::PolySlide => 500.0 / 1024.0,
-        M::FullPorta | M::MainPitch => 1.0,
-        M::ArpRange | M::ArpRepeat => 1.0,
-        M::ArpChord => -1.0,
-        M::Echoes => 4.0,
-        M::VolMid => 100.0,
-        M::Root | M::KeyMid => 60.0,
-        _ => 0.0,
-    }
-}
-
-/// Smallest and largest value of a box / list / note value.
-pub fn range_of(m: M) -> (f32, f32) {
-    match m {
-        M::PolyMax => (0.0, 999.0),
-        M::Cut | M::CutBy => (0.0, 999.0),
-        // spec: audio/channel-misc.md "Settings" (the echo count's control range was not found; 0 and 10 were exported).
-        M::ArpRange => (0.0, 6.0),
-        M::ArpRepeat => (1.0, 6.0),
-        M::Echoes => (0.0, 10.0),
-        M::ArpDir => (0.0, 5.0),
-        M::ArpChord => (-1.0, CHORD_ENTRIES as f32),
-        M::Root | M::VolMid | M::KeyMid => (0.0, 131.0),
-        M::Fine => (-100.0, 100.0),
-        _ => (0.0, 1.0),
-    }
-}
-
 /// Note name ("C5", "F#4"): FL's naming, C5 = MIDI 60, as the settings choose it (`crate::note_names`).
 pub fn note_name(key: i32) -> String {
-    crate::note_names::note_name(key)
+    crate::note_names::note_name(&crate::settings_file::store(), key)
 }
 
 /// The hint value text.

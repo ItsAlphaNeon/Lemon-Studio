@@ -59,10 +59,9 @@ impl Sync {
 
 /// Time mul's seven values (§1) as (numerator, denominator); index 3 is ×1.
 pub const TIME_MUL: [(u32, u32); 7] = [(1, 8), (1, 4), (1, 2), (1, 1), (2, 1), (3, 1), (4, 1)];
-pub(crate) const TIME_MUL_NAMES: [&str; 7] = ["1/8", "1/4", "1/2", "x1", "x2", "x3", "x4"];
+pub const TIME_MUL_NAMES: [&str; 7] = ["1/8", "1/4", "1/2", "x1", "x2", "x3", "x4"];
 
-/// The highest Range; 0 is `---`.
-pub const RANGE_MAX: u8 = 6;
+pub use crate::knob_id::arpeggiate::RANGE_MAX;
 
 /// The Levels knobs (§7): label, hint, neutral row value, highest value.
 pub const LEVELS: [(&str, &str, u8, u8); 6] = [
@@ -97,26 +96,8 @@ impl Default for Settings {
     }
 }
 
-/// The dialog's knobs (Range is a spin box, driven like a knob).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Knob {
-    TimeMul,
-    Range,
-    Gate,
-    /// Index into `LEVELS`.
-    Level(u8),
-}
 
-impl Knob {
-    /// Value change per wheel notch: the stepped controls move one value.
-    pub fn notch(self) -> f32 {
-        match self {
-            Knob::TimeMul => 1.0 / 6.0,
-            Knob::Range => 1.0 / f32::from(RANGE_MAX),
-            Knob::Gate | Knob::Level(_) => 1.0 / 32.0,
-        }
-    }
-}
+pub use crate::knob_id::arpeggiate::Knob;
 
 impl Settings {
     /// A knob as 0..=1.
@@ -212,7 +193,7 @@ impl Row {
         Row { pos, len, key, colour: 0, slide: false, fine: 120, rel: 64, pan: 64, vel: 100, mod_x: 128, mod_y: 128 }
     }
 
-    pub(crate) fn level(&self, i: usize) -> u8 {
+    pub fn level(&self, i: usize) -> u8 {
         [self.pan, self.vel, self.rel, self.mod_x, self.mod_y, self.fine][i]
     }
 }
@@ -303,7 +284,7 @@ pub fn load(path: &Path) -> Result<Pattern, String> {
 
 /// FL's Arpeggiator folder (read in place when FL Studio is installed; §9).
 pub fn folder() -> PathBuf {
-    let fl = crate::factory_folder::dir().unwrap_or_else(os_native::default_fl_dir);
+    let fl = crate::factory_folder::dir(&crate::settings_file::store()).unwrap_or_else(os_paths::default_fl_dir);
     fl.join("Data").join("Patches").join("Scores").join("Arpeggiator")
 }
 
@@ -343,7 +324,7 @@ fn natural(a: &str, b: &str) -> Ordering {
 }
 
 /// The pattern files and sub-folders of `dir`, each sorted naturally.
-pub(crate) fn listing(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+pub fn listing(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let (mut files, mut dirs) = (Vec::new(), Vec::new());
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
@@ -633,8 +614,8 @@ pub fn open(s: &mut State) {
 
 /// Arpeggiate the targets with the dialog's settings; `step` names the undo step (none for a preview).
 fn run(s: &mut State, step: Option<&'static str>) -> bool {
-    let (set, pat, ppq) = (s.arp.set, s.arp.pattern.clone(), u32::from(s.project.ppq.max(4)));
-    let mut used: Vec<u16> = piano::notes(s).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
+    let (set, pat, ppq) = (s.arp.set, s.arp.pattern.clone(), u32::from(s.session.project.ppq.max(4)));
+    let mut used: Vec<u16> = piano::notes(&s.session).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
     used.sort_unstable();
     used.dedup();
     crate::piano_tools::apply_as(s, |_, ns| arpeggiate(ns, &pat, &set, ppq, &used), step)
@@ -645,18 +626,18 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
 /// session again from them.
 pub fn preview(s: &mut State) {
     let Some(ch) = piano::channel(s) else { return };
-    let now = piano::notes(s).to_vec();
+    let now = piano::notes(&s.session).to_vec();
     let fresh = match &s.arp.session {
-        Some(se) => se.pattern != s.pattern || se.channel != ch || se.last != now,
+        Some(se) => se.pattern != s.pattern() || se.channel != ch || se.last != now,
         None => true,
     };
     if fresh {
-        let base_sel = s.piano.selection(s.pattern, Some(ch));
-        s.arp.session = Some(Session { pattern: s.pattern, channel: ch, base: now, base_sel, last: Vec::new() });
+        let base_sel = s.piano.selection(s.pattern(), Some(ch));
+        s.arp.session = Some(Session { pattern: s.pattern(), channel: ch, base: now, base_sel, last: Vec::new() });
     }
     restore(s);
     run(s, None);
-    let last = piano::notes(s).to_vec();
+    let last = piano::notes(&s.session).to_vec();
     if let Some(se) = &mut s.arp.session {
         se.last = last;
     }
@@ -665,17 +646,17 @@ pub fn preview(s: &mut State) {
 /// The session's notes and selection back, when the notes are still what its last preview left.
 fn restore(s: &mut State) -> bool {
     let Some(se) = &s.arp.session else { return false };
-    if se.pattern != s.pattern || piano::notes(s) != se.last.as_slice() && !se.last.is_empty() {
+    if se.pattern != s.pattern() || piano::notes(&s.session) != se.last.as_slice() && !se.last.is_empty() {
         return false;
     }
     let (base, sel, ch) = (se.base.clone(), se.base_sel.clone(), se.channel);
-    piano::pattern_mut(s).notes = base;
+    piano::pattern_mut(&mut s.session).notes = base;
     if sel.is_empty() {
         s.piano.clear_selection();
     } else {
-        s.piano.select(s.pattern, ch, sel);
+        s.piano.select(s.pattern(), ch, sel);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     true
 }
 
@@ -735,7 +716,7 @@ pub fn command(s: &mut State, c: ACmd) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, velocity: 100, ..Note::step(0, pos) }
     }
 
@@ -788,7 +769,7 @@ mod tests {
 
     /// §4: Block and Chord restart the pattern; Time keeps counting from tick 0.
     #[test]
-    fn sync() {
+    pub fn sync() {
         let ns = || vec![note(384, 192, 62), note(384, 192, 65), note(384, 192, 69)];
         assert_eq!(keys(&arp(ns(), |_| {}))[0], 65);
         assert_eq!(keys(&arp(ns(), |s| s.sync = Sync::Block))[..3], [62, 65, 69]);

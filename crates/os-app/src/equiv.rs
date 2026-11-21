@@ -17,7 +17,7 @@
 //! hidden display (`hidden-tests`):
 //! ```text
 //! OS_EQUIV_DIR=<traces> OS_EQUIV_CORPUS=<folder of .flp> \
-//!   cargo test -p os-app --bin lemonstudio equiv_record -- --ignored --nocapture
+//!   cargo test -p os-app --lib equiv_record -- --ignored --nocapture
 //! ```
 //! `equiv_show` runs in the test's own process: give it `HOME=<OS_EQUIV_DIR>/home` and no `DISPLAY` (`equiv_shrink`
 //! runs each candidate in a process of its own, as a recording does). Both work in the folder the trace's recording
@@ -31,7 +31,7 @@ use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{Action, App};
 
@@ -63,8 +63,29 @@ impl fmt::Write for Fnv {
 
 fn hash(v: &impl fmt::Debug) -> u64 {
     let mut h = Fnv::new();
-    let _ = write!(h, "{v:?}");
+    let _ = write!(h, "{}", without_new_ids(&format!("{v:?}")));
     h.0
+}
+
+/// `text` without the ids step 12 gave notes, control points, time markers, playlist tracks and automation points (their
+/// last field, `, id: Id(n) }`): a build without them, a baseline's, has no such field. No other kind's id comes last.
+fn without_new_ids(text: &str) -> String {
+    const KEY: &str = ", id: Id(";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(KEY) {
+        let after = &rest[i + KEY.len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && after[digits..].starts_with(") }") {
+            out.push_str(&rest[..i]);
+            rest = &after[digits + 1..];
+        } else {
+            out.push_str(&rest[..i + KEY.len()]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The project without what `side` holds (the tempo, the pattern shown, the song mode, the rack's groups, locks, zips
@@ -75,10 +96,15 @@ fn project_part(p: &os_model::Project) -> os_model::Project {
     (p.tempo, p.current_pattern, p.song_mode, p.current_group) = (None, None, None, None);
     p.groups.clear();
     for c in &mut p.channels {
-        (c.rack.locked, c.rack.zipped, c.rack.group) = (false, false, 0);
+        (c.rack.locked, c.rack.zipped, c.rack.group) = (false, false, None);
+        // Lemon Studio's own (the `lemon` part compares them, as `.lemon` stores them).
+        c.lemon_icon = None;
+    }
+    for m in &mut p.mixer {
+        (m.slot_names, m.slot_colors, m.slot_icons, m.lemon_icon) = Default::default();
     }
     for q in &mut p.patterns {
-        (q.loops, q.loop_off) = (Vec::new(), None);
+        (q.loops, q.loop_mode) = (Vec::new(), None);
     }
     p
 }
@@ -103,32 +129,41 @@ fn project_hash(p: &os_model::Project) -> u64 {
         }
     }
     out.push_str(&text[from..]);
+    // The fields step 5 added for what `.lemon` keeps, as `project_part` leaves them: out of the text, as before them.
+    let ten = ["None"; 10].join(", ");
+    let out = out.replace(&format!(", slot_names: [{ten}], slot_colors: [{ten}], slot_icons: [{ten}], lemon_icon: None"), "").replace(", lemon_icon: None", "");
+    // Step 5 renamed a pattern's `loop_off` (cleared above) to `loop_mode`: the text keeps the name it was recorded with.
+    let out = out.replace(", loop_mode: None, ", ", loop_off: None, ");
     let mut h = Fnv::new();
-    let _ = write!(h, "{out}");
+    let _ = write!(h, "{}", without_new_ids(&out));
     h.0
 }
 
 /// Project state the interface holds until save (specs: control-plane.md part 2, "Where main is"), as one value: a
 /// field per line, so a difference names its field.
 fn side(app: &App) -> String {
-    let (s, r) = (&app.state, &app.state.rack);
+    let s = &app.state;
+    // Since step 5 the project's (`rack::groups`, `rack::filter`, `rack::unsorted_at`), read as the rack held them.
+    let groups = crate::rack::groups(&s.session.project);
     // "Unsorted" at the end of the group list reads as None (last) or as its place there: the same thing.
-    let unsorted = r.unsorted_at.filter(|&u| u < r.groups.len());
+    let unsorted = crate::rack::unsorted_at(&s.session.project).filter(|&u| u < groups.len());
     let mut out = String::new();
     let mut f = |name: &str, v: &dyn fmt::Debug| {
         let _ = writeln!(out, "{name}: {v:#?}");
     };
-    f("tempo", &s.tempo.to_bits());
-    f("pattern", &s.pattern);
-    f("song_mode", &s.song_mode);
-    f("filter", &r.filter);
-    f("groups", &r.groups);
-    f("zipped", &r.zipped);
-    f("locked", &r.locked);
-    f("loop_mode", &r.loop_mode);
-    f("loop_len", &r.loop_len);
-    f("loop_unit", &r.loop_unit);
-    f("loop_type", &r.loop_type);
+    f("tempo", &s.tempo().to_bits());
+    f("pattern", &s.pattern());
+    f("song_mode", &s.song_mode());
+    f("filter", &crate::rack::filter(&s.session.project));
+    f("groups", &groups);
+    f("zipped", &crate::rack::zipped_rows(&s.session.project));
+    // Since step 5 a channel's own (`rack.locked`); read the same way as when the rack kept the rows.
+    f("locked", &crate::rack::locked_rows(&s.session.project));
+    // Since step 5 the shown pattern's (`rack::loop_mode` and the rest), read as the rack held them.
+    f("loop_mode", &crate::edit::rack::loop_mode(&s.session));
+    f("loop_len", &crate::edit::rack::loop_lens(&s.session));
+    f("loop_unit", &crate::edit::rack::loop_units(&s.session));
+    f("loop_type", &crate::edit::rack::loop_type(&s.session));
     f("unsorted_at", &unsorted);
     out
 }
@@ -141,15 +176,15 @@ impl Fp {
     fn of(app: &App) -> Fp {
         let s = &app.state;
         let side = hash(&side(app));
-        let history = hash(&(s.history.entries(), s.history.at()));
+        let history = hash(&(s.session.history.entries(&app.state.session.settings), s.session.history.at()));
         Fp(vec![
-            ("project", project_hash(&s.project)),
+            ("project", project_hash(&s.session.project)),
             ("side", side),
-            ("lemon", hash(&crate::lemon_state::saved_form(s, &app.plugins))),
+            ("lemon", hash(&crate::lemon_state_ui::saved_form(s, &app.state.session.plugins))),
             ("history", history),
             // Whether the engine holds the project as it is: 0 nothing sent yet, 1 in step, 2 behind. Not the copy
             // itself: what it was last handed while playing starts or pauses follows the audio thread's timing.
-            ("engine", match app.transport.sent_for_tests() {
+            ("engine", match app.state.session.transport.sent_for_tests() {
                 None => 0,
                 Some(p) if p == crate::rack::play_project(s) => 1,
                 Some(_) => 2,
@@ -361,9 +396,9 @@ impl Rig {
         let copy = work.join(project.file_name().expect("a file"));
         std::fs::copy(project, &copy).expect("copy the project");
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
-        app.plugins.available = crate::plugins::builtin();
-        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        app.state.session.plugins.available = crate::plugins::builtin();
+        app.state.session.plugins.effects = crate::plugins::builtin_effects();
         app.open(copy);
         let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0, used: Default::default(), edits: Default::default(), aimed: None, seen: Default::default(), id_fault: None };
         rig.settle();
@@ -373,7 +408,7 @@ impl Rig {
         }
         // The engine is handed the project as opened, as playing it would: from here an edit that doesn't reach the
         // engine leaves it behind, where with nothing sent yet it would look the same as one that does.
-        rig.app.transport.update(&crate::rack::play_project(&rig.app.state));
+        rig.app.state.session.transport.update(&crate::rack::play_project(&rig.app.state));
         rig.paint();
         rig
     }
@@ -405,16 +440,16 @@ impl Rig {
         for _ in 0..4 {
             self.tick();
         }
-        if self.app.transport.playing() {
+        if self.app.state.session.transport.playing() {
             self.app.act(Action::Stop);
             self.tick();
         }
         // A step that started or stopped playback: with no device the audio thread may stop it on its own before the
         // Stop above, which leaves the engine's copy otherwise. Either way it is stopped and handed the project as it
         // is now, so the fingerprint doesn't follow that race.
-        if self.app.transport.generation_for_tests() != generation {
-            self.app.transport.stop();
-            self.app.transport.update(&crate::rack::play_project(&self.app.state));
+        if self.app.state.session.transport.generation_for_tests() != generation {
+            self.app.state.session.transport.stop();
+            self.app.state.session.transport.update(&crate::rack::play_project(&self.app.state));
         }
         self.app.want_close = false;
         self.settle();
@@ -423,7 +458,7 @@ impl Rig {
     }
 
     fn run(&mut self, inputs: &[Input]) -> Fp {
-        let generation = self.app.transport.generation_for_tests();
+        let generation = self.app.state.session.transport.generation_for_tests();
         for i in inputs {
             i.apply(&mut self.app);
         }
@@ -434,10 +469,13 @@ impl Rig {
             let dir = traces_dir().join("dumps");
             let _ = std::fs::create_dir_all(&dir);
             let n = std::fs::read_dir(&dir).map_or(0, |d| d.count());
-            let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}", self.app.state.project, side(&self.app)));
+            let s = &self.app.state.session;
+            let steps: Vec<&str> = s.history.entries(&crate::settings_file::store()).into_iter().map(|e| e.1).collect();
+            let ids = format!("next id {}\nundo steps {steps:?}", s.control.ids.next());
+            let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}\n{ids}", s.project, side(&self.app)));
         }
         if self.id_fault.is_none() {
-            self.id_fault = ids_fault(&self.app.state.project).map(|f| format!("step {}: {f}", self.step));
+            self.id_fault = ids_fault(&self.app.state.session.project).map(|f| format!("step {}: {f}", self.step));
         }
         self.step += 1;
         let fp = Fp::of(&self.app);
@@ -538,8 +576,8 @@ impl Rig {
 
     /// With no steps in the history (just opened, or a project opened or made by a step), undo starts from here.
     fn undo_start(&self, start: &mut os_model::Project) {
-        if self.app.state.history.entries().len() <= 1 {
-            start.clone_from(&self.app.state.project);
+        if self.app.state.session.history.entries(&crate::settings_file::store()).len() <= 1 {
+            start.clone_from(&self.app.state.session.project);
         }
     }
 
@@ -557,14 +595,14 @@ impl Rig {
         }
         // And stopped: a take still recording (a Touch controller note with Start on input on) would keep changing the
         // project, by the clock of a device that is not there, while the checks undo, redo and save.
-        if self.app.transport.playing() || self.app.state.rec.recording() {
+        if self.app.state.session.transport.playing() || self.app.state.session.rec.recording() {
             self.app.act(crate::app::Action::Stop);
             self.run(&[]);
         }
         // The engine holds what the project says (an edit that never reached it shows here): one finding per top-level
         // field that differs, named by its first difference, so what is accepted is decided per field and the names
         // don't depend on the accepted list.
-        if let Some(sent) = self.app.transport.sent_for_tests() {
+        if let Some(sent) = self.app.state.session.transport.sent_for_tests() {
             let play = crate::rack::play_project(&self.app.state);
             if sent != play {
                 let diff = differences(&sent, &play, false);
@@ -577,28 +615,28 @@ impl Rig {
         if let Some(f) = &self.id_fault {
             bad.push(format!("ids({f})"));
         }
-        let last = self.app.state.project.clone();
+        let last = self.app.state.session.project.clone();
         let last_side = side(&self.app);
         // Undo back to the start, then redo to where the trace ended.
         let mut undone = 0;
-        while crate::history::undo(&mut self.app.state).is_some() && undone < 10_000 {
+        while crate::history_ui::undo(&mut self.app.state).is_some() && undone < 10_000 {
             undone += 1;
             self.tick();
         }
-        self.after_step(self.app.transport.generation_for_tests());
+        self.after_step(self.app.state.session.transport.generation_for_tests());
         // The project's part only: what `side` holds is compared there (the end only: what undo leaves, as FL does).
-        if let Some(d) = difference(&canonical(&project_part(opened)), &canonical(&project_part(&self.app.state.project)), false) {
+        if let Some(d) = difference(&canonical(&project_part(opened)), &canonical(&project_part(&self.app.state.session.project)), false) {
             bad.push(format!("undo-to-start({undone}:{d})"));
         }
         // Redo as many steps as were done at the end: steps the trace itself undid stay undone.
         for _ in 0..undone {
-            if crate::history::redo(&mut self.app.state).is_none() {
+            if crate::history_ui::redo(&mut self.app.state).is_none() {
                 break;
             }
             self.tick();
         }
-        self.after_step(self.app.transport.generation_for_tests());
-        if let Some(d) = difference(&canonical(&project_part(&last)), &canonical(&project_part(&self.app.state.project)), false) {
+        self.after_step(self.app.state.session.transport.generation_for_tests());
+        if let Some(d) = difference(&canonical(&project_part(&last)), &canonical(&project_part(&self.app.state.session.project)), false) {
             bad.push(format!("redo-to-end({d})"));
         }
         let now_side = side(&self.app);
@@ -613,11 +651,11 @@ impl Rig {
         // The project as the save wrote it: with what the interface holds written in (the tempo, the pattern shown,
         // the rack's loops and groups, the playlist's view) and the plugins' states; the interface's part is compared
         // on its own below.
-        let mut written = self.app.state.project.clone();
+        let mut written = self.app.state.session.project.clone();
         match self.app.save_copy_with(copy.clone(), &mut |p| written = p.clone()) {
             Some(Ok(())) => {
                 let mut again = open_app(&copy);
-                let back = again.state.project.clone();
+                let back = again.state.session.project.clone();
                 if let Some(d) = difference(&canonical(&written), &canonical(&back), true) {
                     bad.push(format!("roundtrip({d})"));
                 }
@@ -674,7 +712,7 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
     // keeps no loop lengths: FL keeps none for a pattern without notes (flp/events/patterns.md "Loop lengths").
     for q in &mut p.patterns {
         if q.notes.is_empty() {
-            (q.loops, q.loop_off) = (Vec::new(), None);
+            (q.loops, q.loop_mode) = (Vec::new(), None);
         }
     }
     p.patterns.retain(|q| {
@@ -695,8 +733,9 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
     p
 }
 
-/// Whether every channel, pattern, mixer track, slot plugin, arrangement and clip has an id and no two share one (the
-/// session gives them out from one counter, `control::ids`): what is wrong, if anything.
+/// Whether every channel, pattern, mixer track, slot plugin, arrangement, clip, note, control point, time marker,
+/// playlist track and automation point has an id and no two share one (the session gives them out from one counter,
+/// `control::ids`): what is wrong, if anything.
 fn ids_fault(p: &os_model::Project) -> Option<String> {
     let mut all: Vec<(&str, os_model::Id)> = Vec::new();
     all.extend(p.channels.iter().map(|c| ("channel", c.id)));
@@ -705,6 +744,11 @@ fn ids_fault(p: &os_model::Project) -> Option<String> {
     all.extend(p.mixer.iter().flat_map(|m| m.slots.iter().flatten()).map(|x| ("slot", x.id)));
     all.extend(p.arrangements.iter().map(|a| ("arrangement", a.id)));
     all.extend(p.arrangements.iter().flat_map(|a| &a.clips).map(|c| ("clip", c.id)));
+    all.extend(p.patterns.iter().flat_map(|q| &q.notes).map(|n| ("note", n.id)));
+    all.extend(p.patterns.iter().flat_map(|q| &q.controls).map(|c| ("control point", c.id)));
+    all.extend(p.arrangements.iter().flat_map(|a| &a.markers).map(|m| ("time marker", m.id)));
+    all.extend(p.arrangements.iter().flat_map(|a| &a.tracks).map(|t| ("playlist track", t.id)));
+    all.extend(p.automations.iter().flat_map(|a| &a.points).map(|q| ("automation point", q.id)));
     if let Some((kind, _)) = all.iter().find(|(_, id)| id.is_none()) {
         return Some(format!("a {kind} without an id"));
     }
@@ -720,9 +764,9 @@ fn ids_fault(p: &os_model::Project) -> Option<String> {
 /// A second app with `path` opened, as the rig opens (builtin plugins only), loading waited for.
 fn open_app(path: &Path) -> App {
     let mut a = App::new(None);
-    a.plugins = crate::plugins::Plugins::default();
-    a.plugins.available = crate::plugins::builtin();
-    a.plugins.effects = crate::plugins::builtin_effects();
+    a.state.session.plugins = crate::plugins::Plugins::default();
+    a.state.session.plugins.available = crate::plugins::builtin();
+    a.state.session.plugins.effects = crate::plugins::builtin_effects();
     a.open(path.to_path_buf());
     let t0 = Instant::now();
     while a.loading() && t0.elapsed() < Duration::from_secs(180) {
@@ -772,6 +816,10 @@ fn leaves(text: &str) -> Vec<(String, String)> {
 /// `rounding` takes numbers within 1e-4 as equal (what the file format keeps of them).
 fn difference(a: &impl fmt::Debug, b: &impl fmt::Debug, rounding: bool) -> Option<String> {
     let diff = differences(a, b, rounding);
+    // `OS_EQUIV_ALL=1`: every difference, on stderr, to see what a finding's count is made of.
+    if std::env::var_os("OS_EQUIV_ALL").is_some() && !diff.is_empty() {
+        eprintln!("differences: {diff:#?}");
+    }
     diff.first().map(|d| format!("{d}(+{})", diff.len() - 1))
 }
 
@@ -895,7 +943,7 @@ fn record(root: &Path, project: &str, seed: u64, steps: usize) -> Trace {
     let work = work_dir(&trace_name(project, seed));
     let mut rig = Rig::open(&root.join(project), &work);
     let opened = Fp::of(&rig.app);
-    let mut opened_project = rig.app.state.project.clone();
+    let mut opened_project = rig.app.state.session.project.clone();
     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let mut out = Vec::new();
     let mut before = opened.clone();
@@ -922,7 +970,7 @@ fn replay(root: &Path, t: &Trace) -> Option<String> {
     // The folder the recording used: paths the project stores (a render, a save as) must be the same.
     let work = work_dir(&trace_name(&t.project, t.seed));
     let mut rig = Rig::open(&root.join(&t.project), &work);
-    let mut opened_project = rig.app.state.project.clone();
+    let mut opened_project = rig.app.state.session.project.clone();
     let fp = Fp::of(&rig.app);
     if fp != t.opened {
         return Some(format!("opening differs in {:?}", fp.differs(&t.opened)));
@@ -1160,7 +1208,7 @@ fn fails(_root: &Path, project: &str, seed: u64, steps: &[Vec<Input>], kind: &st
 fn fails_here(root: &Path, project: &str, seed: u64, steps: &[Vec<Input>], kind: &str) -> Option<String> {
     let work = work_dir(&trace_name(project, seed));
     let mut rig = Rig::open(&root.join(project), &work);
-    let mut start = rig.app.state.project.clone();
+    let mut start = rig.app.state.session.project.clone();
     for s in steps {
         rig.run(s);
         rig.undo_start(&mut start);
@@ -1234,17 +1282,26 @@ fn equiv_show() {
     let t = Trace::read(&std::fs::read_to_string(&path).expect("read")).expect("a trace");
     let work = work_dir(&trace_name(&t.project, t.seed));
     let mut rig = Rig::open(&root.join(&t.project), &work);
-    let mut start = rig.app.state.project.clone();
+    let mut start = rig.app.state.session.project.clone();
     for (i, (inputs, _)) in t.steps.iter().enumerate() {
         let line: Vec<String> = inputs.iter().map(ToString::to_string).collect();
         eprintln!("step {i}: {}", line.join("; "));
-        let before = rig.app.state.project.clone();
+        let before = rig.app.state.session.project.clone();
+        let sent = rig.app.state.session.transport.sent_for_tests();
         rig.run(inputs);
         rig.undo_start(&mut start);
         let s = &rig.app.state;
-        eprintln!("  undo: {:?} ({} steps), message: {:?}", s.history.newest_done(), s.history.done(), s.message);
-        if let Some(d) = difference(&before, &s.project, false) {
+        eprintln!("  undo: {:?} ({} steps), message: {:?}", s.session.history.newest_done(), s.session.history.done(), s.message);
+        for d in differences(&before, &s.session.project, false).iter().take(8) {
             eprintln!("  changed: {d}");
+        }
+        // What playback was handed (the engine's part of the fingerprint).
+        let now = rig.app.state.session.transport.sent_for_tests();
+        if now != sent {
+            match (&sent, &now) {
+                (Some(a), Some(b)) => eprintln!("  playback: {}", difference(a, b, false).unwrap_or_else(|| "the same project again".into())),
+                _ => eprintln!("  playback: {}", if now.is_some() { "handed the project" } else { "plays a project of its own" }),
+            }
         }
     }
     // OS_EQUIV_SHOW=checks: then the end checks, as a recording runs them.
@@ -1257,11 +1314,11 @@ fn equiv_show() {
     // every difference).
     if std::env::var("OS_EQUIV_SHOW").as_deref() == Ok("save") {
         let copy = work.join("roundtrip.flp");
-        let mut written = rig.app.state.project.clone();
+        let mut written = rig.app.state.session.project.clone();
         match rig.app.save_copy_with(copy.clone(), &mut |p| written = p.clone()) {
             Some(Ok(())) => {
                 let again = open_app(&copy);
-                for d in differences(&canonical(&written), &canonical(&again.state.project), true).iter().take(60) {
+                for d in differences(&canonical(&written), &canonical(&again.state.session.project), true).iter().take(60) {
                     eprintln!("saved and opened: {d}");
                 }
                 let (a, b) = (leaves(&side(&rig.app)), leaves(&side(&again)));

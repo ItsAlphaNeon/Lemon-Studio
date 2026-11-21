@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, State, Win};
 use crate::plugin_db::{self as db, Entry, MenuView};
@@ -421,7 +421,7 @@ impl App {
     }
 
     /// The palette's controls.
-    pub(crate) fn palette_act(&mut self, a: PalAct) {
+    pub fn palette_act(&mut self, a: PalAct) {
         let s = &mut self.state;
         match a {
             PalAct::Search | PalAct::List => {}
@@ -479,7 +479,7 @@ impl App {
     }
 
     /// The wheel over the list: three rows a notch (§6.4).
-    pub(crate) fn palette_wheel(&mut self, notches: f32) {
+    pub fn palette_wheel(&mut self, notches: f32) {
         let s = &mut self.state;
         let (_, total) = tops(&rows(s));
         let max = (total - crate::views::plugin_palette::list_h(s)).max(0.0);
@@ -488,7 +488,7 @@ impl App {
 
     /// The palette's keys while it has the keyboard (§6.1, §6.4); returns whether the key was taken. Typed text goes
     /// into the search; shortcuts with Ctrl or Alt (but AltGr's characters) and the function keys are left to the app.
-    pub(crate) fn palette_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
+    pub fn palette_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> bool {
         if !has_keys(&self.state) {
             return false;
         }
@@ -557,14 +557,14 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.session.plugins = crate::plugins::Plugins::builtins();
         for name in ["Test Synth", "Bass Drum"] {
-            app.plugins.available.push(db::fake(name, os_host::Kind::Instrument));
+            app.state.session.plugins.available.push(db::fake(name, os_host::Kind::Instrument));
         }
         for name in ["Space Reverb", "Delay Lama"] {
-            app.plugins.effects.push(db::fake(name, os_host::Kind::Effect));
+            app.state.session.plugins.effects.push(db::fake(name, os_host::Kind::Effect));
         }
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app
     }
 
@@ -622,12 +622,12 @@ mod tests {
     #[test]
     fn letters_go_to_the_search_not_the_shortcuts() {
         let mut app = app();
-        let song = app.state.song_mode;
+        let song = app.state.song_mode();
         app.open_plugin_palette(Target::All, (0.0, 0.0), None);
         type_text(&mut app, "l");
-        assert_eq!(app.state.song_mode, song);
+        assert_eq!(app.state.song_mode(), song);
         assert_eq!(app.state.palette.query, "l");
-        assert!(!app.typing_key(winit::keyboard::KeyCode::KeyZ, true, false, false), "the typing keyboard leaves it alone");
+        assert!(!app.typing_key(crate::keys::KeyCode::KeyZ, true, false, false), "the typing keyboard leaves it alone");
     }
 
     /// Down / Enter picks the highlighted row: a generator goes to a new channel and the palette closes; Shift+Enter on
@@ -637,9 +637,9 @@ mod tests {
         let mut app = app();
         app.open_plugin_palette(Target::Gen(None), (0.0, 0.0), None);
         type_text(&mut app, "test synth");
-        let n = app.state.project.channels.len();
+        let n = app.state.session.project.channels.len();
         app.key(&Key::Named(NamedKey::Enter), false, false);
-        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.session.project.channels.len(), n + 1);
         assert!(!is_open(&app.state));
 
         crate::mixer::select(&mut app.state, 1, false);
@@ -649,10 +649,10 @@ mod tests {
         app.key(&Key::Named(NamedKey::Enter), false, false);
         app.shift = false;
         assert!(is_open(&app.state), "Shift keeps it open");
-        assert_eq!(crate::mixer::slot_name(&app.state, 1, 3).as_deref(), Some("Space Reverb"));
+        assert_eq!(crate::edit::mixer::slot_name(&app.state.session, 1, 3).as_deref(), Some("Space Reverb"));
         assert_eq!(app.state.palette.target, Target::Fx(None));
         app.key(&Key::Named(NamedKey::Enter), false, false);
-        assert_eq!(crate::mixer::slot_name(&app.state, 1, 0).as_deref(), Some("Space Reverb"), "the first empty slot");
+        assert_eq!(crate::edit::mixer::slot_name(&app.state.session, 1, 0).as_deref(), Some("Space Reverb"), "the first empty slot");
         assert!(!is_open(&app.state));
     }
 
@@ -678,9 +678,9 @@ mod tests {
     fn many_plugins_scroll_inside_a_fixed_window() {
         let mut app = app();
         for i in 0..400 {
-            app.plugins.available.push(db::fake(&format!("Many Synth {i:03}"), os_host::Kind::Instrument));
+            app.state.session.plugins.available.push(db::fake(&format!("Many Synth {i:03}"), os_host::Kind::Instrument));
         }
-        app.state.plugdb.rebuild(&app.plugins);
+        app.state.plugdb.rebuild(&app.state.session.plugins);
         app.state.screen = (1366.0, 768.0);
         app.open_plugin_palette(Target::Gen(None), (1300.0, 700.0), None);
         let r = rect(&app.state);

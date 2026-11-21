@@ -390,15 +390,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "autotools"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef941527c41b0fc0dd48511a8154cd5fc7e29200a0ff8b7203c5d777dbc795cf"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2246,6 +2237,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemonstudio"
+version = "0.0.1"
+dependencies = [
+ "block2 0.6.2",
+ "chrono",
+ "citrus",
+ "lemon-3x-osc",
+ "lemon-parametric-eq-2",
+ "lemon-sampler",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "os-app",
+ "os-clap",
+ "os-engine",
+ "os-flp",
+ "os-host",
+ "os-hostlink",
+ "os-model",
+ "os-native",
+ "os-paths",
+ "os-session",
+ "os-theme",
+ "os-ui",
+ "os-vst3",
+ "serde_json",
+ "smith",
+ "softbuffer",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+ "winit",
+ "x11rb",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2450,22 +2480,20 @@ dependencies = [
 
 [[package]]
 name = "mp3lame-encoder"
-version = "0.2.5"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60cb9bdd89806317373e36ff745f264b7ed7ffc5bc5aab02dc7d1b837c16a8d4"
+checksum = "a768064bbfe7e0853bda4d0fd9c2ee65e4642f9a4d085265a2a12702a8d30f78"
 dependencies = [
  "mp3lame-sys",
 ]
 
 [[package]]
 name = "mp3lame-sys"
-version = "0.1.11"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54e3b1772db47828840702e5a2e05694527f731abadf9b931355d54035f019d8"
+checksum = "a01c8bcc75d256a40b8e3c8dfefbbebe704eef1615cab5025bf362ba2a55f0c0"
 dependencies = [
- "autotools",
  "cc",
- "libc",
 ]
 
 [[package]]
@@ -3047,11 +3075,8 @@ dependencies = [
 name = "os-app"
 version = "0.0.1"
 dependencies = [
- "asio-sys",
- "block2 0.6.2",
  "chrono",
  "citrus",
- "cpal",
  "crossbeam-queue",
  "flacenc",
  "jpeg-decoder",
@@ -3082,12 +3107,8 @@ dependencies = [
  "libc",
  "midir",
  "mp3lame-encoder",
- "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-core-graphics",
  "objc2-foundation 0.3.2",
- "objc2-quartz-core 0.3.2",
  "os-clap",
  "os-dsp",
  "os-engine",
@@ -3095,8 +3116,8 @@ dependencies = [
  "os-host",
  "os-hostlink",
  "os-model",
- "os-native",
  "os-paths",
+ "os-session",
  "os-smf",
  "os-theme",
  "os-ui",
@@ -3104,19 +3125,13 @@ dependencies = [
  "os-vst3",
  "press",
  "pulp-filter",
- "pulseaudio",
  "serde",
  "serde_json",
  "smith",
- "softbuffer",
  "tesla",
  "tiny-skia",
  "vorbis_rs",
- "windows 0.62.2",
  "windows-sys 0.61.2",
- "winit",
- "x11rb",
- "zbus",
  "zip",
 ]
 
@@ -3198,6 +3213,7 @@ dependencies = [
  "os-dsp",
  "os-engine",
  "os-host",
+ "os-paths",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
 ]
@@ -3252,6 +3268,68 @@ dependencies = [
  "os-engine",
  "os-flp",
  "os-model",
+]
+
+[[package]]
+name = "os-session"
+version = "0.0.1"
+dependencies = [
+ "asio-sys",
+ "chrono",
+ "citrus",
+ "cpal",
+ "crossbeam-queue",
+ "flacenc",
+ "lemon-3x-osc",
+ "lemon-balance",
+ "lemon-chorus",
+ "lemon-delay",
+ "lemon-drop",
+ "lemon-drum-sampler",
+ "lemon-fast-distortion",
+ "lemon-filter",
+ "lemon-flanger",
+ "lemon-formula-controller",
+ "lemon-limiter",
+ "lemon-parametric-eq-2",
+ "lemon-peak-controller",
+ "lemon-phaser",
+ "lemon-reverb",
+ "lemon-sampler",
+ "lemon-slicer",
+ "lemon-small-fx",
+ "lemon-soft-clipper",
+ "lemon-soundfont",
+ "lemon-stereo-enhancer",
+ "lemon-stereo-shaper",
+ "lemon-transient-processor",
+ "lemon-vocoder",
+ "libc",
+ "midir",
+ "mp3lame-encoder",
+ "os-clap",
+ "os-dsp",
+ "os-engine",
+ "os-flp",
+ "os-host",
+ "os-hostlink",
+ "os-model",
+ "os-native",
+ "os-paths",
+ "os-vst2",
+ "os-vst3",
+ "press",
+ "pulp-filter",
+ "pulseaudio",
+ "serde",
+ "serde_json",
+ "smith",
+ "tesla",
+ "vorbis_rs",
+ "windows 0.62.2",
+ "windows-sys 0.61.2",
+ "zbus",
+ "zip",
 ]
 
 [[package]]

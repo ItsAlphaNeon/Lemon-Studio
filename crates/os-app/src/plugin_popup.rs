@@ -71,18 +71,18 @@ impl App {
     /// open closes unpicked (the same plugin's was replaced by this one). A menu with no entry closes at once. True
     /// when shown.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
-    pub(crate) fn show_plugin_menu(&mut self, key: usize, m: &Menu, at: (f32, f32)) -> bool {
+    pub fn show_plugin_menu(&mut self, key: usize, m: &Menu, at: (f32, f32)) -> bool {
         let p = popup(key, m, at.0, at.1);
         if let Some((k, id)) = self.plugin_menu.take() {
             if self.state.playlist.popup.as_ref().is_some_and(|q| holds(q, id)) {
                 self.state.playlist.popup = None;
             }
             if id != m.id {
-                self.plugins.menu_done(k, id, None);
+                self.state.session.plugins.menu_done(k, id, None);
             }
         }
         if !holds(&p, m.id) {
-            self.plugins.menu_done(key, m.id, None);
+            self.state.session.plugins.menu_done(key, m.id, None);
             return false;
         }
         self.state.playlist.popup = Some(p);
@@ -92,11 +92,11 @@ impl App {
 
     /// Each tick: the plugin menu's popup closed without a pick (a click elsewhere, Escape, another popup), or the
     /// plugin's editor closed under it (the menu went with it, so the popup goes too). The plugin is told.
-    pub(crate) fn plugin_menu_tick(&mut self) {
+    pub fn plugin_menu_tick(&mut self) {
         let Some((key, id)) = self.plugin_menu else { return };
         let shown = self.state.playlist.popup.as_ref().is_some_and(|p| holds(p, id));
         // An instance busy on the audio thread is taken as still showing its editor.
-        let editor = self.plugins.hosted.get(&key).is_some_and(|h| h.plugin.try_lock().map_or(true, |p| p.editor_open()));
+        let editor = self.state.session.plugins.hosted.get(&key).is_some_and(|h| h.plugin.try_lock().map_or(true, |p| p.editor_open()));
         if shown && editor {
             return;
         }
@@ -105,16 +105,16 @@ impl App {
             self.invalidate();
         }
         self.plugin_menu = None;
-        self.plugins.menu_done(key, id, None);
+        self.state.session.plugins.menu_done(key, id, None);
     }
 
     /// An entry picked in a plugin's menu (`Cmd::PluginMenu`, the popup already closed): the plugin runs it now, on the
     /// UI thread. The host's "Create automation clip" comes back as an automation request (`App::params_tick`).
-    pub(crate) fn plugin_menu_pick(&mut self, key: usize, id: u64, pick: usize) {
+    pub fn plugin_menu_pick(&mut self, key: usize, id: u64, pick: usize) {
         if self.plugin_menu.is_some_and(|(_, m)| m == id) {
             self.plugin_menu = None;
         }
-        self.plugins.menu_done(key, id, Some(pick));
+        self.state.session.plugins.menu_done(key, id, Some(pick));
         self.invalidate();
     }
 }
@@ -272,7 +272,7 @@ mod tests {
         let done = Arc::new(Mutex::new(Vec::new()));
         let desc = crate::plugins::builtin()[0].desc.clone();
         let fake = Arc::new(Mutex::new(Fake { desc, done: done.clone(), automate: Vec::new(), editor: true, asks: None }));
-        a.plugins.hosted.insert(0, Hosted::new(fake.clone()));
+        a.state.session.plugins.hosted.insert(0, Hosted::new(fake.clone()));
         (a, fake, done)
     }
 
@@ -319,16 +319,16 @@ mod tests {
     #[test]
     fn the_host_entry_creates_an_automation_clip() {
         let (mut a, _fake, done) = app();
-        let clips = a.state.project.automations.len();
+        let clips = a.state.session.project.automations.len();
         a.params_tick();
         assert!(a.show_plugin_menu(0, &menu(5), (0.0, 0.0)));
         let create = a.state.playlist.popup.as_ref().unwrap().items.iter().find(|i| i.label == "Create automation clip").unwrap().cmd.clone();
         crate::playlist::run(&mut a, create);
         assert_eq!(*done.lock().unwrap(), [(5, Some(11))]);
         a.params_tick();
-        assert_eq!(a.state.project.automations.len(), clips + 1);
-        let ch = a.state.project.channels[0].index;
-        assert_eq!(a.state.project.automations.last().and_then(|x| x.target()), Some(os_model::target::channel_param(ch, 0)));
+        assert_eq!(a.state.session.project.automations.len(), clips + 1);
+        let ch = a.state.session.project.channels[0].index;
+        assert_eq!(a.state.session.project.automations.last().and_then(|x| x.target()), Some(os_model::target::channel_param(ch, 0)));
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Created automation clip")), "{:?}", a.state.message);
     }
 
@@ -338,8 +338,8 @@ mod tests {
     fn a_menu_without_a_window_closes_unpicked() {
         let (mut a, fake, done) = app();
         fake.lock().unwrap().asks = Some(menu(4));
-        let requests = a.plugins.idle(|_| None);
-        assert!(!requests.iter().any(|r| matches!(r, crate::plugins::Request::PluginMenu(..))));
+        let requests = a.state.editor_host.idle(&mut a.state.session.plugins, |_| None);
+        assert!(!requests.iter().any(|r| matches!(r, crate::editor_host::Request::PluginMenu(..))));
         assert_eq!(*done.lock().unwrap(), [(4, None)]);
         assert!(fake.lock().unwrap().asks.is_none());
     }

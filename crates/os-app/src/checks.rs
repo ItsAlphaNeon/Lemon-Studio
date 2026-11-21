@@ -6,7 +6,7 @@
 //! script drives the app as a user would, and a short report says which dropouts happened, of what kind, whether they
 //! cut into sound, how soon after a key press, and which plugin took the most time in the worst blocks.
 //!
-//! `OS_CHECK_PROJECT=<project.flp> cargo test -p os-app --bin lemonstudio space_play_stop -- --ignored --nocapture`
+//! `OS_CHECK_PROJECT=<project.flp> cargo test -p os-app --lib space_play_stop -- --ignored --nocapture`
 //! (`OS_CHECK_BLOCK=256`, `OS_CHECK_RATE=48000`: the device; `OS_CHECK_ROUNDS=20`; `OS_CHECK_PAUSE=1` pauses instead of
 //! stopping; `OS_CHECK_REPLACE=<plugin>=<plugin>` gives the channels of one plugin another; `OS_CHECK_WAV=<file>`
 //! keeps what was played, with the presses' times next to it; `OS_CHECK_RT=0` leaves the audio
@@ -51,9 +51,9 @@ fn open(path: &std::path::Path) -> App {
         crate::rt::enable_in_tests();
     }
     let mut app = App::new(None);
-    app.plugins = crate::plugins::Plugins::default();
-    app.plugins.available = crate::plugins::builtin();
-    app.plugins.effects = crate::plugins::builtin_effects();
+    app.state.session.plugins = crate::plugins::Plugins::default();
+    app.state.session.plugins.available = crate::plugins::builtin();
+    app.state.session.plugins.effects = crate::plugins::builtin_effects();
     let t0 = Instant::now();
     app.open(path.into());
     while app.loading() && t0.elapsed() < Duration::from_secs(180) {
@@ -62,10 +62,10 @@ fn open(path: &std::path::Path) -> App {
     }
     // `OS_CHECK_REPLACE=<plugin>=<plugin>`: the channels of the first plugin get the second, as Replace ▸ gives it.
     if let Some((from, to)) = std::env::var("OS_CHECK_REPLACE").ok().as_deref().and_then(|v| v.split_once('=')) {
-        let index = app.plugins.index_of(to).unwrap_or_else(|| panic!("no plugin {to}"));
-        let rows: Vec<usize> = (0..app.state.project.channels.len())
+        let index = app.state.session.plugins.index_of(to).unwrap_or_else(|| panic!("no plugin {to}"));
+        let rows: Vec<usize> = (0..app.state.session.project.channels.len())
             .filter(|&r| {
-                let ch = &app.state.project.channels[r];
+                let ch = &app.state.session.project.channels[r];
                 ch.plugin.as_deref() == Some(from) || ch.name.as_deref() == Some(from)
             })
             .collect();
@@ -77,7 +77,7 @@ fn open(path: &std::path::Path) -> App {
     }
     // Mixer effects are hosted a few ticks after loading.
     run(&mut app, Duration::from_millis(500));
-    eprintln!("{}: loaded in {:.1} s, {} plugins hosted", path.display(), t0.elapsed().as_secs_f64(), app.plugins.hosted.len());
+    eprintln!("{}: loaded in {:.1} s, {} plugins hosted", path.display(), t0.elapsed().as_secs_f64(), app.state.session.plugins.hosted.len());
     app
 }
 
@@ -92,12 +92,12 @@ fn run(app: &mut App, d: Duration) {
 
 /// Space, as the user presses it; with `OS_CHECK_PAUSE=1` a playing transport is paused instead of stopped.
 fn space(app: &mut App, presses: &mut Vec<Press>, phase: &'static str) {
-    let playing = app.transport.state() == crate::transport::State::Playing;
+    let playing = app.state.session.transport.state() == crate::transport::State::Playing;
     presses.push(Press { at: Instant::now(), phase, play: !playing });
     if playing && std::env::var_os("OS_CHECK_PAUSE").is_some() {
-        app.transport.pause();
+        app.state.session.transport.pause();
     } else {
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), false, false);
+        app.key(&crate::keys::Key::Named(crate::keys::NamedKey::Space), false, false);
     }
 }
 
@@ -134,7 +134,7 @@ fn save_audio(rec: &Recording, presses: &[Press]) {
 /// Starts recording blocks with the transport's counters and every hosted plugin's processing time. The probes'
 /// names: the transport's (`Transport::probes`), then one per plugin, "<name> (<place>)".
 fn record(app: &App) -> usize {
-    let mut probes = app.transport.probes();
+    let mut probes = app.state.session.transport.probes();
     let fixed = probes.len();
     for s in app.perf_sources() {
         if let Some(m) = s.meter {
@@ -309,7 +309,7 @@ struct Counters {
 }
 
 impl Counters {
-    fn now() -> Counters {
+    pub fn now() -> Counters {
         #[cfg(target_os = "linux")]
         let ((promoted, demoted), refused) = (crate::rt::counts(), crate::rt::refused());
         #[cfg(not(target_os = "linux"))]
@@ -345,7 +345,7 @@ fn space_play_stop() {
     let mut app = open(std::path::Path::new(&path));
     let mut presses = Vec::new();
     let fixed = record(&app);
-    let d0 = app.transport.drops();
+    let d0 = app.state.session.transport.drops();
     let c0 = Counters::now();
     for _ in 0..rounds {
         space(&mut app, &mut presses, "space");
@@ -368,7 +368,7 @@ fn space_play_stop() {
     run(&mut app, Duration::from_millis(4500));
     let rec = sim::take();
     save_audio(&rec, &presses);
-    let d = app.transport.drops();
+    let d = app.state.session.transport.drops();
     eprintln!("\n{}", report(&rec, &presses, fixed));
     eprintln!(
         "the transport counted: {} feeder late, {} plugin late, {} device; {} heard (since the app started: {} dropouts)",
@@ -376,7 +376,7 @@ fn space_play_stop() {
         d.plugin - d0.plugin,
         d.device - d0.device,
         d.heard - d0.heard,
-        app.transport.underruns()
+        app.state.session.transport.underruns()
     );
     eprintln!("{}", c0.since());
     sim::set(None);
@@ -393,11 +393,11 @@ fn space_with_an_instrument_open() {
     };
     let rounds: usize = var("OS_CHECK_ROUNDS", 30);
     let mut app = open(std::path::Path::new(&path));
-    app.transport.listen(true);
+    app.state.session.transport.listen(true);
     run(&mut app, Duration::from_millis(500));
     let mut presses = Vec::new();
     let fixed = record(&app);
-    let d0 = app.transport.drops();
+    let d0 = app.state.session.transport.drops();
     let c0 = Counters::now();
     for _ in 0..rounds {
         space(&mut app, &mut presses, "quick");
@@ -407,10 +407,10 @@ fn space_with_an_instrument_open() {
     }
     run(&mut app, Duration::from_millis(1000));
     let rec = sim::take();
-    let d = app.transport.drops();
+    let d = app.state.session.transport.drops();
     eprintln!("\n{}", report(&rec, &presses, fixed));
     eprintln!("the transport counted: {} feeder late, {} plugin late, {} device; {} heard", d.feeder - d0.feeder, d.plugin - d0.plugin, d.device - d0.device, d.heard - d0.heard);
     eprintln!("{}", c0.since());
-    app.transport.listen(false);
+    app.state.session.transport.listen(false);
     sim::set(None);
 }

@@ -57,7 +57,7 @@ fn wav() -> Option<Vec<u8>> {
 
 impl App {
     /// TOOLS ▸ Save audio clipboard to browser.
-    pub(crate) fn save_audio_clipboard(&mut self) {
+    pub fn save_audio_clipboard(&mut self) {
         let Some(bytes) = wav() else {
             self.state.message = Some("The clipboard holds no audio".into());
             return;

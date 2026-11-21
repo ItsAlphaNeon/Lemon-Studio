@@ -587,6 +587,11 @@ impl ChannelState {
 
     /// The channel's volume gain for volume parameter `v`: its level curve times the volume multiplier (spec:
     /// audio/voice-levels.md "Final levels": the channel's two first), 0 when the channel is off.
+    /// The level a new start of playback gives (`init.0`), from the stored switch and volume.
+    fn start_volume(&self) -> f64 {
+        if self.stored.0 { laws::channel_gain(self.init_v) * f64::from(self.init_adjust.mult) } else { 0.0 }
+    }
+
     fn vol_gain(&self, v: f64) -> f64 {
         if self.enabled { laws::channel_gain(v) * f64::from(self.adjust.mult) } else { 0.0 }
     }
@@ -1155,6 +1160,9 @@ pub struct Engine {
     /// The Tempo tapper's nudge (`set_nudge`): -1, 0 or +1, and the one the clock runs at now.
     nudge: Option<std::sync::Arc<std::sync::atomic::AtomicI8>>,
     nudged: i8,
+    /// The tempo menu's Half speed (`set_half_speed`), and whether the clock runs at half speed now.
+    half: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    halved: bool,
     /// The arrangement's time markers (song mode with clips; spec: audio/transport.md "Time markers in SONG mode").
     marks: marks::Marks,
     /// The next tick was arrived at by a start or a jump: markers on it do not act.
@@ -1738,6 +1746,8 @@ impl Engine {
             count_in_len: 0,
             nudge: None,
             nudged: 0,
+            half: None,
+            halved: false,
             run_on: None,
             marks,
             landed: true,
@@ -1824,6 +1834,12 @@ impl Engine {
     /// (faster) from the next tick on; the tempo itself stays. An export never nudges.
     pub fn set_nudge(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicI8>) {
         self.nudge = Some(flag);
+    }
+
+    /// The tempo menu's Half speed (spec: ui/tempo-menu.md): while `flag` is set, playback runs at half the tempo from
+    /// the next tick on; the tempo itself stays. An export never runs at half speed.
+    pub fn set_half_speed(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.half = Some(flag);
     }
 
     /// Ticks of the count-in left to render (0: none, or over).
@@ -2323,9 +2339,10 @@ impl Engine {
         self.tempo * f64::from(self.steps) / 4.0
     }
 
-    /// The tempo the clock runs the ticks at: `tick_tempo` with the nudge.
+    /// The tempo the clock runs the ticks at: `tick_tempo` with the nudge and Half speed.
     fn clock_tempo(&self) -> f64 {
-        self.tick_tempo() * (1.0 + NUDGE * f64::from(self.nudged))
+        let half = if self.halved { 0.5 } else { 1.0 };
+        self.tick_tempo() * (1.0 + NUDGE * f64::from(self.nudged)) * half
     }
 
     /// The song's end in ticks.
@@ -2699,6 +2716,18 @@ impl Engine {
         self.exporting = old.exporting;
         self.multicore.keep_gate(&old.multicore);
         self.take_mixer(old);
+    }
+
+    /// Pattern playback taken over from another pattern's engine (`continue_from`) while it plays (spec:
+    /// audio/transport.md "Switching patterns while playing"): the position goes on where it was when this pattern is
+    /// that long; past its end, at the same place in the bar it was in (`bar_start` gives where the bar holding a tick
+    /// starts, on the grid of the pattern that played), counted from this pattern's start. Sounding notes keep their
+    /// remaining length, as at a loop point.
+    pub fn pattern_switched(&mut self, bar_start: impl Fn(u64) -> u64) {
+        if self.end_tick > 0 && self.tick >= self.end_tick {
+            let to = (self.tick - bar_start(self.tick).min(self.tick)) % self.end_tick;
+            self.jump_to(to, false);
+        }
     }
 
     /// Carries on from `old` with the hosted plugins as it left them, for a stream that plays this engine's first
@@ -3127,30 +3156,78 @@ impl Engine {
     /// Takes a project edit in place (see [`LiveEdit`]), as a new engine for the edited project would have it.
     pub fn apply_edit(&mut self, edit: LiveEdit) {
         match edit {
+            // What a new start of playback puts back (`ChannelState::reset`, `MixTrack::restore`) changes with each.
             LiveEdit::ChannelVolume(c, v) => {
                 if let Some(ch) = self.channels.get_mut(c) {
                     ch.glide(Some(v), None, 0);
+                    ch.init_v = v;
+                    ch.init.0 = ch.start_volume();
                 }
             }
             LiveEdit::ChannelPan(c, p) => {
                 if let Some(ch) = self.channels.get_mut(c) {
                     ch.glide(None, Some(p), 0);
+                    ch.init.1 = p;
                 }
             }
             LiveEdit::ChannelPitch(c, cents) => {
                 if let Some(ch) = self.channels.get_mut(c) {
                     ch.init_knob = f64::from(cents);
                     ch.retune(f64::from(cents));
+                    ch.init.2 = ch.base_rate;
+                }
+            }
+            LiveEdit::ChannelEnabled(c, on) => {
+                self.switch_channel(c, on);
+                if let Some(ch) = self.channels.get_mut(c) {
+                    ch.stored.0 = on;
+                    ch.init.0 = ch.start_volume();
                 }
             }
             LiveEdit::MixerVolume(t, v) | LiveEdit::MixerPan(t, v) | LiveEdit::MixerSeparation(t, v) => {
                 if let Some(m) = self.tracks.get_mut(t) {
                     match edit {
-                        LiveEdit::MixerVolume(..) => m.vol = (v * 16000.0).round() as i32,
-                        LiveEdit::MixerPan(..) => m.pan = (v * 6400.0).round() as i32,
-                        _ => m.sep = (v * 64.0).round() as i32,
+                        LiveEdit::MixerVolume(..) => (m.vol, m.stored.vol) = ((v * 16000.0).round() as i32, (v * 16000.0).round() as i32),
+                        LiveEdit::MixerPan(..) => (m.pan, m.stored.pan) = ((v * 6400.0).round() as i32, (v * 6400.0).round() as i32),
+                        _ => (m.sep, m.stored.sep) = ((v * 64.0).round() as i32, (v * 64.0).round() as i32),
                     }
                     m.matrix = m.compute_matrix();
+                }
+            }
+            LiveEdit::MixerEnabled(t, on) => {
+                if let Some(m) = self.tracks.get_mut(t) {
+                    m.on = on;
+                    m.matrix = m.compute_matrix();
+                }
+            }
+            LiveEdit::MixerSlots(t, on) => {
+                if let Some(m) = self.tracks.get_mut(t) {
+                    m.slots_enabled = on;
+                    self.pdc.switched = true;
+                }
+            }
+            LiveEdit::SlotOn(t, k, on) => {
+                if let Some(m) = self.tracks.get_mut(t).filter(|_| k < 10) {
+                    m.set_slot_on(k, on);
+                    m.stored.slot_on[k] = on;
+                    self.pdc.switched = true;
+                }
+            }
+            LiveEdit::SlotMix(t, k, v) => {
+                if let Some(m) = self.tracks.get_mut(t).filter(|_| k < 10) {
+                    m.set_slot_mix(k, mix_level(v));
+                    m.stored.slot_mix[k] = mix_level(v);
+                }
+            }
+            LiveEdit::Send(t, d, v) => {
+                if let Some(m) = self.tracks.get_mut(t) {
+                    let gain = os_dsp::mixer::send_gain((v * 16000.0).round() as i32);
+                    if let Some(i) = m.routes.iter().position(|r| r.dest == usize::from(d)) {
+                        m.routes[i].gain = gain;
+                        if let Some(s) = m.stored.sends.get_mut(i) {
+                            *s = gain;
+                        }
+                    }
                 }
             }
         }
@@ -3301,8 +3378,10 @@ impl Engine {
         self.tick = tick + 1;
         // A nudge pressed or let go changes the ticks after this one, as a tempo change does.
         let nudge = self.nudge.as_ref().filter(|_| !self.exporting).map_or(0, |n| n.load(std::sync::atomic::Ordering::Relaxed).signum());
-        if nudge != self.nudged {
+        let halved = self.half.as_ref().filter(|_| !self.exporting).is_some_and(|h| h.load(std::sync::atomic::Ordering::Relaxed));
+        if nudge != self.nudged || halved != self.halved {
             self.nudged = nudge;
+            self.halved = halved;
             self.clock.set_tempo(self.rate, self.ppq, self.clock_tempo());
         }
         self.frame = start + len as u64;
@@ -4895,17 +4974,28 @@ fn lock_busy<'a, T: ?Sized>(m: &'a Mutex<T>, until: &mut Option<Instant>, wait: 
     }
 }
 
-/// A project edit a playing engine can take in place ([`Engine::apply_edit`]), so that moving a knob does not build a new
-/// engine: the channels' volume, pan and pitch knobs and the mixer tracks' volume, pan and separation, by index, as
-/// `Channel` and `MixerTrack` hold them.
+/// A project edit a playing engine can take in place ([`Engine::apply_edit`]), so that moving a knob or a switch does
+/// not build a new engine: the channels' volume, pan and pitch knobs and switch, and the mixer tracks' volume, pan,
+/// separation, switch, effects switch, slot switches and mix levels and send levels, by index, as `Channel` and
+/// `MixerTrack` hold them. Each holds when playback starts again elsewhere, as the project's own value would.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LiveEdit {
     ChannelVolume(usize, f64),
     ChannelPan(usize, f64),
     ChannelPitch(usize, i32),
+    ChannelEnabled(usize, bool),
     MixerVolume(usize, f64),
     MixerPan(usize, f64),
     MixerSeparation(usize, f64),
+    MixerEnabled(usize, bool),
+    /// The track's "effect slots enabled" switch.
+    MixerSlots(usize, bool),
+    /// Track, slot, switch.
+    SlotOn(usize, usize, bool),
+    /// Track, slot, mix level 0..1.
+    SlotMix(usize, usize, f64),
+    /// Track, the track number it sends to (a route both projects have), level 0..1.
+    Send(usize, u16, f64),
 }
 
 impl LiveEdit {
@@ -4920,6 +5010,35 @@ impl LiveEdit {
             LiveEdit::ChannelVolume(c, v) => channel(project, c, &mut |ch| ch.volume = v),
             LiveEdit::ChannelPan(c, p) => channel(project, c, &mut |ch| ch.pan = p),
             LiveEdit::ChannelPitch(c, cents) => channel(project, c, &mut |ch| ch.pitch_cents = cents),
+            LiveEdit::ChannelEnabled(c, on) => channel(project, c, &mut |ch| ch.enabled = on),
+            LiveEdit::MixerEnabled(t, on) => {
+                if let Some(m) = project.mixer.get_mut(t) {
+                    m.enabled = on;
+                }
+            }
+            LiveEdit::MixerSlots(t, on) => {
+                if let Some(m) = project.mixer.get_mut(t) {
+                    m.slots_enabled = on;
+                }
+            }
+            LiveEdit::SlotOn(t, k, on) => {
+                if let Some(s) = project.mixer.get_mut(t).and_then(|m| m.slot_on.get_mut(k)) {
+                    *s = on;
+                }
+            }
+            LiveEdit::SlotMix(t, k, v) => {
+                if let Some(s) = project.mixer.get_mut(t).and_then(|m| m.slot_mix.get_mut(k)) {
+                    *s = v;
+                }
+            }
+            LiveEdit::Send(t, d, v) => {
+                if let Some(m) = project.mixer.get_mut(t) {
+                    match m.send_levels.iter_mut().find(|(x, _)| *x == d) {
+                        Some(l) => l.1 = v,
+                        None => m.send_levels.push((d, v)),
+                    }
+                }
+            }
             LiveEdit::MixerVolume(t, v) => {
                 if let Some(m) = project.mixer.get_mut(t) {
                     m.volume = Some(v);
@@ -4957,6 +5076,9 @@ pub fn live_edits(sent: &mut Project, new: &Project) -> Option<Vec<LiveEdit>> {
         if a.pitch_cents != b.pitch_cents {
             edits.push(LiveEdit::ChannelPitch(c, b.pitch_cents));
         }
+        if a.enabled != b.enabled {
+            edits.push(LiveEdit::ChannelEnabled(c, b.enabled));
+        }
     }
     for (t, (a, b)) in sent.mixer.iter().zip(&new.mixer).enumerate() {
         if let (true, Some(v)) = (a.volume != b.volume, b.volume) {
@@ -4967,6 +5089,30 @@ pub fn live_edits(sent: &mut Project, new: &Project) -> Option<Vec<LiveEdit>> {
         }
         if let (true, Some(v)) = (a.stereo_separation != b.stereo_separation, b.stereo_separation) {
             edits.push(LiveEdit::MixerSeparation(t, v));
+        }
+        if a.enabled != b.enabled {
+            edits.push(LiveEdit::MixerEnabled(t, b.enabled));
+        }
+        if a.slots_enabled != b.slots_enabled {
+            edits.push(LiveEdit::MixerSlots(t, b.slots_enabled));
+        }
+        for k in 0..a.slot_on.len().min(b.slot_on.len()) {
+            if a.slot_on[k] != b.slot_on[k] {
+                edits.push(LiveEdit::SlotOn(t, k, b.slot_on[k]));
+            }
+        }
+        for k in 0..a.slot_mix.len().min(b.slot_mix.len()) {
+            if a.slot_mix[k] != b.slot_mix[k] {
+                edits.push(LiveEdit::SlotMix(t, k, b.slot_mix[k]));
+            }
+        }
+        // Levels of the routes both have; a route added or taken away is a new engine.
+        if a.routes == b.routes {
+            for &(d, v) in &b.send_levels {
+                if a.send_levels.iter().find(|(x, _)| *x == d).map(|l| l.1) != Some(v) && b.routes.contains(&d) {
+                    edits.push(LiveEdit::Send(t, d, v));
+                }
+            }
         }
     }
     if edits.is_empty() {
@@ -5463,6 +5609,7 @@ mod tests {
             sample_path: None, // plays the built-in tone
             layer_children: vec![],
             envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         }
     }
 
@@ -6455,7 +6602,7 @@ mod tests {
     #[test]
     fn points_set_mixer_values_and_the_tempo() {
         use os_model::target;
-        let point = |position: u32, kind: u32, value: i32| ControlPoint { position, kind, value };
+        let point = |position: u32, kind: u32, value: i32| ControlPoint { id: os_model::Id::NONE, position, kind, value };
         let mut p = project(vec![long_note(0, 384, 0)], vec![]);
         p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
         p.patterns[0].controls = vec![
@@ -8326,36 +8473,54 @@ mod tests {
         }
     }
 
-    /// Knobs moved while a note plays: the engine that takes them in place renders what a new engine takes over with.
+    /// Knobs and switches moved while a note plays: the engine that takes them in place renders what a new engine takes
+    /// over with, and keeps them when playback starts again from the top.
     #[test]
     fn an_edit_in_place_sounds_as_a_new_engine() {
         let wav = Sines::new("live-edit", &[(440.0, 3.0)]);
         let mut p = project(vec![long_note(0, 384 * 4, 0)], vec![]);
         p.channels[0].sample_path = wav.path();
         p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
-        let mut edited = p.clone();
-        let edits = [LiveEdit::ChannelVolume(0, 0.3), LiveEdit::ChannelPan(0, -0.4), LiveEdit::ChannelPitch(0, 700), LiveEdit::MixerVolume(1, 0.5), LiveEdit::MixerPan(1, 0.25), LiveEdit::MixerSeparation(0, 0.5)];
-        for e in edits {
-            e.apply_to(&mut edited);
+        p.mixer[1].routes = vec![0, 2];
+        p.mixer[1].send_levels = vec![(0, 0.8), (2, 0.8)];
+        p.mixer[2].routes = vec![0];
+        p.channels[0].mixer_track = 1;
+        let levels = vec![LiveEdit::ChannelVolume(0, 0.3), LiveEdit::ChannelPan(0, -0.4), LiveEdit::ChannelPitch(0, 700), LiveEdit::MixerSeparation(0, 0.5), LiveEdit::MixerVolume(1, 0.5), LiveEdit::MixerPan(1, 0.25)];
+        let switches = vec![LiveEdit::MixerSlots(1, false), LiveEdit::SlotOn(1, 1, false), LiveEdit::SlotMix(1, 0, 0.4), LiveEdit::Send(1, 0, 0.6), LiveEdit::Send(1, 2, 0.3), LiveEdit::MixerEnabled(2, false)];
+        for edits in [levels, switches, vec![LiveEdit::ChannelEnabled(0, false)]] {
+            let mut edited = p.clone();
+            for e in &edits {
+                e.apply_to(&mut edited);
+            }
+            let mut sent = p.clone();
+            assert_eq!(live_edits(&mut sent, &edited).as_deref(), Some(&edits[..]), "found by comparing the projects");
+            let mut lib = SampleLibrary::new(None);
+            let (mut a, mut b) = (Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1)), Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1)));
+            let (mut x, mut y) = (Vec::new(), Vec::new());
+            a.render_ticks(96, &mut x);
+            b.render_ticks(96, &mut y);
+            assert_eq!(x, y);
+            for &e in &edits {
+                a.apply_edit(e);
+            }
+            let mut c = Engine::new(&edited, &mut lib, 44100, PlayMode::Pattern(1));
+            c.continue_from(&mut b);
+            let (mut x, mut y) = (Vec::new(), Vec::new());
+            a.render_ticks(192, &mut x);
+            c.render_ticks(192, &mut y);
+            assert_eq!(x.len(), y.len());
+            let worst = x.iter().zip(&y).map(|(m, n)| (m - n).abs()).fold(0.0f32, f32::max);
+            assert!(worst < 1e-5, "{edits:?}: differ by {worst}");
+            assert!(rms(&x) > 0.001, "{edits:?}: something plays (the tick under way, at least)");
+            // Started again from the top (a seek, as a loop's wrap does), the edits hold.
+            a.seek(0);
+            c.seek(0);
+            let (mut x, mut y) = (Vec::new(), Vec::new());
+            a.render_ticks(192, &mut x);
+            c.render_ticks(192, &mut y);
+            let worst = x.iter().zip(&y).map(|(m, n)| (m - n).abs()).fold(0.0f32, f32::max);
+            assert!(worst < 1e-5, "{edits:?}: after a seek, differ by {worst}");
         }
-        let mut lib = SampleLibrary::new(None);
-        let (mut a, mut b) = (Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1)), Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1)));
-        let (mut x, mut y) = (Vec::new(), Vec::new());
-        a.render_ticks(96, &mut x);
-        b.render_ticks(96, &mut y);
-        assert_eq!(x, y);
-        for e in edits {
-            a.apply_edit(e);
-        }
-        let mut c = Engine::new(&edited, &mut lib, 44100, PlayMode::Pattern(1));
-        c.continue_from(&mut b);
-        let (mut x, mut y) = (Vec::new(), Vec::new());
-        a.render_ticks(192, &mut x);
-        c.render_ticks(192, &mut y);
-        assert_eq!(x.len(), y.len());
-        let worst = x.iter().zip(&y).map(|(m, n)| (m - n).abs()).fold(0.0f32, f32::max);
-        assert!(worst < 1e-5, "differ by {worst}");
-        assert!(rms(&x) > 0.001, "something plays");
     }
 
     /// Levels alone are edits in place; anything else, or nothing at all, is a new engine.
@@ -9836,6 +10001,28 @@ mod tests {
         assert!((plain - 832.0).abs() < 2.0, "{plain}");
         assert!((slow / plain - 0.98).abs() < 0.003 && (fast / plain - 1.02).abs() < 0.003, "{slow} {plain} {fast}");
         assert!((slow_after - plain).abs() < 2.0 && (fast_after - plain).abs() < 2.0, "{slow_after} {fast_after}");
+    }
+
+    // spec: ui/tempo-menu.md "Half speed"
+    #[test]
+    fn half_speed_runs_playback_at_half_the_tempo() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut p = project(vec![Note { length: 96, ..Note::step(0, 1904) }], vec![]);
+        p.channels[0].enabled = false;
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Pattern(1));
+        let flag = std::sync::Arc::new(AtomicBool::new(true));
+        e.set_half_speed(flag.clone());
+        let mut out = vec![0.0; 2 * 48000 * 4];
+        e.process(&mut out);
+        let halved = e.tick_position();
+        // Switched off: the ticks after run at the tempo again.
+        flag.store(false, Ordering::Relaxed);
+        e.process(&mut out);
+        let after = e.tick_position() - halved;
+        // Four seconds at 130 BPM, PPQ 96: 832 ticks, half of them at half speed (the first tick runs before it takes
+        // hold).
+        assert!((halved - 416.0).abs() < 2.0, "{halved}");
+        assert!((after - 832.0).abs() < 2.0, "{after}");
     }
 
     /// The clicks of three seconds of `p`'s pattern 1, looping, and which of them are accented.

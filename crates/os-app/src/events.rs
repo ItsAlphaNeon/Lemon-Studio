@@ -207,7 +207,7 @@ pub fn points(s: &State) -> Vec<(u32, i32)> {
 /// Control `target`'s events in the current pattern.
 pub fn points_of(s: &State, target: u32) -> Vec<(u32, i32)> {
     let kind = target;
-    piano::controls(s).iter().filter(|c| c.kind == kind).map(|c| (c.position, c.value)).collect()
+    piano::controls(&s.session).iter().filter(|c| c.kind == kind).map(|c| (c.position, c.value)).collect()
 }
 
 fn set(s: &mut State, tick: u32, level: f64) {
@@ -217,18 +217,18 @@ fn set(s: &mut State, tick: u32, level: f64) {
 
 fn set_value(s: &mut State, tick: u32, v: i32) {
     let kind = s.events.target;
-    piano::set_control(s, (kind >> 16) as u16, kind as u16, tick, v);
+    piano::set_control(&mut s.session, (kind >> 16) as u16, kind as u16, tick, v);
 }
 
 /// What Copy and Duplicate take without a selection: the pattern's length, or to the last event when that lies later.
 fn whole(s: &State) -> (u32, u32) {
-    (0, s.project.pattern_length(s.pattern).max(points(s).last().map_or(0, |p| p.0 + 1)).max(1))
+    (0, s.session.project.pattern_length(s.pattern()).max(points(s).last().map_or(0, |p| p.0 + 1)).max(1))
 }
 
 /// Deletes the control's events from `from` to `to` (both included); returns how many went.
 pub fn erase(s: &mut State, from: u32, to: u32) -> usize {
     let kind = s.events.target;
-    piano::erase_controls(s, (kind >> 16) as u16, kind as u16, from.min(to), from.max(to))
+    piano::erase_controls(&mut s.session, (kind >> 16) as u16, kind as u16, from.min(to), from.max(to))
 }
 
 /// Draws from `a` to `b` (tick, level): an event on every multiple of `unit` between them (both ends included) at
@@ -239,7 +239,7 @@ pub fn draw(s: &mut State, a: (u32, f64), b: (u32, f64), unit: u32) {
     let unit = unit.max(1);
     let (first, last) = (t0 / unit * unit, t1 / unit * unit);
     let kind = s.events.target;
-    let p = piano::pattern_mut(s);
+    let p = piano::pattern_mut(&mut s.session);
     p.controls.retain(|c| !(c.kind == kind && (first..=last).contains(&c.position)));
     let mut t = first;
     while t <= last {
@@ -247,7 +247,7 @@ pub fn draw(s: &mut State, a: (u32, f64), b: (u32, f64), unit: u32) {
         set(s, t, level);
         t += unit;
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// The Interpolate tool (spec §1): the control's events from `a` to `b` (tick, level) keep their times and take the
@@ -261,7 +261,7 @@ pub fn interpolate(s: &mut State, a: (u32, f64), b: (u32, f64), smooth: bool) ->
         let k = if smooth { (1.0 - (k * std::f64::consts::PI).cos()) / 2.0 } else { k };
         set(s, t, l0 + (l1 - l0) * k);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
     under.len()
 }
 
@@ -302,7 +302,7 @@ pub fn replace(s: &mut State, from: u32, to: u32, points: &[(u32, i32)]) {
     for &(t, v) in points {
         set_value(s, t, v);
     }
-    s.piano.dirty = true;
+    s.session.dirty = true;
 }
 
 /// Edit ▸ Select previous (Ctrl+Left) / Select next (Ctrl+Right): the selection moves back or on by its length (the
@@ -339,7 +339,7 @@ pub const ZOOM_STEP: f32 = 1.5;
 pub fn zoom_selection(s: &mut State) -> bool {
     let Some((a, b)) = s.events.sel.filter(|(a, b)| b > a) else { return false };
     let w = crate::views::events::graph(s).w;
-    let ppq = f32::from(s.project.ppq.max(4));
+    let ppq = f32::from(s.session.project.ppq.max(4));
     s.events.px_per_beat = (w * ppq / (b - a) as f32).clamp(ZOOM.0, ZOOM.1);
     s.events.scroll = f64::from(a);
     true
@@ -364,7 +364,7 @@ pub fn delete(s: &mut State) -> usize {
 
 /// Edit ▸ Select all: the pattern's whole length, or to the last event when that lies later.
 pub fn select_all(s: &mut State) {
-    let end = s.project.pattern_length(s.pattern).max(points(s).last().map_or(0, |p| p.0 + 1));
+    let end = s.session.project.pattern_length(s.pattern()).max(points(s).last().map_or(0, |p| p.0 + 1));
     s.events.sel = Some((0, end.max(1)));
 }
 
@@ -488,7 +488,7 @@ pub fn unit(s: &State, alt: bool) -> u32 {
     if alt {
         return 1;
     }
-    let ppq = u32::from(s.project.ppq.max(4));
+    let ppq = u32::from(s.session.project.ppq.max(4));
     crate::piano_snap::unit_of(crate::snap::EditorSnap::Main, s.global_snap.now, ppq, s.events.px_per_beat).unwrap_or(1).max(1)
 }
 
@@ -542,7 +542,7 @@ pub fn menu(s: &State, x: f32, y: f32) -> Popup {
 impl App {
     /// Edit automation on a control's menu: the editor shows that control's events in the current pattern, centred over
     /// the main window the first time (then where it was left), in front (§1).
-    pub(crate) fn edit_events(&mut self, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> Option<String> {
+    pub fn edit_events(&mut self, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> Option<String> {
         let s = &mut self.state;
         if !open(s, target, name, value, range) {
             return None;
@@ -565,7 +565,7 @@ impl App {
     /// second editor window on the control, in front, 30 px right of and below the editor showing, which keeps its
     /// control and goes behind. With no editor showing, this is Edit automation. A second window already open gives
     /// way: there are two at most.
-    pub(crate) fn edit_events_window(&mut self, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> Option<String> {
+    pub fn edit_events_window(&mut self, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> Option<String> {
         if !self.state.shown(Win::Events) {
             return self.edit_events(target, name, value, range);
         }
@@ -593,7 +593,7 @@ impl App {
     }
 
     /// A control of the window, pressed.
-    pub(crate) fn events_act(&mut self, a: EvAct) {
+    pub fn events_act(&mut self, a: EvAct) {
         match a {
             EvAct::Menu => {
                 let r = crate::views::events::rect(&self.state);
@@ -609,7 +609,7 @@ impl App {
     }
 
     /// A press on the graph (`right`: the right button) or the ruler (`ruler`): a stroke starts (§3).
-    pub(crate) fn events_press(&mut self, right: bool, ruler: bool) {
+    pub fn events_press(&mut self, right: bool, ruler: bool) {
         let (x, y) = self.mouse;
         let ctrl = self.ctrl;
         let s = &mut self.state;
@@ -634,12 +634,12 @@ impl App {
             s.events.line = Some(((tick, level), (tick, level)));
             Stroke::Line
         } else if s.events.tool == Tool::Erase {
-            piano::snapshot_as(s, EDIT);
+            piano::snapshot_as(&mut s.session, EDIT);
             let u = unit(s, alt);
             erase(s, tick, tick + u - 1);
             Stroke::Erase(tick)
         } else {
-            piano::snapshot_as(s, EDIT);
+            piano::snapshot_as(&mut s.session, EDIT);
             let u = unit(s, alt);
             draw(s, (tick, level), (tick, level), u);
             Stroke::Draw((tick, level))
@@ -649,7 +649,7 @@ impl App {
     }
 
     /// The mouse moved during a stroke.
-    pub(crate) fn events_drag(&mut self, stroke: Stroke, x: f32, y: f32) {
+    pub fn events_drag(&mut self, stroke: Stroke, x: f32, y: f32) {
         let s = &mut self.state;
         let alt = self.alt || s.events.tool == Tool::Paint;
         let tick = snapped(s, crate::views::events::tick_at(s, x), alt);
@@ -686,13 +686,13 @@ impl App {
     }
 
     /// The button went up: a line is drawn, or the events under it interpolated (one undo step).
-    pub(crate) fn events_release(&mut self, stroke: Stroke) {
+    pub fn events_release(&mut self, stroke: Stroke) {
         let s = &mut self.state;
         let alt = self.alt || s.events.tool == Tool::Paint;
         // Zoom: a drag of 4 px or more zooms on its stretch, a click zooms in about it; the selection comes back.
         if let Stroke::Zoom(anchor, kept) = stroke {
             let dragged = s.events.sel.take().filter(|(a, b)| {
-                let px = f64::from(s.events.px_per_beat) / f64::from(s.project.ppq.max(4));
+                let px = f64::from(s.events.px_per_beat) / f64::from(s.session.project.ppq.max(4));
                 f64::from(b - a) * px >= 4.0
             });
             match dragged {
@@ -714,7 +714,7 @@ impl App {
             _ => return,
         };
         if let Some((a, b)) = line {
-            piano::snapshot_as(s, EDIT);
+            piano::snapshot_as(&mut s.session, EDIT);
             match stroke {
                 Stroke::Interpolate(smooth) => {
                     interpolate(s, a, b, smooth);
@@ -729,7 +729,7 @@ impl App {
     }
 
     /// The menu's entries (§4).
-    pub(crate) fn events_cmd(&mut self, c: EvCmd) -> Option<String> {
+    pub fn events_cmd(&mut self, c: EvCmd) -> Option<String> {
         let s = &mut self.state;
         let m = match c {
             EvCmd::Copy => {
@@ -738,14 +738,14 @@ impl App {
             }
             EvCmd::Cut => {
                 if copy(s) {
-                    piano::snapshot_as(s, EDIT);
+                    piano::snapshot_as(&mut s.session, EDIT);
                     delete(s);
                 }
                 None
             }
             EvCmd::Paste => {
                 if s.events.clipboard.is_some() {
-                    piano::snapshot_as(s, EDIT);
+                    piano::snapshot_as(&mut s.session, EDIT);
                     paste(s);
                 }
                 None
@@ -755,23 +755,23 @@ impl App {
                 None
             }
             EvCmd::Delete => {
-                piano::snapshot_as(s, EDIT);
+                piano::snapshot_as(&mut s.session, EDIT);
                 delete(s);
                 None
             }
             EvCmd::InsertValue => {
-                piano::snapshot_as(s, EDIT);
+                piano::snapshot_as(&mut s.session, EDIT);
                 insert_value(s);
                 None
             }
             EvCmd::Duplicate => {
-                piano::snapshot_as(s, EDIT);
+                piano::snapshot_as(&mut s.session, EDIT);
                 duplicate(s);
                 None
             }
             EvCmd::InsertSpace | EvCmd::DeleteSpace => {
                 if s.events.sel.is_some() {
-                    piano::snapshot_as(s, EDIT);
+                    piano::snapshot_as(&mut s.session, EDIT);
                     space(s, c == EvCmd::InsertSpace);
                 }
                 None
@@ -819,8 +819,8 @@ impl App {
 
     /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I, Ctrl+B, Ctrl+Ins / Del,
     /// Ctrl+Left / Right, PgUp / PgDn, Shift+5.
-    pub(crate) fn events_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
-        use winit::keyboard::{Key, NamedKey};
+    pub fn events_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
+        use crate::keys::{Key, NamedKey};
         let shift = self.shift;
         let c = match key {
             Key::Named(NamedKey::ArrowLeft) if ctrl && !alt => EvCmd::SelectPrev,
@@ -852,10 +852,10 @@ impl App {
     }
 
     /// The wheel over the graph or the ruler: it scrolls time, a beat a notch; with Ctrl it zooms about the mouse.
-    pub(crate) fn events_wheel(&mut self, d: f32, ctrl: bool) {
+    pub fn events_wheel(&mut self, d: f32, ctrl: bool) {
         let x = self.mouse.0;
         let s = &mut self.state;
-        let ppq = f64::from(s.project.ppq.max(4));
+        let ppq = f64::from(s.session.project.ppq.max(4));
         if ctrl {
             let at = crate::views::events::tick_at(s, x);
             s.events.px_per_beat = (s.events.px_per_beat * 1.25f32.powf(d)).clamp(ZOOM.0, ZOOM.1);
@@ -880,13 +880,12 @@ pub fn turn_into_clip(s: &mut State) -> Option<String> {
     if points.is_empty() {
         return None;
     }
-    let ppq = u32::from(s.project.ppq.max(4));
+    let ppq = u32::from(s.session.project.ppq.max(4));
     let clip = clip_points(&points, s.events.range, ppq, s.events.value, CLIP_TOLERANCE);
     let (target, name) = (s.events.target, s.events.name.clone());
     let row = crate::playlist::automation_channel(s, target, &name, clip);
-    erase(s, 0, u32::MAX);
     close(s);
-    let name = s.project.channels.get(row).and_then(|c| c.name.clone()).unwrap_or(name);
+    let name = s.session.project.channels.get(row).and_then(|c| c.name.clone()).unwrap_or(name);
     Some(format!("Created automation clip \"{name}\""))
 }
 
@@ -912,7 +911,7 @@ mod tests {
     #[test]
     fn draw_erase_and_delete() {
         let mut app = App::new(None);
-        app.state.project = test_project();
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let s = &mut app.state;
         assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         draw(s, (0, 0.0), (96, 1.0), 24);
@@ -931,16 +930,16 @@ mod tests {
         s.events.sel = Some((24, 72));
         assert!(copy(s));
         s.events.sel = Some((192, 200));
-        piano::set_control(s, 0, 0, 200, 1);
+        piano::set_control(&mut s.session, 0, 0, 200, 1);
         assert!(paste(s));
         assert_eq!(points(s).iter().filter(|p| p.0 >= 192).copied().collect::<Vec<_>>(), vec![(192, 3200), (216, 6400)]);
         assert_eq!(s.events.sel, Some((192, 240)));
         s.events.sel = None;
         assert_eq!(delete(s), 6, "every event without a selection");
         // Another control's events stay.
-        piano::set_control(s, 1, 0, 0, 100);
+        piano::set_control(&mut s.session, 1, 0, 0, 100);
         assert_eq!(delete(s), 0);
-        assert_eq!(piano::controls(s).len(), 1);
+        assert_eq!(piano::controls(&s.session).len(), 1);
         // A mixer track's pan keeps its own unit.
         assert!(open(s, os_model::target::mixer(1, os_model::target::MIXER_PAN), "Insert 1 - Pan", 0.5, None));
         draw(s, (0, 0.0), (0, 0.0), 24);
@@ -952,7 +951,7 @@ mod tests {
     #[test]
     fn interpolate_duplicate_and_space() {
         let mut app = App::new(None);
-        app.state.project = test_project();
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let s = &mut app.state;
         assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         for t in [0, 24, 48, 72, 96] {
@@ -984,7 +983,7 @@ mod tests {
     fn scale_levels_and_lfo() {
         use crate::piano_dlg::{self as dlg, Tool as DTool};
         let mut app = App::new(None);
-        app.state.project = test_project();
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let s = &mut app.state;
         assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         for t in [0, 24, 48] {
@@ -1019,7 +1018,7 @@ mod tests {
         app.state.events.sel = None;
         app.events_cmd(EvCmd::Lfo);
         let s = &mut app.state;
-        let bar = 4 * u32::from(s.project.ppq);
+        let bar = 4 * u32::from(s.session.project.ppq);
         assert!(points(s).iter().filter(|p| p.0 < bar).count() > 10);
         assert_eq!(point(s, 400.max(bar)), if bar > 400 { None } else { Some(3200) });
         dlg::accept(s);
@@ -1031,13 +1030,13 @@ mod tests {
     fn zoom_tool() {
         use crate::app::Drag;
         let mut app = App::new(None);
-        app.state.project = test_project();
+        app.state.session.project = crate::locked::Locked::new(test_project());
         assert!(open(&mut app.state, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         app.state.z.push(Win::Events);
-        assert!(app.events_key(&winit::keyboard::Key::Character("z".into()), false, false));
+        assert!(app.events_key(&crate::keys::Key::Character("z".into()), false, false));
         assert_eq!(app.state.events.tool, Tool::Zoom);
         let g = crate::views::events::graph(&app.state);
-        let ppq = f64::from(app.state.project.ppq);
+        let ppq = f64::from(app.state.session.project.ppq);
         app.state.events.sel = Some((0, 10));
         // A click: in, the tick under it stays.
         app.mouse = (g.x + 200.0, g.y + 20.0);
@@ -1072,7 +1071,7 @@ mod tests {
     #[test]
     fn select_step_relocate_and_zoom() {
         let mut app = App::new(None);
-        app.state.project = test_project();
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let s = &mut app.state;
         assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
         assert!(!select_step(s, true), "needs a selection");
@@ -1101,7 +1100,7 @@ mod tests {
         let px = s.events.px_per_beat;
         zoom(s, 2.0);
         assert_eq!(s.events.px_per_beat, px * 2.0);
-        let end = 96 + 8 * u32::from(s.project.ppq);
+        let end = 96 + 8 * u32::from(s.session.project.ppq);
         s.events.sel = Some((96, end));
         assert!(zoom_selection(s));
         assert_eq!(s.events.scroll, 96.0);
@@ -1111,7 +1110,7 @@ mod tests {
         // The keys.
         s.events.sel = Some((0, 48));
         app.state.z.push(Win::Events);
-        assert!(app.events_key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowRight), true, false));
+        assert!(app.events_key(&crate::keys::Key::Named(crate::keys::NamedKey::ArrowRight), true, false));
         assert_eq!(app.state.events.sel, Some((48, 96)));
         assert_eq!(app.events_cmd(EvCmd::Relocate).as_deref(), Some("Relocate events off"));
     }
@@ -1137,7 +1136,7 @@ mod tests {
     fn edit_events_draw_and_turn_into_clip() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.project = test_project();
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let knob = Action::Knob(KnobId::ChanVol(0));
         let auto = app.automation_target(&knob);
         let menu = crate::rack::knob_menu(&app.state, KnobId::ChanVol(0), auto, 0.0, 0.0);
@@ -1157,18 +1156,18 @@ mod tests {
         assert!(pts.len() >= 3, "{pts:?}");
         assert!(pts[0].1 < 200 && pts.last().unwrap().1 > 12600, "{pts:?}");
 
-        let rows = app.state.project.channels.len();
+        let rows = app.state.session.project.channels.len();
         let m = app.events_cmd(EvCmd::TurnIntoClip);
         assert_eq!(m.as_deref(), Some("Created automation clip \"Kick - Channel volume\""), "{m:?}");
-        let ch = app.state.project.channels.last().expect("clip channel");
-        assert_eq!((app.state.project.channels.len(), ch.kind), (rows + 1, os_model::ChannelKind::Automation));
-        let a = app.state.project.automation(ch.index).expect("clip");
+        let ch = app.state.session.project.channels.last().expect("clip channel");
+        assert_eq!((app.state.session.project.channels.len(), ch.kind), (rows + 1, os_model::ChannelKind::Automation));
+        let a = app.state.session.project.automation(ch.index).expect("clip");
         assert_eq!(a.targets, vec![os_model::target::channel(0, 0)]);
         assert!(a.points.len() >= 2 && a.points[0].value < 0.02);
         assert!(points(&app.state).is_empty(), "the events leave the pattern");
         assert!(!app.state.shown(Win::Events));
-        crate::history::undo(&mut app.state);
-        assert_eq!(app.state.project.channels.len(), rows);
+        crate::history_ui::undo(&mut app.state);
+        assert_eq!(app.state.session.project.channels.len(), rows);
         assert_eq!(points(&app.state), pts, "undo brings the events back");
     }
 
@@ -1181,7 +1180,7 @@ mod tests {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut d = Canvas::new(1920, 1080, 1.0).unwrap();
         let mut app = App::new(None);
-        app.state.project = test_project();
+        app.state.session.project = crate::locked::Locked::new(test_project());
         let item = |app: &App, k: KnobId| {
             let auto = app.automation_target(&Action::Knob(k));
             crate::rack::knob_menu(&app.state, k, auto, 0.0, 0.0).items.into_iter().find(|i| i.label == "Edit automation in a window").expect("the entry")

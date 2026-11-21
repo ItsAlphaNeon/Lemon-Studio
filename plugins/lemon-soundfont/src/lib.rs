@@ -11,6 +11,7 @@
 
 pub mod dsp;
 pub mod effects;
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod params;
 pub mod profile;
@@ -231,6 +232,7 @@ impl Plugin for LemonSoundfont {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::FontEditor::new(self.params.clone(), self.shared.clone())))
     }

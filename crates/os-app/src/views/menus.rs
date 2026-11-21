@@ -519,8 +519,8 @@ pub fn shortcut_now(item: &Item) -> &'static str {
 /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
 pub fn label_now(s: &State, menu: usize, item: &Item) -> std::borrow::Cow<'static, str> {
     match (menu, item.label) {
-        (EDIT_MENU, "Undo") => crate::history::edit_label(s, false).into(),
-        (EDIT_MENU, "Redo") => crate::history::edit_label(s, true).into(),
+        (EDIT_MENU, "Undo") => crate::history::edit_label(&s.session, false).into(),
+        (EDIT_MENU, "Redo") => crate::history::edit_label(&s.session, true).into(),
         (TOOLS_MENU, LOGGER_HEAD) => format!("{LOGGER_HEAD} (memory used: {}MB)", crate::audio_log::memory_mb()).into(),
         _ => label_of(menu, item),
     }
@@ -529,7 +529,7 @@ pub fn label_now(s: &State, menu: usize, item: &Item) -> std::borrow::Cow<'stati
 /// Whether an entry is in its menu now: EDIT's Redo only with Alternate undo mode on and a history to act on (spec:
 /// ui/menus.md "EDIT": only Undo while the history is empty).
 pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
-    !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(s)
+    !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(&s.session)
 }
 
 /// Whether an entry can be chosen now: it works (`works`), EDIT's have a step to act on, the project file rows
@@ -537,8 +537,8 @@ pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
 /// clipboard to browser audio.
 pub fn active(s: &State, menu: usize, item: &Item) -> bool {
     works(menu, item)
-        && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo"))
-        && (s.path.is_some() || !needs_file(menu, item.label))
+        && (menu != EDIT_MENU || crate::history::edit_enabled(&s.session, item.label == "Redo"))
+        && (s.session.path.is_some() || !needs_file(menu, item.label))
         && (!matches!(item.cmd, MenuCmd::SaveMidiClip) || !s.piano.clipboard.is_empty())
         && (!matches!(item.cmd, MenuCmd::SaveAudioClip) || crate::audio_clipboard::has_audio())
 }
@@ -607,17 +607,17 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         // spec: ui/midi-files.md §1: FL's Import holds only MIDI file...
         Sub::Import => |_| vec![crate::playlist::PItem::new("MIDI file...", crate::playlist::Cmd::MidiImport(false))],
         // spec: ui/project-templates.md
-        Sub::Templates => crate::project_files::template_items,
+        Sub::Templates => crate::project_files_ui::template_items,
         // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
         Sub::Effect => |s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true),
         Sub::Editors => |_| crate::rack::editor_items(),
         // spec: ui/channel-switches.md §3, §6
         Sub::KeyFocus => |_| crate::rack::key_focus_items(),
         // spec: ui/one-click-recording.md §2
-        Sub::OneClick => crate::one_click::items,
+        Sub::OneClick => crate::one_click_ui::items,
         // spec: ui/recording.md §6
-        Sub::DumpLog => crate::score_log::items,
-        Sub::AudioLog => crate::audio_log::items,
+        Sub::DumpLog => crate::score_log_ui::items,
+        Sub::AudioLog => crate::audio_log_ui::items,
         Sub::Declick => crate::rack::declick_items,
         Sub::ClipsAll => |_| crate::rack::stretch_items(true),
         Sub::ClipsSel => |_| crate::rack::stretch_items(false),
@@ -687,13 +687,13 @@ fn mark_of(s: &State, _menu: usize, item: &Item) -> Mark {
             MenuCmd::Window(w) => s.shown(w),
             MenuCmd::Typing => s.toggles.contains(&"typing"),
             MenuCmd::Metronome => crate::metronome::on(),
-            MenuCmd::Record(o) => o.on(),
+            MenuCmd::Record(o) => o.on(&s.session.settings),
             MenuCmd::Autoscroll => crate::autoscroll::on(),
             MenuCmd::Groups => crate::enable_groups::on(),
-            MenuCmd::StepEdit => crate::step_edit::on(),
+            MenuCmd::StepEdit => crate::step_edit::on(&s.session.settings),
             MenuCmd::Multilink => s.multilink.on,
-            MenuCmd::Midi(sw) => sw.on(),
-            MenuCmd::AudioLog => crate::audio_log::enabled(),
+            MenuCmd::Midi(sw) => sw.on(&s.session.settings),
+            MenuCmd::AudioLog => crate::audio_log::enabled(&s.session.settings),
             _ => false,
         },
         (mk, _) => return mk,
@@ -739,8 +739,8 @@ pub fn bar_model(s: &State) -> Vec<BarMenu> {
                 }
                 if mi == PATTERNS && ci == 0 {
                     for n in crate::patterns::listed(s) {
-                        let mark = Mark::Radio(n == s.pattern);
-                        rows.push(BarRow { kind: Kind::Item, label: crate::patterns::name_of(s, n), shortcut: "", enabled: true, mark, pick: Some((mi, PATTERN_PICK + n as usize)) });
+                        let mark = Mark::Radio(n == s.pattern());
+                        rows.push(BarRow { kind: Kind::Item, label: crate::patterns::name_of(&s.session, n), shortcut: "", enabled: true, mark, pick: Some((mi, PATTERN_PICK + n as usize)) });
                     }
                 }
                 for (i, item) in items.iter().enumerate() {
@@ -805,7 +805,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     // Pattern list column: one row per project pattern (spec: ui/menus.md, PATTERNS).
     // spec: ui/pattern-menu.md §2: only used patterns, the column as wide as the longest name.
     let pats: Vec<(u16, String)> = if menu == PATTERNS {
-        crate::patterns::listed(s).into_iter().map(|n| (n, crate::patterns::name_of(s, n))).collect()
+        crate::patterns::listed(s).into_iter().map(|n| (n, crate::patterns::name_of(&s.session, n))).collect()
     } else {
         Vec::new()
     };
@@ -892,7 +892,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     let rr = Rect::new(col.x, y, col.w, row);
                     let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
                     ui.menu_row(crate::app::MENU_DROPDOWN);
-                    let on = hov || (*n == s.pattern && away);
+                    let on = hov || (*n == s.pattern() && away);
                     if hov && lit.glide {
                         lit.hot = Some(rr);
                     } else if on && lemon {
@@ -900,7 +900,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     } else if on {
                         ui.c.fill_rect(rr, ui.t.s(0x03080c));
                     }
-                    let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
+                    let col = if *n == s.pattern() { t.glyph } else { t.menu_pop_text };
                     let dx = if on { 22.0 } else { 20.0 };
                     ui.c.text_clip(font, rr.x + dx, rr.y + 2.0 + dy, rr.w - dx - 4.0, col, name);
                     y += row;
@@ -1126,7 +1126,7 @@ mod tests {
         assert_eq!(playlist.mark, Mark::Check(app.state.shown(Win::Playlist)));
         // Patterns in use head PATTERNS, the current one marked.
         assert_eq!(bar[PATTERNS].rows[0].label, "New empty pattern...", "a new project uses no pattern yet");
-        app.state.project.patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
+        app.state.session.project.get_mut().patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
         let first = bar_model(&app.state)[PATTERNS].rows[0].clone();
         assert_eq!((first.label.as_str(), first.mark, first.pick), ("Intro", Mark::Radio(true), Some((PATTERNS, PATTERN_PICK + 1))));
         // Live state: hiding the playlist unticks it.

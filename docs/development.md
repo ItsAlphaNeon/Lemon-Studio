@@ -7,7 +7,7 @@ The details that used to be in the README. For how to install and use Lemon Stud
 
 ## Running from source
 
-`cargo run -p os-app --release` builds and runs Lemon Studio. Before Lemon Studio starts, it also rebuilds Lemon Studio's
+`cargo run -p lemonstudio --release` builds and runs Lemon Studio. Before Lemon Studio starts, it also rebuilds Lemon Studio's
 own plugins and installs the ones that changed as VST3 and CLAP plugins, in the folders where other DAWs find them. Lemon
 Studio itself has every one of them built in and needs no plugin files. A plugin that is new or updated in the repository
 shows up in other DAWs at the next run. The first run builds every plugin, which takes a few minutes more; later runs
@@ -18,14 +18,14 @@ plugins with `cargo run -p bundle-plugins -- --install`.
 Open a project directly by passing its path:
 
 ```bash
-cargo run -p os-app --release -- path/to/project.lemon
+cargo run -p lemonstudio --release -- path/to/project.lemon
 ```
 
 The render that `FILE > Export audio` does also runs without a window, hosting the same plugins the app would and without
 opening an audio device:
 
 ```bash
-cargo run -p os-app --release -- --render path/to/project.lemon out.wav [--rate 48000] [--seconds 30] [--from TICK] [--builtin-only]
+cargo run -p lemonstudio --release -- --render path/to/project.lemon out.wav [--rate 48000] [--seconds 30] [--from TICK] [--builtin-only]
 ```
 
 `--builtin-only` hosts only Lemon Studio's own plugins, for a render that is the same on every machine.
@@ -62,7 +62,7 @@ where FL Studio's factory content is looked for (by default the newest `/Applica
 cargo test --workspace
 ```
 
-Tests that need an audio device are marked `#[ignore]` and run with `cargo test -p os-app -- --ignored`. Project-file
+Tests that need an audio device are marked `#[ignore]` and run with `cargo test -p os-session -p os-app -- --ignored`. Project-file
 corpus tests run when `OPENSTUDIO_FLP_CORPUS` points to a text file listing `.flp` paths; project files are never
 committed to this repository. The watermark test (`cargo test -p watermark`) checks that every source file opens with its
 header: a copyright line for each of its copyright holders, its SPDX licence identifier and the project's name.
@@ -80,7 +80,7 @@ client; clients can be limited to reading or to proposing changes the user accep
 [control-plane.md](control-plane.md).
 
 ```bash
-cargo run -p os-app --release -- --control /tmp/lemon.sock path/to/project.lemon
+cargo run -p lemonstudio --release -- --control /tmp/lemon.sock path/to/project.lemon
 ```
 
 ## Command-line tools
@@ -90,7 +90,7 @@ cargo run -p os-app --release -- --control /tmp/lemon.sock path/to/project.lemon
 | `flp-dump` | Print a project file's event stream and verify that it round-trips |
 | `os-render` | Render a project or pattern offline to a WAV file with the engine alone (no hosted plugins, so it does not sound like the app; `--render` above does) |
 | `os-play` | Play a project through the default audio output |
-| `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them (`cargo run -p os-app --release` runs it with `--install`) |
+| `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them (`cargo run -p lemonstudio --release` runs it with `--install`) |
 | `bundle-app` | Build Lemon Studio as a macOS app, and optionally install it |
 | `notices` | Generate the last section of [THIRD-PARTY-NOTICES.txt](../THIRD-PARTY-NOTICES.txt) (below) |
 | `updater` | `lemonstudio-updater`, which release builds carry to update themselves (built by the release workflow only; [releasing.md](releasing.md)) |
@@ -108,7 +108,9 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-dsp`](../crates/os-dsp) | DSP building blocks: level curve, pan split, gain glides, mixer matrix and equaliser |
 | [`os-theme`](../crates/os-theme) | Colour palette, skins (Lemon, Citrus), theme files and the HSL adjustment model |
 | [`os-ui`](../crates/os-ui) | CPU canvas, text rendering and the shared widget kit |
-| [`os-app`](../crates/os-app) | The `lemonstudio` application: windows, editors, transport |
+| [`os-session`](../crates/os-session) | The session, with no window: the project, transport, devices, MIDI, plugins, recording, loading and saving, history, settings, the control server |
+| [`os-app`](../crates/os-app) | The interface: editors, views, menus and dialogs, drawn with `os-ui` on `os-session` (which it re-exports under the module names it had); no window system |
+| [`lemonstudio`](../crates/lemonstudio) | The program: its windows (winit), the plugin editors' frame windows, detached windows, the startup splash and the macOS menu bar |
 | [`os-host`](../crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3, VST2) |
 | [`os-clap`](../crates/os-clap) | CLAP plugin host |
 | [`os-vst3`](../crates/os-vst3) | VST3 plugin host |
@@ -120,6 +122,22 @@ Lemon Studio is a Cargo workspace of focused crates:
 Each built-in plugin is a crate in [`plugins/`](../plugins), built into Lemon Studio and also as a VST3 and CLAP plugin.
 `lemon-small-fx` is what the small Lemon effects share, `lemon-3x-osc` is Lemon Trio and `lemon-parametric-eq-2` is Lemon
 Parametric EQ.
+
+### Optional parts
+
+Some parts are cargo features, on by default, so a build can leave them out:
+
+| Feature | Of | What it leaves out when off |
+|---|---|---|
+| `vst3`, `vst2` | `os-session` (passed on by `os-app` and `lemonstudio`) | VST 3 and VST 2 hosting: those plugins are not found, and a saved one does not load |
+| `export-flac`, `export-mp3`, `export-ogg` | `os-session` (passed on likewise) | That export format: exporting to it says it is not in this build |
+| `midi-io` | `os-session` (passed on likewise) | The system's MIDI ports: none are listed or opened |
+| `rpc` | `os-session` (passed on likewise) | Listening for control-plane clients: `--control` and `--serve` say the socket is not in this build |
+| `editor` | each built-in plugin | Its editor (the session builds its plugins without them; the interface turns them on) |
+| `gui` | `os-plugkit` | The plugin editors' native windows, popups and type-in boxes |
+
+`cargo check -p lemonstudio --no-default-features` builds the program with the session's features off; CI builds that, each
+of them alone, and the session without its plugins' editors (`cargo check -p os-session`).
 
 ## Old plugin names
 
@@ -151,7 +169,7 @@ others' work (`crates/os-vst2/src/abi.rs`, `crates/os-ui/src/tabler.rs`) name it
 | [signalsmith-stretch](https://github.com/colinmarc/signalsmith-stretch-rs) by Colin Marc | Rust bindings to Signalsmith Stretch | MIT |
 | [ASIO SDK](https://www.steinberg.net/asiosdk) by Steinberg Media Technologies GmbH (host files) | ASIO output on Windows | [GPLv3](../crates/os-app/asiosdk/LICENSE.txt) (its GPL option); a Windows build with it is GPLv3 |
 | [Cantarell](https://gitlab.gnome.org/GNOME/cantarell-fonts), built into the sctk-adwaita crate | Window title bars on Wayland (Linux) | SIL Open Font License 1.1 |
-| [LAME](https://lame.sourceforge.io) 3.100, built by the mp3lame-sys crate | MP3 export | LGPL version 2 or later |
+| [LAME](https://lame.sourceforge.io) 4.0, built by the mp3lame-sys crate | MP3 export | LGPL version 2 or later |
 | Rust crates listed in `Cargo.lock` | Various | Their respective licenses |
 
 Their copyright notices and licence texts are collected in [THIRD-PARTY-NOTICES.txt](../THIRD-PARTY-NOTICES.txt), which

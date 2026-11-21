@@ -452,7 +452,7 @@ pub const PRESETS: [Preset; 8] = [
 
 /// Where the user's presets are: the user folder's `Toolbar presets` (in tests the thread's folder, `app::theme_dir`).
 pub fn user_dir() -> Option<PathBuf> {
-    crate::app::theme_dir().map(|d| d.join("Toolbar presets"))
+    crate::user_dir::theme_dir().map(|d| d.join("Toolbar presets"))
 }
 
 /// A preset as the menus name it: a factory one by its place in `PRESETS`, the user's by its file.
