@@ -3096,10 +3096,18 @@ mod tests {
         t.play(&project, PlayMode::Pattern(4), 0.0);
         wait_for(|| t.tick() > 400.0);
         assert_eq!(t.pattern(), Some(4));
+        let before = t.tick();
         t.switch_pattern(2);
         assert_eq!(t.pattern(), Some(2));
         sleep(100);
-        assert!(t.playing() && t.tick() > 400.0, "goes on: {}", t.tick());
+        let after = t.tick();
+        assert!(t.playing(), "goes on");
+        // Pattern 2 is 3 bars (1152 ticks): within them playback goes on where it was, past them at the same place in
+        // the first bar. What played since the switch is then a short way on from there (a slow machine may lag, or
+        // catch up in a burst), where a restart would be a whole loop less the place it left.
+        let kept = if before < 1152.0 { before } else { before % 384.0 };
+        let since = (after - kept).rem_euclid(1152.0);
+        assert!(since < 400.0 || !(100.0..=752.0).contains(&kept), "goes on from {kept} (was {before}), now {after}");
         t.stop();
         sleep(50);
         assert_eq!(t.pattern(), None);
