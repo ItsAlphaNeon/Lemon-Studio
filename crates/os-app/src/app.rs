@@ -3955,7 +3955,7 @@ impl App {
 
     /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
     /// time and then where it was left, also in later runs (`layout`); close it when it is in front (§1, §8).
-    fn toggle_tapper(&mut self) {
+    pub(crate) fn toggle_tapper(&mut self) {
         let s = &mut self.state;
         if s.shown(Win::Tapper) && s.in_front(Win::Tapper) {
             s.hide(Win::Tapper);
@@ -7052,8 +7052,14 @@ impl App {
                 return self.invalidate();
             }
         }
-        // Knobs, faders and the tempo: "Create automation clip" (spec: ui/playlist.md §8) and "Enter value..."
-        // (spec: ui/type-in-value.md §8).
+        // The tempo display (spec: ui/tempo-menu.md).
+        if action == Some(Action::Tempo) {
+            let auto = self.automation_target(&Action::Tempo);
+            self.state.playlist.popup = Some(crate::tempo_menu::menu(&self.state, auto, x, y));
+            return self.invalidate();
+        }
+        // Knobs and faders: "Create automation clip" (spec: ui/playlist.md §8) and "Enter value..." (spec:
+        // ui/type-in-value.md §8).
         if let Some(a) = action.as_ref() {
             let typein = match *a {
                 Action::Knob(k) => Some(crate::typein::Target::Knob(k)),
@@ -12076,6 +12082,23 @@ mod tests {
         assert_eq!(app.state.tempo, t0 + 10.0);
         app.mouse_up();
         assert!(!app.cursor_locked());
+    }
+
+    /// A right click on the tempo display opens its menu (spec: ui/tempo-menu.md §1), and its rows act.
+    #[test]
+    fn the_tempo_display_right_click_opens_its_menu() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Tempo);
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        let menu = app.state.playlist.popup.clone().expect("the tempo menu");
+        assert!(menu.items.iter().any(|i| i.col), "two columns");
+        let preset = menu.items.iter().find(|i| i.label == "150 BPM").expect("the presets");
+        crate::playlist::run(&mut app, preset.cmd.clone());
+        assert_eq!(app.state.tempo, 150.0);
     }
 
     /// The tempo box's drag, Settings > Project's time settings: undo steps named as the control plane's commands, one

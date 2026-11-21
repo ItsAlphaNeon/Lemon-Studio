@@ -1715,6 +1715,7 @@ impl Audio {
         if song {
             e.set_run_on(crate::record::run_on_flag());
             e.set_nudge(crate::tapper::nudge_flag());
+            e.set_half_speed(crate::tempo_menu::half_flag());
             e.set_record_tap(self.shared.record.lock().ok().and_then(|t| t.clone()));
             if let Some(gate) = self.shared.gate.lock().ok().and_then(|g| *g) {
                 e.set_load_gate(gate);

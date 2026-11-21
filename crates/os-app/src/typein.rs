@@ -34,6 +34,8 @@ pub enum Target {
     /// Parameter `.3` of member `.2` (its id) of the container in slot `.1` of mixer track `.0`: a plugin parameter
     /// named by what a project keeps, for remote control links (`crate::params::link_target`).
     MemberParam(u16, u8, u32, usize),
+    /// The project tempo, typed in BPM (10-522; spec: ui/tempo-menu.md).
+    Tempo,
 }
 
 /// A member's parameter as the hosted instance's (`Target::Param`), while its effect is loaded.
@@ -112,6 +114,8 @@ enum Unit {
     Track,
     /// A rack row's mute LED: "On" / "Off" (no value mode).
     Switch,
+    /// The tempo in BPM (no value mode).
+    Bpm,
 }
 
 /// The gain laws of the dB controls (spec: audio/gain-laws.md).
@@ -136,6 +140,7 @@ fn unit(t: Target) -> Unit {
         Target::Latency(..) => Unit::Latency,
         Target::RackTrack(_) => Unit::Track,
         Target::RackLed(_) => Unit::Switch,
+        Target::Tempo => Unit::Bpm,
     }
 }
 
@@ -146,7 +151,7 @@ pub fn mode_button(t: Target) -> Option<(&'static str, &'static str)> {
         Unit::Pan | Unit::Sep => Some(("C", "Centered")),
         Unit::Db(_) => Some(("dB", "dB")),
         Unit::Percent => Some(("%", "%")),
-        Unit::Hz | Unit::Plain | Unit::Latency | Unit::Track | Unit::Switch => None,
+        Unit::Hz | Unit::Plain | Unit::Latency | Unit::Track | Unit::Switch | Unit::Bpm => None,
     }
 }
 
@@ -157,7 +162,7 @@ pub fn width(t: Target) -> f32 {
 /// The mode a box opens in: the remembered one, or the only one it has.
 fn opening_norm(t: Target, remembered: bool) -> bool {
     match unit(t) {
-        Unit::Hz | Unit::Latency | Unit::Track | Unit::Switch => false,
+        Unit::Hz | Unit::Latency | Unit::Track | Unit::Switch | Unit::Bpm => false,
         Unit::Plain => true,
         _ => remembered,
     }
@@ -167,6 +172,7 @@ fn opening_norm(t: Target, remembered: bool) -> bool {
 pub fn caption(s: &State, t: Target) -> String {
     match t {
         Target::Knob(KnobId::MasterPitch) => "Master pitch (Hz)".into(),
+        Target::Tempo => "Tempo (BPM)".into(),
         _ => format!("Value for {}", target_name(s, t)),
     }
 }
@@ -185,6 +191,7 @@ pub fn target_name(s: &State, t: Target) -> String {
         Target::Latency(m, input, u) => format!("{} - {} latency ({})", crate::mixer::name(s, m), if input { "Input" } else { "Track" }, u.name()),
         Target::RackTrack(_) => "Target mixer track".into(),
         Target::RackLed(_) => "Channel on / off".into(),
+        Target::Tempo => "Tempo".into(),
         Target::Member(m, k, id, wet) => crate::container::level_name(s, m, k, id, wet),
         Target::MemberParam(.., i) => match resolved(s, t) {
             Some(p @ Target::Param(..)) => target_name(s, p),
@@ -232,6 +239,7 @@ pub(crate) fn get(s: &State, t: Target) -> Option<f64> {
         Target::Latency(m, input, _) => crate::mixer::track(s, m).map(|t| f64::from(if input { t.latency_in } else { t.latency_out })),
         Target::RackTrack(r) => s.project.channels.get(r).map(|c| f64::from(c.mixer_track)),
         Target::RackLed(r) => s.project.channels.get(r).map(|c| if c.enabled { 1.0 } else { 0.0 }),
+        Target::Tempo => Some(s.tempo),
         Target::Member(m, k, id, wet) => crate::container::level(s, m, k, id, wet).map(f64::from),
         Target::MemberParam(..) => match resolved(s, t)? {
             p @ Target::Param(..) => get(s, p),
@@ -284,16 +292,40 @@ fn set(s: &mut State, t: Target, v: f64) {
             Some(p @ Target::Param(..)) => set(s, p, v),
             _ => s.message = Some("This effect is not loaded (its plugin was not found)".into()),
         },
+        Target::Tempo => set_tempo(s, v),
     }
 }
 
-/// The 0..1 position of a rack row's mixer track box or LED, for Copy value and Paste value (Lemon Studio's design):
+/// The tempo display's range in BPM.
+pub(crate) const TEMPO_MIN: f64 = 10.0;
+pub(crate) const TEMPO_MAX: f64 = 522.0;
+/// A new project's tempo: the tempo menu's Set... ▸ Default.
+pub(crate) const TEMPO_DEFAULT: f64 = 130.0;
+
+/// Sets the project tempo to `bpm`, kept in the display's range and its thousandths, as one undo step named "Tempo" (as
+/// a drag of the display): the tempo menu's typed value, Paste value, Set... and presets (spec: ui/tempo-menu.md).
+pub(crate) fn set_tempo(s: &mut State, bpm: f64) {
+    crate::control::edit(s, crate::control::command::TEMPO, crate::control::command::Region::Settings, |s| set_tempo_now(s, bpm));
+}
+
+/// `set_tempo` without its undo step.
+pub(crate) fn set_tempo_now(s: &mut State, bpm: f64) {
+    let t = (bpm.clamp(TEMPO_MIN, TEMPO_MAX) * 1000.0).round() / 1000.0;
+    if s.tempo != t {
+        s.tempo = t;
+        s.piano.dirty = true;
+    }
+}
+
+/// The 0..1 position of a rack row's mixer track box, its LED or the tempo, for Copy value and Paste value (Lemon Studio's design):
 /// the track over the highest insert, the LED 0 (off) or 1 (on). `None` for the other targets, which copy their knob.
 pub(crate) fn position(s: &State, t: Target) -> Option<f64> {
     let v = get(s, t)?;
     match t {
         Target::RackTrack(_) => Some(v / f64::from(crate::mixer::max_insert(&s.project).max(1))),
         Target::RackLed(_) => Some(v),
+        // The tempo's automation value: 10 BPM at 0, 522 at 1 (spec: ui/tempo-menu.md, 97.5 BPM copies as 17 %).
+        Target::Tempo => Some(crate::playlist::tempo_value(v)),
         _ => None,
     }
 }
@@ -304,6 +336,7 @@ pub(crate) fn at_position(s: &State, t: Target, p: f64) -> f64 {
     let p = p.clamp(0.0, 1.0);
     match t {
         Target::RackTrack(_) => (p * f64::from(crate::mixer::max_insert(&s.project))).round(),
+        Target::Tempo => TEMPO_MIN + p * (TEMPO_MAX - TEMPO_MIN),
         _ => if p >= 0.5 { 1.0 } else { 0.0 },
     }
 }
@@ -341,6 +374,7 @@ pub fn text(s: &State, t: Target, norm: bool) -> String {
         Unit::Hz => short(440.0 * 2f64.powf(bipolar), 11),
         Unit::Track => crate::views::rack::insert_name(n as u16),
         Unit::Switch => if n >= 0.5 { "On" } else { "Off" }.into(),
+        Unit::Bpm => short(n, 3),
         Unit::Plain | Unit::Latency => short(n, 4),
     }
 }
@@ -431,6 +465,11 @@ pub fn parse(t: Target, norm: bool, text: &str) -> Option<f64> {
                 _ => number(&w).map(|(v, pct)| if (if pct { v / 100.0 } else { v }) >= 0.5 { 1.0 } else { 0.0 }),
             }
         }
+        // A number of BPM, with or without "BPM" after it; out of the range: its nearest end.
+        Unit::Bpm => match number(strip_suffix_ci(text, "bpm"))? {
+            (_, true) => None,
+            (v, false) => Some(v.clamp(TEMPO_MIN, TEMPO_MAX)),
+        },
         Unit::Plain | Unit::Latency => None,
     }
 }

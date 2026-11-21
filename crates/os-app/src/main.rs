@@ -162,6 +162,7 @@ mod chop;
 mod piano_dlg;
 mod arpeggiate;
 mod tapper;
+mod tempo_menu;
 mod touch;
 mod events;
 mod record;

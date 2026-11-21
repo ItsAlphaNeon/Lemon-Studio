@@ -383,6 +383,8 @@ pub enum Run {
     Channel(usize, ChannelControl),
     /// A controller moving the wet (`.3`) or dry level of member `.2` of the container in slot `.1` of track `.0`.
     Member(u16, u8, u32, bool),
+    /// A controller moving the tempo.
+    Tempo,
 }
 
 /// A channel control a run of changes goes to (`Run::Channel`).
