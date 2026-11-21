@@ -7477,25 +7477,28 @@ impl App {
     }
 
     /// Playback tool: the line moved from tick `from` to `to` (the same tick for a press). The notes it touches sound at
-    /// their velocities for as long as it stays on them with the button held; a note it passes in one jump sounds until
-    /// the next move (spec: ui/piano-roll.md §9).
+    /// their velocities for as long as it stays on them with the button held, the shown ghost notes' too, each on its
+    /// own channel; a note it passes in one jump sounds until the next move (spec: ui/piano-roll.md §9).
     fn scrub(&mut self, from: f32, to: f32) {
         let Some(ch) = piano::channel(&self.state) else { return };
-        let Some(row) = self.state.project.channels.iter().position(|c| c.index == ch) else { return };
-        let want = piano::scrub_keys(&self.state, ch, from, to);
+        let channels = &self.state.project.channels;
+        let want: Vec<(usize, u16, u8)> = piano::scrub_keys(&self.state, ch, from, to)
+            .into_iter()
+            .filter_map(|(c, k, v)| Some((channels.iter().position(|x| x.index == c)?, k, v)))
+            .collect();
         let transport = &self.transport;
         self.scrub_notes.retain(|&(r, k, _)| {
-            let keep = r == row && want.iter().any(|&(w, _)| w == k);
+            let keep = want.iter().any(|&(wr, wk, _)| (wr, wk) == (r, k));
             if !keep {
                 transport.note_off(r, k);
             }
             keep
         });
-        let new: Vec<(u16, u8)> = want.into_iter().filter(|&(k, _)| !self.scrub_notes.iter().any(|n| n.1 == k)).collect();
+        let new: Vec<(usize, u16, u8)> = want.into_iter().filter(|&(r, k, _)| !self.scrub_notes.iter().any(|n| (n.0, n.1) == (r, k))).collect();
         if !new.is_empty() {
             self.sync_live();
         }
-        for (k, velocity) in new {
+        for (row, k, velocity) in new {
             self.transport.note_on(row, k, velocity);
             self.scrub_notes.push((row, k, velocity));
         }
@@ -16552,6 +16555,50 @@ mod tests {
         assert_eq!(app.scrub_notes.len(), 2, "back on them");
         app.mouse_up();
         assert!(app.scrub_notes.is_empty(), "they stop with the button");
+    }
+
+    /// Alt+right and the Playback tool play the other channels' notes of the pattern too, while the ghost notes are
+    /// shown, each on its own channel, for as long as the button is held (issue #349; spec: ui/piano-roll.md §9).
+    #[test]
+    fn playing_under_the_mouse_sounds_the_ghost_notes() {
+        let (mut app, mut c) = piano_with_note(37);
+        let n = piano::notes(&app.state)[0];
+        let row = app.state.project.channels.iter().position(|c| c.index == n.channel).unwrap();
+        let other = (row + 1) % app.state.project.channels.len();
+        let mut ghost = n;
+        (ghost.channel, ghost.key, ghost.velocity) = (app.state.project.channels[other].index, n.key + 5, 90);
+        // A ghost note alone, a bar later.
+        let mut later = ghost;
+        later.position = n.position + u32::from(app.state.project.ppq) * 4;
+        piano::pattern_mut(&mut app.state).notes.extend([ghost, later]);
+        frame(&mut app, &mut c, None);
+        let g = app.piano_geom().unwrap();
+        let r = g.note_rect(&n).unwrap();
+        let l = g.note_rect(&later).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.alt = true;
+        app.mouse_down_right();
+        let mut held = app.scrub_notes.clone();
+        held.sort_unstable();
+        let mut want = vec![(row, n.key, 37), (other, ghost.key, 90)];
+        want.sort_unstable();
+        assert_eq!(held, want, "both channels sound, each at its velocity");
+        app.mouse_move(l.cx(), r.cy());
+        assert_eq!(app.scrub_notes, [(other, later.key, 90)], "a column with only a ghost note sounds it");
+        app.mouse_up();
+        app.alt = false;
+        assert!(app.scrub_notes.is_empty(), "held until the button goes up");
+        assert_eq!(piano::notes(&app.state).len(), 3, "nothing was deleted");
+        // Ghost notes hidden: only the piano roll's channel.
+        app.state.piano.ghosts = false;
+        app.state.piano.tool = Tool::Playback;
+        frame(&mut app, &mut c, None);
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        assert_eq!(app.scrub_notes, [(row, n.key, 37)]);
+        app.mouse_move(l.cx(), r.cy());
+        assert!(app.scrub_notes.is_empty());
+        app.mouse_up();
     }
 
     /// Ctrl and Alt with the right button don't delete: Ctrl zooms to a box, Alt plays what is under the mouse (#305).
