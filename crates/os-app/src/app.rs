@@ -8771,10 +8771,7 @@ impl App {
             }
             Action::PlPickTab(k) => self.state.playlist.picker = k,
             Action::PlPick(src) => {
-                self.state.playlist.source = Some(src);
-                if let os_model::ClipSource::Pattern(n) = src {
-                    self.state.pattern = n;
-                }
+                pl::pick_source(&mut self.state, src);
                 if right {
                     let (x, y) = self.mouse;
                     match src {

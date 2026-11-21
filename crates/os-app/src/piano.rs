@@ -654,7 +654,8 @@ pub fn paint_mono(s: &mut State, i: usize) -> usize {
     i - gone.iter().filter(|&&j| j < i).count()
 }
 
-/// The controls a new note takes from the last one touched; never its place, length, key or mute.
+/// The controls a new note takes from the last one touched, its slide and portamento switches too (FL, measured for
+/// issue #381); never its place, length, key or mute.
 pub fn copy_controls(from: &Note, to: &mut Note) {
     to.velocity = from.velocity;
     to.pan = from.pan;
@@ -664,6 +665,7 @@ pub fn copy_controls(from: &Note, to: &mut Note) {
     to.fine_pitch = from.fine_pitch;
     to.repeat = from.repeat;
     to.group = (to.group & Note::MUTED) | (from.group & !Note::MUTED);
+    to.flags = (to.flags & !Note::SLIDE) | (from.flags & Note::SLIDE);
 }
 
 /// Delete notes by index.
@@ -934,11 +936,15 @@ mod tests {
     fn new_notes_copy_controls_not_place_or_mute() {
         use super::*;
         let mut from = Note { velocity: 33, pan: 10, release: 90, mod_x: 200, mod_y: 7, fine_pitch: 130, repeat: 3, group: 0x05, ..Note::step(0, 480) };
-        from.group |= Note::MUTED;
+        from.group |= Note::MUTED | Note::PORTA;
+        from.flags |= Note::SLIDE;
         let mut to = Note { length: 48, key: 72, ..Note::step(1, 96) };
         copy_controls(&from, &mut to);
         assert_eq!((to.velocity, to.pan, to.release, to.mod_x, to.mod_y, to.fine_pitch, to.repeat), (33, 10, 90, 200, 7, 130, 3));
-        assert_eq!(to.group, 0x05, "the colour comes along, the mute does not");
+        assert_eq!(to.group, 0x05 | Note::PORTA, "the colour and the portamento switch come along, the mute does not");
+        assert!(to.slide(), "a slide note's template makes slide notes");
+        copy_controls(&Note::step(0, 0), &mut to);
+        assert!(!to.slide() && !to.porta(), "a plain note's template makes plain notes");
         assert_eq!((to.position, to.length, to.key, to.channel), (96, 48, 72, 1));
     }
 
