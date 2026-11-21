@@ -34,6 +34,7 @@ mod equiv;
 mod open_bench;
 mod browser;
 mod browser_index;
+mod wav_facts;
 mod burn_midi;
 mod cable;
 mod capture;
