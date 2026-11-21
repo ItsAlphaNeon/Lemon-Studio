@@ -208,13 +208,13 @@ pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
             _ => true,
         });
     }
-    // The playlist's Draw source and its locked clip length follow their pattern; a pattern that goes takes them.
+    // The playlist's Draw source and its clip brush follow their pattern; a pattern that goes takes them.
     let follow = |c: ClipSource| match c {
         ClipSource::Pattern(n) => map(n).map(ClipSource::Pattern),
         c => Some(c),
     };
     s.playlist.source = s.playlist.source.and_then(follow);
-    s.playlist.lock_len = s.playlist.lock_len.and_then(|(c, len)| Some((follow(c)?, len)));
+    s.playlist.brush = s.playlist.brush.and_then(|c| Some(os_model::Clip { source: follow(c.source)?, ..c }));
     s.playlist.sel.clear();
     s.playlist.hover_clip = None;
     s.piano.clear_selection();
@@ -688,18 +688,19 @@ mod tests {
         assert_eq!(others(s), vec![ClipSource::Pattern(1)], "the deleted pattern's clip goes");
     }
 
-    /// The playlist's Draw source and its locked clip length follow their pattern when it moves, and go with it.
+    /// The playlist's Draw source and its clip brush follow their pattern when it moves, and go with it.
     #[test]
     fn the_draw_source_follows_its_pattern() {
         let mut app = app();
         let s = &mut app.state;
         s.playlist.source = Some(ClipSource::Pattern(2));
-        s.playlist.lock_len = Some((ClipSource::Pattern(2), 96));
+        s.playlist.brush = Some(Clip::new(0, 96, 0, ClipSource::Pattern(2)));
         s.pattern = 2;
         run(s, Cmd::MoveDown, (0.0, 0.0));
-        assert_eq!((s.playlist.source, s.playlist.lock_len), (Some(ClipSource::Pattern(3)), Some((ClipSource::Pattern(3), 96))));
+        let brush = |s: &State| s.playlist.brush.map(|c| (c.source, c.length));
+        assert_eq!((s.playlist.source, brush(s)), (Some(ClipSource::Pattern(3)), Some((ClipSource::Pattern(3), 96))));
         delete_current(s);
-        assert_eq!((s.playlist.source, s.playlist.lock_len), (None, None), "the source went with its pattern");
+        assert_eq!((s.playlist.source, brush(s)), (None, None), "the source went with its pattern");
     }
 
     #[test]
