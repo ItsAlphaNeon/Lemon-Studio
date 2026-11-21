@@ -10,6 +10,7 @@ use os_ui::{Color, Font, Rect};
 
 use super::{rgb, FrameInfo};
 use crate::app::{Action, Live, Scroll, State, Ui, Win};
+use crate::clip_colors::NAME_MIX;
 use crate::icons::{self, Icon};
 use crate::knobs::KnobId;
 use crate::rack::{self as rk, FillHit, FillType, Tab};
@@ -22,9 +23,6 @@ pub const DEFAULT_SIZE: (f32, f32) = (499.0 + rk::NAME_W - rk::FL_NAME_W, 246.0)
 pub const MIN_H: f32 = 96.0 + ROW_H;
 /// Space above the first row and below the last one inside the rows panel.
 const PAD: f32 = 18.0;
-/// The Classic name button's face: the channel colour mixed this far toward the theme's neutral face (`clip_colors`
-/// stores new clip channels' colours through it).
-pub const NAME_MIX: f32 = 0.35;
 /// Graph editor panel height (§14), its tab row included.
 pub const GRAPH_H: f32 = 240.0;
 const GRAPH_TABS_H: f32 = 20.0;
@@ -66,7 +64,7 @@ pub fn base_w(s: &State) -> f32 {
 /// Smallest width (Lemon Studio's; FL's is 4 steps, §5): four beats of the project's signature, and never under the
 /// default 16 steps, below which the title bar's right group runs into the speaker and the "Instrument rack" title.
 pub fn min_w(s: &State) -> f32 {
-    let steps = (4 * rk::beat_steps(s)).max(16);
+    let steps = (4 * rk::beat_steps(&s.session)).max(16);
     base_w(s) + STEP_W * (steps - 1) as f32
 }
 
@@ -133,10 +131,10 @@ impl RowPos {
 
 pub fn layout(s: &State) -> Vec<RowPos> {
     let mut y = PAD + 2.0;
-    rk::shown(s)
+    rk::shown(&s.session)
         .into_iter()
         .map(|row| {
-            let zipped = s.rack.zipped.contains(&row);
+            let zipped = s.session.project.channels.get(row).is_some_and(|c| c.rack.zipped);
             let p = RowPos { row, top: y, zipped };
             y += p.pitch();
             p
@@ -194,13 +192,13 @@ pub fn step_at(s: &State, x: f32) -> Option<u32> {
 /// Horizontal step scroll in pixels.
 fn sx(s: &State) -> f32 {
     let shown = visible_steps(s);
-    let total = rk::pattern_steps(s).max(shown) + 256;
+    let total = rk::pattern_steps(&s.session).max(shown) + 256;
     s.rack_scroll_x.clamp(0.0, ((total - shown) as f32 * STEP_W).max(0.0))
 }
 
 /// Name width that fits the longest channel name (Options > Channel button width > Size to fit).
 pub fn fit_name_w(s: &State) -> f32 {
-    let longest = s.project.channels.iter().map(|c| c.name.as_deref().unwrap_or("Channel 00").chars().count()).max().unwrap_or(8);
+    let longest = s.session.project.channels.iter().map(|c| c.name.as_deref().unwrap_or("Channel 00").chars().count()).max().unwrap_or(8);
     (longest as f32 * 7.5 + 14.0).max(40.0)
 }
 
@@ -219,8 +217,8 @@ pub fn graph_rect(s: &State) -> Option<Rect> {
 /// The columns of the steps playing at ticks `a` and `b` in pattern mode, when they differ: lit steps down the
 /// column and the footer marker (§16) are all that a new step changes.
 pub fn step_columns(s: &State, a: f64, b: f64) -> Vec<Rect> {
-    let per_step = f64::from(rk::per_step(s).max(1));
-    let len = rk::pattern_steps(s).max(1);
+    let per_step = f64::from(rk::per_step(&s.session).max(1));
+    let len = rk::pattern_steps(&s.session).max(1);
     let step = |t: f64| (t / per_step).floor().max(0.0) as u32 % len;
     let (ka, kb) = (step(a), step(b));
     if ka == kb {
@@ -292,13 +290,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let rows_clip = if vbar { Rect::span(inner.x, inner.right() - 11.0, inner.y, inner.bottom()) } else { inner };
     let scroll = scroll(s);
     let steps_shown = visible_steps(s);
-    let len = rk::pattern_steps(s);
+    let len = rk::pattern_steps(&s.session);
     let sx = sx(s);
     let total_steps = len.max(steps_shown) + 256;
     let first_step = (sx / STEP_W).floor() as u32;
-    let per_step = rk::per_step(s);
-    let (group, bars) = (rk::beat_steps(s), rk::pattern_bars(s, len * per_step));
-    let pat = s.project.pattern(s.pattern);
+    let per_step = rk::per_step(&s.session);
+    let (group, bars) = (rk::beat_steps(&s.session), rk::pattern_bars(&s.session, len * per_step));
+    let pat = s.session.project.pattern(s.pattern());
     let notes: &[os_model::Note] = pat.map_or(&[], |p| &p.notes);
     // Playback position (pattern mode): the current step (§16).
     let cur_step = (f.playing && !f.song).then(|| (f.tick / f64::from(per_step)).floor() as u32);
@@ -312,7 +310,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         if ry + p.pitch() < rows_clip.y - 4.0 || ry - 4.0 > rows_clip.bottom() {
             continue;
         }
-        let ch = &s.project.channels[i];
+        let ch = &s.session.project.channels[i];
         let focused = i == s.selected_channel;
         let selected = s.rack.sel.contains(&i);
         let nb = Rect::new(x + c.name_x, ry, c.name_w, 26.0);
@@ -330,7 +328,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         // Mute LED, or the padlock of a locked channel (§10).
         let lr = Rect::new(x + 11.5, ry + 6.5, 12.0, 12.0);
         ui.hit(lr, Action::ChannelEnable(i), "Mute / solo  (shift/ctrl+)0..9");
-        if s.rack.locked.contains(&i) {
+        if ch.rack.locked {
             padlock(ui, x + 17.5, ry + 12.5, ch.enabled);
         } else {
             rack_led(ui, x + 17.5, ry + 12.5, ch.enabled);
@@ -384,16 +382,16 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         // A channel locked to a note source shows a padlock at the button's right end (§18 Receive notes from ▸).
         let locked = s.rack.note_lock.contains(&Some(i));
         // Change icon... (§18, Lemon Studio's design): the icon at the button's left end, the name moved right of it.
-        let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, i);
+        let icon = crate::playlist::window_icon(&s.session.project, i);
         let icon_lead = if icon.is_some() { 16.0 } else { 0.0 };
         // A channel with an instrument track (playlist §6c): the "I" disc before the name, as on the track header.
-        let inst = crate::track_links::instrument_track_of(s, ch.index).is_some();
+        let inst = crate::track_links::instrument_track_of(&s.session, ch.index).is_some();
         let lead = icon_lead + if inst { 14.0 } else { 0.0 };
         let tb = Rect::new(nb.x + lead, nb.y, nb.w - lead - if locked { 12.0 } else { 0.0 }, nb.h);
         let label = shorten(ui, nf, &label, tb.w - 8.0);
         ui.c.push_clip(nb.inset(1.0));
         // Show waveform preview (§18, Lemon Studio's design): the sample's waveform across the face, under the name.
-        if let Some(w) = rk::wave_preview(s, i).and_then(|p| s.playlist.wave(p)) {
+        if let Some(w) = rk::wave_preview(s, i).and_then(|p| s.session.samples.wave(&s.session.settings, p)) {
             name_wave(ui, nb.inset(2.0), &w, col.mix(base, 0.6));
         }
         if let Some(ic) = icon {
@@ -456,7 +454,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
                 ui.c.icon(if ch.enabled { &os_ui::tabler::VOLUME } else { &os_ui::tabler::VOLUME_OFF }, mb, col);
             }
         } else {
-            let row_len = rk::row_len(s, i);
+            let row_len = rk::row_len(&s.session, i);
             ui.c.push_clip(step_area);
             for k in first_step..(first_step + steps_shown + 1) {
                 let sr = Rect::new(step_x0 + STEP_W * k as f32 - sx, ry + 4.0, 13.0, 19.0);
@@ -479,8 +477,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
             }
             let tc = if !has { t.text_dim.shade(-0.3) } else if lhov { t.glyph } else { t.text_dim.shade(0.08) };
             // Advanced looping's words ("Beat") take a smaller font to fit.
-            let txt = rk::loop_box_text(s, i);
-            let font = if rk::advanced(s) { Font::new(10) } else { Font::new(13) };
+            let txt = rk::loop_box_text(&s.session, i);
+            let font = if rk::advanced(&s.session) { Font::new(10) } else { Font::new(13) };
             ui.c.text_center(font, lb, tc, &txt);
         }
     }
@@ -556,9 +554,9 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         ui.c.fill_rect(Rect::new(cf.x, cf.y + 1.0, cf.w, cf.h / 2.0), ui.t.s(0x202122));
         ui.c.fill_rect(Rect::span(cf.x, cf.right(), cf.y + 1.0 + cf.h / 2.0, cf.bottom()), ui.t.s(0x1b1c1d));
     }
-    let label = match s.rack.filter {
+    let label = match rk::filter(&s.session.project) {
         rk::Filter::All => "All".to_string(),
-        rk::Filter::Group(g) => s.rack.groups.get(g).map_or("All".to_string(), |g| g.name.clone()),
+        rk::Filter::Group(g) => rk::groups(&s.session.project).get(g).map_or("All".to_string(), |g| g.name.clone()),
         rk::Filter::Unsorted => "Unsorted".to_string(),
     };
     let lf = Font::new(17);
@@ -606,7 +604,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         ui.c.fill_rect_gradient(bx.inset(1.0), ui.t.s(0x35393b), ui.t.s(0x2f3335), 3.0);
     }
     let lc = if bhov { ui.t.tx(0xffffff) } else { ui.t.tx(0xa7adb0) };
-    match rk::explicit_len(s) {
+    match rk::explicit_len(&s.session) {
         None => {
             for k in 0..3 {
                 ui.c.fill_rect(Rect::new(r - 116.0 + 3.0 * k as f32, y + 14.0, 2.0, 1.0), lc);
@@ -621,17 +619,17 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let green = ui.t.a(0x8fd14a);
     if lemon {
         // Lemon: toggles are lit rounded squares with dark glyphs.
-        if s.rack.loop_mode {
+        if rk::loop_mode(&s.session) {
             lk::lit_in(ui.c, ui.t, lr, lk::r_btn(t), lhov);
         } else if lhov {
             ui.c.fill_rrect(lr, lk::r_btn(t), t.button_hi);
         }
-        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { lk::ink_on_lit(ui.t) } else { t.glyph });
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(&s.session) { lk::ink_on_lit(ui.t) } else { t.glyph });
     } else {
-        if s.rack.loop_mode || lhov {
-            ui.c.stroke_rrect(lr, 3.0, 1.0, if s.rack.loop_mode { green } else { t.glyph.shade(-0.3) });
+        if rk::loop_mode(&s.session) || lhov {
+            ui.c.stroke_rrect(lr, 3.0, 1.0, if rk::loop_mode(&s.session) { green } else { t.glyph.shade(-0.3) });
         }
-        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if s.rack.loop_mode { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
+        ui.c.icon(&os_ui::tabler::REPEAT, lr.inset(2.5), if rk::loop_mode(&s.session) { green } else if lhov { ui.t.tx(0xffffff) } else { t.glyph });
     }
     // Graph editor (§7, §14): blue outline when on.
     let gx = r - 58.0;
@@ -730,15 +728,15 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
     let (Some(g), Some(bars)) = (graph_rect(s), graph_bars(s)) else { return };
     let t = ui.t;
     let tab = s.rack.graph_tab;
-    let ps = rk::per_step(s);
+    let ps = rk::per_step(&s.session);
     ui.c.fill_rect(g, ui.t.s(0x15181a));
     ui.c.stroke_rrect(g, 0.0, 1.0, ui.t.s(0x0c0e0f));
     ui.hit(g, Action::Swallow, "");
-    let ch = s.project.channels.get(s.selected_channel).map(|c| c.index);
-    let notes = rk::row_notes(s, s.selected_channel);
+    let ch = s.session.project.channels.get(s.selected_channel).map(|c| c.index);
+    let notes = rk::row_notes(&s.session, s.selected_channel);
     ui.c.push_clip(bars);
     let x0 = s.rack_pos.0 + cols(s).step_x;
-    let group = rk::beat_steps(s);
+    let group = rk::beat_steps(&s.session);
     for k in first..first + shown + 1 {
         let cx = x0 + STEP_W * k as f32 - sx;
         let col = Rect::new(cx - 1.0, bars.y, STEP_W, bars.h);
@@ -905,7 +903,7 @@ pub fn paint_fill(ui: &mut Ui, s: &State) {
     let hov = super::close_button(ui, close, close, Action::RackFill(FillHit::Close), "Close");
     icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
     // Preview row: the channel.
-    let name = s.project.channels.get(fd.row).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default();
+    let name = s.session.project.channels.get(fd.row).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default();
     ui.c.text(font, r.x + 12.0, r.y + 34.0, t.text_dim, "Preview");
     ui.c.fill_polygon(&[(r.x + 70.0, r.y + 38.0), (r.x + 75.0, r.y + 42.0), (r.x + 70.0, r.y + 46.0)], t.glyph);
     ui.c.text_clip(font, r.x + 82.0, r.y + 34.0, r.w - 94.0, t.text, &name);

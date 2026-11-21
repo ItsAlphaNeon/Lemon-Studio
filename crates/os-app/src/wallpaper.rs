@@ -136,7 +136,7 @@ pub fn paint(ui: &mut Ui, work: Rect) -> bool {
         let mut held = held.borrow_mut();
         if held.as_ref().is_none_or(|h| h.name != name) {
             // Read once per name (a name still relative is the user folder's, where `current.flstheme` is).
-            let image = read(&resolve(name, crate::app::theme_dir().as_deref()));
+            let image = read(&resolve(name, crate::user_dir::theme_dir().as_deref()));
             *held = Some(Held { name: name.to_string(), image, scaled: None });
         }
         let h = held.as_mut().expect("just set");
@@ -164,7 +164,7 @@ pub fn items(_: &crate::app::State) -> Vec<crate::playlist::PItem> {
 
 impl crate::app::App {
     /// Set image wallpaper...: a file dialog for the picture.
-    pub(crate) fn wallpaper_dialog(&mut self) {
+    pub fn wallpaper_dialog(&mut self) {
         let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Set image wallpaper", "wallpaper", crate::dialog::Then::Wallpaper)
             .filter("Picture", &["png", "jpg", "jpeg"])
             .start(None);
@@ -173,7 +173,7 @@ impl crate::app::App {
 
     /// The applied theme shows picture `path` over the workspace (`BackMode` 2, `BackPicFilename` its absolute name),
     /// live and kept for the next start, as Theme ▸ Adjustments keep their changes.
-    pub(crate) fn set_wallpaper(&mut self, path: &Path) {
+    pub fn set_wallpaper(&mut self, path: &Path) {
         let name = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
         let text = os_theme::fl::set_key(&self.theme_text(), "BackMode", "2");
         let text = os_theme::fl::set_key(&text, "BackPicFilename", &name.to_string_lossy());

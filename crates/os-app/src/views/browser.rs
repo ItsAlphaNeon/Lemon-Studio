@@ -71,7 +71,7 @@ const PROJECT: &[(&str, Icon)] = &[
     ("Samples", Icon::Wave),
 ];
 pub const INITIALIZED_CONTROLS: &str = "Controls with a start value";
-/// The controller links, one row each (`crate::remote::label`); VIEW > Remote control opens it.
+/// The controller links, one row each (`crate::remote_ui::label`); VIEW > Remote control opens it.
 pub const REMOTE_CONTROL: &str = "Remote control";
 pub const PROJECT_DATA: &str = "Project data";
 
@@ -360,10 +360,12 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
 }
 
 /// Icon for a file by extension (spec §6 table).
-pub fn file_icon(name: &str) -> Icon {
+fn file_icon(name: &str) -> Icon {
+    if crate::browser_index::is_audio_file(name) {
+        return Icon::FileAudio;
+    }
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" | "m4a" => Icon::FileAudio,
         "mid" | "midi" => Icon::PianoRoll,
         "flp" | "lemon" => Icon::FileProject,
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
@@ -375,7 +377,7 @@ pub fn file_icon(name: &str) -> Icon {
 
 /// What a file row stands for (spec §6): an audio file a sample, a preset file a preset, anything else a file.
 fn file_item(name: &str, path: &str) -> Item {
-    if file_icon(name) == Icon::FileAudio {
+    if crate::browser_index::is_audio_file(name) {
         Item::Sample(path.into())
     } else if crate::presets::is_preset_file(Path::new(path)) || crate::presets::is_factory(Path::new(path)) || crate::channel_states::is_state_file(Path::new(path)) {
         Item::Preset(path.into())
@@ -415,13 +417,13 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
 }
 
 fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
-    let p = &s.project;
+    let p = &s.session.project;
     for &(name, icon) in PROJECT {
         if name == INITIALIZED_CONTROLS && p.init_controls.is_empty() {
             continue;
         }
         if name == PROJECT_DATA {
-            if let Some(dir) = crate::data_folder::folder(s) {
+            if let Some(dir) = crate::data_folder_ui::folder(s) {
                 data_folder_rows(s, root, &dir, cat, out);
             }
             continue;
@@ -433,9 +435,9 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
         match name {
             // Undone steps grey, their arrow mirrored (spec: ui/settings-choices.md "Undo history: the four checks").
             "History" => {
-                for (e, step) in s.history.entries() {
-                    let icon = if s.history.undone(e) { Icon::Redo } else { Icon::Undo };
-                    let (bright, item) = (s.history.current(e), Item::History(e));
+                for (e, step) in s.session.history.entries(&s.session.settings) {
+                    let icon = if s.session.history.undone(e) { Icon::Redo } else { Icon::Undo };
+                    let (bright, item) = (s.session.history.current(e), Item::History(e));
                     out.push(Row { key: format!("{parent}/{e}"), depth: 2, label: step.into(), icon, cat, open: None, bright, item, path: None });
                 }
             }
@@ -444,7 +446,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 pats.sort_by_key(|p| p.number);
                 for pat in pats {
                     let label = pat.name.clone().unwrap_or_else(|| format!("Pattern {}", pat.number));
-                    leaf(out, &parent, label, Icon::Note, cat, pat.number == s.pattern, Item::Pattern(pat.number));
+                    leaf(out, &parent, label, Icon::Note, cat, pat.number == s.pattern(), Item::Pattern(pat.number));
                 }
             }
             // Hosted plugins open into their parameters (spec: plugins/plugin-parameters.md §6).
@@ -453,9 +455,9 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                     let label = channel_label(s, i).unwrap_or_default();
                     plugin_node(s, out, &parent, label, Icon::Plug, cat, i == s.selected_channel, Item::Channel(i), i);
                     // A channel's container's plugins follow it, in its order (plugins/patcher §4.4).
-                    for mem in crate::container::members(s, i as u16, crate::container::CHANNEL).unwrap_or_default() {
-                        let Some(key) = crate::container::member_key(s, i, mem.id) else { continue };
-                        let label = crate::container::member_label(s, key).unwrap_or_default();
+                    for mem in crate::container::members(&s.session, i as u16, crate::container::CHANNEL).unwrap_or_default() {
+                        let Some(key) = crate::container::member_key(&s.session, i, mem.id) else { continue };
+                        let label = crate::container::member_label(&s.session, key).unwrap_or_default();
                         let icon = if mem.instrument { Icon::Plug } else { Icon::Speaker };
                         plugin_node(s, out, &parent, label, icon, cat, false, Item::None, key);
                     }
@@ -464,27 +466,27 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             "Effects" => {
                 for m in &p.mixer {
                     for k in (0..m.slots.len()).filter(|&k| m.slots[k].is_some()) {
-                        let label = crate::params::effect_label(s, m.index, k as u8).unwrap_or_default();
+                        let label = crate::params::effect_label(&s.session, m.index, k as u8).unwrap_or_default();
                         plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, crate::plugins::fx_key(m.index, k as u8));
                         // A container's effects follow it, in its order (Lemon Studio's design: plugins/patcher §4.2).
-                        let list = crate::container::members(s, m.index, k as u8).unwrap_or_default();
+                        let list = crate::container::members(&s.session, m.index, k as u8).unwrap_or_default();
                         for mem in &list {
-                            let Some(key) = crate::container::member_key(s, crate::container::place_key(m.index, k as u8), mem.id) else { continue };
-                            let label = crate::container::member_label(s, key).unwrap_or_default();
+                            let Some(key) = crate::container::member_key(&s.session, crate::container::place_key(m.index, k as u8), mem.id) else { continue };
+                            let label = crate::container::member_label(&s.session, key).unwrap_or_default();
                             plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, key);
                         }
                     }
                 }
             }
             REMOTE_CONTROL => {
-                for l in crate::remote::links() {
-                    leaf(out, &parent, crate::remote::label(s, &l), Icon::MidiControl, cat, false, Item::None);
+                for l in crate::remote::links(&s.session.settings) {
+                    leaf(out, &parent, crate::remote_ui::label(s, &l), Icon::MidiControl, cat, false, Item::None);
                 }
             }
             // "<owner> - <setting>", as the automation clip on the control is named.
             INITIALIZED_CONTROLS => {
                 for c in &p.init_controls {
-                    leaf(out, &parent, crate::init::name(s, c.target), Icon::Slide, cat, false, Item::None);
+                    leaf(out, &parent, crate::init_ui::name(s, c.target), Icon::Slide, cat, false, Item::None);
                 }
             }
             "Samples" => {
@@ -513,21 +515,21 @@ fn data_folder_rows(s: &State, root: &str, dir: &Path, cat: u8, out: &mut Vec<Ro
 
 /// A channel's row label under Generators.
 pub fn channel_label(s: &State, i: usize) -> Option<String> {
-    let c = s.project.channels.get(i)?;
+    let c = s.session.project.channels.get(i)?;
     Some(c.name.clone().or_else(|| crate::project_plugins::plugin_title(c)).unwrap_or_else(|| format!("Channel {}", i + 1)))
 }
 
 /// A generator / effect row: a leaf, or a node listing its parameters when it is a hosted plugin that has some.
 #[allow(clippy::too_many_arguments)]
 fn plugin_node(s: &State, out: &mut Vec<Row>, parent: &str, label: String, icon: Icon, cat: u8, bright: bool, item: Item, key: usize) {
-    if !s.params.has_params(key) {
+    if !s.session.params.has_params(key) {
         return leaf(out, parent, label, icon, cat, bright, item);
     }
     let k = format!("{parent}/{label}");
     let open = is_open(s, &k);
     out.push(Row { key: k.clone(), depth: 2, label, icon, cat, open: Some(open), bright: bright || open, item, path: None });
     if open {
-        for (index, e) in s.params.visible(key) {
+        for (index, e) in s.session.params.visible(key) {
             out.push(Row { key: format!("{k}/{index}"), depth: 3, label: e.name.clone(), icon: Icon::Slide, cat, open: None, bright: false, item: Item::Param(key, index), path: None });
         }
     }
@@ -573,7 +575,7 @@ fn preset_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 preset(out, &pk, 2, crate::presets::shown_name(&e.path), &e.path);
             }
         }
-        let fac = crate::presets::factory(&plugin);
+        let fac = crate::presets::factory(&s.session.settings, &plugin);
         if fac.is_empty() {
             continue;
         }
@@ -722,7 +724,7 @@ fn paint_wave(ui: &mut Ui, s: &State, sample: &str, slot: Rect, list: Rect) {
     let outer = Rect::new(list.x, slot.y + 4.0, list.w, WAVE_H);
     s.browser_wave_rect.set(Some(outer));
     let inner = Rect::new(outer.x + 1.0, outer.y + 1.0, outer.w - 2.0, outer.h - 2.0);
-    let file = crate::plugins::resolve_sample(sample);
+    let file = crate::plugins::resolve_sample(&s.session.settings, sample);
     let facts = {
         let mut cache = s.browser_facts.borrow_mut();
         match cache.as_ref() {
@@ -738,7 +740,7 @@ fn paint_wave(ui: &mut Ui, s: &State, sample: &str, slot: Rect, list: Rect) {
     ui.c.fill_rect(outer, t.s(0x0b1419));
     ui.c.fill_rect(inner, if looped { t.s(0x261c21) } else { t.s(0x131c21) });
     let hov = ui.hit(inner, Action::BrowserWave, "Click to play the sample from its start");
-    let wave = s.playlist.wave(sample);
+    let wave = s.session.samples.wave(&s.session.settings, sample);
     let frames = wave.as_ref().map_or(0, |w| w.frames);
     let x_of = |frame: f64| inner.x + (frame / frames.max(1) as f64 * f64::from(inner.w)) as f32;
     if let Some(w) = &wave {
@@ -989,7 +991,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         let rect = Rect::new(13.0, y, bw - 13.0, ROW_H);
         // A parameter row's hint carries its value (spec: plugins/plugin-parameters.md §6); read for the hovered row only.
         let hint = match row.item {
-            Item::Param(key, index) if ui.hovering(rect) => crate::params::row_hint(s, key, index),
+            Item::Param(key, index) if ui.hovering(rect) => crate::params_ui::row_hint(s, key, index),
             _ => row.label.clone(),
         };
         let hov = ui.hit(rect, Action::BrowserRow(i), hint);
@@ -1002,7 +1004,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             c => cats[usize::from(c).min(1)],
         };
         let c = if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
-        let c = if matches!(row.item, Item::History(e) if s.history.undone(e)) { t.text_faint } else { c };
+        let c = if matches!(row.item, Item::History(e) if s.session.history.undone(e)) { t.text_faint } else { c };
         // Expander: only an opened node shows its ▾ in the gutter (FL screenshots, spec §2).
         if row.open == Some(true) && s.browser_search.is_empty() {
             let (ax, cy) = (x - 9.0, y + ROW_H / 2.0);

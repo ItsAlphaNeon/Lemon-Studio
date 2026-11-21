@@ -158,6 +158,7 @@ fn project(samples: &Path) -> Project {
                 rack: ChannelRack { stored_color: Some(color), ..Default::default() },
                 misc: Default::default(),
                 sound: Default::default(),
+                lemon_icon: None,
             }
         })
         .collect();

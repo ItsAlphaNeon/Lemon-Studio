@@ -8,7 +8,7 @@
     python tools/logo/gen.py --rs       (logo.rs only: no Pillow needed)
 
 Writes:
-  crates/os-app/src/logo.rs        the full-colour logo's parts (the startup splash), those the Nightly logo has
+  crates/os-session/src/logo.rs    the full-colour logo's parts (the startup splash), those the Nightly logo has
                                    instead, and the greyscale mark (drawn in one tint), as absolute M/L/Q/C/Z path data
   crates/os-app/assets/lemonstudio.ico  app icon, 16..256 px (exe, window, taskbar), from the owner's
                                         bitmap assets/logo/icon-lemon.png (edited in icon-lemon.pdn, Paint.NET)
@@ -100,7 +100,7 @@ def write_rs():
         "/// The greyscale mark, drawn in one tint (`icons::logo`).",
         "pub const PATHS: &[&str] = &[RECORD, CENTER, RIND, SLICES[0], SLICES[1], SLICES[2], SLICES[3]];",
     ]
-    with open(os.path.join(ROOT, "crates", "os-app", "src", "logo.rs"), "w", newline="\n") as f:
+    with open(os.path.join(ROOT, "crates", "os-session", "src", "logo.rs"), "w", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
 
 

@@ -10,7 +10,7 @@ build updates itself on its own channel. A build from source has no channel and 
 
 **A tagged release with major version 0 is an alpha.** The tag has no `alpha` in it: `v0.1.0`, `v0.1.1` and `v0.2.0` are
 alphas, and `v1.0.0` is the first stable release. Lemon Studio, the diagnostics and the release's title say which it is
-([version.rs](../crates/os-app/src/version.rs)), and installed alphas update on to the first stable release like any
+([version.rs](../crates/os-session/src/version.rs)), and installed alphas update on to the first stable release like any
 other newer version. Alphas are not marked as pre-releases on GitHub, because the updater finds the newest one as
 GitHub's *latest* release. In the workflow and the manifest the channel is called `stable`, alphas included.
 
@@ -56,7 +56,7 @@ edit the sources in `assets/logo`, then regenerate:
 The workflow builds `lemonstudio-updater` ([tools/updater](../tools/updater)) first. It then builds Lemon Studio with
 these environment variables set:
 
-- `LEMON_CHANNEL` and `LEMON_VERSION`: [crates/os-app/src/version.rs](../crates/os-app/src/version.rs)
+- `LEMON_CHANNEL` and `LEMON_VERSION`: [crates/os-session/src/version.rs](../crates/os-session/src/version.rs)
 - `LEMON_UPDATER`: the updater, which the program carries inside itself (`build.rs`)
 - `LEMON_UPDATE_KEY`: the public key the updater checks manifests with
 
@@ -149,7 +149,7 @@ check that each one offers it, installs it and starts again.
 The workflow refuses a tag that isn't `vMAJOR.MINOR.PATCH`, doesn't match `Cargo.toml` or isn't on `main`.
 
 Once the first alpha is out, nightlies and builds from source stop being "pre-alpha": change `stage_of` in
-[version.rs](../crates/os-app/src/version.rs).
+[version.rs](../crates/os-session/src/version.rs).
 
 ## Testing the workflow's scripts
 

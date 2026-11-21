@@ -70,7 +70,7 @@ impl Default for ChopPattern {
 
 /// FL's Chopping folder (read in place when FL Studio is installed).
 pub fn folder() -> PathBuf {
-    os_native::default_fl_dir().join("Data").join("Patches").join("Scores").join("Chopping")
+    os_paths::default_fl_dir().join("Data").join("Patches").join("Scores").join("Chopping")
 }
 
 /// The ▸ menu (§1): the folder as Quantize lists its templates, the current pattern ticked.
@@ -187,7 +187,7 @@ fn weigh(n: &mut Note, r: &Row, knobs: &[f32; 6]) {
 mod tests {
     use super::*;
 
-    fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, ..Note::step(0, pos) }
     }
 

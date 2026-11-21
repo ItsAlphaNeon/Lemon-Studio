@@ -11,6 +11,7 @@
 use crate::app::{App, State, Win};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
 use crate::typein::Target;
+use crate::typein_ui as typein;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -49,8 +50,8 @@ pub fn run(app: &mut App, c: TCmd) -> Option<String> {
             None
         }
         TCmd::Preset(b) => {
-            crate::typein::set_tempo(&mut app.state, f64::from(b));
-            Some(format!("Tempo {:.3} BPM", app.state.tempo))
+            typein::set_tempo(&mut app.state, f64::from(b));
+            Some(format!("Tempo {:.3} BPM", app.state.tempo()))
         }
         TCmd::HalfSpeed => {
             let on = !half_speed();
@@ -62,19 +63,10 @@ pub fn run(app: &mut App, c: TCmd) -> Option<String> {
     msg
 }
 
-/// Half speed: while it is set, every playback engine runs at half the tempo (`Engine::set_half_speed`). It lasts
-/// until switched off or the program ends; projects do not keep it. One per test thread under tests.
+/// Half speed: while it is set, every playback engine runs at half the tempo (`crate::transport::half_flag`). It lasts
+/// until switched off or the program ends; projects do not keep it.
 pub fn half_flag() -> Arc<AtomicBool> {
-    #[cfg(test)]
-    {
-        thread_local!(static TEST: Arc<AtomicBool> = Arc::new(AtomicBool::new(false)));
-        TEST.with(Arc::clone)
-    }
-    #[cfg(not(test))]
-    {
-        static FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
-        FLAG.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
-    }
+    crate::transport::half_flag()
 }
 
 /// Whether Half speed is on.
@@ -117,46 +109,46 @@ mod tests {
     #[test]
     fn a_preset_sets_the_tempo_in_one_step() {
         let mut app = App::new(None);
-        app.state.tempo = 97.25;
-        let steps = app.state.history.at();
+        app.state.set_tempo(97.25);
+        let steps = app.state.session.history.at();
         pl_run(&mut app, Cmd::Tempo(TCmd::Preset(120)));
-        assert_eq!((app.state.tempo, app.state.history.at()), (120.0, steps + 1));
+        assert_eq!((app.state.tempo(), app.state.session.history.at()), (120.0, steps + 1));
         // The same tempo again: no step.
         pl_run(&mut app, Cmd::Tempo(TCmd::Preset(120)));
-        assert_eq!(app.state.history.at(), steps + 1);
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(TEMPO));
-        assert_eq!(app.state.tempo, 97.25);
+        assert_eq!(app.state.session.history.at(), steps + 1);
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(TEMPO));
+        assert_eq!(app.state.tempo(), 97.25);
     }
 
     // spec: ui/tempo-menu.md §3
     #[test]
     fn copy_and_paste_value_carry_the_tempo() {
         let mut app = App::new(None);
-        app.state.tempo = 97.5;
+        app.state.set_tempo(97.5);
         pl_run(&mut app, Cmd::Rack(RCmd::CopyBox(Target::Tempo)));
         let m = menu(&app.state, None, 0.0, 0.0);
         let paste = m.items.iter().find(|i| i.label.starts_with("Paste value")).unwrap();
         assert_eq!((paste.label.as_ref(), paste.enabled), ("Paste value (17%)", true), "(97.5 - 10) / 512");
         pl_run(&mut app, Cmd::Tempo(TCmd::Preset(140)));
         pl_run(&mut app, Cmd::Rack(RCmd::PasteBox(Target::Tempo)));
-        assert_eq!(app.state.tempo, 97.5);
+        assert_eq!(app.state.tempo(), 97.5);
     }
 
     // spec: ui/tempo-menu.md §3
     #[test]
     fn the_value_box_takes_bpm() {
-        use crate::typein::{accept, caption, parse, text};
+        use crate::typein_ui::{accept, caption, parse, text};
         let mut app = App::new(None);
-        app.state.tempo = 160.0;
+        app.state.set_tempo(160.0);
         assert_eq!((caption(&app.state, Target::Tempo), text(&app.state, Target::Tempo, false)), ("Tempo (BPM)".to_string(), "160".to_string()));
         assert_eq!(parse(Target::Tempo, false, "97.5"), Some(97.5));
         assert_eq!(parse(Target::Tempo, false, "128 bpm"), Some(128.0));
         assert_eq!(parse(Target::Tempo, false, "999"), Some(522.0));
         assert_eq!(parse(Target::Tempo, false, "50%"), None);
         assert_eq!(parse(Target::Tempo, false, "fast"), None);
-        let steps = app.state.history.at();
+        let steps = app.state.session.history.at();
         accept(&mut app.state, Target::Tempo, false, "97.5");
-        assert_eq!((app.state.tempo, app.state.history.at()), (97.5, steps + 1));
+        assert_eq!((app.state.tempo(), app.state.session.history.at()), (97.5, steps + 1));
         assert_eq!(text(&app.state, Target::Tempo, false), "97.5");
     }
 
@@ -164,7 +156,7 @@ mod tests {
     #[test]
     fn set_offers_the_default_and_the_range() {
         let mut app = App::new(None);
-        app.state.tempo = 10.0;
+        app.state.set_tempo(10.0);
         let m = menu(&app.state, None, 0.0, 0.0);
         let set: Vec<(String, Mark)> = item(&m, "Set...").children.iter().filter(|i| !i.label.is_empty()).map(|i| (i.label.to_string(), i.mark)).collect();
         assert_eq!(set[0].0, "Default (130.000 BPM)");
@@ -172,7 +164,7 @@ mod tests {
         assert_eq!(set[3].0, "50% (266.000 BPM)");
         assert_eq!(set.last().unwrap().0, "Maximum (522.000 BPM)");
         pl_run(&mut app, Cmd::Rack(RCmd::SetBox(Target::Tempo, 266.0)));
-        assert_eq!(app.state.tempo, 266.0);
+        assert_eq!(app.state.tempo(), 266.0);
     }
 
     // spec: ui/tempo-menu.md §4, §5
@@ -185,11 +177,11 @@ mod tests {
         assert_eq!(item(&menu(&app.state, None, 0.0, 0.0), "Tap tempo").mark, Mark::Check(true));
         pl_run(&mut app, Cmd::Tempo(TCmd::Tapper));
         assert!(!app.state.shown(Win::Tapper), "a second time closes it");
-        let (tempo, steps) = (app.state.tempo, app.state.history.at());
+        let (tempo, steps) = (app.state.tempo(), app.state.session.history.at());
         pl_run(&mut app, Cmd::Tempo(TCmd::HalfSpeed));
         assert!(half_speed());
         assert_eq!(item(&menu(&app.state, None, 0.0, 0.0), "Half speed").mark, Mark::Check(true));
-        assert_eq!((app.state.tempo, app.state.history.at()), (tempo, steps), "the tempo stays; no undo step");
+        assert_eq!((app.state.tempo(), app.state.session.history.at()), (tempo, steps), "the tempo stays; no undo step");
         pl_run(&mut app, Cmd::Tempo(TCmd::HalfSpeed));
         assert!(!half_speed());
     }

@@ -87,7 +87,7 @@ impl os_host::Library for NativeLibrary {
 
 /// Every installed native plugin DLL under the default FL folder, as library-ready paths.
 pub fn dll_files() -> Vec<PathBuf> {
-    dll_files_in(&crate::default_fl_dir())
+    dll_files_in(&os_paths::default_fl_dir())
 }
 
 /// Every installed native plugin DLL under `fl_dir`.

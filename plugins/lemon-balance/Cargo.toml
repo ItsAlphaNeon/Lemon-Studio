@@ -11,10 +11,14 @@ doctest = false
 test = false
 
 [features]
+default = ["editor"]
+# The plugin's editor and the windows it opens in (off: a plugin with no editor, as a session with no interface
+# hosts it).
+editor = ["os-plugkit/gui", "lemon-small-fx/editor"]
 # Compiled into Lemon Studio: no exported plugin entry points (they would clash with the other built-in plugins).
 linked = []
 
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
-lemon-small-fx = { path = "../lemon-small-fx" }
-os-plugkit = { path = "../../crates/os-plugkit" }
+lemon-small-fx = { path = "../lemon-small-fx", default-features = false }
+os-plugkit = { path = "../../crates/os-plugkit", default-features = false }

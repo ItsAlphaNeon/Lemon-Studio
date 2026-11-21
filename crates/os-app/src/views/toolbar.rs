@@ -322,7 +322,7 @@ fn transport(ui: &mut Ui, c: &Ctx) {
     let song = a.span(384.0, 418.0, 20.0, 35.0);
     ui.hit(pat, Action::PatSong(false), "Pattern: play the current pattern");
     ui.hit(song, Action::PatSong(true), "Song: play the arrangement");
-    for (r, label, active) in [(pat, "PAT", !s.song_mode), (song, "SONG", s.song_mode)] {
+    for (r, label, active) in [(pat, "PAT", !s.song_mode()), (song, "SONG", s.song_mode())] {
         if active && lemon {
             os_ui::kit::lemon::lit_in(ui.c, ui.t, Rect::new(r.x + 2.0, r.y + 1.0, r.w - 3.0, r.h - 1.5), 4.0, false);
         } else if active {
@@ -362,7 +362,7 @@ fn transport(ui: &mut Ui, c: &Ctx) {
         }
         let g = Rect::new(r.x + 8.0, r.y + 8.0, r.w - 16.0, r.h - 16.0);
         let c = if on { t.on_glyph } else { t.glyph };
-        if icon == Icon::Play && s.rec.waiting {
+        if icon == Icon::Play && s.session.rec.waiting {
             // Waiting for input (spec: ui/recording.md §3): three dots.
             for k in [-1.0, 0.0, 1.0] {
                 ui.c.fill_circle(g.cx() + k * g.w * 0.32, g.cy(), (g.w * 0.1).max(1.5), c);
@@ -381,8 +381,8 @@ fn transport(ui: &mut Ui, c: &Ctx) {
     // dark dot in the middle; disarmed, a small dimmed dot. The record colour is white under High visibility
     // (`crate::high_visibility`).
     let rec = a.span(486.0, 513.0, 7.0, 33.0);
-    let hov = ui.hit(rec, Action::Record, crate::record::hint());
-    let armed = s.rec.armed;
+    let hov = ui.hit(rec, Action::Record, crate::record::hint(&crate::settings_file::store()));
+    let armed = s.session.rec.armed;
     let down = ui.down(rec, &Action::Record);
     let dot = crate::high_visibility::record_dot(t, crate::high_visibility::on());
     let face = Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0);
@@ -459,7 +459,7 @@ fn recording(ui: &mut Ui, c: &Ctx) -> bool {
         if r.right() > c.fit {
             return false;
         }
-        tool_button(ui, r, icon, opt.on(), Action::RecOpt(opt), crate::record::option_hint(opt));
+        tool_button(ui, r, icon, opt.on(&crate::settings_file::store()), Action::RecOpt(opt), crate::record::option_hint(opt));
     }
     true
 }
@@ -478,13 +478,13 @@ fn time(ui: &mut Ui, c: &Ctx) {
     // spec: ui/time-display.md §2-3 (the bar's signature is the project's).
     ui.hit(tp, Action::Clock, s.clock.hint());
     ui.live(Live::Clock, tp);
-    let ppq = f64::from(s.project.ppq.max(1));
+    let ppq = f64::from(s.session.project.ppq.max(1));
     // A bar that makes no signature (3 steps per beat) counts its beats as quarters.
-    let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
-    let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo.max(1.0));
+    let sig = s.session.project.signature().unwrap_or((s.session.project.bar().0, 4));
+    let secs = f.tick / ppq * 60.0 / s.session.project.tick_tempo(s.tempo().max(1.0));
     let ticks96 = f.tick * 96.0 / ppq;
     // The bars count from the Start marker's bar (spec: ui/playlist.md §7a, ui/performance-mode.md §1).
-    let start = crate::playlist::start_marker(s).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);
+    let start = crate::playlist::start_marker(&s.session).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);
     let (bar, step, tick) = match start {
         Some(z) => s.clock.bars_from(ticks96, (f64::from(z) * 96.0 / ppq / 384.0).floor() * 384.0, sig),
         None => {
@@ -505,7 +505,7 @@ fn time(ui: &mut Ui, c: &Ctx) {
     let bar_x = (step_x - 8.0 - bw).max(tp.x + 2.0);
     ui.c.push_clip(tp.inset(1.0));
     let g = if lemon { t.pill } else { t.glyph };
-    if let Some(c) = s.rec.count.filter(|c| c.left() > 0) {
+    if let Some(c) = s.session.rec.count.filter(|c| c.left() > 0) {
         // A recording count-in (spec: ui/recording.md §3): the beats left.
         ui.c.text_center(Font::light(22, 8), Rect::new(tp.x, tp.y + 2.0, tp.w, tp.h - 2.0), g, &format!("REC IN {}", c.left()));
     } else {
@@ -688,7 +688,7 @@ fn utilities(ui: &mut Ui, c: &Ctx) -> bool {
             Icon::Mic => Action::OneClick,
             _ => Action::Placeholder(hint),
         };
-        let lit = icon == Icon::Mic && s.rec.audio;
+        let lit = icon == Icon::Mic && s.session.rec.audio;
         tool_button(ui, r, icon, lit, action, hint);
     }
     true
@@ -755,20 +755,20 @@ fn pitch(ui: &mut Ui, c: &Ctx) {
 fn song_pos(ui: &mut Ui, c: &Ctx) {
     let (t, a, s, f) = (ui.t, c.a, c.s, c.f);
     let lemon = super::lemon(ui);
-    let sp = a.r(crate::song_pos::PANEL);
-    let range = crate::song_pos::range(s);
-    let pos = crate::song_pos::shown(s, f.playing, f.song, f.tick, f.song_pos_drag);
+    let sp = a.r(crate::song_pos_ui::PANEL);
+    let range = crate::song_pos_ui::range(s);
+    let pos = crate::song_pos_ui::shown(s, f.playing, f.song, f.tick, f.song_pos_drag);
     ui.live(Live::Clock, sp);
     match range {
         Some(_) => {
-            ui.hit(sp, Action::SongPos, crate::song_pos::hint(s, pos));
+            ui.hit(sp, Action::SongPos, crate::song_pos_ui::hint(s, pos));
         }
         // An empty playlist in SONG mode: nothing to move through.
         None => {
             ui.hit(sp, Action::Swallow, "Song position: the arranger is empty");
         }
     }
-    let hx = range.map(|len| a.x(crate::song_pos::handle_x(pos, len).round()));
+    let hx = range.map(|len| a.x(crate::song_pos_ui::handle_x(pos, len).round()));
     let y = |v: f32| a.y(v);
     if lemon {
         let x0 = a.x(390.0);
@@ -823,7 +823,7 @@ fn modes(ui: &mut Ui, c: &Ctx) -> bool {
         let (on, action) = match i {
             0 => (s.toggles.contains(&"typing"), Action::Typing),
             1 => (crate::autoscroll::on(), Action::AutoScroll),
-            2 => (crate::step_edit::on(), Action::StepEdit),
+            2 => (crate::step_edit::on(&crate::settings_file::store()), Action::StepEdit),
             3 => (crate::enable_groups::on(), Action::EnableGroups),
             _ => (s.multilink.on, Action::Multilink),
         };
@@ -871,19 +871,19 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
     ui.c.fill_rrect(prev, if lemon { 4.0 } else { 2.0 }, t.button);
     icons::draw(ui.c, Icon::ArrowRight, prev.inset(2.0), t.glyph);
     let pb = a.span(855.0, 948.0, 47.0, 76.0);
-    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(s, s.pattern.max(1)));
+    let hov = ui.hit(pb, Action::PatternNext, crate::patterns::name_of(&s.session, s.pattern().max(1)));
     if lemon {
         os_ui::kit::lemon::well(ui.c, t, pb, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
     } else {
         ui.c.fill_rrect(pb, 2.0, t.tempo_box.shade(if hov { 0.16 } else { 0.08 }));
     }
     let name = s
-        .project
+        .session.project
         .patterns
         .iter()
-        .find(|p| p.number == s.pattern)
+        .find(|p| p.number == s.pattern())
         .and_then(|p| p.name.clone())
-        .unwrap_or_else(|| format!("Pattern {}", s.pattern));
+        .unwrap_or_else(|| format!("Pattern {}", s.pattern()));
     // Right-aligned before the spin arrow; a name too long for that keeps its start and is cut at the arrow, as FL
     // cuts long labels (long names were not measured here: Lemon Studio's choice).
     let pf = Font::condensed(21, 7);

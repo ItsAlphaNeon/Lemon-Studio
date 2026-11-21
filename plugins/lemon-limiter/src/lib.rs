@@ -8,6 +8,7 @@
 // spec: plugins/lemon-limiter.md, plugins/fruity-limiter-dsp.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod params;
 pub mod view;
@@ -161,6 +162,7 @@ impl Plugin for LemonLimiter {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::LimiterEditor::new(self.params.clone(), self.shared.clone())))
     }

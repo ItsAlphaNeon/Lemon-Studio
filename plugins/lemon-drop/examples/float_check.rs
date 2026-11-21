@@ -780,7 +780,7 @@ mod check {
         println!("== Presets over the desktop");
         back.orderFrontRegardless();
         float.orderFrontRegardless();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets/Lemon Drop/Themes");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-session/factory-presets/Lemon Drop/Themes");
         let keep = params.current().1;
         for name in ["Scope over desktop", "Spectrum over desktop", "Vectorscope over desktop", "Meter over desktop", "Acrylic oscilloscope", "Frosted glass"] {
             let b = std::fs::read(root.join(format!("{name}.ospreset"))).unwrap();

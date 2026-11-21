@@ -122,7 +122,7 @@ pub fn paint_row(ui: &mut Ui, s: &State, m: MRow, g: Rect, x0: f32, y: f32, h: f
                 .outputs
                 .iter()
                 .map(|n| {
-                    let c = cfg::output(n);
+                    let c = cfg::output(&s.session.settings, n);
                     let mut info = format!("port {}", port_text(c.port));
                     if c.sync {
                         info.push_str(", sync");
@@ -137,7 +137,7 @@ pub fn paint_row(ui: &mut Ui, s: &State, m: MRow, g: Rect, x0: f32, y: f32, h: f
                 .inputs
                 .iter()
                 .map(|i| {
-                    let c = cfg::input(&i.name);
+                    let c = cfg::input(&s.session.settings, &i.name);
                     let kind = if i.failed { "(in use)".to_string() } else { crate::prefs::choice(&crate::prefs::CONTROLLER_TYPE).to_string() };
                     (i.name.clone(), format!("{kind}   port {}", port_text(c.port)), c.enabled)
                 })
@@ -145,20 +145,20 @@ pub fn paint_row(ui: &mut Ui, s: &State, m: MRow, g: Rect, x0: f32, y: f32, h: f
             list(ui, Rect::new(x0 - 4.0, y + 2.0, g.w - 16.0, h - 6.0), "Installed MIDI input devices", &rows, p.input, IN_ROWS, true);
         }
         MRow::OutOptions => {
-            let out = p.selected_output().map(|n| cfg::output(n));
+            let out = p.selected_output().map(|n| cfg::output(&s.session.settings, n));
             let c = out.unwrap_or_default();
             check(ui, g.x + 22.0, cy, c.sync, MAct::OutSync, "Send master sync", "Send master synchronization to this device", out.is_some());
             check(ui, g.x + 324.0, cy, c.notes_off, MAct::OutNotesOff, "Send all notes off", "Send all notes off to this device on init and after render", out.is_some());
             port_box(ui, g, y, &port_text(c.port), MAct::OutPort, "Access port number (right-click: reset)", out.is_some());
         }
         MRow::InOptions => {
-            let inp = p.selected_input().map(|i| cfg::input(&i.name));
+            let inp = p.selected_input().map(|i| cfg::input(&s.session.settings, &i.name));
             let c = inp.unwrap_or_default();
             check(ui, g.x + 22.0, cy, c.enabled, MAct::Enable, "Enable", "Enable input from this device", inp.is_some());
             port_box(ui, g, y, &port_text(c.port), MAct::InPort, "Unique / feedback port number (right-click: reset)", inp.is_some());
         }
         MRow::Offset(o) => {
-            let v = cfg::offset(o).to_string();
+            let v = cfg::offset(&s.session.settings, o).to_string();
             match o {
                 Offset::MasterSync => {
                     let b = Rect::new(x0, y + 3.0, 46.0, 21.0);
@@ -184,14 +184,14 @@ pub fn paint_row(ui: &mut Ui, s: &State, m: MRow, g: Rect, x0: f32, y: f32, h: f
             kit::combo(ui.c, t, b, crate::prefs::choice(c), f, kit::State::hover(hov));
             // The curve button: a small curve icon.
             let cb = Rect::new(b.right() + 4.0, y + 3.0, 24.0, 21.0);
-            let lit = !cfg::curve(of).is_line();
+            let lit = !cfg::curve(&s.session.settings, of).is_line();
             let hov_c = ui.hit(cb, act(MAct::Curve(of)), "Edit mapping curve");
             button_face(ui, cb, hov_c);
             let col = if lit || hov_c { t.glyph } else { t.text };
             let pts: Vec<(f32, f32)> = (0..=10)
                 .map(|i| {
                     let x = i as f32 / 10.0;
-                    let v = cfg::curve(of).map(x);
+                    let v = cfg::curve(&s.session.settings, of).map(x);
                     (cb.x + 5.0 + x * (cb.w - 10.0), cb.bottom() - 5.0 - v * (cb.h - 10.0))
                 })
                 .collect();
@@ -201,7 +201,7 @@ pub fn paint_row(ui: &mut Ui, s: &State, m: MRow, g: Rect, x0: f32, y: f32, h: f
         MRow::ExtSync => {
             let b = Rect::new(x0, y + 3.0, 168.0, 21.0);
             let hov = ui.hit(b, act(MAct::ExtSync(b.x, b.bottom())), "Device whose MIDI clock drives playback");
-            let v = cfg::ext_sync().unwrap_or_else(|| "Off".into());
+            let v = cfg::ext_sync(&s.session.settings).unwrap_or_else(|| "Off".into());
             kit::combo(ui.c, t, b, &v, f, kit::State::hover(hov));
             ui.c.text(f, b.right() + 8.0, ty, if hov { t.glyph } else { t.text }, "External clock sync");
         }
