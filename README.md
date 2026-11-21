@@ -9,7 +9,7 @@ plus what is listed here. For everything else (building, using, contributing, li
 
 > **Wayland first, not tested on every platform.** This branch is used daily on Linux under Wayland (Hyprland); X11
 > still works (`OPENSTUDIO_WAYLAND=0`). Other platforms may work, but not everything added here is tested on each, and
-> some of it is Linux-only (plugin editors drawn in the app's window, the Hyprland plugin-window handling).
+> some of it is Linux-only (the Hyprland plugin-window handling, MPRIS, following Omarchy's theme).
 
 `main` is merged into this branch with `tools/merge-main.sh`, which keeps this README and `docs/` to this branch's
 own content. Side branches are named `cutting-edge-<topic>`.
@@ -24,8 +24,6 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **After a crash, the backup is offered.** When the last run ended without closing while its project had unsaved
   changes, the next start says so and offers the newest autosave written since the project was last saved. Opening it
   works as Revert to last backup.
-- **Ctrl+C in the terminal closes properly.** The keyboard is let go and the session kept, as closing the window does;
-  unsaved changes go to a backup, which the next start offers. A second Ctrl+C ends the program at once.
 
 - **Wayland first.** On Linux the main window is native Wayland in a Wayland session; plugin windows open detached.
   `OPENSTUDIO_WAYLAND=0` brings back the X11 window, where plugin windows dock. CI runs on Linux on every push
@@ -78,7 +76,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
   right), a second, smaller grey arrow points at the nearest of those, in a narrow grid too. Notes on one key at the
   same time look stacked: a note lying over others gets a thin layer above it for each one under it, up to three, only
   over the stretch they share.
-- **Plugin editors in the app's window (Linux).** The plugins compiled into Lemon Studio (the stock instruments and
+- **Plugin editors in the app's window (Linux and macOS).** The plugins compiled into Lemon Studio (the stock instruments and
   effects) draw their editors inside Lemon Studio's own window, as floating windows like the instrument rack: no X11
   window, no XWayland, no OpenGL. Their menus and value boxes are drawn above the app; knob drags hold the cursor as the
   app's own knobs do; the close shortcut closes them. In the Lemon skin their window is a card like the channel
@@ -86,8 +84,8 @@ own content. Side branches are named `cutting-edge-<topic>`.
   Presets, close). FL's frame is gone there: no minimize button, no gear strip (the channel settings window has those
   controls), no frame around the editor. Third-party plugins keep windows of their own.
   `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives the built-in ones their own windows again.
-- **Zest.** An analog-style synthesizer, compiled in on x86-64 (`plugins/zest`). It aims at the sound of u-he Diva and loads Diva's presets when they are installed. Its Space bank holds borrowed Diva presets for now; further banks go in `plugins/zest/banks/` or `~/.local/share/zest/banks/` as `.zest` files.
-- **Windows of one plugin as tabs (Linux).** A second window of a plugin drawn in the app's joins the first, with a row of
+- **Zest.** An analog-style synthesizer, compiled in on every processor (`plugins/zest`: SSE on x86-64, the same operations in plain Rust elsewhere). It aims at the sound of u-he Diva and loads Diva's presets when they are installed. Its Space bank holds borrowed Diva presets for now; further banks go in `plugins/zest/banks/` or `~/.local/share/zest/banks/` as `.zest` files.
+- **Windows of one plugin as tabs (Linux and macOS).** A second window of a plugin drawn in the app's joins the first, with a row of
   tabs on top of the window: each narrows upwards between slanted edges, the window keeps its size (no row is added
   to it), and the row starts clear of its rounded corners. Each tab has its own close button, and the one left shows at
   once; the window's close closes them all. A tab dragged out of the row stands alone, to compare side by side. Held for a moment over another window of its plugin's title, or just below it, a dragged window shows in its own row of tabs the group it would make, its own tab outlined, and letting go there makes it where it was let go. General ▸ Miscellaneous "Show windows of
@@ -109,20 +107,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Closing costs nothing: the session comes back.** General settings ▸ Miscellaneous ▸ Startup project is on "Last
   used project" by default, and a start puts back the windows that were open in it when the app closed (the arranger,
   mixer, piano roll, instrument rack, channel window, tool windows and plugin windows, back to front; each plugin's
-  window once its plugin has loaded). Linux: the audio stream is named "Lemon Studio" in the sound server, not
-  "PipeWire ALSA [lemonstudio]" (unless `PIPEWIRE_ALSA` is set).
-- **Real-time audio threads (Linux).** The feeder that renders and the device callback run at real-time priority
-  (through rtkit, as PipeWire's do), so a busy machine no longer makes them late at small buffers. A thread that keeps
-  the CPU too long (a project too heavy to play in time, or the kernel freeing memory for it on a full machine) goes
-  back to normal priority instead of the kernel ending the program, and gets real-time priority back once it has
-  stayed calm for a few seconds. The UI touches a plugin only just after the audio thread processed it (reading its
-  state, its parameters, its window's work), so it makes no plugin late. Under load (16 busy threads per core, 4 ms
-  of work per 5.3 ms block) a normal-priority thread missed all of 1500 blocks, a real-time one none
-  (`rt::tests::deadlines_under_load`).
-- **A dropout log (Linux).** `Logs/audio.log` in the user folder says why playback dropped out: each playback's start
-  (its audio settings), each audio thread's priority (real-time, or refused and why, or taken back by the safety cap),
-  and dropouts at most once a second, by kind (the feeder late, a plugin late, the device's own underruns) with the
-  threads' priority at that moment, and what held a plugin for 2 ms or more on the UI's side. Events only, and at 256 KB it becomes `audio.log.1`: never more than half a MB.
+  window once its plugin has loaded).
 - **A media player to the desktop (MPRIS).** Lemon Studio is on the session bus as `org.mpris.MediaPlayer2.lemonstudio`:
   media keys, a bar's player widget and `playerctl` play, pause and stop the transport, and show whether it plays and
   the project's name.
