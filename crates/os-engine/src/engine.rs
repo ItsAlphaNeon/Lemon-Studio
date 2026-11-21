@@ -2701,6 +2701,18 @@ impl Engine {
         self.take_mixer(old);
     }
 
+    /// Pattern playback taken over from another pattern's engine (`continue_from`) while it plays (spec:
+    /// audio/transport.md "Switching patterns while playing"): the position goes on where it was when this pattern is
+    /// that long; past its end, at the same place in the bar it was in (`bar_start` gives where the bar holding a tick
+    /// starts, on the grid of the pattern that played), counted from this pattern's start. Sounding notes keep their
+    /// remaining length, as at a loop point.
+    pub fn pattern_switched(&mut self, bar_start: impl Fn(u64) -> u64) {
+        if self.end_tick > 0 && self.tick >= self.end_tick {
+            let to = (self.tick - bar_start(self.tick).min(self.tick)) % self.end_tick;
+            self.jump_to(to, false);
+        }
+    }
+
     /// Carries on from `old` with the hosted plugins as it left them, for a stream that plays this engine's first
     /// frame right after `old`'s last (a Play while a Stop's tails ring): the mixer goes on (its glides, pads and own
     /// effects) and the instruments keep being processed while `old` would have, so what they ring goes on unbroken.
