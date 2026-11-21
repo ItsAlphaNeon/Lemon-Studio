@@ -5865,6 +5865,22 @@ impl App {
                 let pan = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.pan).unwrap_or(0.0);
                 (target::mixer(t, target::MIXER_PAN), format!("{} - Pan", mix_name(t)), 0.5 + pan / 2.0)
             }
+            // The stereo separation knob, a send level knob and an effect slot's mix knob, named as the original names
+            // their clips ("Delay - Stereo separation", "Delay - To Master", "Fruity delay bank (Delay) - Mix level",
+            // an empty slot's "Slot 2 (Insert 17) - Mix level": `init::name`); a new clip stores the knob's level (spec:
+            // flp/events/automation.md "Targets", measured 2026-11-21).
+            Action::Knob(k @ (crate::knobs::KnobId::MixSep(t) | crate::knobs::KnobId::Send(t, _) | crate::knobs::KnobId::SlotMix(t, _))) => {
+                crate::mixer::track(s, t)?;
+                let tgt = match k {
+                    crate::knobs::KnobId::Send(_, d) => target::send(t, d),
+                    crate::knobs::KnobId::SlotMix(_, slot) => target::slot(t, slot.min(9), target::SLOT_MIX),
+                    _ => target::mixer(t, target::MIXER_SEPARATION),
+                };
+                (tgt, crate::init::name(s, tgt), f64::from(s.knob(k)))
+            }
+            // The toolbar's master pitch knob, "Master pitch" at its level (0 cents = 0.5). The main volume knob has no
+            // automation in the original (its menu is Reset, Copy value, Paste value, Type in value...).
+            Action::Knob(k @ crate::knobs::KnobId::MasterPitch) => (target::MAIN_PITCH, "Master pitch".into(), f64::from(s.knob(k))),
             Action::Fader(t) => {
                 let v = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 (target::mixer(t, target::MIXER_VOLUME), format!("{} - Volume", mix_name(t)), v)
@@ -18527,7 +18543,7 @@ mod tests {
             app.state.playlist.edit.clone().expect("value box")
         };
         let pitch = Target::Knob(KnobId::MasterPitch);
-        let e = open(&mut app, &mut c, Action::Knob(KnobId::MasterPitch), false);
+        let e = open(&mut app, &mut c, Action::Knob(KnobId::MasterPitch), true);
         assert_eq!(e.target, EditTarget::TypeIn(pitch, false));
         assert_eq!(e.text, "440");
         assert_eq!(crate::typein::width(pitch), crate::typein::W_PLAIN);
@@ -18557,9 +18573,61 @@ mod tests {
         typ(&mut app, "40 left");
         assert_eq!(app.state.knob_text(KnobId::MixPan(2)), "Panning: 40% left");
         frame(&mut app, &mut c, None);
-        open(&mut app, &mut c, Action::Knob(KnobId::MixSep(2)), false);
+        open(&mut app, &mut c, Action::Knob(KnobId::MixSep(2)), true);
         typ(&mut app, "50");
         assert!(app.state.knob_text(KnobId::MixSep(2)).ends_with("50% merged"), "{}", app.state.knob_text(KnobId::MixSep(2)));
+    }
+
+    /// Create automation clip on an effect slot's mix knob, a stereo separation knob, a send knob and the master pitch
+    /// knob (issue #383; spec flp/events/automation.md "Targets", measured 2026-11-21): the right-click menu offers it, and
+    /// the clip is named as the original names it, on the control's target, at the control's level.
+    #[test]
+    fn mixer_knobs_and_master_pitch_create_automation_clips() {
+        use crate::knobs::KnobId;
+        use crate::playlist::{self as pl, Cmd};
+        use os_model::target;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.mixer[3].name = Some("Delay".into());
+        app.state.project.mixer[3].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Test Delay".into(), state: Vec::new() });
+        app.state.project.mixer[3].slot_mix[0] = 0.75;
+        app.state.project.mixer[3].stereo_separation = Some(-0.5);
+        app.state.project.mixer[3].routes.push(5);
+        app.state.project.mixer[3].send_levels = vec![(5, 0.4)];
+        app.state.project.main_pitch = Some(600);
+        app.state.selected_mixer = 3;
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let cases = [
+            (KnobId::SlotMix(3, 0), target::slot(3, 0, target::SLOT_MIX), "Test Delay (Delay) - Mix level", 0.75),
+            (KnobId::SlotMix(3, 1), target::slot(3, 1, target::SLOT_MIX), "Slot 2 (Delay) - Mix level", 1.0),
+            (KnobId::MixSep(3), target::mixer(3, target::MIXER_SEPARATION), "Delay - Stereo separation", 0.25),
+            (KnobId::Send(3, 5), target::send(3, 5), "Delay - To Bus 5", 0.4),
+            (KnobId::Send(3, 0), target::send(3, 0), "Delay - To Master", 0.8),
+            (KnobId::MasterPitch, target::MAIN_PITCH, "Master pitch", 0.75),
+        ];
+        for (k, tgt, name, v) in cases {
+            let auto = app.automation_target(&Action::Knob(k)).unwrap_or_else(|| panic!("{k:?} has a target"));
+            assert_eq!((auto.0, auto.1.as_str()), (tgt, name), "{k:?}");
+            assert!((auto.2 - v).abs() < 1e-6, "{k:?}: {}", auto.2);
+            let made = pl::create_automation(&mut app.state, tgt, &auto.1, auto.2);
+            assert_eq!(app.state.project.channels.iter().find(|c| c.index == made).and_then(|c| c.name.as_deref()), Some(name));
+            let clip = app.state.project.automation(made).unwrap();
+            assert_eq!(clip.target(), Some(tgt));
+            assert!((clip.points[0].value - v).abs() < 1e-6);
+        }
+        // The main volume has no automation (its menu: Reset, Copy value, Paste value, Type in value...).
+        assert!(app.automation_target(&Action::Knob(KnobId::MasterVol)).is_none());
+        // A right click on the slot's mix knob in the mixer offers the entry.
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Knob(KnobId::SlotMix(3, 0)));
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        let menu = app.state.playlist.popup.clone().expect("knob menu");
+        let item = menu.items.iter().find(|i| i.label == "Create automation clip").expect("Create automation clip");
+        assert!(matches!(&item.cmd, Cmd::CreateAutomation(t, n, _) if *t == target::slot(3, 0, target::SLOT_MIX) && n == "Test Delay (Delay) - Mix level"));
     }
 
     #[test]
