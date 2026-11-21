@@ -7159,7 +7159,8 @@ impl App {
     }
 
     /// A double right click on a ghost note (another channel's, shown with Ghost channels on) makes its channel the
-    /// piano roll's, as in FL. Returns whether this press was the second click.
+    /// piano roll's, as in FL: the notes selected are let go, the ruler's time selection stays (spec:
+    /// ui/piano-roll.md §8). Returns whether this press was the second click.
     fn ghost_double(&mut self, x: f32, y: f32) -> bool {
         let s = &self.state;
         let Some(g) = self.piano_geom().filter(|_| s.piano.ghosts) else { return false };
@@ -7173,7 +7174,9 @@ impl App {
         let double = self.ghost_right.is_some_and(|(r, at)| r == row && now.duration_since(at).as_millis() < 450);
         self.ghost_right = (!double).then_some((row, now));
         if double {
+            let range = self.state.piano.range;
             self.state.message = Some(crate::piano_tools::target(&mut self.state, row));
+            self.state.piano.range = range;
             self.invalidate();
         }
         double
@@ -17882,11 +17885,23 @@ mod tests {
             app.mouse_up_from(None);
             frame(app, c, None);
         };
+        // Channel 3's notes all selected, with a time selection over them (issue #396).
+        let mut own = piano::notes(&app.state)[0];
+        own.channel = app.state.project.channels[3].index;
+        own.position = 384;
+        piano::pattern_mut(&mut app.state).notes.push(own);
+        frame(&mut app, &mut c, None);
+        let (pat, ch3) = (app.state.pattern, own.channel);
+        app.state.piano.select(pat, ch3, vec![1]);
+        app.state.piano.range = Some((0, 768));
         right(&mut app, &mut c);
         assert_eq!(app.state.selected_channel, 3, "one right click");
+        assert_eq!(app.state.piano.selection(pat, Some(ch3)), [1], "one right click keeps the selection");
         right(&mut app, &mut c);
         assert_eq!(app.state.selected_channel, 1, "the second: the ghost's channel");
-        assert_eq!(piano::notes(&app.state).len(), 1, "nothing deleted");
+        assert_eq!(piano::notes(&app.state).len(), 2, "nothing deleted");
+        assert!(app.state.piano.selection(pat, Some(ch3)).is_empty(), "no notes selected");
+        assert_eq!(app.state.piano.range, Some((0, 768)), "the time selection stays");
         // The tool wheel works here too.
         app.mouse_move(g.x_of(400.0), g.y_of(72) + 4.0);
         app.mouse_down_right();
