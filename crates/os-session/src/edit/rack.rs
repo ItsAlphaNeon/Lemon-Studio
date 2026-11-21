@@ -998,6 +998,17 @@ pub fn read_tags(st: &crate::settings_file::SettingsStore, ch: &mut os_model::Ch
 /// (`locked::Locked`), and the flag for what playback reads outside it (`Session::dirty`). Returns whether playback was
 /// given the project again.
 pub fn sync_playback(ses: &mut crate::session::Session) -> bool {
+    let synced = sync_project(ses);
+    // Another pattern made current while a pattern plays: playback goes on with it at once, from where it is (spec:
+    // audio/transport.md "Switching patterns while playing"). After the edits, so a new pattern is there to play.
+    if !ses.song_mode() {
+        ses.transport.switch_pattern(ses.pattern());
+    }
+    synced
+}
+
+/// `sync_playback`'s project: given to playback again when an edit changed what it reads.
+fn sync_project(ses: &mut crate::session::Session) -> bool {
     let written = ses.project.take_written();
     // A write alone that changes nothing playback reads (the project's info, a plugin state stored for a save) builds no
     // new engine.

@@ -152,6 +152,7 @@ fn target_text(t: Target) -> String {
         Target::Member(m, k, id, wet) => format!("{}:{m}:{k}:{id}", if wet { "memberwet" } else { "memberdry" }),
         Target::MemberParam(m, k, id, i) => format!("memberparam:{m}:{k}:{id}:{i}"),
         Target::Latency(..) => "none".into(),
+        Target::Tempo => "tempo".into(),
     }
 }
 
@@ -163,6 +164,7 @@ fn parse_target(s: &str) -> Option<Target> {
         "mainvol" => Target::Knob(KnobId::MasterVol),
         "mainpitch" => Target::Knob(KnobId::MasterPitch),
         "swing" => Target::Knob(KnobId::Swing),
+        "tempo" => Target::Tempo,
         "mixpan" => Target::Knob(KnobId::MixPan(n()? as u16)),
         "mixsep" => Target::Knob(KnobId::MixSep(n()? as u16)),
         "slotmix" => Target::Knob(KnobId::SlotMix(n()? as u16, n()? as u8)),

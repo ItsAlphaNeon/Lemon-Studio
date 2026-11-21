@@ -137,13 +137,13 @@ fn view(s: &mut State, v: crate::session::View) {
         }
         View::MemberLevel { t, k, id, wet, v } => crate::container_ui::show_level(s, t, k, id, wet, v),
         View::PatternsMoved(map) => {
-            // The playlist's Draw source and its locked clip length follow their pattern; a pattern that goes takes them.
+            // The playlist's Draw source and its clip brush follow their pattern; a pattern that goes takes them.
             let follow = |c: os_model::ClipSource| match c {
                 os_model::ClipSource::Pattern(n) => map.get(usize::from(n)).copied().unwrap_or(Some(n)).map(os_model::ClipSource::Pattern),
                 c => Some(c),
             };
             s.playlist.source = s.playlist.source.and_then(follow);
-            s.playlist.lock_len = s.playlist.lock_len.and_then(|(c, len)| Some((follow(c)?, len)));
+            s.playlist.brush = s.playlist.brush.and_then(|c| Some(os_model::Clip { source: follow(c.source)?, ..c }));
         }
         View::PatternsRenumbered => {
             s.playlist.sel.clear();

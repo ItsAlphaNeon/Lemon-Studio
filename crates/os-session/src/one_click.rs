@@ -96,7 +96,7 @@ pub fn with_lost(placed: String) -> String {
 
 /// Every tick: follows where the song's start falls in the input; on stop, pause or disarm finishes the file;
 /// once it is made, places it (spec §2 The take).
-/// `lock_len` as `playlist::place_in` takes it. A finished take for the audio editor comes back for the interface.
+/// `lock_len`: the clip brush's source and the length its next clip gets (the interface's `playlist::brush_len`). A finished take for the audio editor comes back for the interface.
 pub fn tick_in(s: &mut Session, lock_len: Option<(os_model::ClipSource, u32)>) -> Option<std::path::PathBuf> {
     let Some(r) = s.audio_rec.as_mut() else { return None };
     if !r.ending {

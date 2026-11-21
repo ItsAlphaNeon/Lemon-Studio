@@ -82,6 +82,11 @@ tiny-skia = "0.11"
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
+# The tests (the splash, the frame timing, the window tests) set checks and choices: per-thread settings keep them off
+# the user's settings file.
+[dev-dependencies]
+os-app = { path = "../os-app", default-features = false, features = ["test-util"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_System_DataExchange", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 

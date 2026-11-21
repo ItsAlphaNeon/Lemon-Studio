@@ -6997,6 +6997,35 @@ mod tests {
         assert_eq!(read, [Some(Target::MainSwing), Some(Target::ChannelMixerTrack(1)), Some(Target::ChannelOn(0))]);
     }
 
+    /// Clips on an effect slot's mix level, a track's stereo separation, a send level and the main pitch (spec:
+    /// flp/events/automation.md "Targets"; the original's Create automation clip on Insert 17's controls wrote targets
+    /// 0x7440_1F01, 0x7440_1FC2, 0x7440_2000 and 0x4000_0002, measured 2026-11-21) are written as those links and read
+    /// back as they were.
+    #[test]
+    fn mixer_knob_automation_round_trips() {
+        use os_model::target::{self, decode, Target};
+        let mut p = new_project();
+        let names = ["Fruity delay bank (Delay) - Mix level", "Delay - Stereo separation", "Delay - To Master", "Master pitch"];
+        for (i, name) in (2u16..).zip(names) {
+            p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(i, name, 0) });
+        }
+        let tgts = [target::slot(17, 0, target::SLOT_MIX), target::mixer(17, target::MIXER_SEPARATION), target::send(17, 0), target::MAIN_PITCH];
+        assert_eq!(tgts, [0x7440_1F01, 0x7440_1FC2, 0x7440_2000, 0x4000_0002]);
+        for ((i, t), v) in (2u16..).zip(tgts).zip([1.0, 0.5, 0.8, 0.5]) {
+            p.automations.push(new_automation(i, t, v, 4.0));
+        }
+        let mut arr = default_arrangement();
+        arr.clips = (0..4).map(|k| Clip::new(0, 384, k, ClipSource::Channel(2 + k))).collect();
+        p.arrangements = vec![arr];
+        let file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.automations, p.automations);
+        let links = events_of(&file).unwrap().iter().filter(|e| e.id == id::AUTO_LINK).filter_map(|e| e.data()).map(|d| d[8..12].to_vec()).collect::<Vec<_>>();
+        assert_eq!(links, tgts.map(|t| t.to_le_bytes().to_vec()));
+        let read: Vec<Option<Target>> = back.automations.iter().map(|a| a.target().map(decode)).collect();
+        assert_eq!(read, [Some(Target::SlotMix(17, 0)), Some(Target::MixerSeparation(17)), Some(Target::MixerSend(17, 0)), Some(Target::MainPitch)]);
+    }
+
     /// A clip on an effect inside a container (Lemon Studio's member targets: the container slot's parameter packing
     /// the member's id and the item, spec plugins/patcher/README.md §4.2) is a slot parameter link like any other: up
     /// to the last member's dry level, 0x7FFF, it is written and read back as it is.

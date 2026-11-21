@@ -680,14 +680,131 @@ pub fn list_h(s: &State) -> f32 {
     (s.screen.1 - list_top(s) - FOOTER_H - info_h(&rows(s), s)).max(0.0)
 }
 
-/// The selected disk entry, shown in the info panel (spec §6).
+/// The selected disk entry, shown in the info panel (spec §6), unless it is a sample (its waveform panel, §7b).
 fn info_path(rows: &[Row], s: &State) -> Option<PathBuf> {
     let k = s.browser_sel.as_deref()?;
-    rows.iter().find(|r| r.key == k)?.path.clone()
+    rows.iter().find(|r| r.key == k && !matches!(r.item, Item::Sample(_)))?.path.clone()
 }
 
+/// The selected sample, whose waveform panel shows above the footer (spec §7b).
+fn wave_of(rows: &[Row], s: &State) -> Option<String> {
+    let k = s.browser_sel.as_deref()?;
+    match &rows.iter().find(|r| r.key == k)?.item {
+        Item::Sample(p) => Some(p.clone()),
+        _ => None,
+    }
+}
+
+/// The sample the waveform panel shows, if any (spec §7b).
+pub fn wave_sample(s: &State) -> Option<String> {
+    wave_of(&rows(s), s)
+}
+
+/// The height the panel above the footer takes: the waveform panel's or the info panel's, else none.
 fn info_h(rows: &[Row], s: &State) -> f32 {
-    if info_path(rows, s).is_some() { INFO_H } else { 0.0 }
+    if wave_of(rows, s).is_some() {
+        WAVE_SLOT
+    } else if info_path(rows, s).is_some() {
+        INFO_H
+    } else {
+        0.0
+    }
+}
+
+/// The room the waveform panel takes above the footer (spec §7b): 4 px, the 101 px panel, 4 px.
+const WAVE_SLOT: f32 = 109.0;
+/// The waveform panel's height with its border.
+const WAVE_H: f32 = 101.0;
+
+/// The selected sample's waveform panel (spec §7b): the file's waveform, a loop and its cue markers when the file has
+/// them, the play / stop button, the rate and bit depth, and the play cursor while the preview sounds.
+fn paint_wave(ui: &mut Ui, s: &State, sample: &str, slot: Rect, list: Rect) {
+    let t = ui.t;
+    ui.c.fill_rect(slot, t.browser_tabs);
+    let outer = Rect::new(list.x, slot.y + 4.0, list.w, WAVE_H);
+    s.browser_wave_rect.set(Some(outer));
+    let inner = Rect::new(outer.x + 1.0, outer.y + 1.0, outer.w - 2.0, outer.h - 2.0);
+    let file = crate::plugins::resolve_sample(&s.session.settings, sample);
+    let facts = {
+        let mut cache = s.browser_facts.borrow_mut();
+        match cache.as_ref() {
+            Some((p, f)) if p == sample => f.clone(),
+            _ => {
+                let f = std::rc::Rc::new(crate::wav_facts::read(Path::new(&file)));
+                *cache = Some((sample.to_string(), f.clone()));
+                f
+            }
+        }
+    };
+    let looped = facts.sample_loop.is_some();
+    ui.c.fill_rect(outer, t.s(0x0b1419));
+    ui.c.fill_rect(inner, if looped { t.s(0x261c21) } else { t.s(0x131c21) });
+    let hov = ui.hit(inner, Action::BrowserWave, "Click to play the sample from its start");
+    let wave = s.session.samples.wave(&s.session.settings, sample);
+    let frames = wave.as_ref().map_or(0, |w| w.frames);
+    let x_of = |frame: f64| inner.x + (frame / frames.max(1) as f64 * f64::from(inner.w)) as f32;
+    if let Some(w) = &wave {
+        // One column per pixel: the lowest to the highest value under it, as one band about the middle row.
+        let base = if looped { t.s(0x94888d) } else { t.s(0x81888d) };
+        let col = if hov { base.mix(t.s(0x131c21), 0.3) } else { base };
+        let mid = (inner.y + inner.h / 2.0).floor();
+        let amp = (inner.h / 2.0 - 1.0).floor();
+        let n = inner.w as usize;
+        for i in 0..n {
+            let (a, b) = (i * w.peaks.len() / n.max(1), ((i + 1) * w.peaks.len() / n.max(1)).max(i * w.peaks.len() / n.max(1) + 1));
+            let (lo, hi) = w.peaks[a.min(w.peaks.len())..b.min(w.peaks.len())].iter().fold((0.0f32, 0.0f32), |(lo, hi), &(l, h)| (lo.min(l), hi.max(h)));
+            let (y0, y1) = ((mid - hi.clamp(-1.0, 1.0) * amp).round(), (mid - lo.clamp(-1.0, 1.0) * amp).round());
+            ui.c.fill_rect(Rect::new(inner.x + i as f32, y0, 1.0, (y1 - y0).max(1.0)), col);
+        }
+        // The loop's ends, red; the cue markers, small orange triangles along the top.
+        if let Some((a, b)) = facts.sample_loop {
+            for f in [f64::from(a), f64::from(b) + 1.0] {
+                let x = x_of(f).clamp(inner.x, inner.right() - 1.0).floor();
+                ui.c.fill_rect(Rect::new(x, inner.y, 1.0, inner.h), t.s(0xed1313));
+            }
+        }
+        for &c in &facts.cues {
+            let x = x_of(f64::from(c)).floor() + 0.5;
+            let y = inner.y;
+            ui.c.fill_polygon(&[(x - 3.5, y), (x + 3.5, y), (x, y + 4.5)], t.h(0xea9049));
+        }
+    }
+    // The play cursor, with a trail fading behind it, while the preview of this sample sounds.
+    let play = s.browser_play.as_ref().filter(|p| p.path == sample);
+    let at = play.and_then(|p| p.at(crate::anim::now()).map(|t| (t, p.file_secs)));
+    if let Some((secs, len)) = at.filter(|(_, len)| *len > 0.0) {
+        let x = (inner.x + secs / len * inner.w).floor().min(inner.right() - 1.0);
+        ui.c.push_clip(inner);
+        const TRAIL: usize = 24;
+        for k in 1..=TRAIL {
+            let u = 1.0 - k as f32 / (TRAIL + 1) as f32;
+            ui.c.fill_rect(Rect::new(x - k as f32, inner.y, 1.0, inner.h), t.h(0x9d7a54).with_alpha((u * u * 150.0) as u8));
+        }
+        ui.c.fill_rect(Rect::new(x, inner.y, 1.0, inner.h), t.h(0xf8bc7e));
+        ui.c.pop_clip();
+    }
+    // The button: ▶, or a square while the preview sounds.
+    let b = Rect::new(outer.x + 4.0, outer.bottom() - 16.0, 24.0, 14.0);
+    let bhov = ui.hit(b, Action::BrowserWavePlay, if at.is_some() { "Stop the preview" } else { "Play the sample" });
+    ui.c.fill_rrect(b, 2.0, t.s(0x0f1519));
+    let face = if at.is_some() { t.h(0xda833a) } else { t.s(0x878787) };
+    ui.c.fill_rrect(Rect::new(b.x + 1.0, b.y + 1.0, b.w - 2.0, b.h - 2.0), 2.0, if bhov { face.shade(0.15) } else { face });
+    let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+    if at.is_some() {
+        ui.c.fill_rect(Rect::new(cx - 3.0, cy - 2.5, 6.0, 5.0), t.s(0x000000));
+    } else {
+        ui.c.fill_polygon(&[(cx - 2.5, cy - 3.0), (cx + 2.5, cy), (cx - 2.5, cy + 3.0)], t.s(0x000000));
+    }
+    // The rate and bit depth (and the tempo an `acid` chunk gives), bottom right.
+    if let Some(w) = &wave {
+        let mut info = crate::wav_facts::rate_text(w.rate);
+        if let Some(beats) = facts.beats.filter(|_| w.secs() > 0.0) {
+            info += &format!(" {} BPM", (f64::from(beats) * 60.0 / w.secs()).round());
+        }
+        info += &format!(" {}", facts.pcm_bits.unwrap_or(32));
+        let f = os_ui::Font::new(13);
+        ui.c.text_right(f, inner.right() - 5.0, outer.bottom() - 16.0, t.text_dim, &info);
+    }
 }
 
 /// `35 B`, `12.4 KB`, `2.29 MB` (spec §6).
@@ -854,7 +971,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     }
     let rows = rows(s);
     let info = info_path(&rows, s);
-    let ih = if info.is_some() { INFO_H } else { 0.0 };
+    let wave = wave_of(&rows, s);
+    let ih = info_h(&rows, s);
     let list = Rect::span(13.0, bw - 1.0, top, r.bottom() - FOOTER_H - ih);
     ui.c.fill_rect(Rect::new(0.0, top, 13.0, list.h), t.browser_tabs.shade(0.02));
     ui.c.fill_rect(list, t.browser_list);
@@ -942,8 +1060,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
     }
     ui.c.pop_clip();
-    if let Some(p) = &info {
+    if let Some(sample) = &wave {
+        paint_wave(ui, s, sample, Rect::new(0.0, list.bottom(), bw, ih), list);
+    } else if let Some(p) = &info {
+        s.browser_wave_rect.set(None);
         paint_info(ui, s, p, Rect::new(0.0, list.bottom(), bw, ih));
+    } else {
+        s.browser_wave_rect.set(None);
     }
     // Footer: the search field takes the width the splitter adds.
     let fy = r.bottom() - 27.0;

@@ -169,7 +169,7 @@ others' work (`crates/os-vst2/src/abi.rs`, `crates/os-ui/src/tabler.rs`) name it
 | [signalsmith-stretch](https://github.com/colinmarc/signalsmith-stretch-rs) by Colin Marc | Rust bindings to Signalsmith Stretch | MIT |
 | [ASIO SDK](https://www.steinberg.net/asiosdk) by Steinberg Media Technologies GmbH (host files) | ASIO output on Windows | [GPLv3](../crates/os-app/asiosdk/LICENSE.txt) (its GPL option); a Windows build with it is GPLv3 |
 | [Cantarell](https://gitlab.gnome.org/GNOME/cantarell-fonts), built into the sctk-adwaita crate | Window title bars on Wayland (Linux) | SIL Open Font License 1.1 |
-| [LAME](https://lame.sourceforge.io) 3.100, built by the mp3lame-sys crate | MP3 export | LGPL version 2 or later |
+| [LAME](https://lame.sourceforge.io) 4.0, built by the mp3lame-sys crate | MP3 export | LGPL version 2 or later |
 | Rust crates listed in `Cargo.lock` | Various | Their respective licenses |
 
 Their copyright notices and licence texts are collected in [THIRD-PARTY-NOTICES.txt](../THIRD-PARTY-NOTICES.txt), which

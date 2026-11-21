@@ -18,3 +18,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 
 [target.'cfg(unix)'.dependencies]
 swash = "0.2"
+
+# The outline engine's tests run on Windows too.
+[target.'cfg(windows)'.dev-dependencies]
+swash = "0.2"

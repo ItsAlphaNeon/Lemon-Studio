@@ -164,6 +164,8 @@ pub enum Run {
     Channel(usize, ChannelControl),
     /// A controller moving the wet (`.3`) or dry level of member `.2` of the container in slot `.1` of track `.0`.
     Member(u16, u8, u32, bool),
+    /// A controller moving the tempo.
+    Tempo,
     /// A client's gesture (`control::begin_in`).
     Gesture(u64),
     /// The steps a press in the step sequencer paints, with the drag that follows.

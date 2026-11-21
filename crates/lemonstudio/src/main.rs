@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorGrabMode, CursorIcon, ResizeDirection, Window, WindowId};
@@ -93,6 +93,9 @@ struct Shell {
     detached: Vec<detached_win::DetWin>,
     /// The key event being handled came to this detached window: it goes to the app on that window's surface.
     key_on: Option<app::Win>,
+    /// The finger or pen that stands in for the mouse, and where it last was (physical pixels in its window). The window
+    /// system reports a touch apart from the mouse and sends no mouse events for it (`touch_event`).
+    touch: Option<(u64, (f64, f64))>,
 }
 
 /// Frame timing for tuning (`OS_FRAMES=<file>`): per frame the time, what was repainted (`full` or the number of
@@ -341,6 +344,66 @@ fn draw_border(buf: &mut [u32], w: usize, h: usize, (l, t, r, b): (u32, u32, u32
 }
 
 impl Shell {
+    /// Motion of the held cursor (`lock`), in physical pixels: the virtual position follows it, and the hidden cursor is
+    /// held at the anchor. Held in a detached window, the motion goes to that window's surface.
+    fn held_motion(&mut self, delta: (f64, f64)) {
+        let (Some((anchor, virt)), Some(window)) = (self.lock, self.lock_window()) else { return };
+        let scale = ui_scale(&window);
+        let v = (virt.0 + (delta.0 / scale) as f32, virt.1 + (delta.1 / scale) as f32);
+        self.lock = Some((anchor, v));
+        self.app.on(self.lock_on, |a| a.mouse_move(v.0, v.1));
+        if !self.pointer_locked {
+            let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+        }
+        if self.lock_on.is_some_and(|w| self.app.detached_dirty(w)) {
+            window.request_redraw();
+        }
+        self.pending = true;
+    }
+
+    /// A touch screen's finger or pen plays the left mouse button: the first one down moves the pointer there and
+    /// presses, its moves move the pointer, and lifting it (or the system cancelling it) releases. Other fingers down at
+    /// the same time do nothing. While a knob or scroll-bar drag holds the cursor (`lock`), the finger's moves drive it
+    /// as the mouse's raw motion would.
+    fn touch_event(&mut self, el: &ActiveEventLoop, id: WindowId, touch: Touch) {
+        let Touch { device_id, phase, location, id: finger, .. } = touch;
+        let at = (location.x, location.y);
+        let moved = WindowEvent::CursorMoved { device_id, position: location };
+        let button = |state| WindowEvent::MouseInput { device_id, state, button: MouseButton::Left };
+        match phase {
+            TouchPhase::Started => {
+                if self.touch.is_some() {
+                    return;
+                }
+                self.touch = Some((finger, at));
+                self.window_event(el, id, moved);
+                self.window_event(el, id, button(ElementState::Pressed));
+            }
+            TouchPhase::Moved => {
+                let Some((held, last)) = self.touch else { return };
+                if held != finger {
+                    return;
+                }
+                self.touch = Some((finger, at));
+                if self.lock.is_some() {
+                    self.held_motion((at.0 - last.0, at.1 - last.1));
+                } else {
+                    self.window_event(el, id, moved);
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                if self.touch.is_none_or(|(held, _)| held != finger) {
+                    return;
+                }
+                self.touch = None;
+                if self.lock.is_none() {
+                    self.window_event(el, id, moved);
+                }
+                self.window_event(el, id, button(ElementState::Released));
+            }
+        }
+    }
+
     /// Holds the cursor for a drag that moves a value rather than the cursor (knobs, scroll-bar right-drags): hidden,
     /// with raw motion driving the virtual position `virt` (`device_event`).
     fn lock_cursor(&mut self, window: &Window, anchor: (f64, f64), virt: (f32, f32)) {
@@ -705,21 +768,17 @@ impl ApplicationHandler for Shell {
     /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor. Held in a detached
     /// window, the motion goes to that window's surface.
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.lock_window()) else { return };
-        let scale = ui_scale(&window);
-        let v = (virt.0 + (delta.0 / scale) as f32, virt.1 + (delta.1 / scale) as f32);
-        self.lock = Some((anchor, v));
-        self.app.on(self.lock_on, |a| a.mouse_move(v.0, v.1));
-        if !self.pointer_locked {
-            let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+        // While a finger holds the drag its own moves drive it (`touch_event`); a system that also reports them as raw
+        // motion would move it twice.
+        if let (DeviceEvent::MouseMotion { delta }, None) = (event, self.touch) {
+            self.held_motion(delta);
         }
-        if self.lock_on.is_some_and(|w| self.app.detached_dirty(w)) {
-            window.request_redraw();
-        }
-        self.pending = true;
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let WindowEvent::Touch(touch) = event {
+            return self.touch_event(el, id, touch);
+        }
         // A detached window's native window: its own handling, but for its keys, which go where the main window's do.
         let det = self.detached_of(id);
         self.key_on = det.map(|i| self.detached[i].win);
@@ -1883,6 +1942,7 @@ pub fn run() {
         main_win: layout::main_win(),
         detached: Vec::new(),
         key_on: None,
+        touch: None,
     };
     #[cfg(unix)]
     stop_signal::install();

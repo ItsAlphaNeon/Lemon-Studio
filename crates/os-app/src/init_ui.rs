@@ -70,9 +70,14 @@ pub fn name(s: &State, t: u32) -> String {
         Target::MixerPan(m) => format!("{} - Pan", mix(m)),
         Target::MixerSeparation(m) => format!("{} - Stereo separation", mix(m)),
         Target::MixerEq(m, b, k) => format!("{} - EQ band {} {}", mix(m), b + 1, ["gain", "frequency", "width"][usize::from(k).min(2)]),
-        Target::MixerSend(m, d) => format!("{} - Send to {}", mix(m), mix(d)),
+        // As the original names the clips on a send knob and a slot's mix knob: "Delay - To Master", "Fruity delay
+        // bank (Delay) - Mix level", an empty slot "Slot 2 (Insert 17) - Mix level" (measured 2026-11-21).
+        Target::MixerSend(m, d) => format!("{} - To {}", mix(m), mix(d)),
         Target::SlotOn(m, k) => format!("{} - Slot {} switch", mix(m), k + 1),
-        Target::SlotMix(m, k) => format!("{} - Slot {} mix level", mix(m), k + 1),
+        Target::SlotMix(m, k) => {
+            let slot = crate::mixer::slot_name(&s.session, m, k).unwrap_or_else(|| format!("Slot {}", k + 1));
+            format!("{slot} ({}) - Mix level", mix(m))
+        }
         // A plugin that isn't hosted: its parameter by number.
         p @ (Target::ChannelParam(..) | Target::SlotParam(..)) => match (crate::params::key_of(&s.session, p), p) {
             (Some((key, index)), _) => crate::params_ui::clip_name(s, key, index),
@@ -369,6 +374,6 @@ mod tests {
         assert_eq!(list[at - 1].label, crate::views::browser::REMOTE_CONTROL, "after Remote control (spec: ui/browser.md)");
         let inside = format!("{folder}/");
         let names: Vec<&str> = list.iter().filter(|r| r.key.starts_with(&inside)).map(|r| r.label.as_str()).collect();
-        assert_eq!(names, ["Clap - Channel volume", "Bus 1 - Volume", "Tempo", "Bus 2 - Slot 1 mix level", "Kick - Parameter 4"]);
+        assert_eq!(names, ["Clap - Channel volume", "Bus 1 - Volume", "Tempo", "Slot 1 (Bus 2) - Mix level", "Kick - Parameter 4"]);
     }
 }

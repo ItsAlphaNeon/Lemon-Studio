@@ -20,9 +20,9 @@ pub fn armed_file(s: &State, track: u16) -> String {
 }
 
 impl App {
-    /// Every tick: the session's `tick_in` with the song position and the playlist's last clip length.
+    /// Every tick: the session's `tick_in` with the song position and the playlist's clip brush.
     pub fn track_rec_tick(&mut self) {
-        let (pos, lock) = (self.state.session.song_pos, self.state.playlist.lock_len);
+        let (pos, lock) = (self.state.session.song_pos, crate::playlist::brush(&self.state));
         self.host(|ses| tick_in(ses, pos, lock));
     }
 

@@ -268,6 +268,10 @@ pub enum Action {
     BrowserClear,
     /// The splitter right of the browser: drag to resize it, double-click for the default width (§9).
     BrowserSplitter,
+    /// The selected sample's waveform panel: plays the sample again from its start (spec: ui/browser.md §7b).
+    BrowserWave,
+    /// The waveform panel's play / stop button (§7b).
+    BrowserWavePlay,
     PlaylistArea,
     MixerArea,
     RackArea,
@@ -841,6 +845,12 @@ impl Ui<'_> {
         hovered
     }
 
+    /// `hit` for a control in a scrolled area `view` (a track header, a list item): only its part inside `view` takes
+    /// the pointer, so a row scrolled part way out of view leaves what is drawn over its hidden part clickable.
+    pub fn hit_in(&mut self, view: Rect, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
+        self.hit(rect.intersect(&view), action, hint)
+    }
+
     /// Whether `ui.hit(rect, action, ..)` would say the mouse is over it (without registering it).
     pub fn hovers(&self, rect: Rect, action: &Action) -> bool {
         self.hover.as_ref() == Some(action) && rect.contains(self.mouse.0, self.mouse.1)
@@ -1184,6 +1194,12 @@ pub struct State {
     pub browser_split_click: Option<std::time::Instant>,
     /// The hovered row whose label is scrolling, as last painted (spec: ui/browser.md §9).
     pub browser_marquee: std::cell::RefCell<Option<views::browser::Marquee>>,
+    /// The browser's sample preview while it sounds, for the waveform panel's cursor and button (spec: ui/browser.md
+    /// §7b), and the panel's place as last painted.
+    pub browser_play: Option<crate::browser::Play>,
+    pub browser_wave_rect: std::cell::Cell<Option<Rect>>,
+    /// The WAV facts of the sample the waveform panel last showed (its path, read once).
+    pub browser_facts: std::cell::RefCell<Option<(String, std::rc::Rc<crate::wav_facts::WavFacts>)>>,
     /// Favorite files (spec: ui/browser.md §10) and the index of the browser's disk folders (§11).
     pub browser_favs: Vec<crate::browser::Fav>,
     pub browser_index: crate::browser_index::Index,
@@ -1454,6 +1470,8 @@ pub struct App {
     pub updates: crate::update::Updates,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
+    /// Alt+wheel movement over the playlist short of a whole notch (`App::wheel_act`).
+    row_notch: f32,
     /// A Shift+press grabbed piano-roll notes: the drag's first move picks up copies of them (`App::pick_up_notes`).
     shift_clone: bool,
     /// Audio ▸ Auto close: whether the output is closed while another program is in front (`crate::auto_close`).
@@ -1626,6 +1644,9 @@ impl App {
                 browser_w: crate::browser::load_width(),
                 browser_split_click: None,
                 browser_marquee: Default::default(),
+                browser_play: None,
+                browser_wave_rect: Default::default(),
+                browser_facts: Default::default(),
                 browser_favs: crate::browser::load_favs(),
                 browser_index: Default::default(),
                 tempo_digits: std::cell::Cell::new([f32::INFINITY; 3]),
@@ -1708,6 +1729,7 @@ impl App {
             audio_log: Default::default(),
             updates: Default::default(),
             menu_notch: 0.0,
+            row_notch: 0.0,
             shift_clone: false,
             auto_close: Default::default(),
             want_minimize: false,
@@ -3670,7 +3692,7 @@ impl App {
 
     /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
     /// time and then where it was left, also in later runs (`layout`); close it when it is in front (§1, §8).
-    fn toggle_tapper(&mut self) {
+    pub(crate) fn toggle_tapper(&mut self) {
         let s = &mut self.state;
         if s.shown(Win::Tapper) && s.in_front(Win::Tapper) {
             s.hide(Win::Tapper);
@@ -3951,6 +3973,7 @@ impl App {
             || !self.state.session.ext_pending.is_empty()
             || self.remote.busy()
             || self.state.browser_marquee.borrow().is_some()
+            || self.state.browser_play.is_some()
             || self.state.cpu.fps_view
     }
 
@@ -4082,6 +4105,7 @@ impl App {
         self.cables_tick(now);
         self.motion_tick();
         self.marquee_tick(now);
+        self.browser_play_tick(now);
         self.browser_index_tick();
         self.backup_tick(now);
         self.work_tick(now);
@@ -5604,6 +5628,22 @@ impl App {
                 let pan = s.session.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.pan).unwrap_or(0.0);
                 (target::mixer(t, target::MIXER_PAN), format!("{} - Pan", mix_name(t)), 0.5 + pan / 2.0)
             }
+            // The stereo separation knob, a send level knob and an effect slot's mix knob, named as the original names
+            // their clips ("Delay - Stereo separation", "Delay - To Master", "Fruity delay bank (Delay) - Mix level",
+            // an empty slot's "Slot 2 (Insert 17) - Mix level": `init::name`); a new clip stores the knob's level (spec:
+            // flp/events/automation.md "Targets", measured 2026-11-21).
+            Action::Knob(k @ (crate::knobs::KnobId::MixSep(t) | crate::knobs::KnobId::Send(t, _) | crate::knobs::KnobId::SlotMix(t, _))) => {
+                crate::mixer::track(&s.session, t)?;
+                let tgt = match k {
+                    crate::knobs::KnobId::Send(_, d) => target::send(t, d),
+                    crate::knobs::KnobId::SlotMix(_, slot) => target::slot(t, slot.min(9), target::SLOT_MIX),
+                    _ => target::mixer(t, target::MIXER_SEPARATION),
+                };
+                (tgt, crate::init_ui::name(s, tgt), f64::from(s.knob(k)))
+            }
+            // The toolbar's master pitch knob, "Master pitch" at its level (0 cents = 0.5). The main volume knob has no
+            // automation in the original (its menu is Reset, Copy value, Paste value, Type in value...).
+            Action::Knob(k @ crate::knobs::KnobId::MasterPitch) => (target::MAIN_PITCH, "Master pitch".into(), f64::from(s.knob(k))),
             Action::Fader(t) => {
                 let v = s.session.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 (target::mixer(t, target::MIXER_VOLUME), format!("{} - Volume", mix_name(t)), v)
@@ -6791,8 +6831,14 @@ impl App {
                 return self.invalidate();
             }
         }
-        // Knobs, faders and the tempo: "Create automation clip" (spec: ui/playlist.md §8) and "Enter value..."
-        // (spec: ui/type-in-value.md §8).
+        // The tempo display (spec: ui/tempo-menu.md).
+        if action == Some(Action::Tempo) {
+            let auto = self.automation_target(&Action::Tempo);
+            self.state.playlist.popup = Some(crate::tempo_menu::menu(&self.state, auto, x, y));
+            return self.invalidate();
+        }
+        // Knobs and faders: "Create automation clip" (spec: ui/playlist.md §8) and "Enter value..." (spec:
+        // ui/type-in-value.md §8).
         if let Some(a) = action.as_ref() {
             let typein = match *a {
                 Action::Knob(k) => Some(crate::typein::Target::Knob(k)),
@@ -6873,7 +6919,8 @@ impl App {
     }
 
     /// A double right click on a ghost note (another channel's, shown with Ghost channels on) makes its channel the
-    /// piano roll's, as in FL. Returns whether this press was the second click.
+    /// piano roll's, as in FL: the notes selected are let go, the ruler's time selection stays (spec:
+    /// ui/piano-roll.md §8). Returns whether this press was the second click.
     fn ghost_double(&mut self, x: f32, y: f32) -> bool {
         let s = &self.state;
         let Some(g) = self.piano_geom().filter(|_| s.piano.ghosts) else { return false };
@@ -6887,7 +6934,9 @@ impl App {
         let double = self.ghost_right.is_some_and(|(r, at)| r == row && now.duration_since(at).as_millis() < 450);
         self.ghost_right = (!double).then_some((row, now));
         if double {
+            let range = self.state.piano.range;
             self.state.message = Some(crate::piano_tools::target(&mut self.state, row));
+            self.state.piano.range = range;
             self.invalidate();
         }
         double
@@ -7188,25 +7237,28 @@ impl App {
     }
 
     /// Playback tool: the line moved from tick `from` to `to` (the same tick for a press). The notes it touches sound at
-    /// their velocities for as long as it stays on them with the button held; a note it passes in one jump sounds until
-    /// the next move (spec: ui/piano-roll.md §9).
+    /// their velocities for as long as it stays on them with the button held, the shown ghost notes' too, each on its
+    /// own channel; a note it passes in one jump sounds until the next move (spec: ui/piano-roll.md §9).
     fn scrub(&mut self, from: f32, to: f32) {
         let Some(ch) = piano::channel(&self.state) else { return };
-        let Some(row) = self.state.session.project.channels.iter().position(|c| c.index == ch) else { return };
-        let want = piano::scrub_keys(&self.state.session, ch, from, to);
+        let channels = &self.state.session.project.channels;
+        let want: Vec<(usize, u16, u8)> = piano::scrub_keys(&self.state.session, ch, self.state.piano.ghosts, from, to)
+            .into_iter()
+            .filter_map(|(c, k, v)| Some((channels.iter().position(|x| x.index == c)?, k, v)))
+            .collect();
         let transport = &self.state.session.transport;
         self.scrub_notes.retain(|&(r, k, _)| {
-            let keep = r == row && want.iter().any(|&(w, _)| w == k);
+            let keep = want.iter().any(|&(wr, wk, _)| (wr, wk) == (r, k));
             if !keep {
                 transport.note_off(r, k);
             }
             keep
         });
-        let new: Vec<(u16, u8)> = want.into_iter().filter(|&(k, _)| !self.scrub_notes.iter().any(|n| n.1 == k)).collect();
+        let new: Vec<(usize, u16, u8)> = want.into_iter().filter(|&(r, k, _)| !self.scrub_notes.iter().any(|n| (n.0, n.1) == (r, k))).collect();
         if !new.is_empty() {
             self.sync_live();
         }
-        for (k, velocity) in new {
+        for (row, k, velocity) in new {
             self.state.session.live(crate::session::Live::NoteOn { row, key: k, velocity, midi: 0 });
             self.scrub_notes.push((row, k, velocity));
         }
@@ -7741,9 +7793,18 @@ impl App {
             }
             // Alt+wheel anywhere in the playlist: track height (spec: ui/playlist.md §3, §6), at once (only the time
             // zoom eases, `crate::smooth`).
+            // A wheel reporting fractions of a notch (a high-resolution wheel or a touchpad, as Linux often sends them)
+            // adds them up to whole notches: each report rounded on its own lost a step under half a notch and made a
+            // whole one of half (issue #411).
             _ if pl_area && alt => {
                 let grid = pl_grid.unwrap_or(Rect::new(481.0, 150.0, 1400.0, 800.0));
-                crate::playlist::zoom_rows(s, grid, y, dy + dx);
+                if self.row_notch * (dy + dx) < 0.0 {
+                    self.row_notch = 0.0;
+                }
+                self.row_notch += dy + dx;
+                let notches = self.row_notch.trunc();
+                self.row_notch -= notches;
+                crate::playlist::zoom_rows(s, grid, y, notches);
                 Some(Win::Playlist)
             }
             // Ctrl+wheel anywhere in the playlist, the plain wheel over the ruler: time zoom around the mouse (§3). It
@@ -8486,10 +8547,7 @@ impl App {
             }
             Action::PlPickTab(k) => self.state.playlist.picker = k,
             Action::PlPick(src) => {
-                self.state.playlist.source = Some(src);
-                if let os_model::ClipSource::Pattern(n) = src {
-                    self.state.set_pattern(n);
-                }
+                pl::pick_source(&mut self.state, src);
                 if right {
                     let (x, y) = self.mouse;
                     match src {
@@ -9021,7 +9079,7 @@ impl App {
                 self.invalidate();
             }
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter => {}
+            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter | Action::BrowserWave | Action::BrowserWavePlay => {}
             Action::TypeIn(t) => crate::typein_ui::click(s, t),
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
@@ -11651,6 +11709,23 @@ mod tests {
         assert_eq!(app.state.tempo(), t0 + 10.0);
         app.mouse_up();
         assert!(!app.cursor_locked());
+    }
+
+    /// A right click on the tempo display opens its menu (spec: ui/tempo-menu.md §1), and its rows act.
+    #[test]
+    fn the_tempo_display_right_click_opens_its_menu() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Tempo);
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        let menu = app.state.playlist.popup.clone().expect("the tempo menu");
+        assert!(menu.items.iter().any(|i| i.col), "two columns");
+        let preset = menu.items.iter().find(|i| i.label == "150 BPM").expect("the presets");
+        crate::playlist::run(&mut app, preset.cmd.clone());
+        assert_eq!(app.state.tempo(), 150.0);
     }
 
     /// The tempo box's drag, Settings > Project's time settings: undo steps named as the control plane's commands, one
@@ -16103,6 +16178,50 @@ mod tests {
         assert!(app.scrub_notes.is_empty(), "they stop with the button");
     }
 
+    /// Alt+right and the Playback tool play the other channels' notes of the pattern too, while the ghost notes are
+    /// shown, each on its own channel, for as long as the button is held (issue #349; spec: ui/piano-roll.md §9).
+    #[test]
+    fn playing_under_the_mouse_sounds_the_ghost_notes() {
+        let (mut app, mut c) = piano_with_note(37);
+        let n = piano::notes(&app.state.session)[0];
+        let row = app.state.session.project.channels.iter().position(|c| c.index == n.channel).unwrap();
+        let other = (row + 1) % app.state.session.project.channels.len();
+        let mut ghost = n;
+        (ghost.channel, ghost.key, ghost.velocity) = (app.state.session.project.channels[other].index, n.key + 5, 90);
+        // A ghost note alone, a bar later.
+        let mut later = ghost;
+        later.position = n.position + u32::from(app.state.session.project.ppq) * 4;
+        piano::pattern_mut(&mut app.state.session).notes.extend([ghost, later]);
+        frame(&mut app, &mut c, None);
+        let g = app.piano_geom().unwrap();
+        let r = g.note_rect(&n).unwrap();
+        let l = g.note_rect(&later).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.alt = true;
+        app.mouse_down_right();
+        let mut held = app.scrub_notes.clone();
+        held.sort_unstable();
+        let mut want = vec![(row, n.key, 37), (other, ghost.key, 90)];
+        want.sort_unstable();
+        assert_eq!(held, want, "both channels sound, each at its velocity");
+        app.mouse_move(l.cx(), r.cy());
+        assert_eq!(app.scrub_notes, [(other, later.key, 90)], "a column with only a ghost note sounds it");
+        app.mouse_up();
+        app.alt = false;
+        assert!(app.scrub_notes.is_empty(), "held until the button goes up");
+        assert_eq!(piano::notes(&app.state.session).len(), 3, "nothing was deleted");
+        // Ghost notes hidden: only the piano roll's channel.
+        app.state.piano.ghosts = false;
+        app.state.piano.tool = Tool::Playback;
+        frame(&mut app, &mut c, None);
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        assert_eq!(app.scrub_notes, [(row, n.key, 37)]);
+        app.mouse_move(l.cx(), r.cy());
+        assert!(app.scrub_notes.is_empty());
+        app.mouse_up();
+    }
+
     /// Ctrl and Alt with the right button don't delete: Ctrl zooms to a box, Alt plays what is under the mouse (#305).
     #[test]
     fn right_modifiers_in_the_piano_roll_keep_the_notes() {
@@ -16581,6 +16700,90 @@ mod tests {
             app.mouse_up();
         }
         assert_eq!(app.state.browser_w, 209.0, "a double click: the default width");
+    }
+
+    /// A selected sample shows its waveform panel above the footer in place of the info panel (spec: ui/browser.md
+    /// §7b): its place, the loop's tint, the button that plays and stops, the cursor while it sounds, the rate and bit
+    /// depth; a folder still shows the info panel.
+    #[test]
+    fn browser_sample_shows_its_waveform_panel() {
+        use crate::views::browser::{disk_key, rows};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_browser_wave_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Sub")).unwrap();
+        // One second of a decaying 16-bit tone, with a loop over its second half.
+        let rate = 44_100u32;
+        let pcm: Vec<u8> = (0..rate)
+            .flat_map(|i| {
+                let t = i as f32 / rate as f32;
+                (((t * 440.0 * std::f32::consts::TAU).sin() * (-4.0 * t).exp() * 30_000.0) as i16).to_le_bytes()
+            })
+            .collect();
+        let mut fmt = Vec::new();
+        for v in [1u16, 1] {
+            fmt.extend(v.to_le_bytes());
+        }
+        fmt.extend(rate.to_le_bytes());
+        fmt.extend((rate * 2).to_le_bytes());
+        fmt.extend(2u16.to_le_bytes());
+        fmt.extend(16u16.to_le_bytes());
+        let mut smpl = vec![0u8; 36];
+        smpl[28..32].copy_from_slice(&1u32.to_le_bytes());
+        let mut lp = vec![0u8; 24];
+        lp[8..12].copy_from_slice(&(rate / 2).to_le_bytes());
+        lp[12..16].copy_from_slice(&(rate - 1).to_le_bytes());
+        smpl.extend(lp);
+        let mut body = b"WAVE".to_vec();
+        for (id, b) in [(b"fmt ", &fmt), (b"smpl", &smpl), (b"data", &pcm)] {
+            body.extend(id);
+            body.extend((b.len() as u32).to_le_bytes());
+            body.extend(b.iter());
+        }
+        let mut wav = b"RIFF".to_vec();
+        wav.extend((body.len() as u32).to_le_bytes());
+        wav.extend(body);
+        std::fs::write(dir.join("Tone.wav"), &wav).unwrap();
+        let mut app = App::new(None);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(disk_key(&dir));
+        frame(&mut app, &mut c, None);
+        let row = |app: &App, label: &str| rows(&app.state).iter().position(|r| r.label == label).expect("the row");
+        let i = row(&app, "Tone");
+        app.act(Action::BrowserRow(i));
+        frame(&mut app, &mut c, None);
+        assert!(app.state.browser_play.as_ref().is_some_and(|p| (p.file_secs - 1.0).abs() < 1e-3 && (p.secs - 1.0).abs() < 1e-3));
+        let wave = hit_rect(&app, &Action::BrowserWave);
+        // Inside a 1 px border: the list's width less 2, 99 px tall, 5 px above the footer (y 1053).
+        assert_eq!((wave.x, wave.h, wave.bottom()), (14.0, 99.0, 1048.0));
+        let px = |c: &Canvas, x: f32, y: f32| c.pixmap.pixel(x as u32, y as u32).map(|p| u32::from_be_bytes([0, p.red(), p.green(), p.blue()]));
+        assert_eq!(px(&c, wave.x - 1.0, wave.cy()), Some(0x0b1419), "the border");
+        assert_eq!(px(&c, wave.x + 5.0, wave.y + 5.0), Some(0x261c21), "a file with a loop tints the panel");
+        assert_eq!(px(&c, wave.x + wave.w / 2.0, wave.y + 30.0), Some(0xed1313), "the loop starts half way");
+        let button = hit_rect(&app, &Action::BrowserWavePlay);
+        assert_eq!((button.x, button.w, button.h), (17.0, 24.0, 14.0));
+        assert_eq!(px(&c, button.x + 3.0, button.y + 3.0), Some(0xda833a), "orange while it sounds");
+        assert!(app.animating());
+        // The button stops it; again, it plays from the start.
+        app.act(Action::BrowserWavePlay);
+        assert!(app.state.browser_play.is_none());
+        frame(&mut app, &mut c, None);
+        assert_eq!(px(&c, button.x + 3.0, button.y + 3.0), Some(0x878787), "grey when stopped");
+        app.act(Action::BrowserWavePlay);
+        assert!(app.state.browser_play.is_some());
+        // When the preview's time is up, the tick ends it.
+        app.state.browser_play.as_mut().unwrap().since -= std::time::Duration::from_secs(2);
+        app.browser_play_tick(crate::anim::now());
+        assert!(app.state.browser_play.is_none());
+        // A click on the waveform plays it again.
+        app.act(Action::BrowserWave);
+        assert!(app.state.browser_play.is_some());
+        // A folder shows the info panel instead.
+        let i = row(&app, "Sub");
+        app.act(Action::BrowserRow(i));
+        frame(&mut app, &mut c, None);
+        assert!(!app.hits.iter().any(|h| h.action == Action::BrowserWave));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A hovered row whose label does not fit scrolls it (spec: ui/browser.md §9): still at first, then moving while the
@@ -17435,11 +17638,23 @@ mod tests {
             app.mouse_up_from(None);
             frame(app, c, None);
         };
+        // Channel 3's notes all selected, with a time selection over them (issue #396).
+        let mut own = piano::notes(&app.state.session)[0];
+        own.channel = app.state.session.project.channels[3].index;
+        own.position = 384;
+        piano::pattern_mut(&mut app.state.session).notes.push(own);
+        frame(&mut app, &mut c, None);
+        let (pat, ch3) = (app.state.pattern(), own.channel);
+        app.state.piano.select(pat, ch3, vec![1]);
+        app.state.piano.range = Some((0, 768));
         right(&mut app, &mut c);
         assert_eq!(app.state.selected_channel, 3, "one right click");
+        assert_eq!(app.state.piano.selection(pat, Some(ch3)), [1], "one right click keeps the selection");
         right(&mut app, &mut c);
         assert_eq!(app.state.selected_channel, 1, "the second: the ghost's channel");
-        assert_eq!(piano::notes(&app.state.session).len(), 1, "nothing deleted");
+        assert_eq!(piano::notes(&app.state.session).len(), 2, "nothing deleted");
+        assert!(app.state.piano.selection(pat, Some(ch3)).is_empty(), "no notes selected");
+        assert_eq!(app.state.piano.range, Some((0, 768)), "the time selection stays");
         // The tool wheel works here too.
         app.mouse_move(g.x_of(400.0), g.y_of(72) + 4.0);
         app.mouse_down_right();
@@ -18114,7 +18329,7 @@ mod tests {
             app.state.playlist.edit.clone().expect("value box")
         };
         let pitch = Target::Knob(KnobId::MasterPitch);
-        let e = open(&mut app, &mut c, Action::Knob(KnobId::MasterPitch), false);
+        let e = open(&mut app, &mut c, Action::Knob(KnobId::MasterPitch), true);
         assert_eq!(e.target, EditTarget::TypeIn(pitch, false));
         assert_eq!(e.text, "440");
         assert_eq!(crate::typein::width(pitch), crate::typein::W_PLAIN);
@@ -18144,9 +18359,61 @@ mod tests {
         typ(&mut app, "40 left");
         assert_eq!(app.state.knob_text(KnobId::MixPan(2)), "Panning: 40% left");
         frame(&mut app, &mut c, None);
-        open(&mut app, &mut c, Action::Knob(KnobId::MixSep(2)), false);
+        open(&mut app, &mut c, Action::Knob(KnobId::MixSep(2)), true);
         typ(&mut app, "50");
         assert!(app.state.knob_text(KnobId::MixSep(2)).ends_with("50% merged"), "{}", app.state.knob_text(KnobId::MixSep(2)));
+    }
+
+    /// Create automation clip on an effect slot's mix knob, a stereo separation knob, a send knob and the master pitch
+    /// knob (issue #383; spec flp/events/automation.md "Targets", measured 2026-11-21): the right-click menu offers it, and
+    /// the clip is named as the original names it, on the control's target, at the control's level.
+    #[test]
+    fn mixer_knobs_and_master_pitch_create_automation_clips() {
+        use crate::knobs::KnobId;
+        use crate::playlist::{self as pl, Cmd};
+        use os_model::target;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.project.get_mut().mixer[3].name = Some("Delay".into());
+        app.state.session.project.get_mut().mixer[3].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Test Delay".into(), state: Vec::new() });
+        app.state.session.project.get_mut().mixer[3].slot_mix[0] = 0.75;
+        app.state.session.project.get_mut().mixer[3].stereo_separation = Some(-0.5);
+        app.state.session.project.get_mut().mixer[3].routes.push(5);
+        app.state.session.project.get_mut().mixer[3].send_levels = vec![(5, 0.4)];
+        app.state.session.project.get_mut().main_pitch = Some(600);
+        app.state.selected_mixer = 3;
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let cases = [
+            (KnobId::SlotMix(3, 0), target::slot(3, 0, target::SLOT_MIX), "Test Delay (Delay) - Mix level", 0.75),
+            (KnobId::SlotMix(3, 1), target::slot(3, 1, target::SLOT_MIX), "Slot 2 (Delay) - Mix level", 1.0),
+            (KnobId::MixSep(3), target::mixer(3, target::MIXER_SEPARATION), "Delay - Stereo separation", 0.25),
+            (KnobId::Send(3, 5), target::send(3, 5), "Delay - To Bus 5", 0.4),
+            (KnobId::Send(3, 0), target::send(3, 0), "Delay - To Master", 0.8),
+            (KnobId::MasterPitch, target::MAIN_PITCH, "Master pitch", 0.75),
+        ];
+        for (k, tgt, name, v) in cases {
+            let auto = app.automation_target(&Action::Knob(k)).unwrap_or_else(|| panic!("{k:?} has a target"));
+            assert_eq!((auto.0, auto.1.as_str()), (tgt, name), "{k:?}");
+            assert!((auto.2 - v).abs() < 1e-6, "{k:?}: {}", auto.2);
+            let made = pl::create_automation(&mut app.state, tgt, &auto.1, auto.2);
+            assert_eq!(app.state.session.project.channels.iter().find(|c| c.index == made).and_then(|c| c.name.as_deref()), Some(name));
+            let clip = app.state.session.project.automation(made).unwrap();
+            assert_eq!(clip.target(), Some(tgt));
+            assert!((clip.points[0].value - v).abs() < 1e-6);
+        }
+        // The main volume has no automation (its menu: Reset, Copy value, Paste value, Type in value...).
+        assert!(app.automation_target(&Action::Knob(KnobId::MasterVol)).is_none());
+        // A right click on the slot's mix knob in the mixer offers the entry.
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Knob(KnobId::SlotMix(3, 0)));
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        let menu = app.state.playlist.popup.clone().expect("knob menu");
+        let item = menu.items.iter().find(|i| i.label == "Create automation clip").expect("Create automation clip");
+        assert!(matches!(&item.cmd, Cmd::CreateAutomation(t, n, _) if *t == target::slot(3, 0, target::SLOT_MIX) && n == "Test Delay (Delay) - Mix level"));
     }
 
     #[test]
@@ -21547,6 +21814,62 @@ mod tests {
         app.key(&Key::Named(NamedKey::F5), false, false);
         assert_eq!(app.state.z.last(), Some(&Win::Playlist));
         assert!(app.state.shown(Win::Playlist));
+    }
+
+    /// Tall tracks scrolled part way (issue #411): a track header's row reaching above the grid takes no clicks there,
+    /// so the title bar's tools, the stretch switch, the ruler and the picker's tabs stay clickable; a tall picker item
+    /// scrolled part way leaves the tabs too. A click on the stretch switch turns stretch mode on. Alt+wheel adds up
+    /// fractions of a notch.
+    #[test]
+    fn tall_tracks_leave_the_title_bar_clickable() {
+        use crate::playlist::{self as pl, PickKind, PlTool};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(test_project());
+        app.state.session.file = None;
+        app.state.session.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let grid = app.pl_grid().expect("playlist grid");
+        // The tallest tracks, track 2 at the top of the grid less a few pixels: track 1's row reaches far above it.
+        app.state.playlist.row_h = pl::ROW_MAX;
+        app.state.playlist_scroll.1 = pl::ROW_MAX * 2.0 - 10.0;
+        let pitch = pl::PICK_ROW_MAX;
+        app.state.playlist.pick_rows = [pitch; 3];
+        app.state.playlist.pick_scroll = pitch - 10.0;
+        frame(&mut app, &mut c, None);
+        let mut wanted = vec![Action::PlStretch, Action::PlOptions, Action::PlSnap, Action::PlRuler];
+        wanted.extend(PlTool::ALL.map(Action::PlTool));
+        wanted.extend([PickKind::Pattern, PickKind::Audio, PickKind::Automation].map(Action::PlPickTab));
+        for a in wanted {
+            let r = hit_rect(&app, &a);
+            assert_eq!(app.top_hit(r.cx(), r.cy()).map(|h| &h.action), Some(&a), "{a:?} under tall tracks");
+        }
+        // Headers still take clicks inside the grid's rows.
+        let g = pl::PGeom::new(&app.state, grid);
+        let head = hit_rect(&app, &Action::PlHeader(2));
+        assert!(head.y >= grid.y && app.top_hit(head.cx(), g.y_of(2) + 20.0).is_some_and(|h| h.action == Action::PlHeader(2)));
+        assert!(app.top_hit(head.cx(), grid.y + 2.0).is_some_and(|h| h.action == Action::PlHeader(1)), "the partly shown row");
+        assert!(!app.state.playlist.stretch);
+        let r = hit_rect(&app, &Action::PlStretch);
+        click(&mut app, &mut c, r);
+        assert!(app.state.playlist.stretch, "the stretch switch takes the click");
+
+        // Alt+wheel from a wheel reporting quarter notches (high-resolution wheels, touchpads): four make one 6 px step,
+        // and a turn the other way starts counting again.
+        app.state.playlist.row_h = pl::ROW_H;
+        app.state.playlist_scroll = (0.0, 0.0);
+        frame(&mut app, &mut c, None);
+        app.mouse_move(grid.cx(), grid.y + 100.0);
+        app.alt = true;
+        let mut heights = Vec::new();
+        for d in [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, -0.25, -0.25, -0.25, -0.25, 0.6, 0.6] {
+            app.wheel(0.0, d, false, false);
+            heights.push(app.state.playlist.row_h - pl::ROW_H);
+        }
+        app.alt = false;
+        assert_eq!(heights, [0.0, 0.0, 0.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0, 0.0, 6.0]);
     }
 
     /// Look check for playlist states (markers, time selection, selected / muted clips, automation points,
