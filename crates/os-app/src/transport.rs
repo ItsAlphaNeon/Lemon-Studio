@@ -3152,8 +3152,13 @@ mod tests {
         wait_for(|| t.seconds() > 0.2);
         assert!(t.playing() && t.seconds() > 0.2, "playing again: {}", t.seconds());
         t.pause();
-        sleep(100);
-        let held = t.tick();
+        // The device first plays out what was queued before the pause; then the position holds (a slow machine can
+        // take more than a few blocks to get there).
+        let mut held = t.tick();
+        wait_for(|| {
+            sleep(100);
+            std::mem::replace(&mut held, t.tick()) == held
+        });
         sleep(200);
         assert!(t.paused() && t.tick() == held, "paused at {held}: {}", t.tick());
         t.resume();
