@@ -435,6 +435,8 @@ enum Cmd {
     PreviewSong(Box<Project>),
     /// Like `Preview`, faded out after the given time if still sounding (browser sample preview).
     PreviewFor(Box<Project>, Option<Duration>),
+    /// End the sounding preview (the browser's waveform panel's stop button).
+    StopPreview,
     /// The hosted instruments changed (in `Transport::instruments`): rebuild the engines.
     Instruments,
     /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
@@ -759,6 +761,11 @@ impl Transport {
     /// sample preview). A new preview replaces the one sounding.
     pub fn preview_for(&self, project: Project, limit: Option<Duration>) {
         let _ = self.tx.send(Cmd::PreviewFor(Box::new(project), limit));
+    }
+
+    /// End the preview sounding on the preview stream, if any (spec: ui/browser.md §7b, the stop button).
+    pub fn stop_preview(&self) {
+        let _ = self.tx.send(Cmd::StopPreview);
     }
 
     /// Play the playlist of `project` once on the preview stream (spec: ui/playlist.md §10, clip Preview).
@@ -2006,6 +2013,12 @@ impl Audio {
                 }
             }
             Cmd::PreviewFor(project, limit) => self.preview(&project, PlayMode::Pattern(1), limit),
+            Cmd::StopPreview => {
+                self.preview_until = None;
+                if let Some(s) = &self.pre {
+                    drop(s.swap(None, false, 0, false));
+                }
+            }
             Cmd::PreviewSong(project) => self.preview_clip(*project),
             Cmd::Preview(project) => {
                 // A plugin channel's preview plays as a timed live note on the engine that hosts the instrument.

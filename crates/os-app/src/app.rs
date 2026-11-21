@@ -266,6 +266,10 @@ pub enum Action {
     BrowserClear,
     /// The splitter right of the browser: drag to resize it, double-click for the default width (§9).
     BrowserSplitter,
+    /// The selected sample's waveform panel: plays the sample again from its start (spec: ui/browser.md §7b).
+    BrowserWave,
+    /// The waveform panel's play / stop button (§7b).
+    BrowserWavePlay,
     PlaylistArea,
     MixerArea,
     RackArea,
@@ -1151,6 +1155,12 @@ pub struct State {
     pub browser_split_click: Option<std::time::Instant>,
     /// The hovered row whose label is scrolling, as last painted (spec: ui/browser.md §9).
     pub browser_marquee: std::cell::RefCell<Option<views::browser::Marquee>>,
+    /// The browser's sample preview while it sounds, for the waveform panel's cursor and button (spec: ui/browser.md
+    /// §7b), and the panel's place as last painted.
+    pub browser_play: Option<crate::browser::Play>,
+    pub browser_wave_rect: std::cell::Cell<Option<Rect>>,
+    /// The WAV facts of the sample the waveform panel last showed (its path, read once).
+    pub browser_facts: std::cell::RefCell<Option<(String, std::rc::Rc<crate::wav_facts::WavFacts>)>>,
     /// Favorite files (spec: ui/browser.md §10) and the index of the browser's disk folders (§11).
     pub browser_favs: Vec<crate::browser::Fav>,
     pub browser_index: crate::browser_index::Index,
@@ -1624,6 +1634,9 @@ impl App {
                 browser_w: crate::browser::load_width(),
                 browser_split_click: None,
                 browser_marquee: Default::default(),
+                browser_play: None,
+                browser_wave_rect: Default::default(),
+                browser_facts: Default::default(),
                 browser_favs: crate::browser::load_favs(),
                 browser_index: Default::default(),
                 tempo: 130.0,
@@ -4237,6 +4250,7 @@ impl App {
             || self.midi_play.busy()
             || self.remote.busy()
             || self.state.browser_marquee.borrow().is_some()
+            || self.state.browser_play.is_some()
             || self.state.cpu.fps_view
     }
 
@@ -4367,6 +4381,7 @@ impl App {
         self.cables_tick(now);
         self.motion_tick();
         self.marquee_tick(now);
+        self.browser_play_tick(now);
         self.browser_index_tick();
         self.backup_tick(now);
         self.work_tick(now);
@@ -9348,7 +9363,7 @@ impl App {
                 self.invalidate();
             }
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter => {}
+            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter | Action::BrowserWave | Action::BrowserWavePlay => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
@@ -17083,6 +17098,90 @@ mod tests {
             app.mouse_up();
         }
         assert_eq!(app.state.browser_w, 209.0, "a double click: the default width");
+    }
+
+    /// A selected sample shows its waveform panel above the footer in place of the info panel (spec: ui/browser.md
+    /// §7b): its place, the loop's tint, the button that plays and stops, the cursor while it sounds, the rate and bit
+    /// depth; a folder still shows the info panel.
+    #[test]
+    fn browser_sample_shows_its_waveform_panel() {
+        use crate::views::browser::{disk_key, rows};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_browser_wave_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Sub")).unwrap();
+        // One second of a decaying 16-bit tone, with a loop over its second half.
+        let rate = 44_100u32;
+        let pcm: Vec<u8> = (0..rate)
+            .flat_map(|i| {
+                let t = i as f32 / rate as f32;
+                (((t * 440.0 * std::f32::consts::TAU).sin() * (-4.0 * t).exp() * 30_000.0) as i16).to_le_bytes()
+            })
+            .collect();
+        let mut fmt = Vec::new();
+        for v in [1u16, 1] {
+            fmt.extend(v.to_le_bytes());
+        }
+        fmt.extend(rate.to_le_bytes());
+        fmt.extend((rate * 2).to_le_bytes());
+        fmt.extend(2u16.to_le_bytes());
+        fmt.extend(16u16.to_le_bytes());
+        let mut smpl = vec![0u8; 36];
+        smpl[28..32].copy_from_slice(&1u32.to_le_bytes());
+        let mut lp = vec![0u8; 24];
+        lp[8..12].copy_from_slice(&(rate / 2).to_le_bytes());
+        lp[12..16].copy_from_slice(&(rate - 1).to_le_bytes());
+        smpl.extend(lp);
+        let mut body = b"WAVE".to_vec();
+        for (id, b) in [(b"fmt ", &fmt), (b"smpl", &smpl), (b"data", &pcm)] {
+            body.extend(id);
+            body.extend((b.len() as u32).to_le_bytes());
+            body.extend(b.iter());
+        }
+        let mut wav = b"RIFF".to_vec();
+        wav.extend((body.len() as u32).to_le_bytes());
+        wav.extend(body);
+        std::fs::write(dir.join("Tone.wav"), &wav).unwrap();
+        let mut app = App::new(None);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(disk_key(&dir));
+        frame(&mut app, &mut c, None);
+        let row = |app: &App, label: &str| rows(&app.state).iter().position(|r| r.label == label).expect("the row");
+        let i = row(&app, "Tone");
+        app.act(Action::BrowserRow(i));
+        frame(&mut app, &mut c, None);
+        assert!(app.state.browser_play.as_ref().is_some_and(|p| (p.file_secs - 1.0).abs() < 1e-3 && (p.secs - 1.0).abs() < 1e-3));
+        let wave = hit_rect(&app, &Action::BrowserWave);
+        // Inside a 1 px border: the list's width less 2, 99 px tall, 5 px above the footer (y 1053).
+        assert_eq!((wave.x, wave.h, wave.bottom()), (14.0, 99.0, 1048.0));
+        let px = |c: &Canvas, x: f32, y: f32| c.pixmap.pixel(x as u32, y as u32).map(|p| u32::from_be_bytes([0, p.red(), p.green(), p.blue()]));
+        assert_eq!(px(&c, wave.x - 1.0, wave.cy()), Some(0x0b1419), "the border");
+        assert_eq!(px(&c, wave.x + 5.0, wave.y + 5.0), Some(0x261c21), "a file with a loop tints the panel");
+        assert_eq!(px(&c, wave.x + wave.w / 2.0, wave.y + 30.0), Some(0xed1313), "the loop starts half way");
+        let button = hit_rect(&app, &Action::BrowserWavePlay);
+        assert_eq!((button.x, button.w, button.h), (17.0, 24.0, 14.0));
+        assert_eq!(px(&c, button.x + 3.0, button.y + 3.0), Some(0xda833a), "orange while it sounds");
+        assert!(app.animating());
+        // The button stops it; again, it plays from the start.
+        app.act(Action::BrowserWavePlay);
+        assert!(app.state.browser_play.is_none());
+        frame(&mut app, &mut c, None);
+        assert_eq!(px(&c, button.x + 3.0, button.y + 3.0), Some(0x878787), "grey when stopped");
+        app.act(Action::BrowserWavePlay);
+        assert!(app.state.browser_play.is_some());
+        // When the preview's time is up, the tick ends it.
+        app.state.browser_play.as_mut().unwrap().since -= std::time::Duration::from_secs(2);
+        app.browser_play_tick(crate::anim::now());
+        assert!(app.state.browser_play.is_none());
+        // A click on the waveform plays it again.
+        app.act(Action::BrowserWave);
+        assert!(app.state.browser_play.is_some());
+        // A folder shows the info panel instead.
+        let i = row(&app, "Sub");
+        app.act(Action::BrowserRow(i));
+        frame(&mut app, &mut c, None);
+        assert!(!app.hits.iter().any(|h| h.action == Action::BrowserWave));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A hovered row whose label does not fit scrolls it (spec: ui/browser.md §9): still at first, then moving while the
