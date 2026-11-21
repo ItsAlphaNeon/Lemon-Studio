@@ -316,22 +316,24 @@ pub fn song_tick_of(s: &State, t: u32, near: u32) -> Option<u32> {
         .map(place)
 }
 
-/// What the Playback tool's line sounds on channel `ch` moving from tick `from` to `to` (the same tick for a press): the
-/// notes it is on now and those whose start it just passed, as (key, velocity), a key once at its loudest note's velocity.
-pub fn scrub_keys(s: &State, ch: u16, from: f32, to: f32) -> Vec<(u16, u8)> {
+/// What the Playback tool's line sounds moving from tick `from` to `to` (the same tick for a press): the notes it is on
+/// now and those whose start it just passed, as (channel, key, velocity), a key once per channel at its loudest note's
+/// velocity. Channel `ch`'s notes, and with the ghost notes shown the other channels' notes of the pattern too (spec:
+/// ui/piano-roll.md §9).
+pub fn scrub_keys(s: &State, ch: u16, from: f32, to: f32) -> Vec<(u16, u16, u8)> {
     let (a, b) = (from.min(to), from.max(to));
-    let mut keys: Vec<(u16, u8)> = notes(s)
+    let mut keys: Vec<(u16, u16, u8)> = notes(s)
         .iter()
-        .filter(|n| n.channel == ch && !n.muted())
+        .filter(|n| (n.channel == ch || s.piano.ghosts) && !n.muted())
         .filter(|n| {
             let p = n.position as f32;
             let on = p <= to && to < p + shown_len(s, n) as f32;
             on || (p > a && p <= b)
         })
-        .map(|n| (n.key, n.velocity))
+        .map(|n| (n.channel, n.key, n.velocity))
         .collect();
-    keys.sort_unstable_by_key(|&(k, v)| (k, std::cmp::Reverse(v)));
-    keys.dedup_by_key(|n| n.0);
+    keys.sort_unstable_by_key(|&(c, k, v)| (c, k, std::cmp::Reverse(v)));
+    keys.dedup_by_key(|n| (n.0, n.1));
     keys
 }
 
