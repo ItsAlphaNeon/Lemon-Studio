@@ -296,7 +296,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     });
     ui.c.push_clip(heads);
     for &row in &visible {
-        header(ui, s, &g, row, head_x, head_w);
+        header(ui, s, &g, row, heads);
     }
     // Performance track progress (spec: ui/performance-mode.md §3): a bar along the bottom of a launched track's header.
     if f.playing && f.song && s.playlist.perf_track_progress {
@@ -430,7 +430,7 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         let tall = pitch > PICK_ROW;
         let title = if tall { Rect::new(row.x, row.y, row.w, PICK_TITLE) } else { row };
         let body = if tall { Rect::span(row.x + 3.0, row.right() - 3.0, title.bottom(), row.bottom() - 3.0) } else { row.inset(3.0) };
-        let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click for its menu)");
+        let hov = ui.hit_in(list, row, Action::PlPick(src), "Select clip source (right-click for its menu)");
         let filled = pick_used(s, src);
         let k = if hov { 0.05 } else { 0.0 };
         let lemon = super::lemon(ui);
@@ -1478,8 +1478,10 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
 
 /// A track header (§6, §6a): a box in the track's colour with the name, "…" and the mute LED. A group is one block
 /// in its group track's colour: the group track spans the width with a collapse arrow, its members are indented;
-/// a collapsed group's members are bare strips.
-fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
+/// a collapsed group's members are bare strips. `heads` is the header column: a row scrolled part way out of it takes
+/// clicks only inside it (issue #411: a tall track's header took the title bar's).
+fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, heads: Rect) {
+    let (x, w) = (heads.x, heads.w);
     const INDENT: f32 = 6.0;
     const RADIUS: f32 = 4.0;
     let t = ui.t;
@@ -1515,7 +1517,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
         let left = if lead { hr.x + k } else { hr.x };
         ui.c.fill_rect(Rect::new(left, hr.bottom() - k, hr.right() - left, k), bottom);
     }
-    ui.hit(hr, Action::PlHeader(row), "Track (double-click: rename, right-click: menu, Shift+wheel: move)");
+    ui.hit_in(heads, hr, Action::PlHeader(row), "Track (double-click: rename, right-click: menu, Shift+wheel: move)");
     if strip {
         return;
     }
@@ -1523,7 +1525,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     // rows drop the "…" and keep the name clear of the LED.
     let short = g.rows.row_h < pl::ROW_H - 8.0;
     let led = Rect::new(hr.right() - 19.0, (h - gap - 15.0).max(1.0) + hr.y, 14.0, 14.0);
-    ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo; with Alt: the whole group)");
+    ui.hit_in(heads, led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo; with Alt: the whole group)");
     // An audio or instrument track (§6c): a light disc with "A" / "I" before its name, which is drawn bright.
     let link = crate::track_links::link(s, row);
     let badge = match link.kind {
@@ -1539,7 +1541,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
         let b = Rect::new(hr.x + 3.0, hr.y + 4.0, 11.0, 11.0);
         ui.c.fill_circle(b.cx(), b.cy(), 5.5, text);
         ui.c.text_center(Font::new(10), b, base.shade(-0.25), letter);
-        ui.hit(b, Action::PlHeader(row), hint);
+        ui.hit_in(heads, b, Action::PlHeader(row), hint);
         name_x += 14.0;
     }
     if !editing {
@@ -1555,13 +1557,13 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
         // the LED, and of the group arrow on a group's lead.
         let x = if lead { led.x - 34.0 } else { led.x - 16.0 };
         let b = Rect::new(x, led.y + 1.0, 12.0, 12.0);
-        ui.hit(b, Action::PlHeader(row), "Locked to its clips: Draw and Paint place this source (TOOLS: Unlock all tracks)");
+        ui.hit_in(heads, b, Action::PlHeader(row), "Locked to its clips: Draw and Paint place this source (TOOLS: Unlock all tracks)");
         icons::draw(ui.c, Icon::Lock, b, text);
     }
     if lead {
         // Collapse arrow left of the LED: up while open, down while collapsed.
         let a = Rect::new(led.x - 18.0, led.y, 14.0, 14.0);
-        let hov = ui.hit(a, Action::PlGroupArrow(row), "Collapse / expand the group");
+        let hov = ui.hit_in(heads, a, Action::PlGroupArrow(row), "Collapse / expand the group");
         let col = if hov { ui.t.tx(0xffffff) } else { text };
         let (cx, cy) = (a.cx(), a.cy());
         if info.is_some_and(|i| i.collapsed) {

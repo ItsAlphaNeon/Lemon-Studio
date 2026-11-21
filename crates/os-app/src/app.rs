@@ -839,6 +839,12 @@ impl Ui<'_> {
         hovered
     }
 
+    /// `hit` for a control in a scrolled area `view` (a track header, a list item): only its part inside `view` takes
+    /// the pointer, so a row scrolled part way out of view leaves what is drawn over its hidden part clickable.
+    pub fn hit_in(&mut self, view: Rect, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
+        self.hit(rect.intersect(&view), action, hint)
+    }
+
     /// Whether `ui.hit(rect, action, ..)` would say the mouse is over it (without registering it).
     pub fn hovers(&self, rect: Rect, action: &Action) -> bool {
         self.hover.as_ref() == Some(action) && rect.contains(self.mouse.0, self.mouse.1)
@@ -1439,6 +1445,8 @@ pub struct App {
     pub(crate) updates: crate::update::Updates,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
+    /// Alt+wheel movement over the playlist short of a whole notch (`App::wheel_act`).
+    row_notch: f32,
     /// A Shift+press grabbed piano-roll notes: the drag's first move picks up copies of them (`App::pick_up_notes`).
     shift_clone: bool,
     /// Audio ▸ Auto close: whether the output is closed while another program is in front (`crate::auto_close`).
@@ -1711,6 +1719,7 @@ impl App {
             audio_log: Default::default(),
             updates: Default::default(),
             menu_notch: 0.0,
+            row_notch: 0.0,
             shift_clone: false,
             auto_close: Default::default(),
             want_minimize: false,
@@ -8013,9 +8022,18 @@ impl App {
             }
             // Alt+wheel anywhere in the playlist: track height (spec: ui/playlist.md §3, §6), at once (only the time
             // zoom eases, `crate::smooth`).
+            // A wheel reporting fractions of a notch (a high-resolution wheel or a touchpad, as Linux often sends them)
+            // adds them up to whole notches: each report rounded on its own lost a step under half a notch and made a
+            // whole one of half (issue #411).
             _ if pl_area && alt => {
                 let grid = pl_grid.unwrap_or(Rect::new(481.0, 150.0, 1400.0, 800.0));
-                crate::playlist::zoom_rows(s, grid, y, dy + dx);
+                if self.row_notch * (dy + dx) < 0.0 {
+                    self.row_notch = 0.0;
+                }
+                self.row_notch += dy + dx;
+                let notches = self.row_notch.trunc();
+                self.row_notch -= notches;
+                crate::playlist::zoom_rows(s, grid, y, notches);
                 Some(Win::Playlist)
             }
             // Ctrl+wheel anywhere in the playlist, the plain wheel over the ruler: time zoom around the mouse (§3). It
@@ -22017,6 +22035,62 @@ mod tests {
         app.key(&Key::Named(NamedKey::F5), false, false);
         assert_eq!(app.state.z.last(), Some(&Win::Playlist));
         assert!(app.state.shown(Win::Playlist));
+    }
+
+    /// Tall tracks scrolled part way (issue #411): a track header's row reaching above the grid takes no clicks there,
+    /// so the title bar's tools, the stretch switch, the ruler and the picker's tabs stay clickable; a tall picker item
+    /// scrolled part way leaves the tabs too. A click on the stretch switch turns stretch mode on. Alt+wheel adds up
+    /// fractions of a notch.
+    #[test]
+    fn tall_tracks_leave_the_title_bar_clickable() {
+        use crate::playlist::{self as pl, PickKind, PlTool};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let grid = app.pl_grid().expect("playlist grid");
+        // The tallest tracks, track 2 at the top of the grid less a few pixels: track 1's row reaches far above it.
+        app.state.playlist.row_h = pl::ROW_MAX;
+        app.state.playlist_scroll.1 = pl::ROW_MAX * 2.0 - 10.0;
+        let pitch = pl::PICK_ROW_MAX;
+        app.state.playlist.pick_rows = [pitch; 3];
+        app.state.playlist.pick_scroll = pitch - 10.0;
+        frame(&mut app, &mut c, None);
+        let mut wanted = vec![Action::PlStretch, Action::PlOptions, Action::PlSnap, Action::PlRuler];
+        wanted.extend(PlTool::ALL.map(Action::PlTool));
+        wanted.extend([PickKind::Pattern, PickKind::Audio, PickKind::Automation].map(Action::PlPickTab));
+        for a in wanted {
+            let r = hit_rect(&app, &a);
+            assert_eq!(app.top_hit(r.cx(), r.cy()).map(|h| &h.action), Some(&a), "{a:?} under tall tracks");
+        }
+        // Headers still take clicks inside the grid's rows.
+        let g = pl::PGeom::new(&app.state, grid);
+        let head = hit_rect(&app, &Action::PlHeader(2));
+        assert!(head.y >= grid.y && app.top_hit(head.cx(), g.y_of(2) + 20.0).is_some_and(|h| h.action == Action::PlHeader(2)));
+        assert!(app.top_hit(head.cx(), grid.y + 2.0).is_some_and(|h| h.action == Action::PlHeader(1)), "the partly shown row");
+        assert!(!app.state.playlist.stretch);
+        let r = hit_rect(&app, &Action::PlStretch);
+        click(&mut app, &mut c, r);
+        assert!(app.state.playlist.stretch, "the stretch switch takes the click");
+
+        // Alt+wheel from a wheel reporting quarter notches (high-resolution wheels, touchpads): four make one 6 px step,
+        // and a turn the other way starts counting again.
+        app.state.playlist.row_h = pl::ROW_H;
+        app.state.playlist_scroll = (0.0, 0.0);
+        frame(&mut app, &mut c, None);
+        app.mouse_move(grid.cx(), grid.y + 100.0);
+        app.alt = true;
+        let mut heights = Vec::new();
+        for d in [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, -0.25, -0.25, -0.25, -0.25, 0.6, 0.6] {
+            app.wheel(0.0, d, false, false);
+            heights.push(app.state.playlist.row_h - pl::ROW_H);
+        }
+        app.alt = false;
+        assert_eq!(heights, [0.0, 0.0, 0.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 0.0, 0.0, 6.0]);
     }
 
     /// Look check for playlist states (markers, time selection, selected / muted clips, automation points,
