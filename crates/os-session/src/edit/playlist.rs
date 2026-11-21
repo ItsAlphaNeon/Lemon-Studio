@@ -1032,9 +1032,9 @@ pub fn audio_clip_channel() -> Channel {
     }
 }
 
-/// `add_audio_clip_in` on the session (`lock_len` as `place_in` takes it): the playlist's clip source becomes the new
+/// `add_audio_clip_in` on the session (`brush` as `place_in` takes it): the playlist's clip source becomes the new
 /// channel and the clip is selected (`View::AudioClipAdded`).
-pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16, tick: u32, mixer: Option<u16>, lock_len: Option<(ClipSource, u32)>) -> Option<usize> {
+pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16, tick: u32, mixer: Option<u16>, brush: Option<Brush>) -> Option<usize> {
     s.samples.wave(&s.settings, path)?;
     // Not on an instrument track: the next free track below it (§6c); on an audio track, through its mixer track.
     let track = crate::track_links::audio_drop_track(s, track, tick, tick + 1);
@@ -1052,7 +1052,7 @@ pub fn add_audio_clip_on(s: &mut crate::session::Session, path: &str, track: u16
         ..audio_clip_channel()
     });
     let src = track_info(s, track).and_then(|t| t.clip_lock).unwrap_or(ClipSource::Channel(index));
-    let i = place_in(s, src, track, tick, lock_len);
+    let i = place_in(s, src, track, tick, brush);
     s.touched.views.push(crate::session::View::AudioClipAdded { channel: index, clip: i });
     Some(i)
 }
@@ -1081,22 +1081,41 @@ pub fn follow_crossfades(s: &mut crate::session::Session) -> bool {
     true
 }
 
-/// `place` of source `src`; `lock_len` is the length the last clip of a source was given (`PlaylistUi::lock_len`).
-pub fn place_in(s: &mut crate::session::Session, src: ClipSource, track: u16, tick: u32, lock_len: Option<(ClipSource, u32)>) -> usize {
-    let len = match lock_len {
-        Some((l, n)) if l == src => n,
-        _ => source_len(s, src),
+/// The playlist's clip brush (spec: ui/playlist.md §3, issue #381) as `place_in` takes it: the last clip clicked or
+/// resized, and whether it showed its whole source (new clips then take the source's length as it is when placed).
+pub type Brush = (Clip, bool);
+
+/// Byte-19 bit FL sets on a clip selected when it saved (spec: flp/events/playlist.md).
+pub const CLIP_SELECTED: u8 = 0x80;
+
+/// `place` of source `src`. With a `brush` of that source the clip is a copy of it (§3): every property but its place,
+/// mute, group and selection.
+pub fn place_in(s: &mut crate::session::Session, src: ClipSource, track: u16, tick: u32, brush: Option<Brush>) -> usize {
+    let c = match brush {
+        Some((b, whole)) if b.source == src => {
+            let length = if whole { source_len(s, src) } else { b.length };
+            let mut c = Clip { length, muted: false, ..b };
+            c.id = os_model::Id::NONE;
+            c.set_id(0);
+            c.set_group(0);
+            c.raw[19] &= !CLIP_SELECTED;
+            c
+        }
+        _ => fresh_clip(s, src, source_len(s, src)),
     };
-    let audio = source_kind(s, src) == PickKind::Audio && matches!(src, ClipSource::Channel(_));
-    let a = arr_mut(s);
-    let mut c = Clip::new(tick, len, track, src);
-    if audio {
+    arr_mut(s).clips.push(Clip { position: tick, track, ..c });
+    s.dirty = true;
+    clips(s).len() - 1
+}
+
+/// A new clip of `src`, `len` ticks long, with FL's defaults: from the start of its source, gain 1.0 for audio.
+pub fn fresh_clip(s: &crate::session::Session, src: ClipSource, len: u32) -> Clip {
+    let mut c = Clip::new(0, len, 0, src);
+    if source_kind(s, src) == PickKind::Audio && matches!(src, ClipSource::Channel(_)) {
         // FL writes gain 1.0 into a new audio clip (spec: flp/events/playlist.md, byte 52).
         c.set_gain(1.0);
     }
-    a.clips.push(c);
-    s.dirty = true;
-    clips(s).len() - 1
+    c
 }
 
 

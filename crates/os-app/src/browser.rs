@@ -19,6 +19,24 @@ const DRAG_START: f32 = 4.0;
 /// How long a clicked sample plays (spec §7).
 const PREVIEW_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// A browser sample preview while it sounds (spec §7b): the file, when it started and how long it plays.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Play {
+    pub path: String,
+    pub since: std::time::Instant,
+    /// Seconds it sounds: the file's length, at most the cut-off.
+    pub secs: f32,
+    /// The file's length in seconds (the waveform's width).
+    pub file_secs: f32,
+}
+
+impl Play {
+    /// Seconds played at `now`, while it still sounds.
+    pub fn at(&self, now: std::time::Instant) -> Option<f32> {
+        let t = now.saturating_duration_since(self.since).as_secs_f32();
+        (t < self.secs).then_some(t)
+    }
+}
 /// The settings key of the browser's side in the tiling layout (`State::browser_right`).
 pub const BROWSER_RIGHT_KEY: &str = "browser_right";
 
@@ -32,6 +50,20 @@ impl App {
         if *a == Action::BrowserMove {
             self.drag = Some(Drag::BrowserMove);
             return true;
+        }
+        match *a {
+            Action::BrowserWavePlay => {
+                self.browser_wave_play();
+                return true;
+            }
+            // A click on the waveform plays the sample again from its start, wherever it lands (§7b).
+            Action::BrowserWave => {
+                if let Some(path) = view::wave_sample(&self.state) {
+                    self.preview_sample(&path);
+                }
+                return true;
+            }
+            _ => {}
         }
         let s = &mut self.state;
         match *a {
@@ -91,12 +123,39 @@ impl App {
     }
 
     /// Clicking a sample plays it once (spec §7): cut off after `PREVIEW_LIMIT` unless "Full sample preview" is ticked.
-    pub fn preview_sample(&self, path: &str) {
+    pub(crate) fn preview_sample(&mut self, path: &str) {
         let mut p = crate::projects::preview_project(&self.state.session.settings, path);
         p.tempo = Some(self.state.tempo());
         crate::preview_track::route(&mut p, &self.state.session.project, crate::prefs::number(&crate::prefs::BROWSER_PREVIEW_TRACK));
         let limit = (!view::opt(&self.state, view::OPT_PREVIEW)).then_some(PREVIEW_LIMIT);
         self.state.session.transport.preview_for(p, limit);
+        // The waveform panel's cursor follows it (§7b) for the file's length, at most the cut-off.
+        let file = crate::plugins::resolve_sample(&self.state.session.settings, path);
+        let file_secs = os_engine::sample::length(std::path::Path::new(&file)).map_or(0.0, |(n, rate)| n as f32 / rate.max(1) as f32);
+        let secs = limit.map_or(file_secs, |l| file_secs.min(l.as_secs_f32()));
+        self.state.browser_play = (secs > 0.0).then(|| Play { path: path.to_string(), since: crate::anim::now(), secs, file_secs });
+        self.invalidate();
+    }
+
+    /// The waveform panel's button (§7b): stops the preview while it sounds, else plays the selected sample.
+    pub(crate) fn browser_wave_play(&mut self) {
+        if self.state.browser_play.take().is_some() {
+            self.state.session.transport.stop_preview();
+            self.invalidate();
+        } else if let Some(path) = view::wave_sample(&self.state) {
+            self.preview_sample(&path);
+        }
+    }
+
+    /// While a preview sounds, the waveform panel repaints for its cursor; when it ends the cursor goes (§7b).
+    pub(crate) fn browser_play_tick(&mut self, now: std::time::Instant) {
+        let Some(p) = &self.state.browser_play else { return };
+        if p.at(now).is_none() {
+            self.state.browser_play = None;
+        }
+        if let Some(r) = self.state.browser_wave_rect.get() {
+            self.damage_rect(r);
+        }
     }
 
     /// A browser options-menu command (spec §4); returns a message.

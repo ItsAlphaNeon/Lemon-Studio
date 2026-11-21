@@ -33,6 +33,8 @@ pub enum Target {
     /// Parameter `.3` of member `.2` (its id) of the container in slot `.1` of mixer track `.0`: a plugin parameter
     /// named by what a project keeps, for remote control links (`crate::params::link_target`).
     MemberParam(u16, u8, u32, usize),
+    /// The project tempo, typed in BPM (10-522; spec: ui/tempo-menu.md).
+    Tempo,
 }
 
 /// The units a latency setting is typed in: Set in ms / samples / beats.
@@ -84,6 +86,8 @@ pub enum Unit {
     Track,
     /// A rack row's mute LED: "On" / "Off" (no value mode).
     Switch,
+    /// The tempo in BPM (no value mode).
+    Bpm,
 }
 
 /// The gain laws of the dB controls (spec: audio/gain-laws.md).
@@ -108,6 +112,7 @@ pub fn unit(t: Target) -> Unit {
         Target::Latency(..) => Unit::Latency,
         Target::RackTrack(_) => Unit::Track,
         Target::RackLed(_) => Unit::Switch,
+        Target::Tempo => Unit::Bpm,
     }
 }
 
@@ -118,7 +123,7 @@ pub fn mode_button(t: Target) -> Option<(&'static str, &'static str)> {
         Unit::Pan | Unit::Sep => Some(("C", "Centered")),
         Unit::Db(_) => Some(("dB", "dB")),
         Unit::Percent => Some(("%", "%")),
-        Unit::Hz | Unit::Plain | Unit::Latency | Unit::Track | Unit::Switch => None,
+        Unit::Hz | Unit::Plain | Unit::Latency | Unit::Track | Unit::Switch | Unit::Bpm => None,
     }
 }
 
@@ -129,7 +134,7 @@ pub fn width(t: Target) -> f32 {
 /// The mode a box opens in: the remembered one, or the only one it has.
 pub fn opening_norm(t: Target, remembered: bool) -> bool {
     match unit(t) {
-        Unit::Hz | Unit::Latency | Unit::Track | Unit::Switch => false,
+        Unit::Hz | Unit::Latency | Unit::Track | Unit::Switch | Unit::Bpm => false,
         Unit::Plain => true,
         _ => remembered,
     }

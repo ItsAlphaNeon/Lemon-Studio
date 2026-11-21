@@ -149,8 +149,12 @@ mod tests {
         a.save_to(out.clone());
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&out).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&out);
+        // The id is the session's, and the icon name is what an open makes of the channel's FLP icon number (which the
+        // comparison covers): a plain FLP load has neither.
         for &r in &rows {
-            assert_eq!(back.channels[r], before.channels[r], "channel {r}");
+            let b = &before.channels[r];
+            let got = os_model::Channel { id: b.id, lemon_icon: b.lemon_icon.clone(), ..back.channels[r].clone() };
+            assert_eq!(got, *b, "channel {r}");
         }
     }
 }

@@ -65,6 +65,15 @@ enum Known {
 const KNOWN_MAX: usize = 1 << 20;
 
 impl Editor {
+    /// Its open window's handle (none without plugin windows: no editor opens).
+    #[cfg(windows)]
+    fn hwnd(&self) -> Option<isize> {
+        #[cfg(plugin_windows)]
+        return self.window.as_ref().map(|f| f.hwnd());
+        #[cfg(not(plugin_windows))]
+        None
+    }
+
     /// Its window is open.
     pub fn open(&self) -> bool {
         #[cfg(plugin_windows)]
@@ -415,7 +424,7 @@ impl EditorHost {
         // top-level window.
         let mut w = unsafe { WindowFromPoint(POINT { x, y }) };
         while !w.is_null() {
-            if let Some((&r, _)) = self.editors.iter().find(|(_, e)| e.window.as_ref().is_some_and(|f| f.hwnd() == w as isize)) {
+            if let Some((&r, _)) = self.editors.iter().find(|(_, e)| e.hwnd() == Some(w as isize)) {
                 return Some(r);
             }
             w = unsafe { GetAncestor(w, GA_PARENT) };
@@ -429,7 +438,7 @@ impl EditorHost {
     #[cfg(windows)]
     pub fn drop_file(&mut self, pl: &mut Plugins, row: usize, x: i32, y: i32, path: &str, sampler: bool) -> bool {
         self.sync(pl);
-        if self.editors.get(&row).and_then(|e| e.window.as_ref()).is_some_and(|f| post_drop(x, y, path, f.hwnd())) {
+        if self.editors.get(&row).and_then(Editor::hwnd).is_some_and(|f| post_drop(x, y, path, f)) {
             return true;
         }
         sampler && pl.load_sample(row, path)

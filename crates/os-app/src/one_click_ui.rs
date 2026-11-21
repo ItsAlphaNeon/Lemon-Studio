@@ -82,7 +82,7 @@ impl App {
 
     /// Every tick: the session's `tick_in`; a take for the audio editor goes there.
     pub fn one_click_tick(&mut self) {
-        let lock = self.state.playlist.lock_len;
+        let lock = crate::playlist::brush_len(&self.state);
         let Some(path) = self.host(|ses| tick_in(ses, lock)) else { return };
         let placed = self.take_to_editor(&path);
         self.state.message = Some(with_lost(placed));

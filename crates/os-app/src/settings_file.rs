@@ -8,19 +8,19 @@
 
 pub use os_session::settings_file::*;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-util")))]
 static STORE: std::sync::OnceLock<SettingsStore> = std::sync::OnceLock::new();
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 thread_local! {
     static TEST: SettingsStore = SettingsStore::memory();
 }
 
 /// The program's store: the user folder's, read at the first use.
 pub fn store() -> SettingsStore {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     return TEST.with(SettingsStore::clone);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-util")))]
     STORE.get_or_init(SettingsStore::user).clone()
 }
 

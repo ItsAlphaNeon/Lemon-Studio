@@ -572,18 +572,19 @@ mod tests {
         assert_eq!(others(s), vec![ClipSource::Pattern(1)], "the deleted pattern's clip goes");
     }
 
-    /// The playlist's Draw source and its locked clip length follow their pattern when it moves, and go with it.
+    /// The playlist's Draw source and its clip brush follow their pattern when it moves, and go with it.
     #[test]
     fn the_draw_source_follows_its_pattern() {
         let mut app = app();
         let s = &mut app.state;
         s.playlist.source = Some(ClipSource::Pattern(2));
-        s.playlist.lock_len = Some((ClipSource::Pattern(2), 96));
+        s.playlist.brush = Some(Clip::new(0, 96, 0, ClipSource::Pattern(2)));
         s.set_pattern(2);
         run(s, Cmd::MoveDown, (0.0, 0.0));
-        assert_eq!((s.playlist.source, s.playlist.lock_len), (Some(ClipSource::Pattern(3)), Some((ClipSource::Pattern(3), 96))));
+        let brush = |s: &State| s.playlist.brush.map(|c| (c.source, c.length));
+        assert_eq!((s.playlist.source, brush(s)), (Some(ClipSource::Pattern(3)), Some((ClipSource::Pattern(3), 96))));
         delete_current(s);
-        assert_eq!((s.playlist.source, s.playlist.lock_len), (None, None), "the source went with its pattern");
+        assert_eq!((s.playlist.source, brush(s)), (None, None), "the source went with its pattern");
     }
 
     #[test]

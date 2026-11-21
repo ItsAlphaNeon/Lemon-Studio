@@ -1161,6 +1161,9 @@ pub struct Engine {
     /// The Tempo tapper's nudge (`set_nudge`): -1, 0 or +1, and the one the clock runs at now.
     nudge: Option<std::sync::Arc<std::sync::atomic::AtomicI8>>,
     nudged: i8,
+    /// The tempo menu's Half speed (`set_half_speed`), and whether the clock runs at half speed now.
+    half: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    halved: bool,
     /// The arrangement's time markers (song mode with clips; spec: audio/transport.md "Time markers in SONG mode").
     marks: marks::Marks,
     /// The next tick was arrived at by a start or a jump: markers on it do not act.
@@ -1745,6 +1748,8 @@ impl Engine {
             count_in_len: 0,
             nudge: None,
             nudged: 0,
+            half: None,
+            halved: false,
             run_on: None,
             marks,
             landed: true,
@@ -1831,6 +1836,12 @@ impl Engine {
     /// (faster) from the next tick on; the tempo itself stays. An export never nudges.
     pub fn set_nudge(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicI8>) {
         self.nudge = Some(flag);
+    }
+
+    /// The tempo menu's Half speed (spec: ui/tempo-menu.md): while `flag` is set, playback runs at half the tempo from
+    /// the next tick on; the tempo itself stays. An export never runs at half speed.
+    pub fn set_half_speed(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.half = Some(flag);
     }
 
     /// Ticks of the count-in left to render (0: none, or over).
@@ -2338,9 +2349,10 @@ impl Engine {
         self.tempo * f64::from(self.steps) / 4.0
     }
 
-    /// The tempo the clock runs the ticks at: `tick_tempo` with the nudge.
+    /// The tempo the clock runs the ticks at: `tick_tempo` with the nudge and Half speed.
     fn clock_tempo(&self) -> f64 {
-        self.tick_tempo() * (1.0 + NUDGE * f64::from(self.nudged))
+        let half = if self.halved { 0.5 } else { 1.0 };
+        self.tick_tempo() * (1.0 + NUDGE * f64::from(self.nudged)) * half
     }
 
     /// The song's end in ticks.
@@ -2714,6 +2726,18 @@ impl Engine {
         self.exporting = old.exporting;
         self.multicore.keep_gate(&old.multicore);
         self.take_mixer(old);
+    }
+
+    /// Pattern playback taken over from another pattern's engine (`continue_from`) while it plays (spec:
+    /// audio/transport.md "Switching patterns while playing"): the position goes on where it was when this pattern is
+    /// that long; past its end, at the same place in the bar it was in (`bar_start` gives where the bar holding a tick
+    /// starts, on the grid of the pattern that played), counted from this pattern's start. Sounding notes keep their
+    /// remaining length, as at a loop point.
+    pub fn pattern_switched(&mut self, bar_start: impl Fn(u64) -> u64) {
+        if self.end_tick > 0 && self.tick >= self.end_tick {
+            let to = (self.tick - bar_start(self.tick).min(self.tick)) % self.end_tick;
+            self.jump_to(to, false);
+        }
     }
 
     /// Carries on from `old` with the hosted plugins as it left them, for a stream that plays this engine's first
@@ -3360,8 +3384,10 @@ impl Engine {
         self.tick = tick + 1;
         // A nudge pressed or let go changes the ticks after this one, as a tempo change does.
         let nudge = self.nudge.as_ref().filter(|_| !self.exporting).map_or(0, |n| n.load(std::sync::atomic::Ordering::Relaxed).signum());
-        if nudge != self.nudged {
+        let halved = self.half.as_ref().filter(|_| !self.exporting).is_some_and(|h| h.load(std::sync::atomic::Ordering::Relaxed));
+        if nudge != self.nudged || halved != self.halved {
             self.nudged = nudge;
+            self.halved = halved;
             self.clock.set_tempo(self.rate, self.ppq, self.clock_tempo());
         }
         self.frame = start + len as u64;
@@ -9962,6 +9988,28 @@ mod tests {
         assert!((plain - 832.0).abs() < 2.0, "{plain}");
         assert!((slow / plain - 0.98).abs() < 0.003 && (fast / plain - 1.02).abs() < 0.003, "{slow} {plain} {fast}");
         assert!((slow_after - plain).abs() < 2.0 && (fast_after - plain).abs() < 2.0, "{slow_after} {fast_after}");
+    }
+
+    // spec: ui/tempo-menu.md "Half speed"
+    #[test]
+    fn half_speed_runs_playback_at_half_the_tempo() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut p = project(vec![Note { length: 96, ..Note::step(0, 1904) }], vec![]);
+        p.channels[0].enabled = false;
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Pattern(1));
+        let flag = std::sync::Arc::new(AtomicBool::new(true));
+        e.set_half_speed(flag.clone());
+        let mut out = vec![0.0; 2 * 48000 * 4];
+        e.process(&mut out);
+        let halved = e.tick_position();
+        // Switched off: the ticks after run at the tempo again.
+        flag.store(false, Ordering::Relaxed);
+        e.process(&mut out);
+        let after = e.tick_position() - halved;
+        // Four seconds at 130 BPM, PPQ 96: 832 ticks, half of them at half speed (the first tick runs before it takes
+        // hold).
+        assert!((halved - 416.0).abs() < 2.0, "{halved}");
+        assert!((after - 832.0).abs() < 2.0, "{after}");
     }
 
     /// The clicks of three seconds of `p`'s pattern 1, looping, and which of them are accented.

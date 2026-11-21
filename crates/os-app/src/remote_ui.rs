@@ -209,6 +209,13 @@ impl App {
                 let to = crate::typein_ui::at_position(&self.state, t, f64::from(v));
                 crate::typein_ui::set_value(&mut self.state, t, to);
             }
+            // The tempo over its range (10-522 BPM): one undo step while the controller keeps moving it; recorded as the
+            // tempo display's changes.
+            Target::Tempo => {
+                let bpm = crate::typein_ui::at_position(&self.state, t, f64::from(v));
+                crate::typein_ui::set_tempo_in(&mut self.state, bpm, Some(crate::history::Run::Tempo));
+                self.record_control(&crate::app::Action::Tempo);
+            }
             // Never linked (no remote control).
             Target::Latency(..) => {}
         }

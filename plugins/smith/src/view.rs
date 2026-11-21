@@ -1103,10 +1103,6 @@ fn keyboard(ui: &mut Ui) {
             // The whites' tops lie under the label band, which is part of each key's hit area.
             let shown = if black { r } else { edges(r.x, r.right(), BAND_Y1, r.bottom()) };
             ui.c.fill_rrect(Rect::new(shown.x + 0.5, shown.y, shown.w - 1.0, shown.h), if black { 2.5 } else { 3.0 }, fill);
-            if !black && k % 12 == 0 && !held {
-                // The C keys' shaded foot.
-                ui.c.fill_rrect(Rect::new(r.x + 0.5, BLACK_Y1, r.w - 1.0, KEYS_Y1 - BLACK_Y1), 3.0, Color::rgb(0xc4c4c4));
-            }
             ui.hit(r, Target::Key(k));
         }
     }
