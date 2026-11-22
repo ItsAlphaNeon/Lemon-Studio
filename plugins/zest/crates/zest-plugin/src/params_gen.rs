@@ -42,7 +42,7 @@ fn float_param(i: usize) -> FloatParam {
 pub struct ZestParams {
     /// The editor's size, page and preset (saved with the plugin state).
     #[persist = "editor"]
-    pub editor: Arc<RwLock<crate::editor::Memo>>,
+    pub editor: Arc<RwLock<crate::memo::Memo>>,
     /// Editor edits the host has not handed back yet: the sound reads every value through them.
     pub live: Arc<LiveEdits>,
     #[id = "main_output"]

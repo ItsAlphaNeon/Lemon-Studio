@@ -141,7 +141,7 @@ impl Mwc {
     }
 }
 
-/// Four float32 lanes. SSE is the baseline on x86-64 (`simd` elsewhere), so these always inline.
+/// Four float32 lanes. SSE is the baseline on x86-64, so these always inline.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct F4(pub __m128);
@@ -276,6 +276,7 @@ pub fn chain_step<const M: usize>(s: &mut [F4; M], c: &[F4], w: F4) -> F4 {
 pub struct DenormalGuard(u64);
 
 impl DenormalGuard {
+    /// x86-64: MXCSR's FTZ and DAZ (the plain-Rust lanes too, so they give the SSE lanes' bits).
     #[cfg(target_arch = "x86_64")]
     #[inline]
     pub fn new() -> DenormalGuard {
@@ -288,7 +289,7 @@ impl DenormalGuard {
         DenormalGuard(old as u64)
     }
 
-    /// FPCR's FZ does both jobs here.
+    /// AArch64: FPCR's FZ, which flushes subnormal arguments and results alike, as FTZ and DAZ together do.
     #[cfg(target_arch = "aarch64")]
     #[inline]
     pub fn new() -> DenormalGuard {
@@ -299,20 +300,27 @@ impl DenormalGuard {
         }
         DenormalGuard(old)
     }
+
+    /// Elsewhere the processor's own modes stay.
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[inline]
+    pub fn new() -> DenormalGuard {
+        DenormalGuard(0)
+    }
 }
 
 impl Drop for DenormalGuard {
-    #[cfg(target_arch = "x86_64")]
     #[inline]
     fn drop(&mut self) {
-        let old = self.0 as u32;
-        unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &old, options(nostack)) };
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    #[inline]
-    fn drop(&mut self) {
-        unsafe { core::arch::asm!("msr fpcr, {}", in(reg) self.0, options(nomem, nostack)) };
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let old = self.0 as u32;
+            core::arch::asm!("ldmxcsr [{}]", in(reg) &old, options(nostack))
+        };
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("msr fpcr, {}", in(reg) self.0, options(nomem, nostack))
+        };
     }
 }
 

@@ -466,6 +466,7 @@ mod w4 {
 }
 
 /// Eight lanes under AVX: two voices.
+#[cfg(zest_sse)]
 mod w8 {
     use super::*;
 
@@ -495,13 +496,13 @@ mod w8 {
     }
 
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     pub fn both(a: f32, b: f32) -> __m256 {
         _mm256_set_m128(_mm_set1_ps(b), _mm_set1_ps(a))
     }
 
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     pub fn pack(a: &Pre, b: &Pre) -> PreV {
         macro_rules! s {
             ($f:ident) => {
@@ -534,72 +535,72 @@ mod w8 {
     }
 
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     pub fn set1(x: f32) -> __m256 {
         _mm256_set1_ps(x)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn add(a: __m256, b: __m256) -> __m256 {
         _mm256_add_ps(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn sub(a: __m256, b: __m256) -> __m256 {
         _mm256_sub_ps(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn mul(a: __m256, b: __m256) -> __m256 {
         _mm256_mul_ps(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn min(a: __m256, b: __m256) -> __m256 {
         _mm256_min_ps(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn max(a: __m256, b: __m256) -> __m256 {
         _mm256_max_ps(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn rcp(a: __m256) -> __m256 {
         _mm256_rcp_ps(a)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn cmp_ge(a: __m256, b: __m256) -> __m256 {
         _mm256_cmp_ps::<_CMP_GE_OS>(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn cmp_le(a: __m256, b: __m256) -> __m256 {
         _mm256_cmp_ps::<_CMP_LE_OS>(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn and(a: __m256, b: __m256) -> __m256 {
         _mm256_and_ps(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn or(a: __m256, b: __m256) -> __m256 {
         _mm256_or_ps(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn andnot(a: __m256, b: __m256) -> __m256 {
         _mm256_andnot_ps(a, b)
     }
     #[inline]
-    #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+    #[target_feature(enable = "avx")]
     fn neg_of(a: __m256) -> __m256 {
         _mm256_xor_ps(a, _mm256_set1_ps(-0.0))
     }
 
-    kernels!(__m256, #[inline] #[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))] pub);
+    kernels!(__m256, #[inline] #[target_feature(enable = "avx")] pub);
 }
 
 impl SolverFilter {
@@ -999,7 +1000,8 @@ impl SolverFilter {
 ///
 /// # Safety
 /// The CPU has AVX.
-#[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx"))]
+#[cfg(zest_sse)]
+#[target_feature(enable = "avx")]
 unsafe fn run_pair_avx(p: &mut SolverFilter, q: &mut SolverFilter, x: &FilterCtx, iop: &mut FilterIo, ioq: &mut FilterIo, casc: bool) {
     let c = SolverFilter::call_c(x, casc);
     p.begin(x, &c, iop, casc);
@@ -1081,9 +1083,13 @@ unsafe fn run_pair_avx(p: &mut SolverFilter, q: &mut SolverFilter, x: &FilterCtx
 
 /// Two filters together when the CPU can, else one after the other: the same samples either way.
 pub fn run_pair(p: &mut SolverFilter, q: &mut SolverFilter, x: &FilterCtx, iop: &mut FilterIo, ioq: &mut FilterIo, casc: bool, avx: bool) {
+    #[cfg(zest_sse)]
     if avx {
-        unsafe { run_pair_avx(p, q, x, iop, ioq, casc) }
-    } else {
+        return unsafe { run_pair_avx(p, q, x, iop, ioq, casc) };
+    }
+    #[cfg(not(zest_sse))]
+    let _ = avx;
+    {
         p.run(x, iop, casc);
         q.run(x, ioq, casc);
     }

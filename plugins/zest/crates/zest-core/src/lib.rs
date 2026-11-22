@@ -5,6 +5,7 @@
 //! Zest's engine. The signatures here are what the plugin (`crates/zest-plugin`) and the renderer
 //! (`src/bin/zest-render.rs`) call: keep them. Everything behind them comes from `pages/`.
 
+pub mod simd;
 pub mod arp;
 pub mod dsp;
 pub mod envelope;
@@ -17,10 +18,19 @@ mod notes;
 pub mod osc;
 pub mod params;
 pub mod settings;
-pub mod simd;
 pub mod slop;
 pub mod tables;
 pub mod voice;
+
+/// The processor runs AVX (two voices' filters in one evaluation, `filter::solver::run_pair`).
+#[cfg(zest_sse)]
+fn avx_here() -> bool {
+    std::is_x86_feature_detected!("avx")
+}
+#[cfg(not(zest_sse))]
+fn avx_here() -> bool {
+    false
+}
 
 use dsp::{Lcg, MWC_SEED};
 use filter::{FilterCtx, FilterTables};
@@ -153,7 +163,7 @@ impl Engine {
             values,
             settings,
             offline: false,
-            avx: simd::has_avx(),
+            avx: cfg!(zest_sse) && avx_here(),
             voices,
             sh: Box::new(Shared {
                 rng: MWC_SEED,
@@ -825,6 +835,24 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// The same with both effect slots on, each module in turn, and a chord: a reset copies the voices and effects
+    /// as built, and must leave nothing of what played before.
+    #[test]
+    fn reset_is_the_startup_state_with_effects() {
+        for m in 0..5 {
+            let set = [(id::MAIN_ACTIVE_FX1, 1.0), (id::FX1_MODULE, m as f32), (id::MAIN_ACTIVE_FX2, 1.0), (id::FX2_MODULE, ((m + 2) % 5) as f32)];
+            let (mut e, _) = engine(&set);
+            let chord = [on(48), on(60), on(64), on(67)];
+            let mut a = (vec![0.0; 8192], vec![0.0; 8192]);
+            e.process(&chord, &Transport::default(), &mut a.0, &mut a.1);
+            e.reset();
+            let mut b = (vec![0.0; 8192], vec![0.0; 8192]);
+            e.process(&chord, &Transport::default(), &mut b.0, &mut b.1);
+            assert!(a.0.iter().any(|x| *x != 0.0), "module {m} sounds");
+            assert_eq!(a, b, "module {m}");
+        }
+    }
+
     #[test]
     fn pairing_gives_the_samples_of_plain_calls() {
         // two voices in lockstep against the same two run alone
@@ -835,7 +863,7 @@ mod tests {
             e.process(&[on(48), on(60)], &Transport::default(), &mut l, &mut r);
             (l, r)
         };
-        if simd::has_avx() {
+        if cfg!(zest_sse) && avx_here() {
             assert_eq!(render(true), render(false));
         }
     }

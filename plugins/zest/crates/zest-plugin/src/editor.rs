@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use nih_plug::prelude::*;
 use os_plugkit::vals::Vals;
-use serde::{Deserialize, Serialize};
 use zest_core::params::{COUNT, PARAMS};
 use zest_ui::view;
 use zest_ui::{ParamInfo, ParamTable};
@@ -25,23 +24,7 @@ use zest_ui::{ParamInfo, ParamTable};
 use crate::params_gen::ZestParams;
 use crate::PendingSlop;
 
-/// What the editor keeps in the plugin's state: its size (logical px, the standalone editor's), page and preset.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Memo {
-    pub w: u32,
-    pub h: u32,
-    pub page: usize,
-    pub preset: Option<String>,
-    /// The analog spread of the preset loaded (`spread_text`), so a reopened project sounds the same.
-    #[serde(default)]
-    pub spread: Option<String>,
-}
-
-impl Default for Memo {
-    fn default() -> Self {
-        Memo { w: view::BASE_W as u32, h: view::BASE_H as u32, page: 0, preset: None, spread: None }
-    }
-}
+pub use crate::memo::Memo;
 
 /// The largest editor the host may make.
 const MAX_W: u32 = 2560;

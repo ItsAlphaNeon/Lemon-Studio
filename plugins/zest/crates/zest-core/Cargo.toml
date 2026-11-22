@@ -6,7 +6,7 @@ edition = "2021"
 license.workspace = true
 
 [features]
-# The lane-by-lane vector operations other processors use (`simd`), on x86-64 too: to compare renders.
+# The plain-Rust lanes on x86-64 too (other processors always have them): the same samples, for checking them there.
 portable = []
 
 [dependencies]

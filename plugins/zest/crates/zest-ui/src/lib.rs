@@ -10,7 +10,7 @@
 //! (values), and presets only as files: loading and saving are actions the plugin carries out ([`ui::Act`]). So the
 //! engine behind it can be replaced without touching this crate.
 //!
-//! Spec: `zest/editor.md` (specs repo).
+//! Spec: `zest/editor.md` (specs repo, cutting-edge branch).
 
 pub mod library;
 pub mod macros;
