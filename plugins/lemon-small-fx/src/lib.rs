@@ -20,6 +20,7 @@
 
 pub mod balance;
 pub mod chorus;
+#[cfg(feature = "editor")]
 pub mod editor;
 pub mod fast_distortion;
 pub mod filter;
@@ -277,6 +278,7 @@ impl<K: Kind> Plugin for SmallFx<K> {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::FxEditor::new(K::SPEC, self.params.clone(), self.shared.clone())))
     }
@@ -404,6 +406,34 @@ mod tests {
         assert_eq!(<balance::LemonBalance as Plugin>::NAME, "Lemon Balance");
     }
 
+    /// The older pages' cards (their ranges end before the last number): 6 px apart, 8 px from the editor's sides and
+    /// over the hint well; the displays as far inside their cards on every side.
+    #[test]
+    fn the_older_pages_cards_are_6_px_apart_and_8_from_the_edges() {
+        let older = [soft_clipper::SPEC, fast_distortion::SPEC, balance::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC];
+        for s in older {
+            let mut cards: Vec<Rect> = s.cards.iter().map(|k| Rect::span(k.x0, k.x1, k.y0, k.y1)).collect();
+            cards.extend(s.controls.iter().filter_map(|c| match *c {
+                Control::Tile { x0, y0, x1, y1, .. } => Some(Rect::span(x0, x1, y0, y1)),
+                _ => None,
+            }));
+            let w = s.size.0 as f32;
+            assert_eq!(cards.iter().map(|r| r.x).fold(w, f32::min), 8.0, "{}", s.name);
+            assert_eq!(cards.iter().map(|r| r.right()).fold(0.0, f32::max), w - 8.0, "{}", s.name);
+            // The next card in its row starts 6 px after each.
+            for a in &cards {
+                let next = cards.iter().filter(|b| b.y == a.y && b.x > a.x).map(|b| b.x).fold(w, f32::min);
+                assert!(next == w || next == a.right() + 6.0, "{} {a:?}", s.name);
+            }
+            let foot = cards.iter().map(|r| r.bottom()).fold(0.0, f32::max);
+            assert_eq!(s.hint.map_or(s.size.1 as f32, |h| h.y), foot + 8.0, "{}", s.name);
+            if let Some(d) = &s.display {
+                let k = cards.iter().find(|k| k.x <= d.r.x && d.r.right() <= k.right()).unwrap();
+                assert_eq!([d.r.x - k.x, k.right() - d.r.right(), d.r.y - k.y, k.bottom() - d.r.bottom()], [8.0; 4], "{}", s.name);
+            }
+        }
+    }
+
     #[test]
     fn editor_edits_reach_the_sound_and_stored_bytes_play_as_stored() {
         let mut p = soft_clipper::LemonSoftClipper::default();
@@ -422,12 +452,12 @@ mod tests {
         assert_eq!(p.settings()[0], 0);
     }
 
-    /// The factory presets (`crates/os-app/factory-presets/<name>/`, one level of category folders) list every
+    /// The factory presets (`crates/os-session/factory-presets/<name>/`, one level of category folders) list every
     /// parameter by its name, as its step count from the minimum, and hold FL's presets (spec
     /// plugins/factory-presets.md).
     #[test]
     fn factory_presets_list_every_parameter_and_hold_fls_states() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-session/factory-presets");
         // Every preset of a plugin, as `[category/]name`.
         let all = |spec: &Spec| -> Vec<String> {
             let mut names = Vec::new();

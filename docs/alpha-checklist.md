@@ -20,8 +20,9 @@ Systems a fully functional DAW can't ship without.
   mixer menu's Arm and Disarm selected track(s) and Disk recording ▸ Auto-create audio clips work
 - [x] **Input monitoring.** A track's input plays through it while it is armed, or always, per its Monitor external
   input setting (Off / When armed / On), also while stopped (#182)
-- [x] **Automation recording into clips.** Every automatable control records into the pattern, as in the original,
-  and patterns play those points; the event editor's Turn into automation clip makes a clip of them
+- [x] **Automation recording.** Channel, mixer, tempo and plugin controls record into the pattern, as in the original,
+  which records nothing into clips either, and patterns play those points; the event editor's Turn into automation clip
+  makes a clip of them. Not recorded yet: send levels, the swing knob, the rack's mixer box and LED, the pitch knobs
 - [x] **Automation clip LFO and min / range.** The clip channel's MIN / MAX knobs set its range and its LFO
   (switch, mode, amount, speed, tension, skew, pulse width, its own envelope) plays as the original's, in the clip's
   channel window; files keep every LFO field
@@ -30,8 +31,15 @@ Systems a fully functional DAW can't ship without.
   Fruity effects stay wrapped instead of becoming the native plugins, and a 3x Osc saved before FL Studio 21 has
   its envelope and filter settings at their defaults
 - [x] **Multi-core mixing.** The engine renders on one audio thread, which limits dense projects
-- [ ] **Engine rework (sampler voice, automation).** The README's roadmap names it as the next big step; land it
-  before the alpha rather than after
+- [x] **Engine rework (sampler voice, automation).** The README's roadmap names it as the next big step; land it
+  before the alpha rather than after. For the alpha (decided 2026-11-02): what the engine does against FL, the four
+  rows of section 1 of the specs' engine roadmap (slide notes bend only the notes of their colour, a length-0 step on
+  a hosted instrument has no end, a control point's change as one limited gain ramp per tick, Lemon Trio's 3x Osc
+  DSP), and the mixer's separation term in single precision. The other engine pages (the arpeggiator, echo delay,
+  tracking, gate time, time shift, glides on all five levels, control points on sends, tempo by control point) come
+  after the alpha, under "After the alpha". The engine's own voice (the browser's previews, the engine's tests and
+  `os-render`) stays Lemon Studio's own and is not held to the voice pages. Lemon Trio keeps FL 26's averaged edges
+  with HQ off: FL 24.1's exports show a plain table lookup, and the specs leave open which version is right
 
 ## Built-in instruments and effects
 
@@ -41,6 +49,9 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
 - [x] **Drum sampler (FPC).** A pad-based drum instrument. Lemon Drum Sampler plays projects' FPC channels with their
   pads and samples (layers by velocity, the original's level, pan and tune laws, cut groups) and saves them back
   unchanged
+- [x] **SoundFont player (Fruity Soundfont Player).** Lemon SoundFont Player plays SoundFont 2 files and projects'
+  player channels, with a Classic mode (the 32-bit player's sound) and a Modern mode (the 64-bit player's), and saves
+  the channels back unchanged
 - [x] **Slicer (Slicex, Fruity Slicer).** A loop chopped into slices that the piano roll plays. Lemon Slicer
   recreates Fruity Slicer: it slices a loop by its markers, by beats or by transients, plays slice n on C5 + n, dumps
   the slices to the piano roll, and opens and saves a project's Fruity Slicer channels so the original still opens
@@ -48,19 +59,21 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
 - [x] **Filter effect (Fruity Filter, Fruity Love Philter).** Lemon Filter and Pulp Filter, each also playing the
   original's slots in opened projects
 - [x] **Flanger and phaser.** Lemon Flanger and Lemon Phaser recreate Fruity Flanger and Fruity Phaser
+- [x] **Visualizer (Wave Candy).** Lemon Drop shows projects' Wave Candy slots (oscilloscope, spectrum, meter,
+  vectorscope) with their colours and saves them back unchanged
 - [x] **Vocoder (Vocodex).** Lemon Vocoder plays projects' Vocodex slots, with the carrier or the voice from another
   track through its sidechain input; the original's built-in synth carrier isn't played yet
 - [x] **Peak Controller.** Common for sidechain pumping in projects. Lemon Peak Controller plays projects' Fruity Peak
   Controller slots and the engine plays their controller links (mixer and plugin targets, formulas)
 - [x] **Formula Controller.** Lemon Formula Controller plays projects' Fruity Formula Controller slots, with the
   original's formula language, and their controller links drive linked controls as the Peak Controller's do
-- [ ] **Patcher.** Slice 1 on 2026-10-30: the mixer slot menu's Patcherize and Patcherize all (Wrap in container,
+- [x] **Patcher.** Slice 1 on 2026-10-30: the mixer slot menu's Patcherize and Patcherize all (Wrap in container,
   Wrap all in container) put the slot's effect, or all of the track's, into a container that plays them in series,
   each with its own wet and dry, with their delays made up and one undo step. The container keeps the slot's name,
   colour and icon. Its window (the slot menu's Container ▸ Edit list..., or opening the slot) opens each effect's
   plugin window, turns and types in its wet and dry levels on knobs that follow automation, and removes, moves and
   adds effects, one undo step each
-  ([container.rs](../crates/os-app/src/container.rs), [chain.rs](../crates/os-engine/src/chain.rs)). Containers are
+  ([container.rs](../crates/os-session/src/container.rs), [chain.rs](../crates/os-engine/src/chain.rs)). Containers are
   saved in Lemon Studio's projects. The effects inside are automated and linked as a slot's effect is, their wet and
   dry levels too (clips and controller links name the member by its container's slot and its id, so they follow it
   when it moves and are saved with the project), and their windows have their presets, a slot effect's menu
@@ -72,7 +85,11 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   onto its member, in the same undo step (the slot's own switch and mix and the channel's own settings stay theirs),
   and each member has its own CPU switches (Auto-bypass when silent passes a silent effect by), name, colour and icon
   from its window menu, one undo step each, saved with the container. Left: the original's Patcher slots in imported
-  projects, Shift+drop of Patcher, and the graph editor
+  projects, Shift+drop of Patcher, and the graph editor. For the alpha (decided 2026-11-02): the first two; the graph
+  editor comes after, under "After the alpha". Done 2026-11-02: an opened project's Patcher slots whose patch is one
+  plain serial chain of effects open as containers, members in chain order; other patches (parallel paths, link
+  levels, controllers, sidechains, instruments) and Patcher channels stay as they were and the hint names each with
+  its reason. The browser's Lemon Container entry dropped with Shift wraps a slot's effect or a channel's instrument
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
   small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/integration/fx_null.rs`); the
   Chorus uses the true pi where the original's is a hair off, so 10 of its 21 cases match and the rest are at least
@@ -87,7 +104,8 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [x] **Undo for a plugin editor's own changes.** Parameters moved in a plugin's window and presets loaded from its
   title bar or dropped on it are one step each; a preset's undo brings back the state, the preset and the name
 - [x] **Undo for mixer track commands.** Routing, names, colours, resets, effect slots, audio input / output and
-  latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
+  latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step (FL Studio's change log
+  says it gave them undo in 24.2; not measured)
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
 - [x] **Mixer right-click menus.** None greyed out but Compensate for master latency, greyed in the original too
@@ -97,14 +115,17 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   controls), the track and slot menus' Change icon..., the slot menu's Link all parameters... and its Patcherize and
   Patcherize all (Wrap in container, Wrap all in container: see Patcher), Mixer options ▸ Detached (the mixer in a
   native window of its own), and last Assign to new / Unassign from Audio track(s) and Select ▸ Channels and playlist
-  tracks routed to this track (audio tracks, [track_links.rs](../crates/os-app/src/track_links.rs)) were enabled.
+  tracks routed to this track (audio tracks, [track_links.rs](../crates/os-session/src/track_links.rs)) were enabled.
   Scaling ▸ is greyed for a slot without a hosted plugin, "(no saved states)" when none is saved. Not counted: the
-  layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
+  layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs)). Still greyed as of 2026-11-08: the
+  latency menus' Adjust position of recorded audio, Set from, Delay audio output and Bypass track latency compensation,
+  and Override global mapping... on the mixer knobs
 - [x] **Playlist right-click menus.** None greyed out since 2026-10-30: the last five, the picker's Change icon and
   the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
-  as Lemon Studio's design (Change icon is kept for the session only)
+  as Lemon Studio's design (Change icon is kept for the session only). This counts greyed entries only: entries of the
+  original that Lemon Studio does not have are left out of these menus
   ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
-- [ ] **Channel rack right-click menus.** 6 of the rack's own entries greyed out on 2026-11-02, counted entry by
+- [x] **Channel rack right-click menus.** 6 of the rack's own entries greyed out on 2026-11-02, counted entry by
   entry after 29 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
   plugins, Change icon ▸, Show waveform preview, MIDI channel through, Restretch all, Detached and Patcherize, as
   Wrap in container, on 2026-10-30; Assign to new instrument track, with the playlist's instrument tracks, and Burn
@@ -123,14 +144,17 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   not described), and Edit automation in piano roll on the swing knob, the mixer box and the LED (the piano roll has
   no lane for the main swing, a channel's mixer track or its switch; greyed in the original too, which also greys Edit
   events in new window there, 2026-11-02)
-  ([rack.rs](../crates/os-app/src/rack.rs), [burn_midi.rs](../crates/os-app/src/burn_midi.rs))
-- [ ] **Main menu bar.** 2 of its 137 entries greyed out on 2026-10-30, counted entry by entry after Save audio
+  ([rack.rs](../crates/os-app/src/rack.rs), [burn_midi.rs](../crates/os-app/src/burn_midi.rs)). These stay greyed
+  for the alpha (decided 2026-11-02): each waits on something Lemon Studio does not have yet or on what the original
+  does, listed under "After the alpha"
+- [x] **Main menu bar.** 2 of its 137 entries greyed out on 2026-10-30, counted entry by entry after Save audio
   clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance,
   Switch auto-bypass for all plugins, Chord progression tool..., Set keyboard focus of all plugins to ▸ (its Enabled
   and Disabled not counted; greyed on Linux), Lock / Unlock all tracks to / from their clips (the last four as Lemon
   Studio's design) and Set up for MIDI export (with the new ADD ▸ MIDI Out, Lemon MIDI Out) were enabled: TOOLS >
   Control builder (no control builder yet); VIEW > Script output (no scripting)
-  ([menus.rs](../crates/os-app/src/views/menus.rs))
+  ([menus.rs](../crates/os-app/src/views/menus.rs)). Both stay greyed for the alpha (decided 2026-11-02), listed
+  under "After the alpha"
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's
   Tesla. At its time limit Tesla now keeps the last minutes, as Edison does. What FL Studio's logger records and how
@@ -174,16 +198,61 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [x] **ASIO output pairs.** Every track has an output menu with the pairs of the driver's first 16 outputs, and the
   master plays on the pair chosen for it (#182)
 
+## Found by the parity audit
+
+Found on 2026-11-08 by an audit of the code against FL Studio 26.1.7. They wait on a decision about whether they hold up
+the alpha; the larger gaps it found are on the roadmap.
+
+- [ ] **Consolidate and Export all playlist tracks leave out plugins.** Both render without hosted instruments and
+  effects, so plugin channels come out silent; Consolidate still mutes the source clips
+  ([playlist.rs](../crates/os-app/src/playlist.rs))
+- [ ] **The playlist's bars are always 4 beats.** Its bars, ruler and Bar snap ignore the project's time signature and
+  time signature markers
+- [ ] **Menus show keys that do something else.** The playlist's ▸ Select menu (Ctrl+Enter, Shift+C), the mixer track
+  menu (Ctrl+E, Shift+E) and PATTERNS Clone (Shift+Ctrl+C, which has no handler)
+- [ ] **New or cloned channels vanish under a group filter.** They join no group, so they stay hidden until the filter
+  changes
+- [ ] **ADD ▸ Automation clip can't be linked.** Nothing in the app can give the new clip a target, so it drives nothing
+- [ ] **FL plugins with no Lemon version aren't reported.** Their channels play silent and their slots pass dry, but the
+  missing-files box doesn't list them
+- [ ] **Export's Resampling choice doesn't reach Lemon Sampler channels.** Only the engine's own voices and the
+  converter after the mix use it
+
+## After the alpha
+
+Left out of the alpha on 2026-11-02; each stays open here until it is done.
+
+- [ ] **The other engine pages.** The arpeggiator with the chords file, echo delay, tracking, gate time, time shift
+  and the time law (`audio/channel-misc.md` in the specs), glides on all five levels for hosted instruments
+  (`audio/note-rules.md`), control points on sends (their unit not measured yet), tempo by control point, the
+  mixer's "current" track and summing order, Full porta, and the rest of the specs' engine roadmap sections 2 and 3
+- [ ] **Patcher's graph editor.** Free routing between a container's members
+- [ ] **Greyed channel rack entries.** Loop starter and its 3 playlist-track options (the original's is built on its
+  online loop library), Auto fill (what it does is unknown), Create instrument (no multi-sample instrument yet),
+  Override global mapping... on the knob, mixer box and LED menus (what the original's override does is not
+  described), and Edit automation in piano roll on the swing knob, the mixer box and the LED (no piano roll lane for
+  them; greyed in the original too)
+- [ ] **TOOLS > Control builder and VIEW > Script output.** Lemon Studio has neither a control builder nor scripting
+- [ ] **Lemon Parametric EQ 2's greyed options.** Band solo on Shift's Adaptive and Bandpass listening (and Inherit
+  bandwidth), Minimum phase mod speed, Phase rotation, and the heatmap's Enhanced frequency and High precision. They
+  show and keep their stored values, but nothing reads them yet; Shift+click solos the band alone (2026-11-05 audit)
+
 ## Shipping a build
 
-What has to exist before anyone outside can run the alpha. Builds ship once the rest of this checklist is done
-(decided 2026-10-29), so these come last: until then nothing is packaged or released, and contributions that add
-installers or release packaging are declined.
+What has to exist before anyone outside can run the alpha. Tagged releases ship once the rest of this checklist is
+done (decided 2026-10-29), so these come last; a tag with major version 0, like `v0.1.0`, is an alpha. Nightly builds
+of main are published before that (decided 2026-11-07), by the release workflow ([releasing.md](releasing.md));
+contributions that add other installers or packaging are declined.
 
-- [ ] **Prebuilt binaries for Windows, macOS and Linux.** Today Lemon Studio is built from source only
+- [ ] **Prebuilt binaries for Windows, macOS and Linux.** The release workflow builds them, a nightly from main every
+  night and a tagged release from a `vMAJOR.MINOR.PATCH` tag: a Windows `.exe`, a Linux AppImage and a macOS `.app`
+  (Apple silicon), each updating itself (`lemonstudio-updater`), and the plugins for other DAWs as a zip per platform.
+  Left: the steps under "Going live" in [releasing.md](releasing.md), its first run and trying the updates on each
+  platform among them
 - [x] **Complete [THIRD-PARTY-NOTICES.txt](../THIRD-PARTY-NOTICES.txt).** Every crate that goes into a build is
   listed with its licence text, generated by `cargo run -p notices`; `cargo test` fails when one is missing
-- [ ] **macOS signing and notarization.** Builds and plugin bundles are signed ad hoc only
+- [x] **macOS signing and notarization.** Not done: builds and plugin bundles are signed ad hoc only, as notarization
+  needs a paid Apple Developer account. The release notes say how to open them anyway (decided 2026-11-07)
 - [ ] **Plugin crashes contained on macOS and Linux.** Calls into plugins run under a signal guard there, with the
   same handling of a stopped plugin as on Windows (its crash tests pass in CI on both), and so do CLAP and VST3
   editors' run loop callbacks on Linux. Left: macOS editors, which the system's run loop calls outside any host

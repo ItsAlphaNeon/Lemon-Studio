@@ -24,6 +24,20 @@ pub(crate) const MAX_AUTO: usize = 2048;
 /// with id `u32::MAX`, so positions stay the automation indexes.
 pub(crate) type Range = (u32, f64, f64, bool);
 
+/// Where each parameter id is in a list of ranges, sorted by id (the first place for an id listed twice): finding a
+/// parameter's range takes a search, not a pass over the list, for plugins with thousands of parameters.
+pub(crate) fn by_id(ranges: &[Range]) -> Vec<(u32, usize)> {
+    let mut out: Vec<(u32, usize)> = ranges.iter().enumerate().map(|(i, r)| (r.0, i)).collect();
+    out.sort_unstable();
+    out
+}
+
+/// The place of parameter `id` in the ranges `by` was made from (`by_id`).
+pub(crate) fn place(by: &[(u32, usize)], id: u32) -> Option<usize> {
+    let &(found, i) = by.get(by.partition_point(|e| e.0 < id))?;
+    (found == id).then_some(i)
+}
+
 /// Reads the parameter ranges in list order (main thread).
 ///
 /// # Safety
@@ -69,6 +83,7 @@ impl Plugin {
     /// Automation (audio thread): parameter `index` of the list to normalized `value`, `offset` frames into the next
     /// process call. A stepped parameter gets its nearest step. Unknown indexes are ignored.
     pub(crate) fn automate(&mut self, offset: u32, index: u32, value: f64) {
+        let index = self.param_aliases.iter().find(|a| a.0 == index).map_or(index, |a| a.1);
         let Some(&(id, lo, hi, stepped)) = self.ranges.get(index as usize) else { return };
         if id == u32::MAX || self.auto.len() >= MAX_AUTO {
             return;
@@ -114,6 +129,7 @@ impl Plugin {
         let rescan = self.host_data.rescan.swap(0, std::sync::atomic::Ordering::AcqRel);
         if rescan & (CLAP_PARAM_RESCAN_INFO | CLAP_PARAM_RESCAN_ALL) != 0 {
             self.ranges = unsafe { read_ranges(self.params, self.plugin) };
+            self.range_of = by_id(&self.ranges);
         }
         if !self.processed && !self.auto.is_empty() {
             for (_, id, v) in self.auto.drain(..) {
@@ -126,5 +142,20 @@ impl Plugin {
         if !self.auto.is_empty() || !self.param_queue.is_empty() {
             self.host_data.attention.raise();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_range_is_found_by_id_at_its_first_place() {
+        let ranges: Vec<Range> = vec![(900, 0.0, 1.0, false), (7, 0.0, 2.0, false), (u32::MAX, 0.0, 1.0, false), (7, 0.0, 3.0, true)];
+        let by = by_id(&ranges);
+        assert_eq!(place(&by, 900), Some(0));
+        assert_eq!(place(&by, 7), Some(1));
+        assert_eq!(place(&by, 8), None);
+        assert_eq!(place(&by, 1000), None);
     }
 }

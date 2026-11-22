@@ -38,6 +38,10 @@ const DOT_SHIFT: u8 = 92;
 /// A channel's colour in the older files when it was not chosen (the 0x6A655C of FL 26's resaves with colour flag 0).
 const OLD_CHANNEL_COLOR: u32 = 0x006A_655C;
 
+/// A channel's name in files up to FL 11; the event 203 that comes before it in a block is not its name (spec:
+/// flp/events/channels.md "Version scope").
+const CH_NAME_OLD: u8 = 192;
+
 /// The channel's mixer track before FL 24.2, a signed byte (spec: flp/engine-events.md "A channel").
 const CH_TARGET_OLD: u8 = 22;
 
@@ -67,9 +71,16 @@ fn saved_by(events: &[Event]) -> (u32, u32) {
 }
 
 /// True when `events` are in an older generation's layout: saved before FL 24.2, or with channel blocks that no event
-/// 51 closes (spec: flp/layouts.md "How to tell the generation").
+/// 51 closes (spec: flp/layouts.md "How to tell the generation"). Blocks that event 51 closes are the current layout
+/// whatever the version says: a build that converted older projects and kept their version wrote such files, and
+/// converting one again would read its single stretch lengths as integers. Up to FL 11 the version still decides, as the
+/// text's encoding goes by it.
 pub fn is_legacy(events: &[Event]) -> bool {
-    saved_by(events) < (24, 2) || (events.iter().any(|e| e.id == id::CH_START) && !events.iter().any(|e| e.id == id::CH_END))
+    let version = saved_by(events);
+    if events.iter().any(|e| e.id == id::CH_END) {
+        return version.0 <= 11;
+    }
+    version < (24, 2) || events.iter().any(|e| e.id == id::CH_START)
 }
 
 /// Rewrites a file of an older generation into the current layout; `Ok(false)` leaves a current file as it is. What
@@ -163,8 +174,15 @@ fn channel_blocks(ev: &mut Vec<Event>, version: (u32, u32)) -> Dots {
         let split = block.iter().position(|x| x.id == id::PAT_START || x.id == id::CH_END).unwrap_or(block.len());
         let has_target = block[..split].iter().any(|x| x.id == id::CH_TARGET);
         let has_flag = block[..split].iter().any(|x| x.id == id::CH_COLOR_FLAG);
-        for x in &block[..split] {
+        let old_name = if version.0 <= 11 { block[..split].iter().position(|x| x.id == CH_NAME_OLD) } else { None };
+        for (k, x) in block[..split].iter().enumerate() {
             match x.id {
+                CH_NAME_OLD if old_name.is_some() => {
+                    if let Some(d) = x.data().filter(|d| !decode_text(d, TextEnc::Utf16).is_empty()) {
+                        out.push(Event::new(id::DISPLAY_NAME, Value::var(d.to_vec())));
+                    }
+                }
+                id::DISPLAY_NAME if old_name.is_some_and(|at| k < at) => {}
                 // The colour flag (41) after the colour: set, except on the older files' default colour, which becomes
                 // the current default (as FL 26's resaves of the older files have it).
                 id::COLOR if !has_flag => {
@@ -673,6 +691,35 @@ mod tests {
         ev.iter().map(|e| e.id).collect()
     }
 
+    /// Up to FL 11 a channel's name is its event 192, not the 203 before it or the mixer slot's 203 after it in the last
+    /// block; a later file's 192 is left alone.
+    #[test]
+    fn old_channel_names_come_from_event_192() {
+        let names = |version: &str| {
+            let mut ev = vec![
+                Event::new(id::VERSION, ansi(version)),
+                Event::new(id::CH_START, Value::U16(0)),
+                Event::new(id::DISPLAY_NAME, ansi("Getta")),
+                Event::new(CH_NAME_OLD, ansi("Bass")),
+                Event::new(id::CH_START, Value::U16(1)),
+                Event::new(CH_NAME_OLD, ansi("Lead")),
+                Event::new(id::PLUGIN_STATE, Value::var(vec![0])),
+                Event::new(id::DISPLAY_NAME, ansi("Love Philter")),
+            ];
+            let v = saved_by(&ev);
+            if v.0 <= 11 {
+                text_to_utf16(&mut ev);
+            }
+            let _ = channel_blocks(&mut ev, v);
+            let enc = TextEnc::Utf16;
+            let starts: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::CH_START).map(|(k, _)| k).collect();
+            let ends: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::CH_END).map(|(k, _)| k).collect();
+            starts.iter().zip(&ends).map(|(&a, &b)| scan_channel(&ev, a, b).name.and_then(|i| ev[i].data().map(|d| decode_text(d, enc)))).collect::<Vec<_>>()
+        };
+        assert_eq!(names("11.0.3"), [Some("Bass".to_string()), Some("Lead".to_string())]);
+        assert_eq!(names("12.0.0")[0].is_none(), false, "a later file keeps its 203");
+    }
+
     /// A clip record of the FL 20 form (32 bytes): position, the 0x5000 base, the item, length 96, the track.
     fn clip_32(position: u32, item: u16, track: u16) -> Vec<u8> {
         let mut r = vec![0u8; 32];
@@ -815,6 +862,20 @@ mod tests {
                 (0, MX_KIND_PARAM, mixer_location(MX_SPECIAL_TRACK, 0), 12800),
             ]
         );
+    }
+
+    /// A file already in the current layout (its channel blocks closed) with an older version is not converted again.
+    #[test]
+    fn a_closed_layout_is_current_whatever_its_version() {
+        let ev = |id: u8, v: Value| Event::new(id, v);
+        let version = |t: &str| ev(id::VERSION, Value::var(format!("{t}\0").into_bytes()));
+        let closed = [version("20.7.1.1773"), ev(id::CH_START, Value::U16(0)), ev(id::CH_END, Value::U8(0))];
+        assert!(!is_legacy(&closed));
+        assert!(is_legacy(&[version("11.1.1"), ev(id::CH_START, Value::U16(0)), ev(id::CH_END, Value::U8(0))]), "8-bit text goes by the version");
+        let open = [version("26.1.7.5653"), ev(id::CH_START, Value::U16(0))];
+        assert!(is_legacy(&open), "blocks not closed");
+        assert!(is_legacy(&[version("24.1.1.4285")]), "an older version with no channels");
+        assert!(!is_legacy(&[version("26.1.7.5653")]));
     }
 
     /// The whole conversion of a small FL 11 file: it loads, and an unedited save keeps the converted stream.

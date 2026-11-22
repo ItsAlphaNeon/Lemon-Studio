@@ -81,8 +81,8 @@ pub const SPEC: &Spec = &Spec {
     cards: &[],
     controls: &CONTROLS,
     display: None,
-    // The name's last letter ends a pixel inside `x` (its side bearing).
-    mark: Mark { x: W - GAP + 1.0, y: BAND_Y + BAND_H / 2.0, anchor: 1.0, stacked: false },
+    // The name's last pixel is the one before `x`: 6 px clear of the right edge.
+    mark: Mark { x: W - GAP, y: BAND_Y + BAND_H / 2.0, anchor: 1.0, stacked: false },
     // The well's outline covers its far edges (as `Rect::span`): one pixel less each way.
     hint: Some(Rect::new(GAP, BAND_Y, W - 2.0 * GAP - 1.0, BAND_H - 1.0)),
     labels: &[],

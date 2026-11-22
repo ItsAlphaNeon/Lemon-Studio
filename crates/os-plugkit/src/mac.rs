@@ -9,7 +9,9 @@
 //! contents. Popup menus painted with `os_ui::kit::menu` (never native menus) and the "Type in value" box are
 //! borderless panels the GUI thread asks the main thread for and then runs like the X11 ones; event monitors stand in
 //! for X11's grabs (a press elsewhere cancels, keys go to the box). The cursor is held during a knob drag by hiding it
-//! and detaching it from the mouse. A view can take dropped files, and WAV audio goes to and from the clipboard.
+//! and detaching it from the mouse. A view can take dropped files, and WAV audio goes to and from the clipboard. A
+//! floating window (`Window::floating`) is a see-through panel of its own with a GUI thread of its own, so it outlives
+//! the editor that opened it.
 //! Positions are device px (points times the window's backing scale), screen positions device px from the top left of
 //! the main screen. The GUI thread never waits on the main thread past the editor's closing (the host closes editors on
 //! the main thread, waiting for the GUI thread).
@@ -28,12 +30,13 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{msg_send, sel, AllocAnyThread, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSCursor, NSDragOperation, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSPanel, NSPasteboard,
-    NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindowStyleMask,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSCursor, NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSDragOperation, NSEvent,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSNormalWindowLevel, NSPanel, NSPasteboard, NSPasteboardTypeFileURL, NSPopUpMenuWindowLevel, NSScreen,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{kCFRunLoopCommonModes, CFRetained, CFRunLoop};
 use objc2_core_graphics::{
-    CGAssociateMouseAndMouseCursorPosition, CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGDisplayBounds, CGImage,
+    CGAssociateMouseAndMouseCursorPosition, CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGDisplayBounds, CGEvent, CGImage,
     CGImageAlphaInfo, CGImageByteOrderInfo, CGMainDisplayID,
 };
 use objc2_foundation::{NSArray, NSData, NSPoint, NSRect, NSSize, NSString, NSURL};
@@ -84,6 +87,8 @@ enum Ev {
     Leave,
     Key { sym: u32 },
     Expose,
+    /// A floating window's backing scale is now this (it moved to another screen).
+    Scale(f32),
     Drop(String),
     /// A press outside every surface while a popup or box is open.
     Outside,
@@ -95,6 +100,8 @@ struct Shared {
     quit: AtomicBool,
     /// The cursor is hidden and held (main thread).
     held: AtomicBool,
+    /// A floating window's `Window::set_floating` is on its way to the main thread.
+    asked: AtomicBool,
 }
 
 #[derive(Default)]
@@ -104,6 +111,10 @@ struct State {
 }
 
 impl Shared {
+    fn new() -> Arc<Shared> {
+        Arc::new(Shared { state: Mutex::default(), cv: Condvar::new(), quit: AtomicBool::new(false), held: AtomicBool::new(false), asked: AtomicBool::new(false) })
+    }
+
     fn push(&self, r: Raw) {
         if let Ok(mut s) = self.state.lock() {
             s.events.push_back(r);
@@ -155,6 +166,13 @@ pub struct EditorThread {
     thread: Option<JoinHandle<()>>,
 }
 
+impl EditorThread {
+    /// The thread has ended by itself (its `run` returned).
+    pub fn finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+}
+
 impl Drop for EditorThread {
     fn drop(&mut self) {
         if let Ok(mut s) = self.slot.lock() {
@@ -192,14 +210,19 @@ pub fn spawn(parent: Parent, size: (u32, u32), slot: &Slot, run: impl FnOnce(Win
     // SAFETY: the host passes a valid NSView (or null).
     let parent_view = unsafe { (parent as *const NSView).as_ref() }?;
     let scale = backing_scale(parent);
-    let shared = Arc::new(Shared { state: Mutex::default(), cv: Condvar::new(), quit: AtomicBool::new(false), held: AtomicBool::new(false) });
+    let shared = Shared::new();
     let s = f64::from(scale);
-    let view = new_view(mtm, NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(f64::from(size.0) / s, f64::from(size.1) / s)));
+    let view = new_view(mtm, view_class(), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(f64::from(size.0) / s, f64::from(size.1) / s)));
     // Stays at the parent's top left (where child windows sit on Windows and X11) when the parent changes size.
     view.setAutoresizingMask(if parent_view.isFlipped() { NSAutoresizingMaskOptions::ViewMaxYMargin } else { NSAutoresizingMaskOptions::ViewMinYMargin });
     parent_view.addSubview(&view);
     place(&view);
     let id = register(view, None, &shared, scale);
+    start(shared, id, scale, slot, run)
+}
+
+/// The GUI thread of surface `id`, running `run`.
+fn start(shared: Arc<Shared>, id: u64, scale: f32, slot: &Slot, run: impl FnOnce(Window) + Send + 'static) -> Option<EditorThread> {
     let waker = Waker(shared.clone());
     let win = Window {
         shared: shared.clone(),
@@ -208,12 +231,13 @@ pub fn spawn(parent: Parent, size: (u32, u32), slot: &Slot, run: impl FnOnce(Win
         mods: (false, false, false),
         locked: false,
         pointer: (0, 0),
+        tick: TICK,
         next_tick: Instant::now() + TICK,
         raw: VecDeque::new(),
         queue: VecDeque::new(),
     };
     let Ok(thread) = std::thread::Builder::new().name("plugin editor".into()).spawn(move || run(win)) else {
-        close_all(&shared);
+        on_main(move |_| close_all(&shared));
         return None;
     };
     if let Ok(mut s) = slot.lock() {
@@ -241,6 +265,8 @@ struct Surface {
     /// The frame shown, and the newest one painted, not shown yet.
     image: Option<CFRetained<CGImage>>,
     pending: Option<CFRetained<CGImage>>,
+    /// A floating window: how it was last put on the desktop.
+    floating: Option<Floating>,
 }
 
 static SURFACES: Mutex<Vec<Surface>> = Mutex::new(Vec::new());
@@ -255,7 +281,7 @@ fn surfaces() -> std::sync::MutexGuard<'static, Vec<Surface>> {
 
 fn register(view: Retained<NSView>, panel: Option<Retained<NSPanel>>, shared: &Arc<Shared>, scale: f32) -> u64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    surfaces().push(Surface { id, shared: shared.clone(), scale, view: Main(view), panel: panel.map(Main), image: None, pending: None });
+    surfaces().push(Surface { id, shared: shared.clone(), scale, view: Main(view), panel: panel.map(Main), image: None, pending: None, floating: None });
     id
 }
 
@@ -329,54 +355,68 @@ fn hold_cursor(shared: &Shared, on: bool) {
     }
 }
 
-/// The view class of editors, popups and boxes: registered once per loaded module, under a name of its own (this
-/// module's address), so two plugin modules (or two builds of one) never share a class with another's code.
+/// The view class of editors, popups and boxes.
 fn view_class() -> &'static AnyClass {
     static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
-    CLASS.get_or_init(|| {
-        let base = format!("LemonPluginView{:x}", view_class as fn() -> &'static AnyClass as usize);
-        let mut b = (0..)
-            .find_map(|n| {
-                let name = CString::new(if n == 0 { base.clone() } else { format!("{base}_{n}") }).ok()?;
-                ClassBuilder::new(&name, NSView::class())
-            })
-            .expect("a free class name");
-        // SAFETY: each function has the selector's signature.
-        unsafe {
-            for s in [sel!(isFlipped), sel!(isOpaque), sel!(wantsUpdateLayer), sel!(acceptsFirstResponder)] {
-                b.add_method(s, yes as extern "C-unwind" fn(_, _) -> _);
-            }
-            b.add_method(sel!(acceptsFirstMouse:), first_mouse as extern "C-unwind" fn(_, _, _) -> _);
-            for s in [
-                sel!(mouseDown:),
-                sel!(mouseUp:),
-                sel!(rightMouseDown:),
-                sel!(rightMouseUp:),
-                sel!(otherMouseDown:),
-                sel!(otherMouseUp:),
-                sel!(mouseMoved:),
-                sel!(mouseDragged:),
-                sel!(rightMouseDragged:),
-                sel!(otherMouseDragged:),
-                sel!(scrollWheel:),
-                sel!(mouseEntered:),
-                sel!(mouseExited:),
-                sel!(keyDown:),
-            ] {
-                b.add_method(s, on_event as extern "C-unwind" fn(_, _, _));
-            }
-            b.add_method(sel!(draggingEntered:), drag_enter as extern "C-unwind" fn(_, _, _) -> _);
-            b.add_method(sel!(performDragOperation:), drag_drop as extern "C-unwind" fn(_, _, _) -> _);
-            b.add_method(sel!(updateLayer), update_layer as extern "C-unwind" fn(_, _));
-            b.add_method(sel!(viewDidChangeBackingProperties), expose as extern "C-unwind" fn(_, _));
-            b.add_method(sel!(viewDidMoveToWindow), expose as extern "C-unwind" fn(_, _));
+    CLASS.get_or_init(|| build_class("LemonPluginView", true))
+}
+
+/// The view class of floating windows: not opaque, and it paints again at the backing scale of the screen it is on.
+fn clear_view_class() -> &'static AnyClass {
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    CLASS.get_or_init(|| build_class("LemonPluginClearView", false))
+}
+
+/// A view class, registered once per loaded module, under a name of its own (this module's address), so two plugin
+/// modules (or two builds of one) never share a class with another's code.
+fn build_class(prefix: &str, opaque: bool) -> &'static AnyClass {
+    let base = format!("{prefix}{:x}", view_class as fn() -> &'static AnyClass as usize);
+    let mut b = (0..)
+        .find_map(|n| {
+            let name = CString::new(if n == 0 { base.clone() } else { format!("{base}_{n}") }).ok()?;
+            ClassBuilder::new(&name, NSView::class())
+        })
+        .expect("a free class name");
+    // SAFETY: each function has the selector's signature.
+    unsafe {
+        for s in [sel!(isFlipped), sel!(wantsUpdateLayer), sel!(acceptsFirstResponder)] {
+            b.add_method(s, yes as extern "C-unwind" fn(_, _) -> _);
         }
-        b.register()
-    })
+        b.add_method(sel!(isOpaque), if opaque { yes } else { no } as extern "C-unwind" fn(_, _) -> _);
+        b.add_method(sel!(acceptsFirstMouse:), first_mouse as extern "C-unwind" fn(_, _, _) -> _);
+        for s in [
+            sel!(mouseDown:),
+            sel!(mouseUp:),
+            sel!(rightMouseDown:),
+            sel!(rightMouseUp:),
+            sel!(otherMouseDown:),
+            sel!(otherMouseUp:),
+            sel!(mouseMoved:),
+            sel!(mouseDragged:),
+            sel!(rightMouseDragged:),
+            sel!(otherMouseDragged:),
+            sel!(scrollWheel:),
+            sel!(mouseEntered:),
+            sel!(mouseExited:),
+            sel!(keyDown:),
+        ] {
+            b.add_method(s, on_event as extern "C-unwind" fn(_, _, _));
+        }
+        b.add_method(sel!(draggingEntered:), drag_enter as extern "C-unwind" fn(_, _, _) -> _);
+        b.add_method(sel!(performDragOperation:), drag_drop as extern "C-unwind" fn(_, _, _) -> _);
+        b.add_method(sel!(updateLayer), update_layer as extern "C-unwind" fn(_, _));
+        b.add_method(sel!(viewDidChangeBackingProperties), if opaque { expose } else { rescaled } as extern "C-unwind" fn(_, _));
+        b.add_method(sel!(viewDidMoveToWindow), expose as extern "C-unwind" fn(_, _));
+    }
+    b.register()
 }
 
 extern "C-unwind" fn yes(_: &NSView, _: Sel) -> Bool {
     Bool::YES
+}
+
+extern "C-unwind" fn no(_: &NSView, _: Sel) -> Bool {
+    Bool::NO
 }
 
 /// A click into an inactive window acts at once, as on Windows and X11.
@@ -400,6 +440,19 @@ extern "C-unwind" fn update_layer(v: &NSView, _: Sel) {
 extern "C-unwind" fn expose(v: &NSView, _: Sel) {
     if let Some((id, shared, _)) = target(v) {
         shared.push(Raw { surface: id, ev: Ev::Expose, mods: (false, false, false) });
+    }
+}
+
+/// A floating window moved to another screen: from here on its events and frames are at that screen's backing scale.
+extern "C-unwind" fn rescaled(v: &NSView, _: Sel) {
+    let Some(k) = v.window().map(|w| w.backingScaleFactor() as f32).filter(|k| *k > 0.0) else { return };
+    let p: *const NSView = v;
+    let found = surfaces().iter_mut().find(|s| Retained::as_ptr(&s.view.0) == p).map(|s| {
+        s.scale = k;
+        (s.id, s.shared.clone())
+    });
+    if let Some((id, shared)) = found {
+        shared.push(Raw { surface: id, ev: Ev::Scale(k), mods: (false, false, false) });
     }
 }
 
@@ -437,9 +490,18 @@ fn mods_of(f: NSEventModifierFlags) -> (bool, bool, bool) {
 fn at(v: &NSView, e: &NSEvent, scale: f32) -> At {
     let loc = e.locationInWindow();
     let p = v.convertPoint_fromView(loc, None);
-    let s = v.window().map_or(loc, |w| w.convertPointToScreen(loc));
+    // A floating window moves under the pointer, so an event's place in the window can be out of date: it has its place
+    // on the screen from the event itself.
+    let global = if v.isOpaque() { None } else { e.CGEvent() }.map(|g| CGEvent::location(Some(&g)));
+    let (sx, sy) = global.map_or_else(
+        || {
+            let s = v.window().map_or(loc, |w| w.convertPointToScreen(loc));
+            (s.x, main_height() - s.y)
+        },
+        |g| (g.x, g.y),
+    );
     let k = f64::from(scale);
-    At { x: (p.x * k) as f32, y: (p.y * k) as f32, sx: (s.x * k).round() as i32, sy: ((main_height() - s.y) * k).round() as i32 }
+    At { x: (p.x * k) as f32, y: (p.y * k) as f32, sx: (sx * k).round() as i32, sy: (sy * k).round() as i32 }
 }
 
 /// The view's mouse and key methods: what happened, for the GUI thread.
@@ -524,10 +586,10 @@ fn key_sym(e: &NSEvent) -> Option<u32> {
 
 /// A view of our class, layer-backed (frames are its layer's contents), told about the mouse moving over it and
 /// leaving it, whichever window is key.
-fn new_view(_mtm: MainThreadMarker, frame: NSRect) -> Retained<NSView> {
-    // SAFETY: our class is an NSView subclass; `initWithFrame:` is its initialiser.
+fn new_view(_mtm: MainThreadMarker, class: &AnyClass, frame: NSRect) -> Retained<NSView> {
+    // SAFETY: our classes are NSView subclasses; `initWithFrame:` is their initialiser.
     let view: Retained<NSView> = unsafe {
-        let a: Allocated<NSView> = msg_send![view_class(), alloc];
+        let a: Allocated<NSView> = msg_send![class, alloc];
         msg_send![a, initWithFrame: frame]
     };
     view.setWantsLayer(true);
@@ -547,9 +609,9 @@ fn place(v: &NSView) {
     v.setFrameOrigin(NSPoint::new(0.0, y));
 }
 
-/// A frame as an image: XRGB rows of `w`, in the display's colour space as Lemon Studio's own windows are (softbuffer's),
-/// so an editor's colours match the frame around it.
-fn image(px: &[u32], w: u32, h: u32) -> Option<CFRetained<CGImage>> {
+/// A frame as an image: XRGB rows of `w` (premultiplied ARGB with `alpha`), in the display's colour space as Lemon
+/// Studio's own windows are (softbuffer's), so an editor's colours match the frame around it.
+fn image(px: &[u32], w: u32, h: u32, alpha: bool) -> Option<CFRetained<CGImage>> {
     let n = w as usize * h as usize;
     if n == 0 || px.len() < n {
         return None;
@@ -568,8 +630,9 @@ fn image(px: &[u32], w: u32, h: u32) -> Option<CFRetained<CGImage>> {
         return None;
     };
     let space = CGColorSpace::new_device_rgb();
-    // XRGB words in memory order: 32-bit little endian, the top byte skipped.
-    let bits = CGBitmapInfo(CGImageAlphaInfo::NoneSkipFirst.0 | CGImageByteOrderInfo::Order32Little.0);
+    // XRGB words in memory order: 32-bit little endian, the top byte skipped (or the alpha).
+    let first = if alpha { CGImageAlphaInfo::PremultipliedFirst } else { CGImageAlphaInfo::NoneSkipFirst };
+    let bits = CGBitmapInfo(first.0 | CGImageByteOrderInfo::Order32Little.0);
     // SAFETY: the provider holds `w * h` 32-bit pixels; no decode array.
     unsafe {
         CGImage::new(w as usize, h as usize, 8, 32, w as usize * 4, space.as_deref(), bits, Some(&provider), std::ptr::null(), false, CGColorRenderingIntent::RenderingIntentDefault)
@@ -577,8 +640,8 @@ fn image(px: &[u32], w: u32, h: u32) -> Option<CFRetained<CGImage>> {
 }
 
 /// Shows a frame on a surface: the newest frame waits for the main thread, which is asked once per batch.
-fn show_frame(id: u64, px: &[u32], w: u32, h: u32) {
-    let Some(img) = image(px, w, h) else { return };
+fn show_frame(id: u64, px: &[u32], w: u32, h: u32, alpha: bool) {
+    let Some(img) = image(px, w, h, alpha) else { return };
     let ask = {
         let mut l = surfaces();
         let Some(s) = l.iter_mut().find(|s| s.id == id) else { return };
@@ -617,16 +680,130 @@ fn make_panel(mtm: MainThreadMarker, r: [i32; 4], shared: &Arc<Shared>, scale: f
     panel.setHasShadow(true);
     panel.setHidesOnDeactivate(false);
     panel.setAcceptsMouseMovedEvents(true);
-    let view = new_view(mtm, NSRect::new(NSPoint::new(0.0, 0.0), rect.size));
+    let view = new_view(mtm, view_class(), NSRect::new(NSPoint::new(0.0, 0.0), rect.size));
     panel.setContentView(Some(&view));
     let id = register(view, Some(panel.clone()), shared, scale);
     panel.orderFrontRegardless();
     Some(id)
 }
 
-/// Whether a window is one of our panels. Main thread.
-fn is_panel(w: *const AnyObject) -> bool {
-    surfaces().iter().any(|s| s.panel.as_ref().is_some_and(|p| Retained::as_ptr(&p.0).cast::<AnyObject>() == w))
+/// Whether a window is one of `shared`'s panels. Main thread.
+fn is_panel(w: *const AnyObject, shared: &Arc<Shared>) -> bool {
+    surfaces().iter().any(|s| Arc::ptr_eq(&s.shared, shared) && s.panel.as_ref().is_some_and(|p| Retained::as_ptr(&p.0).cast::<AnyObject>() == w))
+}
+
+// -------------------------------------------------------------------------------------------------------------------
+// Floating windows
+
+/// How a floating window sits on the desktop (`Window::set_floating`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Floating {
+    /// It belongs to the host: above the host's windows while the host is active, gone while another application is
+    /// (as the app's detached plugin windows are), or while the host is hidden or all its windows are minimised.
+    pub owned: bool,
+    /// Above every window, whichever application is active.
+    pub front: bool,
+    /// It takes the mouse all over; if not, clicks go through it.
+    pub solid: bool,
+}
+
+/// A rectangle (left, top, right, bottom: points from the main screen's top left, at least a point wide and high) in
+/// AppKit's screen coordinates.
+fn to_appkit(r: [i32; 4]) -> NSRect {
+    let (w, h) = (f64::from((r[2] - r[0]).max(1)), f64::from((r[3] - r[1]).max(1)));
+    NSRect::new(NSPoint::new(f64::from(r[0]), main_height() - f64::from(r[1]) - h), NSSize::new(w, h))
+}
+
+/// `to_appkit`'s way back.
+fn from_appkit(f: NSRect) -> [i32; 4] {
+    let (l, t) = (f.origin.x.round() as i32, (main_height() - f.origin.y - f.size.height).round() as i32);
+    [l, t, l + f.size.width.round() as i32, t + f.size.height.round() as i32]
+}
+
+/// `f` as it is on a screen; on none (a project from another screen layout), in the middle of the usable part of
+/// `near`, else of the main screen. Main thread.
+fn on_a_screen(mtm: MainThreadMarker, f: NSRect, near: Option<Retained<NSScreen>>) -> NSRect {
+    let meets = |s: NSRect| {
+        f.origin.x < s.origin.x + s.size.width && s.origin.x < f.origin.x + f.size.width && f.origin.y < s.origin.y + s.size.height && s.origin.y < f.origin.y + f.size.height
+    };
+    if NSScreen::screens(mtm).iter().any(|s| meets(s.frame())) {
+        return f;
+    }
+    let Some(s) = near.or_else(|| NSScreen::mainScreen(mtm)) else { return f };
+    let v = s.visibleFrame();
+    NSRect::new(NSPoint::new(v.origin.x + ((v.size.width - f.size.width) / 2.0).max(0.0), v.origin.y + ((v.size.height - f.size.height) / 2.0).max(0.0)), f.size)
+}
+
+/// A hidden floating window at `r` (see `to_appkit`): a clear borderless panel showing a new surface, which never takes
+/// the keyboard or activates the application. Its surface and backing scale. Main thread.
+fn make_floating(mtm: MainThreadMarker, r: [i32; 4], near: Option<Retained<NSScreen>>, shared: &Arc<Shared>) -> Option<(u64, f32)> {
+    if shared.quitting() {
+        return None;
+    }
+    let rect = on_a_screen(mtm, to_appkit(r), near);
+    let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(NSPanel::alloc(mtm), rect, style, NSBackingStoreType::Buffered, false);
+    // SAFETY: the panel is kept (and closed) by its surface.
+    unsafe { panel.setReleasedWhenClosed(false) };
+    panel.setOpaque(false);
+    panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    panel.setHasShadow(false);
+    panel.setHidesOnDeactivate(false);
+    panel.setAcceptsMouseMovedEvents(true);
+    let scale = panel.backingScaleFactor() as f32;
+    let view = new_view(mtm, clear_view_class(), NSRect::new(NSPoint::new(0.0, 0.0), rect.size));
+    panel.setContentView(Some(&view));
+    Some((register(view, Some(panel), shared, scale), scale))
+}
+
+/// A floating window's panel. Main thread.
+fn panel_of(id: u64) -> Option<Retained<NSPanel>> {
+    surfaces().iter().find(|s| s.id == id).and_then(|s| s.panel.as_ref().map(|p| p.0.clone()))
+}
+
+/// No window of the host is on the screen and at least one is minimised. The windows that can be minimised are the ones
+/// that count (panels and the like go with them), title bar or not: Lemon Studio's main window draws its own.
+fn minimised(app: &NSApplication) -> bool {
+    let (mut shown, mut mini) = (false, false);
+    for w in app.windows().iter().filter(|w| w.styleMask().contains(NSWindowStyleMask::Miniaturizable)) {
+        shown |= w.isVisible();
+        mini |= w.isMiniaturized();
+    }
+    mini && !shown
+}
+
+/// Puts a floating window on the desktop as `f` says, and on or off the screen as the host stands now. Main thread.
+fn keep_floating(mtm: MainThreadMarker, id: u64, f: Floating) {
+    let changed = surfaces().iter_mut().find(|s| s.id == id).is_some_and(|s| s.floating.replace(f) != Some(f));
+    let Some(panel) = panel_of(id) else { return };
+    if changed {
+        // In front: above the panels detached plugin windows and other applications float at, under dialogs.
+        panel.setLevel(if f.front { NSFloatingWindowLevel + 1 } else if f.owned { NSFloatingWindowLevel } else { NSNormalWindowLevel });
+        panel.setCanHide(f.owned);
+        panel.setIgnoresMouseEvents(!f.solid);
+        // With a full-screen window too; on every Space once it no longer goes with the host.
+        let spaces = if f.front || !f.owned { NSWindowCollectionBehavior::CanJoinAllSpaces } else { NSWindowCollectionBehavior::empty() };
+        panel.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenAuxiliary | NSWindowCollectionBehavior::IgnoresCycle | spaces);
+    }
+    let app = NSApplication::sharedApplication(mtm);
+    let show = !f.owned || (!app.isHidden() && (f.front || app.isActive()) && !minimised(&app));
+    if show != panel.isVisible() {
+        if show {
+            panel.orderFrontRegardless();
+        } else {
+            panel.orderOut(None);
+        }
+    }
+}
+
+/// The cursor over a floating window's sizing corner: the system's frame-resize cursor (macOS 15 and later), else the
+/// plain one, deprecated for later systems only.
+#[allow(deprecated)]
+fn grip_cursor() -> Retained<NSCursor> {
+    if NSCursor::class().responds_to(sel!(frameResizeCursorFromPosition:inDirections:)) {
+        return NSCursor::frameResizeCursorFromPosition_inDirections(NSCursorFrameResizePosition::BottomRight, NSCursorFrameResizeDirections::All);
+    }
+    NSCursor::resizeLeftRightCursor()
 }
 
 /// While a popup or box of editor surface `id` is open: a press anywhere else (this app's other windows, other apps)
@@ -637,6 +814,7 @@ fn add_monitors(id: u64, shared: &Arc<Shared>) {
     }
     let presses = NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
     let sh = shared.clone();
+    let mine = shared.clone();
     let local = RcBlock::new(move |e: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit passes a valid event.
         let ev = unsafe { e.as_ref() };
@@ -650,7 +828,7 @@ fn add_monitors(id: u64, shared: &Arc<Shared>) {
             NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown => {
                 // SAFETY: monitors run on the main thread.
                 let w = ev.window(unsafe { MainThreadMarker::new_unchecked() });
-                if w.as_ref().is_some_and(|w| is_panel(Retained::as_ptr(w).cast())) {
+                if w.as_ref().is_some_and(|w| is_panel(Retained::as_ptr(w).cast(), &mine)) {
                     return e.as_ptr();
                 }
                 sh.push(Raw { surface: id, ev: Ev::Outside, mods: (false, false, false) });
@@ -699,6 +877,8 @@ pub struct Window {
     locked: bool,
     /// The pointer on the screen at the last event.
     pointer: (i32, i32),
+    /// The polling period.
+    tick: Duration,
     next_tick: Instant,
     /// Events taken from the main thread, not looked at yet.
     raw: VecDeque<Raw>,
@@ -736,7 +916,7 @@ impl Window {
             }
             let now = Instant::now();
             if now >= self.next_tick {
-                self.next_tick = now + TICK;
+                self.next_tick = now + self.tick;
                 return Some(Input::Tick);
             }
             if self.wait(self.next_tick) {
@@ -762,8 +942,9 @@ impl Window {
         std::mem::take(&mut s.woke)
     }
 
-    /// The next event of any surface, for modal loops; `None` when the editor closes.
-    fn event(&mut self) -> Option<Raw> {
+    /// The next event of any surface, for modal loops, with `live` called on each tick meanwhile; `None` when the editor
+    /// closes.
+    fn event(&mut self, live: &mut dyn FnMut(&Window)) -> Option<Raw> {
         loop {
             if self.shared.quitting() {
                 return None;
@@ -771,10 +952,18 @@ impl Window {
             if let Some(r) = self.raw.pop_front() {
                 if r.surface == self.id {
                     self.mods = r.mods;
+                    if let Ev::Scale(k) = r.ev {
+                        self.scale = k;
+                    }
                 }
                 return Some(r);
             }
-            self.wait(Instant::now() + Duration::from_millis(100));
+            let now = Instant::now();
+            if now >= self.next_tick {
+                self.next_tick = now + self.tick;
+                live(self);
+            }
+            self.wait(self.next_tick.min(now + Duration::from_millis(100)));
         }
     }
 
@@ -805,6 +994,10 @@ impl Window {
             Ev::Leave => Some(Input::Leave),
             Ev::Key { sym } => Some(Input::Key { sym, text: keysym_char(sym) }),
             Ev::Expose => Some(Input::Expose),
+            Ev::Scale(k) => {
+                self.scale = k;
+                Some(Input::Expose)
+            }
             Ev::Drop(path) => Some(Input::Drop { path }),
             Ev::Outside => None,
         }
@@ -841,7 +1034,92 @@ impl Window {
 
     /// Copies `px` (XRGB rows of `w`) into the window at (0, 0).
     pub fn blit(&self, px: &[u32], w: u32, h: u32) {
-        show_frame(self.id, px, w, h);
+        show_frame(self.id, px, w, h, false);
+    }
+
+    /// How often `next` gives `Input::Tick`.
+    pub fn set_tick(&mut self, every: Duration) {
+        self.tick = every;
+        self.next_tick = Instant::now() + every;
+    }
+
+    /// The backing scale events and frames are at: a floating window's changes with its screen (`Input::Expose` comes).
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// The pointer on the screen at the last event (device px).
+    pub fn pointer(&self) -> (i32, i32) {
+        self.pointer
+    }
+
+    /// Opens a floating window at `r` (left, top, right, bottom: points from the main screen's top left; on no screen, in
+    /// the middle of this window's) and runs `run` with it on a thread of its own, which lives on after this editor. It
+    /// is shown by `set_floating`. `None` when this editor closes meanwhile.
+    pub fn floating(&self, r: [i32; 4], run: impl FnOnce(Window) + Send + 'static) -> Option<EditorThread> {
+        let shared = Shared::new();
+        let (me, sh) = (self.id, shared.clone());
+        let (id, scale) = self.call(move |mtm| make_floating(mtm, r, view_of(me).and_then(|v| v.window()).and_then(|w| w.screen()), &sh)).flatten()?;
+        start(shared, id, scale, &Slot::default(), run)
+    }
+
+    /// A floating window: where it is (see `floating`); `None` when it closes meanwhile.
+    pub fn frame(&self) -> Option<[i32; 4]> {
+        let id = self.id;
+        self.call(move |_| panel_of(id).map(|p| from_appkit(p.frame()))).flatten()
+    }
+
+    /// A floating window: moves or sizes it to `r` (see `floating`), wherever that is.
+    pub fn set_frame(&self, r: [i32; 4]) {
+        let id = self.id;
+        on_main(move |_| {
+            if let Some(p) = panel_of(id) {
+                p.setFrame_display(to_appkit(r), false);
+            }
+        });
+    }
+
+    /// A floating window: puts it at `r` (see `floating`), or in the middle of its screen when `r` is on none.
+    pub fn place(&self, r: [i32; 4]) {
+        let id = self.id;
+        on_main(move |mtm| {
+            if let Some(p) = panel_of(id) {
+                p.setFrame_display(on_a_screen(mtm, to_appkit(r), p.screen()), false);
+            }
+        });
+    }
+
+    /// A floating window: to the front of its level, as a click brings a window on macOS (without activating anything).
+    pub fn raise(&self) {
+        let id = self.id;
+        on_main(move |_| {
+            if let Some(p) = panel_of(id) {
+                p.orderFrontRegardless();
+            }
+        });
+    }
+
+    /// A floating window: on the desktop as `f` says, and shown or hidden as the host stands now, so this is called on
+    /// every tick. Once per batch, if the main thread is behind.
+    pub fn set_floating(&self, f: Floating) {
+        if self.shared.asked.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (id, shared) = (self.id, self.shared.clone());
+        on_main(move |mtm| {
+            shared.asked.store(false, Ordering::Release);
+            keep_floating(mtm, id, f);
+        });
+    }
+
+    /// A floating window: a frame of premultiplied ARGB (rows of `w`) that shows what is under the window through it.
+    pub fn blit_alpha(&self, px: &[u32], w: u32, h: u32) {
+        show_frame(self.id, px, w, h, true);
+    }
+
+    /// The cursor for sizing (`on`) or the plain one.
+    pub fn sizing_cursor(&self, on: bool) {
+        on_main(move |_| if on { grip_cursor() } else { NSCursor::arrowCursor() }.set());
     }
 
     /// Resizes the window (device px).
@@ -962,7 +1240,7 @@ impl Window {
         let (w, h) = (c.pixmap.width(), c.pixmap.height());
         let mut px = vec![0u32; (w * h) as usize];
         c.copy_to_xrgb(&mut px);
-        show_frame(id, &px, w, h);
+        show_frame(id, &px, w, h, false);
     }
 
     // ---------------------------------------------------------------------------------------------------------------
@@ -970,12 +1248,17 @@ impl Window {
 
     /// Shows a menu at screen (`x`, `y`); the picked entry's command.
     pub fn popup<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32) -> Option<C> {
+        self.popup_live(x, y, def, pal, scale, &mut |_| {})
+    }
+
+    /// `popup`, with `live` called on each tick while the menu is open (a picture that keeps moving under its menu).
+    pub fn popup_live<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32, live: &mut dyn FnMut(&Window)) -> Option<C> {
         if crate::no_modal() {
             return None;
         }
         self.unlock();
         self.grab();
-        let r = match self.popup_at(x, y, def, pal, scale, None) {
+        let r = match self.popup_at(x, y, def, pal, scale, None, live) {
             PopRes::Pick(c) => Some(c),
             _ => None,
         };
@@ -983,7 +1266,8 @@ impl Window {
         r
     }
 
-    fn popup_at<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32, parent: Option<Opener>) -> PopRes<C> {
+    #[allow(clippy::too_many_arguments)]
+    fn popup_at<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32, parent: Option<Opener>, live: &mut dyn FnMut(&Window)) -> PopRes<C> {
         let Ok(mut measure) = Canvas::new(8, 8, scale) else { return PopRes::Cancel };
         let layout = kmenu::layout(&mut measure, &def.items, def.style);
         let (w, h) = ((layout.w * scale).ceil() as i32, (layout.h * scale).ceil() as i32);
@@ -1014,7 +1298,7 @@ impl Window {
         let start = self.pointer;
         let mut moved = false;
         let result = loop {
-            let Some(e) = self.event() else { break PopRes::Cancel };
+            let Some(e) = self.event(live) else { break PopRes::Cancel };
             match e.ev {
                 Ev::Expose if e.surface == pop => self.show(pop, &canvas),
                 Ev::Outside => break PopRes::Cancel,
@@ -1038,7 +1322,7 @@ impl Window {
                         let row = layout.rows[i];
                         let sx = px + ((row.x + row.w) * scale) as i32 - 2;
                         let sy = py + (row.y * scale) as i32 - 2;
-                        match self.popup_at(sx, sy, sub, pal, scale, Some(Opener::new(rect, row, scale))) {
+                        match self.popup_at(sx, sy, sub, pal, scale, Some(Opener::new(rect, row, scale)), live) {
                             PopRes::Pick(c) => break PopRes::Pick(c),
                             PopRes::Cancel => break PopRes::Cancel,
                             PopRes::Back => {}
@@ -1140,7 +1424,7 @@ impl Window {
         self.show(boxw, &canvas);
         let r = [x, y, x + w, y + h];
         let result = loop {
-            let Some(e) = self.event() else { break None };
+            let Some(e) = self.event(&mut |_| {}) else { break None };
             match e.ev {
                 Ev::Expose if e.surface == boxw => self.show(boxw, &canvas),
                 Ev::Outside => break None,

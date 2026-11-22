@@ -233,8 +233,8 @@ fn heading(ui: &mut Ui, x0: f32, x1: f32, y: f32, s: &str) {
     let tx = ((x0 + x1 + 1.0) / 2.0 - w / 2.0).round();
     lemon::spaced(ui.c, HEADING, tx, (y - lh / 2.0).round(), plug::DIM, s, 2.0);
     if tx - 7.0 > x0 + 8.0 {
-        ui.c.fill_rect(Rect::span(x0 + 4.0, tx - 7.0, y, y + 1.0), RULE);
-        ui.c.fill_rect(Rect::span((tx + w + 6.0).round(), x1 - 4.0, y, y + 1.0), RULE);
+        ui.c.fill_rect(Rect::span(x0 + 4.0, tx - 7.0, y, y), RULE);
+        ui.c.fill_rect(Rect::span((tx + w + 6.0).round(), x1 - 4.0, y, y), RULE);
     }
 }
 
@@ -273,12 +273,13 @@ fn switch(ui: &mut Ui, id: &str, x: f32, cy: f32, label: &str, disabled: bool) {
     ui.hit(hr, target);
 }
 
-/// A selector: one row per position from `top`, the chosen one on a dark pill in lemon.
+/// A selector: one row per position from `top`, 15 px high on a 16 px pitch (spec §2), the chosen one on a dark pill in
+/// lemon.
 fn choices(ui: &mut Ui, id: &str, x0: f32, x1: f32, top: f32, names: &[&str], disabled: bool) {
     let chosen = ui.plain(id);
     for (i, name) in names.iter().enumerate() {
         let target = Target::Choice(id.into(), i as i32);
-        let r = Rect::span(x0, x1, top + 16.0 * i as f32, top + 16.0 * i as f32 + 15.0);
+        let r = Rect::span(x0, x1, top + 16.0 * i as f32, top + 16.0 * i as f32 + 14.0);
         let st = ui.state(r, &target, disabled);
         let ink = lemon::choice_button(ui.c, r, chosen == i as i32, brand::MAIN, st);
         ui.c.text_center(LABEL, r, ink, name);

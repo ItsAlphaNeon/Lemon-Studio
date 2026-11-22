@@ -48,7 +48,7 @@ pub struct Category {
 
 /// Template `name`'s file in category `cat`: `<name>.lemon`, else an existing `<name>.flp` (spec: flp/lemon-format.md
 /// "Templates").
-pub(crate) fn file_in(root: &Path, cat: &str, name: &str) -> PathBuf {
+pub fn file_in(root: &Path, cat: &str, name: &str) -> PathBuf {
     let dir = root.join(cat).join(name);
     let lemon = dir.join(format!("{name}.{}", crate::project_files::EXT));
     let flp = dir.join(format!("{name}.flp"));
@@ -103,24 +103,24 @@ pub fn last_project() -> Option<PathBuf> {
 }
 
 /// `path` was opened or saved: it is the last used project.
-pub(crate) fn remember(path: &Path) {
+pub fn remember(path: &Path) {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     prefs::set_text(LAST_KEY, &path.to_string_lossy());
 }
 
 /// The last used project as kept, to put back with `restore_last` after writing a copy or opening a template.
-pub(crate) fn last_kept() -> Option<String> {
+pub fn last_kept() -> Option<String> {
     prefs::text(LAST_KEY)
 }
 
-pub(crate) fn restore_last(kept: Option<String>) {
+pub fn restore_last(kept: Option<String>) {
     prefs::set_text(LAST_KEY, kept.as_deref().unwrap_or(""));
 }
 
 impl App {
     /// The Default template combo was clicked: its tree under the box (`x`, `y`: the box's bottom left), "Empty" then a
     /// submenu per category, the current pick marked.
-    pub(crate) fn template_menu(&mut self, x: f32, y: f32) {
+    pub fn template_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let now = if file().is_some() { picked() } else { EMPTY.into() };
         let mut items = vec![PItem::new(EMPTY, Cmd::Template(EMPTY.into())).mark(Mark::Radio(now == EMPTY))];
@@ -141,7 +141,7 @@ impl App {
     }
 
     /// A row of the Default template tree was picked (`Cmd::Template`): kept. Returns the message.
-    pub(crate) fn set_template(&mut self, pick: &str) -> Option<String> {
+    pub fn set_template(&mut self, pick: &str) -> Option<String> {
         prefs::set_text(TEMPLATE_KEY, pick);
         self.invalidate();
         Some(format!("Default template: {}", name()))
@@ -149,27 +149,27 @@ impl App {
 
     /// FILE ▸ New with a template picked: the template opened as an untitled project (Save asks where), started now.
     /// False for Empty and when the template does not load: the caller makes the built-in project then.
-    pub(crate) fn new_from_template(&mut self) -> bool {
+    pub fn new_from_template(&mut self) -> bool {
         let Some(path) = file() else { return false };
         self.new_from_file(&path, &name())
     }
 
     /// The template file `path` (named `name`) opened as an untitled project (FILE ▸ New, New from template ▸). False
     /// when it does not load.
-    pub(crate) fn new_from_file(&mut self, path: &Path, name: &str) -> bool {
+    pub fn new_from_file(&mut self, path: &Path, name: &str) -> bool {
         let path = path.to_path_buf();
         // A template is not a recent project either (spec: ui/recent-projects.md §2).
         let (kept, recent) = (last_kept(), crate::recent::list());
-        self.state.path = None;
+        self.state.session.path = None;
         self.open(path.clone());
         restore_last(kept);
         crate::recent::restore(&recent);
-        if self.state.path.as_deref() != Some(path.as_path()) {
+        if self.state.session.path.as_deref() != Some(path.as_path()) {
             return false;
         }
         let s = &mut self.state;
-        s.path = None;
-        crate::project_info::created(s);
+        s.session.path = None;
+        crate::project_info_ui::created(s);
         s.message = Some(format!("New project from the template {name}"));
         self.mark_saved();
         true
@@ -186,7 +186,7 @@ impl App {
         if choice == 2 {
             if let Some(p) = last_project().filter(|p| p.is_file()) {
                 self.open(p.clone());
-                if self.state.path.as_deref() == Some(p.as_path()) {
+                if self.state.session.path.as_deref() == Some(p.as_path()) {
                     return;
                 }
             }
@@ -210,9 +210,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         for (cat, name) in [("Minimal", "Basic with limiter"), ("Utility", "Scoring")] {
             let mut a = App::new(None);
-            a.state.tempo = 140.0;
-            let ch = a.state.project.channels[0].clone();
-            a.state.project.channels.push(ch);
+            a.state.set_tempo(140.0);
+            let ch = a.state.session.project.channels[0].clone();
+            a.state.session.project.get_mut().channels.push(ch);
             let at = dir.join(cat).join(name);
             std::fs::create_dir_all(&at).unwrap();
             a.save_to(at.join(format!("{name}.flp")));
@@ -288,28 +288,28 @@ mod tests {
         app.set_template("Minimal/Basic with limiter");
         app.menu_item(0, crate::views::menus::FILE_NEW);
         assert!(app.state.dialogs.is_empty(), "nothing to discard");
-        assert_eq!(app.state.tempo, 140.0);
-        assert_eq!(app.state.project.channels.len(), 6);
-        assert_eq!(app.state.path, None, "untitled: Save asks where");
-        assert!(app.state.file.is_some(), "the template's events are kept for the save");
+        assert_eq!(app.state.tempo(), 140.0);
+        assert_eq!(app.state.session.project.channels.len(), 6);
+        assert_eq!(app.state.session.path, None, "untitled: Save asks where");
+        assert!(app.state.session.file.is_some(), "the template's events are kept for the save");
         assert!(!app.unsaved());
         assert_eq!(app.title(), "[untitled]");
         assert_eq!(app.state.message.as_deref(), Some("New project from the template Basic with limiter"));
         assert_eq!(last_project(), None);
-        let w = app.state.project.work_time.expect("started");
+        let w = app.state.session.project.work_time.expect("started");
         assert_eq!(w.spent, 0.0);
         // Saved where asked, it becomes that file; the template stays as it was.
         let saved = dir.join("Song.flp");
         let before = std::fs::read(file().unwrap()).unwrap();
         app.save_to(saved.clone());
-        assert_eq!(app.state.path.as_deref(), Some(saved.as_path()));
+        assert_eq!(app.state.session.path.as_deref(), Some(saved.as_path()));
         assert_eq!(std::fs::read(file().unwrap()).unwrap(), before);
         assert_eq!(last_project(), Some(std::path::absolute(&saved).unwrap()));
         // The template's file gone: Empty.
         std::fs::remove_dir_all(dir.join("Minimal")).unwrap();
         assert_eq!(name(), "Empty");
         app.menu_item(0, crate::views::menus::FILE_NEW);
-        assert_eq!((app.state.tempo, app.state.project.channels.len(), app.state.file.is_none()), (130.0, 1, true));
+        assert_eq!((app.state.tempo(), app.state.session.project.channels.len(), app.state.session.file.is_none()), (130.0, 1, true));
         assert_eq!(app.state.message.as_deref(), Some("New project"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -326,23 +326,23 @@ mod tests {
         // Default template.
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.path.clone()), (140.0, None));
+        assert_eq!((a.state.tempo(), a.state.session.path.clone()), (140.0, None));
         // Empty project.
         prefs::set_choice(&prefs::STARTUP_PROJECT, 0);
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.project.channels.len(), a.state.file.is_none()), (130.0, 5, true), "App::new's project, untouched");
+        assert_eq!((a.state.tempo(), a.state.session.project.channels.len(), a.state.session.file.is_none()), (130.0, 5, true), "App::new's project, untouched");
         // Last used project: the file last saved; a backup copy does not count.
         prefs::set_choice(&prefs::STARTUP_PROJECT, 2);
         let song = dir.join("Last.flp");
-        app.state.tempo = 111.0;
+        app.state.set_tempo(111.0);
         app.save_to(song.clone());
         assert_eq!(last_project(), Some(std::path::absolute(&song).unwrap()));
         assert!(app.save_copy(dir.join("copy.flp")).is_some_and(|r| r.is_ok()));
         assert_eq!(last_project(), Some(std::path::absolute(&song).unwrap()), "a copy is not the last used project");
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.path.as_deref()), (111.0, Some(std::path::absolute(&song).unwrap().as_path())));
+        assert_eq!((a.state.tempo(), a.state.session.path.as_deref()), (111.0, Some(std::path::absolute(&song).unwrap().as_path())));
         // Opening another file makes it the last used project.
         let other = dir.join("Other.flp");
         std::fs::copy(&song, &other).unwrap();
@@ -352,11 +352,11 @@ mod tests {
         std::fs::remove_file(&other).unwrap();
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.path.clone()), (140.0, None));
+        assert_eq!((a.state.tempo(), a.state.session.path.clone()), (140.0, None));
         std::fs::write(&other, b"not a project").unwrap();
         let mut a = App::new(None);
         a.startup_project();
-        assert_eq!((a.state.tempo, a.state.path.clone()), (140.0, None));
+        assert_eq!((a.state.tempo(), a.state.session.path.clone()), (140.0, None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

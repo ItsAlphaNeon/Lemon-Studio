@@ -20,10 +20,12 @@ pub const SETTINGS: [Setting; dsp::PARAMS] = [
     Setting { id: "post", name: "Post gain", range: dsp::RANGES[dsp::POST], start: dsp::DEFAULTS[dsp::POST], magnet: Some(128) },
 ];
 
-/// Editor layout (spec §2), as the original's: the two knobs over the wordmark at the left, the curve at the right.
+/// Editor layout (spec §2), as the original's: the two knobs over the wordmark at the left, the curve at the right. The
+/// page's ranges end before their last number (6 px apart, 8 px from the edges); a card's `x1` and `y1` are its last
+/// pixels.
 const CARDS: [Card; 2] = [
-    Card { x0: 8.0, x1: 156.0, y0: 28.0, y1: 104.0, heading: "CLIPPER" },
-    Card { x0: 162.0, x1: 312.0, y0: 28.0, y1: 152.0, heading: "CURVE" },
+    Card { x0: 8.0, x1: 155.0, y0: 28.0, y1: 103.0, heading: "CLIPPER" },
+    Card { x0: 162.0, x1: 311.0, y0: 28.0, y1: 151.0, heading: "CURVE" },
 ];
 
 const CONTROLS: [Control; 2] = [

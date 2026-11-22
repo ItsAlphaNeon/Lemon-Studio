@@ -70,7 +70,9 @@ pub const SPEC: &Spec = &Spec {
     cards: &CARDS,
     controls: &CONTROLS,
     display: Some(Display { r: RESPONSE, draw: response }),
-    mark: Mark { x: 400.0, y: 162.0, anchor: 0.5, stacked: false },
+    // Right-aligned with the cards above: the name's last pixel at x 480, 6 px clear of the edge (`x` is the end after
+    // it).
+    mark: Mark { x: 481.0, y: 162.0, anchor: 1.0, stacked: false },
     hint: None,
     labels: &[],
     text,

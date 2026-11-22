@@ -271,11 +271,15 @@ pub fn page_icon(c: &mut Canvas, page: u8, cx: f32, cy: f32, col: Color) {
 }
 
 fn tab_strip(ui: &mut Ui) {
-    let hover = (0..PAGES).find(|&i| ui.state(rr(5.0 + 43.0 * f32::from(i), 49.0 + 43.0 * f32::from(i), 26.0, 71.0), &Target::Tab(i)).hover);
+    // One 43 px cell per tab, edge to edge (the cells must not overlap), as in Lemon Sampler.
+    let cell = |i: u8| {
+        let x0 = 5.0 + 43.0 * f32::from(i);
+        rr(x0, x0 + 42.0, 26.0, 71.0)
+    };
+    let hover = (0..PAGES).find(|&i| ui.state(cell(i), &Target::Tab(i)).hover);
     lemon::page_strip(ui.c, rr(4.0, 563.0, 25.0, 71.0), PAGES, ui.st.tab, hover, &|i| 5.0 + 43.0 * f32::from(i), &mut |c, i, x, yy, col| page_icon(c, i, x, yy, col));
     for i in 0..PAGES {
-        let x0 = 5.0 + 43.0 * f32::from(i);
-        ui.hit(rr(x0, x0 + 44.0, 26.0, 71.0), Target::Tab(i));
+        ui.hit(cell(i), Target::Tab(i));
     }
 }
 
@@ -555,6 +559,12 @@ fn label(ui: &mut Ui, x: f32, cy: f32, s: &str) -> f32 {
     inst::label(ui.c, ui.t, x, y(cy), s, false)
 }
 
+/// A Tempo / Global switch: 3x Osc stores none (spec §3), so it is drawn off and greyed out, with no hit.
+fn inert_switch(ui: &mut Ui, x: f32, cx: f32, cy: f32, s: &str) {
+    inst::label(ui.c, ui.t, x, y(cy), s, true);
+    inst::radio(ui.c, ui.t, cx, y(cy), false, State { disabled: true, ..State::NORMAL });
+}
+
 fn envelope_page(ui: &mut Ui) {
     let t = ui.t;
     ui.c.fill_rect(rr(4.0, 563.0, 72.0, 461.0), plug::BG);
@@ -583,6 +593,11 @@ fn envelope_page(ui: &mut Ui) {
         if let Some(h) = ui.hits.last_mut() {
             h.r.w += lw + 4.0;
         }
+        // Lemon Sampler's ▸ presets arrow (spec §3): nothing to offer here, so drawn inert.
+        let mut g = os_ui::Glyph::new();
+        let (ax, ay) = (284.0, y(126.0));
+        g.polygon(&[(ax - 2.5, ay - 4.5), (ax + 3.0, ay), (ax - 2.5, ay + 4.5)]);
+        ui.c.glyph(plug::OFF, &g);
         let g = env_rect();
         inst::graph_bg(ui.c, g);
         env_graph(ui, g, p, t.a(line));
@@ -598,6 +613,7 @@ fn envelope_page(ui: &mut Ui) {
         for x in [101.0, 169.0] {
             inst::caption_spaced(ui.c, t, x, y(283.0) - 4.0, "TENSION", false, 2.3);
         }
+        inert_switch(ui, 240.0, 284.0, 292.0, "Tempo");
     }
 
     // LFO.
@@ -619,6 +635,8 @@ fn envelope_page(ui: &mut Ui) {
     for (k, x, cap) in [("lfo_delay", 326.0, "DELAY"), ("lfo_att", 359.0, "ATT"), ("lfo_amt", 393.0, "AMT"), ("lfo_speed", 427.0, "SPEED")] {
         dial(ui, &id(k), x, 241.0, MID, arc, k == "lfo_amt", cap);
     }
+    inert_switch(ui, 336.0, 380.0, 292.0, "Tempo");
+    inert_switch(ui, 394.0, 436.0, 292.0, "Global");
     if !works(&Target::Knob(id("lfo_amt"))) {
         // Nothing in the panel plays (the Panning LFO).
         lemon::plug_veil(ui.c, lr);
@@ -870,7 +888,12 @@ pub fn hint(t: &Target, m: &dyn Model, st: &ViewState, names: &dyn Fn(&str) -> S
         Target::Tab(1) => "Envelopes, LFOs and filter".into(),
         Target::Tab(_) => "Custom shape sample".into(),
         Target::SubTab(i) => format!("{} envelope / LFO", TARGET_NAMES[usize::from(*i).min(4)]),
-        Target::EnvPoint(_) => String::new(),
+        // The knob the node drags first, as the drag's own hint (the sustain node: DEC).
+        Target::EnvPoint(i) => {
+            let k = ["delay", "att", "hold", "dec", "rel"][usize::from(*i).min(4)];
+            let id = format!("{}_{k}", ENV_PREFIX[usize::from(st.sub.min(4))]);
+            format!("{}: {}", names(&id), m.text(&id))
+        }
         Target::LoadSample => sample_hint(&st.sample),
     }
 }

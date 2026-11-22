@@ -39,6 +39,8 @@ pub const KEY_FOCUS: u8 = 200;
 pub const TRACK_LOCKS: u8 = 201;
 /// `LMex` event: the channels the live note sources are locked to (Receive notes from ▸).
 pub const NOTE_LOCKS: u8 = 202;
+/// `LMex` event: what the project uses that a Lemon Studio without it cannot play, by name (os-app `lemon_state`).
+pub const FEATURES: u8 = 203;
 
 /// Whether `file` is a `.lemon` file (its first chunk is `LMhd`).
 pub fn is_lemon(file: &FlpFile) -> bool {

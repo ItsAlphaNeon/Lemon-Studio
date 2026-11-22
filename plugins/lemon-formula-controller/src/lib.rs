@@ -23,7 +23,9 @@ use std::sync::Arc;
 use lemon_small_fx::formula_controller::{self as fc, SPEC};
 use lemon_small_fx::params::FxParams;
 use lemon_small_fx::ticks::{send_outputs, Ticks, TICKS_PER_BEAT};
-use lemon_small_fx::{editor, Shared};
+#[cfg(feature = "editor")]
+use lemon_small_fx::editor;
+use lemon_small_fx::Shared;
 use nih_plug::prelude::*;
 use os_engine::effects::formula_ctrl::Core;
 
@@ -105,6 +107,7 @@ impl Plugin for LemonFormulaController {
         self.params.clone()
     }
 
+    #[cfg(feature = "editor")]
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(editor::FxEditor::new(SPEC, self.params.clone(), self.shared.clone())))
     }

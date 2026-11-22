@@ -158,6 +158,9 @@ pub(super) struct Pdc {
     /// Per channel: the delay its instrument last reported, and the pad between it and its mixer track.
     pub chan_delay: Vec<u32>,
     pub chan_pad: Vec<Pad>,
+    /// Per channel, per extra output: the pad between it and the mixer track it plays into (spec:
+    /// audio/multi-output.md).
+    pub out_pads: Vec<Vec<Pad>>,
     /// What the pads were last worked out with, for the automation waits: per track `leaving`, per slot `arriving`
     /// plus the delays of the slots above it that ran; and per track whether a slot was on (the master always counts).
     leaving: Vec<i64>,
@@ -175,6 +178,9 @@ pub(super) struct Pdc {
     pub first: bool,
     /// ... and a new head of the stream is skipped (not when an engine takes over playback).
     pub fresh: bool,
+    /// The engine follows another one's tails on the stream (`Engine::carry_on`): its head is not skipped, as it is
+    /// those tails going on; its song comes in that much later, the position heard as ever (`lag`).
+    pub follows: bool,
     /// A slot was switched: an insert whose slots all went off, or one came on, works the pads out again.
     pub switched: bool,
     /// The first tick's slot values have reached the slots already.
@@ -238,9 +244,12 @@ impl Pdc {
         for p in &mut self.chan_pad {
             p.clear();
         }
+        for p in self.out_pads.iter_mut().flatten() {
+            p.clear();
+        }
         self.waiting.clear();
         self.marks.clear();
-        (self.first, self.fresh, self.due) = (true, true, false);
+        (self.first, self.fresh, self.due, self.follows) = (true, true, false, false);
         (self.lag, self.head, self.flush, self.stream) = (0, 0, None, 0);
     }
 
@@ -251,6 +260,7 @@ impl Pdc {
         for (new, o) in self.chan_pad.iter_mut().zip(&mut old.chan_pad) {
             *new = std::mem::take(o);
         }
+        self.out_pads = std::mem::take(&mut old.out_pads);
         for (new, &o) in self.chan_delay.iter_mut().zip(&old.chan_delay) {
             *new = o;
         }
@@ -342,6 +352,11 @@ impl Engine {
             if ch.instrument.0.is_some() && !self.pdc.manual {
                 let d = self.pdc.chan_delay.get(c).copied().unwrap_or(0);
                 ins[ch.insert].chan = ins[ch.insert].chan.max(d);
+                for k in 0..ch.outputs.len() {
+                    if let Some(t) = ch.output_track(k, n) {
+                        ins[t].chan = ins[t].chan.max(d);
+                    }
+                }
             }
         }
         let l = lateness(&ins, &self.order, self.rate);
@@ -405,12 +420,21 @@ impl Engine {
             if let Some(p) = self.pdc.chan_pad.get_mut(c) {
                 p.set_len(len);
             }
+            if self.pdc.out_pads.len() <= c {
+                self.pdc.out_pads.resize_with(c + 1, Vec::new);
+            }
+            let pads = &mut self.pdc.out_pads[c];
+            pads.resize_with(ch.outputs.len(), Pad::default);
+            for (k, p) in pads.iter_mut().enumerate() {
+                let len = match ch.instrument.0.is_some() { true => ch.output_track(k, n).map_or(0, |t| l.channel_pad(t, delay)), false => 0 };
+                p.set_len(len);
+            }
         }
         self.pdc.reach = (0..n).map(|t| l.leaving[t].max(l.arriving[t]) + l.extra[t]).max().unwrap_or(0).max(0) as u64;
         if self.pdc.fresh {
             // The head of the stream: the export starts this many samples in; so does live playback. Each track's output
             // for Split mixer tracks skips its own lateness, so it lines up with the song (a Lemon Studio choice).
-            (self.pdc.lag, self.pdc.head) = (l.start, l.start);
+            (self.pdc.lag, self.pdc.head) = (l.start, if self.pdc.follows { 0 } else { l.start });
             self.pdc.cap_skip = l.leaving.iter().map(|&v| (v.max(0) as u64).min(l.start)).collect();
         }
         self.pdc.leaving = l.leaving;
@@ -656,6 +680,7 @@ mod tests {
             rack: Default::default(),
             misc: Default::default(),
             sound: Default::default(),
+            lemon_icon: None,
         }
     }
 
@@ -842,6 +867,27 @@ mod tests {
         e.seek_tick(96);
         let (n, tick) = e.next_tick().map(|(s, t, ..)| (s.len() / 2, t)).unwrap();
         assert_eq!((n, tick), (TICK - 100, 96.0));
+    }
+
+    /// A playback that follows a Stop's tails on the stream (`Engine::carry_on`) skips no head: those frames are the
+    /// tails going on. Its song comes in that much later, and the playhead follows what is heard as ever.
+    #[test]
+    fn a_playback_that_follows_tails_skips_no_head_and_the_playhead_follows_what_is_heard() {
+        let p = project(&[1, 2], 3);
+        let mut old = engine(&p, vec![(1, 0, Late::new(100))], false);
+        old.next_tick();
+        let mut e = engine(&p, vec![(1, 0, Late::new(100))], false);
+        e.carry_on(&mut old);
+        let mut blocks = Vec::new();
+        for _ in 0..3 {
+            let (s, tick, frame, held, len) = e.next_tick().unwrap();
+            blocks.push((s.len() / 2, tick, frame, held, len));
+        }
+        assert_eq!(blocks[0], (TICK, 0.0, 0, false, TICK as u64), "every frame of the first tick");
+        assert_eq!(blocks[1], (TICK, (TICK - 100) as f64 / TICK as f64, (TICK - 100) as u64, false, TICK as u64));
+        // A seek skips the head again, as any playback's.
+        e.seek_tick(96);
+        assert_eq!(e.next_tick().map(|(s, t, ..)| (s.len() / 2, t)), Some((TICK - 100, 96.0)));
     }
 
     #[test]

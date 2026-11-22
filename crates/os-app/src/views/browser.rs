@@ -31,10 +31,19 @@ pub const INFO_H: f32 = 84.0;
 /// (label, icon, category colour index). Only the roots with content: FL's other disk-folder roots (Recent files,
 /// Channel presets, Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders
 /// follow these. Plugin presets: the preset store, user and factory (spec: plugins/presets.md "Browser").
-/// Channel presets: the channel state files (`crate::channel_states`; empty until one is saved).
-const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin library", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1), (CHANNEL_PRESETS, Icon::FilePreset, 1)];
+/// Channel presets: the channel state files (`crate::channel_states`; empty until one is saved). My projects: the user's
+/// projects folder, as FL lists its own (`save_form::default_root`, where the Save as and New project forms put them
+/// and the backups go; empty until a project is saved there).
+const ROOTS: &[(&str, Icon, u8)] = &[
+    ("Current project", Icon::Page, 0),
+    ("Plugin library", Icon::Speaker, 1),
+    (PLUGIN_PRESETS, Icon::FilePreset, 1),
+    (CHANNEL_PRESETS, Icon::FilePreset, 1),
+    (MY_PROJECTS, Icon::Folder, FOLDER),
+];
 pub const PLUGIN_PRESETS: &str = "Plugin presets";
 pub const CHANNEL_PRESETS: &str = "Channel presets";
+pub const MY_PROJECTS: &str = "My projects";
 
 /// Tree key of the All tab's Channel presets root.
 pub fn channel_presets_key() -> String {
@@ -62,7 +71,7 @@ const PROJECT: &[(&str, Icon)] = &[
     ("Samples", Icon::Wave),
 ];
 pub const INITIALIZED_CONTROLS: &str = "Controls with a start value";
-/// The controller links, one row each (`crate::remote::label`); VIEW > Remote control opens it.
+/// The controller links, one row each (`crate::remote_ui::label`); VIEW > Remote control opens it.
 pub const REMOTE_CONTROL: &str = "Remote control";
 pub const PROJECT_DATA: &str = "Project data";
 
@@ -115,6 +124,9 @@ pub enum Item {
     /// A plugin preset file (any `presets::IMPORT_EXTS` type) or factory preset path: dropped, it loads (spec:
     /// plugins/presets.md "Drag and drop").
     Preset(String),
+    /// Lemon Studio's container (its Patcher, `crate::container`): dropped on a slot or channel with Shift, it wraps
+    /// the plugin there; without, it puts an empty container there (spec: plugins/patcher/README.md §3.3 "Shift+drop").
+    Container,
 }
 
 #[derive(Debug, Clone)]
@@ -269,8 +281,13 @@ fn tree(s: &State) -> Vec<Row> {
             0 => project_rows(s, &key, cat, &mut out),
             1 => plugin_rows(s, &key, cat, &mut out),
             2 => preset_rows(s, &key, cat, &mut out),
-            _ => {
+            3 => {
                 if let Some(dir) = crate::channel_states::root().filter(|d| d.is_dir()) {
+                    disk_rows(s, &dir, &key, 1, &mut out);
+                }
+            }
+            _ => {
+                if let Some(dir) = crate::save_form::default_root().filter(|d| d.is_dir()) {
                     disk_rows(s, &dir, &key, 1, &mut out);
                 }
             }
@@ -343,10 +360,12 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
 }
 
 /// Icon for a file by extension (spec §6 table).
-pub fn file_icon(name: &str) -> Icon {
+fn file_icon(name: &str) -> Icon {
+    if crate::browser_index::is_audio_file(name) {
+        return Icon::FileAudio;
+    }
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" => Icon::FileAudio,
         "mid" | "midi" => Icon::PianoRoll,
         "flp" | "lemon" => Icon::FileProject,
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
@@ -358,7 +377,7 @@ pub fn file_icon(name: &str) -> Icon {
 
 /// What a file row stands for (spec §6): an audio file a sample, a preset file a preset, anything else a file.
 fn file_item(name: &str, path: &str) -> Item {
-    if file_icon(name) == Icon::FileAudio {
+    if crate::browser_index::is_audio_file(name) {
         Item::Sample(path.into())
     } else if crate::presets::is_preset_file(Path::new(path)) || crate::presets::is_factory(Path::new(path)) || crate::channel_states::is_state_file(Path::new(path)) {
         Item::Preset(path.into())
@@ -398,13 +417,13 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
 }
 
 fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
-    let p = &s.project;
+    let p = &s.session.project;
     for &(name, icon) in PROJECT {
         if name == INITIALIZED_CONTROLS && p.init_controls.is_empty() {
             continue;
         }
         if name == PROJECT_DATA {
-            if let Some(dir) = crate::data_folder::folder(s) {
+            if let Some(dir) = crate::data_folder_ui::folder(s) {
                 data_folder_rows(s, root, &dir, cat, out);
             }
             continue;
@@ -416,9 +435,9 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
         match name {
             // Undone steps grey, their arrow mirrored (spec: ui/settings-choices.md "Undo history: the four checks").
             "History" => {
-                for (e, step) in s.history.entries() {
-                    let icon = if s.history.undone(e) { Icon::Redo } else { Icon::Undo };
-                    let (bright, item) = (s.history.current(e), Item::History(e));
+                for (e, step) in s.session.history.entries(&s.session.settings) {
+                    let icon = if s.session.history.undone(e) { Icon::Redo } else { Icon::Undo };
+                    let (bright, item) = (s.session.history.current(e), Item::History(e));
                     out.push(Row { key: format!("{parent}/{e}"), depth: 2, label: step.into(), icon, cat, open: None, bright, item, path: None });
                 }
             }
@@ -427,7 +446,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 pats.sort_by_key(|p| p.number);
                 for pat in pats {
                     let label = pat.name.clone().unwrap_or_else(|| format!("Pattern {}", pat.number));
-                    leaf(out, &parent, label, Icon::Note, cat, pat.number == s.pattern, Item::Pattern(pat.number));
+                    leaf(out, &parent, label, Icon::Note, cat, pat.number == s.pattern(), Item::Pattern(pat.number));
                 }
             }
             // Hosted plugins open into their parameters (spec: plugins/plugin-parameters.md §6).
@@ -436,9 +455,9 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                     let label = channel_label(s, i).unwrap_or_default();
                     plugin_node(s, out, &parent, label, Icon::Plug, cat, i == s.selected_channel, Item::Channel(i), i);
                     // A channel's container's plugins follow it, in its order (plugins/patcher §4.4).
-                    for mem in crate::container::members(s, i as u16, crate::container::CHANNEL).unwrap_or_default() {
-                        let Some(key) = crate::container::member_key(s, i, mem.id) else { continue };
-                        let label = crate::container::member_label(s, key).unwrap_or_default();
+                    for mem in crate::container::members(&s.session, i as u16, crate::container::CHANNEL).unwrap_or_default() {
+                        let Some(key) = crate::container::member_key(&s.session, i, mem.id) else { continue };
+                        let label = crate::container::member_label(&s.session, key).unwrap_or_default();
                         let icon = if mem.instrument { Icon::Plug } else { Icon::Speaker };
                         plugin_node(s, out, &parent, label, icon, cat, false, Item::None, key);
                     }
@@ -447,27 +466,27 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
             "Effects" => {
                 for m in &p.mixer {
                     for k in (0..m.slots.len()).filter(|&k| m.slots[k].is_some()) {
-                        let label = crate::params::effect_label(s, m.index, k as u8).unwrap_or_default();
+                        let label = crate::params::effect_label(&s.session, m.index, k as u8).unwrap_or_default();
                         plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, crate::plugins::fx_key(m.index, k as u8));
                         // A container's effects follow it, in its order (Lemon Studio's design: plugins/patcher §4.2).
-                        let list = crate::container::members(s, m.index, k as u8).unwrap_or_default();
+                        let list = crate::container::members(&s.session, m.index, k as u8).unwrap_or_default();
                         for mem in &list {
-                            let Some(key) = crate::container::member_key(s, crate::container::place_key(m.index, k as u8), mem.id) else { continue };
-                            let label = crate::container::member_label(s, key).unwrap_or_default();
+                            let Some(key) = crate::container::member_key(&s.session, crate::container::place_key(m.index, k as u8), mem.id) else { continue };
+                            let label = crate::container::member_label(&s.session, key).unwrap_or_default();
                             plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, key);
                         }
                     }
                 }
             }
             REMOTE_CONTROL => {
-                for l in crate::remote::links() {
-                    leaf(out, &parent, crate::remote::label(s, &l), Icon::MidiControl, cat, false, Item::None);
+                for l in crate::remote::links(&s.session.settings) {
+                    leaf(out, &parent, crate::remote_ui::label(s, &l), Icon::MidiControl, cat, false, Item::None);
                 }
             }
             // "<owner> - <setting>", as the automation clip on the control is named.
             INITIALIZED_CONTROLS => {
                 for c in &p.init_controls {
-                    leaf(out, &parent, crate::init::name(s, c.target), Icon::Slide, cat, false, Item::None);
+                    leaf(out, &parent, crate::init_ui::name(s, c.target), Icon::Slide, cat, false, Item::None);
                 }
             }
             "Samples" => {
@@ -496,21 +515,21 @@ fn data_folder_rows(s: &State, root: &str, dir: &Path, cat: u8, out: &mut Vec<Ro
 
 /// A channel's row label under Generators.
 pub fn channel_label(s: &State, i: usize) -> Option<String> {
-    let c = s.project.channels.get(i)?;
+    let c = s.session.project.channels.get(i)?;
     Some(c.name.clone().or_else(|| crate::project_plugins::plugin_title(c)).unwrap_or_else(|| format!("Channel {}", i + 1)))
 }
 
 /// A generator / effect row: a leaf, or a node listing its parameters when it is a hosted plugin that has some.
 #[allow(clippy::too_many_arguments)]
 fn plugin_node(s: &State, out: &mut Vec<Row>, parent: &str, label: String, icon: Icon, cat: u8, bright: bool, item: Item, key: usize) {
-    if !s.params.has_params(key) {
+    if !s.session.params.has_params(key) {
         return leaf(out, parent, label, icon, cat, bright, item);
     }
     let k = format!("{parent}/{label}");
     let open = is_open(s, &k);
     out.push(Row { key: k.clone(), depth: 2, label, icon, cat, open: Some(open), bright: bright || open, item, path: None });
     if open {
-        for (index, e) in s.params.visible(key) {
+        for (index, e) in s.session.params.visible(key) {
             out.push(Row { key: format!("{k}/{index}"), depth: 3, label: e.name.clone(), icon: Icon::Slide, cat, open: None, bright: false, item: Item::Param(key, index), path: None });
         }
     }
@@ -556,7 +575,7 @@ fn preset_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 preset(out, &pk, 2, crate::presets::shown_name(&e.path), &e.path);
             }
         }
-        let fac = crate::presets::factory(&plugin);
+        let fac = crate::presets::factory(&s.session.settings, &plugin);
         if fac.is_empty() {
             continue;
         }
@@ -596,6 +615,11 @@ fn plugin_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 }
             }
         }
+        // Lemon Studio's own: the container after the categories, under its own name (owner request #8 on the name is
+        // open), in both sections, as it holds instruments on a channel and effects in a slot. Dragged with Shift it
+        // wraps the plugin it is dropped on (`App::drop_container_on_slot`, `App::drop_container_on_rack`).
+        let label = crate::container::CONTAINER.to_string();
+        out.push(Row { key: format!("{parent}/{label}"), depth: 2, label, icon, cat, open: None, bright: false, item: Item::Container, path: None });
     }
     if !section(s, root, INSTALLED, Icon::Plug, cat, out) {
         return;
@@ -656,14 +680,131 @@ pub fn list_h(s: &State) -> f32 {
     (s.screen.1 - list_top(s) - FOOTER_H - info_h(&rows(s), s)).max(0.0)
 }
 
-/// The selected disk entry, shown in the info panel (spec §6).
+/// The selected disk entry, shown in the info panel (spec §6), unless it is a sample (its waveform panel, §7b).
 fn info_path(rows: &[Row], s: &State) -> Option<PathBuf> {
     let k = s.browser_sel.as_deref()?;
-    rows.iter().find(|r| r.key == k)?.path.clone()
+    rows.iter().find(|r| r.key == k && !matches!(r.item, Item::Sample(_)))?.path.clone()
 }
 
+/// The selected sample, whose waveform panel shows above the footer (spec §7b).
+fn wave_of(rows: &[Row], s: &State) -> Option<String> {
+    let k = s.browser_sel.as_deref()?;
+    match &rows.iter().find(|r| r.key == k)?.item {
+        Item::Sample(p) => Some(p.clone()),
+        _ => None,
+    }
+}
+
+/// The sample the waveform panel shows, if any (spec §7b).
+pub fn wave_sample(s: &State) -> Option<String> {
+    wave_of(&rows(s), s)
+}
+
+/// The height the panel above the footer takes: the waveform panel's or the info panel's, else none.
 fn info_h(rows: &[Row], s: &State) -> f32 {
-    if info_path(rows, s).is_some() { INFO_H } else { 0.0 }
+    if wave_of(rows, s).is_some() {
+        WAVE_SLOT
+    } else if info_path(rows, s).is_some() {
+        INFO_H
+    } else {
+        0.0
+    }
+}
+
+/// The room the waveform panel takes above the footer (spec §7b): 4 px, the 101 px panel, 4 px.
+const WAVE_SLOT: f32 = 109.0;
+/// The waveform panel's height with its border.
+const WAVE_H: f32 = 101.0;
+
+/// The selected sample's waveform panel (spec §7b): the file's waveform, a loop and its cue markers when the file has
+/// them, the play / stop button, the rate and bit depth, and the play cursor while the preview sounds.
+fn paint_wave(ui: &mut Ui, s: &State, sample: &str, slot: Rect, list: Rect) {
+    let t = ui.t;
+    ui.c.fill_rect(slot, t.browser_tabs);
+    let outer = Rect::new(list.x, slot.y + 4.0, list.w, WAVE_H);
+    s.browser_wave_rect.set(Some(outer));
+    let inner = Rect::new(outer.x + 1.0, outer.y + 1.0, outer.w - 2.0, outer.h - 2.0);
+    let file = crate::plugins::resolve_sample(&s.session.settings, sample);
+    let facts = {
+        let mut cache = s.browser_facts.borrow_mut();
+        match cache.as_ref() {
+            Some((p, f)) if p == sample => f.clone(),
+            _ => {
+                let f = std::rc::Rc::new(crate::wav_facts::read(Path::new(&file)));
+                *cache = Some((sample.to_string(), f.clone()));
+                f
+            }
+        }
+    };
+    let looped = facts.sample_loop.is_some();
+    ui.c.fill_rect(outer, t.s(0x0b1419));
+    ui.c.fill_rect(inner, if looped { t.s(0x261c21) } else { t.s(0x131c21) });
+    let hov = ui.hit(inner, Action::BrowserWave, "Click to play the sample from its start");
+    let wave = s.session.samples.wave(&s.session.settings, sample);
+    let frames = wave.as_ref().map_or(0, |w| w.frames);
+    let x_of = |frame: f64| inner.x + (frame / frames.max(1) as f64 * f64::from(inner.w)) as f32;
+    if let Some(w) = &wave {
+        // One column per pixel: the lowest to the highest value under it, as one band about the middle row.
+        let base = if looped { t.s(0x94888d) } else { t.s(0x81888d) };
+        let col = if hov { base.mix(t.s(0x131c21), 0.3) } else { base };
+        let mid = (inner.y + inner.h / 2.0).floor();
+        let amp = (inner.h / 2.0 - 1.0).floor();
+        let n = inner.w as usize;
+        for i in 0..n {
+            let (a, b) = (i * w.peaks.len() / n.max(1), ((i + 1) * w.peaks.len() / n.max(1)).max(i * w.peaks.len() / n.max(1) + 1));
+            let (lo, hi) = w.peaks[a.min(w.peaks.len())..b.min(w.peaks.len())].iter().fold((0.0f32, 0.0f32), |(lo, hi), &(l, h)| (lo.min(l), hi.max(h)));
+            let (y0, y1) = ((mid - hi.clamp(-1.0, 1.0) * amp).round(), (mid - lo.clamp(-1.0, 1.0) * amp).round());
+            ui.c.fill_rect(Rect::new(inner.x + i as f32, y0, 1.0, (y1 - y0).max(1.0)), col);
+        }
+        // The loop's ends, red; the cue markers, small orange triangles along the top.
+        if let Some((a, b)) = facts.sample_loop {
+            for f in [f64::from(a), f64::from(b) + 1.0] {
+                let x = x_of(f).clamp(inner.x, inner.right() - 1.0).floor();
+                ui.c.fill_rect(Rect::new(x, inner.y, 1.0, inner.h), t.s(0xed1313));
+            }
+        }
+        for &c in &facts.cues {
+            let x = x_of(f64::from(c)).floor() + 0.5;
+            let y = inner.y;
+            ui.c.fill_polygon(&[(x - 3.5, y), (x + 3.5, y), (x, y + 4.5)], t.h(0xea9049));
+        }
+    }
+    // The play cursor, with a trail fading behind it, while the preview of this sample sounds.
+    let play = s.browser_play.as_ref().filter(|p| p.path == sample);
+    let at = play.and_then(|p| p.at(crate::anim::now()).map(|t| (t, p.file_secs)));
+    if let Some((secs, len)) = at.filter(|(_, len)| *len > 0.0) {
+        let x = (inner.x + secs / len * inner.w).floor().min(inner.right() - 1.0);
+        ui.c.push_clip(inner);
+        const TRAIL: usize = 24;
+        for k in 1..=TRAIL {
+            let u = 1.0 - k as f32 / (TRAIL + 1) as f32;
+            ui.c.fill_rect(Rect::new(x - k as f32, inner.y, 1.0, inner.h), t.h(0x9d7a54).with_alpha((u * u * 150.0) as u8));
+        }
+        ui.c.fill_rect(Rect::new(x, inner.y, 1.0, inner.h), t.h(0xf8bc7e));
+        ui.c.pop_clip();
+    }
+    // The button: ▶, or a square while the preview sounds.
+    let b = Rect::new(outer.x + 4.0, outer.bottom() - 16.0, 24.0, 14.0);
+    let bhov = ui.hit(b, Action::BrowserWavePlay, if at.is_some() { "Stop the preview" } else { "Play the sample" });
+    ui.c.fill_rrect(b, 2.0, t.s(0x0f1519));
+    let face = if at.is_some() { t.h(0xda833a) } else { t.s(0x878787) };
+    ui.c.fill_rrect(Rect::new(b.x + 1.0, b.y + 1.0, b.w - 2.0, b.h - 2.0), 2.0, if bhov { face.shade(0.15) } else { face });
+    let (cx, cy) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
+    if at.is_some() {
+        ui.c.fill_rect(Rect::new(cx - 3.0, cy - 2.5, 6.0, 5.0), t.s(0x000000));
+    } else {
+        ui.c.fill_polygon(&[(cx - 2.5, cy - 3.0), (cx + 2.5, cy), (cx - 2.5, cy + 3.0)], t.s(0x000000));
+    }
+    // The rate and bit depth (and the tempo an `acid` chunk gives), bottom right.
+    if let Some(w) = &wave {
+        let mut info = crate::wav_facts::rate_text(w.rate);
+        if let Some(beats) = facts.beats.filter(|_| w.secs() > 0.0) {
+            info += &format!(" {} BPM", (f64::from(beats) * 60.0 / w.secs()).round());
+        }
+        info += &format!(" {}", facts.pcm_bits.unwrap_or(32));
+        let f = os_ui::Font::new(13);
+        ui.c.text_right(f, inner.right() - 5.0, outer.bottom() - 16.0, t.text_dim, &info);
+    }
 }
 
 /// `35 B`, `12.4 KB`, `2.29 MB` (spec §6).
@@ -806,7 +947,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
         icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0 + dy, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
     }
-    ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
+    // Level with the arrows before it (their middle is y 94).
+    ui.c.text_mid(os_ui::Font::new(14), 52.0, 94.0 + dy, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
     const TIPS: [&str; 4] = ["All", "Current project", "Plugin library", "Favorites"];
@@ -829,7 +971,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     }
     let rows = rows(s);
     let info = info_path(&rows, s);
-    let ih = if info.is_some() { INFO_H } else { 0.0 };
+    let wave = wave_of(&rows, s);
+    let ih = info_h(&rows, s);
     let list = Rect::span(13.0, bw - 1.0, top, r.bottom() - FOOTER_H - ih);
     ui.c.fill_rect(Rect::new(0.0, top, 13.0, list.h), t.browser_tabs.shade(0.02));
     ui.c.fill_rect(list, t.browser_list);
@@ -848,7 +991,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         let rect = Rect::new(13.0, y, bw - 13.0, ROW_H);
         // A parameter row's hint carries its value (spec: plugins/plugin-parameters.md §6); read for the hovered row only.
         let hint = match row.item {
-            Item::Param(key, index) if ui.hovering(rect) => crate::params::row_hint(s, key, index),
+            Item::Param(key, index) if ui.hovering(rect) => crate::params_ui::row_hint(s, key, index),
             _ => row.label.clone(),
         };
         let hov = ui.hit(rect, Action::BrowserRow(i), hint);
@@ -861,7 +1004,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             c => cats[usize::from(c).min(1)],
         };
         let c = if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
-        let c = if matches!(row.item, Item::History(e) if s.history.undone(e)) { t.text_faint } else { c };
+        let c = if matches!(row.item, Item::History(e) if s.session.history.undone(e)) { t.text_faint } else { c };
         // Expander: only an opened node shows its ▾ in the gutter (FL screenshots, spec §2).
         if row.open == Some(true) && s.browser_search.is_empty() {
             let (ax, cy) = (x - 9.0, y + ROW_H / 2.0);
@@ -884,21 +1027,23 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             icons::draw(ui.c, Icon::Star, Rect::new(bw - 19.0, y + 5.0, 13.0, 13.0), sc);
         }
         let (f, w) = (os_ui::Font::new(17), bw - 1.0 - x - 27.0 - if fav { 16.0 } else { 0.0 });
+        // The label level with the icon (both are centred on the row).
+        let ty = y + ROW_H / 2.0 - ui.c.cap_mid(f);
         let over = ui.c.text_width(f, &row.label) - w;
         // Hovered, a label that does not fit scrolls (§9) rather than being cut.
         if hov && over > 0.0 {
-            let now = std::time::Instant::now();
+            let now = crate::anim::now();
             let since = s.browser_marquee.borrow().as_ref().filter(|m| m.key == row.key).map_or(now, |m| m.since);
             let off = marquee_offset(now.duration_since(since).as_secs_f32(), over);
             let lr = Rect::new(x + 25.0, y, w, ROW_H);
             ui.c.push_clip(lr);
-            ui.c.text(f, lr.x - off, y, c, &row.label);
+            ui.c.text(f, lr.x - off, ty, c, &row.label);
             ui.c.pop_clip();
             marquee = Some(Marquee { key: row.key.clone(), since, rect: lr, over, off });
             continue;
         }
         let label = if row.path.is_some() { middle_cut(ui, f, &row.label, w) } else { row.label.clone() };
-        ui.c.text_clip(f, x + 25.0, y, w, c, &label);
+        ui.c.text_clip(f, x + 25.0, ty, w, c, &label);
     }
     *s.browser_marquee.borrow_mut() = marquee;
     let indexing = opt(s, OPT_INDEX) && s.browser_index.building();
@@ -915,8 +1060,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
     }
     ui.c.pop_clip();
-    if let Some(p) = &info {
+    if let Some(sample) = &wave {
+        paint_wave(ui, s, sample, Rect::new(0.0, list.bottom(), bw, ih), list);
+    } else if let Some(p) = &info {
+        s.browser_wave_rect.set(None);
         paint_info(ui, s, p, Rect::new(0.0, list.bottom(), bw, ih));
+    } else {
+        s.browser_wave_rect.set(None);
     }
     // Footer: the search field takes the width the splitter adds.
     let fy = r.bottom() - 27.0;
@@ -996,27 +1146,95 @@ fn search_box(ui: &mut Ui, s: &State, r: Rect) {
     }
 }
 
-/// Rect of the drag label at mouse position (x, y).
+/// Everything the drag tag can cover with the mouse at (x, y), however it swings.
 pub fn ghost_rect(x: f32, y: f32) -> Rect {
-    Rect::new(x + 12.0, y + 6.0, 190.0, 22.0)
+    crate::motion::tag_reach(x, y)
 }
 
-/// The label that follows the cursor during a browser drag (spec §3).
+/// The tag that follows the cursor during a browser drag (spec §3): a card with the item's name hanging by its top
+/// centre just below and right of the mouse, slightly see-through, with a soft shadow. From Animations ▸ Polished up
+/// it swings after the mouse like a sign on a nail (spec: ui/animations.md §4.1, `crate::motion`); below, it hangs
+/// rigid.
 pub fn paint_ghost(ui: &mut Ui, s: &State) {
-    let Some((label, x, y)) = &s.browser_drag else { return };
+    if let Some((label, x, y)) = &s.browser_drag {
+        let angle = s.motion.borrow().tag_angle();
+        paint_tag(ui, label, *x, *y, angle, 0.9);
+    }
+}
+
+/// The glow on where a browser drag would drop in window `win` (spec: ui/animations.md §4.6): a faint wash of the
+/// accent colour with an outline, drawn with the window so that what covers the window covers it.
+pub fn paint_drop_glows(ui: &mut Ui, s: &State, win: crate::app::Win) {
+    let glows = s.motion.borrow_mut().drop_glows(s.drop_on, win);
+    for (r, a) in glows {
+        let c = ui.t.accent;
+        ui.c.fill_rect(r, c.with_alpha((a * 26.0) as u8));
+        ui.c.stroke_rrect(r.inset(0.75), 2.0, 1.5, c.with_alpha((a * 200.0) as u8));
+    }
+}
+
+/// The tag of a cancelled drag in window `win` (None: the main one), falling away (spec: ui/animations.md §4.1).
+pub fn paint_fall(ui: &mut Ui, s: &State, win: Option<crate::app::Win>) {
+    let fall = s.motion.borrow_mut().falling(win);
+    if let Some((label, x, y, angle, alpha)) = fall {
+        paint_tag(ui, &label, x, y, angle, 0.9 * alpha);
+    }
+}
+
+/// The drag tag `label` hanging from the mouse at (`x`, `y`), turned by `angle` (radians, clockwise), at opacity
+/// `alpha`.
+fn paint_tag(ui: &mut Ui, label: &str, x: f32, y: f32, angle: f32, alpha: f32) {
+    use crate::motion::{TAG_H, TAG_MAX_W, TAG_PIN};
     let t = ui.t;
-    let r = ghost_rect(*x, *y);
     let f = os_ui::Font::new(15);
-    let w = (ui.c.text_width(f, label) + 14.0).min(r.w);
-    let r = Rect::new(r.x, r.y, w, r.h);
-    ui.c.fill_rrect(r, 3.0, t.browser_row_hi.shade(0.08));
-    ui.c.stroke_rrect(r, 3.0, 1.0, t.browser_tab_outline);
-    ui.c.text_clip(f, r.x + 7.0, r.y + 2.0, r.w - 10.0, t.glyph, label);
+    let w = (ui.c.text_width(f, label) + 18.0).clamp(40.0, TAG_MAX_W).round();
+    let (px, py) = ((x + TAG_PIN.0).round(), (y + TAG_PIN.1).round());
+    let card = Rect::new((px - w / 2.0).round(), py, w, TAG_H);
+    let layer = ui.c.begin_layer(Rect::new(card.x - 6.0, card.y - 2.0, card.w + 12.0, card.h + 10.0), true);
+    // A soft shadow, from Subtle up (at Off the tag is the plain card).
+    if crate::anim::level() > crate::anim::Level::Off {
+        for (grow, alpha) in [(3.0, 28), (1.5, 42)] {
+            let sh = Rect::new(card.x - grow, card.y + 2.0 - grow / 2.0, card.w + 2.0 * grow, card.h + grow);
+            ui.c.fill_rrect(sh, 4.0 + grow, Color::rgb(0).with_alpha(alpha));
+        }
+    }
+    ui.c.fill_rrect(card, 4.0, t.browser_row_hi.shade(0.08));
+    ui.c.stroke_rrect(card, 4.0, 1.0, t.browser_tab_outline);
+    // Text writes every pixel around it too: on the card, or it would leave a black line on the cleared layer.
+    ui.c.push_clip(card.inset(1.0));
+    ui.c.text_clip(f, card.x + 9.0, card.y + 3.0, card.w - 14.0, t.glyph, label);
+    ui.c.pop_clip();
+    if let Some(tag) = ui.c.take_layer(layer) {
+        ui.c.sprite(&tag, px, py, angle, 1.0, 0.0, 0.0, alpha);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// My projects lists the user's projects folder, as FL lists its own: each project's folder and the backups, which
+    /// open like any folder.
+    #[test]
+    fn my_projects_lists_the_users_projects_folder() {
+        let dir = std::env::temp_dir().join(format!("os_myprojects_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Song").join("Samples")).unwrap();
+        std::fs::write(dir.join("Song").join("Song.lemon"), b"x").unwrap();
+        std::fs::create_dir_all(dir.join("Backup")).unwrap();
+        crate::save_form::TEST_ROOT.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut app = crate::app::App::new(None);
+        let key = format!("0:{MY_PROJECTS}");
+        assert!(rows(&app.state).iter().any(|r| r.key == key), "a root of the All tab");
+        app.state.browser_open.insert(key.clone());
+        app.state.browser_open.insert(format!("{key}/Song"));
+        let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
+        for want in ["Backup", "Song", "Song.lemon"] {
+            assert!(labels.iter().any(|l| l == want), "{want} in {labels:?}");
+        }
+        crate::save_form::TEST_ROOT.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// File dates read in the local time zone on every platform (spec §6): within a day of the UTC date.
     #[test]

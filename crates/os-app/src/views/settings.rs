@@ -205,7 +205,7 @@ pub struct SettingsUi {
     pub info_edit: Option<InfoEdit>,
     /// The File page's Browser extra search folders cell being typed into.
     pub folder_edit: Option<crate::search_folders::CellEdit>,
-    /// The Plugins page shows the experimental native host toggles: `os_native::settings_shown()` at startup.
+    /// The Plugins page shows the experimental native host toggles: `os_session::native::settings_shown()` at startup.
     pub native: bool,
     /// Project ▸ Time settings: the last bar (beats per bar, steps per beat) of each "Set as" mode, indexed by
     /// `signature as usize` (0 = time division), kept while the program runs; `None` = 4/4 (spec:
@@ -295,7 +295,28 @@ pub const LIVE: &[&str] = &[
     "Reset",
     ASSOCIATE_CHECK,
     SHOW_ASIO_PANEL,
+    CHECK_UPDATES,
+    WEBSITE,
+    WIKI,
+    SOURCE_CODE,
 ];
+
+/// About: checks the build's channel for a newer build (`App::check_updates_now`, as HELP ▸ Check for updates).
+pub const CHECK_UPDATES: &str = "Check for updates";
+/// About: open the project's pages (`crate::help_links`).
+pub const WEBSITE: &str = "Website";
+pub const WIKI: &str = "Wiki";
+pub const SOURCE_CODE: &str = "Source code";
+
+/// About: which build this is and how it is kept up to date (`crate::update`).
+fn update_lines() -> Vec<Row> {
+    let how = match (crate::version::CHANNEL, crate::update::enabled()) {
+        (Some("nightly"), true) => "A nightly build of main. It updates itself from the nightly releases.".to_string(),
+        (Some(_), true) => format!("It updates itself from the {} releases.", crate::version::releases()),
+        _ => "Built from its source code: it doesn't update itself (git pull, then build it again).".to_string(),
+    };
+    vec![txt(&how), Row::Buttons(vec![(CHECK_UPDATES, 130.0)])]
+}
 
 /// MIDI: lists the devices again (`App::midi_refresh`); Update MIDI scripts stays greyed with its reason.
 pub const REFRESH_MIDI: &str = "Refresh device list";
@@ -310,7 +331,7 @@ fn live(key: &str) -> bool {
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
 pub const LIVE_COMBOS: [&str; 6] = [OUTPUT_DEVICE, INPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
-/// General ▸ Display: "Playful" simulates the mixer's cables, "Off" hangs them still (crate::cable).
+/// General ▸ Display: the level of every animation (`crate::anim`): Playful, Polished, Subtle or Off.
 pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
 /// The device the mixer tracks' inputs and one-click recording take in from (not under an ASIO driver, whose inputs
@@ -412,6 +433,7 @@ pub const THEME: usize = 6;
 pub const PROJECT: usize = 7;
 pub const INFO: usize = 8;
 pub const DEBUG: usize = 9;
+pub const ABOUT: usize = 10;
 
 /// Plugin table rows shown at once (spec: ui/plugin-manager.md §2).
 pub const TABLE_ROWS: usize = 18;
@@ -677,7 +699,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         RECORDING => {
             use crate::prefs as p;
             // Where takes go now: the project's data folder's Recorded folder, else the user folder's.
-            let folder = crate::track_rec::folder(s).display().to_string();
+            let folder = crate::track_rec::folder(&s.session).display().to_string();
             vec![
                 g("Recording filter", vec![Check2(p::REC_NOTES.label, true, p::REC_AUTOMATION.label, true), Check(p::REC_AUDIO.label, false)]),
                 g("Options", vec![
@@ -710,7 +732,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
-                combo(if s.cables.borrow().animations() { "Playful" } else { "Off" }, 126.0, ANIMATIONS),
+                combo(crate::anim::level().name(), 126.0, ANIMATIONS),
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
                 Check2("Force refreshes", true, "Transparent menus", true),
@@ -748,8 +770,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             ]),
             gf("System", false, vec![Check(ASSOCIATE_CHECK, s.settings.assoc)]),
             // FL's "Updates and privacy" without Send usage data and its More information button: Lemon Studio collects
-            // nothing. The update checks stay greyed until Lemon Studio can update itself (spec: ui/settings.md
-            // "General").
+            // nothing. The checks are `prefs::AUTO_CHECK_UPDATES` and `AUTO_DOWNLOAD_UPDATES` (`crate::update`; a
+            // build from source does not update itself) (spec: ui/settings.md "General").
             gf("Updates", false, vec![
                 Check("Automatically check for updates", true),
                 Check("Automatically download program updates", true),
@@ -822,9 +844,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // The native host toggle appears only with `OPENSTUDIO_NATIVE_SETTINGS`, the second one only while the
             // native host is on too.
             if st.native {
-                scanning.push(Check(NATIVE_HOST_CHECK, os_native::enabled()));
-                if os_native::enabled() {
-                    scanning.push(Check(NATIVE_FIRST_CHECK, os_native::prefer_native()));
+                scanning.push(Check(NATIVE_HOST_CHECK, os_session::native::enabled()));
+                if os_session::native::enabled() {
+                    scanning.push(Check(NATIVE_FIRST_CHECK, os_session::native::prefer_native()));
                 }
             }
             scanning.push(Buttons(vec![("Scan for new plugins", 130.0), ("Rescan all", 100.0)]));
@@ -860,7 +882,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // The project's data folder (events 167 and 202) and two program settings (spec: ui/data-folder.md §1);
             // drawn by `super::data_folder`.
             g(super::data_folder::GROUP, vec![
-                combo(crate::data_folder::choice_text(&s.project), 306.0, crate::data_folder::COMBO),
+                combo(crate::data_folder::choice_text(&s.session.project), 306.0, crate::data_folder::COMBO),
                 DataFolder,
                 combo(crate::prefs::choice(&crate::prefs::ASK_DATA_FOLDER), 444.0, crate::prefs::ASK_DATA_FOLDER.label),
                 Check(crate::prefs::COPY_USED_SAMPLES.label, false),
@@ -868,10 +890,10 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("Time settings", {
                 // The bar as the project holds it (4/4 when the file has none), in the mode of event 35: a time
                 // signature's two combos or a time division's two value boxes (spec: ui/settings-choices.md "Project").
-                let (beats, steps) = s.project.bar();
-                let sig = s.project.bar_is_signature();
+                let (beats, steps) = s.session.project.bar();
+                let sig = s.session.project.bar_is_signature();
                 let mut rows = vec![
-                    combo(&s.project.ppq.to_string(), 44.0, TIMEBASE),
+                    combo(&s.session.project.ppq.to_string(), 44.0, TIMEBASE),
                     combo(if sig { SET_AS_SIGNATURE } else { SET_AS_DIVISION }, 196.0, SET_AS),
                 ];
                 if sig {
@@ -886,15 +908,15 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // The panning law (event 23) and the check show what the engine plays. Fast declick shows the project's
             // value, greyed: its sound is not played yet (event 40; spec: flp/engine-events.md "Project").
             gf("Advanced", true, vec![
-                combo(&panning_text(s.project.panning_law), 82.0, PANNING_LAW),
-                Check(TRUNCATED_CHECK, s.project.play_truncated),
-                Check("Fast fade for choke groups", s.project.fast_declick.unwrap_or(false)),
+                combo(&panning_text(s.session.project.panning_law), 82.0, PANNING_LAW),
+                Check(TRUNCATED_CHECK, s.session.project.play_truncated),
+                Check("Fast fade for choke groups", s.session.project.fast_declick.unwrap_or(false)),
             ]),
             // The project's automatic crossfades (event 44; off when the file has none) and the program setting new
             // projects take it from (`prefs::AUTO_CROSSFADES_NEW`, which the check shows).
             gf("Arranger", false, vec![Check2(
                 CROSSFADES_CHECK,
-                s.project.auto_crossfades.unwrap_or(false),
+                s.session.project.auto_crossfades.unwrap_or(false),
                 crate::prefs::AUTO_CROSSFADES_NEW.label,
                 true,
             )]),
@@ -905,7 +927,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
         INFO => {
             vec![g("Project credits", vec![
                 Text("Title".into(), true),
-                pair(Edit(InfoField::Title, 288.0), Check(SHOW_INFO_CHECK, s.project.show_info.unwrap_or(false))),
+                pair(Edit(InfoField::Title, 288.0), Check(SHOW_INFO_CHECK, s.session.project.show_info.unwrap_or(false))),
                 Text("Author".into(), true),
                 Edit(InfoField::Author, 0.0),
                 Text("Genre".into(), true),
@@ -916,16 +938,16 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Edit(InfoField::Url, 0.0),
                 Gap(8.0),
                 // FL's footer (spec: ui/settings-choices.md "Info").
-                InfoFooter(crate::project_info::footer(s, std::time::Instant::now())),
+                InfoFooter(crate::project_info_ui::footer(s, std::time::Instant::now())),
             ])]
         }
         DEBUG => {
             let mut lines = vec![
-                format!("Lemon Studio {}", env!("CARGO_PKG_VERSION")),
-                format!("Project: {}", s.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
-                format!("Saved by: {}", s.project.saved_by),
-                format!("PPQ {}, tempo {:.3}", s.project.ppq, s.tempo),
-                format!("Channels {}, patterns {}, mixer tracks {}", s.project.channels.len(), s.project.patterns.len(), s.project.mixer.len()),
+                format!("Lemon Studio {}", crate::version::text()),
+                format!("Project: {}", s.session.path.as_ref().map_or("(new project)".into(), |p| p.display().to_string())),
+                format!("Saved by: {}", s.session.project.saved_by),
+                format!("PPQ {}, tempo {:.3}", s.session.project.ppq, s.tempo()),
+                format!("Channels {}, patterns {}, mixer tracks {}", s.session.project.channels.len(), s.session.project.patterns.len(), s.session.project.mixer.len()),
                 format!("Output device: {}", st.device),
                 format!("Device rate: {:?}", st.rate),
                 format!("Instruments listed: {}, effects listed: {}", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()),
@@ -943,11 +965,14 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("", [
                 vec![
                     Gap(20.0),
-                    Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
+                    Big(format!("Lemon Studio {}", crate::version::staged())),
                     txt("A digital audio workstation written in Rust."),
                     txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
+                    Buttons(vec![(WEBSITE, 80.0), (WIKI, 64.0), (SOURCE_CODE, 100.0)]),
                     Gap(10.0),
                 ],
+                update_lines(),
+                vec![Gap(6.0)],
                 if cfg!(windows) {
                     vec![txt("Licence: GNU General Public License, version 3 (the ASIO SDK it includes is version 3 only).")]
                 } else {
@@ -968,7 +993,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 txt("It is free software: you can redistribute it and/or modify it under the terms"),
                 txt("of the GNU General Public License, version 3 or (at your option) any later version."),
                 txt("It comes with ABSOLUTELY NO WARRANTY. Licence: https://www.gnu.org/licenses/"),
-                txt("No registration, no online services, no usage data."),
+                txt("No registration and no usage data. Release builds ask GitHub for updates"),
+                txt("(Settings > General > Updates); a build from source never goes online."),
             ]),
         ],
     }
@@ -1045,10 +1071,10 @@ pub fn paint(ui: &mut Ui, s: &State) {
     }
     ui.c.icon(&os_ui::tabler::SETTINGS, Rect::new(r.x + 7.0, r.y + 7.0, 16.0, 16.0), t.text_dim);
     let (_, title, _) = TABS[st.tab.min(TABS.len() - 1)];
-    ui.c.text(Font::new(13), r.x + 28.0, r.y + 7.0, t.text, &format!("Settings - {title}"));
+    ui.c.text_mid(Font::new(13), r.x + 28.0, r.y + 15.0, t.text, &format!("Settings - {title}"));
     let x = Rect::new(r.right() - 26.0, r.y + 5.0, 20.0, 20.0);
-    let hov = ui.hit(x, Action::Settings(SAct::Close), "Close");
-    ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.glyph } else { t.text });
+    let hov = super::close_button(ui, x, x, Action::Settings(SAct::Close), "Close");
+    ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.tx(0xffffff) } else { t.text });
     // Tabs (spec §2): active text coloured by group.
     let font = Font::new(13);
     let rects = tab_rects(ui, r);
@@ -1205,8 +1231,8 @@ fn picker(ui: &mut Ui, s: &State, p: &crate::theme_adjust::Picker, win: Rect) {
         _ => format!("{} colour", SWATCHES[p.swatch]),
     };
     ui.c.text(Font::new(13).bold(), rr.panel.x + 10.0, rr.panel.y + 9.0, t.text, &title);
-    let hov = ui.hit(rr.close, Action::Settings(SAct::PickClose), "Close (Esc)");
-    ui.c.icon(&os_ui::tabler::X, rr.close.inset(3.0), if hov { t.glyph } else { t.text });
+    let hov = super::close_button(ui, rr.close, rr.close, Action::Settings(SAct::PickClose), "Close (Esc)");
+    ui.c.icon(&os_ui::tabler::X, rr.close.inset(3.0), if hov { t.tx(0xffffff) } else { t.text });
     for (k, (b, part)) in rr.chips.iter().zip(&parts).enumerate() {
         let hov = ui.hit(*b, Action::Settings(SAct::PickPart(k as u8)), "Pick this colour");
         let frame = if k == p.part {
@@ -1757,7 +1783,7 @@ const ASIO_LOGO_H: f32 = 40.0;
 
 /// The ASIO Compatible Logo from the ASIO SDK (`asiosdk/logo`, unchanged), decoded once.
 #[cfg(windows)]
-pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+pub fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
     static LOGO: std::sync::OnceLock<Option<(usize, usize, Vec<u32>)>> = std::sync::OnceLock::new();
     LOGO.get_or_init(|| os_ui::Canvas::decode_png(include_bytes!("../../asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png")))
         .as_ref()
@@ -1765,7 +1791,7 @@ pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
 
 /// Builds without ASIO show no logo.
 #[cfg(not(windows))]
-pub(crate) fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
+pub fn asio_logo() -> Option<&'static (usize, usize, Vec<u32>)> {
     None
 }
 
@@ -1789,7 +1815,7 @@ fn info_box(ui: &mut Ui, s: &State, field: InfoField, b: Rect) {
     let hov = ui.hit(b, Action::Settings(SAct::Info(field)), hint);
     let well = if edit.is_some() { t.s(0x141516) } else if hov { t.s(0x1d1f21) } else { t.s(0x191b1c) };
     kit::sunken(ui.c, t, b, well);
-    let shown = field.get(&s.project.info).as_deref().unwrap_or("");
+    let shown = field.get(&s.session.project.info).as_deref().unwrap_or("");
     let (text, caret, all) = match edit {
         Some(e) => (e.text.as_str(), Some(e.caret), e.all && !e.text.is_empty()),
         None => (shown, None, false),
@@ -1840,7 +1866,7 @@ fn byte_at(s: &str, i: usize) -> usize {
 
 /// The lines `text` shows in `w` px: (first character, characters) of each, in characters. A line longer than `w`
 /// breaks after its last space that fits, else where it is full; the line break itself belongs to no line.
-pub(crate) fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
+pub fn wrap(ui: &mut Ui, f: Font, text: &str, w: f32) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut base = 0;
     for para in text.split('\n') {

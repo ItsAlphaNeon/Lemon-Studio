@@ -111,7 +111,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         if !off {
             ui.hit(Rect::new(cx - 14.0, cy - 14.0, 28.0, 28.0), Action::Knob(id), s.knob_text(id));
         }
-        super::knob(ui, cx, cy, 12.0, s.knob(id), true, t.text, t.text_dim);
+        super::knob(ui, cx, cy, 12.0, s.knob_at(id, cx, cy, 14.0), true, t.text, t.text_dim);
         if off {
             ui.veil(Rect::new(cx - 14.0, cy - 14.0, 28.0, 28.0), panel);
         }

@@ -13,11 +13,10 @@ use std::cell::RefCell;
 
 use os_model::{ControlPoint, Note, Project, TimeMarker};
 use os_smf::{Event, Kind as Ev, Smf, Track};
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, State};
 use crate::dialog::{spans, Answer, Body, Kind, Reply, Then};
-use crate::history::{self, Snap};
 use crate::project_forms::{FHit, Form};
 
 /// The form's caption (spec §2).
@@ -459,7 +458,7 @@ pub fn pattern_file(p: &Project, n: u16, ch: u16, tempo: f64) -> Smf {
 
 /// The user folder's "Clipboard files" (tests: a temporary folder of the test's own thread, so that two tests saving
 /// clipboards never share one).
-pub(crate) fn clipboard_dir() -> Option<PathBuf> {
+pub fn clipboard_dir() -> Option<PathBuf> {
     if cfg!(test) {
         let thread = format!("{:?}", std::thread::current().id()).chars().filter(char::is_ascii_digit).collect::<String>();
         return Some(std::env::temp_dir().join(format!("lemon-clipboard-{}-{thread}", std::process::id())));
@@ -557,53 +556,120 @@ fn stem(path: &Path) -> String {
 
 /// The channels' notes go into pattern `n` with the import's control points and signature markers, the markers into
 /// the playlist; the new channels into a filter group named after the file, which the rack then shows (spec §3, §7).
-fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16) {
-    let base = s.project.channels.len();
-    let max = crate::mixer::max_insert(&s.project);
-    for (i, part) in imp.parts.iter().enumerate() {
-        let row = match o.instrument {
-            Instrument::Sampler => crate::app::add_channel(&mut s.project),
-            k => crate::app::add_plugin_channel(&mut s.project, k.label()),
-        };
-        let ch = &mut s.project.channels[row];
-        ch.name = Some(part.name.clone());
-        ch.mixer_track = if o.mixer { (i as u16 + 1).min(max) } else { 0 };
+/// One undo step `IMPORT_STEP`, or (`step` false: a new project's first content) none.
+fn place(s: &mut State, imp: Imported, o: &Options, name: &str, n: u16, step: bool) {
+    use crate::control::command::Command;
+    crate::control_ui::settle_ids(s);
+    let base = s.session.project.channels.len();
+    let max = crate::mixer::max_insert(&s.session.project);
+    let track_id = |t: u16| crate::edit::mixer::track(&s.session, t).map(|m| m.id.0);
+    let mut first: Vec<Command> = imp
+        .parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| Command::AddChannel {
+            name: Some(part.name.clone()),
+            plugin: (o.instrument != Instrument::Sampler).then(|| o.instrument.label().to_string()),
+            sample: None,
+            track: track_id(if o.mixer { (i as u16 + 1).min(max) } else { 0 }),
+            kind: None,
+            color: None,
+            target: None,
+            points: Vec::new(),
+            children: Vec::new(),
+        })
+        .collect();
+    if s.session.project.pattern(n).is_none() {
+        first.push(Command::AddPattern { name: Some(name.to_string()), color: None, number: Some(n) });
     }
-    let index: Vec<u16> = s.project.channels[base..].iter().map(|c| c.index).collect();
-    let old = s.project.pattern_length(n);
-    let pat = crate::patterns::pat_mut(s, n);
-    if pat.name.is_none() {
-        pat.name = Some(name.to_string());
+    let parts = imp.parts.len();
+    let then = |s: &State, _: &[serde_json::Value]| import_commands(s, &imp, o, name, n, base..base + parts);
+    let r = if step {
+        crate::control_ui::command_then(s, IMPORT_STEP, first, then).map(drop)
+    } else {
+        crate::control_ui::run(s, first).and_then(|_| {
+            let more = then(s, &[]);
+            crate::control_ui::run(s, more).map(drop)
+        })
+    };
+    if let Err(e) = r {
+        s.message = Some(e);
+        return;
     }
-    for (part, &ch) in imp.parts.iter().zip(&index) {
-        pat.notes.extend(part.notes.iter().map(|x| Note { channel: ch, ..*x }));
-        pat.controls.extend(part.controls.iter().map(|c| ControlPoint::new(c.position, ch, c.param(), c.value)));
-    }
-    pat.controls.extend(imp.tempos.iter().copied());
-    pat.notes.sort_by_key(|x| x.position);
-    pat.controls.sort_by_key(|c| c.position);
-    if o.signatures && !imp.signatures.is_empty() {
-        pat.markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
-        pat.markers.extend(imp.signatures.iter().cloned());
-        pat.markers.sort_by_key(|m| m.position);
-        crate::playlist::refit_pattern_clips(s, n, old);
-    }
-    if !imp.markers.is_empty() {
-        crate::playlist::arr_mut(s).markers.extend(imp.markers.iter().cloned());
-    }
-    let rack = &mut s.rack;
-    rack.groups.insert(0, crate::rack::Group { name: name.to_string(), members: (base..base + index.len()).collect() });
-    rack.unsorted_at = None;
-    rack.filter = crate::rack::Filter::Group(0);
     s.selected_channel = base;
     s.rack.select_only(base);
     crate::rack::autosize(s);
-    s.piano.dirty = true;
+    s.session.dirty = true;
+}
+
+/// What an import does once its channels (rack rows `rows`) and pattern `n` are there: the pattern's name, notes,
+/// controls and time markers, the playlist's markers and the filter group.
+fn import_commands(s: &State, imp: &Imported, o: &Options, name: &str, n: u16, rows: std::ops::Range<usize>) -> Vec<crate::control::command::Command> {
+    use crate::control::command::{Command, ControlIn, GroupIn, MarkerIn, NoteIn};
+    let p = &s.session.project;
+    let Some(pat) = p.pattern(n) else { return Vec::new() };
+    let id = |ch: u16| p.channels.iter().find(|c| c.index == ch).map(|c| c.id.0);
+    let new: Vec<u32> = p.channels[rows.clone()].iter().map(|c| c.id.0).collect();
+    let mut v = Vec::new();
+    if pat.name.is_none() {
+        v.push(Command::SetPattern { pattern: pat.id.0, name: Some(name.to_string()), color: None, length: None });
+    }
+    // The pattern's notes, then the file's, in position order.
+    let mut notes: Vec<(u32, NoteIn)> = pat.notes.iter().filter_map(|x| Some((x.position, NoteIn::of(x, id(x.channel)?)))).collect();
+    for (part, &ch) in imp.parts.iter().zip(&new) {
+        notes.extend(part.notes.iter().map(|x| (x.position, NoteIn::of(x, ch))));
+    }
+    notes.sort_by_key(|x| x.0);
+    v.push(Command::SetNotes { pattern: pat.id.0, channel: None, notes: notes.into_iter().map(|x| x.1).collect() });
+    if imp.parts.iter().any(|x| !x.controls.is_empty()) || !imp.tempos.is_empty() {
+        let kept = |c: &ControlPoint| ControlIn { position: c.position, value: c.value, channel: None, param: None, kind: Some(c.kind), id: (c.id.0 != 0).then_some(c.id.0) };
+        let mut list: Vec<(u32, ControlIn)> = pat.controls.iter().map(|c| (c.position, kept(c))).collect();
+        for (part, &ch) in imp.parts.iter().zip(&new) {
+            list.extend(part.controls.iter().map(|c| (c.position, ControlIn { position: c.position, value: c.value, channel: Some(ch), param: Some(c.param()), kind: None, id: None })));
+        }
+        list.extend(imp.tempos.iter().map(|c| (c.position, kept(c))));
+        list.sort_by_key(|x| x.0);
+        v.push(Command::SetControls { pattern: pat.id.0, controls: list.into_iter().map(|x| x.1).collect() });
+    }
+    if o.signatures && !imp.signatures.is_empty() {
+        let kept = pat.markers.iter().filter(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
+        let markers = kept.chain(&imp.signatures).map(MarkerIn::of).collect();
+        v.push(Command::SetPatternMarkers { pattern: pat.id.0, markers });
+    }
+    if !imp.markers.is_empty() {
+        let held = p.arrangement().map(|a| a.markers.clone()).unwrap_or_default();
+        v.push(Command::SetMarkers { markers: held.iter().chain(&imp.markers).map(MarkerIn::of).collect() });
+    }
+    let mut q: Project = (**p).clone();
+    crate::edit::rack::import_group_in(&mut q, name, rows);
+    let channels = q.channels.iter().map(|c| GroupIn { channel: c.id.0, group: c.rack.group }).collect();
+    v.push(Command::SetGroups { groups: q.groups, channels, shown: q.current_group });
+    v
+}
+
+/// The piano roll's import into channel `ch` (an index) of pattern `n`: the notes, the imported ones' places in the
+/// new list in `sel`, and the time markers.
+fn piano_commands(s: &State, n: u16, ch: u16, new: &[Note], imp: &Imported, o: &Options, sel: &mut Vec<usize>) -> Vec<crate::control::command::Command> {
+    use crate::control::command::{Command, MarkerIn, NoteIn};
+    let p = &s.session.project;
+    let Some(pat) = p.pattern(n) else { return Vec::new() };
+    let id = |ch: u16| p.channels.iter().find(|c| c.index == ch).map(|c| c.id.0);
+    let mut all: Vec<(&Note, bool)> = pat.notes.iter().filter(|x| o.blend || x.channel != ch).map(|x| (x, false)).collect();
+    all.extend(new.iter().map(|x| (x, true)));
+    all.sort_by_key(|(x, _)| x.position);
+    *sel = all.iter().enumerate().filter(|(_, (_, new))| *new).map(|(i, _)| i).collect();
+    let notes = all.iter().filter_map(|(x, _)| Some(NoteIn::of(x, id(x.channel)?))).collect();
+    let mut v = vec![Command::SetNotes { pattern: pat.id.0, channel: None, notes }];
+    if o.signatures && !imp.signatures.is_empty() {
+        let kept = pat.markers.iter().filter(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
+        v.push(Command::SetPatternMarkers { pattern: pat.id.0, markers: kept.chain(&imp.signatures).map(MarkerIn::of).collect() });
+    }
+    v
 }
 
 impl App {
     /// FILE ▸ Import ▸ MIDI file... (`piano` = false) and the piano roll's Import MIDI file...: the open dialog (spec §1).
-    pub(crate) fn import_midi_dialog(&mut self, piano: bool) {
+    pub fn import_midi_dialog(&mut self, piano: bool) {
         use crate::filedlg::{FileDlg, Mode};
         let dlg = FileDlg::new(Mode::Open, "Import MIDI file", "midi", Then::MidiImport(piano)).filter("MIDI file", &["mid", "midi"]);
         self.file_dialog(dlg);
@@ -611,7 +677,7 @@ impl App {
 
     /// A MIDI file chosen in the open dialog or dropped on the window: the form, or the import with the last settings
     /// as the MIDI import window setting says (spec §10.5).
-    pub(crate) fn midi_file_chosen(&mut self, path: PathBuf, piano: bool) {
+    pub fn midi_file_chosen(&mut self, path: PathBuf, piano: bool) {
         let smf = match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| os_smf::read(&b).map_err(|e| e.to_string())) {
             Ok(f) => f,
             Err(e) => return self.tell(Kind::Warning, TITLE, spans(&["Could not import ", &file_name(&path), &format!(": {e}.")])),
@@ -647,7 +713,7 @@ impl App {
     }
 
     /// The save-changes question was answered: the import that waited for it (`Next::ImportMidi`).
-    pub(crate) fn import_pending(&mut self, path: PathBuf) {
+    pub fn import_pending(&mut self, path: PathBuf) {
         let Some((p, o)) = PENDING.take().filter(|(p, _)| *p == path) else { return };
         match std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| os_smf::read(&b).map_err(|e| e.to_string())) {
             Ok(f) => self.import_into_project(&p, &f, &o),
@@ -658,7 +724,7 @@ impl App {
     /// FILE's import (spec §3 to §7): into a new project in pattern mode at PPQ 96, or added to this one as one undo
     /// step.
     fn import_into_project(&mut self, path: &Path, f: &Smf, o: &Options) {
-        let ppq = if o.new_project { 96 } else { self.state.project.ppq.max(1) };
+        let ppq = if o.new_project { 96 } else { self.state.session.project.ppq.max(1) };
         let imp = convert(f, o, ppq);
         let name = stem(path);
         if imp.parts.is_empty() {
@@ -666,37 +732,26 @@ impl App {
         }
         let parts = imp.parts.len();
         if o.new_project {
-            self.transport.stop();
-            self.reset_hosted();
+            self.leave_project();
             let tempo = imp.tempo.unwrap_or(120.0);
             let s = &mut self.state;
-            s.project = crate::app::empty_project();
-            s.project.ppq = ppq;
-            s.project.tempo = Some(tempo);
-            crate::project_info::created(s);
-            s.file = None;
-            s.path = None;
-            s.tempo = tempo;
-            s.pattern = 1;
-            s.song_mode = false;
-            s.piano.reset();
-            s.playlist.reset();
-            s.history.reset();
-            s.control.reset();
-            s.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
+            let mut p = crate::projects::empty_project(&crate::settings_file::store());
+            (p.ppq, p.tempo) = (ppq, Some(tempo));
+            s.session.project = crate::locked::Locked::new(p);
+            crate::project_info_ui::created(s);
+            s.session.file = None;
+            s.session.path = None;
+            s.set_tempo(tempo);
+            s.set_pattern(1);
+            s.set_song_mode(false);
+            s.session.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
             crate::playlist::load_view(s);
-            s.rack.reset();
-            crate::rack::from_model(s);
             // A project with nothing in it counts as saved; the import is its first change.
             self.mark_saved();
-            place(&mut self.state, imp, o, &name, 1);
+            place(&mut self.state, imp, o, &name, 1, false);
         } else {
-            let s = &mut self.state;
-            // As every playlist step does (`playlist::snapshot_as`), the arrangement exists before the step.
-            crate::playlist::arr_mut(s);
-            // One undo step through the control plane, as the rack's other channel adds (`control::edit`).
-            let n = s.pattern;
-            crate::control::edit(s, IMPORT_STEP, crate::control::command::Region::Project, |s| place(s, imp, o, &name, n));
+            let n = self.state.pattern();
+            place(&mut self.state, imp, o, &name, n, true);
         }
         let s = &mut self.state;
         crate::piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
@@ -709,34 +764,28 @@ impl App {
     fn import_into_piano(&mut self, path: &Path, f: &Smf, o: &Options) {
         let s = &mut self.state;
         let Some(ch) = crate::piano::channel(s) else { return };
-        let imp = convert(f, &Options { per_track: true, ..o.clone() }, s.project.ppq.max(1));
+        let imp = convert(f, &Options { per_track: true, ..o.clone() }, s.session.project.ppq.max(1));
         let new: Vec<Note> = imp.parts.iter().flat_map(|p| p.notes.iter()).map(|x| Note { channel: ch, ..*x }).collect();
         if new.is_empty() {
             return self.tell(Kind::Info, TITLE, spans(&["", &file_name(path), " has no notes in the tracks and channels chosen."]));
         }
-        let n = s.pattern;
-        history::record(s, IMPORT_STEP, Snap::Patterns { patterns: s.project.patterns.clone(), current: n });
-        let old = s.project.pattern_length(n);
-        let pat = crate::patterns::pat_mut(s, n);
-        let mut all: Vec<(Note, bool)> = std::mem::take(&mut pat.notes).into_iter().filter(|x| o.blend || x.channel != ch).map(|x| (x, false)).collect();
-        all.extend(new.iter().map(|x| (*x, true)));
-        all.sort_by_key(|(x, _)| x.position);
-        let sel = all.iter().enumerate().filter(|(_, (_, new))| *new).map(|(i, _)| i).collect();
-        pat.notes = all.into_iter().map(|(x, _)| x).collect();
-        if o.signatures && !imp.signatures.is_empty() {
-            pat.markers.retain(|m| !(m.kind == TimeMarker::SIGNATURE && imp.signatures.iter().any(|x| x.position == m.position)));
-            pat.markers.extend(imp.signatures.iter().cloned());
-            pat.markers.sort_by_key(|m| m.position);
-            crate::playlist::refit_pattern_clips(s, n, old);
+        let n = s.pattern();
+        crate::control_ui::settle_ids(s);
+        let first = if s.session.project.pattern(n).is_none() { vec![crate::control::command::Command::AddPattern { name: None, color: None, number: Some(n)}] } else { Vec::new() };
+        let mut sel = Vec::new();
+        let then = |s: &State, _: &[serde_json::Value]| piano_commands(s, n, ch, &new, &imp, o, &mut sel);
+        if let Err(e) = crate::control_ui::command_then(s, IMPORT_STEP, first, then) {
+            s.message = Some(e);
+            return;
         }
         s.piano.select(n, ch, sel);
-        s.piano.dirty = true;
+        s.session.dirty = true;
         s.message = Some(format!("Imported {} into the piano roll ({} notes)", file_name(path), new.len()));
         self.invalidate();
     }
 
     /// A click on a part of the MIDI form; `Some` closes it. With a list open, a click picks from it or only closes it.
-    pub(crate) fn midi_form_click(&mut self, h: FHit) -> Option<Reply> {
+    pub fn midi_form_click(&mut self, h: FHit) -> Option<Reply> {
         let f = top(self)?;
         if let Some(k) = f.list.take() {
             if let FHit::Item(i) = h {
@@ -760,7 +809,7 @@ impl App {
     }
 
     /// Keys on the MIDI form: Esc closes an open list, then the form; Enter accepts.
-    pub(crate) fn midi_form_key(&mut self, key: &Key) -> Option<Reply> {
+    pub fn midi_form_key(&mut self, key: &Key) -> Option<Reply> {
         let f = top(self)?;
         if f.list.is_some() {
             if matches!(key, Key::Named(NamedKey::Escape)) {
@@ -777,7 +826,7 @@ impl App {
     }
 
     /// The form closed: Accept imports; Esc and the caption's × import nothing (spec §2).
-    pub(crate) fn midi_form_closed(&mut self, f: MidiForm, reply: Reply) {
+    pub fn midi_form_closed(&mut self, f: MidiForm, reply: Reply) {
         if reply == Reply::Button(Answer::Ok) {
             self.midi_accepted(f.path, f.smf, f.o, f.piano);
         }
@@ -785,7 +834,7 @@ impl App {
 
     /// FILE ▸ Export MIDI... (`piano` = false) and the piano roll's Export as MIDI file...: the save dialog, unless
     /// there is nothing to export (spec §9, §10.8).
-    pub(crate) fn export_midi_dialog(&mut self, piano: bool) {
+    pub fn export_midi_dialog(&mut self, piano: bool) {
         use crate::filedlg::{FileDlg, Mode};
         let s = &self.state;
         let file = if piano { self.piano_midi() } else { self.project_midi() };
@@ -793,32 +842,32 @@ impl App {
             let what = if piano { "The piano roll's channel has no notes in this pattern." } else { "There are no notes to export." };
             return self.tell(Kind::Info, "Export MIDI file", spans(&[what]));
         }
-        let name = if piano { "untitled.mid".to_string() } else { format!("{}.mid", s.path.as_deref().map_or_else(|| "Untitled".to_string(), stem)) };
+        let name = if piano { "untitled.mid".to_string() } else { format!("{}.mid", s.session.path.as_deref().map_or_else(|| "Untitled".to_string(), stem)) };
         let dlg = FileDlg::new(Mode::Save, "Export MIDI file", "midi", Then::MidiExport(piano))
             .filter("MIDI file", &["mid"])
-            .start(s.path.as_deref().and_then(Path::parent))
+            .start(s.session.path.as_deref().and_then(Path::parent))
             .name(&name);
         self.file_dialog(dlg);
     }
 
     fn piano_midi(&self) -> Smf {
         let s = &self.state;
-        pattern_file(&s.project, s.pattern, crate::piano::channel(s).unwrap_or(0), s.tempo)
+        pattern_file(&s.session.project, s.pattern(), crate::piano::channel(s).unwrap_or(0), s.tempo())
     }
 
     fn project_midi(&self) -> Smf {
         let s = &self.state;
-        project_file(&s.project, s.song_mode, s.pattern, s.tempo)
+        project_file(&s.session.project, s.song_mode(), s.pattern(), s.tempo())
     }
 
     /// TOOLS ▸ Save MIDI clipboard to browser (Lemon Studio's design after the original's entry; greyed while nothing
     /// is copied): the piano roll's clipboard goes to "MIDI clipboard <n>.mid" in the user folder's "Clipboard files"
     /// (the original's browser has a folder of that name), the next free number; the folder joins the browser and
     /// opens there.
-    pub(crate) fn save_midi_clipboard(&mut self) {
+    pub fn save_midi_clipboard(&mut self) {
         let s = &self.state;
         let Some(dir) = clipboard_dir() else { return };
-        let file = clipboard_file(&s.piano.clipboard, s.project.ppq, s.tempo);
+        let file = clipboard_file(&s.piano.clipboard, s.session.project.ppq, s.tempo());
         let path = (1..).map(|n| dir.join(format!("MIDI clipboard {n}.mid"))).find(|p| !p.exists()).expect("a free name");
         match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, os_smf::write(&file))) {
             Ok(()) => {
@@ -831,7 +880,7 @@ impl App {
     }
 
     /// The save dialog's file: written.
-    pub(crate) fn midi_export_chosen(&mut self, path: PathBuf, piano: bool) {
+    pub fn midi_export_chosen(&mut self, path: PathBuf, piano: bool) {
         let path = if path.extension().is_none() { path.with_extension("mid") } else { path };
         let file = if piano { self.piano_midi() } else { self.project_midi() };
         self.state.message = Some(match std::fs::write(&path, os_smf::write(&file)) {
@@ -1085,8 +1134,8 @@ mod tests {
 
     fn test_app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
-        app.state.song_mode = false;
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        app.state.set_song_mode(false);
         app
     }
 
@@ -1114,7 +1163,7 @@ mod tests {
         let f = form(&app).expect("the form shows for a file of three tracks with notes");
         assert_eq!(f.track_items(), ["All tracks", "1. Song title", "2. Piano", "3. Bass", "4. Drums"]);
         app.dialog_click(crate::dialog::DHit::Form(FHit::Main));
-        let p = &app.state.project;
+        let p = &app.state.session.project;
         assert_eq!(p.ppq, 96);
         assert_eq!(p.channels.iter().map(|c| c.name.as_deref().unwrap_or("")).collect::<Vec<_>>(), ["Piano", "Bass", "Drums"]);
         assert_eq!(p.channels.iter().map(|c| c.mixer_track).collect::<Vec<_>>(), [1, 2, 3]);
@@ -1123,10 +1172,10 @@ mod tests {
         assert_eq!(p.patterns[0].name.as_deref(), Some(stem(&path).as_str()));
         assert_eq!(p.patterns[0].notes.len(), 4);
         assert!(p.arrangement().is_none_or(|a| a.clips.is_empty()), "nothing on the playlist");
-        assert_eq!(app.state.tempo, 120.0);
-        assert!(!app.state.song_mode);
-        assert_eq!(app.state.rack.groups[0].name, stem(&path));
-        assert_eq!(app.state.rack.filter, crate::rack::Filter::Group(0));
+        assert_eq!(app.state.tempo(), 120.0);
+        assert!(!app.state.song_mode());
+        assert_eq!(crate::rack::groups(&app.state.session.project)[0].name, stem(&path));
+        assert_eq!(crate::rack::filter(&app.state.session.project), crate::rack::Filter::Group(0));
         assert!(app.unsaved());
         let _ = std::fs::remove_file(path);
     }
@@ -1137,25 +1186,25 @@ mod tests {
     fn import_into_the_open_project_undoes_in_one_step() {
         let path = write_three("append");
         let mut app = test_app();
-        crate::playlist::arr_mut(&mut app.state);
-        let before = app.state.project.clone();
+        crate::edit::playlist::arr_mut(&mut app.state.session);
+        let before = app.state.session.project.clone();
         let rows = before.channels.len();
         crate::dialog::fake::answer(Some(path.clone()));
         app.import_midi_dialog(false);
         app.dialog_click(crate::dialog::DHit::Form(FHit::Check(0)));
         assert!(!form(&app).unwrap().o.new_project);
         app.dialog_click(crate::dialog::DHit::Form(FHit::Main));
-        assert_eq!(app.state.project.channels.len(), rows + 3);
-        assert_eq!(app.state.project.channels[rows].name.as_deref(), Some("Piano"));
-        assert_eq!(app.state.project.channels[rows].mixer_track, 1, "routing starts again at track 1");
-        let notes = app.state.project.pattern(1).unwrap().notes.len();
+        assert_eq!(app.state.session.project.channels.len(), rows + 3);
+        assert_eq!(app.state.session.project.channels[rows].name.as_deref(), Some("Piano"));
+        assert_eq!(app.state.session.project.channels[rows].mixer_track, 1, "routing starts again at track 1");
+        let notes = app.state.session.project.pattern(1).unwrap().notes.len();
         assert_eq!(notes, before.pattern(1).map_or(0, |p| p.notes.len()) + 4);
-        let after = app.state.project.clone();
-        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(IMPORT_STEP));
-        assert_eq!(app.state.project, before);
-        crate::history::redo(&mut app.state);
-        assert_eq!(app.state.project.channels.len(), after.channels.len());
-        assert_eq!(app.state.project.pattern(1), after.pattern(1));
+        let after = app.state.session.project.clone();
+        assert_eq!(crate::history_ui::undo(&mut app.state).as_deref(), Some(IMPORT_STEP));
+        assert_eq!(app.state.session.project, before);
+        crate::history_ui::redo(&mut app.state);
+        assert_eq!(app.state.session.project.channels.len(), after.channels.len());
+        assert_eq!(app.state.session.project.pattern(1), after.pattern(1));
         let _ = std::fs::remove_file(path);
     }
 
@@ -1165,15 +1214,15 @@ mod tests {
         let path = write_three("piano");
         let mut app = test_app();
         app.state.selected_channel = 1;
-        let ch = app.state.project.channels[1].index;
-        crate::patterns::pat_mut(&mut app.state, 1).notes = vec![Note::step(ch, 0), Note::step(0, 0)];
+        let ch = app.state.session.project.channels[1].index;
+        crate::edit::patterns::pat_mut(&mut app.state.session, 1).notes = vec![Note::step(ch, 0), Note::step(0, 0)];
         crate::dialog::fake::answer(Some(path.clone()));
         app.import_midi_dialog(true);
         let f = form(&app).unwrap();
         assert_eq!(f.lamp(0).map(|l| l.0), Some(BLEND));
         assert!(f.lamp(3).is_none());
         app.dialog_click(crate::dialog::DHit::Form(FHit::Main));
-        let pat = app.state.project.pattern(1).unwrap();
+        let pat = app.state.session.project.pattern(1).unwrap();
         assert_eq!(pat.notes.iter().filter(|n| n.channel == ch).count(), 4, "the step was replaced");
         assert_eq!(pat.notes.iter().filter(|n| n.channel == 0).count(), 1, "other channels keep theirs");
         assert_eq!(app.state.piano.selection(1, Some(ch)).len(), 4);
@@ -1185,7 +1234,7 @@ mod tests {
     #[test]
     fn shortcut_and_drop() {
         let mut app = test_app();
-        crate::patterns::pat_mut(&mut app.state, 1).notes = vec![Note { length: 48, ..Note::step(0, 0) }];
+        crate::edit::patterns::pat_mut(&mut app.state.session, 1).notes = vec![Note { length: 48, ..Note::step(0, 0) }];
         let out = std::env::temp_dir().join(format!("os_midi_export_{}", std::process::id()));
         crate::dialog::fake::answer(Some(out.clone()));
         app.shift = true;
@@ -1201,12 +1250,12 @@ mod tests {
         assert!(matches!(app.state.dialogs.last().map(|d| &d.body), Some(crate::dialog::Body::Msg(_))));
         app.key(&Key::Named(NamedKey::Escape), false, false);
         let path = write_three("drop");
-        let before = app.state.project.clone();
+        let before = app.state.session.project.clone();
         app.drop_file(path.clone());
         assert!(form(&app).is_some());
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(!app.modal_open());
-        assert_eq!(app.state.project, before);
+        assert_eq!(app.state.session.project, before);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1220,9 +1269,9 @@ mod tests {
         app.drop_file(path.clone());
         assert!(form(&app).expect("the form shows for the late file").o.realign);
         app.dialog_click(crate::dialog::DHit::Form(FHit::Main));
-        let notes = &app.state.project.patterns[0].notes;
+        let notes = &app.state.session.project.patterns[0].notes;
         assert_eq!(notes.iter().map(|n| (n.position, n.length, n.key)).collect::<Vec<_>>(), [(0, 48, 60)]);
-        assert_eq!(app.state.tempo, 110.026);
+        assert_eq!(app.state.tempo(), 110.026);
         assert_eq!(LAST.with_borrow(|l| l.as_ref().map(|o| o.realign)), Some(false));
         assert!(!options_for(&one_note(3 * 480, None)).realign, "a pickup imports where it is");
         // Realign chosen for an ordinary file is remembered, as the other settings are.
@@ -1255,11 +1304,11 @@ mod tests {
         let f = Smf { format: 1, ppq: 96, tracks: vec![Track { events: vec![ev(0, Ev::Tempo(500_000))] }] };
         std::fs::write(&path, os_smf::write(&f)).unwrap();
         let mut app = test_app();
-        let before = app.state.project.clone();
+        let before = app.state.session.project.clone();
         app.midi_file_chosen(path.clone(), false);
         let Some(crate::dialog::Body::Msg(m)) = app.state.dialogs.last().map(|d| &d.body) else { panic!("a message") };
         assert!(m.plain().contains("has no notes"), "{}", m.plain());
-        assert_eq!(app.state.project, before);
+        assert_eq!(app.state.session.project, before);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1267,9 +1316,9 @@ mod tests {
     #[test]
     fn exports_read_back() {
         let imp = convert(&three(96), &Options::default(), 96);
-        let mut p = crate::app::empty_project();
+        let mut p = crate::projects::empty_project(&crate::settings_file::store());
         p.channels = (0..3).map(|i| {
-            let mut c = crate::app::test_project().channels[0].clone();
+            let mut c = crate::projects::test_project().channels[0].clone();
             c.index = i;
             c.name = Some(imp.parts[usize::from(i)].name.clone());
             c

@@ -21,7 +21,7 @@ pub const SIZE: (f32, f32) = (430.0, 200.0);
 pub const CLIP_SIZE: (f32, f32) = (430.0, 236.0);
 
 pub fn rect(s: &State) -> Rect {
-    let mo = s.project.channels.get(s.plugin_channel).is_some_and(crate::lemon_midi_out::is_midi_out);
+    let mo = s.session.project.channels.get(s.plugin_channel).is_some_and(crate::lemon_midi_out::is_midi_out);
     let (w, h) = if s.is_clip_row(s.plugin_channel) || mo { CLIP_SIZE } else { SIZE };
     Rect::new(s.plugin_pos.0, s.plugin_pos.1, w, h)
 }
@@ -33,7 +33,7 @@ pub fn bounds(s: &State) -> Rect {
 pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     let t = ui.t;
     let win = rect(s);
-    let Some(ch) = s.project.channels.get(s.plugin_channel) else { return };
+    let Some(ch) = s.session.project.channels.get(s.plugin_channel) else { return };
     ui.c.fill_rect(win, t.window_border);
     ui.c.fill_rect(win.inset(1.0), t.window_body);
     ui.hit(win, Action::Swallow, "");
@@ -44,7 +44,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     icons::draw(ui.c, Icon::Plug, Rect::new(win.x + 9.0, win.y + 7.0, 15.0, 15.0), t.glyph);
     ui.c.text_clip(Font::new(17), win.x + 30.0, win.y + 5.0, win.w - 60.0, t.text, &name);
     let close = Rect::new(win.right() - 22.0, win.y + 6.0, 16.0, 16.0);
-    let hov = ui.hit(close, Action::CloseWin(Win::Plugin), "Close");
+    let hov = super::close_button(ui, close, close, Action::CloseWin(Win::Plugin), "Close");
     icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
 
     let body = Rect::span(win.x + 5.0, win.right() - 6.0, win.y + 30.0, win.bottom() - 6.0);
@@ -85,9 +85,9 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     }
     let (vol, pan) = (KnobId::ChanVol(s.plugin_channel), KnobId::ChanPan(s.plugin_channel));
     ui.hit(Rect::new(body.right() - 68.0, body.y + 20.0, 28.0, 28.0), Action::Knob(vol), s.knob_text(vol));
-    ball_knob(ui, body.right() - 54.0, body.y + 34.0, 12.0, s.knob(vol));
+    ball_knob(ui, body.right() - 54.0, body.y + 34.0, 12.0, s.knob_at(vol, body.right() - 54.0, body.y + 34.0, 14.0));
     ui.hit(Rect::new(body.right() - 68.0, body.y + 70.0, 28.0, 28.0), Action::Knob(pan), s.knob_text(pan));
-    ball_knob(ui, body.right() - 54.0, body.y + 84.0, 12.0, s.knob(pan));
+    ball_knob(ui, body.right() - 54.0, body.y + 84.0, 12.0, s.knob_at(pan, body.right() - 54.0, body.y + 84.0, 14.0));
     ui.c.text_center(Font::new(13), Rect::new(body.right() - 84.0, body.y + 48.0, 60.0, 14.0), t.text_dim, "VOL");
     ui.c.text_center(Font::new(13), Rect::new(body.right() - 84.0, body.y + 98.0, 60.0, 14.0), t.text_dim, "PAN");
 }
@@ -96,7 +96,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
 fn knob(ui: &mut Ui, s: &State, id: KnobId, cx: f32, cy: f32, caption: &str) {
     let t = ui.t;
     ui.hit(Rect::new(cx - 14.0, cy - 14.0, 28.0, 28.0), Action::Knob(id), s.knob_text(id));
-    ball_knob(ui, cx, cy, 12.0, s.knob(id));
+    ball_knob(ui, cx, cy, 12.0, s.knob_at(id, cx, cy, 14.0));
     ui.c.text_center(Font::new(13), Rect::new(cx - 30.0, cy + 14.0, 60.0, 14.0), t.text_dim, caption);
 }
 
@@ -116,7 +116,7 @@ fn paint_midi_out(ui: &mut Ui, s: &State, body: Rect) {
     use crate::lemon_midi_out::{row_settings, MoKnob};
     let t = ui.t;
     let row = s.plugin_channel;
-    let st = row_settings(&s.project, row).unwrap_or_default();
+    let st = row_settings(&s.session.project, row).unwrap_or_default();
     let f = Font::new(15);
     let lines: [(&str, &[MoKnob]); 5] = [("Generator", &[]), ("Channel", &[MoKnob::Channel]), ("Port", &[MoKnob::Port]), ("Patch", &[MoKnob::Patch]), ("Bank", &[MoKnob::Bank, MoKnob::Bank2])];
     for (i, (k, knobs)) in lines.iter().enumerate() {
@@ -154,8 +154,8 @@ fn paint_midi_out(ui: &mut Ui, s: &State, body: Rect) {
 fn paint_clip(ui: &mut Ui, s: &State, body: Rect, kind: String) {
     let t = ui.t;
     let row = s.plugin_channel;
-    let Some(ch) = s.project.channels.get(row) else { return };
-    let points = s.project.automation(ch.index).map_or(0, |a| a.points.len());
+    let Some(ch) = s.session.project.channels.get(row) else { return };
+    let points = s.session.project.automation(ch.index).map_or(0, |a| a.points.len());
     let (min, max) = (s.knob(KnobId::ChanPan(row)), s.knob(KnobId::ChanVol(row)));
     let lines = [("Generator", kind), ("Points", points.to_string()), ("Range", format!("{:.0}% to {:.0}%", min * 100.0, max * 100.0))];
     let f = Font::new(15);

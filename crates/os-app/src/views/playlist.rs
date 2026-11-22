@@ -21,6 +21,8 @@ pub const BAR_W: f32 = 60.0;
 // Clip colours (spec: ui/playlist.md §2).
 const CLIP_BORDER: u32 = 0x353c41;
 const TITLE_TOP: u32 = 0x50595e;
+/// How much of an automation clip's body covers what lies under it (`clip_paint`).
+const AUTO_ALPHA: u8 = 130;
 const TITLE_BOTTOM: u32 = 0x3f494d;
 const TITLE_TEXT: u32 = 0xd6dfe4;
 const SEL_TITLE: u32 = 0x75201f;
@@ -69,8 +71,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     window_body(ui, r);
     let outer = r;
-    let arr = pl::arrangement_name(s);
-    let title = format!("Arranger - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
+    let arr = pl::arrangement_name(&s.session);
+    let title = format!("Arranger - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(&s.session, pl::source(s)));
     // The grid covers most of the window and is painted all over (rows and gaps): the frame skips it.
     let (fr, fc) = super::frame_rects(s, Win::Playlist, r);
     let cover = grid_rect(s, fr, fc);
@@ -154,17 +156,20 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let grid = grid_rect(s, r, client);
     debug_assert_eq!(grid, cover);
     let (grid_x, grid_y, grid_w) = (grid.x, grid.y, grid.w);
-    let has_markers = !pl::markers(s).is_empty();
+    let has_markers = !pl::markers(&s.session).is_empty();
     let lane_y = client.y + 42.0;
     let g = PGeom::new(s, grid);
     let (sx, sy) = s.playlist_scroll;
     let bar_w = s.playlist_bar_w;
+    // The zoom counts in four quarter notes (`bar_t`), whatever the time signature; the song's extent is counted in
+    // the project's bars.
     let bar_t = (g.ppq * 4) as f32;
+    let proj_bar = s.session.project.bar_ticks() as f32;
 
     // Overview (horizontal scroll bar with a miniature of the clips) + ruler. The song extends 16 bars past
     // its last clip, at least 100 bars; 500 tracks.
-    let last = pl::clips(s).iter().map(|c| c.end() as f32 / bar_t).fold(0.0, f32::max);
-    let bars = (last.ceil() + 16.0).max(100.0);
+    let last = pl::clips(&s.session).iter().map(|c| c.end() as f32 / proj_bar).fold(0.0, f32::max);
+    let bars = (last.ceil() + 16.0).max(100.0) * proj_bar / bar_t;
     let (hbar, vbar) = bar_sizes();
     let over = Rect::new(grid_x, client.y + 1.0, grid_w, hbar);
     debug_assert_eq!(over, overview_rect(s, grid));
@@ -206,18 +211,19 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     for &row in &visible {
         let (y, h) = (g.y_of(row), g.rows.height(row));
-        let c = if pl::track_on(s, row) { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
+        let c = if pl::track_on(&s.session, row) { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
         let c = if g.rows.strip(row) { c.mix(t.grid_gap, 0.5) } else { c };
         ui.c.fill_rect(Rect::new(grid_x, y, grid_w, h - gap_of(row)), c);
         // Under the gap line, which a theme's line strength may make see-through.
         ui.c.fill_rect(Rect::new(grid_x, y + h - gap_of(row), grid_w, gap_of(row)), t.grid);
     }
-    let start = pl::start_marker(s);
+    let start = pl::start_marker(&s.session);
     if let Some(p) = start {
         let x = g.x_of(p as f32).clamp(grid_x, grid.right());
         ui.c.fill_rect(Rect::span(grid_x, x, grid.y, grid.bottom()), t.s(0x000000).with_alpha(70));
     }
-    grid_lines(ui, &g, bar_w, start_bar(&g, start));
+    let bars = pl::Bars::new(&s.session);
+    grid_lines(ui, s, &g, &bars, start_bar(&bars, start));
     for &row in &visible {
         let (y, h) = (g.y_of(row), g.rows.height(row));
         // The gap line at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast).
@@ -232,21 +238,28 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     // Clips reaching the painted part of the grid (a scrolled-in strip is a small part, see `App::playlist_scrolled`);
     // a clip draws inside its own rect.
-    for (i, c) in pl::clips(s).iter().enumerate() {
-        if ui.c.visible(g.clip_rect(c).outset(2.0)) {
+    let gliding = s.motion.borrow().clips_gliding();
+    let count = pl::clips(&s.session).len();
+    for (i, c) in pl::clips(&s.session).iter().enumerate() {
+        let glide = if gliding { s.motion.borrow_mut().clip_glide(pl::glide_key(i, count)) } else { None };
+        if let Some(at) = glide {
+            clip_gliding(ui, s, &g, i, c, at);
+        } else if ui.c.visible(g.clip_rect(c).outset(2.0)) {
             clip_paint(ui, s, &g, i, c);
         }
     }
+    stack_edges(ui, s, &g, grid);
+    ripples(ui, s, &g);
     // Performance mode: the part of the zone the MIDI channel's notes reach (spec: ui/performance-mode.md §3).
-    if let Some((tr, n, a, b)) = crate::perform::grid_area(s) {
+    if let Some((tr, n, a, b)) = crate::perform_ui::grid_area(s) {
         let (y0, y1) = (g.y_of(tr), g.y_of(tr + n));
         ui.c.stroke_rrect(Rect::span(g.x_of(a as f32), g.x_of(b as f32), y0, y1), 0.0, 1.0, t.playhead.with_alpha(140));
     }
     // Performance mode: a launched clip's zone clip is outlined and filled as far as its pass has played (spec:
     // ui/performance-mode.md §3).
     if f.playing && f.song && s.playlist.perf_clip_progress {
-        for (i, k) in crate::perform::progress(s, f.tick.max(0.0) as u32) {
-            let r = g.clip_rect(&pl::clips(s)[i]);
+        for (i, k) in crate::perform_ui::progress(s, f.tick.max(0.0) as u32) {
+            let r = g.clip_rect(&pl::clips(&s.session)[i]);
             ui.c.fill_rect(Rect::new(r.x, r.y, r.w * k, r.h), t.playhead.with_alpha(60));
             ui.c.stroke_rrect(r, 0.0, 1.0, t.playhead);
         }
@@ -283,11 +296,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     });
     ui.c.push_clip(heads);
     for &row in &visible {
-        header(ui, s, &g, row, head_x, head_w);
+        header(ui, s, &g, row, heads);
     }
     // Performance track progress (spec: ui/performance-mode.md §3): a bar along the bottom of a launched track's header.
     if f.playing && f.song && s.playlist.perf_track_progress {
-        for (row, k) in crate::perform::track_progress(s, f.tick.max(0.0) as u32) {
+        for (row, k) in crate::perform_ui::track_progress(s, f.tick.max(0.0) as u32) {
             if visible.contains(&row) {
                 let y = g.y_of(row) + g.rows.height(row) - 6.0;
                 ui.c.fill_rect(Rect::new(head_x + 2.0, y, (head_w - 4.0) * k, 3.0), ui.t.playhead);
@@ -300,7 +313,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
 /// The overview bar above `grid` (a miniature of the clips that is also the horizontal scroll bar, §1).
 pub fn overview_rect(s: &State, grid: Rect) -> Rect {
-    let lane_y = grid.y - if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
+    let lane_y = grid.y - if pl::markers(&s.session).is_empty() { 0.0 } else { MARKER_H };
     Rect::new(grid.x, lane_y - 41.0, grid.w, bar_sizes().0)
 }
 
@@ -340,7 +353,7 @@ pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
     ScrollParts {
         grid,
         ruler: ruler_rect(s, grid),
-        lane: (!pl::markers(s).is_empty()).then(|| Rect::new(grid.x, overview.y + 41.0, grid.w, MARKER_H)),
+        lane: (!pl::markers(&s.session).is_empty()).then(|| Rect::new(grid.x, overview.y + 41.0, grid.w, MARKER_H)),
         heads: Rect::new(grid.x - 110.0, grid.y, 98.0, grid.h),
         vbar: Rect::new(grid.right(), overview.y, 4.0 + bar_sizes().1, grid.bottom() - overview.y),
         overview,
@@ -351,7 +364,7 @@ pub fn scroll_parts(s: &State, grid: Rect) -> ScrollParts {
 fn grid_rect(s: &State, r: Rect, client: Rect) -> Rect {
     let grid_x = r.x + 162.0 + 98.0 + 12.0;
     let grid_w = (r.right() - grid_x - 4.0 - bar_sizes().1).max(1.0);
-    let grid_y = client.y + 42.0 + if pl::markers(s).is_empty() { 0.0 } else { MARKER_H };
+    let grid_y = client.y + 42.0 + if pl::markers(&s.session).is_empty() { 0.0 } else { MARKER_H };
     Rect::new(grid_x, grid_y, grid_w, (r.bottom() - grid_y).max(0.0))
 }
 
@@ -368,10 +381,10 @@ fn kind_icon(kind: PickKind) -> Icon {
 /// The icon of clip source `src` (of kind `kind`): its channel's Change icon... choice, else its kind's.
 fn source_icon(s: &State, src: ClipSource, kind: PickKind) -> Icon {
     let row = match src {
-        ClipSource::Channel(ch) => s.project.channels.iter().position(|c| c.index == ch),
+        ClipSource::Channel(ch) => s.session.project.channels.iter().position(|c| c.index == ch),
         ClipSource::Pattern(_) => None,
     };
-    row.and_then(|r| pl::window_icon(&s.project, &s.playlist.icons, r)).unwrap_or_else(|| kind_icon(kind))
+    row.and_then(|r| pl::window_icon(&s.session.project, r)).unwrap_or_else(|| kind_icon(kind))
 }
 
 /// Picker panel: kind tabs, then the list of clip sources of that kind (§1).
@@ -417,15 +430,15 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         let tall = pitch > PICK_ROW;
         let title = if tall { Rect::new(row.x, row.y, row.w, PICK_TITLE) } else { row };
         let body = if tall { Rect::span(row.x + 3.0, row.right() - 3.0, title.bottom(), row.bottom() - 3.0) } else { row.inset(3.0) };
-        let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click for its menu)");
+        let hov = ui.hit_in(list, row, Action::PlPick(src), "Select clip source (right-click for its menu)");
         let filled = pick_used(s, src);
         let k = if hov { 0.05 } else { 0.0 };
         let lemon = super::lemon(ui);
         // The source's colour, as its clips' titles take it (§2): an audio or automation clip's channel colour, a
         // pattern's own colour when it has one; an unused source a darker shade of it.
         let tint = match src {
-            ClipSource::Pattern(_) => pl::source_color(s, src),
-            ClipSource::Channel(_) => pl::clip_tint(s, src),
+            ClipSource::Pattern(_) => pl::source_color(&s.session, src),
+            ClipSource::Channel(_) => pl::clip_tint(&s.session, src),
         }
         .map(rgb);
         let (edge, face) = match tint {
@@ -456,8 +469,10 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.0, ui.t.a(0xa8e44a));
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
-        icons::draw(ui.c, source_icon(s, src, pl::source_kind(s, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
-        ui.c.text_clip(Font::new(14), row.x + 20.0, title.cy() - 8.0, row.w - 23.0, ic, &pl::source_name(s, src));
+        icons::draw(ui.c, source_icon(s, src, pl::source_kind(&s.session, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
+        let nf = Font::new(14);
+        let ty = title.cy() - ui.c.cap_mid(nf);
+        ui.c.text_clip(nf, row.x + 20.0, ty, row.w - 23.0, ic, &pl::source_name(&s.session, src));
         if src == cur {
             let ax = list.x - 1.0;
             let mark = if lemon { ui.t.accent } else { Color::rgb(0xe64363) };
@@ -520,19 +535,19 @@ pub fn pick_items(s: &State) -> Vec<ClipSource> {
             if v.is_empty() { vec![ClipSource::Pattern(1)] } else { v.into_iter().map(ClipSource::Pattern).collect() }
         }
         PickKind::Audio => s
-            .project
+            .session.project
             .channels
             .iter()
             .filter(|c| c.kind == os_model::ChannelKind::AudioClip)
             .map(|c| ClipSource::Channel(c.index))
             .collect(),
-        PickKind::Automation => s.project.automations.iter().map(|a| ClipSource::Channel(a.channel)).collect(),
+        PickKind::Automation => s.session.project.automations.iter().map(|a| ClipSource::Channel(a.channel)).collect(),
     }
 }
 
 fn pick_used(s: &State, src: ClipSource) -> bool {
     match src {
-        ClipSource::Pattern(n) => s.project.pattern(n).is_some_and(|p| !p.notes.is_empty()),
+        ClipSource::Pattern(n) => s.session.project.pattern(n).is_some_and(|p| !p.notes.is_empty()),
         _ => true,
     }
 }
@@ -545,29 +560,29 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
         return;
     }
     let t = ui.t;
-    match (pl::source_kind(s, src), src) {
+    match (pl::source_kind(&s.session, src), src) {
         (PickKind::Pattern, ClipSource::Pattern(n)) => {
-            let Some(p) = s.project.pattern(n) else { return };
-            let len = crate::piano::pattern_length(s, n).max(1) as f32;
+            let Some(p) = s.session.project.pattern(n) else { return };
+            let len = crate::piano::pattern_length(&s.session, n).max(1) as f32;
             let lo = p.notes.iter().map(|n| n.key).min().unwrap_or(0);
             let hi = p.notes.iter().map(|n| n.key).max().unwrap_or(0);
             let span = f32::from(hi - lo + 1).max(6.0);
             let c = if tall { cc(t, NOTE) } else { t.s(0x5a6268) };
             for note in &p.notes {
                 let x = r.x + note.position as f32 / len * r.w;
-                let w = (note.length.max(s.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
+                let w = (note.length.max(s.session.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
                 let y = r.bottom() - 2.0 - f32::from(note.key - lo + 1) / span * (r.h - 2.0);
                 ui.c.fill_rect(Rect::new(x, y, w.min(r.right() - x).max(0.0), 2.0), c);
             }
         }
         (PickKind::Audio, ClipSource::Channel(ch)) if tall => {
-            let Some(path) = s.project.channel(ch).and_then(|c| c.sample_path.clone()) else { return };
-            let Some(w) = s.playlist.wave(&path) else { return };
+            let Some(path) = s.session.project.channel(ch).and_then(|c| c.sample_path.clone()) else { return };
+            let Some(w) = s.session.samples.wave(&s.session.settings, &path) else { return };
             if w.peaks.is_empty() {
                 return;
             }
             // The whole sample: each pixel column spans its peaks' minimum to maximum.
-            let wave = pl::clip_tint(s, src).map(rgb).map_or(cc(t, WAVE), |c| offset(c, 80));
+            let wave = pl::clip_tint(&s.session, src).map(rgb).map_or(cc(t, WAVE), |c| offset(c, 80));
             let (mid, amp) = (r.cy(), r.h / 2.0 - 1.0);
             let n = r.w.floor().max(1.0) as usize;
             let per = w.peaks.len() as f32 / n as f32;
@@ -584,7 +599,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
             ui.c.fill_polygon(&top, wave);
         }
         (PickKind::Automation, ClipSource::Channel(ch)) if tall => {
-            let Some(a) = s.project.automation(ch) else { return };
+            let Some(a) = s.session.project.automation(ch) else { return };
             // Over its points' span.
             let Some(end) = a.points.last().map(|p| p.beat).filter(|&b| b > 0.0) else { return };
             let pts: Vec<(f32, f32)> = (0..=(r.w / 2.0).ceil() as usize)
@@ -594,6 +609,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
                     (x, pl::value_y(r, a.value_at(beat).unwrap_or(0.0)))
                 })
                 .collect();
+            let pts = with_points(pts, a, (r.x, r.right()), |b| r.x + (b / end) as f32 * r.w, |v| pl::value_y(r, v));
             let mut area = pts.clone();
             area.push((r.right(), r.bottom()));
             area.push((r.x, r.bottom()));
@@ -606,7 +622,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
 
 /// Miniature of the arrangement inside the overview bar (§1).
 fn overview(ui: &mut Ui, s: &State, over: Rect, total_ticks: f32) {
-    let cs = pl::clips(s);
+    let cs = pl::clips(&s.session);
     let k = over.w / total_ticks.max(1.0);
     if !cs.is_empty() {
         let top = cs.iter().map(|c| c.track).min().unwrap_or(0);
@@ -614,14 +630,14 @@ fn overview(ui: &mut Ui, s: &State, over: Rect, total_ticks: f32) {
         let span = f32::from(bottom - top + 1).max(1.0);
         let row_h = ((over.h - 6.0) / span).clamp(1.0, 3.0);
         for c in cs {
-            let col = pl::source_color(s, c.source).map(rgb).unwrap_or(ui.t.clip).shade(0.2);
+            let col = pl::source_color(&s.session, c.source).map(rgb).unwrap_or(ui.t.clip).shade(0.2);
             let y = over.y + 3.0 + f32::from(c.track - top) / span * (over.h - 6.0);
             ui.c.fill_rect(Rect::new(over.x + c.position as f32 * k, y, (c.length as f32 * k).max(1.0), row_h), col.with_alpha(170));
         }
     }
     // A flag per time marker (§7a "Look"): a 5 x 5 px right triangle with its upright edge on the marker's place, in its
     // action's colour, the edge a darker shade.
-    for m in pl::markers(s) {
+    for m in pl::markers(&s.session) {
         let x = (over.x + m.position as f32 * k).round();
         let col = Color::rgb(match m.kind {
             TimeMarker::PLAIN | TimeMarker::LOOP | TimeMarker::SKIP => 0xffffa9,
@@ -637,8 +653,8 @@ fn overview(ui: &mut Ui, s: &State, over: Rect, total_ticks: f32) {
 }
 
 /// The bar the Start marker is in (0 without one): bars count from it (§7a).
-fn start_bar(g: &PGeom, start: Option<u32>) -> i32 {
-    start.map_or(0, |p| (p / (g.ppq * 4).max(1)) as i32)
+fn start_bar(bars: &pl::Bars, start: Option<u32>) -> i32 {
+    start.map_or(0, |p| bars.index(p))
 }
 
 /// Bar numbers, time selection, song position (§7).
@@ -652,31 +668,32 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
     }
     // Bars count from the Start marker (§7a): "1" on its bar; before it the ruler is darker and the bars have no
     // numbers.
-    let start = pl::start_marker(s);
-    let sb = start_bar(g, start);
+    let start = pl::start_marker(&s.session);
+    let bars = pl::Bars::new(&s.session);
+    let sb = start_bar(&bars, start);
     if let Some(p) = start {
         let x = g.x_of(p as f32).clamp(ruler.x, ruler.right());
         ui.c.fill_rect(Rect::span(ruler.x, x, ruler.y, ruler.bottom()), offset(t.ruler, -8));
     }
-    let bar_w = g.bar_w;
-    let every = label_step(bar_w);
+    // Labels by the project's bar width; the song's bars follow the time-signature markers (`pl::Bars`).
+    let every = label_step(s.session.project.bar_ticks() as f32 * g.ppt);
     // From the bars whose numbers still reach into view (a number is up to ~40 px wide): which labels are drawn must
     // not depend on the scroll position, or a scrolled ruler would differ from a repainted one.
-    let first_bar = ((g.scroll_x - 48.0) / bar_w).floor().max(0.0) as i32;
-    let last_bar = ((g.scroll_x + ruler.w) / bar_w).ceil() as i32 + 1;
-    for b in first_bar.max(sb)..last_bar {
+    let t0 = ((g.scroll_x - 48.0) / g.ppt).max(0.0) as u32;
+    let t1 = ((g.scroll_x + ruler.w) / g.ppt).max(0.0) as u32 + 1;
+    for (b, tick, _) in bars.lines(t0, t1) {
         let n = b - sb;
-        if n % every != 0 {
+        if n < 0 || n % every != 0 {
             continue;
         }
-        let x = g.xs(f64::from(b) * f64::from(bar_w));
+        let x = g.xs(f64::from(tick) * f64::from(g.bar_w) / f64::from(g.ppq * 4));
         let size = if n % (every * 4) == 0 { 15.0 } else { 13.0 };
         // Along the ruler's bottom 17 px (all of it unless thin scroll bars made it taller).
         ui.c.text(super::fnt(size), x + 2.0, ruler.bottom() - 17.0 + (16.0 - size), t.ruler_text, &format!("{}", n + 1));
     }
     // Song position: a flag ◤ on the playhead while playing the song, else on the start position (§7: its left edge
     // on the position, its top along the ruler's top).
-    let tick = if f.playing && f.song { f.tick as f32 } else { s.playlist.pos as f32 };
+    let tick = if f.playing && f.song { f.tick as f32 } else { s.session.song_pos as f32 };
     let x = g.x_of(tick);
     let (y0, k) = (ruler.y + 0.5, 9.0);
     ui.c.fill_polygon(&[(x - 0.5, y0 - 0.5), (x + k + 1.0, y0 - 0.5), (x - 0.5, y0 + k + 1.0)], t.s(0x0b1114));
@@ -700,7 +717,7 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     ui.c.push_clip(lane);
     // A tab per marker (§7a): flat left edge on its position, rounded top-right corner, slanted right edge; its action's
     // icon, then its name.
-    for m in pl::markers(s) {
+    for m in pl::markers(&s.session) {
         let x64 = g.x64(f64::from(m.position));
         let x = x64 as f32;
         let w = pl::marker_w(s, m);
@@ -723,7 +740,7 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
         ui.c.fill_polygon(&tab, t.ruler.mix(t.track_header, 0.55));
         marker_glyph(ui, m.kind, x, top + 8.0);
         let tx = x + 3.0 + pl::marker_icon(m.kind).0;
-        let label = crate::perform::pad_name(s, m).unwrap_or_else(|| marker_label(m));
+        let label = crate::perform_ui::pad_name(s, m).unwrap_or_else(|| marker_label(m));
         ui.c.text_clip(Font::new(12), tx, lane.y + 1.0, right - tx, t.text, &label);
     }
     ui.c.pop_clip();
@@ -779,7 +796,7 @@ fn marker_glyph(ui: &mut Ui, kind: u8, x: f32, cy: f32) {
 }
 
 /// A marker's label: its name; a time signature first shows the signature (spec: ui/pattern-time-signature.md §2).
-pub(crate) fn marker_label(m: &TimeMarker) -> String {
+pub fn marker_label(m: &TimeMarker) -> String {
     if m.kind == TimeMarker::SIGNATURE {
         // FL names a new signature marker after its signature ("3/8", spec: ui/pattern-time-signature.md §4): shown once.
         let sig = format!("{}/{}", m.numerator, m.denominator);
@@ -791,36 +808,44 @@ pub(crate) fn marker_label(m: &TimeMarker) -> String {
 
 /// Vertical lines: grid units (dim), beats, bars (bright); every fourth bar group tinted, counted from bar `sb` (the
 /// Start marker's, §7a).
-fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32, sb: i32) {
+fn grid_lines(ui: &mut Ui, s: &State, g: &PGeom, bars: &pl::Bars, sb: i32) {
     let t = ui.t;
     let grid = g.grid;
+    let bar_w = g.bar_w;
+    // A bar's width is the project's (the time signature); bars of another length follow its markers (`pl::Bars`).
+    let pb = s.session.project.bar_ticks() as f32 * g.ppt;
     let mut bar_step = 1;
-    while bar_w * (bar_step as f32) < 8.0 {
+    while pb * (bar_step as f32) < 8.0 {
         bar_step *= 2;
     }
-    let first_bar = ((g.scroll_x / bar_w) as i32 / bar_step) * bar_step;
-    let n = (grid.w / bar_w).ceil() as i32 + bar_step + 1;
     // Lines at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast).
     let beat = t.pl_line(t.grid_gap.mix(t.grid, 0.4));
     let bar_line = t.pl_line(t.grid_bar);
-    let unit = pl::grid_ticks(g.ppq, bar_w) as f32 * g.ppt;
-    let per_bar = ((bar_w / unit).round() as i32).max(1);
-    // Bar b's x on the drawing grid (`PGeom::xs`), plus `d` content pixels.
-    let bar_x = |b: i32, d: f32| g.xs(f64::from(b) * f64::from(bar_w) + f64::from(d));
-    let mut b = first_bar;
-    while b < first_bar + n {
-        let x = bar_x(b, 0.0);
-        if (b - sb).div_euclid(4).rem_euclid(2) == 1 {
-            ui.c.fill_rect(Rect::new(x, grid.y, bar_x(b + bar_step, 0.0) - x, grid.h), t.grid_alt.with_alpha(160));
+    let unit_t = pl::grid_ticks(g.ppq, bar_w);
+    let unit = unit_t as f32 * g.ppt;
+    let ref_t = g.ppq * 4;
+    // Content x of `tick` (`PGeom::xs`): the same exact products as bars counted from 0 in 4/4.
+    let tick_x = |tick: u32, d: f32| g.xs(f64::from(tick) * f64::from(bar_w) / f64::from(ref_t) + f64::from(d));
+    let t0 = (g.scroll_x / g.ppt).max(0.0) as u32;
+    let t1 = ((g.scroll_x + grid.w) / g.ppt).max(0.0) as u32 + 1;
+    for (b, at, len) in bars.lines(t0, t1) {
+        if b.rem_euclid(bar_step) != 0 {
+            continue;
         }
-        if bar_step == 1 && per_bar > 1 {
-            for q in 1..per_bar {
-                let c = if unit * q as f32 % (bar_w / 4.0) < 0.5 { beat } else { beat.mix(t.grid, 0.5) };
-                ui.c.fill_rect(Rect::new(bar_x(b, q as f32 * unit), grid.y, 1.0, grid.h), c);
+        let x = tick_x(at, 0.0);
+        if (b - sb).div_euclid(4).rem_euclid(2) == 1 {
+            let next = if bar_step == 1 { at + len } else { bars.floor(at + len * bar_step as u32).max(at + len) };
+            ui.c.fill_rect(Rect::new(x, grid.y, tick_x(next, 0.0) - x, grid.h), t.grid_alt.with_alpha(160));
+        }
+        if bar_step == 1 && unit_t < ref_t {
+            let mut q = 1;
+            while q * unit_t < len {
+                let c = if (q * unit_t) % g.ppq == 0 { beat } else { beat.mix(t.grid, 0.5) };
+                ui.c.fill_rect(Rect::new(tick_x(at, q as f32 * unit), grid.y, 1.0, grid.h), c);
+                q += 1;
             }
         }
         ui.c.fill_rect(Rect::new(x, grid.y, if bar_step == 1 { 2.0 } else { 1.0 }, grid.h), bar_line);
-        b += bar_step;
     }
 }
 
@@ -830,8 +855,104 @@ fn offset(c: Color, d: i16) -> Color {
     Color { r: f(c.r), g: f(c.g), b: f(c.b), a: c.a }
 }
 
+/// A clip on its way to where the magnet put it: its left edge, right edge and top are `at` px from their places
+/// (spec: ui/animations.md §4.10). Only the drawing moves: the clip is already there.
+fn clip_gliding(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, (left, right, down): (f32, f32, f32)) {
+    let r = g.clip_rect(c);
+    let drawn = Rect::span(r.x + left, r.right() + right, r.y + down, r.bottom() + down);
+    s.motion.borrow_mut().live(r.union(&drawn).outset(2.0).intersect(&g.grid));
+    if !ui.c.visible(drawn.outset(2.0)) {
+        return;
+    }
+    let mut at = g.clone();
+    at.scroll_y -= down;
+    if (left - right).abs() < 0.01 {
+        at.scroll_x -= left;
+        clip_paint(ui, s, &at, i, c);
+    } else {
+        clip_paint(ui, s, &at, i, &pl::with_edges(&s.session, g, c, left, right));
+    }
+}
+
+/// Deleted clips rippling away (spec: ui/animations.md §4.10): a rounded shape in the clip's title colour, lifted
+/// toward white, whose fill fades quickly while its outline grows a little and fades slowly.
+fn ripples(ui: &mut Ui, s: &State, g: &PGeom) {
+    let list = s.motion.borrow_mut().ripples();
+    if list.is_empty() {
+        return;
+    }
+    let t = ui.t;
+    let corner = if super::lemon(ui) { lk::r_btn(t) } else { 3.0 };
+    for d in list {
+        if d.arrangement != s.session.project.current_arrangement {
+            continue;
+        }
+        let c = &d.clip;
+        let base = g.clip_draw_rect(c).0;
+        let reach = base.outset(crate::motion::RIPPLE_REACH).intersect(&g.grid);
+        s.motion.borrow_mut().live(reach);
+        if !ui.c.visible(reach) {
+            continue;
+        }
+        let top = if d.selected {
+            cc(t, SEL_TITLE)
+        } else if c.muted {
+            cc(t, MUTED_TITLE)
+        } else {
+            match (pl::source_kind(&s.session, c.source), pl::clip_tint(&s.session, c.source).map(rgb)) {
+                (PickKind::Audio | PickKind::Automation, Some(tint)) => offset(tint, -17),
+                _ => cc(t, TITLE_TOP),
+            }
+        };
+        let top = if pl::track_on(&s.session, c.track) { top } else { top.mix(t.grid, 0.5) };
+        let col = top.mix(t.tx(0xffffff), 0.45);
+        let r = base.outset(d.grow);
+        let radius = (corner + d.grow).min(r.w / 2.0).min(r.h / 2.0);
+        if d.fill > 0.0 {
+            ui.c.fill_rrect(r, radius, col.with_alpha((d.fill * 255.0).round() as u8));
+        }
+        ui.c.stroke_rrect(r, radius, 2.0 - d.grow / 4.0, col.with_alpha((d.line * 255.0).round() as u8));
+    }
+}
+
 /// One clip (§2): a near-black outline with rounded top corners, the title strip (pattern clips neutral, audio and
 /// automation clips in their channel's colour), the body in the track's colour, then the content.
+/// Clips of one track at once (a copy laid on another, or two overlapping in part): each lies on the ones before it,
+/// whose edges show as a stack above it over the time they share, a 3 px layer for each clip under it, three at most
+/// (the piano roll's notes have 2 px ones). The clips keep their places; only the layers tell that more lie there.
+fn stack_edges(ui: &mut Ui, s: &State, g: &PGeom, grid: Rect) {
+    const LAYER: f32 = 3.0;
+    const MOST: usize = 3;
+    let t = ui.t;
+    // Clips in view, by track, in painting order (a collapsed group's strip shows none).
+    let mut tracks: std::collections::BTreeMap<u16, Vec<Rect>> = std::collections::BTreeMap::new();
+    for c in pl::clips(&s.session).iter().filter(|c| !g.rows.strip(c.track)) {
+        let r = g.clip_rect(c);
+        if r.right() > grid.x && r.x < grid.right() && r.bottom() > grid.y && r.y < grid.bottom() {
+            tracks.entry(c.track).or_default().push(r);
+        }
+    }
+    let (rim, face) = (cc(t, CLIP_BORDER), cc(t, TITLE_TOP));
+    for rects in tracks.values().filter(|v| v.len() > 1) {
+        for (a, r) in rects.iter().enumerate() {
+            let mut layer = 0;
+            for under in rects[..a].iter().rev() {
+                let (x0, x1) = (r.x.max(under.x) + 1.0, r.right().min(under.right()) - 1.0);
+                if x1 - x0 < 1.0 {
+                    continue;
+                }
+                layer += 1;
+                let y = r.y - LAYER * layer as f32;
+                ui.c.fill_rect(Rect::new(x0, y, x1 - x0, 1.0), rim);
+                ui.c.fill_rect(Rect::new(x0, y + 1.0, x1 - x0, LAYER - 1.0), face);
+                if layer == MOST {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let t = ui.t;
     let (r, clip_x) = g.clip_draw_rect(c);
@@ -841,23 +962,24 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         let col = if s.playlist.sel.contains(&i) {
             cc(t, SEL_TITLE)
         } else {
-            pl::clip_tint(s, c.source)
-                .or_else(|| pl::source_color(s, c.source))
-                .or_else(|| pl::track_info(s, c.track).and_then(|t| t.color))
+            pl::clip_tint(&s.session, c.source)
+                .or_else(|| pl::source_color(&s.session, c.source))
+                .or_else(|| pl::track_info(&s.session, c.track).and_then(|t| t.color))
                 .map_or(cc(t, TITLE_TOP), rgb)
         };
-        let col = if c.muted || !pl::track_on(s, c.track) { col.mix(t.grid, 0.6) } else { col };
+        let col = if c.muted || !pl::track_on(&s.session, c.track) { col.mix(t.grid, 0.6) } else { col };
         ui.c.fill_rrect(r, 1.5, col);
+        flash(ui, s, g, c, r, 1.5);
         return;
     }
-    let kind = pl::source_kind(s, c.source);
+    let kind = pl::source_kind(&s.session, c.source);
     let selected = s.playlist.sel.contains(&i);
-    let track_on = pl::track_on(s, c.track);
+    let track_on = pl::track_on(&s.session, c.track);
     let dim = |col: Color| if track_on { col } else { col.mix(t.grid, 0.5) };
     // Body colour: the track's colour, else the source's (§2 "Body colour source").
-    let color = pl::track_info(s, c.track).and_then(|t| t.color).or_else(|| pl::source_color(s, c.source)).map(rgb);
+    let color = pl::track_info(&s.session, c.track).and_then(|t| t.color).or_else(|| pl::source_color(&s.session, c.source)).map(rgb);
     let darken = |c: Color| c.mix(ui.t.s(0x000000), 0.55);
-    let tint = pl::clip_tint(s, c.source).map(rgb);
+    let tint = pl::clip_tint(&s.session, c.source).map(rgb);
 
     // Title strip: (edge rows, highlight row, gradient top, gradient bottom, text).
     let (edge, high, top, bottom, text, body) = if selected {
@@ -879,11 +1001,13 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let outline = dim(t.s(0x03090d));
     let narrow = r.w < 8.0;
     let lemon = super::lemon(ui);
+    // An automation clip's body lets the clips under it show through; its title strip stays solid.
+    let see = |col: Color| if kind == PickKind::Automation { col.with_alpha(AUTO_ALPHA) } else { col };
     // Rect fills with the top corners knocked out (cheaper than rounded paths for hundreds of clips).
     if lemon {
-        ui.c.fill_rrect(r, lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0), outline);
+        ui.c.fill_rrect(r, lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0), see(outline));
     } else {
-        ui.c.fill_rect(r, outline);
+        ui.c.fill_rect(r, see(outline));
     }
     let row = if track_on { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
     if !narrow && !lemon {
@@ -914,7 +1038,10 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     let body_r = Rect::new(inner.x, body_r.y, inner.w, inner.bottom() - body_r.y);
     // The content is measured from the body's true edges (the drawn ones may be pulled in, `clip_draw_rect`).
     let body_at = Body { r: body_r, x: clip_x + f64::from(side), w: f64::from((full_w - 2.0 * side).max(1.0)) };
-    if lemon {
+    if kind == PickKind::Automation {
+        // One see-through fill: the outline under it is see-through too, and two would darken the clip behind.
+        ui.c.fill_rect(body_r, see(dim(body)));
+    } else if lemon {
         ui.c.fill_rrect(body_r, ir, dim(body));
         ui.c.fill_rect(Rect::new(body_r.x, body_r.y, body_r.w, ir.min(body_r.h)), dim(body));
     } else {
@@ -937,7 +1064,10 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         }
     }
     if r.w > 16.0 {
-        ui.c.text_clip(Font::new(12), inner.x + 14.0, inner.y - 1.0, inner.w - 16.0, ic, &pl::source_name(s, c.source));
+        // Level with the icon (its middle is iy + 5).
+        let nf = Font::new(12);
+        let ty = iy + 5.0 - ui.c.cap_mid(nf);
+        ui.c.text_clip(nf, inner.x + 14.0, ty, inner.w - 16.0, ic, &pl::source_name(&s.session, c.source));
     }
     // Content.
     let content = if c.muted { dim(text).with_alpha(90) } else { dim(cc(t, NOTE)) };
@@ -954,15 +1084,52 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 if !c.muted {
                     fades(ui, s, g, i, c, body_at, dim(wave));
                 }
+                if s.session.samples.wait {
+                    loading(ui, s, body_at.r);
+                }
             }
             (PickKind::Automation, ClipSource::Channel(ch)) => {
                 let col = if c.muted { content } else { dim(cc(t, CURVE)) };
-                curve(ui, s, g, i, c, ch, body_at, dim(body), col);
+                curve(ui, s, g, i, c, ch, body_at, dim(body).with_alpha(70), col);
             }
             _ => {}
         }
     }
     ui.c.pop_clip();
+    flash(ui, s, g, c, r, if lemon { lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0) } else { 0.0 });
+}
+
+/// An audio clip whose sample is still loading (spec: ui/project-loading.md): a soft highlight sweeps across its body
+/// every 1.2 s, hidden at Animations Off (spec: ui/animations.md §4.8).
+fn loading(ui: &mut Ui, s: &State, body: Rect) {
+    if body.w < 8.0 {
+        return;
+    }
+    let Some(u) = s.motion.borrow_mut().sweep(body) else { return };
+    let band = (body.w * 0.35).clamp(24.0, 140.0).round();
+    let x0 = (body.x - band + u * (body.w + band)).round();
+    let white = ui.t.tx(0xffffff);
+    // 2 px columns, brightest in the middle.
+    for k in 0..(band / 2.0) as usize {
+        let x = x0 + 2.0 * k as f32;
+        let col = Rect::new(x.max(body.x), body.y, (x + 2.0).min(body.right()) - x.max(body.x), body.h);
+        if col.w <= 0.0 {
+            continue;
+        }
+        let a = (std::f32::consts::PI * (k as f32 + 0.5) / (band / 2.0)).sin();
+        ui.c.fill_rect(col, white.with_alpha((a * a * 46.0).round() as u8));
+    }
+}
+
+/// A clip sharing the source of the clip just double-clicked flashes: a white tint up to 60 % and back over 400 ms,
+/// held still at Animations Off (spec: ui/animations.md §4.7).
+fn flash(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, r: Rect, radius: f32) {
+    let a = s.motion.borrow_mut().flash_of(pl::source_key(c.source), r);
+    if a > 0.0 {
+        ui.c.push_clip(r.intersect(&g.grid));
+        ui.c.fill_rrect(r, radius, ui.t.tx(0xffffff).with_alpha((a * 255.0).round() as u8));
+        ui.c.pop_clip();
+    }
 }
 
 /// A clip's body as drawn (`r`, its edges possibly pulled in by `PGeom::clip_draw_rect`) and its true left edge and
@@ -976,12 +1143,12 @@ struct Body {
 }
 
 fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body, col: Color) {
-    let Some(p) = s.project.pattern(n) else { return };
+    let Some(p) = s.session.project.pattern(n) else { return };
     if p.notes.is_empty() {
         return;
     }
     let br = body.r;
-    let (w0, wl) = pl::window(s, c);
+    let (w0, wl) = pl::window(&s.session, c);
     let (lo, hi) = p.notes.iter().fold((u16::MAX, 0u16), |(lo, hi), n| (lo.min(n.key), hi.max(n.key)));
     let span = f32::from(hi - lo + 1);
     let h = ((br.h - 4.0) / span).clamp(1.0, 3.0);
@@ -1016,11 +1183,11 @@ fn pattern_notes(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, n: u16, body: Body
 /// setting, and how the clip dims its colours) each column takes the colour of the frames behind it.
 #[allow(clippy::too_many_arguments)]
 fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, col: Color, colours: Option<(&Waves, &dyn Fn(Color) -> Color)>) {
-    let Some(path) = s.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
-    let Some(w) = s.playlist.wave(&path) else { return };
+    let Some(path) = s.session.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
+    let Some(w) = s.session.samples.wave(&s.session.settings, &path) else { return };
     let Some(area) = ui.c.paint_bounds() else { return };
-    let (w0, _) = pl::window(s, c);
-    let ms_per_tick = pl::to_src(s, c.source, 1.0);
+    let (w0, _) = pl::window(&s.session, c);
+    let ms_per_tick = pl::to_src(&s.session, c.source, 1.0);
     let frames_per_ms = f64::from(w.rate) / 1000.0;
     let br = body.r;
     let mid = f64::from(br.y) + f64::from(br.h) / 2.0;
@@ -1040,7 +1207,7 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     // From the clip's start (the body starts a pixel in).
     let side = body.x - g.x64(f64::from(c.position));
     // The fades count the song's milliseconds (`pl::ms_px`), the window the sample's.
-    let fade_ms = pl::fade_ms_per_tick(s);
+    let fade_ms = pl::fade_ms_per_tick(&s.session);
     let total_ms = f64::from(c.length) * fade_ms;
     let (fin, fout, gain) = (c.stored_fade_in(), c.stored_fade_out(), f64::from(c.gain()));
     // Gain of the fades `d` px into the body (the engine's law, os_model::fade_curve).
@@ -1103,7 +1270,7 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     outline.extend(bottom.into_iter().rev());
     // Colorful waveforms (spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"): the same shape,
     // each device-pixel column in the colour of the frames it shows; silence keeps the plain colour.
-    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.playlist.tones(&path));
+    let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.session.samples.tones(&s.session.settings, &path));
     match (colours, tones) {
         (Some((waves, dim)), Some(tones)) => {
             let frames = |d: f64| (w0 + d / ppt * ms_per_tick) * frames_per_ms;
@@ -1129,7 +1296,7 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     let white = ui.t.tx(0xffffff);
     let hovered = s.playlist.hover_clip == Some(i);
     let lit = |h: pl::Handle| hovered && s.playlist.hover_handle == Some(h);
-    let (fx_in, fx_out) = pl::fade_xs(s, g, c);
+    let (fx_in, fx_out) = pl::fade_xs(&s.session, g, c);
     // Points on the drawing grid, from the body's true edges (`Body`).
     let (bottom, h) = (f64::from(body.bottom()), f64::from(body.h));
     let curve = |ui: &mut Ui, xa: f64, xb: f64, t: f32, out: bool| {
@@ -1144,8 +1311,8 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
         ui.c.polyline(&pts, 1.4, white.with_alpha(230));
     };
     // This clip's crossfade with an earlier clip, and whether a later clip draws this clip's fade-out in its own.
-    let xf = pl::crossfade(s, g, i);
-    let later = os_model::crossfade::partner_after(&s.project, pl::clips(s), i).filter(|&b| pl::crossfade(s, g, b).is_some());
+    let xf = pl::crossfade(&s.session, g, i);
+    let later = os_model::crossfade::partner_after(&s.session.project, pl::clips(&s.session), i).filter(|&b| pl::crossfade(&s.session, g, b).is_some());
     if let Some((_, t)) = c.stored_fade_in() {
         if xf.is_none() {
             curve(ui, edges.x, f64::from(fx_in), t, false);
@@ -1162,11 +1329,26 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
         curve(ui, edges.x, f64::from(xf.x1), xf.t_in, false);
         curve(ui, edges.x, f64::from(xf.x1), xf.t_out, true);
     }
-    // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse.
-    if !hovered {
+    // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse. They fade in
+    // and out (spec: ui/animations.md §4.6).
+    let area = body.outset(8.0);
+    // Not lasting past a change in the list: the next clip would take this one's place, handles and all.
+    let shown = s.motion.borrow_mut().hover(crate::motion::key(("clip handles", i, crate::playlist::clips(&s.session).len())), hovered, area);
+    if shown <= 0.0 {
         return;
     }
+    let fading = (shown < 1.0).then(|| ui.c.begin_layer(area, false));
+    handles(ui, s, g, c, body, xf, &lit, white);
+    if let Some(l) = fading {
+        ui.c.end_layer(l, shown);
+    }
     let _ = wave;
+}
+
+/// An audio clip's handles (`fades`): `lit` says which is under the mouse.
+#[allow(clippy::too_many_arguments)]
+fn handles(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, body: Rect, xf: Option<pl::Xfade>, lit: &dyn Fn(pl::Handle) -> bool, white: Color) {
+    let (fx_in, fx_out) = pl::fade_xs(&s.session, g, c);
     let col = |h: pl::Handle| if lit(h) { white } else { white.with_alpha(215) };
     let k = 6.0;
     ui.c.fill_polygon(&[(fx_in, body.y), (fx_in + k, body.y), (fx_in, body.y + k)], col(pl::Handle::FadeIn));
@@ -1179,39 +1361,64 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
         (gx - r * a.cos(), gy - r * a.sin())
     }).collect();
     ui.c.fill_polygon(&half, col(pl::Handle::Gain));
-    if hovered {
-        // The crossfade's handle: a big filled circle at the later clip's gain in the middle, a small ring at the
-        // earlier clip's (§9a); where they meet the ring shows inside the circle.
-        if let Some(xf) = xf.filter(|xf| xf.x1 - xf.x0 > 10.0) {
-            let (hx, hy, ry) = pl::xfade_handle(g, c, &xf);
-            let on = lit(pl::Handle::Crossfade);
-            ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
-            ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
-            ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
+    // The crossfade's handle: a big filled circle at the later clip's gain in the middle, a small ring at the earlier
+    // clip's (§9a); where they meet the ring shows inside the circle.
+    if let Some(xf) = xf.filter(|xf| xf.x1 - xf.x0 > 10.0) {
+        let (hx, hy, ry) = pl::xfade_handle(g, c, &xf);
+        let on = lit(pl::Handle::Crossfade);
+        ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
+        ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
+        ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
+    }
+    for (h, on, xa, xb, out) in [
+        (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(&s.session, c, false)), body.x, fx_in, false),
+        (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(&s.session, c, true)), fx_out, body.right(), true),
+    ] {
+        let Some((_, t)) = on else { continue };
+        if xb - xa <= 10.0 {
+            continue;
         }
-        for (h, on, xa, xb, out) in [
-            (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
-            (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(s, c, true)), fx_out, body.right(), true),
-        ] {
-            let Some((_, t)) = on else { continue };
-            if xb - xa <= 10.0 {
-                continue;
-            }
-            let (mx, my) = pl::fade_mid(body, xa, xb, t, out);
-            if lit(h) {
-                ui.c.fill_circle(mx, my, 5.5, white);
-            } else {
-                ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(200));
-                ui.c.stroke_circle(mx, my, 4.0, 1.3, white);
-                ui.c.line(mx - 2.2, my + 2.2, mx + 2.2, my - 2.2, 1.1, white);
-            }
+        let (mx, my) = pl::fade_mid(body, xa, xb, t, out);
+        if lit(h) {
+            ui.c.fill_circle(mx, my, 5.5, white);
+        } else {
+            ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(200));
+            ui.c.stroke_circle(mx, my, 4.0, 1.3, white);
+            ui.c.line(mx - 2.2, my + 2.2, mx + 2.2, my - 2.2, 1.1, white);
         }
     }
 }
 
+/// An automation's line sampled every 2 px (`pts`, by x), with its own points between `x0` and `x1` put in where they
+/// fall (`x_of`: a point's beat to x; `y`: a value to y), both sides of a jump: a spike narrower than the samples is
+/// drawn whole, wherever the samples land. Sampled alone, it showed or not as they moved, and twitched while a zoom
+/// eased.
+fn with_points(mut pts: Vec<(f32, f32)>, a: &os_model::Automation, (x0, x1): (f32, f32), x_of: impl Fn(f64) -> f32, y: impl Fn(f64) -> f32) -> Vec<(f32, f32)> {
+    // (x, order at one x: the value before a point, the point's, then a sample), as `pts` takes them.
+    let mut knots: Vec<(f32, u8, f32)> = Vec::new();
+    for (k, p) in a.points.iter().enumerate() {
+        let x = x_of(p.beat);
+        if !(x0..=x1).contains(&x) {
+            continue;
+        }
+        if k > 0 && a.points[k - 1].beat < p.beat {
+            if let Some(v) = a.value_at(p.beat - 1e-9) {
+                knots.push((x, 0, y(v)));
+            }
+        }
+        knots.push((x, 1, y(p.value)));
+    }
+    if knots.is_empty() {
+        return pts;
+    }
+    let mut all: Vec<(f32, u8, f32)> = pts.drain(..).map(|(x, v)| (x, 2, v)).chain(knots).collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    all.into_iter().map(|(x, _, v)| (x, v)).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: Body, bg: Color, col: Color) {
-    let Some(a) = s.project.automation(ch) else { return };
+    let Some(a) = s.session.project.automation(ch) else { return };
     if a.points.is_empty() {
         return;
     }
@@ -1227,7 +1434,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
         return;
     }
     // The beat under content x (measured from the clip's start, as `pl::beat_at`).
-    let (w0, _) = pl::window(s, c);
+    let (w0, _) = pl::window(&s.session, c);
     let clip_x = g.x64(f64::from(c.position));
     let beat = |x: f64| w0 + (x - clip_x) / f64::from(g.ppt) / f64::from(g.ppq);
     let point = |x: f64| (pl::snap(x), pl::value_y(body, a.value_at(beat(x)).unwrap_or(0.0)));
@@ -1238,6 +1445,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
         k += 1.0;
     }
     pts.push(point(x1));
+    let pts = with_points(pts, a, (x0 as f32, x1 as f32), |b| pl::point_x(&s.session, g, c, b), |v| pl::value_y(body, v));
     let (x0, x1) = (pl::snap(x0), pl::snap(x1));
     let mut area = pts.clone();
     area.push((x1, body.bottom()));
@@ -1247,19 +1455,19 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
     // Points and tension handles while the mouse is over the clip (§8).
     if s.playlist.hover_clip == Some(i) {
         for (k, p) in a.points.iter().enumerate() {
-            let px = pl::point_x(s, g, c, p.beat);
+            let px = pl::point_x(&s.session, g, c, p.beat);
             if px < body.x - 4.0 || px > body.right() + 4.0 {
                 continue;
             }
             let py = pl::value_y(body, p.value);
-            ui.c.fill_circle(px, py, 4.0, bg);
+            ui.c.fill_circle(px, py, 4.0, bg.with_alpha(255));
             ui.c.stroke_circle(px, py, 4.0, 1.5, col);
             if k > 0 {
                 let q = a.points[k - 1];
-                let x_a = pl::point_x(s, g, c, q.beat);
+                let x_a = pl::point_x(&s.session, g, c, q.beat);
                 if p.mode.has_tension() && p.mode != AutoMode::Hold && px - x_a > 16.0 {
                     let mid = (q.beat + p.beat) / 2.0;
-                    let hx = pl::point_x(s, g, c, mid);
+                    let hx = pl::point_x(&s.session, g, c, mid);
                     let hy = pl::value_y(body, a.value_at(mid).unwrap_or(0.0));
                     ui.c.stroke_circle(hx, hy, 2.5, 1.0, col.with_alpha(200));
                 }
@@ -1270,21 +1478,23 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
 
 /// A track header (§6, §6a): a box in the track's colour with the name, "…" and the mute LED. A group is one block
 /// in its group track's colour: the group track spans the width with a collapse arrow, its members are indented;
-/// a collapsed group's members are bare strips.
-fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
+/// a collapsed group's members are bare strips. `heads` is the header column: a row scrolled part way out of it takes
+/// clicks only inside it (issue #411: a tall track's header took the title bar's).
+fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, heads: Rect) {
+    let (x, w) = (heads.x, heads.w);
     const INDENT: f32 = 6.0;
     const RADIUS: f32 = 4.0;
     let t = ui.t;
     let (y, h) = (g.y_of(row), g.rows.height(row));
     let strip = g.rows.strip(row);
-    let leader = pl::group_track(s, row);
-    let lead = pl::is_group_track(s, row);
+    let leader = pl::group_track(&s.session, row);
+    let lead = pl::is_group_track(&s.session, row);
     let member = leader.is_some();
-    let next_member = pl::track_info(s, row + 1).is_some_and(|x| x.grouped);
+    let next_member = pl::track_info(&s.session, row + 1).is_some_and(|x| x.grouped);
     let joins_below = (lead || member) && next_member;
-    let on = pl::track_on(s, row);
+    let on = pl::track_on(&s.session, row);
     // A member takes its group track's colour, so the block reads as one.
-    let colored = pl::track_info(s, leader.unwrap_or(row)).and_then(|i| i.color).map(rgb);
+    let colored = pl::track_info(&s.session, leader.unwrap_or(row)).and_then(|i| i.color).map(rgb);
     let base = colored.unwrap_or(t.track_header);
     let base = if s.playlist.track == row { base.shade(0.1) } else { base };
     let base = if on { base } else { base.mix(t.grid_gap, 0.4) };
@@ -1307,7 +1517,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
         let left = if lead { hr.x + k } else { hr.x };
         ui.c.fill_rect(Rect::new(left, hr.bottom() - k, hr.right() - left, k), bottom);
     }
-    ui.hit(hr, Action::PlHeader(row), "Track (double-click: rename, right-click: menu, Shift+wheel: move)");
+    ui.hit_in(heads, hr, Action::PlHeader(row), "Track (double-click: rename, right-click: menu, Shift+wheel: move)");
     if strip {
         return;
     }
@@ -1315,9 +1525,9 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     // rows drop the "…" and keep the name clear of the LED.
     let short = g.rows.row_h < pl::ROW_H - 8.0;
     let led = Rect::new(hr.right() - 19.0, (h - gap - 15.0).max(1.0) + hr.y, 14.0, 14.0);
-    ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo)");
+    ui.hit_in(heads, led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo; with Alt: the whole group)");
     // An audio or instrument track (§6c): a light disc with "A" / "I" before its name, which is drawn bright.
-    let link = crate::track_links::link(s, row);
+    let link = crate::track_links::link(&s.session, row);
     let badge = match link.kind {
         os_model::TrackLink::AUDIO => Some(("A", "Audio track: its audio clips play through its mixer track (Track mode in the menu)")),
         os_model::TrackLink::INSTRUMENT => Some(("I", "Instrument track: linked to a channel (Track mode in the menu)")),
@@ -1331,29 +1541,29 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
         let b = Rect::new(hr.x + 3.0, hr.y + 4.0, 11.0, 11.0);
         ui.c.fill_circle(b.cx(), b.cy(), 5.5, text);
         ui.c.text_center(Font::new(10), b, base.shade(-0.25), letter);
-        ui.hit(b, Action::PlHeader(row), hint);
+        ui.hit_in(heads, b, Action::PlHeader(row), hint);
         name_x += 14.0;
     }
     if !editing {
         let name_w = if short { hr.w - 26.0 } else { hr.w - 4.0 } - (name_x - hr.x - 2.0);
-        ui.c.text_clip(Font::new(16), name_x, hr.y + 1.0, name_w, text, &pl::track_name(s, row));
+        ui.c.text_clip(Font::new(16), name_x, hr.y + 1.0, name_w, text, &pl::track_name(&s.session, row));
     }
     if !short {
         ui.c.text(Font::new(14), hr.x + 14.0, led.y - 6.0, text.shade(-0.2), "...");
     }
-    let info = pl::track_info(s, row);
+    let info = pl::track_info(&s.session, row);
     if info.is_some_and(|i| i.clip_lock.is_some()) {
         // Locked to its clips (Lemon Studio's design, ui/playlist.md "Locking tracks to their clips"): a lock left of
         // the LED, and of the group arrow on a group's lead.
         let x = if lead { led.x - 34.0 } else { led.x - 16.0 };
         let b = Rect::new(x, led.y + 1.0, 12.0, 12.0);
-        ui.hit(b, Action::PlHeader(row), "Locked to its clips: Draw and Paint place this source (TOOLS: Unlock all tracks)");
+        ui.hit_in(heads, b, Action::PlHeader(row), "Locked to its clips: Draw and Paint place this source (TOOLS: Unlock all tracks)");
         icons::draw(ui.c, Icon::Lock, b, text);
     }
     if lead {
         // Collapse arrow left of the LED: up while open, down while collapsed.
         let a = Rect::new(led.x - 18.0, led.y, 14.0, 14.0);
-        let hov = ui.hit(a, Action::PlGroupArrow(row), "Collapse / expand the group");
+        let hov = ui.hit_in(heads, a, Action::PlGroupArrow(row), "Collapse / expand the group");
         let col = if hov { ui.t.tx(0xffffff) } else { text };
         let (cx, cy) = (a.cx(), a.cy());
         if info.is_some_and(|i| i.collapsed) {
@@ -1400,10 +1610,15 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
         // At the Pop-ups scaling (spec: ui/ui-scaling.md §1).
         ui.scaled(super::popup_scale(ui.c.scale), |ui, k| {
             let (w, h) = ui.c.size();
-            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false, p.scroll[0]);
+            // What the menu is: its entries, where it opened (spec: ui/animations.md §4.2).
+            let key = crate::motion::key((p.x.to_bits(), p.y.to_bits(), p.items.iter().map(|it| &*it.label).collect::<Vec<_>>()));
+            let fx = MenuFx { s, slot: crate::motion::Slot::Popup, key, anchor: (p.x / k, p.y / k), k };
+            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, fx, p.scroll[0]);
             if let Some(i) = p.sub {
                 if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
-                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true, p.scroll[1]);
+                    let key = crate::motion::key((key, i));
+                    let fx = MenuFx { s, slot: crate::motion::Slot::Sub, key, anchor: (rr.right(), rr.y), k };
+                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, fx, p.scroll[1]);
                 }
             }
         });
@@ -1458,11 +1673,55 @@ fn any_enabled(items: &[pl::PItem]) -> bool {
     items.iter().any(|c| !c.head && !c.sep && !c.col && c.enabled && (c.children.is_empty() || any_enabled(&c.children)))
 }
 
+/// Which menu a popup list is and how it moves (`crate::motion`): opened from `anchor`, painted at `k` times the
+/// window's scale.
+#[derive(Clone, Copy)]
+pub struct MenuFx<'a> {
+    pub s: &'a State,
+    pub slot: crate::motion::Slot,
+    pub key: u64,
+    pub anchor: (f32, f32),
+    pub k: f32,
+}
+
+impl MenuFx<'_> {
+    /// `r` (the canvas's px) in the window's px.
+    pub fn up(&self, r: Rect) -> Rect {
+        Rect::new(r.x * self.k, r.y * self.k, r.w * self.k, r.h * self.k)
+    }
+}
+
+/// A menu's panel. At Animations Off, menus take a plain look: square, with a 1 px grey border (spec:
+/// ui/animations.md §4.2).
+pub fn menu_panel(ui: &mut Ui, r: Rect, m: &os_ui::kit::menu::Metrics) {
+    let t = ui.t;
+    if crate::anim::level() == crate::anim::Level::Off {
+        ui.c.fill_rect(r, t.menu_pop);
+        ui.c.stroke_rrect(Rect::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0), 0.0, 1.0, t.menu_pop_dim);
+    } else if super::lemon(ui) {
+        os_ui::kit::popup(ui.c, t, r);
+    } else {
+        ui.c.fill_rect(r, t.menu_pop);
+        ui.c.stroke_rrect(Rect::new(r.x + m.line, r.y + m.line, r.w - 2.0 * m.line, r.h - 2.0 * m.line), 0.0, m.border, t.menu_pop_border);
+    }
+}
+
+/// A menu row's highlight bar.
+pub fn menu_highlight(ui: &mut Ui, rr: Rect, lemon: bool) {
+    // At Animations Off, menus are plain and square (`menu_panel`).
+    if lemon && crate::anim::level() != crate::anim::Level::Off {
+        os_ui::kit::row_highlight(ui.c, ui.t, rr);
+    } else {
+        ui.c.fill_rect(rr, ui.t.menu_pop_hi);
+    }
+}
+
 /// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect. Columns wider than the
 /// screen: the ones that fit from column `scroll` on, and a scroll bar under them (spec: ui/menus.md "Menus wider than
-/// the window").
+/// the window"). It appears and its highlight glides as `fx` says (spec: ui/animations.md §4.2).
 #[allow(clippy::too_many_arguments)]
-fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool, scroll: usize) -> (Rect, Vec<Rect>) {
+fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, fx: MenuFx, scroll: usize) -> (Rect, Vec<Rect>) {
+    let sub = fx.slot == crate::motion::Slot::Sub;
     let t = ui.t;
     let font = Font::new(14);
     let mut lw: f32 = 80.0;
@@ -1494,20 +1753,30 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     let menu = if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP };
     let mut rows = Vec::with_capacity(items.len());
     let lemon = super::lemon(ui);
-    if lemon {
-        os_ui::kit::popup(ui.c, t, r);
-    } else {
-        ui.c.fill_rect(r, t.menu_pop);
-        ui.c.stroke_rrect(Rect::new(r.x + m.line, r.y + m.line, r.w - 2.0 * m.line, r.h - 2.0 * m.line), 0.0, m.border, t.menu_pop_border);
-    }
+    let mut draw = fx.s.motion.borrow_mut().menu_begin(ui.c, fx.slot, fx.key, r, fx.anchor, fx.k);
+    fx.s.motion.borrow_mut().menu_behind(ui.c, &mut draw, fx.slot, open.is_some(), r, fx.k);
+    fx.s.motion.borrow_mut().captions_live(fx.slot, r, fx.k);
+    menu_panel(ui, r, &m);
     ui.hit(r, Action::Swallow, "");
+    // A column out of view is placed beside the shown ones.
+    let at = |col: usize| r.x + m.border + (col as f32 - first as f32) * cw;
+    let row_rect = |i: usize| Rect::new(at(layout[i].0), r.y + m.border + layout[i].1, cw - 2.0 * m.border, item_h(&m, &items[i]));
+    let action_of = |i: usize| if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
+    let shows = |i: usize| layout[i].0 >= first && layout[i].0 < first + shown;
+    // The highlight bar goes to the row under the mouse, gliding there from Polished up.
+    let hot = (0..items.len()).find(|&i| {
+        let it = &items[i];
+        it.enabled && !it.head && !it.sep && !it.col && shows(i) && ui.hovers(row_rect(i), &action_of(i))
+    });
+    let bar = fx.s.motion.borrow_mut().glide(fx.slot, fx.key, hot.map(row_rect), fx.up(r));
+    if let Some(b) = bar {
+        menu_highlight(ui, b, lemon);
+    }
     for (i, it) in items.iter().enumerate() {
-        let (col, off) = layout[i];
-        // A column out of view is placed beside the shown ones.
-        let at = |col: usize| r.x + m.border + (col as f32 - first as f32) * cw;
-        let rr = Rect::new(at(col), r.y + m.border + off, cw - 2.0 * m.border, item_h(&m, it));
+        let (col, _) = layout[i];
+        let rr = row_rect(i);
         rows.push(rr);
-        let action = if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
+        let action = action_of(i);
         if col < first || col >= first + shown {
             // The wheel still steps to its rows: where the scroll that shows the column puts them.
             if it.enabled && !it.head && !it.sep && !it.col {
@@ -1539,12 +1808,11 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         // planned). Disabled entries never light up.
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
         if it.enabled {
-            let lit = ui.hit(rr, action, it.label.to_string()) || open == Some(i);
+            ui.hit(rr, action, it.label.to_string());
             ui.menu_row(menu);
-            if lit && lemon {
-                os_ui::kit::row_highlight(ui.c, t, rr);
-            } else if lit {
-                ui.c.fill_rect(rr, t.menu_pop_hi);
+            // The row whose submenu is open stays lit (the bar is on the row under the mouse).
+            if open == Some(i) && hot != Some(i) {
+                menu_highlight(ui, rr, lemon);
             }
         } else if matches!(it.cmd, pl::Cmd::NotYet(_)) {
             ui.hit(rr, action, crate::app::off_text(&it.label));
@@ -1570,7 +1838,10 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             Mark::Radio(false) => ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim),
             _ => {}
         }
-        ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, lw + 4.0, color, &it.label);
+        // At Playful the captions enter one after another; the rest of a row is there at once.
+        let (left, shows) = fx.s.motion.borrow().caption(fx.slot, i);
+        let color = color.with_alpha((f32::from(color.a) * shows) as u8);
+        ui.c.text_clip(font, rr.x + 20.0 - left, rr.y + 2.0 + dy, lw + 4.0, color, &it.label);
         let right = rr.right() - if it.children.is_empty() { 8.0 } else { 16.0 };
         if !it.key.is_empty() {
             let sc = if live { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };
@@ -1588,5 +1859,38 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         let target = if sub { crate::app::Scroll::PopupSub } else { crate::app::Scroll::Popup };
         super::scrollbar(ui, track, false, first as f32, shown as f32, cols as f32, target);
     }
+    crate::motion::Motion::menu_end(ui.c, draw);
     (r, rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use os_model::{AutoPoint, Automation};
+
+    /// A spike narrower than the 2 px the line is sampled at is drawn whole at every zoom, and a jump stays upright:
+    /// sampled alone, the spike showed or not as the samples moved over it, so it twitched while a zoom eased.
+    #[test]
+    fn narrow_automation_spikes_are_drawn_whole_at_any_zoom() {
+        let points = vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(1.0, 0.0), AutoPoint::new(1.001, 1.0), AutoPoint::new(1.002, 0.0), AutoPoint::new(2.0, 0.0), AutoPoint::new(2.0, 0.5), AutoPoint::new(4.0, 0.5)];
+        let a = Automation { channel: 0, targets: vec![], points, header: vec![], tail: vec![], lfo: Default::default() };
+        let y = |v: f64| 100.0 - 100.0 * v as f32;
+        for step in 0..40 {
+            // From about 20 to 60 px a beat, as an eased zoom passes through.
+            let px = 20.0 + step as f32 * 1.013;
+            let x_of = |b: f64| 3.7 + b as f32 * px;
+            let sampled: Vec<(f32, f32)> = (0..=(4.0 * px / 2.0) as usize)
+                .map(|k| {
+                    let x = 3.7 + 2.0 * k as f32;
+                    (x, y(a.value_at(f64::from((x - 3.7) / px)).unwrap_or(0.0)))
+                })
+                .collect();
+            let pts = with_points(sampled, &a, (x_of(0.0), x_of(4.0)), x_of, y);
+            let top = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min);
+            assert_eq!(top, y(1.0), "the spike's top at {px} px a beat");
+            assert!(pts.windows(2).all(|w| w[0].0 <= w[1].0), "in x order");
+            let jump: Vec<f32> = pts.iter().filter(|p| p.0 == x_of(2.0)).map(|p| p.1).collect();
+            assert!(jump.contains(&y(0.0)) && jump.contains(&y(0.5)), "both sides of the jump at its x: {jump:?}");
+        }
+    }
 }

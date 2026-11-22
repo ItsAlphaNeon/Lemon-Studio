@@ -35,6 +35,12 @@ pub fn fader_gain(f: f64) -> f64 {
     volume_curve(f / 0.8)
 }
 
+/// The mixer fader position whose amplitude is `g`: [`fader_gain`]'s inverse, held to the fader's range (a gain over
+/// +5.6 dB gives 1.0).
+pub fn fader_of_gain(g: f64) -> f64 {
+    (0.8 * (10.0 * g.max(0.0) + 1.0).ln() / 11f64.ln()).clamp(0.0, 1.0)
+}
+
 /// Channel pan (−1..=1), constant power: center = 0.7071 per side.
 pub fn channel_pan(p: f64) -> (f64, f64) {
     let a = (1.0 + p.clamp(-1.0, 1.0)) * FRAC_PI_4;
@@ -133,6 +139,15 @@ mod tests {
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() <= tol
+    }
+
+    #[test]
+    fn fader_of_gain_undoes_fader_gain() {
+        for f in [0.0, 0.1, 0.25, 0.5, 0.8, 0.9, 1.0] {
+            assert!(close(fader_of_gain(fader_gain(f)), f, 1e-12), "{f}");
+        }
+        assert_eq!(fader_of_gain(100.0), 1.0, "past the top");
+        assert_eq!(fader_of_gain(-1.0), 0.0, "below silence");
     }
 
     /// spec: audio/gain-laws.md "Panning law: Triangular", the channel table (each side over the centre level, to 4

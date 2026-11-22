@@ -32,13 +32,6 @@ use abi::{flags, IntPtr, PluginObject, VoiceParams};
 use host::HostObject;
 use stream::MemStream;
 
-/// Default FL Studio install folder (data path): `OPENSTUDIO_FACTORY` if set, else the usual path.
-pub fn default_fl_dir() -> PathBuf {
-    std::env::var_os("OPENSTUDIO_FACTORY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Image-Line\FL Studio 2026"))
-}
-
 /// Whether the experimental native-plugin host is opted into for this process, via the
 /// `OPENSTUDIO_NATIVE` environment variable (`1`/`true`/`on`). The app also has a settings
 /// toggle (shown only with `settings_shown`); it sets this so the whole process agrees.
@@ -621,7 +614,7 @@ mod tests {
     // These tests need the user's FL install. They skip (pass) when it is absent, and are only
     // meaningful on Windows x64. No plugin DLL is bundled or committed.
     fn fl() -> Option<PathBuf> {
-        let d = default_fl_dir();
+        let d = os_paths::default_fl_dir();
         d.join("Plugins").join("Fruity").exists().then_some(d)
     }
 

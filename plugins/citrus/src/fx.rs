@@ -538,6 +538,8 @@ pub struct Section {
     plate: Option<Plate>,
     dc: Option<Dc>,
     feeds: bool,
+    /// What the sound on the effects bus keeps when the chorus adds its wet path: 1 in Sytrus; Smith crossfades them.
+    pub fx_keep: f32,
     tail: i64,
     counter: i64,
     pub started_send: bool,
@@ -579,6 +581,7 @@ impl Section {
             plate,
             dc: (st.switch(1) != 0).then(Dc::default),
             feeds,
+            fx_keep: 1.0,
             tail,
             counter: 0,
             started_send: false,
@@ -630,8 +633,9 @@ impl Section {
                         dry[ch][j] += out[ch][j];
                     }
                     if self.feeds {
+                        let keep = self.fx_keep;
                         for j in 0..m {
-                            fx[ch][j] += out[ch][j];
+                            fx[ch][j] = fx[ch][j] * keep + out[ch][j];
                         }
                     }
                 }

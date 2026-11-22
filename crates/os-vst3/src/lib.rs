@@ -504,6 +504,8 @@ pub struct Plugin {
     /// Channel count of each audio input / output bus, and whether the plug-in takes notes.
     ins: Vec<usize>,
     outs: Vec<usize>,
+    /// The names of the output buses after the main one (`extra_output_names`).
+    out_names: Vec<String>,
     takes_notes: bool,
     /// Zeroed channels for inputs the host has no audio for, and output channels it does not use.
     scratch: Vec<f32>,
@@ -520,6 +522,8 @@ pub struct Plugin {
     /// (id, step count) of each parameter in list order: the position is the automation index. A parameter whose
     /// info could not be read keeps its place with id `u32::MAX` (VST 3's "no parameter").
     param_ids: Vec<(u32, i32)>,
+    /// The ids of `param_ids`, sorted: `known` searches them (a plugin can have thousands of parameters).
+    known_ids: Vec<u32>,
     /// The parameter the controller maps each MIDI controller to (IMidiMapping, MIDI channel 1): controllers 0..127,
     /// then channel pressure (128) and pitch bend (129); `u32::MAX` = none (spec: ui/midi-settings.md §4).
     midi_map: Vec<u32>,
@@ -617,6 +621,7 @@ impl Plugin {
                 max_frames: MAX_FRAMES,
                 ins: Vec::new(),
                 outs: Vec::new(),
+                out_names: Vec::new(),
                 takes_notes: false,
                 scratch: Vec::new(),
                 ptrs: Vec::new(),
@@ -628,6 +633,7 @@ impl Plugin {
                 from_processor: Vec::with_capacity(256),
                 pending_since: None,
                 param_ids: Vec::new(),
+                known_ids: Vec::new(),
                 midi_map: Vec::new(),
                 bend: None,
                 bend_range: os_engine::instrument::DEFAULT_BEND_RANGE,
@@ -701,8 +707,9 @@ impl Plugin {
             for b in 0..n_in.min(2) {
                 c.activate_bus(AUDIO, INPUT, b as i32, 1);
             }
-            if n_out > 0 {
-                c.activate_bus(AUDIO, OUTPUT, 0, 1);
+            // Every output bus: the ones after the main bus are the extra outputs (spec: audio/multi-output.md).
+            for b in 0..n_out {
+                c.activate_bus(AUDIO, OUTPUT, b as i32, 1);
             }
             self.takes_notes = c.get_bus_count(EVENT, INPUT) > 0;
             self.note_outputs = c.get_bus_count(EVENT, OUTPUT) > 0;
@@ -719,6 +726,13 @@ impl Plugin {
             };
             self.ins = channels(INPUT, n_in);
             self.outs = channels(OUTPUT, n_out);
+            self.out_names = (1..n_out)
+                .map(|b| {
+                    let mut info: BusInfo = std::mem::zeroed();
+                    let name = if c.get_bus_info(AUDIO, OUTPUT, b as i32, &mut info) == kResultOk { from_utf16(&info.name) } else { String::new() };
+                    if name.trim().is_empty() { format!("Output {}", b + 1) } else { name.trim().to_string() }
+                })
+                .collect();
         }
         let total: usize = self.ins.iter().chain(&self.outs).sum();
         self.scratch = vec![0.0; total * self.max_frames as usize];
@@ -762,7 +776,7 @@ impl Plugin {
     }
 
     fn known(&self, id: u32) -> bool {
-        id != u32::MAX && self.param_ids.iter().any(|p| p.0 == id)
+        id != u32::MAX && self.known_ids.binary_search(&id).is_ok()
     }
 
     fn refresh_param_ids(&mut self) {
@@ -780,6 +794,9 @@ impl Plugin {
                 }
             }
         }
+        self.known_ids = self.param_ids.iter().map(|p| p.0).collect();
+        self.known_ids.sort_unstable();
+        self.known_ids.dedup();
         if let Ok(mut a) = self.shared.automatable.lock() {
             *a = automatable;
         }
@@ -1244,7 +1261,13 @@ impl Plugin {
             let start = self.ptrs.len();
             for c in 0..ch {
                 let host = if b == 0 { [ol, or].get(c).copied() } else { None };
-                let p = host.unwrap_or_else(|| unsafe { base.add(k * max) });
+                // Zeroed: a plug-in that leaves a silent bus unwritten (an extra output nothing plays on) is heard as
+                // silence there.
+                let p = host.unwrap_or_else(|| unsafe {
+                    let s = base.add(k * max);
+                    std::ptr::write_bytes(s, 0, n);
+                    s
+                });
                 k += 1;
                 self.ptrs.push(p as *mut c_void);
             }
@@ -1273,7 +1296,11 @@ impl Plugin {
             right.copy_from_slice(left);
         }
         self.take_outputs();
-        let loud = left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
+        // Sound on an extra output bus counts too (a drum's own output).
+        let first_extra = self.ins.iter().sum::<usize>() + self.outs.first().copied().unwrap_or(0);
+        let extra_channels = self.outs.iter().skip(1).sum::<usize>();
+        let extra = (first_extra..first_extra + extra_channels).any(|c| self.scratch[c * max..c * max + n].iter().any(|v| v.abs() > 1e-5));
+        let loud = extra || left.iter().chain(right.iter()).any(|v| v.abs() > 1e-5);
         self.sounding = self.tail == INFINITE_TAIL || loud;
         self.steady += n as i64;
         // Quiet output ends the released voices (not with an infinite tail: such a plug-in may sound later).
@@ -1375,6 +1402,10 @@ impl os_host::Plugin for Plugin {
 
     fn puts_out_notes(&self) -> bool {
         self.note_outputs
+    }
+
+    fn extra_output_names(&self) -> Vec<String> {
+        self.out_names.clone()
     }
 
     fn help_url(&self) -> Option<String> {
@@ -1598,6 +1629,10 @@ impl os_engine::Instrument for Plugin {
         }
     }
 
+    fn tunes_by_bend(&self) -> bool {
+        self.bend.is_some()
+    }
+
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         self.automate(offset, index, value);
     }
@@ -1607,8 +1642,24 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        self.render(rate, left, right, &mut []);
+    }
+
+    fn extra_outputs(&self) -> usize {
+        self.outs.len().saturating_sub(1)
+    }
+
+    fn process_extra(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
+        self.render(rate, left, right, extra);
+    }
+}
+
+impl Plugin {
+    /// An instrument's block (`Instrument::process_extra`): `extra` receives the output buses after the main one.
+    fn render(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
+        extra.fill(0.0);
         if self.rate != rate {
             // Activation is a UI-thread call: ask for it and stay silent until then.
             self.wanted_rate.store(rate, Ordering::Release);
@@ -1626,9 +1677,32 @@ impl os_engine::Instrument for Plugin {
             let n = (left.len() - at).min(max);
             self.set_context(song.map(|s| s.advanced(at as u64, rate)));
             self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], None, None);
+            self.take_extra(extra, left.len(), at, n);
             at += n;
         }
         self.debug_level(rate, left, right);
+    }
+
+    /// Copies the output buses after the main one, as the chunk of `n` frames just processed left them in scratch, to
+    /// frame `at` of `extra` (`Instrument::process_extra`'s layout, `frames` the whole block): a mono bus on both
+    /// sides, a bus of more than two channels by its first two (spec: audio/multi-output.md).
+    fn take_extra(&self, extra: &mut [f32], frames: usize, at: usize, n: usize) {
+        if extra.is_empty() || frames == 0 {
+            return;
+        }
+        let max = self.max_frames as usize;
+        // Scratch holds every input channel, then every output channel, the main bus's included.
+        let mut ch = self.ins.iter().sum::<usize>() + self.outs.first().copied().unwrap_or(0);
+        for (k, &channels) in self.outs.iter().skip(1).enumerate() {
+            let Some(pair) = extra.get_mut(2 * k * frames..2 * (k + 1) * frames) else { break };
+            let (l, r) = pair.split_at_mut(frames);
+            let side = |c: usize| &self.scratch[(ch + c) * max..(ch + c) * max + n];
+            if channels > 0 {
+                l[at..at + n].copy_from_slice(side(0));
+                r[at..at + n].copy_from_slice(side(if channels > 1 { 1 } else { 0 }));
+            }
+            ch += channels;
+        }
     }
 }
 

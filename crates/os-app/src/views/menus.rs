@@ -70,6 +70,8 @@ pub enum MenuCmd {
     SaveAudioClip,
     /// HELP > Diagnostics (`crate::diagnostics`).
     Diagnostics,
+    /// HELP > Check for updates (`crate::update`).
+    CheckUpdates,
     /// HELP's entries that open a page in the web browser (`crate::help_links`).
     Web(&'static str),
     /// The menu bar's ways into the browser.
@@ -221,9 +223,9 @@ pub const ALIGN_LABEL: &str = "Align all channel editors";
 pub const OPTIONS_MENU: usize = 5;
 /// OPTIONS > Project info (the toolbar's info button).
 pub const OPT_INFO: usize = 9;
-/// HELP > About (the toolbar logo).
+/// HELP > About (the toolbar logo, the Help button's right click, the macOS application menu).
 pub const HELP_MENU: usize = 7;
-pub const HELP_ABOUT: usize = 6;
+pub const HELP_ABOUT: usize = 11;
 /// Index of the ADD and TOOLS menus.
 pub const ADD_MENU: usize = 2;
 pub const TOOLS_MENU: usize = 6;
@@ -431,11 +433,16 @@ const TOOLS_B: &[Item] = &[
 const HELP: &[Item] = &[
     it("Help index", "").on().cmd(MenuCmd::Web(crate::help_links::HELP_INDEX_URL)),
     it("Tutorials", "").sub().cmd(MenuCmd::Sub(Sub::Tutorials)),
+    it("Keyboard shortcuts", "").on().cmd(MenuCmd::Web(crate::help_links::SHORTCUTS_URL)),
     head("Support"),
+    it("Troubleshooting", "").on().cmd(MenuCmd::Web(crate::help_links::TROUBLESHOOTING_URL)),
+    it("Report a bug", "").on().cmd(MenuCmd::Web(crate::help_links::REPORT_BUG_URL)),
     it("Diagnostics", "").on().cmd(MenuCmd::Diagnostics),
     it("What's new", "").on().cmd(MenuCmd::Web(crate::help_links::WHATS_NEW_URL)),
+    it("Check for updates", "").on().cmd(MenuCmd::CheckUpdates),
     SEP,
-    it("About...", "").on(),
+    it("Lemon Studio website", "").on().cmd(MenuCmd::Web(crate::help_links::WEBSITE_URL)),
+    it("About...", "").cmd(MenuCmd::Settings(crate::views::settings::ABOUT)),
 ];
 
 pub const MENUS: &[Menu] = &[
@@ -512,8 +519,8 @@ pub fn shortcut_now(item: &Item) -> &'static str {
 /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
 pub fn label_now(s: &State, menu: usize, item: &Item) -> std::borrow::Cow<'static, str> {
     match (menu, item.label) {
-        (EDIT_MENU, "Undo") => crate::history::edit_label(s, false).into(),
-        (EDIT_MENU, "Redo") => crate::history::edit_label(s, true).into(),
+        (EDIT_MENU, "Undo") => crate::history::edit_label(&s.session, false).into(),
+        (EDIT_MENU, "Redo") => crate::history::edit_label(&s.session, true).into(),
         (TOOLS_MENU, LOGGER_HEAD) => format!("{LOGGER_HEAD} (memory used: {}MB)", crate::audio_log::memory_mb()).into(),
         _ => label_of(menu, item),
     }
@@ -522,7 +529,7 @@ pub fn label_now(s: &State, menu: usize, item: &Item) -> std::borrow::Cow<'stati
 /// Whether an entry is in its menu now: EDIT's Redo only with Alternate undo mode on and a history to act on (spec:
 /// ui/menus.md "EDIT": only Undo while the history is empty).
 pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
-    !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(s)
+    !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(&s.session)
 }
 
 /// Whether an entry can be chosen now: it works (`works`), EDIT's have a step to act on, the project file rows
@@ -530,8 +537,8 @@ pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
 /// clipboard to browser audio.
 pub fn active(s: &State, menu: usize, item: &Item) -> bool {
     works(menu, item)
-        && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo"))
-        && (s.path.is_some() || !needs_file(menu, item.label))
+        && (menu != EDIT_MENU || crate::history::edit_enabled(&s.session, item.label == "Redo"))
+        && (s.session.path.is_some() || !needs_file(menu, item.label))
         && (!matches!(item.cmd, MenuCmd::SaveMidiClip) || !s.piano.clipboard.is_empty())
         && (!matches!(item.cmd, MenuCmd::SaveAudioClip) || crate::audio_clipboard::has_audio())
 }
@@ -600,17 +607,17 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         // spec: ui/midi-files.md §1: FL's Import holds only MIDI file...
         Sub::Import => |_| vec![crate::playlist::PItem::new("MIDI file...", crate::playlist::Cmd::MidiImport(false))],
         // spec: ui/project-templates.md
-        Sub::Templates => crate::project_files::template_items,
+        Sub::Templates => crate::project_files_ui::template_items,
         // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
         Sub::Effect => |s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true),
         Sub::Editors => |_| crate::rack::editor_items(),
         // spec: ui/channel-switches.md §3, §6
         Sub::KeyFocus => |_| crate::rack::key_focus_items(),
         // spec: ui/one-click-recording.md §2
-        Sub::OneClick => crate::one_click::items,
+        Sub::OneClick => crate::one_click_ui::items,
         // spec: ui/recording.md §6
-        Sub::DumpLog => crate::score_log::items,
-        Sub::AudioLog => crate::audio_log::items,
+        Sub::DumpLog => crate::score_log_ui::items,
+        Sub::AudioLog => crate::audio_log_ui::items,
         Sub::Declick => crate::rack::declick_items,
         Sub::ClipsAll => |_| crate::rack::stretch_items(true),
         Sub::ClipsSel => |_| crate::rack::stretch_items(false),
@@ -680,13 +687,13 @@ fn mark_of(s: &State, _menu: usize, item: &Item) -> Mark {
             MenuCmd::Window(w) => s.shown(w),
             MenuCmd::Typing => s.toggles.contains(&"typing"),
             MenuCmd::Metronome => crate::metronome::on(),
-            MenuCmd::Record(o) => o.on(),
+            MenuCmd::Record(o) => o.on(&s.session.settings),
             MenuCmd::Autoscroll => crate::autoscroll::on(),
             MenuCmd::Groups => crate::enable_groups::on(),
-            MenuCmd::StepEdit => crate::step_edit::on(),
+            MenuCmd::StepEdit => crate::step_edit::on(&s.session.settings),
             MenuCmd::Multilink => s.multilink.on,
-            MenuCmd::Midi(sw) => sw.on(),
-            MenuCmd::AudioLog => crate::audio_log::enabled(),
+            MenuCmd::Midi(sw) => sw.on(&s.session.settings),
+            MenuCmd::AudioLog => crate::audio_log::enabled(&s.session.settings),
             _ => false,
         },
         (mk, _) => return mk,
@@ -732,8 +739,8 @@ pub fn bar_model(s: &State) -> Vec<BarMenu> {
                 }
                 if mi == PATTERNS && ci == 0 {
                     for n in crate::patterns::listed(s) {
-                        let mark = Mark::Radio(n == s.pattern);
-                        rows.push(BarRow { kind: Kind::Item, label: crate::patterns::name_of(s, n), shortcut: "", enabled: true, mark, pick: Some((mi, PATTERN_PICK + n as usize)) });
+                        let mark = Mark::Radio(n == s.pattern());
+                        rows.push(BarRow { kind: Kind::Item, label: crate::patterns::name_of(&s.session, n), shortcut: "", enabled: true, mark, pick: Some((mi, PATTERN_PICK + n as usize)) });
                     }
                 }
                 for (i, item) in items.iter().enumerate() {
@@ -798,7 +805,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     // Pattern list column: one row per project pattern (spec: ui/menus.md, PATTERNS).
     // spec: ui/pattern-menu.md §2: only used patterns, the column as wide as the longest name.
     let pats: Vec<(u16, String)> = if menu == PATTERNS {
-        crate::patterns::listed(s).into_iter().map(|n| (n, crate::patterns::name_of(s, n))).collect()
+        crate::patterns::listed(s).into_iter().map(|n| (n, crate::patterns::name_of(&s.session, n))).collect()
     } else {
         Vec::new()
     };
@@ -854,97 +861,139 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     };
     let r = Rect::new((ax / k).min(s.screen.0 / k - width).max(0.0), ay / k, width, body_h + border * 2.0);
     let away = !r.contains(ui.mouse.0, ui.mouse.1);
+    // It drops from its title (spec: ui/animations.md §4.2).
+    use crate::motion::Slot;
+    let key = crate::motion::key((menu, ax.to_bits(), ay.to_bits()));
+    let mut draw = s.motion.borrow_mut().menu_begin(ui.c, Slot::Dropdown, key, r, (r.x, r.y), k);
+    let behind = s.menu_sub.is_some() && s.playlist.popup.is_some();
+    s.motion.borrow_mut().menu_behind(ui.c, &mut draw, Slot::Dropdown, behind, r, k);
+    s.motion.borrow_mut().captions_live(Slot::Dropdown, r, k);
     // Lemon (spec: ui/lemon-design.md §9): a rounded panel, rounded row highlights.
     let lemon = super::lemon(ui);
-    if lemon {
-        os_ui::kit::popup(ui.c, t, r);
-    } else {
-        ui.c.fill_rect(r, t.menu_pop);
-        ui.c.stroke_rrect(Rect::new(r.x + mt.line, r.y + mt.line, r.w - 2.0 * mt.line, r.h - 2.0 * mt.line), 0.0, border, t.menu_pop_border);
-    }
+    super::playlist::menu_panel(ui, r, &mt);
     ui.hit(r, Action::Swallow, "");
-
     let font = Font::new(14);
     // Text sits where it does at 100 %, moved by half of what the row lost.
     let dy = (row - os_ui::kit::menu::ROW) / 2.0;
     // The ▸ entry whose submenu is open stays lit, as in the app's popups.
     let open = s.menu_sub.filter(|_| s.playlist.popup.is_some());
-    let mut cx = r.x + border;
-    let mut flat = 0usize;
-    for (ci, (_, items)) in m.cols.iter().enumerate() {
-        let cw = &col_ws[ci];
-        let col = Rect::new(cx, r.y + border, *cw, body_h);
-        if ci > 0 {
-            ui.c.fill_rect(Rect::new(cx - 1.0, col.y, 1.0, body_h), t.menu_pop_head);
-        }
-        let mut y = col.y;
-        if menu == PATTERNS && ci == 0 {
-            for (n, name) in &pats {
-                let rr = Rect::new(col.x, y, col.w, row);
-                let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
-                ui.menu_row(crate::app::MENU_DROPDOWN);
-                let lit = hov || (*n == s.pattern && away);
-                if lit && lemon {
-                    os_ui::kit::row_highlight(ui.c, t, rr);
-                } else if lit {
-                    ui.c.fill_rect(rr, ui.t.s(0x03080c));
-                }
-                let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
-                let dx = if lit { 22.0 } else { 20.0 };
-                ui.c.text_clip(font, rr.x + dx, rr.y + 2.0 + dy, rr.w - dx - 4.0, col, name);
-                y += row;
+    let rows = |ui: &mut Ui, lit: &mut Lit| {
+        let mut cx = r.x + border;
+        let mut flat = 0usize;
+        for (ci, (_, items)) in m.cols.iter().enumerate() {
+            let cw = &col_ws[ci];
+            let col = Rect::new(cx, r.y + border, *cw, body_h);
+            if ci > 0 {
+                ui.c.fill_rect(Rect::new(cx - 1.0, col.y, 1.0, body_h), t.menu_pop_head);
             }
-        }
-        for (i, item) in items.iter().enumerate() {
-            if recent_before(menu, items, i) {
-                y = paint_recent(ui, &recent, Rect::new(col.x, y, col.w, 0.0), open);
-            }
-            if !in_menu(s, menu, item) {
-                flat += 1;
-                continue;
-            }
-            let h = row_h(&mt, item);
-            let rr = Rect::new(col.x, y, col.w, h);
-            match item.kind {
-                Kind::Sep => ui.c.fill_rect(Rect::new(col.x, y + mt.sep_line, col.w, mt.line), t.menu_pop_head),
-                Kind::Head => head_row(ui, rr, &label_now(s, menu, item)),
-                Kind::Item => {
-                    let ok = active(s, menu, item);
-                    // Greyed-out entries never light up; they only say they are not available yet (EDIT's without a
-                    // step to act on say nothing).
-                    if ok {
-                        let hov = ui.hit(rr, item_action(menu, flat, item), item.label);
-                        ui.menu_row(crate::app::MENU_DROPDOWN);
-                        if hov || open == Some(flat) {
-                            light(ui, rr);
-                        }
-                    } else if !works(menu, item) {
-                        ui.off(rr, item.label);
+            let mut y = col.y;
+            if menu == PATTERNS && ci == 0 {
+                for (n, name) in &pats {
+                    let rr = Rect::new(col.x, y, col.w, row);
+                    let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
+                    ui.menu_row(crate::app::MENU_DROPDOWN);
+                    let on = hov || (*n == s.pattern() && away);
+                    if hov && lit.glide {
+                        lit.hot = Some(rr);
+                    } else if on && lemon {
+                        os_ui::kit::row_highlight(ui.c, t, rr);
+                    } else if on {
+                        ui.c.fill_rect(rr, ui.t.s(0x03080c));
                     }
-                    let mark = mark_of(s, menu, item);
-                    let (mx, my) = (rr.x + 10.0, rr.y + row / 2.0);
-                    match mark {
-                        Mark::Check(true) => {
-                            ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_text);
-                            ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, t.menu_pop_text);
+                    let col = if *n == s.pattern() { t.glyph } else { t.menu_pop_text };
+                    let dx = if on { 22.0 } else { 20.0 };
+                    ui.c.text_clip(font, rr.x + dx, rr.y + 2.0 + dy, rr.w - dx - 4.0, col, name);
+                    y += row;
+                }
+            }
+            for (i, item) in items.iter().enumerate() {
+                if recent_before(menu, items, i) {
+                    y = paint_recent(ui, s, &recent, Rect::new(col.x, y, col.w, 0.0), open, lit);
+                }
+                if !in_menu(s, menu, item) {
+                    flat += 1;
+                    continue;
+                }
+                let h = row_h(&mt, item);
+                let rr = Rect::new(col.x, y, col.w, h);
+                match item.kind {
+                    Kind::Sep => ui.c.fill_rect(Rect::new(col.x, y + mt.sep_line, col.w, mt.line), t.menu_pop_head),
+                    Kind::Head => head_row(ui, rr, &label_now(s, menu, item)),
+                    Kind::Item => {
+                        let ok = active(s, menu, item);
+                        // Greyed-out entries never light up; they only say they are not available yet (EDIT's without a
+                        // step to act on say nothing).
+                        if ok {
+                            let hov = ui.hit(rr, item_action(menu, flat, item), item.label);
+                            ui.menu_row(crate::app::MENU_DROPDOWN);
+                            lit.row(ui, rr, hov, open == Some(flat));
+                        } else if !works(menu, item) {
+                            ui.off(rr, item.label);
                         }
-                        Mark::Radio(on) => {
-                            if on {
-                                ui.c.fill_circle(mx, my, 3.0, t.menu_pop_text);
-                            } else {
-                                ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim);
+                        let mark = mark_of(s, menu, item);
+                        let (mx, my) = (rr.x + 10.0, rr.y + row / 2.0);
+                        match mark {
+                            Mark::Check(true) => {
+                                ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_text);
+                                ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, t.menu_pop_text);
                             }
+                            Mark::Radio(on) => {
+                                if on {
+                                    ui.c.fill_circle(mx, my, 3.0, t.menu_pop_text);
+                                } else {
+                                    ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim);
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                        let key = if item.shortcut.is_empty() { "" } else { shortcut_now(item) };
+                        let caption = s.motion.borrow().caption(Slot::Dropdown, lit.next());
+                        row_text(ui, rr, &label_now(s, menu, item), key, item.sub, ok, caption);
                     }
-                    let key = if item.shortcut.is_empty() { "" } else { shortcut_now(item) };
-                    row_text(ui, rr, &label_now(s, menu, item), key, item.sub, ok);
                 }
+                flat += 1;
+                y += h;
             }
-            flat += 1;
-            y += h;
+            cx += cw;
         }
-        cx += cw;
+    };
+    // From Polished up the highlight bar glides from row to row under the rows' text, so it is painted before them. Text
+    // only blends over what is already there; going through the rows once without painting says where the bar goes.
+    let glide = crate::motion::glides();
+    if glide {
+        let mut dry = Lit { glide, hot: None, shown: 0 };
+        ui.dry(|ui| rows(ui, &mut dry));
+        let up = Rect::new(r.x * k, r.y * k, r.w * k, r.h * k);
+        if let Some(b) = s.motion.borrow_mut().glide(Slot::Dropdown, key, dry.hot, up) {
+            light(ui, b);
+        }
+    }
+    rows(ui, &mut Lit { glide, hot: None, shown: 0 });
+    crate::motion::Motion::menu_end(ui.c, draw);
+}
+
+/// The dropdown's highlight: the row under the mouse goes to the gliding bar (`glide`), or is lit where it is.
+struct Lit {
+    glide: bool,
+    hot: Option<Rect>,
+    /// The captions drawn so far, for their entrance (`Motion::caption`).
+    shown: usize,
+}
+
+impl Lit {
+    /// The next caption's place in the order.
+    fn next(&mut self) -> usize {
+        self.shown += 1;
+        self.shown - 1
+    }
+
+    /// Row `rr`, under the mouse (`hov`) or lit anyway (`stays`: its submenu is open).
+    fn row(&mut self, ui: &mut Ui, rr: Rect, hov: bool, stays: bool) {
+        if hov && self.glide {
+            self.hot = Some(rr);
+        } else if hov || stays {
+            light(ui, rr);
+        }
     }
 }
 
@@ -961,22 +1010,19 @@ fn head_row(ui: &mut Ui, rr: Rect, label: &str) {
 
 /// A row under the mouse, or the ▸ row whose submenu is open.
 fn light(ui: &mut Ui, rr: Rect) {
-    let t = ui.t;
-    if super::lemon(ui) {
-        os_ui::kit::row_highlight(ui.c, t, rr);
-    } else {
-        ui.c.fill_rect(rr, t.menu_pop_hi);
-    }
+    let lemon = super::lemon(ui);
+    super::playlist::menu_highlight(ui, rr, lemon);
 }
 
 /// A row's text: its label, its key (italic, at the right) and its ▸ (`sub`); dim when it cannot be chosen (`ok`).
-fn row_text(ui: &mut Ui, rr: Rect, label: &str, key: &str, sub: bool, ok: bool) {
+fn row_text(ui: &mut Ui, rr: Rect, label: &str, key: &str, sub: bool, ok: bool, caption: (f32, f32)) {
     let t = ui.t;
     let font = Font::new(14);
     // Text sits where it does at 100 %, moved by half of what the row lost.
     let (dy, my) = ((rr.h - os_ui::kit::menu::ROW) / 2.0, rr.cy());
     let color = if ok { t.menu_pop_text } else { t.menu_pop_dim };
-    ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, rr.w - 24.0, color, label);
+    let color = color.with_alpha((f32::from(color.a) * caption.1) as u8);
+    ui.c.text_clip(font, rr.x + 20.0 - caption.0, rr.y + 2.0 + dy, rr.w - 24.0, color, label);
     let right = rr.right() - if sub { 16.0 } else { 8.0 };
     if !key.is_empty() {
         let sc = if ok { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };
@@ -1000,7 +1046,7 @@ fn recent_text(r: &Recent) -> (String, &'static str, bool) {
 
 /// Paints FILE's Recent projects section from the top of `at` (its x and width) down; `open`: the dropdown's open
 /// submenu. Returns the y under it.
-fn paint_recent(ui: &mut Ui, rows: &[Recent], at: Rect, open: Option<usize>) -> f32 {
+fn paint_recent(ui: &mut Ui, s: &State, rows: &[Recent], at: Rect, open: Option<usize>, lit: &mut Lit) -> f32 {
     let mt = os_ui::kit::menu::metrics(ui.c.scale);
     let mut y = at.y;
     for r in rows {
@@ -1017,10 +1063,9 @@ fn paint_recent(ui: &mut Ui, rows: &[Recent], at: Rect, open: Option<usize>) -> 
         let rr = Rect::new(at.x, y, at.w, mt.row);
         let hov = ui.hit(rr, act, hint);
         ui.menu_row(crate::app::MENU_DROPDOWN);
-        if hov || (sub && open == Some(RECENT_MORE)) {
-            light(ui, rr);
-        }
-        row_text(ui, rr, &label, key, sub, true);
+        lit.row(ui, rr, hov, sub && open == Some(RECENT_MORE));
+        let caption = s.motion.borrow().caption(crate::motion::Slot::Dropdown, lit.next());
+        row_text(ui, rr, &label, key, sub, true, caption);
         y += mt.row;
     }
     y
@@ -1081,7 +1126,7 @@ mod tests {
         assert_eq!(playlist.mark, Mark::Check(app.state.shown(Win::Playlist)));
         // Patterns in use head PATTERNS, the current one marked.
         assert_eq!(bar[PATTERNS].rows[0].label, "New empty pattern...", "a new project uses no pattern yet");
-        app.state.project.patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
+        app.state.session.project.get_mut().patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
         let first = bar_model(&app.state)[PATTERNS].rows[0].clone();
         assert_eq!((first.label.as_str(), first.mark, first.pick), ("Intro", Mark::Radio(true), Some((PATTERNS, PATTERN_PICK + 1))));
         // Live state: hiding the playlist unticks it.
@@ -1093,10 +1138,10 @@ mod tests {
     }
 
     /// Every entry that works says what it does (`MenuCmd`), but for those dispatched by their place (FILE's first
-    /// entries, About): none falls through to "not available yet", whatever its label.
+    /// entries): none falls through to "not available yet", whatever its label.
     #[test]
     fn working_entries_have_their_command() {
-        let by_place = [(0, FILE_NEW), (0, FILE_OPEN), (0, FILE_SAVE), (0, FILE_SAVE_AS), (0, FILE_SAVE_VERSION), (0, FILE_EXPORT), (0, FILE_EXPORT_MP3), (0, FILE_EXPORT_MIDI), (0, FILE_EXIT), (HELP_MENU, HELP_ABOUT)];
+        let by_place = [(0, FILE_NEW), (0, FILE_OPEN), (0, FILE_SAVE), (0, FILE_SAVE_AS), (0, FILE_SAVE_VERSION), (0, FILE_EXPORT), (0, FILE_EXPORT_MP3), (0, FILE_EXPORT_MIDI), (0, FILE_EXIT)];
         for (mi, m) in MENUS.iter().enumerate() {
             for (i, it) in m.cols.iter().flat_map(|(_, items)| items.iter()).enumerate().filter(|(_, it)| it.kind == Kind::Item) {
                 if works(mi, it) && !by_place.contains(&(mi, i)) {

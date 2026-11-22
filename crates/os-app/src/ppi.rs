@@ -68,14 +68,14 @@ pub fn stepped(n: u16, notches: i32) -> u16 {
 impl App {
     /// The ruler was pressed (`SAct::Ppi`): a drag from here moves its end (`Drag::Ppi`); the press alone changes
     /// nothing.
-    pub(crate) fn ppi_press(&mut self) {
+    pub fn ppi_press(&mut self) {
         self.drag = Some(Drag::Ppi { x0: self.mouse.0, n0: ppi(self.state.display_scale) });
         self.invalidate();
     }
 
     /// Shows and keeps `n` as the PPI, if it is not what the ruler shows already (so a drag back to where it began
     /// leaves a PPI that follows the display as it was).
-    pub(crate) fn ppi_set(&mut self, n: u16) {
+    pub fn ppi_set(&mut self, n: u16) {
         if n != ppi(self.state.display_scale) {
             set(n);
             self.invalidate();
@@ -83,7 +83,7 @@ impl App {
     }
 
     /// Wheel notches over the ruler: 1 PPI each, up for more.
-    pub(crate) fn ppi_wheel(&mut self, notches: i32) {
+    pub fn ppi_wheel(&mut self, notches: i32) {
         self.ppi_set(stepped(ppi(self.state.display_scale), notches));
     }
 }

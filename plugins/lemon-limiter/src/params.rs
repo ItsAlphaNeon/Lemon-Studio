@@ -109,11 +109,14 @@ pub fn value_text(t: Text, v: i32) -> String {
             let x = number(t, v);
             if v > 0 { format!("{x:.1}:1") } else { format!("1:{:.1}", -x) }
         }
-        Text::Knee => format!("{}%", number(t, v)),
+        // A whole number: −4..−1 read 0 %, not "-0%" (§4.1).
+        Text::Knee => format!("{}%", number(t, v) as i32),
     }
 }
 
-/// A typed value: the stored value whose text shows the nearest number (dB, ms, X of `X:1` / `1:X`, %).
+/// A typed value: the stored value whose text shows the nearest number (dB, ms, X of `X:1` / `1:X`, %). When some
+/// stored values show the typed text itself, it is the nearest of them (a level's text also shows its amplitude, which
+/// the nearest dB alone can miss). The editor keeps the current or the default value first when it shows the text.
 pub fn parse_text(t: Text, s: &str, min: i32, max: i32) -> Option<i32> {
     let s = s.trim().to_ascii_lowercase();
     if matches!(t, Text::Level(_)) && (s.contains("inf") || s == "off") {
@@ -130,7 +133,15 @@ pub fn parse_text(t: Text, s: &str, min: i32, max: i32) -> Option<i32> {
     if t == Text::Curve {
         return Some((x.round() as i32).clamp(min, max));
     }
-    (min..=max).min_by(|&a, &b| (number(t, a) - x).abs().total_cmp(&(number(t, b) - x).abs()))
+    let near = |a: &i32, b: &i32| (number(t, *a) - x).abs().total_cmp(&(number(t, *b) - x).abs());
+    let key = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    let typed = key(&s);
+    let shows = |v: &i32| key(&value_text(t, *v)) == typed;
+    // An end of the range that shows the text is taken first: the ceiling's top text gives the top (2000), not a value
+    // next to it that reads the same.
+    [max, min].into_iter().find(shows)
+        .or_else(|| (min..=max).filter(shows).min_by(near))
+        .or_else(|| (min..=max).min_by(near))
 }
 
 pub struct LimiterParams {
@@ -357,6 +368,7 @@ mod tests {
         assert_eq!(txt(9, -1000), "1:4.0");
         assert_eq!(txt(10, 400), "40%");
         assert_eq!(txt(10, -720), "-72%");
+        assert_eq!((txt(10, -4), txt(10, -1), txt(10, -5)), ("0%".into(), "0%".into(), "-1%".into()));
         assert_eq!(txt(13, 1), "1");
     }
 
@@ -369,6 +381,10 @@ mod tests {
         assert_eq!(parse(9, "20:1"), Some(1000));
         assert_eq!(parse(9, "1:4"), Some(-1000));
         assert_eq!(parse(4, "12"), Some(8));
+        // The nearest dB alone (1996) reads "12.0dB  3.98": the values that show the typed text come first.
+        assert_eq!(parse(2, "12.0dB  4.00").map(|v| value_text(DEFS[2].text, v)), Some("12.0dB  4.00".into()));
+        // The top's own text gives the top (2026-11-05 audit, L3).
+        assert_eq!(parse(2, "12.0dB  4.00"), Some(RANGES[2].1));
         let v = parse(3, "5ms").unwrap();
         assert!((dsp::time_ms(v) - 5.0).abs() < 0.01);
     }

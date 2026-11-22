@@ -36,10 +36,11 @@ pub const SETTINGS: [Setting; dsp::PARAMS] = [
     setting("wet", "Wet only", dsp::WET_ONLY),
 ];
 
-/// Editor layout (spec §2), as the original's: a grid of tiles, three across and four down.
+/// Editor layout (spec §2), as the original's: a grid of tiles, three across and four down. The page's spans end before
+/// their last number (158 x 46, 6 px apart); `Control::Tile` takes end-inclusive edges, so the last pixel is one less.
 const fn tile(id: &'static str, col: usize, row: usize, caption: &'static str) -> Control {
     let (x0, y0) = (8.0 + 164.0 * col as f32, 8.0 + 52.0 * row as f32);
-    Control::Tile { id, x0, y0, x1: x0 + 158.0, y1: y0 + 46.0, caption }
+    Control::Tile { id, x0, y0, x1: x0 + 158.0 - 1.0, y1: y0 + 46.0 - 1.0, caption }
 }
 
 /// The stored value of each wave's lowest setting, and the top for the last (the typed-in names).

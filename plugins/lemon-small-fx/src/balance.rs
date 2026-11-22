@@ -21,11 +21,12 @@ pub const SETTINGS: [Setting; dsp::PARAMS] = [
 ];
 
 /// Editor layout (spec §2), as the original's: the balance knob, the levels between, the volume knob; the value texts
-/// under the knobs.
+/// under the knobs. The page's ranges end before their last number (6 px apart, 8 px from the edges); a card's `x1` and
+/// `y1` are its last pixels.
 const CARDS: [Card; 3] = [
-    Card { x0: 8.0, x1: 100.0, y0: 28.0, y1: 124.0, heading: "BALANCE" },
-    Card { x0: 106.0, x1: 182.0, y0: 28.0, y1: 124.0, heading: "OUTPUT" },
-    Card { x0: 188.0, x1: 280.0, y0: 28.0, y1: 124.0, heading: "VOLUME" },
+    Card { x0: 8.0, x1: 99.0, y0: 28.0, y1: 123.0, heading: "BALANCE" },
+    Card { x0: 106.0, x1: 181.0, y0: 28.0, y1: 123.0, heading: "OUTPUT" },
+    Card { x0: 188.0, x1: 279.0, y0: 28.0, y1: 123.0, heading: "VOLUME" },
 ];
 
 const CONTROLS: [Control; 2] = [

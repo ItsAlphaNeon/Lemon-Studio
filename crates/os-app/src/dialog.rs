@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::path::PathBuf;
 
 use os_ui::Rect;
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::{App, Drag};
 use crate::filedlg::{FileDlg, Focus, Outcome, SortBy, ROW_H};
@@ -137,6 +137,8 @@ pub enum Then {
     MidiExportConfirm,
     /// Marker settings: Accept (Ok) prepares with this count and spacing.
     PerfMarkers(u8, u8),
+    /// The update offered (`crate::update`): Install (Yes), Skip this version (No) or Later (Cancel).
+    Update(crate::update::Found),
 }
 
 /// What waits for the save-changes question.
@@ -242,7 +244,7 @@ pub struct Modal {
 }
 
 impl Modal {
-    pub(crate) fn new(body: Body) -> Modal {
+    pub fn new(body: Body) -> Modal {
         Modal { body, at: None, rect: Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)) }
     }
 }
@@ -445,24 +447,24 @@ impl App {
     }
 
     /// Shows a message box over everything.
-    pub(crate) fn show_msg(&mut self, m: Msg) {
+    pub fn show_msg(&mut self, m: Msg) {
         self.state.dialogs.push(Modal::new(Body::Msg(m)));
         self.modal_changed();
     }
 
     /// Shows a form of the app's own (the time signature dialog) over everything.
-    pub(crate) fn show_form(&mut self, body: Body) {
+    pub fn show_form(&mut self, body: Body) {
         self.state.dialogs.push(Modal::new(body));
         self.modal_changed();
     }
 
     /// A message box with Ok only.
-    pub(crate) fn tell(&mut self, kind: Kind, title: &str, text: Vec<(String, bool)>) {
+    pub fn tell(&mut self, kind: Kind, title: &str, text: Vec<(String, bool)>) {
         self.show_msg(Msg::new(kind, title, text, &[Answer::Ok], Then::Nothing));
     }
 
     /// Shows a file dialog; its answer goes to its `then`.
-    pub(crate) fn file_dialog(&mut self, dlg: FileDlg) {
+    pub fn file_dialog(&mut self, dlg: FileDlg) {
         #[cfg(test)]
         if !fake::is_live() {
             let answer = fake::take(dlg.mode == crate::filedlg::Mode::Save);
@@ -557,7 +559,7 @@ impl App {
     }
 
     /// A click on a part of the top dialog.
-    pub(crate) fn dialog_click(&mut self, h: DHit) {
+    pub fn dialog_click(&mut self, h: DHit) {
         self.invalidate();
         let (x, y) = self.mouse;
         let Some(m) = self.state.dialogs.last_mut() else { return };
@@ -696,7 +698,7 @@ impl App {
     }
 
     /// A key press while a dialog is open (repeats included).
-    pub(crate) fn dialog_key(&mut self, key: &Key, ctrl: bool, alt: bool) {
+    pub fn dialog_key(&mut self, key: &Key, ctrl: bool, alt: bool) {
         self.invalidate();
         let shift = self.shift;
         let Some(m) = self.state.dialogs.last_mut() else { return };
@@ -758,7 +760,7 @@ impl App {
     }
 
     /// The wheel over a dialog: scrolls the file list.
-    pub(crate) fn dialog_wheel(&mut self, dy: f32) {
+    pub fn dialog_wheel(&mut self, dy: f32) {
         if let Some(f) = self.top_file() {
             f.scroll -= dy * 3.0 * ROW_H;
             f.clamp_scroll();
@@ -767,7 +769,7 @@ impl App {
     }
 
     /// A file dropped on the window while a dialog is open: the file dialog goes there.
-    pub(crate) fn dialog_drop(&mut self, p: PathBuf) {
+    pub fn dialog_drop(&mut self, p: PathBuf) {
         if let Some(f) = self.top_file() {
             f.dropped(&p);
             self.invalidate();
@@ -775,7 +777,7 @@ impl App {
     }
 
     /// Drags the top dialog by its caption to top-left (x, y), kept inside the window.
-    pub(crate) fn dialog_drag(&mut self, x: f32, y: f32) {
+    pub fn dialog_drag(&mut self, x: f32, y: f32) {
         let (sw, sh) = self.state.screen;
         if let Some(m) = self.state.dialogs.last_mut() {
             let r = m.rect.get();
@@ -785,7 +787,7 @@ impl App {
     }
 
     /// Drags the file list's scroll bar.
-    pub(crate) fn dialog_scroll(&mut self, scroll: f32) {
+    pub fn dialog_scroll(&mut self, scroll: f32) {
         if let Some(f) = self.top_file() {
             f.scroll = scroll;
             f.clamp_scroll();

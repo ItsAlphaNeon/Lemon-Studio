@@ -33,20 +33,21 @@ pub fn fader_matrix_law(volume: i32, pan: i32, separation: i32, on: bool, law: P
     let vol = curve(knob(volume, R12800));
     let p = knob(pan, R6400);
     let (g0, g1) = pan_split_law(unity_at_centre(vol), p, law);
-    let (mut xl, mut xr) = (0.0f64, 0.0f64);
+    // Single arithmetic throughout, but for the separation's exponential and subtraction: doubles, rounded to single
+    // once (spec: audio/mixer.md "Fader matrix").
+    let (mut xl, mut xr) = (0.0f32, 0.0f32);
     if p > 0.0 {
-        xr = (1.0 - f64::from(g0) / f64::from(vol)) * 0.5;
+        xr = (1.0 - g0 / vol) * 0.5;
     } else if p < 0.0 {
-        xl = (1.0 - f64::from(g1) / f64::from(vol)) * 0.5;
+        xl = (1.0 - g1 / vol) * 0.5;
     }
     if separation != 0 {
-        let sep = f64::from(separation) / 64.0;
-        let add = if separation > 0 { (5f64.powf(sep) - 1.0) * 0.25 } else { sep };
+        let sep = separation as f32 * (1.0f32 / 64.0);
+        let add = if separation > 0 { ((f64::from(sep) * 5f64.ln()).exp() - 1.0) as f32 * 0.25 } else { sep };
         xl = (2.0 * xl + add).min(1.0) * 0.5;
         xr = (2.0 * xr + add).min(1.0) * 0.5;
     }
-    let (g0, g1) = (f64::from(g0), f64::from(g1));
-    [(g0 * (1.0 - xl)) as f32, (g0 * xl) as f32, (g1 * (1.0 - xr)) as f32, (g1 * xr) as f32]
+    [g0 * (1.0 - xl), g0 * xl, g1 * (1.0 - xr), g1 * xr]
 }
 
 /// A send's gain from its stored level (0..16000, 12800 = unity): the level curve.
@@ -349,6 +350,13 @@ mod tests { // This code is a part of L e m o n S t u d i o.
         assert_eq!(fader_matrix(0, 0, 0, true), [0.0; 4]);
         // 16000 is curve(1.25).
         assert!((fader_matrix(16000, 0, 0, true)[0] - 1.90327).abs() < 1e-5);
+        // Separation 64 merges to mono, -64 subtracts the opposite side; the shares are singles (spec: audio/mixer.md
+        // "Fader matrix").
+        assert_eq!(fader_matrix(12800, 0, 64, true), [0.5; 4]);
+        assert_eq!(fader_matrix(12800, 0, -64, true), [1.5, -0.5, 1.5, -0.5]);
+        let sep = 20.0f32 * (1.0 / 64.0);
+        let x = (((f64::from(sep) * 5f64.ln()).exp() - 1.0) as f32 * 0.25) * 0.5;
+        assert_eq!(fader_matrix(12800, 0, 20, true), [1.0 - x, x, 1.0 - x, x]);
     }
 
     /// spec: audio/gain-laws.md "Panning law: Triangular", the mixer table (to 4 decimals): `[L_in->L, R_in->L,

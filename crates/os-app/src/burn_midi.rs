@@ -20,6 +20,8 @@ use std::sync::Arc;
 use os_model::{Channel, ChannelKind, Note};
 
 use crate::app::{App, State};
+use crate::control::command::{Command, NoteIn};
+use crate::misc::M;
 
 /// The undo step.
 pub const STEP: &str = "Burn MIDI";
@@ -91,7 +93,7 @@ impl Play {
     }
 
     /// The note written for it; the velocity, pan and mods of a note whose levels did not change stay its bytes.
-    fn note(&self) -> Note {
+    pub fn note(&self) -> Note {
         let n = &self.src;
         let key = (self.pitch / 100.0).round();
         let rest = self.pitch - key * 100.0;
@@ -674,20 +676,20 @@ pub fn capture(p: &mut dyn os_host::Plugin, notes: &[Note], ppq: u16, tempo: f64
 
 /// Burn MIDI to ▸ on rack row `row`: enabled on a channel that plays notes (not an automation clip's).
 pub fn can_burn(s: &State, row: usize) -> bool {
-    s.project.channels.get(row).is_some_and(|c| c.kind != ChannelKind::Automation)
+    s.session.project.channels.get(row).is_some_and(|c| c.kind != ChannelKind::Automation)
 }
 
 impl App {
     /// Burn MIDI to ▸ Current pattern (`new` false) or New pattern on rack row `row`. Returns the hint bar's message.
-    pub(crate) fn burn_midi(&mut self, row: usize, new: bool) -> Option<String> {
+    pub fn burn_midi(&mut self, row: usize, new: bool) -> Option<String> {
         if !can_burn(&self.state, row) {
             return None;
         }
         let s = &self.state;
-        let ch = &s.project.channels[row];
-        let name = crate::rack::channel_name(s, row);
-        let (ppq, cur) = (s.project.ppq.max(4), s.pattern.max(1));
-        let src: Vec<Note> = s.project.pattern(cur).map(|p| p.notes.iter().filter(|n| n.channel == ch.index).copied().collect()).unwrap_or_default();
+        let ch = &s.session.project.channels[row];
+        let name = crate::edit::rack::channel_name(&s.session, row);
+        let (ppq, cur) = (s.session.project.ppq.max(4), s.pattern().max(1));
+        let src: Vec<Note> = s.session.project.pattern(cur).map(|p| p.notes.iter().filter(|n| n.channel == ch.index).copied().collect()).unwrap_or_default();
         if !src.iter().any(|n| !n.muted() && !n.slide()) {
             return Some(format!("{name} has no notes in this pattern to burn"));
         }
@@ -695,11 +697,11 @@ impl App {
         // A hosted instrument plays what the channel's own arpeggiator made, and what it puts out is what is burnt. One
         // that declares no note output (Lemon Sampler on every sampler channel, most instruments) is not played: the
         // pass would only keep the channel silent for nothing.
-        let hosted = self.plugins.hosted.get(&row).map(|h| Arc::clone(&h.plugin)).filter(|h| h.lock().is_ok_and(|p| p.puts_out_notes()));
+        let hosted = self.state.session.plugins.hosted.get(&row).map(|h| Arc::clone(&h.plugin)).filter(|h| h.lock().is_ok_and(|p| p.puts_out_notes()));
         let from_plugin = hosted.map(|h| {
             let input = own.as_deref().unwrap_or(&src);
-            let end = s.project.pattern_length(cur).max(input.iter().map(|n| n.position + n.length.max(1)).max().unwrap_or(0));
-            plugin_pass(&h, input, ppq, s.tempo, end, ch.index, s.project.signature().unwrap_or((4, 4)))
+            let end = s.session.project.pattern_length(cur).max(input.iter().map(|n| n.position + n.length.max(1)).max().unwrap_or(0));
+            plugin_pass(&h, input, ppq, s.tempo(), end, ch.index, s.session.project.signature().unwrap_or((4, 4)))
         });
         let notes = match (from_plugin, own) {
             (Some(p), _) if !p.is_empty() => p,
@@ -709,25 +711,31 @@ impl App {
         };
         let index = ch.index;
         let count = notes.iter().filter(|n| !n.muted() && !n.slide()).count();
-        let msg = crate::control::edit_app(self, STEP, crate::control::command::Region::Project, |app| {
-            let s = &mut app.state;
-            let to = if new { crate::patterns::next_empty(s, cur) } else { cur };
-            let p = crate::patterns::pat_mut(s, to);
-            if new {
-                p.notes.extend(notes.iter().filter(|n| !n.muted() && !n.slide()).copied());
-            } else {
-                p.notes.retain(|n| n.channel != index);
-                p.notes.extend(notes.iter().copied());
-            }
-            p.notes.sort_by_key(|n| n.position);
+        let s = &mut self.state;
+        let to = if new { crate::edit::patterns::next_empty(&s.session, cur) } else { cur };
+        crate::mixer::track_ids(s);
+        let channel = s.session.project.channels[row].id.0;
+        let first = if s.session.project.pattern(to).is_none() { vec![Command::AddPattern { name: None, color: None, number: Some(to) }] } else { Vec::new() };
+        let r = crate::control_ui::command_then(s, STEP, first, |s, _| {
+            let p = &s.session.project;
+            let Some(pat) = p.pattern(to) else { return Vec::new() };
+            let id = |ch: u16| p.channels.iter().find(|c| c.index == ch).map(|c| c.id.0);
+            // The pattern's other notes, then the burnt ones, in position order.
+            let mut all: Vec<&Note> = pat.notes.iter().filter(|n| new || n.channel != index).collect();
+            all.extend(notes.iter().filter(|n| !new || (!n.muted() && !n.slide())));
+            all.sort_by_key(|n| n.position);
+            let list = all.into_iter().filter_map(|n| Some(NoteIn::of(n, id(n.channel)?))).collect();
             // The channel's own generators are off now: the notes are not made twice.
-            let m = &mut s.project.channels[row].misc;
-            m.arp.direction = 0;
-            m.echo.feed = 0.0;
-            s.pattern = to;
-            s.piano.dirty = true;
-            if new { format!("{count} notes of {name} burnt to {}", crate::patterns::name_of(s, to)) } else { format!("{count} notes of {name} burnt") }
+            let off = Command::SetMisc { channel, values: [(M::ArpDir.key(), 0.0), (M::EchoFeed.key(), 0.0)].into() };
+            vec![Command::SetNotes { pattern: pat.id.0, channel: None, notes: list }, off]
         });
+        let msg = match r {
+            Err(e) => e,
+            Ok(_) => {
+                s.set_pattern(to);
+                if new { format!("{count} notes of {name} burnt to {}", crate::edit::patterns::name_of(&s.session, to)) } else { format!("{count} notes of {name} burnt") }
+            }
+        };
         self.invalidate();
         Some(msg)
     }
@@ -739,7 +747,7 @@ mod tests {
     use os_model::Arpeggio;
 
     /// A note of channel 0 at `pos`, `len` ticks long, on `key`.
-    fn note(pos: u32, len: u32, key: u16) -> Note {
+    pub fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, ..Note::step(0, pos) }
     }
 
@@ -748,7 +756,7 @@ mod tests {
     }
 
     fn arp_channel(f: impl FnOnce(&mut Arpeggio)) -> Channel {
-        let mut ch = crate::app::sampler_channel(0, "Ch", 0);
+        let mut ch = crate::projects::sampler_channel(0, "Ch", 0);
         f(&mut ch.misc.arp);
         ch
     }
@@ -766,7 +774,7 @@ mod tests {
     /// Off: nothing generated.
     #[test]
     fn nothing_without_the_arpeggiator_or_echoes() {
-        assert_eq!(generate(&crate::app::sampler_channel(0, "Ch", 0), &[note(0, 96, 60)], 96), None);
+        assert_eq!(generate(&crate::projects::sampler_channel(0, "Ch", 0), &[note(0, 96, 60)], 96), None);
     }
 
     /// A major chord upwards, one step a note: a note four steps long plays C E G C (spec: "The note list", "Timing").
@@ -806,7 +814,7 @@ mod tests {
     /// The echo delay: each echo later by the time, quieter by the feed, its pitch stepped (spec: "Echo delay").
     #[test]
     fn echoes() {
-        let mut ch = crate::app::sampler_channel(0, "Ch", 0);
+        let mut ch = crate::projects::sampler_channel(0, "Ch", 0);
         let e = &mut ch.misc.echo;
         (e.feed, e.echoes, e.time, e.pitch) = (0.25, 2, 48.0 / 384.0, 100.0 / 1200.0);
         let got = generate(&ch, &[note(0, 12, 60)], 96).unwrap();
@@ -838,11 +846,11 @@ mod tests {
     /// holding `notes` of rack row 0's channel and a step of row 1's.
     fn app_with(notes: &[Note]) -> App {
         let mut app = App::new(None);
-        app.plugins = crate::plugins::Plugins::default();
-        let (a, b) = (app.state.project.channels[0].index, app.state.project.channels[1].index);
-        let cur = app.state.pattern.max(1);
-        app.state.pattern = cur;
-        let p = crate::patterns::pat_mut(&mut app.state, cur);
+        app.state.session.plugins = crate::plugins::Plugins::default();
+        let (a, b) = (app.state.session.project.channels[0].index, app.state.session.project.channels[1].index);
+        let cur = app.state.pattern().max(1);
+        app.state.set_pattern(cur);
+        let p = crate::edit::patterns::pat_mut(&mut app.state.session, cur);
         p.notes = notes.iter().map(|n| Note { channel: a, ..*n }).collect();
         p.notes.push(Note::step(b, 0));
         app
@@ -850,8 +858,8 @@ mod tests {
 
     /// The notes of channel row `row` in pattern `pat`.
     fn notes_of(app: &App, pat: u16, row: usize) -> Vec<Note> {
-        let ch = app.state.project.channels[row].index;
-        app.state.project.pattern(pat).map(|p| p.notes.iter().filter(|n| n.channel == ch).copied().collect()).unwrap_or_default()
+        let ch = app.state.session.project.channels[row].index;
+        app.state.session.project.pattern(pat).map(|p| p.notes.iter().filter(|n| n.channel == ch).copied().collect()).unwrap_or_default()
     }
 
     /// Current pattern: the arpeggio's notes replace the channel's notes in the pattern, another channel's stay, the
@@ -859,18 +867,18 @@ mod tests {
     #[test]
     fn burning_an_arpeggio_into_the_current_pattern() {
         let mut app = app_with(&[note(0, 96, 60)]);
-        assert_eq!(app.state.project.ppq, 96);
-        (app.state.project.channels[0].misc.arp.direction, app.state.project.channels[0].misc.arp.chord) = (1, 1);
-        let cur = app.state.pattern;
+        assert_eq!(app.state.session.project.ppq, 96);
+        (app.state.session.project.get_mut().channels[0].misc.arp.direction, app.state.session.project.get_mut().channels[0].misc.arp.chord) = (1, 1);
+        let cur = app.state.pattern();
         let msg = crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false));
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 24, 60), (24, 24, 64), (48, 24, 67), (72, 24, 60)]);
         assert!(msg.is_some_and(|m| m.starts_with("4 notes of ")), "the hint bar's message");
         assert_eq!(notes_of(&app, cur, 1).len(), 1, "another channel's notes stay");
-        assert_eq!(app.state.project.channels[0].misc.arp.direction, 0, "the arpeggiator is off: not generated twice");
-        assert_eq!(app.state.pattern, cur);
-        crate::history::undo(&mut app.state);
+        assert_eq!(app.state.session.project.channels[0].misc.arp.direction, 0, "the arpeggiator is off: not generated twice");
+        assert_eq!(app.state.pattern(), cur);
+        crate::history_ui::undo(&mut app.state);
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 96, 60)], "one undo step");
-        assert_eq!(app.state.project.channels[0].misc.arp.direction, 1);
+        assert_eq!(app.state.session.project.channels[0].misc.arp.direction, 1);
     }
 
     /// New pattern: the echoes go into the next empty pattern, which becomes the current one; the pattern burnt from
@@ -878,20 +886,20 @@ mod tests {
     #[test]
     fn burning_echoes_into_a_new_pattern() {
         let mut app = app_with(&[note(0, 12, 60)]);
-        let e = &mut app.state.project.channels[0].misc.echo;
+        let e = &mut app.state.session.project.get_mut().channels[0].misc.echo;
         (e.feed, e.echoes, e.time, e.pitch) = (0.25, 2, 48.0 / 384.0, 100.0 / 1200.0);
-        let cur = app.state.pattern;
-        let to = crate::patterns::next_empty(&app.state, cur);
+        let cur = app.state.pattern();
+        let to = crate::edit::patterns::next_empty(&app.state.session, cur);
         assert_ne!(to, cur);
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, true));
-        assert_eq!(app.state.pattern, to, "the new pattern is the current one");
+        assert_eq!(app.state.pattern(), to, "the new pattern is the current one");
         assert_eq!(keys(&notes_of(&app, to, 0)), [(0, 12, 60), (24, 12, 61), (48, 12, 62)]);
         assert!(notes_of(&app, to, 1).is_empty(), "only the burnt channel's notes");
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 12, 60)], "the pattern burnt from keeps its notes");
-        assert_eq!(app.state.project.channels[0].misc.echo.feed, 0.0, "the echo delay is off");
-        crate::history::undo(&mut app.state);
+        assert_eq!(app.state.session.project.channels[0].misc.echo.feed, 0.0, "the echo delay is off");
+        crate::history_ui::undo(&mut app.state);
         assert!(notes_of(&app, to, 0).is_empty(), "one undo step");
-        assert_eq!(app.state.project.channels[0].misc.echo.feed, 0.25);
+        assert_eq!(app.state.session.project.channels[0].misc.echo.feed, 0.25);
     }
 
     /// A channel with no notes in the pattern, or one that generates none, says so in the hint bar and changes
@@ -899,17 +907,17 @@ mod tests {
     #[test]
     fn nothing_to_burn() {
         let mut app = app_with(&[note(0, 96, 60)]);
-        let cur = app.state.pattern;
-        let before = app.state.project.pattern(cur).unwrap().notes.clone();
-        let steps = app.state.history.len();
+        let cur = app.state.pattern();
+        let before = app.state.session.project.pattern(cur).unwrap().notes.clone();
+        let steps = app.state.session.history.len();
         let msg = crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false)).unwrap();
         assert!(msg.ends_with("its arpeggiator and echo delay are off"), "{msg}");
         let msg = crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(2, true)).unwrap();
         assert!(msg.ends_with("has no notes in this pattern to burn"), "{msg}");
-        assert_eq!(app.state.project.pattern(cur).unwrap().notes, before);
-        assert_eq!((app.state.pattern, app.state.history.len()), (cur, steps), "no undo step");
-        assert!(can_burn(&app.state, 0) && !can_burn(&app.state, app.state.project.channels.len()));
-        app.state.project.channels[0].kind = ChannelKind::Automation;
+        assert_eq!(app.state.session.project.pattern(cur).unwrap().notes, before);
+        assert_eq!((app.state.pattern(), app.state.session.history.len()), (cur, steps), "no undo step");
+        assert!(can_burn(&app.state, 0) && !can_burn(&app.state, app.state.session.project.channels.len()));
+        app.state.session.project.get_mut().channels[0].kind = ChannelKind::Automation;
         assert!(!can_burn(&app.state, 0));
         assert_eq!(crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false)), None);
     }
@@ -997,9 +1005,9 @@ mod tests {
         let desc = crate::plugins::builtin()[0].desc.clone();
         let fifths = Arc::new(std::sync::Mutex::new(Fifths { desc, capture: false, out: Vec::new(), resets: 0, outputs: true }));
         let mut h = crate::plugins::Hosted::new(fifths.clone());
-        h.owner = app.state.project.channels[0].id;
-        app.plugins.hosted.insert(0, h);
-        let cur = app.state.pattern;
+        h.owner = app.state.session.project.channels[0].id;
+        app.state.session.plugins.hosted.insert(0, h);
+        let cur = app.state.pattern();
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false));
         // A step plays a step long (24 ticks at 96 PPQ).
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 48, 67), (48, 24, 69)]);
@@ -1008,14 +1016,14 @@ mod tests {
             let f = fifths.lock().unwrap();
             assert_eq!((f.capture, f.resets), (false, 2), "reset before and after, not capturing");
         }
-        crate::history::undo(&mut app.state);
+        crate::history_ui::undo(&mut app.state);
         // With the channel's arpeggiator on, the plugin is played the arpeggio.
-        (app.state.project.channels[0].misc.arp.direction, app.state.project.channels[0].misc.arp.chord) = (1, 1);
-        let ch = app.state.project.channels[0].index;
-        crate::patterns::pat_mut(&mut app.state, cur).notes.retain(|n| n.position == 0 || n.channel != ch);
+        (app.state.session.project.get_mut().channels[0].misc.arp.direction, app.state.session.project.get_mut().channels[0].misc.arp.chord) = (1, 1);
+        let ch = app.state.session.project.channels[0].index;
+        crate::edit::patterns::pat_mut(&mut app.state.session, cur).notes.retain(|n| n.position == 0 || n.channel != ch);
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false));
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 24, 67), (24, 24, 71)]);
-        assert_eq!(app.state.project.channels[0].misc.arp.direction, 0);
+        assert_eq!(app.state.session.project.channels[0].misc.arp.direction, 0);
     }
 
     /// A hosted instrument that declares no note output (Lemon Sampler, most instruments) is not played: the channel's
@@ -1026,11 +1034,11 @@ mod tests {
         let desc = crate::plugins::builtin()[0].desc.clone();
         let silent = Arc::new(std::sync::Mutex::new(Fifths { desc, capture: false, out: Vec::new(), resets: 0, outputs: false }));
         let mut h = crate::plugins::Hosted::new(silent.clone());
-        h.owner = app.state.project.channels[0].id;
-        app.plugins.hosted.insert(0, h);
-        (app.state.project.channels[0].misc.arp.direction, app.state.project.channels[0].misc.arp.chord) = (1, 1);
-        let cur = app.state.pattern;
-        let own = generate(&app.state.project.channels[0], &notes_of(&app, cur, 0), app.state.project.ppq).expect("an arpeggio");
+        h.owner = app.state.session.project.channels[0].id;
+        app.state.session.plugins.hosted.insert(0, h);
+        (app.state.session.project.get_mut().channels[0].misc.arp.direction, app.state.session.project.get_mut().channels[0].misc.arp.chord) = (1, 1);
+        let cur = app.state.pattern();
+        let own = generate(&app.state.session.project.channels[0], &notes_of(&app, cur, 0), app.state.session.project.ppq).expect("an arpeggio");
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false));
         assert_eq!(keys(&notes_of(&app, cur, 0)), keys(&own), "the channel's own arpeggio, nothing a fifth up");
         assert_eq!(silent.lock().unwrap().resets, 0, "never played");

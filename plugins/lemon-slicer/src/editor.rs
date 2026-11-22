@@ -202,6 +202,9 @@ pub struct Logic {
     pub hint: String,
     copied: Option<f32>,
     pub hosted: bool,
+    /// Writes to the state from the editor, and how many of them the host was told of (`take_edit`).
+    made: std::cell::Cell<u64>,
+    told: u64,
     /// The key a click on the well is playing.
     playing: Option<u8>,
     /// The waveform's columns and the kit version they were made for.
@@ -209,9 +212,25 @@ pub struct Logic {
 }
 
 impl Logic {
+    /// The parameters, for a write to the state from the editor: counted for the host (`take_edit`).
+    fn raw(&self) -> &Arc<SlicerParams> {
+        self.made.set(self.made.get() + 1);
+        &self.params
+    }
+
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made.get() == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made.get();
+        true
+    }
+
     pub fn new(params: Arc<SlicerParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, playing: None, peaks: (u64::MAX, Vec::new()) }
+        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, made: std::cell::Cell::new(0), told: 0, playing: None, peaks: (u64::MAX, Vec::new()) }
     }
 
     pub fn dragging(&self) -> bool {
@@ -240,7 +259,7 @@ impl Logic {
 
     /// The loop changed: store it and play it.
     fn commit(&mut self, st: &State) {
-        self.shared.set_state(&self.params, st);
+        self.shared.set_state(self.raw(), st);
     }
 
     fn hint_for(&self, t: Option<&Target>) -> String {
@@ -418,8 +437,9 @@ impl Logic {
                 (t, t * secs / 60.0)
             }
             (None, Some(b)) => {
-                let b = b.clamp(0.25, 512.0);
-                (b * 60.0 / secs, b)
+                // The length's own range, then the one that keeps the tempo it gives in the tempo's range.
+                let b = b.clamp(0.25, 512.0).clamp(10.0 * secs / 60.0, 522.0 * secs / 60.0);
+                ((b * 60.0 / secs).clamp(10.0, 522.0), b)
             }
             (None, None) => return,
         };
@@ -438,7 +458,7 @@ impl Logic {
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
                 if [params::PITCH_ID, params::ATTACK_ID, params::DECAY_ID].contains(&id.as_str()) {
-                    m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
+                    m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
                 }
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
@@ -591,7 +611,7 @@ impl Logic {
     /// Loads a loop (the open dialog's file).
     pub fn load(&mut self, path: &str) {
         self.view.chosen = 0;
-        if let Err(e) = self.shared.load(path, &self.params) {
+        if let Err(e) = self.shared.load(path, self.raw()) {
             self.hint = e;
         }
     }
@@ -896,6 +916,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -964,7 +987,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes | Cmd::Edited => 0,
             }
         }
 
@@ -986,7 +1009,7 @@ mod win32 {
             return None;
         }
         let mut file = vec![0u16; 1024];
-        let filter: Vec<u16> = "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3\0All files\0*.*\0\0".encode_utf16().collect();
+        let filter: Vec<u16> = "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3;*.m4a\0All files\0*.*\0\0".encode_utf16().collect();
         let title = pw::wide("Loop to slice");
         unsafe {
             let mut ofn: OPENFILENAMEW = std::mem::zeroed();
@@ -1138,6 +1161,9 @@ mod gui {
                 self.link.set_hint(&self.logic.hint);
                 self.link.to_host(Cmd::Changed, 0);
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -1199,7 +1225,7 @@ mod gui {
         let path = win.dialog(move || {
             rfd::FileDialog::new()
                 .set_title("Loop to slice")
-                .add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3"])
+                .add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3", "m4a"])
                 .pick_file()
         });
         path.flatten().map(|p| p.to_string_lossy().into_owned())
@@ -1295,7 +1321,9 @@ mod tests {
         // Its key and its reverse switch.
         l.pick(&MenuReq::Key, Cmd::Root(36), 0.0, 0.0);
         let (x, y) = centre(&l, &Target::Rev);
+        let _ = l.take_edit();
         l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(l.take_edit(), "the host hears of it");
         let st = l.state();
         assert_eq!((st.slices[2].root, st.slices[2].reversed()), (36, true));
         assert_eq!(l.shared.kit.lock().unwrap().as_ref().unwrap().keys[36], Some(2));
@@ -1312,6 +1340,36 @@ mod tests {
         l.typed(BPM_ID, "60 bpm");
         assert_eq!((l.state().beats(), l.state().bpm()), (2.0, 60.0));
         assert_eq!(l.value_text(BPM_ID), "60.000");
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// BEATS keeps the tempo it gives in BPM's range (10 to 522): the 2 s loop takes 1/3 to 17.4 beats.
+    #[test]
+    fn the_length_keeps_the_tempo_in_range() {
+        let (mut l, p) = loaded("beats_range");
+        l.typed(BEATS_ID, "0.25");
+        assert_eq!(l.state().bpm(), 10.0);
+        assert!((l.state().beats() - 1.0 / 3.0).abs() < 1e-6, "{}", l.state().beats());
+        l.typed(BEATS_ID, "9999");
+        assert_eq!(l.state().bpm(), 522.0);
+        assert!((l.state().beats() - 17.4).abs() < 1e-5, "{}", l.state().beats());
+        // The wheel too.
+        let (x, y) = centre(&l, &Target::Beats);
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.state().bpm(), 522.0);
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// A file that can't be read: the hint names its path once, then why.
+    #[test]
+    fn a_bad_file_is_named_once() {
+        let p = std::env::temp_dir().join(format!("lemon-slicer-{}-bad.wav", std::process::id()));
+        std::fs::write(&p, b"not a wav").unwrap();
+        let path = p.to_string_lossy().into_owned();
+        let mut l = logic();
+        l.load(&path);
+        assert!(l.hint.starts_with(&format!("{path}: ")), "{}", l.hint);
+        assert_eq!(l.hint.matches(path.as_str()).count(), 1, "{}", l.hint);
         let _ = std::fs::remove_file(p);
     }
 

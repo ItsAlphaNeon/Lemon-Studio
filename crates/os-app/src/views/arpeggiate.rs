@@ -112,7 +112,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         let id = KnobId::Arp(k);
         let (cx, cy) = (x0 + cx, y0 + cy);
         ui.hit(Rect::new(cx - r - 2.0, cy - r - 2.0, 2.0 * r + 4.0, 2.0 * r + 4.0), Action::Knob(id), s.knob_text(id));
-        super::knob(ui, cx, cy, r, s.knob(id), k == Knob::TimeMul, t.text, t.text_dim);
+        super::knob(ui, cx, cy, r, s.knob_at(id, cx, cy, r + 2.0), k == Knob::TimeMul, t.text, t.text_dim);
     };
     side(ui, 241.0, 103.0, "Time mul", false);
     knob(ui, 264.0, 104.0, 13.0, Knob::TimeMul);

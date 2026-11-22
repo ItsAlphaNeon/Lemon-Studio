@@ -21,6 +21,7 @@ pub mod mixer;
 pub mod piano;
 pub mod patterns;
 pub mod perf;
+pub mod plugin_palette;
 pub mod playlist;
 pub mod project_forms;
 pub mod rack;
@@ -183,10 +184,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if docked.is_none() && !crate::wallpaper::paint(ui, work) {
         let wm = ui.t.watermark;
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
-        let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
+        let version = format!("Lemon Studio v{}", crate::version::staged());
         let vc = ui.t.version_text;
-        let vw = ui.c.text_width(crate::views::fnt(16.0), version);
-        ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, version);
+        let vw = ui.c.text_width(crate::views::fnt(16.0), &version);
+        ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, &version);
     }
 
     // One stacking order for all child windows (spec: ui/channel-rack.md §5). A maximized window
@@ -208,6 +209,11 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         // A window paints inside its paint area (also what it marks as drawn, e.g. text's generous overhang).
         let a = paint_area(s, win);
         ui.c.push_clip(a);
+        // Transparent windows: one that isn't the active one shows what is behind it (spec: ui/animations.md §4.9). A
+        // maximized one has nothing behind it to show.
+        let inactive = i + 1 != s.z.len() && !s.is_max(win) && crate::prefs::index(&crate::prefs::TRANSPARENT_WINDOWS) == 1;
+        let opacity = s.motion.borrow_mut().window_opacity(win, None, inactive, a);
+        let behind = (opacity < 1.0 && ui.c.visible(a)).then(|| ui.c.begin_layer(a, false));
         match win {
             Win::Playlist => ui.part(Seg::Win(win), a, |ui| playlist::paint(ui, s, r, f)),
             Win::Mixer => ui.part(Seg::Win(win), a, |ui| {
@@ -231,7 +237,12 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
             Win::Events => ui.part(Seg::Win(win), a, |ui| events::paint(ui, s, f)),
             Win::Container => ui.part(Seg::Win(win), a, |ui| container::paint(ui, s, f)),
+            Win::PluginPalette => ui.part(Seg::Win(win), a, |ui| plugin_palette::paint(ui, s, f)),
             _ => {}
+        }
+        browser::paint_drop_glows(ui, s, win);
+        if let Some(l) = behind {
+            ui.c.end_layer(l, opacity);
         }
         ui.c.pop_clip();
         ui.win = None;
@@ -276,6 +287,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.drag_on.is_none_or(|w| !s.is_detached(w)) {
         browser::paint_ghost(ui, s);
     }
+    browser::paint_fall(ui, s, None);
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }
@@ -283,7 +295,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         cabledebug::paint(ui, s);
     }
     // The Song info box of a project opened with "Show info on opening" (spec: flp/events/project-info.md).
-    crate::project_info::paint_song_info(ui, s);
+    crate::project_info_ui::paint_song_info(ui, s);
     // The Remote control settings box (spec: ui/remote-control.md §2).
     if let Some(b) = &s.link_box {
         remote_box::paint(ui, s, b);
@@ -293,6 +305,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if over_dialog && here {
         playlist::paint_overlays(ui, s);
     }
+    s.motion.borrow_mut().paint_ghosts(ui.c);
     overlays
 }
 
@@ -310,6 +323,7 @@ pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
         Win::ChannelRack => rack::paint(ui, s, f),
         _ => {}
     }
+    browser::paint_drop_glows(ui, s, w);
     ui.c.pop_clip();
     ui.win = None;
     let overlays = ui.hit_count();
@@ -322,6 +336,8 @@ pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
     if s.drag_on == Some(w) {
         browser::paint_ghost(ui, s);
     }
+    browser::paint_fall(ui, s, Some(w));
+    s.motion.borrow_mut().paint_ghosts(ui.c);
     overlays
 }
 
@@ -364,7 +380,7 @@ pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
 
 /// Minimize / maximize / close buttons from `x0` at the title bar of a window at top `y`.
 pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _hover: Color) {
-    let mut hovered = None;
+    let (mut hovered, mut down) = (None, None);
     for (i, (hint, action)) in [
         ("Minimize window", Action::MinWin(win)),
         ("Maximize / restore window", Action::MaxWin(win)),
@@ -373,11 +389,24 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
     .into_iter()
     .enumerate()
     {
-        if ui.hit(Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0), action, hint) {
+        let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
+        if ui.down(b, &action) {
+            down = Some(i);
+        }
+        if ui.hit(b, action, hint) {
             hovered = Some(i);
         }
     }
-    kit::window_buttons(ui.c, ui.t, x0, y, hovered);
+    kit::window_buttons(ui.c, ui.t, x0, y, hovered, down);
+}
+
+/// A window's own close ✕ in its title bar: the hit on `hit`, then the hover / pressed back of every title bar button
+/// on `back` (`kit::title_button_back`), under the glyph the caller draws. Whether the mouse is over it.
+pub fn close_button(ui: &mut Ui, hit: Rect, back: Rect, action: Action, hint: &'static str) -> bool {
+    let down = ui.down(hit, &action);
+    let hov = ui.hit(hit, action, hint);
+    kit::title_button_back(ui.c, ui.t, back, true, hov, down);
+    hov || down
 }
 
 /// Window frame with a title bar (§5); the bar drags the window. `buttons` = draw the window
@@ -555,9 +584,28 @@ pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, h
     }
     let hov = ui.hit(r, action.clone(), hint);
     let down = ui.down(r, &action);
-    let look = if on { Look::On } else if down { Look::Hot } else if hov { Look::Hover } else { Look::Off };
+    let look = if on { Look::On } else if down { Look::Hot } else { Look::Off };
+    lit_button(ui, r, icon, look, Look::Hover, hov && !on && !down);
+}
+
+/// A toolbar button in `look`; from rest, the look `hover` comes and goes over that as `lit` says.
+pub fn lit_button(ui: &mut Ui, r: Rect, icon: Icon, look: Look, hover: Look, lit: bool) {
+    let place = Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0);
     let c = tool_face(ui, r, look);
-    icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), c);
+    icons::draw(ui.c, icon, place, c);
+    let glow = button_glow(ui, r, lit);
+    if glow > 0.0 && matches!(look, Look::Off) {
+        let l = ui.c.begin_layer(r.outset(1.0), false);
+        let c = tool_face(ui, r, hover);
+        icons::draw(ui.c, icon, place, c);
+        ui.c.end_layer(l, glow);
+    }
+}
+
+/// How lit a toolbar button in `r` shows: its times and its curve are FL's, measured (spec: ui/animations.md §2.2, §4.6).
+pub fn button_glow(ui: &mut Ui, r: Rect, lit: bool) -> f32 {
+    let key = crate::motion::key((r.x.to_bits(), r.y.to_bits()));
+    ui.hover_linear(key, lit, r, crate::motion::BUTTON_HOVER).powf(1.5)
 }
 
 /// A sunken panel (hint bar, monitors): flat fill inside a 1 px dark border.
@@ -567,14 +615,30 @@ pub fn sunken(ui: &mut Ui, r: Rect, fill: Color) {
 
 /// A ring knob (toolbar style): arc from the minimum; bipolar knobs pass `center = true`.
 pub fn knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32, center: bool, _c: Color, _track: Color) {
-    let hov = ui.hovering(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r));
-    kit::knob(ui.c, ui.t, cx, cy, r, value, center, kit::KnobLook::Ring, kit::State::hover(hov));
+    hover_look(ui, Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), |c, t, st| kit::knob(c, t, cx, cy, r, value, center, kit::KnobLook::Ring, st));
+}
+
+/// A control in `area` drawn as `draw` says, its hover look coming and going over its look at rest (spec:
+/// ui/animations.md §4.6).
+pub fn hover_look(ui: &mut Ui, area: Rect, draw: impl Fn(&mut os_ui::Canvas, &os_theme::Palette, kit::State)) {
+    let hov = ui.hovering(area);
+    let k = ui.k;
+    let up = Rect::new(area.x * k, area.y * k, area.w * k, area.h * k);
+    let lit = ui.motion.borrow_mut().hover_knob(crate::motion::key((area.x.to_bits(), area.y.to_bits())), hov, up);
+    if lit >= 1.0 {
+        return draw(ui.c, ui.t, kit::State::hover(true));
+    }
+    draw(ui.c, ui.t, kit::State::hover(false));
+    if lit > 0.0 {
+        let l = ui.c.begin_layer(area.outset(2.0), false);
+        draw(ui.c, ui.t, kit::State::hover(true));
+        ui.c.end_layer(l, lit);
+    }
 }
 
 /// A dark glossy ball knob (mixer, rack, slots) with a pointer.
 pub fn ball_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32) {
-    let hov = ui.hovering(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r));
-    kit::knob(ui.c, ui.t, cx, cy, r, value, false, kit::KnobLook::Ball, kit::State::hover(hov));
+    hover_look(ui, Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), |c, t, st| kit::knob(c, t, cx, cy, r, value, false, kit::KnobLook::Ball, st));
 }
 
 /// A round LED (spec §7: grey ring, green ball with a bright core when lit).

@@ -158,20 +158,40 @@ pub fn panel_tab(c: &mut Canvas, t: &Palette, panel: Rect, w: f32, title: &str) 
 /// Extra space between caption letters (px).
 pub const CAPTION_TRACK: f32 = 1.0;
 
+/// `track` in logical px, rounded to whole device pixels. At 150 % a 1 px track is 1.5 device px: letters placed at
+/// fractional positions then sit 1 or 2 device px apart in turn, which reads as uneven spacing ("ATT ACK").
+fn device_track(c: &Canvas, track: f32) -> f32 {
+    let k = c.scale();
+    (track * k).round() / k
+}
+
 /// Width of a letter-spaced caption.
 pub fn caption_width(c: &mut Canvas, s: &str, track: f32) -> f32 {
-    let n = s.chars().count();
-    s.chars().map(|ch| c.text_width(CAPTION, ch.encode_utf8(&mut [0; 4]))).sum::<f32>() + track * n.saturating_sub(1) as f32
+    caption_xs(c, 0.0, s, track).1
+}
+
+/// Left edge of each letter of a caption starting at `x`, and the caption's width. Laid out in device pixels: the
+/// start snapped to one, each advance a whole number of them (a glyph's advance and the track), so every gap between
+/// letters is the same at any scale.
+fn caption_xs(c: &mut Canvas, x: f32, s: &str, track: f32) -> (Vec<f32>, f32) {
+    let k = c.scale();
+    let track = device_track(c, track);
+    let x0 = (x * k).round() / k;
+    let mut xs = Vec::with_capacity(s.len());
+    let mut at = x0;
+    for ch in s.chars() {
+        xs.push(at);
+        at += c.text_width(CAPTION, ch.encode_utf8(&mut [0; 4])) + track;
+    }
+    let w = if xs.is_empty() { 0.0 } else { at - track - x0 };
+    (xs, w)
 }
 
 /// Letter-spaced caption with its left edge at `x`, top at `y`.
 pub fn caption_at(c: &mut Canvas, x: f32, y: f32, col: Color, s: &str, track: f32) {
-    let mut x = x;
-    for ch in s.chars() {
-        let mut b = [0; 4];
-        let g = ch.encode_utf8(&mut b);
-        c.text(CAPTION, x.round(), y, col, g);
-        x += c.text_width(CAPTION, g) + track;
+    let (xs, _) = caption_xs(c, x, s, track);
+    for (ch, x) in s.chars().zip(xs) {
+        c.text(CAPTION, x, y, col, ch.encode_utf8(&mut [0; 4]));
     }
 }
 
@@ -321,6 +341,30 @@ mod tests {
             graph_bg(&mut c, Rect::new(60.0, 60.0, 50.0, 30.0));
             caption(&mut c, &t, 30.0, 40.0, "AMT", st.disabled);
             label(&mut c, &t, 120.0, 100.0, "Tempo", st.disabled);
+            }
+        }
+    }
+
+    /// Captions keep one gap between letters at every scale: at 150 % a 1 px track rounded per letter in logical px
+    /// gave gaps of 1 and 2 device px in turn ("ATT ACK", 2026-11-05 audit).
+    #[test]
+    fn caption_letters_evenly_spaced() {
+        for k in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            let mut c = Canvas::new(300, 60, k).unwrap();
+            for (x, s) in [(10.0, "ATTACK"), (10.5, "RELEASE"), (3.3, "TENSION")] {
+                let (xs, w) = caption_xs(&mut c, x, s, CAPTION_TRACK);
+                let gaps: Vec<f32> = s.chars().zip(&xs).zip(xs.iter().skip(1)).map(|((ch, a), b)| {
+                    let adv = c.text_width(CAPTION, ch.encode_utf8(&mut [0; 4]));
+                    ((b - a - adv) * k).round()
+                }).collect();
+                let want = (CAPTION_TRACK * k).round();
+                assert!(gaps.iter().all(|&g| g == want), "{s} at {k}: device gaps {gaps:?}, want {want}");
+                for a in &xs {
+                    assert!(((a * k) - (a * k).round()).abs() < 1e-3, "{s} at {k}: letter at {a} is between device px");
+                }
+                let last = s.chars().last().unwrap();
+                let end = xs.last().unwrap() + c.text_width(CAPTION, last.encode_utf8(&mut [0; 4]));
+                assert!((end - xs[0] - w).abs() < 1e-3 && (caption_width(&mut c, s, CAPTION_TRACK) - w).abs() < 1e-3);
             }
         }
     }

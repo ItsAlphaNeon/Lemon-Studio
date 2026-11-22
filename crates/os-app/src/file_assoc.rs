@@ -22,7 +22,7 @@ pub const EXT: &str = ".flp";
 pub const LEMON_EXT: &str = ".lemon";
 /// The type's description and the open verb's name (spec).
 const DESCRIPTION: &str = "Lemon Studio project";
-const FRIENDLY_NAME: &str = "Lemon Studio";
+const FRIENDLY_NAME: &str = crate::version::NAME;
 /// The per-user classes, where every write goes (`Root::Classes`).
 const CLASSES: &str = r"Software\Classes";
 /// Windows' "Open with ▸ Always" choice for `.flp` (`Root::User`), value `ProgId`.
@@ -173,14 +173,14 @@ fn program() -> Option<String> {
 impl App {
     /// Reads the check's state for General ▸ System (each time the page opens; spec: "It is read again whenever the
     /// page opens").
-    pub(crate) fn assoc_read(&mut self) {
+    pub fn assoc_read(&mut self) {
         self.state.settings.assoc = program().is_some_and(|p| ticked(&p, &look(reg::get)));
     }
 
     /// The check was clicked: ticked, the registration is removed; else it is written. Then the registry is read
     /// again: the check shows what Windows now says, and the hint bar why it stayed unticked when a `UserChoice` keeps
     /// another program.
-    pub(crate) fn assoc_click(&mut self) {
+    pub fn assoc_click(&mut self) {
         let label = crate::views::settings::ASSOCIATE_CHECK;
         let Some(program) = program() else {
             self.state.message = Some(format!("{label}: the program's own path is not known"));

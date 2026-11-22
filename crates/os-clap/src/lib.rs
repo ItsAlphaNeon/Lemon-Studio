@@ -82,6 +82,15 @@ unsafe fn cstr(p: *const c_char) -> String {
     if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned() }
 }
 
+/// A fixed-size name field's text, up to its first NUL (a field the plugin filled to the end has none).
+fn fixed_str(a: &[c_char]) -> String {
+    let bytes: Vec<u8> = a.iter().map(|&c| c as u8).take_while(|&b| b != 0).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Audio ports read per direction: a multi-output instrument may have a main port and 16 or more extra ones.
+const MAX_PORTS: u32 = 64;
+
 impl Library {
     /// Loads plugin `path`: a `.clap` file, or on macOS a `.clap` bundle (its `init` gets the bundle's path).
     pub fn load(path: &Path) -> Result<Arc<Library>, String> {
@@ -678,6 +687,8 @@ pub struct Plugin {
     chan_mods: [f32; 2],
     /// Voices started with note levels, until the plugin reports their end.
     level_voices: Vec<LevelVoice>,
+    /// Automation indexes that stand for others of the list (`use_param_aliases`).
+    param_aliases: &'static [(u32, u32)],
     /// Mod amounts of sounding voices to send at the start of the next block (note id, key, parameter, amount).
     mod_resend: Vec<(i32, u8, u32, f64)>,
     /// Voices get their gains as volume note expressions (`use_voice_gains`).
@@ -722,6 +733,8 @@ pub struct Plugin {
     /// extra outputs get unheard scratch (spec: audio/sidechain.md "Hosted plugins' input buses").
     aux_ins: Vec<usize>,
     aux_outs: Vec<usize>,
+    /// The names of the output ports after the main one (`extra_output_names`).
+    aux_out_names: Vec<String>,
     /// Buffers for channels the host has no audio for (a mono input's mix of both sides, channels beyond two, the
     /// other ports), the channel pointers and the port buffers of the current process call: sized at activation, so
     /// the audio thread never allocates.
@@ -733,6 +746,8 @@ pub struct Plugin {
     /// Parameter ranges in list order (id, min, max, stepped), read after init and on a rescan (values cross the
     /// hosting layer normalized).
     ranges: Vec<params::Range>,
+    /// `ranges`' places by parameter id (`params::by_id`).
+    range_of: Vec<(u32, usize)>,
     /// Host parameter changes (id, plain value) for the next process call or flush.
     param_queue: Vec<(u32, f64)>,
     /// Automation values (frame offset, id, plain value) for the next process call (`params.rs`).
@@ -966,6 +981,7 @@ impl Plugin {
                 note_levels: None,
                 chan_mods: [0.0; 2],
                 level_voices: Vec::new(),
+                param_aliases: &[],
                 mod_resend: Vec::new(),
                 voice_gains: false,
                 channel_levels: false,
@@ -1001,6 +1017,7 @@ impl Plugin {
                 outs: 2,
                 aux_ins: Vec::new(),
                 aux_outs: Vec::new(),
+                aux_out_names: Vec::new(),
                 scratch: Vec::new(),
                 in_ptrs: Vec::new(),
                 out_ptrs: Vec::new(),
@@ -1013,6 +1030,7 @@ impl Plugin {
                 voice_info,
                 ledger: VoiceLedger::new(),
                 bend,
+                range_of: params::by_id(&ranges),
                 ranges,
                 param_queue: Vec::new(),
                 auto: Vec::with_capacity(params::MAX_AUTO),
@@ -1083,24 +1101,29 @@ impl Plugin {
     /// The channels of the plugin's input and output ports, the main one first (main thread, inactive: ports only
     /// change then), and buffers for them. Without the audio-ports extension the plugin is taken as stereo in and out.
     fn read_ports(&mut self) {
-        let ports = |is_input: bool| -> Option<Vec<usize>> {
+        let ports = |is_input: bool| -> Option<Vec<(usize, String)>> {
             let ports = unsafe { self.audio_ports.as_ref() }?;
-            let count = unsafe { ports.count.map_or(0, |c| c(self.plugin, is_input)) }.min(16);
+            let count = unsafe { ports.count.map_or(0, |c| c(self.plugin, is_input)) }.min(MAX_PORTS);
             Some(
                 (0..count)
                     .map(|i| {
                         // SAFETY: plain data the plugin fills.
                         let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
                         let ok = unsafe { ports.get.is_some_and(|g| g(self.plugin, i, is_input, &mut info)) };
-                        if ok { (info.channel_count as usize).min(64) } else { 2 }
+                        match ok {
+                            true => ((info.channel_count as usize).min(64), fixed_str(&info.name)),
+                            false => (2, String::new()),
+                        }
                     })
                     .collect(),
             )
         };
-        let (ins, outs) = (ports(true).unwrap_or_else(|| vec![2]), ports(false).unwrap_or_else(|| vec![2]));
-        (self.ins, self.outs) = (ins.first().copied().unwrap_or(0), outs.first().copied().unwrap_or(0));
-        self.aux_ins = ins.get(1..).unwrap_or_default().to_vec();
-        self.aux_outs = outs.get(1..).unwrap_or_default().to_vec();
+        let stereo = || vec![(2, String::new())];
+        let (ins, outs) = (ports(true).unwrap_or_else(stereo), ports(false).unwrap_or_else(stereo));
+        (self.ins, self.outs) = (ins.first().map_or(0, |p| p.0), outs.first().map_or(0, |p| p.0));
+        self.aux_ins = ins.iter().skip(1).map(|p| p.0).collect();
+        self.aux_outs = outs.iter().skip(1).map(|p| p.0).collect();
+        self.aux_out_names = outs.iter().enumerate().skip(1).map(|(i, p)| if p.1.trim().is_empty() { format!("Output {}", i + 1) } else { p.1.trim().to_string() }).collect();
         let (aux_in, aux_out): (usize, usize) = (self.aux_ins.iter().sum(), self.aux_outs.iter().sum());
         self.scratch = vec![0.0; (self.ins + self.outs + aux_in + aux_out) * self.max_frames as usize];
         self.in_ptrs = Vec::with_capacity(self.ins + aux_in);
@@ -1233,7 +1256,7 @@ impl Plugin {
 
     /// (min, max) of parameter `id`.
     fn range(&self, id: u32) -> Option<(f64, f64)> {
-        self.ranges.iter().find(|r| r.0 == id).map(|&(_, lo, hi, _)| (lo, hi))
+        params::place(&self.range_of, id).map(|i| (self.ranges[i].1, self.ranges[i].2))
     }
 
     fn normalize(&self, id: u32, plain: f64) -> f64 {
@@ -1340,6 +1363,12 @@ impl Plugin {
     pub fn use_voice_gains(&mut self) -> bool {
         self.voice_gains = true;
         true
+    }
+
+    /// Automation of index `.0` of each pair reaches parameter `.1` of the list: a project file's indexes for the plugin
+    /// this one stands in for (spec: plugins/citrus.md).
+    pub fn use_param_aliases(&mut self, aliases: &'static [(u32, u32)]) {
+        self.param_aliases = aliases;
     }
 
     /// Sends the channel's volume and pan (`Instrument::channel_levels`) as the SysEx message of
@@ -1492,6 +1521,28 @@ impl Plugin {
         let mut r = Reader(data, 0);
         let stream = clap_istream { ctx: &mut r as *mut Reader as *mut c_void, read: Some(read) };
         unsafe { (*self.state).load.is_some_and(|f| f(self.plugin, &stream)) }
+    }
+
+    /// Copies the output ports after the main one, as the chunk of `n` frames just processed left them in scratch, to
+    /// frame `at` of `extra` (`Instrument::process_extra`'s layout): a mono port on both sides, a port of more than two
+    /// channels by its first two (spec: audio/multi-output.md).
+    /// `frames` is the whole block's length (`left.len()` of `process_extra`).
+    fn take_extra(&self, extra: &mut [f32], frames: usize, at: usize, n: usize) {
+        if extra.is_empty() || frames == 0 {
+            return;
+        }
+        let max = self.max_frames as usize;
+        let mut ch = self.ins + self.outs + self.aux_ins.iter().sum::<usize>();
+        for (k, &channels) in self.aux_outs.iter().enumerate() {
+            let Some(pair) = extra.get_mut(2 * k * frames..2 * (k + 1) * frames) else { break };
+            let (l, r) = pair.split_at_mut(frames);
+            let side = |c: usize| &self.scratch[(ch + c) * max..(ch + c) * max + n];
+            if channels > 0 {
+                l[at..at + n].copy_from_slice(side(0));
+                r[at..at + n].copy_from_slice(side(if channels > 1 { 1 } else { 0 }));
+            }
+            ch += channels;
+        }
     }
 
     /// Processes `n` frames (≤ max) with the queued events whose time falls inside them.
@@ -1847,7 +1898,9 @@ impl Plugin {
             right.copy_from_slice(left);
         }
         // CONTINUE / TAIL: the plugin says it is still going; CONTINUE_IF_NOT_QUIET: while its output is not silent.
-        let loud = left.iter().chain(right.iter()).any(|v| v.abs() > QUIET);
+        // Sound on an extra output port counts too (a drum's own output).
+        let extra = (aux_out_at..aux_out_at + self.aux_outs.iter().sum::<usize>()).any(|c| self.scratch[c * max..c * max + frames].iter().any(|v| v.abs() > QUIET));
+        let loud = extra || left.iter().chain(right.iter()).any(|v| v.abs() > QUIET);
         self.sounding = status == CLAP_PROCESS_CONTINUE || status == CLAP_PROCESS_TAIL || (status == CLAP_PROCESS_CONTINUE_IF_NOT_QUIET && loud);
         self.steady += i64::from(n);
         // Voices: the ends it reported, none once it sleeps, released voices ringing out (spec: audio/voices.md §2).
@@ -1937,6 +1990,10 @@ impl os_host::Plugin for Plugin {
         Plugin::use_channel_levels(self)
     }
 
+    fn use_param_aliases(&mut self, aliases: &'static [(u32, u32)]) {
+        Plugin::use_param_aliases(self, aliases);
+    }
+
     fn set_offline(&mut self, offline: bool) {
         Plugin::set_offline(self, offline);
     }
@@ -2019,6 +2076,10 @@ impl os_host::Plugin for Plugin {
 
     fn puts_out_notes(&self) -> bool {
         self.note_outputs
+    }
+
+    fn extra_output_names(&self) -> Vec<String> {
+        self.aux_out_names.clone()
     }
 
     fn take_automation_requests(&mut self) -> Vec<u32> {
@@ -2155,6 +2216,10 @@ impl os_engine::Instrument for Plugin {
         }
     }
 
+    fn tunes_by_bend(&self) -> bool {
+        self.bend.is_some()
+    }
+
     /// The engine applies the channel's volume and pan to the output (false), unless the plugin takes them
     /// (`use_channel_levels`, true); the channel's mod X / Y join each note's in its modulation, and sounding voices
     /// are sent their new amounts (spec: audio/voice-levels.md "Changes while a note sounds").
@@ -2195,8 +2260,24 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        self.render(rate, left, right, &mut []);
+    }
+
+    fn extra_outputs(&self) -> usize {
+        self.aux_outs.len()
+    }
+
+    fn process_extra(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
+        self.render(rate, left, right, extra);
+    }
+}
+
+impl Plugin {
+    /// An instrument's block (`Instrument::process_extra`): `extra` receives the output ports after the main one.
+    fn render(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], extra: &mut [f32]) {
         left.fill(0.0);
         right.fill(0.0);
+        extra.fill(0.0);
         if self.rate != rate {
             // Activation is a main-thread call: ask the UI to do it and stay silent until then.
             if debug() && self.wanted_rate.load(Ordering::Acquire) != rate {
@@ -2229,6 +2310,7 @@ impl os_engine::Instrument for Plugin {
             self.chunk_song = song.map(|s| s.advanced(at as u64, rate));
             let (l, r) = (&mut left[at..at + n], &mut right[at..at + n]);
             self.process_chunk(l, r);
+            self.take_extra(extra, left.len(), at, n);
             at += n;
         }
         if debug() {
@@ -2378,6 +2460,8 @@ impl Drop for Plugin {
 
 #[cfg(test)]
 mod mono_mock;
+#[cfg(test)]
+mod multi_mock;
 #[cfg(all(test, unix, not(target_os = "macos")))]
 mod timer_mock;
 #[cfg(test)]
@@ -2469,6 +2553,37 @@ mod tests {
         p.audio_ports = ptr::null();
         p.read_ports();
         assert_eq!((p.ins, p.outs), (2, 2));
+    }
+
+    /// A second output port is the plugin's first extra output, by its port's name: `process` leaves it out, and
+    /// `process_extra` gives it after the main output, left then right, across a block boundary (spec:
+    /// audio/multi-output.md §2).
+    #[test]
+    fn a_second_output_port_is_an_extra_output() {
+        use crate::multi_mock::ENTRY;
+        use os_engine::Instrument as _;
+        let entry = &ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Multi Test.clap")) }.expect("mock");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 48000));
+        assert_eq!(p.extra_outputs(), 1);
+        assert_eq!(os_host::Plugin::extra_output_names(&p), ["Snare"]);
+        let n = MAX_FRAMES as usize + 904;
+        // An idle instrument sleeps (`asleep`): a note wakes it.
+        p.note_on(0, 60, 1.0);
+        let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
+        p.process(48000, &mut l, &mut r);
+        let bad: Vec<(usize, f32, f32)> = l.iter().zip(&r).enumerate().filter(|(_, (a, b))| (*a - 0.25).abs() > 1e-6 || (*b - 0.25).abs() > 1e-6).map(|(i, (a, b))| (i, *a, *b)).take(5).collect();
+        assert!(bad.is_empty(), "{bad:?} of {n}");
+        let (mut l, mut r, mut extra) = (vec![0.0f32; n], vec![0.0f32; n], vec![9.0f32; 2 * n]);
+        p.process_extra(48000, &mut l, &mut r, &mut extra);
+        assert!(l.iter().chain(&r).all(|v| (v - 0.25).abs() < 1e-6));
+        assert!(extra[..n].iter().all(|&v| v == 0.5), "left");
+        assert!(extra[n..].iter().all(|&v| v == -0.5), "right");
+        // More room than outputs: the rest is silence.
+        let mut extra = vec![9.0f32; 4 * 64];
+        p.process_extra(48000, &mut l[..64], &mut r[..64], &mut extra);
+        assert!(extra[128..].iter().all(|&v| v == 0.0));
     }
 
     /// A plugin with ports besides its main ones (Lemon Limiter's sidechain input) gets a buffer for every port, as
@@ -2878,6 +2993,7 @@ mod tests {
             index: 0, kind: ChannelKind::Automation, name: None, plugin: None, color: None, enabled: true, volume: 1.0,
             pan: -1.0, pitch_cents: 0, mixer_track: 0, sample_path: None, layer_children: vec![], envelopes: Default::default(),
             rack: Default::default(), plugin_state: None, misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         };
         // Main level from 0 (-18 dB) to 1 (+18 dB) over 4 beats (120 BPM: 2 s).
         let auto = Automation {
@@ -3002,6 +3118,7 @@ mod tests {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -3036,6 +3153,7 @@ mod tests {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         };
         let note = os_model::Note { length: 24, ..os_model::Note::step(0, 0) };
         let project = os_model::Project {
@@ -3083,6 +3201,7 @@ mod tests {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();
@@ -3136,6 +3255,7 @@ mod tests {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+            lemon_icon: None,
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut lib = os_engine::SampleLibrary::default();
@@ -3279,6 +3399,7 @@ mod tests {
             index: 0, kind: os_model::ChannelKind::Plugin, name: None, plugin: Some("Lemon Sampler".into()), plugin_state: None, color: None,
             enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None,
             layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc, sound: Default::default(),
+            lemon_icon: None,
         };
         let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
         let mut slib = os_engine::SampleLibrary::default();
@@ -3426,6 +3547,20 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// An index past the plugin's list is dropped, unless an alias (`use_param_aliases`) gives it a parameter.
+    #[test]
+    fn automation_follows_the_param_aliases() {
+        let wav = dc_wav("aliases");
+        let mut p = sampler_of(&wav);
+        const FAR: u32 = 1_000_000;
+        p.automate(0, FAR, 0.5);
+        assert!(p.auto.is_empty(), "unknown index");
+        p.use_param_aliases(&[(FAR, 0)]);
+        p.automate(0, FAR, 0.5);
+        assert_eq!(p.auto.len(), 1, "reaches parameter 0");
+        assert_eq!(p.auto[0].1, p.ranges[0].0);
+    }
+
     /// The channel's levels (`use_channel_levels`): Lemon Sampler is sent the volume and pan as the host-link message,
     /// at the block's start and ahead of its notes, only when they change, and again after it is activated; it works
     /// them into its voices, so the engine is told to leave the output alone. Without the switch it is told otherwise.
@@ -3502,6 +3637,7 @@ mod tests {
                 index: 0, kind: os_model::ChannelKind::AudioClip, name: None, plugin: None, plugin_state: None, color: None,
                 enabled: true, volume: 0.78125, pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: Some(wav.to_string_lossy().into_owned()),
                 layer_children: vec![], envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+                lemon_icon: None,
             };
             let arrangement = os_model::Arrangement { clips, tracks: (1..=4).map(os_model::PlaylistTrack::new).collect(), ..Default::default() };
             let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], arrangements: vec![arrangement], auto_crossfades: Some(true), ..Default::default() };

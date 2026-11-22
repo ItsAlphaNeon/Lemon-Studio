@@ -36,7 +36,7 @@ fn height(n: usize) -> f32 {
 
 pub fn rect(s: &State) -> Rect {
     let (t, k) = s.container.at;
-    let n = member_count(s, t, k).unwrap_or(0);
+    let n = member_count(&s.session, t, k).unwrap_or(0);
     Rect::new(s.container.pos.0, s.container.pos.1, W, height(n))
 }
 
@@ -58,11 +58,11 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     }
     ui.hit(win, Action::Swallow, "");
     let (track, slot) = s.container.at;
-    let title = crate::container::title(s, track, slot).unwrap_or_else(|| "Container".into());
+    let title = crate::container::title(&s.session, track, slot).unwrap_or_else(|| "Container".into());
     ui.hit(Rect::new(x0 + 1.0, y0 + 1.0, W - 30.0, TITLE_H - 4.0), Action::WinDrag(Win::Container), "");
     super::strum::label(ui, Font::new(17), x0 + 9.0, y0 + 15.0, -1, t.text, &title);
     let close = Rect::new(x0 + W - 20.0, y0 + 10.0, 10.0, 10.0);
-    let hov = ui.hit(close.outset(4.0), Action::CloseWin(Win::Container), "Close");
+    let hov = super::close_button(ui, close.outset(4.0), close.outset(3.0), Action::CloseWin(Win::Container), "Close");
     icons::draw(ui.c, Icon::Close, close.outset(1.0), if hov { t.tx(0xffffff) } else { t.glyph });
 
     let small = Font::new(9);
@@ -70,7 +70,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     let (wx, dx, mx) = (x0 + W - WET_X, x0 + W - DRY_X, x0 + W - MENU_X);
     super::strum::label(ui, small, wx, y0 + TOP - 8.0, 0, t.text_dim, "WET");
     super::strum::label(ui, small, dx, y0 + TOP - 8.0, 0, t.text_dim, "DRY");
-    let list = members(s, track, slot).unwrap_or_default();
+    let list = members(&s.session, track, slot).unwrap_or_default();
     if list.is_empty() {
         super::strum::label(ui, lf, x0 + 12.0, y0 + TOP + ROW_H / 2.0, -1, t.text_faint, "(empty)");
     }
@@ -82,7 +82,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         // The name (the one typed for it, else its plugin's), after its colour and icon: a click opens the effect's
         // window; a member whose plugin was not found is greyed.
         let name = m.shown();
-        let found = crate::container::member_key(s, crate::container::place_key(track, slot), m.id).is_some();
+        let found = crate::container::member_key(&s.session, crate::container::place_key(track, slot), m.id).is_some();
         let name_r = Rect::new(row.x, row.y, row.w - WET_X - 18.0, row.h);
         let hint = if found { format!("Open {name}'s window (right-click: its menu)") } else { format!("{name} was not found (right-click: its menu)") };
         let hov = ui.hit(name_r, Action::Container(CAct::Open(i)), hint);
@@ -104,7 +104,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
             let id = KnobId::Member(track, slot, m.id, wet);
             let v = s.knob(id);
             ui.hit(Rect::new(cx - 15.0, row.cy() - 15.0, 30.0, 30.0), Action::Knob(id), level_text(name, wet, v));
-            super::knob(ui, cx, row.cy(), 11.0, v, false, t.text, t.text_dim);
+            super::knob(ui, cx, row.cy(), 11.0, s.knob_at(id, cx, row.cy(), 13.0), false, t.text, t.text_dim);
         }
         // Its menu: Open editor, the levels' parameter menus, Move up, Move down, Remove.
         let b = Rect::new(mx - 12.0, row.cy() - 11.0, 24.0, 22.0);

@@ -3,15 +3,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Plugin menus (the full-screen plugin picker is retired): F8, the toolbar's plugin button, the channel rack's "+",
-//! Add one ▸ / Insert ▸ and the mixer slots open the app's own popup listing the installed plugins, and a pick adds
-//! the plugin where that menu says.
+//! Plugin menus (the full-screen plugin picker is retired): Add one ▸, Insert ▸, Replace ▸ and the other submenus list
+//! the installed plugins in the app's own popup, and a pick adds the plugin where that menu says. What opened a plugin
+//! menu on its own (F8, the toolbar's plugin button, the channel rack's "+", an empty mixer slot) opens the plugin
+//! palette (`crate::plugin_palette`), which lists the same plugins and picks the same way.
 // spec: ui/plugin-menu.md
 
 use std::collections::BTreeMap;
 
 use crate::app::{App, State};
-use crate::playlist::{Cmd, Mark, PItem, Popup};
+use crate::playlist::{Cmd, Mark, PItem};
 use crate::plugin_db::{self as db, Entry, MenuView, Mode};
 
 /// What a plugin menu entry does (`Cmd::Plugin`).
@@ -54,7 +55,8 @@ pub enum Target {
     Track(u16),
 }
 
-fn pick(target: Target, effect: bool, index: usize) -> Cmd {
+/// What picking plugin `index` (a generator, or an effect with `effect`) runs for `target`.
+pub fn pick(target: Target, effect: bool, index: usize) -> Cmd {
     use crate::mixer::MCmd;
     match target {
         Target::Container(slot) if effect => return Cmd::Mixer(MCmd::MemberAdd(slot, index)),
@@ -169,35 +171,6 @@ pub fn track_generators(s: &State, t: u16) -> Vec<PItem> {
     section(s, false, Target::Track(t), true)
 }
 
-/// A plugin menu for `target` at (x, y).
-pub fn menu(s: &State, target: Target, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: items(s, target, false), sub: None, scroll: [0; 2] }
-}
-
-/// Whether the open popup is a plugin menu (F8 closes it).
-pub fn is_open(s: &State) -> bool {
-    s.playlist.popup.as_ref().is_some_and(|p| p.items.iter().any(|i| i.cmd == Cmd::Plugin(PlugCmd::Manage)))
-}
-
-impl App {
-    /// Opens the plugin menu for `target` at (x, y); F8 while one is open closes it.
-    pub fn open_plugin_menu(&mut self, target: Target, at: (f32, f32)) {
-        self.state.menu_open = None;
-        self.state.playlist.popup = Some(menu(&self.state, target, at.0, at.1));
-        self.invalidate();
-    }
-
-    /// F8 (spec §1): the all-plugins menu at the mouse, or closes an open plugin menu.
-    pub fn toggle_plugin_menu(&mut self) {
-        if is_open(&self.state) {
-            self.state.playlist.popup = None;
-            self.invalidate();
-        } else {
-            self.open_plugin_menu(Target::All, self.mouse);
-        }
-    }
-}
-
 /// Runs a plugin menu command. Returns a status message.
 pub fn run(app: &mut App, c: PlugCmd) -> Option<String> {
     let m = match c {
@@ -224,29 +197,27 @@ pub fn run(app: &mut App, c: PlugCmd) -> Option<String> {
 
 /// A new channel for generator `index` (spec §1): at the bottom of the rack, or right below row `after`; selected and
 /// in view. Lemon Sampler makes an empty sampler channel (hosted on the next tick); any other generator a plugin
-/// channel hosting it. Its plugin window opens once it is hosted. One undo step, "Add channel" (`control::edit_app`):
+/// channel hosting it. Its plugin window opens once it is hosted. One undo step, "Add channel" (`Command::AddChannel`):
 /// undone, the channel goes and its instance is kept; redone, it comes back with it (`control::host`).
 pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
-    crate::control::edit_app(app, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| add_generator_now(app, index, after))
-}
-
-pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
-    let d = app.plugins.available.get(index)?.desc.clone();
+    use crate::control::command::Command;
+    let d = app.state.session.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
-    let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
-    let mut ch = if sampler { crate::app::add_channel(&mut s.project) } else { crate::app::add_plugin_channel(&mut s.project, &d.name) };
-    if sampler {
-        s.pending_open = Some(ch);
-    } else {
-        s.pending_plugin = Some((ch, index));
-    }
-    s.piano.dirty = true;
-    if let Some(r) = after.filter(|&r| r + 1 < ch) {
-        let order: Vec<usize> = (0..=r).chain([ch]).chain(r + 1..ch).collect();
-        crate::rack::reorder(app, &order);
-        ch = r + 1;
-    }
-    let s = &mut app.state;
+    let sampler = is_sampler(&d);
+    crate::mixer::track_ids(s);
+    let n = s.session.project.channels.len();
+    let to = after.filter(|&r| r + 1 < n).map(|r| r + 1);
+    let first = vec![Command::AddChannel { name: None, plugin: (!sampler).then(|| d.name.clone()), sample: None, track: None, kind: None, color: None, target: None, points: Vec::new(), children: Vec::new() }];
+    let id_of = |r: &[serde_json::Value]| r.first().and_then(|v| v["channel"].as_u64()).map(|id| id as u32);
+    let made = crate::control_ui::command_then(s, crate::history::ADD_CHANNEL, first, |_, r| {
+        id_of(r).zip(to).map(|(channel, row)| Command::MoveChannel { channel, row }).into_iter().collect()
+    });
+    let id = match made {
+        Ok(r) => id_of(&r)?,
+        Err(e) => return Some(e),
+    };
+    let ch = s.session.project.channels.iter().position(|c| c.id.0 == id)?;
+    open_hosted(s, id, ch, sampler, index);
     s.selected_channel = ch;
     s.rack.select_only(ch);
     crate::rack::autosize(s);
@@ -259,49 +230,41 @@ pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize
     sampler.then(|| "Added a sampler channel (Lemon Sampler)".into())
 }
 
+/// Whether generator `d` is the built-in Lemon Sampler (a channel of its own kind, no plugin).
+pub fn is_sampler(d: &os_host::Descriptor) -> bool {
+    d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(d)
+}
+
+/// Channel `id` on row `row` just given generator `index`: the interface hosts it its own way, so its plugin window
+/// opens (a command's own hosting opens none, `control::host`).
+pub fn open_hosted(s: &mut crate::app::State, id: u32, row: usize, sampler: bool, index: usize) {
+    s.session.control.host.retain(|r| !matches!(r, crate::control::HostReq::Instrument { channel, .. } if channel.0 == id));
+    if sampler {
+        s.session.pending_open = Some(row);
+    } else {
+        s.session.pending_plugin = Some((row, index));
+    }
+}
+
 /// Generator `index` in place of rack row `row`'s (channel menu and plugin window menu > Replace ▸; FL: "the plugin list
 /// of Add one", spec ui/channel-rack.md §18). The channel keeps its row, notes and steps, mixer track, levels and
 /// Misc settings; its old instance goes, the new one starts from its defaults, and the channel takes the new
 /// plugin's name. Lemon Studio choice where FL was not measured: the name follows the plugin. One undo step, "Replace
-/// channel" (`control::edit_app`): the channel takes a new id, so its old instrument, kept by the old one's
+/// channel" (`Command::ReplaceInstrument`): the channel takes a new id, so its old instrument, kept by the old one's
 /// (`Plugins::keep`), comes back with an undo and the new one with a redo (`control::host`).
 pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<String> {
-    crate::control::edit_app(app, crate::history::REPLACE_CHANNEL, crate::control::command::Region::Project, |app| replace_generator_now(app, index, row))
-}
-
-fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<String> {
-    let d = app.plugins.available.get(index)?.desc.clone();
-    app.state.project.channels.get(row)?;
-    let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
-    app.plugins.keep(row);
-    app.plugins.drop_key(row);
-    app.state.hosted_rows.retain(|&r| r != row);
-    app.transport.set_instruments(app.plugins.instruments());
+    use crate::control::command::Command;
+    let d = app.state.session.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
-    let ch = &mut s.project.channels[row];
-    ch.plugin_state = None;
-    // A new id at once, before the new instance is hosted and takes its channel's.
-    ch.id = os_model::Id::NONE;
-    s.control.settle(&mut s.project);
-    let ch = &mut s.project.channels[row];
-    if sampler {
-        ch.kind = os_model::ChannelKind::Sampler;
-        ch.plugin = None;
-        ch.clear_sample();
-        ch.name = Some(d.name.clone());
-        s.pending_open = Some(row);
-    } else {
-        ch.kind = os_model::ChannelKind::Plugin;
-        ch.plugin = Some(crate::osc3::file_name(&d.name).to_string());
-        ch.name = Some(d.name.clone());
-        // A Lemon Trio channel's sample is its custom shape's (spec: plugins/lemon-3x-osc.md §6): the new instance has
-        // none, so neither does the channel.
-        if crate::osc3::is_osc3(ch) {
-            ch.sample_path = None;
-        }
-        s.pending_plugin = Some((row, index));
-    }
-    s.piano.dirty = true;
+    let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
+    crate::mixer::track_ids(s);
+    let channel = s.session.project.channels.get(row)?.id.0;
+    let c = Command::ReplaceInstrument { channel, plugin: (!sampler).then(|| d.name.clone()) };
+    let id = match crate::control_ui::command(s, crate::history::REPLACE_CHANNEL, None, vec![c]) {
+        Ok(r) => r.first().and_then(|v| v["channel"].as_u64())? as u32,
+        Err(e) => return Some(e),
+    };
+    open_hosted(s, id, row, sampler, index);
     s.selected_channel = row;
     s.rack.select_only(row);
     Some(format!("Replaced with {}", d.name))
@@ -311,7 +274,7 @@ fn replace_generator_now(app: &mut App, index: usize, row: usize) -> Option<Stri
 pub fn add_effect(app: &mut App, index: usize, slot: Option<u8>) -> Option<String> {
     let s = &app.state;
     let t = s.selected_mixer;
-    let slot = slot.or_else(|| s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8));
+    let slot = slot.or_else(|| s.session.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.iter().position(Option::is_none)).map(|k| k as u8));
     match slot {
         Some(k) => crate::mixer::run(app, crate::mixer::MCmd::AddEffect(k, index)),
         None => Some("Every slot of this track is in use".into()),

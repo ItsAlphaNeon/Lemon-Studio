@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use winit::keyboard::{Key, NamedKey};
+use crate::keys::{Key, NamedKey};
 
 use crate::app::App;
 use crate::dialog::{spans, Answer, Body, Field, Kind, Reply, Then};
@@ -265,39 +265,39 @@ impl App {
     /// FILE > Export audio (Ctrl+R; `mp3`: Export MP3, Shift+Ctrl+R, with MP3 the only format): the Export form with
     /// the last choices, unless there is nothing to render (spec §2).
     // spec: audio/export.md §2
-    pub(crate) fn open_export(&mut self, mp3: bool) {
-        if self.export.is_some() {
+    pub fn open_export(&mut self, mp3: bool) {
+        if self.state.session.export.is_some() {
             return;
         }
         let s = &self.state;
         let p = crate::rack::play_project(s);
-        let song = s.song_mode;
+        let song = s.song_mode();
         // Play starts on the app's mode, else on whichever of the two has something to render (as FL: PAT with an
         // empty pattern still exports the playlist). Only with neither is it refused, in a warning box: a hint-bar
         // message is lost under the menu's own hint at once.
         let song_ok = p.arrangement().is_some_and(|a| !a.clips.is_empty());
-        let pat_ok = p.patterns.iter().find(|q| q.number == s.pattern).is_some_and(|q| !q.notes.is_empty());
+        let pat_ok = p.patterns.iter().find(|q| q.number == s.pattern()).is_some_and(|q| !q.notes.is_empty());
         if !song_ok && !pat_ok {
-            let text = format!("Nothing to export: the arranger is empty and {} has no notes.", crate::patterns::name_of(s, s.pattern));
+            let text = format!("Nothing to export: the arranger is empty and {} has no notes.", crate::edit::patterns::name_of(&s.session, s.pattern()));
             return self.tell(Kind::Warning, TITLE, spans(&[&text]));
         }
         let song = if song { song_ok } else { !pat_ok };
-        let mut o = Options::load();
+        let mut o = Options::load(&self.state.session.settings);
         if mp3 {
             o.formats = [false, false, true, false];
         }
-        let name = s.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
+        let name = s.session.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
         let folder = match crate::settings_file::get("export_folder").map(PathBuf::from).filter(|d| d.is_dir()) {
             // The project's folder first, else the last one used.
-            _ if s.path.as_ref().and_then(|p| p.parent()).is_some_and(|d| d.is_dir()) => s.path.as_ref().and_then(|p| p.parent()).unwrap().to_path_buf(),
+            _ if s.session.path.as_ref().and_then(|p| p.parent()).is_some_and(|d| d.is_dir()) => s.session.path.as_ref().and_then(|p| p.parent()).unwrap().to_path_buf(),
             Some(d) => d,
             None => crate::save_form::default_root().unwrap_or_else(std::env::temp_dir),
         };
         let device_rate = crate::transport::Transport::device_rate().unwrap_or(44100);
-        let tempo = s.project.tick_tempo(s.tempo);
-        let secs_per_tick = 60.0 / tempo.max(1.0) / f64::from(s.project.ppq.max(1));
-        let song_end = crate::playlist::clips(s).iter().map(|c| c.end()).max().unwrap_or(0);
-        let pat_len = crate::piano::pattern_length(s, s.pattern);
+        let tempo = s.session.project.tick_tempo(s.tempo());
+        let secs_per_tick = 60.0 / tempo.max(1.0) / f64::from(s.session.project.ppq.max(1));
+        let song_end = crate::edit::playlist::clips(&s.session).iter().map(|c| c.end()).max().unwrap_or(0);
+        let pat_len = crate::edit::notes::pattern_length(&s.session, s.pattern());
         let sel = |r: Option<(u32, u32)>| r.filter(|(a, b)| b > a);
         let mut name_field = Field::default();
         name_field.set(&name);
@@ -325,7 +325,7 @@ impl App {
 
     /// A click on a part of the Export form; `Some` closes it with that answer. With a list open, a click picks from it
     /// or only closes it.
-    pub(crate) fn export_form_click(&mut self, h: FHit) -> Option<Reply> {
+    pub fn export_form_click(&mut self, h: FHit) -> Option<Reply> {
         let f = top(self)?;
         if let Some(k) = f.list.take() {
             if let FHit::Item(i) = h {
@@ -370,7 +370,7 @@ impl App {
     }
 
     /// Keys on the Export form: Esc closes an open list, then the form; Enter exports; the rest types in the name.
-    pub(crate) fn export_form_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> Option<Reply> {
+    pub fn export_form_key(&mut self, key: &Key, ctrl: bool, alt: bool) -> Option<Reply> {
         let f = top(self)?;
         if f.list.is_some() {
             if matches!(key, Key::Named(NamedKey::Escape)) {
@@ -399,7 +399,7 @@ impl App {
     }
 
     /// The picker chose `dir`: the files go there.
-    pub(crate) fn export_folder_chosen(&mut self, dir: PathBuf) {
+    pub fn export_folder_chosen(&mut self, dir: PathBuf) {
         if let Some(f) = top(self) {
             f.folder = dir;
         }
@@ -407,7 +407,7 @@ impl App {
     }
 
     /// The form closed: Export keeps the choices and starts the render.
-    pub(crate) fn export_form_closed(&mut self, f: ExportForm, reply: Reply) {
+    pub fn export_form_closed(&mut self, f: ExportForm, reply: Reply) {
         if reply != Reply::Button(Answer::Ok) {
             return;
         }
@@ -419,7 +419,7 @@ impl App {
             let job = self.export_job(&f);
             return self.start_export(job, f.song);
         }
-        f.o.save();
+        f.o.save(&self.state.session.settings);
         crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
         let job = self.export_job(&f);
         self.start_export(job, f.song);
@@ -427,19 +427,19 @@ impl App {
 
     /// What the audio thread needs for form `f`: the span, the markers, loop and tempo at the device's rate, the
     /// mixer tracks' names.
-    pub(crate) fn export_job(&self, f: &ExportForm) -> ex::Job {
+    pub fn export_job(&self, f: &ExportForm) -> ex::Job {
         let s = &self.state;
         let o = f.o.clone();
         let rate = f.device_rate;
-        let tempo = s.project.tick_tempo(s.tempo);
-        let ppq = s.project.ppq;
-        let song_end = crate::playlist::clips(s).iter().map(|c| c.end()).max().unwrap_or(0);
+        let tempo = s.session.project.tick_tempo(s.tempo());
+        let ppq = s.session.project.ppq;
+        let song_end = crate::edit::playlist::clips(&s.session).iter().map(|c| c.end()).max().unwrap_or(0);
         // The spans of ticks the file plays, in order: the export's span; a whole song from its start marker, broken at
         // skips (spec: audio/song-structure.md "Time markers"); else everything. A tick is placed in the file through
         // them, or is not in it.
         let spans: Vec<(u64, u64)> = match f.span() {
             Some((a, b)) => vec![(u64::from(a), u64::from(b))],
-            None if f.song => os_engine::engine::rendered_spans(s.project.arrangement().map_or(&[], |a| a.markers.as_slice()), u64::from(song_end)),
+            None if f.song => os_engine::engine::rendered_spans(s.session.project.arrangement().map_or(&[], |a| a.markers.as_slice()), u64::from(song_end)),
             None => vec![(0, u64::MAX)],
         };
         let place = |tick: u32| {
@@ -456,7 +456,7 @@ impl App {
         let frame = |t: u64| os_engine::laws::tick_to_frame(t as f64, ppq, tempo, rate) as u64;
         let mut markers = Vec::new();
         if o.markers {
-            let list = if f.song { s.project.arrangement().map(|a| a.markers.clone()) } else { s.project.pattern(s.pattern).map(|p| p.markers.clone()) };
+            let list = if f.song { s.session.project.arrangement().map(|a| a.markers.clone()) } else { s.session.project.pattern(s.pattern()).map(|p| p.markers.clone()) };
             for m in list.unwrap_or_default().iter().filter(|m| m.kind == 0) {
                 if let Some(t) = place(m.position) {
                     markers.push(ex::Marker { frame: frame(t), name: m.name.clone() });
@@ -464,7 +464,7 @@ impl App {
             }
         }
         if o.note_markers && !f.song {
-            let mut starts: Vec<u64> = s.project.pattern(s.pattern).map(|p| p.notes.iter().filter_map(|n| place(n.position)).collect()).unwrap_or_default();
+            let mut starts: Vec<u64> = s.session.project.pattern(s.pattern()).map(|p| p.notes.iter().filter_map(|n| place(n.position)).collect()).unwrap_or_default();
             starts.sort_unstable();
             starts.dedup();
             markers.extend(starts.into_iter().map(|t| ex::Marker { frame: frame(t), name: String::new() }));
@@ -480,9 +480,9 @@ impl App {
         let ticks = match f.span() {
             Some((a, b)) => b - a,
             None if f.song => spans.iter().map(|&(a, b)| b - a).sum::<u64>().min(u64::from(u32::MAX)) as u32,
-            None => crate::piano::pattern_length(s, s.pattern),
+            None => crate::edit::notes::pattern_length(&s.session, s.pattern()),
         };
-        let tracks = s.project.mixer.iter().map(|m| m.index).max().unwrap_or(0);
+        let tracks = s.session.project.mixer.iter().map(|m| m.index).max().unwrap_or(0);
         // Render to wave file... renders the tracks' outputs, as Split mixer tracks does.
         let o = if f.tracks.is_empty() { o } else { Options { split: true, ..o } };
         ex::Job {
@@ -493,7 +493,7 @@ impl App {
             markers,
             loop_frames,
             tempo: (tempo, f64::from(ticks) / f64::from(ppq.max(1))),
-            track_names: (0..=tracks).map(|t| crate::mixer::name(s, t)).collect(),
+            track_names: (0..=tracks).map(|t| crate::edit::mixer::name(&s.session, t)).collect(),
             tracks: f.tracks.clone(),
         }
     }
@@ -502,12 +502,12 @@ impl App {
     /// Export form with the last choices and WAV the only format ticked (others can be), named after the track when it
     /// is one; Export writes each track's output (`ex::Job::tracks`). Lemon Studio's choice: the original renders the
     /// selected tracks to wave files, through a form that was not looked at.
-    pub(crate) fn open_track_render(&mut self, tracks: Vec<u16>) {
-        if self.export.is_some() || tracks.is_empty() {
+    pub fn open_track_render(&mut self, tracks: Vec<u16>) {
+        if self.state.session.export.is_some() || tracks.is_empty() {
             return;
         }
         let name = match tracks[..] {
-            [t] => Some(crate::mixer::name(&self.state, t)),
+            [t] => Some(crate::edit::mixer::name(&self.state.session, t)),
             _ => None,
         };
         self.open_export(false);
@@ -543,9 +543,9 @@ mod tests {
     /// A pattern with notes, played in PAT mode.
     fn app() -> App {
         let mut app = App::new(None);
-        app.state.project = crate::app::test_project();
-        app.state.project.patterns[0].notes.push(Note::step(0, 0));
-        app.state.song_mode = false;
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        app.state.session.project.get_mut().patterns[0].notes.push(Note::step(0, 0));
+        app.state.set_song_mode(false);
         app
     }
 
@@ -554,15 +554,15 @@ mod tests {
     #[test]
     fn opens_with_the_last_choices() {
         let mut empty = App::new(None);
-        empty.state.project = crate::app::test_project();
-        empty.state.project.patterns[0].notes.clear();
-        empty.state.song_mode = false;
+        empty.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        empty.state.session.project.get_mut().patterns[0].notes.clear();
+        empty.state.set_song_mode(false);
         empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));
         assert!(form(&empty).is_none());
         assert_eq!(empty.state.dialogs.len(), 1, "a warning says why");
         // PAT with an empty pattern still exports the playlist (and SONG with an empty playlist the pattern).
         empty.state.dialogs.clear();
-        crate::playlist::arr_mut(&mut empty.state).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
+        crate::edit::playlist::arr_mut(&mut empty.state.session).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
         empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));
         let f = form(&empty).expect("the Export form");
         assert!(f.song && f.song_ok && !f.pat_ok, "Play starts on Song");
@@ -581,7 +581,7 @@ mod tests {
         click(&mut app, FHit::Tile(ex::FLAC as u8));
         click(&mut app, FHit::Main);
         // The render started (and keeps going in the background); the next form remembers FLAC.
-        while app.export.is_some() {
+        while app.state.session.export.is_some() {
             app.plugin_tick();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -603,7 +603,7 @@ mod tests {
     fn the_parts_change_the_choices() {
         let mut app = app();
         app.state.piano.range = Some((0, 96));
-        crate::playlist::arr_mut(&mut app.state).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
+        crate::edit::playlist::arr_mut(&mut app.state.session).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
         app.act(crate::app::Action::MenuItem(0, FILE_EXPORT_MP3));
         click(&mut app, FHit::Seg(1, 1));
         assert_eq!(form(&app).unwrap().span(), Some((0, 96)), "the piano roll's selection");

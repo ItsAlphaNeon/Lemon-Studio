@@ -52,6 +52,13 @@ impl Rgb {
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Rgb { r, g, b }
     }
+
+    /// As a channel's colour is kept: no component under 0x14, as FL saves channel colours, so a colour set darker
+    /// shows as it will come back.
+    pub const fn for_channel(self) -> Rgb {
+        const MIN: u8 = 0x14;
+        Rgb { r: if self.r < MIN { MIN } else { self.r }, g: if self.g < MIN { MIN } else { self.g }, b: if self.b < MIN { MIN } else { self.b } }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -191,6 +198,10 @@ impl ControllerLink {
 
     pub fn set_target(&mut self, t: u32) {
         self.bytes[8..12].copy_from_slice(&t.to_le_bytes());
+    }
+
+    pub fn set_source(&mut self, place: u16) {
+        self.bytes[2..4].copy_from_slice(&place.to_le_bytes());
     }
 }
 
@@ -458,6 +469,14 @@ impl PlaylistView {
 pub const UNSORTED_GROUP: &str = "Unsorted";
 
 impl Project {
+    /// The index the file gives channels in no group: the "Unsorted" entry of [`Project::groups`], or one past the end
+    /// when the list has none.
+    pub fn unsorted_group(&self) -> u32 {
+        self.groups.iter().position(|g| g == UNSORTED_GROUP).unwrap_or(self.groups.len()) as u32
+    }
+}
+
+impl Project {
     /// Index into `arrangements` of the current arrangement (the first when unset or not found).
     pub fn arrangement_index(&self) -> usize {
         self.current_arrangement.and_then(|n| self.arrangements.iter().position(|a| a.number == n)).unwrap_or(0)
@@ -707,6 +726,8 @@ pub struct Channel {
     /// Sound settings the engine reads that have no other place in the model (filter, sampler flags, declick,
     /// stretch).
     pub sound: ChannelSound,
+    /// Lemon Studio's icon for the channel (by name), kept in `.lemon`; FL's own is [`ChannelRack::icon`].
+    pub lemon_icon: Option<String>,
 }
 
 impl Channel {
@@ -1188,8 +1209,9 @@ pub struct ChannelRack {
     pub locked: bool,
     /// Zipped row (event 15).
     pub zipped: bool,
-    /// Filter group index into [`Project::groups`] (event 145).
-    pub group: u32,
+    /// Filter group: an index into [`Project::groups`] (event 145); `None` in no group, which the file writes as the
+    /// "Unsorted" entry's index ([`Project::unsorted_group`]).
+    pub group: Option<u32>,
     /// The colour event 128 holds, whether or not it is a custom colour: the playlist draws audio and automation
     /// clips with it (spec: ui/playlist.md §2, "Channel-colour rule"). Display only; saving writes `Channel::color`.
     pub stored_color: Option<Rgb>,
@@ -1303,12 +1325,14 @@ pub struct Pattern {
     /// Length set in the channel rack's pattern length box, in ticks; `None` = Auto (whole bars past the last
     /// note). Stored as metadata event 164 plus a "Length" marker (spec: flp/events/patterns.md).
     pub length: Option<u32>,
-    /// Per-channel loop lengths `(channel, steps)` in channel order (events 160/161 after the notes);
-    /// steps [`Pattern::LOOP_FOLLOW`] = a channel that only follows "Loop all channels".
+    /// Per-channel loop points `(channel, value)` in channel order (events 160/161 after the notes), as FL 24.1.1 writes
+    /// them: a length in steps, 0 = no loop, or [`Pattern::LOOP_STEP`], [`Pattern::LOOP_BEAT`], [`Pattern::LOOP_BAR`]
+    /// (Advanced looping's units; Bar is also what "Loop all channels" writes for a channel that loops).
     pub loops: Vec<(u16, u32)>,
-    /// Loop mode off with loop lengths kept: the loop type value (metadata events 26 = 1 and 162; 3 = loop step
-    /// channels, 2 = loop all channels). `None` = loop mode on (or no loops).
-    pub loop_off: Option<u32>,
+    /// Loop mode on, with its type: event 162 after event 26 = 1 in the metadata block, 1 = Loop step channels, 2 = Loop
+    /// all channels, 3 = Advanced looping. FL 24.1.1 writes them while loop mode is on (spec: flp/events/patterns.md
+    /// "Loop settings on FL 24.1.1"; what FL 26 writes is REQUESTS #15). `None` = loop mode off.
+    pub loop_mode: Option<u32>,
     /// The pattern's own time markers (piano-roll Alt+T markers, time signatures, kinds kept as read), sorted by
     /// position; the "Length" marker is not among them (it follows `length`). Metadata marker groups (spec:
     /// flp/events/patterns.md, metadata block).
@@ -1316,8 +1340,12 @@ pub struct Pattern {
 }
 
 impl Pattern {
-    /// Stored loop length of channels that follow "Loop all channels" (0xFFFFFFFD).
-    pub const LOOP_FOLLOW: u32 = 0xFFFF_FFFD;
+    /// Loop points of [`Pattern::loops`]: Advanced looping's Step, Beat and Bar (−1, −2, −3).
+    pub const LOOP_STEP: u32 = 0xFFFF_FFFF;
+    pub const LOOP_BEAT: u32 = 0xFFFF_FFFE;
+    pub const LOOP_BAR: u32 = 0xFFFF_FFFD;
+    /// What "Loop all channels" writes for a channel that loops: Bar.
+    pub const LOOP_FOLLOW: u32 = Self::LOOP_BAR;
 }
 
 /// One point of a pattern's channel control lane (event 223 record). `kind` is
@@ -1329,6 +1357,8 @@ pub struct ControlPoint {
     pub kind: u32,
     /// Volume and pan 0..=12800 (pan centre 6400); pitch in signed cents.
     pub value: i32,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 impl ControlPoint {
@@ -1337,7 +1367,7 @@ impl ControlPoint {
     pub const PITCH: u16 = 4;
 
     pub fn new(position: u32, channel: u16, param: u16, value: i32) -> Self {
-        ControlPoint { position, kind: u32::from(channel) << 16 | u32::from(param), value }
+        ControlPoint { position, kind: u32::from(channel) << 16 | u32::from(param), value, id: Id::NONE }
     }
 
     pub fn channel(&self) -> u16 {
@@ -1378,6 +1408,8 @@ pub struct Note {
     pub unk14: u16,
     /// Note repeat index 0..=14 (byte 17; 0 = off; spec: flp/events/patterns.md).
     pub repeat: u8,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 impl Note {
@@ -1395,6 +1427,11 @@ impl Note {
     /// "Slide notes").
     pub fn slide(&self) -> bool {
         self.flags & Self::SLIDE != 0
+    }
+
+    /// The note's colour group, 0..=15 (the low nibble of byte 19).
+    pub fn colour(&self) -> u8 {
+        self.group & 0x0F
     }
 
     /// Byte-19 value of a note's own portamento switch (spec: audio/note-rules.md, "A note's own portamento switch").
@@ -1448,7 +1485,7 @@ impl Note {
 
     /// A step-sequencer step with default parameters.
     pub fn step(channel: u16, position: u32) -> Self {
-        Note {
+        Note { id: Id::NONE,
             position,
             length: 0,
             channel,
@@ -1525,6 +1562,13 @@ pub struct MixerTrack {
     pub monitor: u8,
     /// Per slot: the slot plugin's CPU switches (event 212 flags; they follow the plugin when it moves).
     pub slot_cpu: [PluginCpu; 10],
+    /// Lemon Studio's own per slot: a name typed for it, its colour and its icon (by name), kept in `.lemon` (FL's file
+    /// has none); they follow the slot's track when it moves.
+    pub slot_names: [Option<String>; 10],
+    pub slot_colors: [Option<Rgb>; 10],
+    pub slot_icons: [Option<String>; 10],
+    /// Lemon Studio's icon for the track (by name), kept in `.lemon`; FL's own is [`MixerTrack::icon`].
+    pub lemon_icon: Option<String>,
     /// Armed for disk recording (the strip's record button). Not saved, and not part of the track: tracks that differ
     /// only here are equal (spec: audio/track-io.md §1.5).
     pub armed: bool,
@@ -1567,6 +1611,10 @@ impl PartialEq for MixerTrack {
             rec_source,
             monitor,
             slot_cpu,
+            slot_names,
+            slot_colors,
+            slot_icons,
+            lemon_icon,
             armed: _,
             origin: _,
         } = self;
@@ -1597,6 +1645,10 @@ impl PartialEq for MixerTrack {
             && *rec_source == o.rec_source
             && *monitor == o.monitor
             && *slot_cpu == o.slot_cpu
+            && *slot_names == o.slot_names
+            && *slot_colors == o.slot_colors
+            && *slot_icons == o.slot_icons
+            && *lemon_icon == o.lemon_icon
     }
 }
 
@@ -1647,6 +1699,10 @@ impl MixerTrack {
             rec_source: REC_POST_EQ,
             monitor: MONITOR_ARMED,
             slot_cpu: [PluginCpu::default(); 10],
+            slot_names: Default::default(),
+            slot_colors: Default::default(),
+            slot_icons: Default::default(),
+            lemon_icon: None,
             armed: false,
             origin: None,
         }
@@ -1753,8 +1809,15 @@ impl Clip {
         r
     };
 
+    /// A clip showing its source from the start. Its offsets are "none" in its source's encoding: `ff ff ff ff`
+    /// for a pattern clip (the template's), float −1.0 for any other (spec: flp/events/playlist.md, clip offsets).
     pub fn new(position: u32, length: u32, track: u16, source: ClipSource) -> Clip {
-        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw: Clip::TEMPLATE }
+        let mut raw = Clip::TEMPLATE;
+        if let ClipSource::Channel(_) = source {
+            raw[24..28].copy_from_slice(&(-1.0f32).to_le_bytes());
+            raw[28..32].copy_from_slice(&(-1.0f32).to_le_bytes());
+        }
+        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw }
     }
 
     pub fn end(&self) -> u32 {
@@ -1927,6 +1990,8 @@ pub struct TimeMarker {
     pub flag: u8,
     /// Event 168: a key marker's place in [`SCALES`]; −1 Default, −2 Black notes.
     pub scale_index: i32,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 /// The Add key marker list's scales in its order, each with the notes it leaves out at root C in event 101's bits
@@ -1989,7 +2054,7 @@ impl TimeMarker {
     pub const KEY: u8 = 12;
 
     pub fn new(position: u32, name: &str) -> Self {
-        TimeMarker { position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0, root: 0, flag: 0, scale_index: 0 }
+        TimeMarker { id: Id::NONE, position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0, root: 0, flag: 0, scale_index: 0 }
     }
 
     /// The key marker Add key marker ▸ adds (spec: ui/playlist.md §7a): `scale` is a place in [`SCALES`], −1 for
@@ -2040,12 +2105,14 @@ pub struct PlaylistTrack {
     /// The track's link to a mixer track or a channel: the original's audio and instrument tracks (event 238 bytes 49 to
     /// 60; spec: flp/events/playlist.md, ui/playlist.md §6c).
     pub link: TrackLink,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 impl PlaylistTrack {
     /// Track `number` as a new project has it: unnamed, default colour, on, not grouped, not linked.
     pub fn new(number: u32) -> Self {
-        PlaylistTrack {
+        PlaylistTrack { id: Id::NONE,
             number,
             name: None,
             color: None,
@@ -2113,6 +2180,32 @@ impl Project {
                 }
             }
         }
+    }
+
+    /// The automation targets follow mixer places that moved ([`target::moved`]: `track` and `slot` give a place's new
+    /// one, `None` for one that went): the automation clips', recorded pattern events', initial values' and controller
+    /// links', and a controller's own place in a slot. A target whose place went goes (its clip stays), and so does a
+    /// controller link whose controller went.
+    pub fn follow_mixer_places(&mut self, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) {
+        let moved = |t: &mut u32| target::moved(*t, track, slot).map(|n| *t = n).is_some();
+        for a in &mut self.automations {
+            a.targets.retain_mut(moved);
+        }
+        for p in &mut self.patterns {
+            p.controls.retain_mut(|c| moved(&mut c.kind));
+        }
+        self.init_controls.retain_mut(|c| moved(&mut c.target));
+        self.controller_links.retain_mut(|l| {
+            let mut t = l.target();
+            if !moved(&mut t) {
+                return false;
+            }
+            l.set_target(t);
+            match l.source_slot() {
+                Some((tr, k)) => slot(tr, k).map(|(tr, k)| l.set_source(0x7000 + tr * 64 + u16::from(k))).is_some(),
+                None => true,
+            }
+        });
     }
 
     /// Every track link's channel follows `m` (`None`: the channel is gone, and an instrument track's link with it).
@@ -2205,11 +2298,13 @@ pub struct AutoPoint {
     pub mode: AutoMode,
     /// Byte 23 of the record, kept as read.
     pub flag: u8,
+    /// Who it is: given by the session (`os_session::control::ids`), not saved; `==` ignores it.
+    pub id: Id,
 }
 
 impl AutoPoint {
     pub fn new(beat: f64, value: f64) -> Self {
-        AutoPoint { beat, value, tension: 0.0, mode: AutoMode::Single, flag: 2 }
+        AutoPoint { beat, value, tension: 0.0, mode: AutoMode::Single, flag: 2, id: Id::NONE }
     }
 }
 
@@ -2573,6 +2668,36 @@ pub mod target {
         Target::Other(t)
     }
 
+    /// Target `t` after mixer places moved: `track` gives a track's new index (its own settings: volume, pan, stereo
+    /// separation, equaliser, sends, and a send's destination), `slot` a slot's new track and slot (its switch, mix
+    /// level and plugin parameters). `None` from either: the place is gone, and so is the target. Other targets stay.
+    pub fn moved(t: u32, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) -> Option<u32> {
+        let place = |track: u16| u32::from(0x7000 + track * 64) << 16;
+        Some(match decode(t) {
+            Target::SlotParam(tr, k, p) => slot(tr, k).map(|(tr, k)| slot_param(tr, k, p))?,
+            Target::SlotOn(tr, k) => slot(tr, k).map(|(tr, k)| self::slot(tr, k, SLOT_ON))?,
+            Target::SlotMix(tr, k) => slot(tr, k).map(|(tr, k)| self::slot(tr, k, SLOT_MIX))?,
+            Target::MixerVolume(tr) | Target::MixerPan(tr) | Target::MixerSeparation(tr) | Target::MixerEq(tr, ..) => place(track(tr)?) | (t & 0xFFFF),
+            // Both forms of a send keep theirs: 0x2000 + d, or 0x1F00 + 64 + d.
+            Target::MixerSend(tr, d) => {
+                let d = track(d)?;
+                place(track(tr)?) | u32::from(if (t >> 8) as u8 == 0x20 { SEND + d } else { 0x1F00 | (64 + d) })
+            }
+            _ => t,
+        })
+    }
+
+    /// Target `t` after channels moved: `ch` gives a channel's new index (channel targets keep the channel in the high
+    /// half, spec: flp/events/automation.md "Targets"); `None`: the channel is gone, and so is the target. The tempo and
+    /// other places stay.
+    pub fn moved_channel(t: u32, ch: impl Fn(u16) -> Option<u16>) -> Option<u32> {
+        let hi = (t >> 16) as u16;
+        if t == TEMPO || hi >= 0x4000 {
+            return Some(t);
+        }
+        ch(hi).map(|n| channel(n, t as u16))
+    }
+
     /// Bipolar targets centre at 0.5.
     pub fn bipolar(t: u32) -> bool {
         matches!(
@@ -2590,6 +2715,36 @@ pub mod target {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// Targets follow mixer places that move: a slot's to its new track and slot, a track's own (and a send's
+        /// destination) to its new index; a place that goes takes its targets with it; other targets stay.
+        #[test]
+        fn targets_follow_moved_mixer_places() {
+            // Track 3 and 5 swap; slot 2 of track 3 moves to slot 7 of track 4; track 6 goes.
+            let track = |t: u16| match t {
+                3 => Some(5),
+                5 => Some(3),
+                6 => None,
+                t => Some(t),
+            };
+            let slot = |t: u16, k: u8| if (t, k) == (3, 2) { Some((4, 7)) } else { track(t).map(|t| (t, k)) };
+            let m = |t: u32| moved(t, &track, &slot);
+            assert_eq!(m(slot_param(3, 2, 40)), Some(slot_param(4, 7, 40)));
+            assert_eq!(m(self::slot(3, 2, SLOT_MIX)), Some(self::slot(4, 7, SLOT_MIX)));
+            assert_eq!(m(self::slot(3, 0, SLOT_ON)), Some(self::slot(5, 0, SLOT_ON)), "slot 0 is a slot, not the track");
+            assert_eq!(m(self::slot(5, 9, SLOT_ON)), Some(self::slot(3, 9, SLOT_ON)));
+            assert_eq!(m(mixer(3, MIXER_VOLUME)), Some(mixer(5, MIXER_VOLUME)));
+            assert_eq!(m(mixer(5, EQ_FREQ + 1)), Some(mixer(3, EQ_FREQ + 1)));
+            assert_eq!(m(send(3, 5)), Some(send(5, 3)), "the send's destination too");
+            let old_send = u32::from(0x7000 + 3 * 64u16) << 16 | 0x1F00 | (64 + 1);
+            assert_eq!(decode(m(old_send).unwrap()), Target::MixerSend(5, 1));
+            assert_eq!(m(mixer(6, MIXER_PAN)), None);
+            assert_eq!(m(send(1, 6)), None);
+            assert_eq!(m(slot_param(6, 1, 0)), None);
+            for t in [channel(3, CHANNEL_VOLUME), channel_param(5, 2), TEMPO, mixer(1, MIXER_VOLUME)] {
+                assert_eq!(m(t), Some(t));
+            }
+        }
 
         // spec: plugins/plugin-parameters.md §3
         #[test]

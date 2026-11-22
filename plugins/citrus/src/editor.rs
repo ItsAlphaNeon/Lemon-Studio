@@ -317,6 +317,9 @@ pub struct Logic {
     pub hint: String,
     copied: Option<i32>,
     pub hosted: bool,
+    /// Edits written to the state, and how many of them the host was told of (`take_edit`).
+    made: u64,
+    told: u64,
     no_keys: Arc<AtomicBool>,
     /// The operator page's wave and what it was drawn from (the block, band-limit smoothing).
     wave: Option<(OpBlock, bool, Vec<f32>)>,
@@ -359,6 +362,8 @@ impl Logic {
             hint: String::new(),
             copied: None,
             hosted: false,
+            made: 0,
+            told: 0,
             no_keys,
             wave: None,
             tables: patch::Tables::default(),
@@ -410,6 +415,16 @@ impl Logic {
     /// An edit: the edited state becomes the plugin's at once and the audio thread plays it. During a drag its patch
     /// waits for the next repaint or timer tick ([`Logic::flush`]): a waveform setting builds a wave table (up to some
     /// milliseconds), and mouse moves come faster than the editor repaints.
+    /// Whether the host is to be told of edits made since the last call (host link `Edited`): once a drag is let go,
+    /// so a drag is one edit.
+    pub fn take_edit(&mut self) -> bool {
+        if self.made == self.told || self.drag.is_some() {
+            return false;
+        }
+        self.told = self.made;
+        true
+    }
+
     fn commit(&mut self) {
         self.used = patch::usage(&self.st).0;
         let bytes = self.st.to_bytes(self.body.as_deref());
@@ -419,6 +434,7 @@ impl Logic {
             self.reload();
             return;
         }
+        self.made += 1;
         self.pending = true;
         if self.drag.is_none() {
             self.flush();
@@ -1434,11 +1450,14 @@ impl Logic {
         }
     }
 
-    /// Applies a typed value; text that does not read leaves it as it was.
+    /// Applies a typed value; text that does not read leaves it as it was, and so does the text the box opened on.
     pub fn typed(&mut self, t: &TypeTarget, text: &str) {
+        if text.trim() == self.value_text(t) {
+            return;
+        }
         match *t {
             TypeTarget::Field(f) => {
-                if let Some(v) = ctl::parse(f, text) {
+                if let Some(v) = ctl::parse(f, text, ctl::get(&self.st, f)) {
                     self.set(f, v);
                 }
             }
@@ -1729,6 +1748,9 @@ mod win32 {
                     os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
                 }
             }
+            if self.logic.take_edit() && self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Edited, 0);
+            }
         }
 
         fn run(&mut self, acts: Vec<Act>) {
@@ -1810,7 +1832,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes | Cmd::Edited => 0,
             }
         }
 
@@ -1968,6 +1990,9 @@ mod gui {
                 self.link.to_host(Cmd::Changed, 0);
                 self.dirty = true;
             }
+            if self.logic.take_edit() {
+                self.link.to_host(Cmd::Edited, 0);
+            }
             self.logic.hosted = self.link.hosted();
         }
 
@@ -2104,7 +2129,10 @@ mod tests {
         for _ in 0..125 {
             l.delta(0.0, -1.0, Mods::default());
         }
+        assert!(!l.take_edit(), "the host hears of a drag once it is let go");
         l.up(Btn::Left);
+        assert!(l.take_edit());
+        assert!(!l.take_edit(), "once");
         assert_eq!(saved(&l).soften, 64);
         assert_eq!(l.hint, "Soften attack of lower-velocity voices: 50%");
         l.down(x, y, Btn::Left, Mods::default(), false);
@@ -2483,6 +2511,48 @@ mod tests {
         let (x, y) = centre(&l, &Target::Box(Field::S(24)));
         l.wheel(x, y, 1.0, Mods::default());
         assert_eq!(saved(&l).s[24], ctl::get(&crate::preset::default_patch(), Field::S(24)) + 1);
+    }
+
+    /// No control's area takes part of another's (the last painted would win it): the bar's enable switch and ATT
+    /// knob, its GLOBAL switch and the Options arrow, the reverb's TEMPO switch and LC slider among them.
+    #[test]
+    fn control_hits_do_not_overlap() {
+        let mut l = logic();
+        let check = |l: &Logic| {
+            let controls: Vec<_> = l
+                .hits
+                .iter()
+                .filter(|h| matches!(h.t, Target::Switch(_) | Target::Knob(_) | Target::Slider(_) | Target::Box(_) | Target::Choice(..) | Target::CurveOptions | Target::Tool(_) | Target::FxUnit(_)))
+                .collect();
+            for (i, a) in controls.iter().enumerate() {
+                for b in &controls[i + 1..] {
+                    let (p, q) = (a.r, b.r);
+                    let apart = p.right() <= q.x || q.right() <= p.x || p.bottom() <= q.y || q.bottom() <= p.y;
+                    assert!(apart, "page {} part {:?} unit {}: {:?} {p:?} and {:?} {q:?}", l.view.page, l.view.part, l.view.fx_unit, a.t, b.t);
+                }
+            }
+        };
+        l.view.page = 1;
+        for p in 0..2 {
+            l.view.part[1] = p;
+            paint(&mut l);
+            assert!(l.hits.iter().any(|h| matches!(h.t, Target::Switch(Field::Part(_, _, _, 0)))));
+            check(&l);
+        }
+        l.view.page = view::PAGE_FX;
+        for u in 0..4 {
+            l.view.fx_unit = u;
+            paint(&mut l);
+            check(&l);
+        }
+        assert!(l.hits.iter().any(|h| h.t == Target::Switch(Field::Reverb(10))));
+        // The main page, and a filter page's stage rows (13.8 px apart).
+        for page in [0, 7] {
+            l.view.page = page;
+            paint(&mut l);
+            check(&l);
+        }
+        assert!(l.hits.iter().any(|h| matches!(h.t, Target::Choice(Field::Head(_, 0), 5))));
     }
 
     /// The curve view: a right click on empty space adds a point, a drag moves it, its menu sets its mode and a
