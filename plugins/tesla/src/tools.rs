@@ -930,6 +930,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 0.70711: measured values, compared within a tolerance
     fn amp_matches_the_measured_matrices() {
         let close = |m: [[f64; 2]; 2], w: [[f64; 2]; 2]| (0..2).all(|i| (0..2).all(|j| (m[i][j] - w[i][j]).abs() < 1e-4));
         assert!(close(Amp::default().matrix(), [[1.0, 0.0], [0.0, 1.0]]));

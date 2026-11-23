@@ -870,6 +870,7 @@ impl Engine {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 0.70711: measured levels (a sine's peak at -3 dB), compared within a tolerance
 mod tests {
     use super::*;
 

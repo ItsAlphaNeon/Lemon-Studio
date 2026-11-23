@@ -441,6 +441,7 @@ pub fn take_call_log() -> Vec<String> {
 }
 
 /// Exposed for diagnostics: the C string for a char pointer.
+#[allow(clippy::not_unsafe_ptr_arg_deref)] // callers pass a plugin's strings, null or terminated
 pub fn cstr(p: *const c_char) -> String {
     if p.is_null() {
         String::new()

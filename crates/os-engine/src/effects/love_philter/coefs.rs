@@ -6,7 +6,7 @@
 //!
 // spec: plugins/fruity-love-philter.md ("The cascade", "Coefficients")
 
-use std::f64::consts::{LN_2, PI, TAU};
+use std::f64::consts::{FRAC_PI_2, LN_2, PI, TAU};
 
 use os_dsp::num::s;
 
@@ -131,7 +131,7 @@ pub fn work_out(p: &Input) -> [Coef; 3] {
                 q = f64::from(pow_s(q, s_inv));
             }
             for k in 0..n {
-                let w = (cp[k] + 0.007) * (rf * 1.5707963267948966);
+                let w = (cp[k] + 0.007) * (rf * FRAC_PI_2);
                 let kk = w.min(1.2566370614359172).cos();
                 out[k].f = s(2.0 - kk * 2.0);
                 let m = kk - 1.0;

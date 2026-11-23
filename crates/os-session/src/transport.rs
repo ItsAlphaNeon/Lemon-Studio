@@ -172,6 +172,9 @@ pub struct Shared {
     engine_voices: Mutex<Vec<Weak<AtomicU32>>>,
     /// Disk recording into mixer tracks: where the playback's armed tracks hand their takes (`Transport::record_tracks`).
     record: Mutex<Option<Arc<dyn os_engine::RecordTap>>>,
+    /// Tests: how many times this transport's device opened (`Transport::device_opens`).
+    #[cfg(any(test, feature = "test-util"))]
+    device_opens: Arc<AtomicU64>,
 }
 
 /// The frames queued when the device asked for a block, since they were last taken (`AheadStats::take`): what the
@@ -1156,6 +1159,12 @@ impl Transport {
     fn streams(&self) -> usize {
         self.shared.engine_voices.lock().map_or(0, |v| v.iter().filter(|w| w.strong_count() > 0).count())
     }
+
+    /// Times this transport's device opened (`device::opens` counts every transport's, and tests run at once).
+    #[cfg(any(test, feature = "test-util"))]
+    fn device_opens(&self) -> u64 {
+        self.shared.device_opens.load(Ordering::Acquire)
+    }
 }
 
 /// Dropouts by kind (`Transport::drops`): device blocks the queue could not fill (the feeder was late), ticks a hosted
@@ -1743,6 +1752,10 @@ struct Audio {
 }
 
 fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option<Project>>>, inst: Instruments, library: SampleLibrary) {
+    #[cfg(any(test, feature = "test-util"))]
+    let device = OutputDevice::counted(shared.device_opens.clone());
+    #[cfg(not(any(test, feature = "test-util")))]
+    let device = OutputDevice::default();
     let mut a = Audio {
         shared,
         latest,
@@ -1764,7 +1777,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         rewind_at: None,
         lost: None,
         open_asio: (!HEADLESS.load(Ordering::Acquire)).then(|| (Instant::now(), 0)),
-        device: OutputDevice::default(),
+        device,
     };
     // OS_DEBUG: how far playback renders ahead of the device, every 2 s.
     let debug = std::env::var_os("OS_DEBUG").is_some();
@@ -3231,7 +3244,7 @@ mod tests {
         let (_, project) = looping_engine();
         let t = Transport::new(None);
         t.update(&project);
-        let opens = crate::device::opens();
+        let opens = t.device_opens();
         t.play(&project, PlayMode::Pattern(1), 0.0);
         wait_for(|| t.seconds() > 0.2);
         assert!(t.playing() && t.seconds() > 0.2, "playing: {}", t.seconds());
@@ -3266,7 +3279,7 @@ mod tests {
         t.listen(false);
         sleep(100);
         assert_eq!(t.take_error(), None);
-        assert_eq!(crate::device::opens(), opens + 1, "the device opened once and stayed open");
+        assert_eq!(t.device_opens(), opens + 1, "the device opened once and stayed open");
         assert_eq!(t.streams(), 2, "the stream that plays and the previews'");
     }
 
@@ -3277,7 +3290,7 @@ mod tests {
         let _sim = Sim::new();
         let (_, project) = looping_engine();
         let t = Transport::new(None);
-        let opens = crate::device::opens();
+        let opens = t.device_opens();
         t.play(&project, PlayMode::Pattern(1), 0.0);
         wait_for(|| t.seconds() > 0.1);
         t.stop();
@@ -3290,7 +3303,7 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_millis(200), "plays at once: {:?}", t0.elapsed());
         t.stop();
         sleep(50);
-        assert_eq!(crate::device::opens(), opens + 1);
+        assert_eq!(t.device_opens(), opens + 1);
     }
 
     /// The queue hands out exactly what the engine renders, tick after tick, whatever the device's block size; the
@@ -3985,13 +3998,13 @@ mod tests {
         assert!(o.fixed.is_some_and(|b| b > 0) && o.rate > 0, "{o:?}");
         assert_eq!(t.block(), o.fixed.unwrap(), "blocks of the driver's buffer length");
         // The driver asks to be reset (a buffer length changed in its panel): it opens anew and the playback goes on.
-        let (opens, before) = (crate::device::opens(), t.seconds());
+        let (opens, before) = (t.device_opens(), t.seconds());
         t.fail_device();
         let reset = Instant::now();
         while t.seconds() < before + 0.2 && reset.elapsed() < Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(crate::device::opens() > opens, "opened anew");
+        assert!(t.device_opens() > opens, "opened anew");
         assert!(t.playing() && t.seconds() > before + 0.2, "goes on from {before}: {}", t.seconds());
         assert_eq!(t.take_error(), None, "the same driver: nothing to say");
         // Another buffer length it takes, chosen on the Audio page: it opens at that length, and then at its own again.
