@@ -48,7 +48,12 @@ pub fn live_set(addr: usize, norm: f32, host: f32) {
 /// The normalised value the sound should use for the parameter at `addr` (`host` = its host value), or `None` to use
 /// the host's. Never blocks: when the editor holds the list, the host value is used for this block.
 pub fn live_norm(addr: usize, host: f32) -> Option<f32> {
+    // Tests run side by side and all set parameters through the one list: a read that gave up while another test
+    // held it would see the default instead of the value its test set (Keep on disk off, so nothing on disk).
+    #[cfg(not(test))]
     let mut l = LIVE.try_lock().ok()?;
+    #[cfg(test)]
+    let mut l = LIVE.lock().ok()?;
     let i = l.iter().position(|e| e.addr == addr)?;
     let e = l[i];
     if (host - e.base).abs() <= 1e-7 && (host - e.norm).abs() > 1e-7 {
