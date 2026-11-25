@@ -36,6 +36,13 @@ pub enum NCmd {
     /// ui/piano-randomize.md).
     Dialog(crate::piano_dlg::Tool),
     Ghosts,
+    /// Note grid highlights on or off (Alt+B, spec: ui/piano-scale-highlighting.md §1).
+    Highlights,
+    /// Scale highlighting ▸ opened as a menu of its own, and its root notes, which keep it open (§1).
+    ScaleMenu,
+    ScaleRoot(u8),
+    /// A Scale highlighting mode: a place in `os_model::SCALES` or a `ScaleHighlight` constant (−1, −2, −3).
+    Scale(i32),
     AddMarker,
     /// The magnet button's menus (spec: ui/piano-snap.md): the snap setting, a stock length for new notes.
     Snap(crate::snap::EditorSnap),
@@ -78,9 +85,50 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("LFO...", Dialog(Tool::Lfo)).key("Alt+O"),
         PItem::head("View"),
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
+        item("Note grid highlights", Highlights).key("Alt+B").mark(Mark::Check(s.piano.highlights)),
+        PItem { children: scale_items(s), ..item("Scale highlighting", ScaleMenu) },
         item("Add time marker", AddMarker).key("Alt+T"),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// Scale highlighting ▸ (spec: ui/piano-scale-highlighting.md §1): "Root note" with C … B, checked only while a scale
+/// is chosen, then "Scale" with Default, Black notes, Automatic and the scale list.
+pub fn scale_items(s: &State) -> Vec<PItem> {
+    use os_model::ScaleHighlight as H;
+    let h = s.session.project.scale_highlight.unwrap_or_default();
+    let mut items = vec![PItem::head("Root note")];
+    let root = |k: u8| Mark::Radio(h.is_scale() && h.label_root() == k);
+    items.extend(os_model::NOTE_NAMES.iter().enumerate().map(|(k, n)| item(n, NCmd::ScaleRoot(k as u8)).mark(root(k as u8))));
+    items.extend([PItem::col(), PItem::head("Scale")]);
+    let check = |m: i32| Mark::Radio(h.mode == m);
+    items.extend([
+        item("Default", NCmd::Scale(H::DEFAULT)).mark(check(H::DEFAULT)),
+        item("Black notes", NCmd::Scale(H::BLACK_NOTES)).mark(check(H::BLACK_NOTES)),
+        item("Automatic", NCmd::Scale(H::AUTOMATIC)).mark(check(H::AUTOMATIC)),
+        PItem::sep(),
+    ]);
+    items.extend(os_model::SCALES.iter().enumerate().map(|(k, (n, _))| item(n, NCmd::Scale(k as i32)).mark(check(k as i32))));
+    items
+}
+
+/// Scale highlighting ▸ as a menu of its own: opened from its item, or reopened where it was after a root note (`was`,
+/// the menu clicked in), as the playlist's key marker list is.
+pub fn scale_menu(app: &mut App, cmd: NCmd, was: Option<&Popup>) {
+    if let NCmd::ScaleRoot(r) = cmd {
+        let s = &mut app.state;
+        s.piano.scale_root = r % 12;
+        let h = s.session.project.scale_highlight.unwrap_or_default();
+        if h.is_scale() {
+            crate::edit::notes::put_scale_highlight(&mut s.session, os_model::ScaleHighlight { root: i32::from(r % 12), ..h });
+            s.session.dirty = true;
+        }
+    }
+    let (x, y) = match (was, cmd) {
+        (Some(p), NCmd::ScaleRoot(_)) if p.sub.is_none() => (p.x, p.y),
+        _ => app.mouse,
+    };
+    app.state.playlist.popup = Some(Popup { x, y, items: scale_items(&app.state), sub: None, scroll: [0; 2] });
 }
 
 /// The keys a held key repeats in the piano roll (spec: ui/piano-keys.md §4 rule 1): Shift / Ctrl / Alt + arrows (not
@@ -123,6 +171,7 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Character(c) if alt && !ctrl && is(c, "o") => NCmd::Dialog(crate::piano_dlg::Tool::Lfo),
         Key::Character(c) if alt && !ctrl && is(c, "r") => NCmd::Dialog(crate::piano_dlg::Tool::Randomize),
         Key::Character(c) if alt && !ctrl && is(c, "v") => NCmd::Ghosts,
+        Key::Character(c) if alt && !ctrl && !shift && is(c, "b") => NCmd::Highlights,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
         Key::Character(c) if ctrl && !alt && is(c, "d") => {
             app.state.piano.clear_selection();
@@ -341,6 +390,25 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             s.piano.ghosts = !s.piano.ghosts;
             format!("Ghost channels {}", if s.piano.ghosts { "on" } else { "off" })
         }
+        NCmd::Highlights => {
+            s.piano.highlights = !s.piano.highlights;
+            return Some(format!("Note grid highlights {}", if s.piano.highlights { "on" } else { "off" }));
+        }
+        NCmd::ScaleMenu | NCmd::ScaleRoot(_) => {
+            scale_menu(app, cmd, None);
+            return None;
+        }
+        NCmd::Scale(mode) => {
+            // A scale takes the root last used; the other modes keep root 0, as FL saves them (§5).
+            let root = if (0..os_model::SCALES.len() as i32).contains(&mode) {
+                let h = s.session.project.scale_highlight.unwrap_or_default();
+                i32::from(if h.is_scale() { h.label_root() } else { s.piano.scale_root })
+            } else {
+                0
+            };
+            crate::edit::notes::put_scale_highlight(&mut s.session, os_model::ScaleHighlight { mode, root });
+            format!("Scale highlighting: {}", scale_name(mode, root))
+        }
         NCmd::AddMarker => {
             let tick = if app.state.session.transport.playing() && !app.state.session.transport.song() { app.state.session.transport.tick() as u32 } else { app.state.session.pat_pos };
             return Some(add_marker(&mut app.state, tick));
@@ -358,6 +426,19 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
     };
     s.session.dirty = true;
     Some(msg)
+}
+
+/// A Scale highlighting mode as its menu names it, a scale with its root ("D Major (Ionian)").
+pub fn scale_name(mode: i32, root: i32) -> String {
+    match mode {
+        -1 => "Default".into(),
+        -2 => "Black notes".into(),
+        -3 => "Automatic".into(),
+        m => match usize::try_from(m).ok().and_then(|i| os_model::SCALES.get(i)) {
+            Some((n, _)) => format!("{} {n}", os_model::NOTE_NAMES[root.rem_euclid(12) as usize]),
+            None => "Black notes".into(),
+        },
+    }
 }
 
 /// Add a time marker to the current pattern at `tick` snapped down to a step (§10a). Saved with the pattern
@@ -519,6 +600,48 @@ pub fn next(rng: &mut u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scale highlighting ▸ (spec: ui/piano-scale-highlighting.md §1): a scale takes the root last picked, a root
+    /// turns a chosen scale and keeps the menu open, the other modes keep root 0 and check no root.
+    #[test]
+    fn scale_highlighting_menu() {
+        use crate::playlist::{run as menu_run, Cmd};
+        use os_model::ScaleHighlight as H;
+        let mut app = App::new(None);
+        let radios = |app: &App| -> (Vec<String>, Vec<String>) {
+            let items = scale_items(&app.state);
+            let on = |it: &&PItem| matches!(it.mark, Mark::Radio(true));
+            let col = items.iter().position(|i| i.col).unwrap();
+            (items[..col].iter().filter(on).map(|i| i.label.to_string()).collect(), items[col..].iter().filter(on).map(|i| i.label.to_string()).collect())
+        };
+        assert_eq!(radios(&app), (vec![], vec!["Black notes".to_string()]), "a new project: Black notes, no root");
+        let view = tools_menu(&app.state, 0.0, 0.0).items;
+        let hl = view.iter().find(|i| i.label == "Note grid highlights").unwrap();
+        assert_eq!((hl.key, hl.mark), ("Alt+B", Mark::Check(true)));
+        assert!(view.iter().any(|i| i.label == "Scale highlighting" && i.children.len() == 1 + 12 + 2 + 4 + os_model::SCALES.len()));
+
+        // A root while Black notes is checked is kept for the next scale; the menu stays where it was.
+        app.state.playlist.popup = Some(Popup { x: 40.0, y: 50.0, items: scale_items(&app.state), sub: None, scroll: [0; 2] });
+        menu_run(&mut app, Cmd::Piano(NCmd::ScaleRoot(2)));
+        let p = app.state.playlist.popup.as_ref().expect("a root keeps the menu open");
+        assert_eq!((p.x, p.y), (40.0, 50.0));
+        assert_eq!(app.state.session.project.scale_highlight, None, "nothing chosen yet");
+        menu_run(&mut app, Cmd::Piano(NCmd::Scale(0)));
+        assert!(app.state.playlist.popup.is_none());
+        assert_eq!(app.state.session.project.scale_highlight, Some(H { mode: 0, root: 2 }), "D Major");
+        assert_eq!(radios(&app), (vec!["D".to_string()], vec!["Major (Ionian)".to_string()]));
+        menu_run(&mut app, Cmd::Piano(NCmd::ScaleRoot(5)));
+        assert_eq!(app.state.session.project.scale_highlight, Some(H { mode: 0, root: 5 }), "a root turns the scale");
+        menu_run(&mut app, Cmd::Piano(NCmd::Scale(H::AUTOMATIC)));
+        assert_eq!(app.state.session.project.scale_highlight, Some(H { mode: H::AUTOMATIC, root: 0 }));
+        assert_eq!(radios(&app).0, Vec::<String>::new());
+        assert!(app.state.session.dirty, "the setting is the project's");
+
+        let m = run(&mut app, NCmd::Highlights);
+        assert_eq!((app.state.piano.highlights, m.as_deref()), (false, Some("Note grid highlights off")));
+        run(&mut app, NCmd::Highlights);
+        assert!(app.state.piano.highlights);
+    }
 
     pub fn note(pos: u32, len: u32, key: u16) -> Note {
         Note { length: len, key, ..Note::step(0, pos) }

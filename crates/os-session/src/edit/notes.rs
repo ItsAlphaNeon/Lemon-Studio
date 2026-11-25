@@ -11,6 +11,14 @@
 
 use os_model::{ControlPoint, Note, Pattern};
 
+/// The piano roll's scale highlighting (event 243; spec: ui/piano-scale-highlighting.md §5): a change of the project
+/// with no undo step, like the playlist's view.
+pub fn put_scale_highlight(s: &mut crate::session::Session, h: os_model::ScaleHighlight) {
+    if s.project.scale_highlight != Some(h) {
+        s.project.get_mut().scale_highlight = Some(h);
+    }
+}
+
 /// Where the current pattern plays in the song: each clip of it that sounds (not muted, on a track that is on), as
 /// (song tick of the clip's start, pattern tick there, length), in song order. A clip that plays its whole pattern
 /// (no window) lasts the pattern's length.

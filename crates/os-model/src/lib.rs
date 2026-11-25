@@ -110,6 +110,9 @@ pub struct Project {
     pub performance: Option<bool>,
     /// Playlist scroll, time zoom and track height (event 242). `None` = not in the file.
     pub playlist_view: Option<PlaylistView>,
+    /// The piano roll's scale highlighting (event 243; spec: ui/piano-scale-highlighting.md §5). `None` = not in the
+    /// file (Black notes).
+    pub scale_highlight: Option<ScaleHighlight>,
     /// Main volume 0..=16000, 12800 = unity (mixer record id 0 at place 0x4000; spec: audio/mixer.md "Main volume").
     /// `None` = not in the file (12800).
     pub main_volume: Option<u16>,
@@ -2036,6 +2039,107 @@ pub const SCALES: [(&str, u16); 37] = [
     ("Other Whole Tone", 0x555),
 ];
 
+/// The piano roll's scale highlighting as event 243 holds it (spec: ui/piano-scale-highlighting.md §5): `mode` is a
+/// place in [`SCALES`] or one of the constants below, `root` a pitch class 0 = C … 11 = B. Both are kept as read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScaleHighlight {
+    pub mode: i32,
+    pub root: i32,
+}
+
+impl Default for ScaleHighlight {
+    fn default() -> Self {
+        ScaleHighlight { mode: Self::BLACK_NOTES, root: 0 }
+    }
+}
+
+impl ScaleHighlight {
+    /// Every row light.
+    pub const DEFAULT: i32 = -1;
+    /// Rows of C major's notes light: the piano look.
+    pub const BLACK_NOTES: i32 = -2;
+    /// The scale found from the pattern's notes.
+    pub const AUTOMATIC: i32 = -3;
+
+    pub fn from_bytes(d: &[u8]) -> Option<Self> {
+        let mode = i32::from_le_bytes(d.get(0..4)?.try_into().ok()?);
+        let root = i32::from_le_bytes(d.get(4..8)?.try_into().ok()?);
+        Some(ScaleHighlight { mode, root })
+    }
+
+    pub fn to_bytes(self) -> Vec<u8> {
+        let mut d = self.mode.to_le_bytes().to_vec();
+        d.extend(self.root.to_le_bytes());
+        d
+    }
+
+    /// A scale from [`SCALES`] (`mode` 0..=36).
+    pub fn is_scale(self) -> bool {
+        (0..SCALES.len() as i32).contains(&self.mode)
+    }
+
+    /// The root the keyboard labels sit on: the scale's root, else C (spec: ui/piano-scale-highlighting.md §4).
+    pub fn label_root(self) -> u8 {
+        if self.is_scale() { self.root.rem_euclid(12) as u8 } else { 0 }
+    }
+
+    /// The light rows' pitch classes, bit `pc` (C = bit 0); `None` for Automatic, which depends on the notes. A mode
+    /// not in the list shades as Black notes.
+    pub fn light_keys(self) -> Option<u16> {
+        match self.mode {
+            Self::DEFAULT => Some(0xFFF),
+            Self::AUTOMATIC => None,
+            m if self.is_scale() => Some(scale_keys(m as usize, self.root.rem_euclid(12) as u8)),
+            _ => Some(scale_keys(0, 0)),
+        }
+    }
+}
+
+/// The notes of `SCALES[index]` at `root`, bit `pc` (C = bit 0).
+pub fn scale_keys(index: usize, root: u8) -> u16 {
+    keys_of_left_out(rotate_left_out(SCALES[index.min(SCALES.len() - 1)].1, root))
+}
+
+/// A left-out mask (bit 11 − pitch class) turned up by `root` semitones.
+fn rotate_left_out(m: u16, root: u8) -> u16 {
+    let m = u32::from(m);
+    let r = u32::from(root % 12);
+    ((m >> r | m << (12 - r)) & 0xFFF) as u16
+}
+
+/// The kept notes of a left-out mask (bit 11 − pitch class), as bit `pc`.
+fn keys_of_left_out(m: u16) -> u16 {
+    (0..12).filter(|&pc| m & (1 << (11 - pc)) == 0).fold(0, |k, pc| k | 1 << pc)
+}
+
+/// The scale [`ScaleHighlight::AUTOMATIC`] shades for notes of the pitch classes in `used` (bit `pc`), as a place in
+/// [`SCALES`] and a root; `None` when there are none. Lemon Studio's own rule (FL's is not known beyond one case, spec:
+/// ui/piano-scale-highlighting.md §2): the major or natural minor scale holding the most of the notes, ties to the
+/// one whose root is the lowest used pitch class counted up from the first note's, then major before minor.
+pub fn detect_scale(used: u16, first: u8) -> Option<(usize, u8)> {
+    let used = used & 0xFFF;
+    if used == 0 {
+        return None;
+    }
+    let mut best: Option<(u32, u32, usize, u8)> = None;
+    for root in 0..12u8 {
+        for index in [0usize, 10] {
+            let hits = (scale_keys(index, root) & used).count_ones();
+            // Prefer a root that is one of the notes, nearest above the first note.
+            let dist = if used & 1 << root != 0 { u32::from((root + 12 - first % 12) % 12) } else { 12 };
+            let key = (hits, 12 - dist, usize::from(index != 0), root);
+            let better = match best {
+                None => true,
+                Some((h, d, i, _)) => (key.0, key.1, std::cmp::Reverse(key.2)) > (h, d, std::cmp::Reverse(i)),
+            };
+            if better {
+                best = Some((key.0, key.1, key.2, root));
+            }
+        }
+    }
+    best.map(|(_, _, i, root)| (if i == 0 { 0 } else { 10 }, root))
+}
+
 /// Root note names as the key markers write them.
 pub const NOTE_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -2068,12 +2172,16 @@ impl TimeMarker {
             i => {
                 let (label, m) = SCALES[i.clamp(0, SCALES.len() as i32 - 1) as usize];
                 // A note n semitones up is bit 11 − n: turning the scale up rotates the bits down.
-                let m = u32::from(m);
-                let r = u32::from(root);
-                (format!("{} {label}", NOTE_NAMES[usize::from(root)]), root, ((m >> r | m << (12 - r)) & 0xFFF) as u16, 0)
+                (format!("{} {label}", NOTE_NAMES[usize::from(root)]), root, rotate_left_out(m, root), 0)
             }
         };
         TimeMarker { kind: Self::KEY, scale: mask, root, flag, scale_index: scale, ..TimeMarker::new(position, &name) }
+    }
+
+    /// The rows a key marker shades light from its tick on, bit `pc` (C = bit 0; spec: ui/piano-scale-highlighting.md
+    /// §6): a Default marker every row, else the notes its event 101 keeps. `None` for the other kinds.
+    pub fn light_keys(&self) -> Option<u16> {
+        (self.kind == Self::KEY).then(|| if self.scale_index == -1 { 0xFFF } else { keys_of_left_out(self.scale) })
     }
 
     /// The marker at timebase `to` instead of `from` ([`Project::set_ppq`]).
@@ -2995,5 +3103,59 @@ mod fade_tests {
                 assert!((sum - 1.0).abs() < 1e-12, "t {t} x {x}: {sum}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    /// Bit `pc` for each named pitch class.
+    fn keys(pcs: &[u8]) -> u16 {
+        pcs.iter().fold(0, |k, &pc| k | 1 << pc)
+    }
+
+    /// The scales FL shaded (spec: ui/piano-scale-highlighting.md §2).
+    #[test]
+    fn scales_at_a_root_are_the_measured_rows() {
+        assert_eq!(scale_keys(0, 0), keys(&[0, 2, 4, 5, 7, 9, 11]), "C Major: the piano's white keys");
+        assert_eq!(scale_keys(0, 3), keys(&[3, 5, 7, 8, 10, 0, 2]), "D# Major");
+        assert_eq!(scale_keys(0, 2), keys(&[2, 4, 6, 7, 9, 11, 1]), "D Major");
+        assert_eq!(scale_keys(9, 5), keys(&[5, 7, 8, 10, 0, 2, 4]), "F Minor Melodic");
+        assert_eq!(scale_keys(12, 9), keys(&[9, 0, 2, 4, 7]), "A Minor Pentatonic");
+    }
+
+    #[test]
+    fn modes_and_their_rows_and_labels() {
+        let h = |mode, root| ScaleHighlight { mode, root };
+        assert_eq!(ScaleHighlight::default(), h(ScaleHighlight::BLACK_NOTES, 0), "a project without event 243");
+        assert_eq!(h(-1, 0).light_keys(), Some(0xFFF), "Default: every row light");
+        assert_eq!(h(-2, 7).light_keys(), Some(scale_keys(0, 0)), "Black notes ignores the root");
+        assert_eq!(h(-3, 0).light_keys(), None, "Automatic depends on the notes");
+        assert_eq!(h(0, 2).light_keys(), Some(scale_keys(0, 2)));
+        assert_eq!(h(99, 4).light_keys(), Some(scale_keys(0, 0)), "an unknown mode shades as Black notes");
+        assert_eq!((h(0, 2).label_root(), h(-2, 5).label_root(), h(-3, 5).label_root()), (2, 0, 0), "labels on a scale's root, else C");
+        let d = h(9, 5);
+        assert_eq!(d.to_bytes(), [9, 0, 0, 0, 5, 0, 0, 0]);
+        assert_eq!(ScaleHighlight::from_bytes(&[0xfd, 0xff, 0xff, 0xff, 0, 0, 0, 0]), Some(h(-3, 0)));
+        assert_eq!(ScaleHighlight::from_bytes(&[1, 2, 3]), None);
+    }
+
+    /// FL's one measured case: D5, E5, F#5 and A5 gave D Major. The rule beyond it is Lemon Studio's own.
+    #[test]
+    fn automatic_finds_d_major_from_d_e_f_sharp_a() {
+        assert_eq!(detect_scale(keys(&[2, 4, 6, 9]), 2), Some((0, 2)));
+        assert_eq!(detect_scale(0, 0), None, "no notes, no scale");
+        assert_eq!(detect_scale(keys(&[9, 0, 4]), 9), Some((10, 9)), "A C E from A: the minor on A beats C major");
+        assert_eq!(detect_scale(keys(&[0, 4, 7]), 0), Some((0, 0)), "C E G from C: C major");
+    }
+
+    /// A key marker shades as its event 101 says; a Default marker shades nothing; other markers are not keys.
+    #[test]
+    fn key_markers_light_rows() {
+        assert_eq!(TimeMarker::key(0, 9, 12).light_keys(), Some(scale_keys(12, 9)));
+        assert_eq!(TimeMarker::key(0, 4, -2).light_keys(), Some(scale_keys(0, 0)));
+        assert_eq!(TimeMarker::key(0, 4, -1).light_keys(), Some(0xFFF));
+        assert_eq!(TimeMarker::new(0, "x").light_keys(), None);
     }
 }
