@@ -429,7 +429,8 @@ fn playlist(ev: &mut Vec<Event>, version: (u32, u32)) {
     for &s in starts.iter().rev() {
         let end = (s + 1..ev.len()).find(|&k| ev[k].id == id::ARR_START || ARRANGEMENT_END.contains(&ev[k].id)).unwrap_or(ev.len());
         let last = (s..end).rev().find(|&k| ev[k].id == id::PL_TRACK);
-        let have = last.and_then(|k| ev[k].data()).map_or(0, |d| u32::from_le_bytes(d[0..4].try_into().expect("four bytes")));
+        // A record too short for its number counts as track 0, as `load` reads it.
+        let have = last.and_then(|k| ev[k].data()?.get(0..4)).map_or(0, |d| u32::from_le_bytes([d[0], d[1], d[2], d[3]]));
         let mut at = last.map_or(end, |k| k + 1);
         while ev.get(at).is_some_and(|e| matches!(e.id, id::PL_COLOR_FLAG | id::PL_NAME)) && at < end {
             at += 1;
@@ -568,7 +569,8 @@ fn mixer(ev: &mut Vec<Event>, version: (u32, u32)) {
     let any_routes = ev[flags[0]..].iter().any(|e| e.id == id::MX_ROUTES);
     for t in (0..count).rev() {
         let f = flags[t];
-        let mut next = heads.get(t + 1).copied().unwrap_or_else(|| params.unwrap_or(ev.len()));
+        // Parameters (225) out of place, before the last track's record, leave that track no events after it.
+        let mut next = heads.get(t + 1).copied().unwrap_or_else(|| params.unwrap_or(ev.len())).max(f + 1);
         let master_like = t == 0 || t + 1 == count;
         // The record at 12 bytes (spec: flp/layouts.md "A mixer track's record (event 236)").
         if let Some(d) = ev[f].data().filter(|d| d.len() < 12) {

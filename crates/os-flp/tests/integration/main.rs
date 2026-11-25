@@ -6,5 +6,6 @@
 //! built and linked on its own.
 
 mod corpus;
+mod damaged_files;
 mod legacy_pairs;
 mod project_corpus;

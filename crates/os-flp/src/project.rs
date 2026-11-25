@@ -2306,7 +2306,8 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
     for (n, m) in l.mixer.iter().enumerate() {
         let index = n as u16;
         let from = starts[n];
-        let to = starts.get(n + 1).copied().or(l.mixer_params).unwrap_or(events.len());
+        // Parameters (225) out of place, before the last track, leave it no events (as `slot_events` reads it).
+        let to = starts.get(n + 1).copied().or(l.mixer_params).unwrap_or(events.len()).max(from);
         let mut slots: [Option<SlotPlugin>; 10] = Default::default();
         let mut pending_plugin: Option<SlotPlugin> = None;
         let mut slot_cpu = [os_model::PluginCpu::default(); 10];
