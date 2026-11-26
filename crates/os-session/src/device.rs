@@ -186,6 +186,7 @@ struct Mix {
 
 impl Mix {
     fn new(inbox: Arc<Queue>, outbox: Arc<Queue>) -> Mix {
+        crate::audio_log::init();
         Mix { sources: Vec::with_capacity(MAX_SOURCES), inbox, outbox, one: Vec::with_capacity(2 * MAX_FRAMES), sum: Vec::with_capacity(2 * MAX_FRAMES), width: 2 }
     }
 
@@ -552,6 +553,7 @@ impl OutputDevice {
             self.close();
         }
         if self.open.is_none() {
+            crate::audio_log::init();
             let cfg = AudioCfg::current();
             let o = open(&cfg, &self.xruns, self.wait)?;
             if let Ok(mut l) = LAST.lock() {

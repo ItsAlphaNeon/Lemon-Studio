@@ -318,11 +318,12 @@ impl Plugins {
             if let Some(s) = p.editor_size() {
                 size(s);
             }
+            drop(p);
             if let Some(m) = &h.meter {
                 m.note_hold(t0.elapsed());
             }
             #[cfg(target_os = "linux")]
-            crate::dropout_log::held(&p.desc().name, "the UI's tick", t0);
+            crate::dropout_log::held(&h.name, "the UI's tick", t0);
         }
         (stopped, menu)
     }

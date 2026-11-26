@@ -52,7 +52,13 @@ impl<'de> serde::Deserialize<'de> for StateBytes {
 }
 
 fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(b.len() * 2);
+    for &x in b {
+        out.push(DIGITS[usize::from(x >> 4)] as char);
+        out.push(DIGITS[usize::from(x & 0x0f)] as char);
+    }
+    out
 }
 
 fn from_hex(t: &str) -> Option<Vec<u8>> {
@@ -532,5 +538,17 @@ mod tests {
         assert_eq!(json, "\"00ab07\"");
         assert_eq!(serde_json::from_str::<StateBytes>(&json).unwrap(), StateBytes(vec![0, 0xAB, 7]));
         assert!(serde_json::from_str::<StateBytes>("\"0g\"").is_err());
+    }
+
+    #[test]
+    fn hex_encoding_matches_format_and_roundtrips() {
+        let all: Vec<u8> = (0..=255).collect();
+        let expected: String = all.iter().map(|x| format!("{x:02x}")).collect();
+        assert_eq!(hex(&all), expected);
+        assert_eq!(from_hex(&expected), Some(all));
+
+        let large: Vec<u8> = (0..65536).map(|i| (i * 31 + 17) as u8).collect();
+        let json = serde_json::to_string(&StateBytes(large.clone())).unwrap();
+        assert_eq!(serde_json::from_str::<StateBytes>(&json).unwrap(), StateBytes(large));
     }
 }
