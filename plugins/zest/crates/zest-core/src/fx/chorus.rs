@@ -80,6 +80,27 @@ impl Chorus {
         self.reset = true;
     }
 
+    pub fn reset(&mut self) {
+        if !self.clean {
+            self.line_l.fill(0.0);
+            self.line_r.fill(0.0);
+        }
+        self.w = 0;
+        self.ph = [0.0; 3];
+        self.d = [0.0; 6];
+        self.wcur = 0.0;
+        self.wstep = 0.0;
+        self.reset = true;
+        self.clean = true;
+        self.lp = WetLp::new();
+        self.up = Up4::new();
+        self.down = Down4::new();
+        self.ty = 0;
+        self.d01 = 0.0;
+        self.inc = [0.0; 3];
+        self.fs4 = 0.0;
+    }
+
     pub fn setup(&mut self, raw: &[f32], o: usize) {
         self.ty = raw[id::CHRS1_TYPE + o].round().clamp(0.0, 2.0) as u8;
         let r = raw[id::CHRS1_RATE + o] * 0.005 + 0.5;

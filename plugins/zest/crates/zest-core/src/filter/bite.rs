@@ -412,6 +412,11 @@ impl Bite {
         Box::new(Bite { cm: Common::new(seed), m: Model::default() })
     }
 
+    pub fn reset(&mut self, seed: (u32, u32)) {
+        self.cm = Common::new(seed);
+        self.m = Model::default();
+    }
+
     #[inline(always)]
     fn call<'a>(m: &'a mut Model, x: &'a FilterCtx) -> Run<'a> {
         let r1 = x.s.vcf.sk_revision == 1;

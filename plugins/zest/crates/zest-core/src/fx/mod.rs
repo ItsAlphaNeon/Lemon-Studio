@@ -44,6 +44,27 @@ impl Slot {
         Slot { active_id, offset, chorus: Box::new(Chorus::new(fs)), phaser: Box::new(Phaser::new(fs)), plate: Box::new(Plate::new(fs)), delay: Box::new(Delay::new(fs)), rotary: Box::new(Rotary::new(fs)), running: NONE, current: NONE, has_run: [false; 5] }
     }
 
+    fn reset(&mut self) {
+        if self.has_run[0] {
+            self.chorus.reset();
+        }
+        if self.has_run[1] {
+            self.phaser.reset();
+        }
+        if self.has_run[2] {
+            self.plate.reset();
+        }
+        if self.has_run[3] {
+            self.delay.reset();
+        }
+        if self.has_run[4] {
+            self.rotary.reset();
+        }
+        self.running = NONE;
+        self.current = NONE;
+        self.has_run = [false; 5];
+    }
+
     fn reactivate(&mut self, m: i8) {
         match m {
             0 => self.chorus.reactivate(),
@@ -132,6 +153,16 @@ pub struct Effects {
 impl Effects {
     pub fn new(fs: f32) -> Effects {
         Effects { slots: [Slot::new(fs, id::MAIN_ACTIVE_FX1, 0), Slot::new(fs, id::MAIN_ACTIVE_FX2, SLOT_STRIDE)] }
+    }
+
+    pub fn reset(&mut self) {
+        for slot in &mut self.slots {
+            slot.reset();
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.slots.iter().any(|s| s.running != NONE)
     }
 
     #[allow(clippy::too_many_arguments)]

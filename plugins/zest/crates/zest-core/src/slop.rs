@@ -102,12 +102,18 @@ fn pmax0_index(tpots: f32) -> usize {
     (if tpots > 0.0 { tpots } else { 0.0 }) as usize
 }
 
+/// Maximum decoded `.h2p` binary chunk size (1 MiB) to avoid unbounded allocations on malformed files.
+const MAX_CHUNK_SIZE: usize = 1024 * 1024;
+
 /// The binary chunk after the marker line: `$$$$ size ? codebook ! stream = checksum`, all white space removed.
 fn decode_chunk(text: &str) -> Option<Vec<u8>> {
     let after = &text[text.find("$$$$")? + 4..];
     let bytes = after.as_bytes();
     let digits = bytes.iter().take_while(|c| c.is_ascii_digit()).count();
     let size: usize = after[..digits].parse().ok()?;
+    if size > MAX_CHUNK_SIZE {
+        return None;
+    }
     let rest: Vec<u8> = bytes[digits..].iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
     if rest.first() != Some(&b'?') {
         return None;
@@ -143,18 +149,27 @@ fn decode_chunk(text: &str) -> Option<Vec<u8>> {
         match c {
             b'a'..=b'p' => {
                 let b = byte(c, *stream.get(i + 1)?)?;
+                if out.len() >= size {
+                    return None;
+                }
                 out.push(b);
                 last = Tok::Byte(b);
                 i += 2;
             }
             b'A'..=b'Z' => {
                 let b = *dict.get((c - b'A') as usize)?;
+                if out.len() >= size {
+                    return None;
+                }
                 out.push(b);
                 last = Tok::Byte(b);
                 i += 1;
             }
             b'q'..=b'z' => {
                 let w = *words.get((c - b'q') as usize)?;
+                if out.len().saturating_add(4) > size {
+                    return None;
+                }
                 out.extend_from_slice(&w);
                 last = Tok::Word(w);
                 i += 1;
@@ -163,7 +178,12 @@ fn decode_chunk(text: &str) -> Option<Vec<u8>> {
                 let n = stream[i..].iter().take_while(|c| c.is_ascii_digit()).count();
                 let count: usize = core::str::from_utf8(&stream[i..i + n]).ok()?.parse().ok()?;
                 i += n;
-                if out.len().saturating_add(count) > size.saturating_mul(4).max(1 << 24) {
+                let add = match last {
+                    Tok::None => return None,
+                    Tok::Byte(_) => count,
+                    Tok::Word(_) => count.saturating_mul(4),
+                };
+                if out.len().saturating_add(add) > size {
                     return None;
                 }
                 for _ in 0..count {
@@ -178,4 +198,20 @@ fn decode_chunk(text: &str) -> Option<Vec<u8>> {
         }
     }
     (out.len() == size).then_some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_chunk_rejects_oversized_header_and_rle_overflow() {
+        assert_eq!(decode_chunk("$$$$999999999999?!aa=0"), None);
+        let over = format!("$$$$ {}?!aa=0", MAX_CHUNK_SIZE + 1);
+        assert_eq!(decode_chunk(&over), None);
+        // RLE expanding past declared size is rejected without allocating past `size`.
+        assert_eq!(decode_chunk("$$$$4?!aa1000000=0"), None);
+        // Valid small chunk decodes normally.
+        assert_eq!(decode_chunk("$$$$3?!ab2=0"), Some(vec![0x01, 0x01, 0x01]));
+    }
 }

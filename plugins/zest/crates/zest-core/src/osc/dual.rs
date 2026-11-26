@@ -139,10 +139,9 @@ fn walk(ph: f32, i: f32, pw: f32, ppw: f32, sgn: &mut f32, w_pul: f32, w_sum: f3
 }
 
 impl Dual {
-    /// `seed`: the voice's (a, b) of `data/osc-voice-seeds.tsv`.
-    pub fn new(seed: (u32, u32)) -> Box<Dual> {
+    fn init(seed: (u32, u32)) -> Dual {
         let (ph, rng) = seed_phases(seed);
-        Box::new(Dual {
+        Dual {
             ph: [ph[0], ph[1]],
             inc: [0.0; 4],
             pw: [0.0; 2],
@@ -167,7 +166,16 @@ impl Dual {
             prev_sync: None,
             need_init: true,
             woke: false,
-        })
+        }
+    }
+
+    /// `seed`: the voice's (a, b) of `data/osc-voice-seeds.tsv`.
+    pub fn new(seed: (u32, u32)) -> Box<Dual> {
+        Box::new(Self::init(seed))
+    }
+
+    pub fn reset(&mut self, seed: (u32, u32)) {
+        *self = Self::init(seed);
     }
 
     /// The voice wakes from idle (`voice.md`, note start, step 8).

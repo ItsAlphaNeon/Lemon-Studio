@@ -63,6 +63,8 @@ impl Solver {
 }
 
 const SOLVE_T: [f32; 4] = [0.9997, 0.9897, 0.9602, 0.619];
+/// Safety cap on root-finder rounds so degenerate/NaN state can never spin forever on the audio thread.
+const MAX_ITERS: u32 = 512;
 
 /// One sample's run of the root finder: hands out candidates, takes residuals, says when to commit which lane.
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +76,7 @@ pub struct SolveRun {
     bracket: bool,
     pt: (f32, f32),
     qt: (f32, f32),
+    iters: u32,
     pub cand: [f32; 4],
     pub lane: usize,
 }
@@ -95,6 +98,7 @@ impl SolveRun {
             bracket: true,
             pt: (0.0, 0.0),
             qt: (0.0, 0.0),
+            iters: 0,
             cand: Self::cands(ctr, wd),
             lane: 0,
         }
@@ -108,6 +112,7 @@ impl SolveRun {
     /// Takes the residuals of `cand`. Returns true when the sample is solved: commit lane `lane` of this last evaluation.
     #[inline(always)]
     pub fn feed(&mut self, r: &[f32; 4]) -> bool {
+        self.iters += 1;
         if self.bracket {
             let c = self.cand;
             let i = if !(r[1] * r[0] > 0.0) {
@@ -120,7 +125,7 @@ impl SolveRun {
                 // no sign change
                 let base = r[3];
                 self.mult = (self.mult as f64 * 1.5) as f32;
-                if self.mult <= 1e+30 {
+                if self.mult <= 1e+30 && self.iters < MAX_ITERS {
                     let wd = self.mult * base;
                     self.cand = Self::cands(self.ctr, wd);
                     return false;
@@ -143,7 +148,7 @@ impl SolveRun {
             self.pt = (xs[s - 1], rs[s - 1]);
             self.qt = (xs[s], rs[s]);
         }
-        if !((self.pt.0 - self.qt.0).abs() > self.tol) {
+        if !((self.pt.0 - self.qt.0).abs() > self.tol) || self.iters >= MAX_ITERS {
             return true;
         }
         self.next_round();
@@ -604,8 +609,8 @@ mod w8 {
 }
 
 impl SolverFilter {
-    pub fn new(noise: (u32, u32)) -> Box<SolverFilter> {
-        Box::new(SolverFilter {
+    fn init(noise: (u32, u32)) -> SolverFilter {
+        SolverFilter {
             res: Resamplers::new(),
             pc: 0.0,
             qc: 0.0,
@@ -639,7 +644,15 @@ impl SolverFilter {
             last: None,
             k_cached: f32::NAN,
             fc_cached: 0.0,
-        })
+        }
+    }
+
+    pub fn new(noise: (u32, u32)) -> Box<SolverFilter> {
+        Box::new(Self::init(noise))
+    }
+
+    pub fn reset(&mut self, noise: (u32, u32)) {
+        *self = Self::init(noise);
     }
 
     fn call_c<'a>(x: &FilterCtx<'a>, casc: bool) -> CallC<'a> {

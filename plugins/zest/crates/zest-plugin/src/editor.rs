@@ -111,15 +111,15 @@ pub fn load(path: &Path, m: &mut dyn zest_ui::Model, pending: &PendingSlop) -> R
     let cur = current_values(m);
     if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("h2p")) {
         let vals = zest_core::h2p::load(&text, &cur)?;
-        apply(m, &vals);
         let slop = zest_core::slop::parse_preset(&text);
         *pending.lock().unwrap() = Some(slop);
+        apply(m, &vals);
         Ok(Loaded { author: h2p_author(&text), spread: slop.into() })
     } else {
         let f = zest_preset::parse(&text)?;
         let vals = zest_core::h2p::zest_values(&f, &cur);
-        apply(m, &vals);
         *pending.lock().unwrap() = Some(f.spread.into());
+        apply(m, &vals);
         Ok(Loaded { author: f.head.author, spread: f.spread })
     }
 }
@@ -307,6 +307,7 @@ mod gui {
 
     impl Drop for Ed {
         fn drop(&mut self) {
+            self.scope.set_open(false);
             self.link.unregister();
         }
     }
@@ -334,6 +335,7 @@ mod gui {
             if let Some(p) = &memo.preset {
                 ui.set_current(Some(std::path::Path::new(p)), None);
             }
+            scope.set_open(true);
             let mut ed = Ed {
                 win,
                 canvas,

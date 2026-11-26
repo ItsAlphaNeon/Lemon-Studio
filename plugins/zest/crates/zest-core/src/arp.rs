@@ -89,8 +89,8 @@ fn warp(p: f64, s: f32) -> f32 {
 }
 
 impl Arp {
-    pub fn new() -> Box<Arp> {
-        Box::new(Arp {
+    fn init() -> Arp {
+        Arp {
             chord: [(0, 0); 128],
             n: 0,
             clock_keys: [0; 128],
@@ -118,7 +118,19 @@ impl Arp {
             strict_run: false,
             chord_start: false,
             dirty: false,
-        })
+        }
+    }
+
+    pub fn new() -> Box<Arp> {
+        Box::new(Self::init())
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::init();
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.dirty || self.clock_n > 0 || self.q_len > 0 || self.n > 0
     }
 
     /// A note-on (a note-off is v = 0), when the event is taken.

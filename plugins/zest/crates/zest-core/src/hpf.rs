@@ -62,8 +62,8 @@ impl HpfPre {
         self.flagged = true;
     }
 
-    pub fn new() -> Box<HpfPre> {
-        Box::new(HpfPre {
+    fn init() -> HpfPre {
+        HpfPre {
             noise: Noise::default(),
             a: 0.0,
             b: 0.0,
@@ -75,7 +75,15 @@ impl HpfPre {
             flagged: true,
             last_fl: f32::NAN,
             last_c: (0.0, 0.0),
-        })
+        }
+    }
+
+    pub fn new() -> Box<HpfPre> {
+        Box::new(Self::init())
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::init();
     }
 
     /// The module ran under another HPF model this call: a change of HPF/Model clears this kernel for its next run.
@@ -189,8 +197,8 @@ impl HpfBite {
         self.flagged = true;
     }
 
-    pub fn new() -> Box<HpfBite> {
-        Box::new(HpfBite {
+    fn init() -> HpfBite {
+        HpfBite {
             noise: Noise::default(),
             res: Resamplers::new(),
             sol: Solver::default(),
@@ -208,7 +216,15 @@ impl HpfBite {
             last_acc: -1,
             last_in: (f32::NAN, f32::NAN),
             last_t: BiteC::default(),
-        })
+        }
+    }
+
+    pub fn new() -> Box<HpfBite> {
+        Box::new(Self::init())
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::init();
     }
 
     /// The module ran under another HPF model this call: a change of HPF/Model clears this kernel for its next run.

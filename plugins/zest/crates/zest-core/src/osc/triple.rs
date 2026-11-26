@@ -203,13 +203,13 @@ struct ModeC {
 }
 
 impl Triple {
-    pub fn new(seed: (u32, u32)) -> Box<Triple> {
+    fn init(seed: (u32, u32)) -> Triple {
         let (ph, rng) = seed_phases(seed);
         let mut o = [Lane::default(); 3];
         for i in 0..3 {
             o[i].ph = ph[i];
         }
-        Box::new(Triple {
+        Triple {
             o,
             rings: Rings([[0.0; 256]; 3]),
             idx: 0,
@@ -232,7 +232,15 @@ impl Triple {
             woke: false,
             bp_key: [f32::NAN; 3],
             bp: [(0.0, 0.0, 0.0); 3],
-        })
+        }
+    }
+
+    pub fn new(seed: (u32, u32)) -> Box<Triple> {
+        Box::new(Self::init(seed))
+    }
+
+    pub fn reset(&mut self, seed: (u32, u32)) {
+        *self = Self::init(seed);
     }
 
     #[inline]

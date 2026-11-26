@@ -319,6 +319,12 @@ impl Rotary {
         self.last_ster = f32::NAN;
     }
 
+    pub fn reset(&mut self) {
+        self.reactivate();
+        self.mode = 0;
+        self.ster_off = [0; 4];
+    }
+
     pub fn setup(&mut self, raw: &[f32], o: usize, rows: &[f32; 448]) {
         let mode = raw[id::RTARY1_MODE + o].round() as i32;
         if mode != self.mode {

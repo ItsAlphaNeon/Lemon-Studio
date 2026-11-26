@@ -71,6 +71,8 @@ pub fn dead_zone(u: F4, q: f32) -> F4 {
 }
 
 const GRID: [f32; 4] = [0.9997, 0.9897, 0.9602, 0.619];
+/// Safety cap on root-finder rounds so degenerate/NaN state can never spin forever on the audio thread.
+const MAX_ITERS: u32 = 512;
 
 /// One sample's run of the root finder of `filter-multimode.md` section 6: hands out candidates, takes residuals, says which lane
 /// of the last evaluation to commit. It differs from the Ladder's `SolveRun` in how the secant point joins the grid.
@@ -85,6 +87,7 @@ pub struct Root {
     fp: f32,
     q: f32,
     fq: f32,
+    iters: u32,
     pub cand: [f32; 4],
     pub sel: usize,
 }
@@ -96,7 +99,7 @@ impl Root {
         let g = (((s.f1 - s.f2) - c) * 3.0 + s.f2) + c * 9.0;
         let z = g - s.p;
         let y = s.w + 1e-7;
-        Root { g, z, m: 1.0, tol, bracket: true, p: 0.0, fp: 0.0, q: 0.0, fq: 0.0, cand: Self::spread(z, y), sel: 0 }
+        Root { g, z, m: 1.0, tol, bracket: true, p: 0.0, fp: 0.0, q: 0.0, fq: 0.0, iters: 0, cand: Self::spread(z, y), sel: 0 }
     }
 
     #[inline(always)]
@@ -107,6 +110,7 @@ impl Root {
     /// Takes the residuals of `cand`; true when solved, with `sel` the lane to commit.
     #[inline(always)]
     pub fn feed(&mut self, r: &[f32; 4]) -> bool {
+        self.iters += 1;
         let c = self.cand;
         if self.bracket {
             let i = if !(r[1] * r[0] > 0.0) {
@@ -117,7 +121,7 @@ impl Root {
                 3
             } else {
                 self.m = (self.m as f64 * 1.5) as f32;
-                if self.m <= 1e30 {
+                if self.m <= 1e30 && self.iters < MAX_ITERS {
                     self.cand = Self::spread(self.z, self.m * r[3]);
                     return false;
                 }
@@ -142,7 +146,7 @@ impl Root {
             self.fq = f[k];
             self.sel = if k <= 4 { k - 1 } else { 3 };
         }
-        if !((self.p - self.q).abs() > self.tol) {
+        if !((self.p - self.q).abs() > self.tol) || self.iters >= MAX_ITERS {
             return true;
         }
         self.round();

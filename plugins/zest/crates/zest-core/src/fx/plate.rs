@@ -65,6 +65,29 @@ impl ModAp {
         }
     }
 
+    fn reset(&mut self, clear_buf: bool) {
+        if clear_buf {
+            self.buf.fill(0.0);
+        }
+        self.r = 0;
+        self.r2 = 0;
+        self.w = 0;
+        self.x1 = 0.0;
+        self.y1 = 0.0;
+        self.c = 0.0;
+        self.x2 = 0.0;
+        self.y2 = 0.0;
+        self.c2 = 0.0;
+        self.dcx = 0.0;
+        self.dcy = 0.0;
+        self.g_old = 0.0;
+        self.g_new = 0.0;
+        self.rms = 0.0;
+        self.last = 0.0;
+        self.xf = 0.0;
+        self.sumsq = 0.0;
+    }
+
     fn prepare(&mut self, d: f32, fs: f32, reset: bool) {
         const M: u32 = MOD as u32 - 1;
         let mut i = 0;
@@ -235,6 +258,43 @@ impl Plate {
 
     pub fn reactivate(&mut self) {
         self.reset = true;
+    }
+
+    pub fn reset(&mut self) {
+        let dirty = !self.clean;
+        if dirty {
+            self.pre.fill(0.0);
+            for s in &mut self.short {
+                s.fill(0.0);
+            }
+            for l in &mut self.long {
+                l.fill(0.0);
+            }
+        }
+        for ap in &mut self.ap {
+            ap.reset(dirty);
+        }
+        self.w = 0;
+        self.ph = 0.0;
+        self.bw = 0.0;
+        self.d1 = 0.0;
+        self.d2 = 0.0;
+        self.up = Up2::new();
+        self.down = Down2::new();
+        self.reset = true;
+        self.clean = true;
+        self.a = 0.0;
+        self.fd = 0.0;
+        self.g625 = 0.0;
+        self.g707 = 0.0;
+        self.g6 = 0.0;
+        self.d_line = [0; 10];
+        self.d_pre = 0;
+        self.taps = [0; 14];
+        self.dcc = 0.0;
+        self.dry = 0.0;
+        self.wet = 0.0;
+        self.decay = 0.0;
     }
 
     pub fn setup(&mut self, raw: &[f32], o: usize) {

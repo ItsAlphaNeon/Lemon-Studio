@@ -98,6 +98,8 @@ pub struct Ui {
     /// Layout size (logical px, at least the base size).
     pub size: (f32, f32),
     pub mouse: Option<(f32, f32)>,
+    hovered: Option<Target>,
+    hovered_adv: bool,
     pub pressed: Option<Target>,
     pub hint: String,
     /// A message for the hint well while nothing is hovered (loaded, saved, errors).
@@ -141,6 +143,8 @@ impl Ui {
             hosted: false,
             size: (view::BASE_W, view::BASE_H),
             mouse: None,
+            hovered: None,
+            hovered_adv: false,
             pressed: None,
             hint: String::new(),
             status: String::new(),
@@ -614,21 +618,34 @@ impl Ui {
             None => {}
         }
         let t = self.hit(x, y);
+        let hover_changed = t != self.hovered;
+        self.hovered = t.clone();
+        let in_adv = self.page == pages::ADVANCED && self.out.adv.contains(x, y);
+        let adv_changed = in_adv || self.hovered_adv;
+        self.hovered_adv = in_adv;
         let hint = self.hint_for(t.as_ref(), m);
         if self.revealed.is_some() && t.is_none() {
-            return vec![];
+            return if hover_changed || adv_changed { vec![Act::Repaint] } else { vec![] };
         }
-        self.revealed = None;
-        if hint != self.hint {
+        let was_revealed = self.revealed.take().is_some();
+        let hint_changed = hint != self.hint;
+        if hint_changed {
             self.hint = hint;
         }
-        vec![Act::Repaint]
+        if hover_changed || hint_changed || was_revealed || adv_changed {
+            vec![Act::Repaint]
+        } else {
+            vec![]
+        }
     }
 
     pub fn leave(&mut self) -> Vec<Act> {
-        self.mouse = None;
+        let had = self.mouse.take().is_some()
+            || self.hovered.take().is_some()
+            || std::mem::take(&mut self.hovered_adv)
+            || !self.hint.is_empty();
         self.hint.clear();
-        vec![Act::Repaint]
+        if had { vec![Act::Repaint] } else { vec![] }
     }
 
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, mods: Mods, m: &mut dyn Model) -> Vec<Act> {

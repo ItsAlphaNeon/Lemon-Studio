@@ -73,6 +73,30 @@ impl Delay {
         self.reset = true;
     }
 
+    pub fn reset(&mut self) {
+        if !self.clean {
+            self.line.fill(0.0);
+        }
+        self.w = 0;
+        self.ph = 0.0;
+        self.d = [0.0; 3];
+        self.step = [0.0; 3];
+        self.s = 0.0;
+        self.xh = 0.0;
+        self.yh = 0.0;
+        self.up = Up2::new();
+        self.down = Down2::new();
+        self.reset = true;
+        self.clean = true;
+        self.sv = 0.0;
+        self.cv = 0.0;
+        self.fb = 0.0;
+        self.dry = 0.0;
+        self.c = 0.0;
+        self.b0 = 0.0;
+        self.c1 = 0.0;
+    }
+
     pub fn setup(&mut self, raw: &[f32], o: usize, bpm: f64) {
         let (fs, dt) = (self.fs, self.dt);
         let left = raw[id::DELAY1_LEFT_DELAY + o];

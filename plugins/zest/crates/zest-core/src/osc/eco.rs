@@ -118,10 +118,9 @@ fn walk(h: &mut f32, i: f32, w: f32, pp: &mut f32, c: f32, ring: &mut [f32; 256]
 }
 
 impl Eco {
-    /// `seed`: the voice's (a, b) of `data/osc-voice-seeds.tsv`.
-    pub fn new(seed: (u32, u32)) -> Box<Eco> {
+    fn init(seed: (u32, u32)) -> Eco {
         let (ph, rng) = seed_phases(seed);
-        Box::new(Eco {
+        Eco {
             ph,
             inc: [0.0; 4],
             width: [0.0; 3],
@@ -147,7 +146,16 @@ impl Eco {
             prev_mode: None,
             need_init: true,
             woke: false,
-        })
+        }
+    }
+
+    /// `seed`: the voice's (a, b) of `data/osc-voice-seeds.tsv`.
+    pub fn new(seed: (u32, u32)) -> Box<Eco> {
+        Box::new(Self::init(seed))
+    }
+
+    pub fn reset(&mut self, seed: (u32, u32)) {
+        *self = Self::init(seed);
     }
 
     /// The voice wakes from idle (`voice.md`, note start, step 8).
