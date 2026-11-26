@@ -343,11 +343,8 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
         .map(|rd| {
             rd.flatten()
                 .filter_map(|e| {
+                    let md = crate::browser_index::listed_metadata(&e)?;
                     let name = e.file_name().to_string_lossy().into_owned();
-                    let md = e.metadata().ok()?;
-                    if !crate::browser_index::listed(&name, &md) {
-                        return None;
-                    }
                     Some(Entry { name, path: e.path(), dir: md.is_dir(), size: md.len(), modified: md.modified().ok() })
                 })
                 .collect()
