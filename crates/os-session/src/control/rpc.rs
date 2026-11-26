@@ -141,6 +141,7 @@ pub fn rpc_in(ses: &mut Session, c: &mut Client, m: &str, params: &Value, select
             }
             Ok(json!({ "app": "Lemon Studio", "version": crate::version::VERSION, "protocol": PROTOCOL, "name": c.name, "level": c.level }))
         }
+        "describe" => Ok(super::describe()),
         "state" => Ok(super::query::project_in(ses, selected)),
         "notes" => super::query::notes(ses, uint(params, "pattern")? as u32).map_err(bad),
         "plugins" => {

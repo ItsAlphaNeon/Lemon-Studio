@@ -43,6 +43,8 @@ pub mod checks;
 pub mod equiv;
 #[cfg(test)]
 pub mod open_bench;
+#[cfg(test)]
+pub mod sound_ledger;
 pub mod browser;
 pub mod browser_index;
 pub mod wav_facts;

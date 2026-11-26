@@ -122,6 +122,7 @@ pub fn events_in(s: &crate::session::Session, plugins: &Plugins, looks: &Looks) 
     v.push(track_locks(s));
     v.push(note_locks(looks));
     v.push(features(s));
+    v.push(object_ids(s));
     v
 }
 
@@ -144,6 +145,10 @@ pub fn apply_session(s: &mut crate::session::Session, file: &FlpFile) {
         return;
     }
     let read = |id| lemon::data(file, id).filter(|d| d.first() == Some(&LAYOUT));
+    // Restore stable object ids first so downstream UI state and control-plane clients keep their references.
+    if let Some(d) = read(lemon::OBJECT_IDS) {
+        read_object_ids(s, &d[1..]);
+    }
     if let Some(&flags) = read(lemon::MIXER).as_deref().and_then(|d| d.get(1)) {
         s.project.get_mut().pdc_off = flags & PDC_AUTO == 0;
     }
@@ -398,6 +403,188 @@ fn note_locks(looks: &Looks) -> Event {
     Event::new(lemon::NOTE_LOCKS, Value::var(b))
 }
 
+/// [`lemon::OBJECT_IDS`]: stable `os_model::Id` values for every channel, pattern (+ notes/controls), mixer track (+
+/// effect slots), arrangement (+ clips/markers/playlist tracks), and automation (+ points).
+fn object_ids(s: &crate::session::Session) -> Event {
+    let p = &s.project;
+    let mut b = vec![LAYOUT];
+    let push_u32 = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_le_bytes());
+    let push_u16 = |b: &mut Vec<u8>, v: u16| b.extend_from_slice(&v.to_le_bytes());
+
+    // Channels (rack order).
+    push_u32(&mut b, p.channels.len() as u32);
+    for c in &p.channels {
+        push_u32(&mut b, c.id.0);
+    }
+    // Patterns (matched by pattern number on read) + notes & controls.
+    push_u32(&mut b, p.patterns.len() as u32);
+    for q in &p.patterns {
+        push_u16(&mut b, q.number);
+        push_u32(&mut b, q.id.0);
+        push_u32(&mut b, q.notes.len() as u32);
+        for n in &q.notes {
+            push_u32(&mut b, n.id.0);
+        }
+        push_u32(&mut b, q.controls.len() as u32);
+        for c in &q.controls {
+            push_u32(&mut b, c.id.0);
+        }
+    }
+    // Mixer tracks (matched by mixer track index) + occupied effect slots.
+    push_u32(&mut b, p.mixer.len() as u32);
+    for m in &p.mixer {
+        push_u16(&mut b, m.index);
+        push_u32(&mut b, m.id.0);
+        let occupied: Vec<(u8, u32)> = m.slots.iter().enumerate().filter_map(|(k, sl)| Some((k as u8, sl.as_ref()?.id.0))).collect();
+        b.push(occupied.len() as u8);
+        for (k, id) in occupied {
+            b.push(k);
+            push_u32(&mut b, id);
+        }
+    }
+    // Arrangements (in order) + clips, markers, playlist tracks.
+    push_u32(&mut b, p.arrangements.len() as u32);
+    for a in &p.arrangements {
+        push_u32(&mut b, a.id.0);
+        push_u32(&mut b, a.clips.len() as u32);
+        for c in &a.clips {
+            push_u32(&mut b, c.id.0);
+        }
+        push_u32(&mut b, a.markers.len() as u32);
+        for mk in &a.markers {
+            push_u32(&mut b, mk.id.0);
+        }
+        push_u32(&mut b, a.tracks.len() as u32);
+        for tr in &a.tracks {
+            push_u32(&mut b, tr.id.0);
+        }
+    }
+    // Automations (in order) + points.
+    push_u32(&mut b, p.automations.len() as u32);
+    for au in &p.automations {
+        push_u32(&mut b, au.points.len() as u32);
+        for pt in &au.points {
+            push_u32(&mut b, pt.id.0);
+        }
+    }
+    Event::new(lemon::OBJECT_IDS, Value::var(b))
+}
+
+fn read_object_ids(s: &mut crate::session::Session, d: &[u8]) {
+    let mut r = Reader(d);
+    let set = |dst: &mut os_model::Id, v: u32| {
+        if v != 0 {
+            *dst = os_model::Id(v);
+        }
+    };
+    {
+        let p = s.project.get_mut();
+        // Channels.
+        let Some(n_ch) = r.u32() else { return };
+        for i in 0..n_ch as usize {
+            let Some(id) = r.u32() else { return };
+            if let Some(c) = p.channels.get_mut(i) {
+                set(&mut c.id, id);
+            }
+        }
+        // Patterns + notes & controls.
+        let Some(n_pat) = r.u32() else { return };
+        for _ in 0..n_pat {
+            let (Some(num), Some(pid), Some(n_notes)) = (r.u16(), r.u32(), r.u32()) else { return };
+            let mut note_ids = Vec::with_capacity((n_notes as usize).min(1024));
+            for _ in 0..n_notes {
+                let Some(id) = r.u32() else { return };
+                note_ids.push(id);
+            }
+            let Some(n_ctrl) = r.u32() else { return };
+            let mut ctrl_ids = Vec::with_capacity((n_ctrl as usize).min(1024));
+            for _ in 0..n_ctrl {
+                let Some(id) = r.u32() else { return };
+                ctrl_ids.push(id);
+            }
+            if let Some(q) = p.patterns.iter_mut().find(|q| q.number == num) {
+                set(&mut q.id, pid);
+                for (n, id) in q.notes.iter_mut().zip(note_ids) {
+                    set(&mut n.id, id);
+                }
+                for (c, id) in q.controls.iter_mut().zip(ctrl_ids) {
+                    set(&mut c.id, id);
+                }
+            }
+        }
+        // Mixer tracks + slots.
+        let Some(n_mix) = r.u32() else { return };
+        for _ in 0..n_mix {
+            let (Some(idx), Some(mid), Some(n_slots)) = (r.u16(), r.u32(), r.u8()) else { return };
+            let mut slot_ids = Vec::with_capacity(usize::from(n_slots));
+            for _ in 0..n_slots {
+                let (Some(k), Some(sid)) = (r.u8(), r.u32()) else { return };
+                slot_ids.push((k, sid));
+            }
+            if let Some(m) = p.mixer.iter_mut().find(|m| m.index == idx) {
+                set(&mut m.id, mid);
+                for (k, sid) in slot_ids {
+                    if let Some(Some(sl)) = m.slots.get_mut(usize::from(k)) {
+                        set(&mut sl.id, sid);
+                    }
+                }
+            }
+        }
+        // Arrangements + clips, markers, tracks.
+        let Some(n_arr) = r.u32() else { return };
+        for a_idx in 0..n_arr as usize {
+            let (Some(aid), Some(n_clips)) = (r.u32(), r.u32()) else { return };
+            let mut clip_ids = Vec::with_capacity((n_clips as usize).min(1024));
+            for _ in 0..n_clips {
+                let Some(id) = r.u32() else { return };
+                clip_ids.push(id);
+            }
+            let Some(n_markers) = r.u32() else { return };
+            let mut marker_ids = Vec::with_capacity((n_markers as usize).min(256));
+            for _ in 0..n_markers {
+                let Some(id) = r.u32() else { return };
+                marker_ids.push(id);
+            }
+            let Some(n_tracks) = r.u32() else { return };
+            let mut track_ids = Vec::with_capacity((n_tracks as usize).min(512));
+            for _ in 0..n_tracks {
+                let Some(id) = r.u32() else { return };
+                track_ids.push(id);
+            }
+            if let Some(a) = p.arrangements.get_mut(a_idx) {
+                set(&mut a.id, aid);
+                for (c, id) in a.clips.iter_mut().zip(clip_ids) {
+                    set(&mut c.id, id);
+                }
+                for (mk, id) in a.markers.iter_mut().zip(marker_ids) {
+                    set(&mut mk.id, id);
+                }
+                for (tr, id) in a.tracks.iter_mut().zip(track_ids) {
+                    set(&mut tr.id, id);
+                }
+            }
+        }
+        // Automations + points.
+        let Some(n_auto) = r.u32() else { return };
+        for au_idx in 0..n_auto as usize {
+            let Some(n_pts) = r.u32() else { return };
+            let mut pt_ids = Vec::with_capacity((n_pts as usize).min(1024));
+            for _ in 0..n_pts {
+                let Some(id) = r.u32() else { return };
+                pt_ids.push(id);
+            }
+            if let Some(au) = p.automations.get_mut(au_idx) {
+                for (pt, id) in au.points.iter_mut().zip(pt_ids) {
+                    set(&mut pt.id, id);
+                }
+            }
+        }
+    }
+    crate::control::ids::forget(&mut s.control.ids);
+    s.control.ids.advance_past(&s.project);
+    s.control.settle(s.project.get_mut());
+}
+
 /// A payload's layout version and entry count.
 pub fn start(count: usize) -> Vec<u8> {
     let mut b = vec![LAYOUT];
@@ -439,4 +626,48 @@ mod tests {
         d
     }
 
+    #[test]
+    fn object_ids_survive_lemon_save_and_reopen() {
+        let d = dir("object_ids");
+        let path = d.join("song.lemon");
+        let st = crate::settings_file::SettingsStore::memory();
+        let mut s = crate::session::Session::new(crate::projects::default_project(&st), crate::transport::Transport::new(None), st);
+        {
+            let p = s.project.get_mut();
+            p.channels.push(os_model::Channel::default());
+            p.channels.push(os_model::Channel::default());
+            p.patterns[0].notes.push(os_model::Note::step(0, 0));
+            p.patterns[0].notes.push(os_model::Note::step(1, 96));
+        }
+        // Assign non-default high ids to prove restored ids come from the file, not fresh numbering.
+        s.control.settle(s.project.get_mut());
+        {
+            let p = s.project.get_mut();
+            p.channels[0].id = os_model::Id(77);
+            p.channels[1].id = os_model::Id(88);
+            p.patterns[0].id = os_model::Id(123);
+            p.mixer[0].id = os_model::Id(456);
+            p.patterns[0].notes[0].id = os_model::Id(crate::control::ids::PARTS + 42);
+            p.patterns[0].notes[1].id = os_model::Id(crate::control::ids::PARTS + 99);
+        }
+        let (res, msg) = crate::project_io::save(&mut s, &path);
+        assert!(res.is_ok(), "{msg}");
+
+        let st2 = crate::settings_file::SettingsStore::memory();
+        let mut reopened = crate::session::Session::new(crate::projects::default_project(&st2), crate::transport::Transport::new(None), st2);
+        let (file, proj, _) = crate::project_io::read(&path).unwrap();
+        crate::project_io::open_in(&mut reopened, file.clone(), proj, path.clone());
+        super::apply_session(&mut reopened, &file);
+
+        assert_eq!(reopened.project.channels[0].id.0, 77);
+        assert_eq!(reopened.project.channels[1].id.0, 88);
+        assert_eq!(reopened.project.patterns[0].id.0, 123);
+        assert_eq!(reopened.project.mixer[0].id.0, 456);
+        assert_eq!(reopened.project.patterns[0].notes[0].id.0, crate::control::ids::PARTS + 42);
+        assert_eq!(reopened.project.patterns[0].notes[1].id.0, crate::control::ids::PARTS + 99);
+        // Newly allocated ids after reopen must sit strictly above all restored ids.
+        assert!(reopened.control.ids.fresh().0 > 456);
+        assert!(reopened.control.ids.part().0 > crate::control::ids::PARTS + 99);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
