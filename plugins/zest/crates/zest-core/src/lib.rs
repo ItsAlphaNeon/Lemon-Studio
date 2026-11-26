@@ -123,6 +123,14 @@ pub struct Engine {
 const VOICE_SEEDS: &str = include_str!("../data/voice-seeds.tsv");
 const STARTUP_SPREAD: &str = include_str!("../data/startup-spread.tsv");
 
+fn voice_seeds() -> &'static [(u32, u32); VOICES] {
+    static SEEDS: std::sync::OnceLock<[(u32, u32); VOICES]> = std::sync::OnceLock::new();
+    SEEDS.get_or_init(|| {
+        let (_, seeds) = dsp::parse_tsv(VOICE_SEEDS);
+        core::array::from_fn(|v| (seeds[v][0] as u32, seeds[v][1] as u32))
+    })
+}
+
 fn startup_spread() -> Spread {
     let (_, rows) = dsp::parse_tsv(STARTUP_SPREAD);
     let mut sp = Spread { knobs: [16.0, 24.0, 33.0, 26.0], ..Spread::default() };
@@ -151,8 +159,8 @@ impl Engine {
         let values: [f32; COUNT] = core::array::from_fn(|i| PARAMS[i].default);
         let settings = Box::new(Settings::read(&values));
         let tables = Tables::get();
-        let (_, seeds) = dsp::parse_tsv(VOICE_SEEDS);
-        let voices = (0..VOICES).map(|v| Voice::new(v, (seeds[v][0] as u32, seeds[v][1] as u32))).collect();
+        let seeds = voice_seeds();
+        let voices = (0..VOICES).map(|v| Voice::new(v, seeds[v])).collect();
         let mut eng = Engine {
             fs,
             dt: 1.0 / fs,
@@ -560,11 +568,23 @@ impl Engine {
         self.t = end;
     }
 
+    /// True when any voice is playing or scheduled, events are queued, or the arpeggiator is active.
+    pub fn has_active_voices(&self) -> bool {
+        self.q_len > 0 || self.left_n > 0 || self.arp.is_active() || self.voices.iter().any(|v| v.playing || v.n_actions > 0)
+    }
+
+    /// True when either effect slot is currently active.
+    pub fn fx_active(&self) -> bool {
+        self.fx.is_active()
+    }
+
     /// Everything silent, voices and effects cleared: the startup state, keeping the parameters, the pots, the knobs and the
     /// instance generator.
     pub fn reset(&mut self) {
-        let (_, seeds) = dsp::parse_tsv(VOICE_SEEDS);
-        self.voices = (0..VOICES).map(|v| Voice::new(v, (seeds[v][0] as u32, seeds[v][1] as u32))).collect();
+        let seeds = voice_seeds();
+        for (v, &seed) in self.voices.iter_mut().zip(seeds.iter()) {
+            v.reset(seed);
+        }
         let spread = self.sh.spread;
         let last_vel = self.sh.last_vel;
         let key_table = self.sh.key_table;
@@ -584,7 +604,7 @@ impl Engine {
             ctrl: [0.0; 4],
             press: 0.0,
         };
-        self.arp = arp::Arp::new();
+        self.arp.reset();
         self.lfo_reset_run();
         self.lfo_reset_run();
         self.ch = notes::Channel::new();
@@ -597,7 +617,7 @@ impl Engine {
         self.prev_playing = None;
         self.order_n = 0;
         self.post = hpf::HpfPost::new(self.fs);
-        *self.fx = fx::Effects::new(self.fs);
+        self.fx.reset();
     }
 }
 
@@ -865,6 +885,37 @@ mod tests {
         };
         if cfg!(zest_sse) && avx_here() {
             assert_eq!(render(true), render(false));
+        }
+    }
+
+    #[test]
+    fn reset_is_the_startup_state_with_digital_feedback() {
+        let set = [(id::OSC_MODEL, 4.0), (id::OSC_DIGITALTYPE1, 3.0), (id::OSC_DIGITALTYPE2, 3.0)];
+        let (mut e, _) = engine(&set);
+        let chord = [on(48), on(60)];
+        let mut a = (vec![0.0; 4096], vec![0.0; 4096]);
+        e.process(&chord, &Transport::default(), &mut a.0, &mut a.1);
+        e.reset();
+        let mut b = (vec![0.0; 4096], vec![0.0; 4096]);
+        e.process(&chord, &Transport::default(), &mut b.0, &mut b.1);
+        assert!(a.0.iter().any(|x| *x != 0.0));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn root_finders_terminate_on_degenerate_residuals() {
+        let s = filter::solver::Solver { f0: 1e20, f1: 1e20, f2: 1e20, w: 1e15, p: 0.0, e: 0.0 };
+        let mut sr = filter::solver::SolveRun::start(&s, 1e-6);
+        let mut n = 0;
+        while !sr.feed(&[f32::NAN; 4]) {
+            n += 1;
+            assert!(n <= 1024);
+        }
+        let mut rt = filter::kernel::Root::start(&s, 1e-6);
+        let mut m = 0;
+        while !rt.feed(&[f32::NAN; 4]) {
+            m += 1;
+            assert!(m <= 1024);
         }
     }
 }

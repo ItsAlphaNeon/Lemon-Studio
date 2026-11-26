@@ -220,7 +220,7 @@ fn icon(ui: &mut Ui, kind: Kind, cx: f32, cy: f32) {
             // A hook from the left over the top, down to the stem, and the dot.
             let (w, r, oy) = (7.0 * k, 10.0 * k, cy - 14.0 * k);
             c.arc(cx, oy, r, std::f32::consts::PI, 1.25 * std::f32::consts::PI, w, glyph);
-            let end = (cx + r * 0.7071, oy + r * 0.7071);
+            let end = (cx + r * std::f32::consts::FRAC_1_SQRT_2, oy + r * std::f32::consts::FRAC_1_SQRT_2);
             c.fill_circle(end.0, end.1, w / 2.0, glyph);
             c.line(end.0, end.1, cx, cy + 0.5 * k, w, glyph);
             c.fill_rrect(Rect::new(cx - w / 2.0, cy - 1.5 * k, w, 9.0 * k), w / 2.0, glyph);

@@ -262,6 +262,61 @@ impl Voice {
         })
     }
 
+    pub fn reset(&mut self, seed: (u32, u32)) {
+        self.busy = false;
+        self.gated = false;
+        self.vnote = 0;
+        self.age = 0;
+        self.actions = [Action::EMPTY; MAX_ACTIONS];
+        self.n_actions = 0;
+        self.note = 0;
+        self.pitch = [69.0, 69.0];
+        self.duo_key = [0, 0];
+        self.vel = 0.0;
+        self.level = 0.0;
+        self.dec = 0.0;
+        self.pressure = 0.0;
+        self.cur = [0.0; 4];
+        self.tgt = [0.0; 4];
+        self.tgt_press = 0.0;
+        self.prog = [1.0, 1.0];
+        self.start = [60.0, 60.0];
+        self.v_alt = 0.0;
+        self.v_rnd = 0.0;
+        self.v_stack = 0.0;
+        self.playing = false;
+        self.gate_row = false;
+        self.countdown = 0;
+        self.used = false;
+        self.ghost = false;
+        self.tune = 0.0;
+        self.rows = [0.0; ROWS_LEN];
+        self.row_last = [0.0; 24];
+        self.env = [Envelope::default(); 2];
+        self.env1_active = false;
+        self.lfo = [LfoState::default(); 2];
+        self.mod_state = [0.0; 6];
+        self.needs_clear = false;
+        self.stop_block = -1;
+        self.ran = false;
+        self.triple.reset(seed);
+        self.dual.reset(seed);
+        self.dco.reset(seed);
+        self.eco.reset(seed);
+        self.digital.reset(seed);
+        self.solver.reset(seed);
+        self.multimode.reset(seed);
+        self.bite.reset(seed);
+        self.uhbie.reset(seed);
+        self.hpf_pre.reset();
+        self.hpf_bite.reset();
+        self.mx = MatrixSums::zero();
+        self.a = [0.0; 64];
+        self.b = [0.0; 64];
+        self.out_l = [0.0; 64];
+        self.out_r = [0.0; 64];
+    }
+
     #[inline]
     pub fn has_on_waiting(&self) -> bool {
         self.actions[..self.n_actions].iter().any(|a| a.kind == ActKind::On)

@@ -100,8 +100,30 @@ impl Osc {
             f2: Fst::default(),
             lp: [f32::from_bits(0x2EDB_E6FF); 2],
             ca: 0.0,
-            delay: vec![0.0; DELAY],
+            delay: Vec::new(),
             wi: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.ty = 0;
+        self.saws = [0.0; 6];
+        self.q = 0.7;
+        self.coef = Coef { f: !0, q: !0, k: 0.0, c1: 0.0, c2: 0.0, c3: 0.0, c4: 0.0 };
+        self.f1 = Fst::default();
+        self.f2 = Fst::default();
+        self.lp = [f32::from_bits(0x2EDB_E6FF); 2];
+        self.ca = 0.0;
+        if !self.delay.is_empty() {
+            self.delay.fill(0.0);
+        }
+        self.wi = 0;
+    }
+
+    #[inline]
+    fn ensure_delay(&mut self) {
+        if self.delay.len() < DELAY {
+            self.delay.resize(DELAY, 0.0);
         }
     }
 }
@@ -497,6 +519,35 @@ impl Digital {
         })
     }
 
+    pub fn reset(&mut self, seed: (u32, u32)) {
+        let (ph, rng) = seed_phases(seed);
+        self.ph = [ph[0], ph[1]];
+        self.inc = [0.0; 4];
+        self.s = [0.0; 4];
+        self.st_base = [0.0; 4];
+        self.st_shape = [0.0; 4];
+        self.st_mix = 0.0;
+        self.st_fm = 0.0;
+        self.cache = [0.0; 4];
+        self.level = [0; 2];
+        self.osc[0].reset();
+        self.osc[1].reset();
+        self.rings = Rings2([[0.0; 256]; 2]);
+        self.idx = 0;
+        self.x1 = 0.0;
+        self.y1 = 0.0;
+        self.rng = rng;
+        self.pink = [0.0; 5];
+        self.up = Up2::new();
+        self.down = Down2::new();
+        self.last_end = 0;
+        self.prev_mode = None;
+        self.need_init = true;
+        self.woke = false;
+        self.saws_set = false;
+        self.saw_runs = 1;
+    }
+
     /// The voice wakes from idle (`voice.md`, note start, step 8).
     pub fn wake(&mut self) {
         self.woke = true;
@@ -548,6 +599,12 @@ impl Digital {
     }
 
     fn pass(&mut self, x: &OscCtx, set: &Set, n: usize, init: bool, a: &mut [f32], b: &mut [f32]) {
+        if set.t1 == FEEDBACK {
+            self.osc[0].ensure_delay();
+        }
+        if set.t2 == FEEDBACK {
+            self.osc[1].ensure_delay();
+        }
         let s = &x.s.osc;
         let (per_step, q_step, cap) = if set.x2 { (8usize, 0.125f32, 0.25f32) } else { (4usize, 0.25f32, 0.5f32) };
         let e = per_step as f32;

@@ -170,25 +170,36 @@ pub fn listed(name: &str, md: &std::fs::Metadata) -> bool {
     !(name.starts_with('.') || low == "desktop.ini" || low == "thumbs.db")
 }
 
-/// Reads everything below `roots`, breadth first, skipping what the browser does not list and links to folders (no
-/// loops); stops at `MAX_ENTRIES`.
+/// A listed directory entry's metadata, with a link followed so that a link to a folder is that folder (issue #443).
+/// `None` when the entry is not listed (by its own name and attributes) or is a broken link.
+pub fn listed_metadata(e: &std::fs::DirEntry) -> Option<std::fs::Metadata> {
+    let md = e.metadata().ok()?;
+    if !listed(&e.file_name().to_string_lossy(), &md) {
+        return None;
+    }
+    if md.file_type().is_symlink() { std::fs::metadata(e.path()).ok() } else { Some(md) }
+}
+
+/// Reads everything below `roots`, breadth first, skipping what the browser does not list; stops at `MAX_ENTRIES`.
+/// Links to folders are followed, and a folder already read under this root (by its real path) is not read again, so
+/// a link loop ends.
 pub fn build(roots: &[PathBuf]) -> Built {
     let mut entries = Vec::new();
     let mut cut = false;
     'roots: for (root, r) in roots.iter().enumerate() {
         let mut queue = std::collections::VecDeque::from([r.clone()]);
+        let mut seen = HashSet::new();
         while let Some(dir) = queue.pop_front() {
+            if !seen.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+                continue;
+            }
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };
             for e in rd.flatten() {
+                let Some(md) = listed_metadata(&e) else { continue };
                 let name = e.file_name().to_string_lossy().into_owned();
-                let Ok(md) = e.metadata() else { continue };
-                if !listed(&name, &md) {
-                    continue;
-                }
-                let link = e.file_type().is_ok_and(|t| t.is_symlink());
                 let path = e.path();
                 let is_dir = md.is_dir();
-                if is_dir && !link {
+                if is_dir {
                     queue.push_back(path.clone());
                 }
                 entries.push(IEntry { label: disk_label(&name, &path, is_dir).to_lowercase(), path, dir: is_dir, root });
@@ -231,5 +242,44 @@ mod tests {
         ix.clear();
         assert!(ix.match_dirs("kick", true).is_none() && !ix.covers(std::slice::from_ref(&root)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Makes a link to a folder; `false` where this machine does not allow it (Windows without Developer Mode).
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        let r = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let r = std::os::windows::fs::symlink_dir(target, link);
+        r.is_ok()
+    }
+
+    /// A link to a folder is listed as that folder and its files are indexed; a link back up the tree does not loop
+    /// (issue #443).
+    #[test]
+    fn links_to_folders_are_folders() {
+        let root = std::env::temp_dir().join(format!("os_index_links_{}", std::process::id()));
+        let elsewhere = std::env::temp_dir().join(format!("os_index_elsewhere_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("Snare.wav"), b"").unwrap();
+        if !link_dir(&elsewhere, &root.join("Downloads")) || !link_dir(&root, &root.join("Up")) {
+            eprintln!("links_to_folders_are_folders: this machine can't make folder links; skipped");
+            return;
+        }
+        let listed: Vec<(String, bool)> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| listed_metadata(&e).map(|m| (e.file_name().to_string_lossy().into_owned(), m.is_dir())))
+            .collect();
+        assert!(listed.contains(&("Downloads".into(), true)), "{listed:?}");
+        let mut ix = Index::default();
+        ix.start(vec![root.clone()]);
+        assert!(!ix.building());
+        let set = ix.match_dirs("snare", true).unwrap();
+        assert!(set.contains(&root.join("Downloads")), "{set:?}");
+        // Downloads, Up, Snare; Up's own contents are root's, already read.
+        assert_eq!(ix.len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
 }

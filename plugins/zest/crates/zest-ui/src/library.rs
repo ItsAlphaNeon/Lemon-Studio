@@ -254,7 +254,20 @@ fn cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Librar
 
 /// The sources as a cache key: their folders and what they take.
 fn cache_key(sources: &[Source]) -> String {
-    sources.iter().map(|s| format!("{}|{}|{}|{}\n", s.root.display(), s.exts.join(","), s.name, s.single)).collect()
+    sources
+        .iter()
+        .map(|s| format!("{}|{}|{}|{}|{}|{}|{}\n", s.root.display(), s.exts.join(","), s.name, s.single, s.user, s.banks, s.built_in))
+        .collect()
+}
+
+/// Guards background library scans so multiple plugin instances do not spawn concurrent scans.
+static WARM_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct WarmGuard;
+impl Drop for WarmGuard {
+    fn drop(&mut self) {
+        WARM_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl Library {
@@ -282,17 +295,29 @@ impl Library {
     /// Scans `sources` on a thread of its own into the cache `scan_cached` takes from (a new instance warms it before
     /// its editor opens).
     pub fn warm(sources: &[Source]) {
+        if WARM_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
         let sources = sources.to_vec();
-        std::thread::spawn(move || {
-            let lib = Library::scan(&sources);
-            if let Ok(mut c) = cache().lock() {
-                c.insert(cache_key(&sources), lib);
-            }
-        });
+        if std::thread::Builder::new()
+            .spawn(move || {
+                let _guard = WarmGuard;
+                let lib = Library::scan(&sources);
+                if let Ok(mut c) = cache().lock() {
+                    c.insert(cache_key(&sources), lib);
+                }
+            })
+            .is_err()
+        {
+            WARM_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// `warm`, when nothing is kept for `sources` yet.
     pub fn prewarm(sources: &[Source]) {
+        if WARM_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
         let kept = cache().lock().is_ok_and(|c| c.contains_key(&cache_key(sources)));
         if !kept {
             Library::warm(sources);
@@ -703,5 +728,19 @@ mod tests {
         favs.toggle(&root.join("diva/1 BASS/HS Other.h2p")).unwrap();
         assert_eq!(lib.filter("", &Chip::Favorites, &favs), vec![1]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cache_key_includes_source_flags() {
+        let base = Source { root: PathBuf::from("/tmp/p"), exts: vec!["zest".into()], name: "A".into(), ..Default::default() };
+        let mut s_user = base.clone();
+        s_user.user = true;
+        let mut s_banks = base.clone();
+        s_banks.banks = true;
+        let mut s_builtin = s_banks.clone();
+        s_builtin.built_in = true;
+        assert_ne!(cache_key(&[base.clone()]), cache_key(&[s_user]));
+        assert_ne!(cache_key(&[base]), cache_key(&[s_banks.clone()]));
+        assert_ne!(cache_key(&[s_banks]), cache_key(&[s_builtin]));
     }
 }

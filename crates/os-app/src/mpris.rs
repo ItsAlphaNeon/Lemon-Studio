@@ -62,19 +62,34 @@ impl Mpris {
         self.rx.try_iter().collect()
     }
 
-    /// Shows `now`, telling the desktop when it changed.
+    /// Shows `status` and `title`, telling the desktop only when either changed.
     pub fn show(&self, now: Now) {
-        let old = std::mem::replace(&mut *self.now.lock().unwrap(), now.clone());
-        if old == now {
-            return;
-        }
+        self.show_str(now.status, &now.title);
+    }
+
+    /// Like `show`, avoiding `String` allocation when unchanged.
+    pub fn show_str(&self, status: &'static str, title: &str) {
+        let (status_changed, title_changed) = {
+            let mut cur = self.now.lock().unwrap_or_else(|e| e.into_inner());
+            let sc = cur.status != status;
+            let tc = cur.title != title;
+            if !sc && !tc {
+                return;
+            }
+            cur.status = status;
+            if tc {
+                cur.title.clear();
+                cur.title.push_str(title);
+            }
+            (sc, tc)
+        };
         let Ok(iface) = self.conn.object_server().interface::<_, Player>(PATH) else { return };
         let p = iface.get();
         let e = iface.signal_emitter();
-        if old.status != now.status {
+        if status_changed {
             let _ = zbus::block_on(p.playback_status_changed(e));
         }
-        if old.title != now.title {
+        if title_changed {
             let _ = zbus::block_on(p.metadata_changed(e));
         }
     }

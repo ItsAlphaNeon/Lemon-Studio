@@ -84,7 +84,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
   Presets, close). FL's frame is gone there: no minimize button, no gear strip (the channel settings window has those
   controls), no frame around the editor. Third-party plugins keep windows of their own.
   `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives the built-in ones their own windows again.
-- **Zest.** An analog-style synthesizer, compiled in on every processor (`plugins/zest`: SSE on x86-64, the same operations in plain Rust elsewhere). It aims at the sound of u-he Diva and loads Diva's presets when they are installed. Its Space bank holds borrowed Diva presets for now; further banks go in `plugins/zest/banks/` or `~/.local/share/zest/banks/` as `.zest` files.
+- **Zest.** An analog-style synthesizer, compiled in on every processor (`plugins/zest`: SSE on x86-64, the same operations in plain Rust elsewhere). It aims at the sound of u-he Diva and loads Diva's presets when they are installed. Banks go in `plugins/zest/banks/` or `~/.local/share/zest/banks/` as `.zest` files.
 - **Windows of one plugin as tabs (Linux and macOS).** A second window of a plugin drawn in the app's joins the first, with a row of
   tabs on top of the window: each narrows upwards between slanted edges, the window keeps its size (no row is added
   to it), and the row starts clear of its rounded corners. Each tab has its own close button, and the one left shows at

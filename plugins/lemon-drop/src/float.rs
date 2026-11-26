@@ -45,6 +45,7 @@ const MIN_SIDE: f32 = 24.0;
 
 /// Opens the floating display when the state is Visible and it is not open. On the host's UI thread (the editor's
 /// tick); `editor` is the editor's window, whose top owner owns the floating one.
+#[allow(clippy::not_unsafe_ptr_arg_deref)] // `editor` is a window handle, not memory read here
 pub fn ensure(params: &Arc<DropParams>, shared: &Arc<Shared>, scale: f32, editor: HWND) {
     if shared.float.load(Ordering::Acquire) != 0 {
         return;

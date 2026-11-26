@@ -76,6 +76,9 @@ pub struct Drive {
     sticky: [Option<Sticky>; 8],
     /// Each encoder's last turn: when, and what it turned (a gesture's first turn makes the undo step).
     last_turn: [Option<(Instant, Target)>; 8],
+    /// Each fader's last move (0..8 bank faders, 8 master): when, and which track (prevents colliding with encoders or
+    /// between fader 0 and master).
+    last_fader: [Option<(Instant, u16)>; 9],
     /// A stepped parameter's turning not yet enough for a step.
     carry: [f64; 8],
     /// The tempo the Transport layout last showed.
@@ -121,6 +124,7 @@ impl Drive {
             takeover: [(None, false); 9],
             sticky: [None; 8],
             last_turn: [None; 8],
+            last_fader: [None; 9],
             carry: [0.0; 8],
             tempo_shown: None,
             plugin_shown: None,
@@ -472,7 +476,7 @@ impl App {
             self.toggle_record_option(Opt::Loop);
         }
         if let Some(d) = &self.surface {
-            let name = d.port.name.clone();
+            let name = d.port.out_name.clone();
             crate::midi_cfg::set_output(&self.state.session.settings, &name, crate::midi_cfg::OutCfg { sync: true, ..crate::midi_cfg::output(&self.state.session.settings, &name) });
         }
     }
@@ -867,9 +871,8 @@ impl App {
         let t = t as u16;
         if arm {
             crate::mixer::hit(self, crate::mixer::MHit::Arm(t));
-        } else if let Some(m) = crate::mixer::track_mut(&mut self.state.session, t) {
-            m.enabled = !m.enabled;
-            self.state.session.dirty = true;
+        } else {
+            crate::mixer::hit(self, crate::mixer::MHit::Led(t));
         }
         self.invalidate();
     }
@@ -1014,18 +1017,18 @@ impl App {
             self.open_target_window(pt.key);
             return self.reveal_param(pt.key, index);
         }
-        // A stepped parameter takes the turns it could not show yet into the next.
+        // A stepped parameter takes the turns it could not show yet into the next (`wanted` already includes `carry`).
         let carry = self.drive().carry[i];
         let wanted = self.turn(i, t, steps, centre, carry);
         let got = self.target_value(t);
-        self.drive().carry[i] = if (got - wanted).abs() > 1e-9 { carry + wanted - got } else { 0.0 };
+        self.drive().carry[i] = if (got - wanted).abs() > 1e-9 { wanted - got } else { 0.0 };
         self.open_target_window(pt.key);
         self.reveal_param(pt.key, index);
     }
 
     /// The plugin's window shows the parameter being turned: the tab of its window, the page it is on, and what changes.
     fn reveal_param(&mut self, key: usize, index: usize) {
-        #[cfg(all(target_os = "linux", plugin_windows))]
+        #[cfg(all(lemon_cards, plugin_windows))]
         if self.state.plugin_tabs.hidden(key) {
             self.state.raise(Win::Hosted(key));
         }
@@ -1214,7 +1217,7 @@ impl App {
             || last.is_some_and(|l| (l - now_v) * (v - now_v) <= 0.0);
         d.takeover[i] = (Some(v), caught);
         if caught {
-            let first = self.gesture_fader(i);
+            let first = self.gesture_fader(i, t);
             self.target_set(Target::Fader(t), v, first);
         }
         let name = crate::mixer::name(&self.state.session, t);
@@ -1229,13 +1232,11 @@ impl App {
         }
     }
 
-    fn gesture_fader(&mut self, i: usize) -> bool {
-        // The faders share the encoders' gesture timing, on their own slots.
+    fn gesture_fader(&mut self, i: usize, track: u16) -> bool {
         let now = Instant::now();
         let d = self.drive();
-        let slot = i % 8;
-        let first = !d.last_turn[slot].is_some_and(|(at, was)| matches!(was, Target::Fader(_)) && now.duration_since(at) < GESTURE);
-        d.last_turn[slot] = Some((now, Target::Fader(i as u16)));
+        let first = !d.last_fader[i].is_some_and(|(at, was)| was == track && now.duration_since(at) < GESTURE);
+        d.last_fader[i] = Some((now, track));
         first
     }
 
@@ -1460,5 +1461,18 @@ mod tests {
         assert!(map_of("fruity  REEVERB 2").is_some());
         assert!(map_of(crate::osc3::LEMON_TRIO).is_some());
         assert!(map_of("Some VST").is_none());
+    }
+
+    #[test]
+    fn stepped_carry_accumulates_linearly() {
+        let mut carry = 0.0_f64;
+        let v = 0.0_f64;
+        let step = 0.01_f64;
+        for n in 1..=10 {
+            let wanted = (v + step).clamp(0.0, 1.0) + carry;
+            let got = v; // parameter snapped back to 0.0
+            carry = if (got - wanted).abs() > 1e-9 { wanted - got } else { 0.0 };
+            assert!((carry - step * n as f64).abs() < 1e-12, "turn {n}: carry={carry}");
+        }
     }
 }

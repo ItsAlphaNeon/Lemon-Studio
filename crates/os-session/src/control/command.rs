@@ -1238,6 +1238,28 @@ pub enum Region {
 }
 
 impl Taken {
+    /// A copy of a part of the project as it was, which putting back restores whatever was done to it since (not an
+    /// add's or a delete's undo, a parameter's or a plugin state's, which are made from what the command did).
+    fn is_snapshot(&self) -> bool {
+        matches!(
+            self,
+            Taken::Settings(_)
+                | Taken::Channel(_)
+                | Taken::Track(_)
+                | Taken::Pattern(_)
+                | Taken::Lfo(..)
+                | Taken::Arrangement(_)
+                | Taken::Project(_)
+                | Taken::Mutes(_)
+                | Taken::Locks(_)
+                | Taken::Points(..)
+                | Taken::Zips(_)
+                | Taken::Start(..)
+                | Taken::Groups(_)
+                | Taken::TracksOn(_)
+        )
+    }
+
     /// `region` as it is now (`None`: it names nothing).
     pub fn of(s: &crate::session::Session, region: Region) -> Option<Taken> {
         let p = &s.project;
@@ -1828,7 +1850,18 @@ impl Command {
         // `Taken::Links`, not by following the rows again).
         let rows_before = matches!(self, Command::MoveChannel { .. } | Command::DeleteChannel { .. } | Command::CloneChannel { .. })
             .then(|| s.project.channels.iter().map(|c| c.id.0).collect::<Vec<u32>>());
-        let result = self.change(s)?;
+        let result = match self.change(s) {
+            Ok(r) => r,
+            // A command checks what it is given as it goes, so a late check (one of several settings) finds the earlier
+            // ones written. What it took is the region as it was: put back, a command that fails leaves nothing,
+            // whichever check failed.
+            Err(e) => {
+                if taken.is_snapshot() {
+                    let _ = Command::Put(Box::new(taken)).change(s);
+                }
+                return Err(e);
+            }
+        };
         if let Some(before) = rows_before {
             let now: std::collections::HashMap<u32, usize> = s.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
             let map: Vec<Option<usize>> = before.iter().map(|id| now.get(id).copied()).collect();

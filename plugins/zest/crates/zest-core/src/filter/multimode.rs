@@ -363,7 +363,15 @@ impl Multimode {
 
     /// `seed`: the voice's (seed_a, seed_b) of `data/voice-seeds.tsv`, the filter noise's start.
     pub fn new(seed: (u32, u32)) -> Box<Multimode> {
-        Box::new(Multimode {
+        Box::new(Self::init(seed))
+    }
+
+    pub fn reset(&mut self, seed: (u32, u32)) {
+        *self = Self::init(seed);
+    }
+
+    fn init(seed: (u32, u32)) -> Multimode {
+        Multimode {
             cm: Common::new(seed),
             m: Model {
                 st: [Stage::default(); 2],
@@ -375,7 +383,7 @@ impl Multimode {
                 last_d: f32::NAN,
                 drive: 0.0,
             },
-        })
+        }
     }
 
     #[inline(always)]

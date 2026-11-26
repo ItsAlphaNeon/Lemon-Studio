@@ -39,6 +39,23 @@ const PROJECT_EVERY: Duration = Duration::from_millis(250);
 const STATE_MAX: usize = 4 << 20;
 /// How many entries the control plane can read back from memory.
 const MEMORY: usize = 20_000;
+/// When no journal file is open (e.g. tests), cap how many in-memory `plugin_state` entries retain base64 blobs.
+const MAX_MEM_STATES: usize = 32;
+
+/// The user's Journal folder (`user_dir()/Journal`).
+pub fn journal_dir() -> Option<PathBuf> {
+    os_paths::user_dir().map(|d| d.join("Journal"))
+}
+
+/// Validates that `file` resolves to a `.jsonl` file inside `dir`, rejecting path traversal or external files.
+pub fn confine_journal_path(file: &std::path::Path, dir: &std::path::Path) -> Option<PathBuf> {
+    let canon_dir = std::fs::canonicalize(dir).ok()?;
+    let canon_file = std::fs::canonicalize(file).ok()?;
+    if !canon_file.starts_with(&canon_dir) || !canon_file.is_file() {
+        return None;
+    }
+    canon_file.extension().is_some_and(|e| e == "jsonl").then_some(canon_file)
+}
 
 #[derive(Default)]
 pub struct Journal {
@@ -64,8 +81,8 @@ pub struct Journal {
     attention: HashMap<usize, u64>,
     /// Instances to read at the next plugin tick: the audio thread had them when they were due.
     retry: Vec<usize>,
-    /// The plugin states the project's entries hold already (by hash): not written again.
-    known: std::collections::HashSet<String>,
+    /// Each owner's last written state hash: consecutive duplicates are skipped, while reverting A -> B -> A is recorded.
+    known: HashMap<String, String>,
     plugins_at: Option<Instant>,
 }
 
@@ -100,11 +117,37 @@ impl Journal {
         if let (Some(o), Value::Object(f)) = (e.as_object_mut(), fields) {
             o.extend(f);
         }
+        let mut persisted = false;
         if let Some(w) = &mut self.file {
             let ok = serde_json::to_writer(&mut *w, &e).is_ok() && w.write_all(b"\n").is_ok() && w.flush().is_ok();
-            if !ok {
+            if ok {
+                persisted = true;
+            } else {
                 eprintln!("lemonstudio: journal: writing failed; the journal stops");
                 self.file = None;
+            }
+        }
+        // Keep multi-MB base64 plugin state blobs on disk instead of pinning them in the 20,000-entry memory queue.
+        if kind == "plugin_state" {
+            if persisted {
+                if let Some(o) = e.as_object_mut() {
+                    if o.get("state").is_some_and(Value::is_string) {
+                        o.remove("state");
+                        o.insert("has_state".into(), Value::Bool(true));
+                    }
+                }
+            } else {
+                let mut kept = 0usize;
+                for prev in self.entries.iter_mut().rev() {
+                    if prev["kind"] == "plugin_state" && prev["state"].is_string() {
+                        kept += 1;
+                        if kept >= MAX_MEM_STATES {
+                            if let Some(o) = prev.as_object_mut() {
+                                o.remove("state");
+                            }
+                        }
+                    }
+                }
             }
         }
         self.entries.push_back(e);
@@ -276,16 +319,19 @@ impl App {
         }
         // Changed since it was first read after the project opened: an edit in the plugin's own window.
         self.state.session.plugin_edited |= was.is_some();
-        if !self.journal.known.insert(format!("{hash:016x}")) {
+        let hash_hex = format!("{hash:016x}");
+        let owner_key = owner.to_string();
+        if self.journal.known.get(&owner_key).is_some_and(|last| last == &hash_hex) {
             return true;
         }
+        self.journal.known.insert(owner_key, hash_hex.clone());
         let plugin = self.state.session.plugins.descriptor(key).map(|d| json!({ "name": d.name, "format": d.format.as_str(), "id": d.id }));
         let place = match crate::plugins::fx_of(key) {
             None => json!({ "channel": self.state.session.project.channels.get(key).map(|c| c.name.clone()) }),
             Some((t, k)) => json!({ "track": t, "slot": k }),
         };
         let data = (state.len() <= STATE_MAX).then(|| base64(&state));
-        self.journal.write("plugin_state", json!({ "owner": owner, "at": place, "plugin": plugin, "size": state.len(), "hash": format!("{hash:016x}"), "state": data }));
+        self.journal.write("plugin_state", json!({ "owner": owner, "at": place, "plugin": plugin, "size": state.len(), "hash": hash_hex, "state": data }));
         true
     }
 }
@@ -307,7 +353,8 @@ impl Journal {
     pub fn states_of(&self, name: &str, max: usize) -> Vec<Found> {
         let mut out: Vec<Found> = Vec::new();
         let take = |file: &std::path::Path, e: &Value, out: &mut Vec<Found>| {
-            if e["kind"] != "plugin_state" || e["plugin"]["name"] != name || !e["state"].is_string() {
+            let has_state = e["state"].is_string() || e["has_state"].as_bool() == Some(true);
+            if e["kind"] != "plugin_state" || e["plugin"]["name"] != name || !has_state {
                 return;
             }
             let hash = e["hash"].as_str().unwrap_or("").to_string();
@@ -338,12 +385,19 @@ impl Journal {
 
     /// The state written as entry `seq` of journal `file` (this session's when it is this journal's file).
     pub fn state_at(&self, file: &std::path::Path, seq: u64) -> Option<Vec<u8>> {
-        let e = if self.path.as_deref() == Some(file) || file.as_os_str().is_empty() {
-            self.entries.iter().find(|e| e["seq"] == seq).cloned()?
-        } else {
-            let text = std::fs::read_to_string(file).ok()?;
-            text.lines().filter(|l| l.contains("\"plugin_state\"")).filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|e| e["seq"] == seq)?
-        };
+        let is_current = self.path.as_deref() == Some(file) || file.as_os_str().is_empty();
+        if is_current {
+            if let Some(s) = self.entries.iter().find(|e| e["seq"] == seq).and_then(|e| e["state"].as_str()) {
+                return unbase64(s);
+            }
+        }
+        let disk_path = if file.as_os_str().is_empty() { self.path.as_deref()? } else { file };
+        let text = std::fs::read_to_string(disk_path).ok()?;
+        let e = text
+            .lines()
+            .filter(|l| l.contains("\"plugin_state\""))
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|e| e["seq"] == seq)?;
         unbase64(e["state"].as_str()?)
     }
 }

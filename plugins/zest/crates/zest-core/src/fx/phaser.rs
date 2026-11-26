@@ -122,6 +122,46 @@ impl Phaser {
         self.reset = true;
     }
 
+    pub fn reset(&mut self) {
+        if self.rings_dirty {
+            self.rings[0].fill(0.0);
+            self.rings[1].fill(0.0);
+            self.rings_dirty = false;
+        }
+        self.reset = true;
+        self.ph = 0.0;
+        self.wcur = 0.0;
+        self.wstep = 0.0;
+        self.counter = 0;
+        self.acc = 0.0;
+        self.bypass = false;
+        self.ty = 0;
+        self.inc = 0.0;
+        self.stereo = 0.0;
+        self.phase = 0.0;
+        self.up = Up4::new();
+        self.down = Down4::new();
+        self.dt4 = 0.0;
+        self.x1 = [F4::zero(); 4];
+        self.s = [F4::zero(); 4];
+        self.hx = F4::zero();
+        self.hy = F4::zero();
+        self.fb_mem = F4::zero();
+        self.c0 = 0.0;
+        self.c1 = 0.0;
+        self.gf = 0.0;
+        self.lo = 0.0;
+        self.range = 0.0;
+        self.w = 0;
+        self.lp = WetLp::new();
+        self.fb = 0.0;
+        self.lo2 = 0.0;
+        self.hi2 = 0.0;
+        self.depth = 0.0;
+        self.ms = 0.0;
+        self.off = 0.0;
+    }
+
     /// The rate function: A in Hz, and with Sync on the phase from the song position when `resync`.
     fn rate(&mut self, r: f32, sync: bool, resync: bool, bpm: f64, beats: f64) -> f32 {
         if sync {

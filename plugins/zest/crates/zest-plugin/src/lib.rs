@@ -41,6 +41,9 @@ pub struct Zest {
     values: [f32; COUNT],
     left: Vec<f32>,
     right: Vec<f32>,
+    /// Remaining silent samples to stay `KeepAlive` so active FX pre-delay/tails can ring out.
+    tail_hold: usize,
+    sample_rate: f32,
 }
 
 impl Default for Zest {
@@ -55,6 +58,8 @@ impl Default for Zest {
             values: [0.0; COUNT],
             left: vec![0.0; MAX_BLOCK],
             right: vec![0.0; MAX_BLOCK],
+            tail_hold: 0,
+            sample_rate: 48000.0,
         }
     }
 }
@@ -114,6 +119,8 @@ impl Plugin for Zest {
         zest_ui::library::Library::prewarm(&zest_ui::library::default_sources());
         let mut e = Engine::new(config.sample_rate, MAX_BLOCK);
         e.set_offline(config.process_mode == ProcessMode::Offline);
+        self.sample_rate = config.sample_rate;
+        self.tail_hold = 0;
         self.scope.set_rate(config.sample_rate);
         // Diva's 16-sample event grid (see zest-core): the host compensates it
         context.set_latency_samples(e.latency());
@@ -129,6 +136,7 @@ impl Plugin for Zest {
     }
 
     fn reset(&mut self) {
+        self.tail_hold = 0;
         if let Some(e) = &mut self.engine {
             e.reset();
         }
@@ -180,6 +188,7 @@ impl Plugin for Zest {
         engine.set_params(&self.values);
         let mut start = 0usize;
         let mut ev = 0usize;
+        let mut audible = false;
         while start < n {
             let len = (n - start).min(MAX_BLOCK);
             self.chunk.clear();
@@ -190,13 +199,25 @@ impl Plugin for Zest {
             }
             let (l, r) = (&mut self.left[..len], &mut self.right[..len]);
             engine.process(&self.chunk, &transport, l, r);
+            if !audible && l.iter().chain(r.iter()).any(|s| s.abs() > 1e-6) {
+                audible = true;
+            }
             out[0][start..start + len].copy_from_slice(l);
             out[1][start..start + len].copy_from_slice(r);
             self.scope.push(l, r);
             transport.beats += len as f64 / 60.0 * transport.tempo / context.transport().sample_rate as f64;
             start += len;
         }
-        ProcessStatus::KeepAlive
+        let active = engine.has_active_voices();
+        if active || audible {
+            self.tail_hold = if engine.fx_active() { (self.sample_rate * 3.0) as usize } else { 0 };
+            ProcessStatus::KeepAlive
+        } else if self.tail_hold > 0 {
+            self.tail_hold = self.tail_hold.saturating_sub(n);
+            ProcessStatus::KeepAlive
+        } else {
+            ProcessStatus::Normal
+        }
     }
 }
 

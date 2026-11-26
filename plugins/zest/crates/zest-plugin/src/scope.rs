@@ -7,7 +7,7 @@
 //! timer (`Bands::next`): sixteen log-spaced bands from 40 Hz to 16 kHz (-60..0 dB) and the sound's pitch (where its
 //! spectrum is centred, 150 Hz to 6 kHz on a log scale). How they show is `zest_ui::viz`.
 
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use zest_ui::viz::BANDS;
@@ -25,16 +25,24 @@ const TILT_DB: f32 = 1.5;
 /// The pitch's range (the spectrum's centre, Hz): 0 at the low end, 1 at the high one.
 const PITCH_LOW: f32 = 150.0;
 const PITCH_HIGH: f32 = 6000.0;
+/// Sample peak below which every band is guaranteed below `FLOOR_DB` even with max tilt, so FFT can be skipped.
+const SILENT_PEAK: f32 = 1e-5;
 
 pub struct Scope {
     buf: Vec<AtomicU32>,
     pos: AtomicUsize,
     rate: AtomicU32,
+    open: AtomicBool,
 }
 
 impl Default for Scope {
     fn default() -> Self {
-        Scope { buf: (0..LEN).map(|_| AtomicU32::new(0)).collect(), pos: AtomicUsize::new(0), rate: AtomicU32::new(48000f32.to_bits()) }
+        Scope {
+            buf: (0..LEN).map(|_| AtomicU32::new(0)).collect(),
+            pos: AtomicUsize::new(0),
+            rate: AtomicU32::new(48000f32.to_bits()),
+            open: AtomicBool::new(false),
+        }
     }
 }
 
@@ -43,8 +51,15 @@ impl Scope {
         self.rate.store(rate.to_bits(), Ordering::Relaxed);
     }
 
-    /// Audio thread: the samples just played (their mid).
+    pub fn set_open(&self, open: bool) {
+        self.open.store(open, Ordering::Relaxed);
+    }
+
+    /// Audio thread: the samples just played (their mid). Skipped while the editor is closed.
     pub fn push(&self, left: &[f32], right: &[f32]) {
+        if !self.open.load(Ordering::Relaxed) {
+            return;
+        }
         let mut p = self.pos.load(Ordering::Relaxed);
         for (l, r) in left.iter().zip(right) {
             self.buf[p % LEN].store((0.5 * (l + r)).to_bits(), Ordering::Relaxed);
@@ -62,12 +77,16 @@ pub struct Bands {
     re: Vec<f32>,
     im: Vec<f32>,
     window: Vec<f32>,
+    edges: [f32; BANDS + 1],
+    inv_pitch_span: f32,
 }
 
 impl Default for Bands {
     fn default() -> Self {
         let window = (0..FFT).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / FFT as f32).cos()).collect();
-        Bands { last: None, seen: 0, re: vec![0.0; FFT], im: vec![0.0; FFT], window }
+        let edges = std::array::from_fn(|k| LOW_HZ * (HIGH_HZ / LOW_HZ).powf(k as f32 / BANDS as f32));
+        let inv_pitch_span = 1.0 / (PITCH_HIGH / PITCH_LOW).log2();
+        Bands { last: None, seen: 0, re: vec![0.0; FFT], im: vec![0.0; FFT], window, edges, inv_pitch_span }
     }
 }
 
@@ -85,10 +104,18 @@ impl Bands {
     }
 
     fn analyse(&mut self, scope: &Scope, pos: usize) -> ([f32; BANDS], Option<f32>) {
+        let mut peak = 0.0f32;
         for i in 0..FFT {
             let s = f32::from_bits(scope.buf[pos.wrapping_sub(FFT - i) % LEN].load(Ordering::Relaxed));
+            let a = s.abs();
+            if a > peak {
+                peak = a;
+            }
             self.re[i] = s * self.window[i];
             self.im[i] = 0.0;
+        }
+        if peak < SILENT_PEAK {
+            return ([0.0; BANDS], None);
         }
         fft(&mut self.re, &mut self.im);
         let rate = f32::from_bits(scope.rate.load(Ordering::Relaxed)).max(8000.0);
@@ -97,9 +124,8 @@ impl Bands {
         let norm = (FFT as f32 / 4.0).powi(2);
         let mut out = [0.0; BANDS];
         for (b, o) in out.iter_mut().enumerate() {
-            let edge = |k: usize| LOW_HZ * (HIGH_HZ / LOW_HZ).powf(k as f32 / BANDS as f32);
-            let lo = ((edge(b) / hz_per_bin).floor() as usize).max(1);
-            let hi = ((edge(b + 1) / hz_per_bin).ceil() as usize).clamp(lo + 1, FFT / 2);
+            let lo = ((self.edges[b] / hz_per_bin).floor() as usize).max(1);
+            let hi = ((self.edges[b + 1] / hz_per_bin).ceil() as usize).clamp(lo + 1, FFT / 2);
             let power: f32 = (lo..hi).map(|k| self.re[k] * self.re[k] + self.im[k] * self.im[k]).sum::<f32>() / norm;
             let db = 10.0 * power.max(1e-12).log10() + TILT_DB * b as f32;
             *o = ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0);
@@ -113,7 +139,7 @@ impl Bands {
             weighted += p * k as f32 * hz_per_bin;
         }
         let audible = 10.0 * (sum / norm).max(1e-12).log10() > FLOOR_DB;
-        let pitch = audible.then(|| ((weighted / sum).max(1.0) / PITCH_LOW).log2() / (PITCH_HIGH / PITCH_LOW).log2());
+        let pitch = audible.then(|| ((weighted / sum).max(1.0) / PITCH_LOW).log2() * self.inv_pitch_span);
         (out, pitch.map(|p| p.clamp(0.0, 1.0)))
     }
 }
@@ -164,6 +190,10 @@ mod tests {
         let scope = Scope::default();
         scope.set_rate(48000.0);
         let sine: Vec<f32> = (0..2048).map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / 48000.0).sin()).collect();
+        // Closed editor: push is a no-op.
+        scope.push(&sine, &sine);
+        assert_eq!(scope.pos.load(Ordering::Relaxed), 0);
+        scope.set_open(true);
         scope.push(&sine, &sine);
         let mut b = Bands::default();
         let (levels, pitch, _) = b.next(&scope);
@@ -173,6 +203,11 @@ mod tests {
         assert!(levels[8] > 0.95 && levels[0] < 0.2, "{levels:?}");
         // 1 kHz on the pitch scale (150 Hz..6 kHz, log): about 0.51
         assert!(pitch.is_some_and(|p| (p - 0.514).abs() < 0.03), "{pitch:?}");
+        let (silent, none, _) = b.next(&scope);
+        assert_eq!((silent, none), ([0.0; BANDS], None));
+        // Silence pushed: fast-path returns zeros without running FFT.
+        let zeros = vec![0.0f32; 2048];
+        scope.push(&zeros, &zeros);
         let (silent, none, _) = b.next(&scope);
         assert_eq!((silent, none), ([0.0; BANDS], None));
     }

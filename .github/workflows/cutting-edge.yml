@@ -47,9 +47,5 @@ jobs:
       - name: Bundle plugins
         run: cargo run -p bundle-plugins --locked
 
-      - name: Bundle the app
-        if: runner.os == 'macOS'
-        run: cargo run -p bundle-app --locked
-
       - name: Test
         run: cargo test --workspace --locked

@@ -102,10 +102,9 @@ impl Set {
 }
 
 impl Dco {
-    /// `seed`: the voice's (a, b) of `data/osc-voice-seeds.tsv`.
-    pub fn new(seed: (u32, u32)) -> Box<Dco> {
+    fn init(seed: (u32, u32)) -> Dco {
         let (ph, rng) = seed_phases(seed);
-        Box::new(Dco {
+        Dco {
             ph,
             inc: 0.0,
             w: 0.0,
@@ -134,7 +133,16 @@ impl Dco {
             last_end: 0,
             need_init: true,
             woke: false,
-        })
+        }
+    }
+
+    /// `seed`: the voice's (a, b) of `data/osc-voice-seeds.tsv`.
+    pub fn new(seed: (u32, u32)) -> Box<Dco> {
+        Box::new(Self::init(seed))
+    }
+
+    pub fn reset(&mut self, seed: (u32, u32)) {
+        *self = Self::init(seed);
     }
 
     /// The voice wakes from idle (`voice.md`, note start, step 8).

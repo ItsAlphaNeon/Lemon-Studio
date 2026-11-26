@@ -46,7 +46,7 @@ pub enum LatUnit {
 }
 
 /// The range a latency setting takes, in ms (OS).
-pub const LATENCY_MAX_MS: f64 = 1000.0;
+pub use os_model::LATENCY_MAX_MS;
 
 /// Clicks on the box's parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

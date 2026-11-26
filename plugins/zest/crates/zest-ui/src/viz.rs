@@ -85,11 +85,15 @@ impl Viz {
         self.shown() != before
     }
 
-    /// What painting draws: the cells per side (to a hundredth) and each column's lit height in cells.
-    fn shown(&self) -> (i32, Vec<usize>) {
+    /// What painting draws: the cells per side (to a hundredth), visible column count, and each column's lit height in cells.
+    fn shown(&self) -> (i32, usize, [usize; BANDS]) {
         let n = self.cells;
-        let cols = n.ceil() as usize;
-        ((n * 100.0).round() as i32, (0..cols).map(|c| (self.column(n, c) * n).round() as usize).collect())
+        let cols = (n.ceil() as usize).min(BANDS);
+        let mut lit = [0usize; BANDS];
+        for (c, slot) in lit[..cols].iter_mut().enumerate() {
+            *slot = (self.column(n, c) * n).round() as usize;
+        }
+        ((n * 100.0).round() as i32, cols, lit)
     }
 
     /// Column `c` of a grid of `n` cells per side (`n` fractional during a zoom): the loudest of the bands under it.
@@ -104,7 +108,7 @@ impl Viz {
     pub fn paint(&self, c: &mut Canvas, x: f32, cy: f32) -> Rect {
         let sq = Rect::new(x, (cy - SIDE / 2.0).round(), SIDE, SIDE);
         let n = self.cells;
-        let (_, lit) = self.shown();
+        let (_, cols, lit) = self.shown();
         // the gap shrinks as the cells do; a cell and its gap make one even step across the square
         let gap = (12.0 / n).clamp(1.0, 4.0);
         let step = (SIDE + gap) / n;
@@ -112,7 +116,7 @@ impl Viz {
         let off = Color::rgb(0x2b2b2b);
         // partly shown cells at the top and right while zooming
         c.push_clip(sq);
-        for (col, &h) in lit.iter().enumerate() {
+        for (col, &h) in lit[..cols].iter().enumerate() {
             for row in 0..n.ceil() as usize {
                 let r = Rect::new(sq.x + col as f32 * step, sq.bottom() - row as f32 * step - cell, cell, cell);
                 c.fill_rrect(r, (cell * 0.2).clamp(1.0, 3.0), if row < h { heat((row as f32 + 0.5) / n) } else { off });
@@ -164,7 +168,8 @@ mod tests {
         assert_eq!(v.shown().0, 1200);
         let quiet = [0.0; BANDS];
         settle(&mut v, &quiet, None);
-        assert_eq!(v.shown(), (1200, vec![0; 12]), "dark, on the last grid");
+        let (n, cols, lit) = v.shown();
+        assert_eq!((n, &lit[..cols]), (1200, &[0; 12][..]), "dark, on the last grid");
         assert!(!v.step(&quiet, None, 0.03), "nothing to repaint");
     }
 
@@ -193,7 +198,8 @@ mod tests {
         let mut t = [0.0; BANDS];
         t[3] = 1.0;
         settle(&mut v, &t, Some(0.3));
-        assert_eq!(v.shown(), (400, vec![4, 0, 0, 0]));
+        let (n, cols, lit) = v.shown();
+        assert_eq!((n, &lit[..cols]), (400, &[4, 0, 0, 0][..]));
     }
 
     /// Lemon below the hot range, orange in it, red near the top.

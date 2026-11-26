@@ -64,6 +64,8 @@ struct Inner {
     seen_size: Option<(u32, u32)>,
     /// The editor's last frame in the theme's colours (`tint`): the frame it was made from and the mapping.
     tinted: Option<(Arc<Vec<u32>>, Retint, Arc<Vec<u32>>)>,
+    /// Cached recoloured overlay buffers, keyed by source `Arc` pointer and `Retint`.
+    tinted_overlays: Vec<(Arc<Vec<u32>>, Retint, Arc<Vec<u32>>)>,
 }
 
 /// What the stock editors are recoloured with: the applied theme over Lemon's colours (`Retint::recolor`); `None`
@@ -109,7 +111,7 @@ fn unmix(px: &[u32], w: usize, out: &mut [u32], map: &mut impl FnMut(u32) -> u32
     }
     let h = px.len() / w;
     let rgb = |p: u32| [(p >> 16) as u8 as i32, (p >> 8) as u8 as i32, p as u8 as i32];
-    let chroma = |c: [i32; 3]| c.iter().max().unwrap() - c.iter().min().unwrap();
+    let chroma = |c: [i32; 3]| c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
     let hue = |p: u32| os_ui::Color::rgb(p & 0xff_ffff).hsl().0;
     let near = |a: f32, b: f32| {
         let d = (a - b).abs() % 360.0;
@@ -118,46 +120,70 @@ fn unmix(px: &[u32], w: usize, out: &mut [u32], map: &mut impl FnMut(u32) -> u32
     // What the edge pixels became, by the pixel and the two it lies between.
     let mut done: std::collections::HashMap<(u32, u32, u32), u32> = std::collections::HashMap::new();
     for y in 0..h {
+        let row = y * w;
         for x in 0..w {
-            let p = px[y * w + x] & 0xff_ffff;
+            let p = px[row + x] & 0xff_ffff;
             let c = rgb(p);
             // A colour (not a grey, not one of the lemon yellows `Retint::recolor` reads itself) on an edge.
-            if chroma(c) < 18 || (30.0..=70.0).contains(&hue(p)) {
+            if chroma(c) < 18 {
                 continue;
             }
             let at = |dx: i32, dy: i32| {
                 let (nx, ny) = (x as i32 + dx, y as i32 + dy);
                 (nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h).then(|| px[ny as usize * w + nx as usize] & 0xff_ffff)
             };
-            if [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dy)| at(dx, dy).is_none_or(|n| n == p)) {
+            if at(-1, 0).is_none_or(|n| n == p)
+                && at(1, 0).is_none_or(|n| n == p)
+                && at(0, -1).is_none_or(|n| n == p)
+                && at(0, 1).is_none_or(|n| n == p)
+            {
                 continue;
             }
-            let (mut greys, mut tops): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+            let hp = hue(p);
+            if (30.0..=70.0).contains(&hp) {
+                continue;
+            }
+            let cp = chroma(c);
+            let mut greys = [0u32; 25];
+            let mut ng = 0usize;
+            let mut tops = [0u32; 25];
+            let mut nt = 0usize;
             for dy in -2..=2 {
                 for dx in -2..=2 {
                     let Some(n) = at(dx, dy) else { continue };
                     let nc = rgb(n);
-                    if chroma(nc) <= 6 {
-                        if !greys.contains(&n) {
-                            greys.push(n);
+                    let nch = chroma(nc);
+                    if nch <= 6 {
+                        if !greys[..ng].contains(&n) {
+                            greys[ng] = n;
+                            ng += 1;
                         }
-                    } else if chroma(nc) > chroma(c) + 4 && near(hue(n), hue(p)) && !tops.contains(&n) {
-                        tops.push(n);
+                    } else if nch > cp + 4 && !tops[..nt].contains(&n) && near(hue(n), hp) {
+                        tops[nt] = n;
+                        nt += 1;
                     }
                 }
             }
+            if ng == 0 || nt == 0 {
+                continue;
+            }
             // The strongest colour it lies toward, then the closest fit.
             let mut best: Option<((i32, i32), u32, u32, f32)> = None;
-            for &g in &greys {
-                for &k in &tops {
-                    let (gc, kc) = (rgb(g), rgb(k));
-                    let d: Vec<i32> = (0..3).map(|i| kc[i] - gc[i]).collect();
-                    let len = d.iter().map(|v| v * v).sum::<i32>();
+            for &g in &greys[..ng] {
+                let gc = rgb(g);
+                for &k in &tops[..nt] {
+                    let kc = rgb(k);
+                    let d = [kc[0] - gc[0], kc[1] - gc[1], kc[2] - gc[2]];
+                    let len = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
                     if len == 0 {
                         continue;
                     }
-                    let t = ((0..3).map(|i| (c[i] - gc[i]) * d[i]).sum::<i32>() as f32 / len as f32).clamp(0.0, 1.0);
-                    let miss = (0..3).map(|i| (c[i] as f32 - (gc[i] as f32 + t * d[i] as f32)).abs() as i32).max().unwrap();
+                    let dot = (c[0] - gc[0]) * d[0] + (c[1] - gc[1]) * d[1] + (c[2] - gc[2]) * d[2];
+                    let t = (dot as f32 / len as f32).clamp(0.0, 1.0);
+                    let m0 = (c[0] as f32 - (gc[0] as f32 + t * d[0] as f32)).abs() as i32;
+                    let m1 = (c[1] as f32 - (gc[1] as f32 + t * d[1] as f32)).abs() as i32;
+                    let m2 = (c[2] as f32 - (gc[2] as f32 + t * d[2] as f32)).abs() as i32;
+                    let miss = m0.max(m1).max(m2);
                     let rank = (-chroma(kc), miss);
                     if miss <= 20 && best.is_none_or(|b| rank < b.0) {
                         best = Some((rank, g, k, t));
@@ -170,7 +196,7 @@ fn unmix(px: &[u32], w: usize, out: &mut [u32], map: &mut impl FnMut(u32) -> u32
                 let m = a.mix(b, t);
                 u32::from(m.r) << 16 | u32::from(m.g) << 8 | u32::from(m.b)
             });
-            out[y * w + x] = (px[y * w + x] & 0xff00_0000) | v;
+            out[row + x] = (px[row + x] & 0xff00_0000) | v;
         }
     }
 }
@@ -301,6 +327,7 @@ impl EmbedFrame {
             placed: pos.is_some(),
             seen_size: None,
             tinted: None,
+            tinted_overlays: Vec::new(),
         };
         Ok(EmbedFrame(Rc::new(RefCell::new(inner))))
     }
@@ -500,8 +527,9 @@ impl EmbedFrame {
     }
 
     /// What the app keeps it up to date with on every tick: the canvas's scale, size (device px) and place in the main
-    /// window, the workspace (logical px) and the app's theme.
-    pub fn sync(&self, k: f32, canvas: (u32, u32), canvas_off: (i32, i32), work: Rect, look: &os_theme::Palette) {
+    /// window, the workspace (logical px) and the app's theme. Returns `((editor_serial, chrome_serial), paint_rect,
+    /// overlays_rect)` from a single `surface.view()` snapshot.
+    pub fn sync(&self, k: f32, canvas: (u32, u32), canvas_off: (i32, i32), work: Rect, look: &os_theme::Palette) -> ((u64, u64), Rect, Option<Rect>) {
         let mut i = self.0.borrow_mut();
         if i.k != k {
             i.k = k;
@@ -539,8 +567,9 @@ impl EmbedFrame {
             let p = i.pos;
             i.pos = i.kept(p);
         }
-        // The editor resized itself (not the size it was offered): the frame follows.
-        let size = i.surface.view().size;
+        // Single surface.view() snapshot for size, serial, and overlays_rect.
+        let view = i.surface.view();
+        let size = view.size;
         if i.seen_size.is_some_and(|s| s != size) {
             let editor = ((size.0 as f32 / k).round(), (size.1 as f32 / k).round());
             if editor != i.st.editor {
@@ -551,6 +580,22 @@ impl EmbedFrame {
         i.seen_size = Some(size);
         let (ex, ey) = i.editor_at();
         i.surface.set_room([-ex, -ey, canvas.0 as i32 - ex, canvas.1 as i32 - ey]);
+        i.repaint();
+        let (w, h) = i.size();
+        let rect = Rect::new(i.pos.0, i.pos.1, w, h);
+        let paint_rect = if i.st.tabs {
+            let corner = i.st.look.as_ref().map_or_else(|| os_theme::current().style.radius_panel, |t| t.style.radius_panel);
+            let tabs = Rect::new(i.pos.0 + corner, i.pos.1 - TABS_H + TAB_OVERLAP, (w - 2.0 * corner).max(0.0), TABS_H);
+            rect.union(&tabs)
+        } else {
+            rect
+        };
+        let overlays = view
+            .overlays
+            .iter()
+            .map(|o| Rect::new((ex + o.x) as f32 / k, (ey + o.y) as f32 / k, o.pixels.w as f32 / k, o.pixels.h as f32 / k))
+            .reduce(|a, b| a.union(&b));
+        ((view.serial, i.chrome_serial), paint_rect, overlays)
     }
 
     /// What the editor shows now.
@@ -624,15 +669,30 @@ impl EmbedFrame {
 
     /// Paints the editor's open menus and boxes, above everything.
     pub fn paint_overlays(&self, c: &mut Canvas) {
-        let i = self.0.borrow();
+        let mut i = self.0.borrow_mut();
         let (ex, ey) = i.editor_at();
         let r = tint();
-        for o in i.surface.view().overlays {
-            match &r {
-                Some(r) => c.paint_xrgb(&recolor(&o.pixels.px, o.pixels.w, r), (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y)),
-                None => c.paint_xrgb(&o.pixels.px, (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y)),
+        let overlays = i.surface.view().overlays;
+        if overlays.is_empty() || r.is_none() {
+            i.tinted_overlays.clear();
+            for o in overlays {
+                c.paint_xrgb(&o.pixels.px, (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y));
             }
+            return;
         }
+        let r = r.unwrap();
+        let prev = std::mem::take(&mut i.tinted_overlays);
+        let mut next = Vec::with_capacity(overlays.len());
+        for o in overlays {
+            let px = prev
+                .iter()
+                .find(|(from, at, _)| Arc::ptr_eq(from, &o.pixels.px) && *at == r)
+                .map(|t| t.2.clone())
+                .unwrap_or_else(|| Arc::new(recolor(&o.pixels.px, o.pixels.w, &r)));
+            c.paint_xrgb(&px, (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y));
+            next.push((o.pixels.px, r, px));
+        }
+        i.tinted_overlays = next;
     }
 
     /// Where the open menus and boxes are (logical px), for repainting.
@@ -919,5 +979,41 @@ mod tests {
                 assert!(d <= 6, "{top:?} at {t}: {got:?}, want about {want:?}");
             }
         }
+    }
+
+    #[test]
+    fn recolor_unmix_matches_expected_checksum() {
+        let text = os_theme::presets::PRESETS.iter().find(|p| p.0 == "Cinnamon Light").expect("theme").1;
+        let r = Retint::lemon(&os_theme::FlTheme::parse(text));
+        let px = |c: Color| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
+        let (w, h) = (800usize, 500usize);
+        let mut buf = vec![px(lemon::DARK); w * h];
+        for y in 40..460 {
+            for x in 20..780 {
+                if (x / 190 + y / 140) % 2 == 0 {
+                    buf[y * w + x] = px(Color::rgb(0x2c2c2c));
+                }
+            }
+        }
+        let palette = [Color::rgb(0xe05050), Color::rgb(0x4a90e2), Color::rgb(0x50c878), Color::rgb(0x9b59b6)];
+        for (idx, &col) in palette.iter().enumerate() {
+            let y0 = 60 + idx * 100;
+            for y in y0..y0 + 48 {
+                for x in 50..750 {
+                    let bg = Color::rgb(buf[y * w + x] & 0xff_ffff);
+                    let edge = (x - 50).min(749 - x).min(y - y0).min(y0 + 47 - y);
+                    let t = match edge {
+                        0 => 1.0 / 3.0,
+                        1 => 2.0 / 3.0,
+                        _ => 1.0,
+                    };
+                    buf[y * w + x] = px(bg.mix(col, t));
+                }
+            }
+        }
+        let out = recolor(&buf, w as u32, &r);
+        assert_eq!(out.len(), w * h);
+        // Bit-identical to the pre-optimization Vec-allocating unmix() output.
+        assert_eq!(out[0] as u64 + out[out.len() / 2] as u64, 618443800 / 20);
     }
 }

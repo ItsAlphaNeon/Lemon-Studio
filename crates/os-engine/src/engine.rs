@@ -1529,7 +1529,7 @@ impl Engine {
                         slot_mix: m.slot_mix.map(mix_level),
                         slot_smart: m.slot_cpu.map(|c| c.smart_disable),
                         routes,
-                        latency: (m.latency_out, m.latency_in),
+                        latency: m.latency(),
                         input: if m.monitored() { m.audio_in } else { -1 },
                         output: m.audio_out,
                         rec: rec::Arm::of(m),
@@ -2148,8 +2148,9 @@ impl Engine {
             return;
         }
         self.fade_len = ((f64::from(self.rate) * PAUSE_FADE_SECONDS).round() as u32).max(1);
-        // Out from where a fade in has got to.
-        self.fade_out = self.fade_len - self.fade_in.min(self.fade_len);
+        // Out from where a fade in has got to: at least a frame, as a fade in that has not started yet is at silence
+        // and a fade out of none would be no pause at all (fuzz campaign).
+        self.fade_out = (self.fade_len - self.fade_in.min(self.fade_len)).max(1);
         self.fade_in = 0;
     }
 
@@ -2233,6 +2234,13 @@ impl Engine {
     /// `note_on` on MIDI channel `midi` (0..15): an instrument channel's plugin gets the note, and its end, on it (MIDI
     /// channel through, spec: ui/channel-rack.md §18); other channels ignore it.
     pub fn note_on_midi(&mut self, channel: usize, key: u16, velocity: u8, midi: u8) {
+        if channel >= self.channels.len() {
+            return;
+        }
+        // A live key is down or not: pressed again while down (two keyboards, or a client), it retriggers, on every
+        // channel. One release then ends it, as the instruments' note rules count one end per start (a mono channel
+        // would keep a second start listed and its voice sounding).
+        self.note_off(channel, key);
         let Some(ch) = self.channels.get(channel) else { return };
         self.tail_done = false;
         if ch.instrument.0.is_some() {
@@ -2251,7 +2259,6 @@ impl Engine {
             Some(i) => ((i + 1) as u16, 1.0),
             None => (0, laws::playback_rate(key, 0)),
         };
-        self.note_off(channel, key); // retrigger
         self.voices.push(Voice {
             channel,
             pos: 0.0,
@@ -3370,14 +3377,18 @@ impl Engine {
                 self.held = self.fade_out == 0;
                 if self.held {
                     self.marker_paused = self.pause_at.take().or(self.marker_paused);
-                    // Held from here: the hosted instruments are let go of what they hold and ring on.
-                    self.release_instruments();
                 }
             } else {
                 self.fade_in = self.fade_in.saturating_sub(len as u32);
             }
         }
         self.instruments_out(len);
+        // Held from here: the hosted instruments are let go of what they hold and ring on. After `instruments_out`, which
+        // files the notes of this tick an instrument busy elsewhere missed: a note on among them is dropped with the
+        // others it missed, or it would reach the instrument after its note off and sound on through the pause.
+        if self.held {
+            self.release_instruments();
+        }
         for ch in &mut self.channels {
             ch.advance(len as u32);
         }
@@ -7371,6 +7382,44 @@ mod tests {
             e.next_tick();
         }
         all_ended(&recs[0], "missed");
+    }
+
+    /// The same for a note due on the very tick the pause's fade ends, where the instrument is let go of its notes: a
+    /// riff of back-to-back notes (a note off and the next note on every tick, as a mono or legato line plays them) on
+    /// an instrument busy through the pause. That tick's note on, missed, must not reach it after the pause's note
+    /// offs: a synth with a full sustain would hold it for as long as the playback stays paused.
+    #[test]
+    fn a_note_missed_on_the_tick_the_pause_holds_does_not_start_after_it() {
+        let riff = (0..24).map(|i| Note { channel: 1, key: 60 + (i % 2) as u16 * 2, ..long_note(i, 1, 0) }).collect();
+        let mut p = project(riff, vec![]);
+        p.channels.push(Channel { index: 1, kind: ChannelKind::Plugin, ..channel() });
+        let (mut e, recs) = recorded(&p);
+        e.busy_wait = Duration::ZERO;
+        for _ in 0..3 {
+            e.next_tick();
+        }
+        // Held elsewhere from the pause through the end of its fade.
+        let rec = recs[0].clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _g = rec.lock().unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        rx.recv().unwrap();
+        e.pause();
+        for _ in 0..10 {
+            if e.held() {
+                break;
+            }
+            e.next_tick();
+        }
+        assert!(e.held(), "held");
+        holder.join().unwrap();
+        for _ in 0..4 {
+            e.next_tick();
+        }
+        all_ended(&recs[0], "missed on the hold");
     }
 
     /// Flag 4: one child per note in turn, from the first; flag 1: one at random, drawn from the project's generator
