@@ -527,6 +527,10 @@ pub struct OutputDevice {
     /// The device chosen not opening (an ASIO driver; a Windows device another program has, or that refuses exclusive
     /// mode for that reason) is an error, not the system's default device or shared mode (while it is tried again).
     pub wait: bool,
+    /// Tests: how many times this device opened (`opens` counts every device in the program, which tests running at
+    /// once share).
+    #[cfg(any(test, feature = "test-util"))]
+    opened: Arc<AtomicU64>,
 }
 
 impl Drop for OutputDevice {
@@ -536,6 +540,12 @@ impl Drop for OutputDevice {
 }
 
 impl OutputDevice {
+    /// Tests: a closed device that also counts its openings in `opened`.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn counted(opened: Arc<AtomicU64>) -> OutputDevice {
+        OutputDevice { open: None, xruns: Arc::default(), wait: false, opened }
+    }
+
     /// The open stream, opening it with the audio settings first if it is closed or has failed.
     pub fn open(&mut self) -> Result<&Open, String> {
         if self.open.as_ref().is_some_and(|o| o.failed.load(Ordering::Acquire)) {
@@ -548,6 +558,8 @@ impl OutputDevice {
                 *l = Some((cfg, o.info.clone()));
             }
             OPENS.fetch_add(1, Ordering::AcqRel);
+            #[cfg(any(test, feature = "test-util"))]
+            self.opened.fetch_add(1, Ordering::AcqRel);
             self.open = Some(o);
         }
         Ok(self.open.as_ref().expect("opened"))

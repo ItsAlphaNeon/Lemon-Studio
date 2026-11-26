@@ -5,6 +5,9 @@
 //! Win32 parts of a Lemon plugin editor: window classes, painting a canvas into a window, the cursor held in place
 //! during a drag, popup menus painted with `os_ui::kit::menu` (never native menus), and the "Type in value" box.
 
+// `HWND` and `HDC` are handles the system checks, not memory read here.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::c_void;
 use std::time::Instant;
 

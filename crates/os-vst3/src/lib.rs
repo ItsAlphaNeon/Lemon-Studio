@@ -1037,6 +1037,7 @@ impl Plugin {
     /// its size in pixels. `scale` is the parent's DPI factor, given to editors that support content scaling (spec:
     /// ui/ui-scaling.md §3). On macOS editors measure in points and follow their window's backing scale themselves (no
     /// content scaling there), so their sizes are turned into pixels at `scale` here.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)] // `parent` is a window handle handed to the plugin, not read here
     pub fn open_editor(&mut self, parent: *mut c_void, scale: f32) -> Result<(u32, u32), String> {
         if !self.can_edit {
             return Err(format!("{} has no editor", self.desc.name));

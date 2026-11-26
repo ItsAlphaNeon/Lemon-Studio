@@ -412,6 +412,7 @@ mod tests {
 
     /// The quick inverse gives the same table to within what a table can tell.
     #[test]
+    #[allow(clippy::approx_constant)] // 6.283: any test signal will do
     fn the_half_size_inverse_matches_the_whole_one() {
         let mut t = vec![0f32; N];
         for (i, x) in t.iter_mut().enumerate() {

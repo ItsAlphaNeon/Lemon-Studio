@@ -58,8 +58,9 @@ pub struct PatternGone {
     shown: u16,
     /// The numbers the delete fills with empty patterns (`edit::patterns::renumber_in` keeps every number there was).
     fillers: Vec<u16>,
-    /// The arrangement shown's clips of it: (arrangement id, ...).
-    clips: Option<(u32, Places<Clip>)>,
+    /// Every arrangement's clips of it (patterns are the project's, `edit::patterns::renumber_in`): (arrangement id,
+    /// ...).
+    clips: Vec<(u32, Places<Clip>)>,
 }
 
 /// A mixer track deleted, at its number, and what went with it.
@@ -116,7 +117,7 @@ impl Removed {
                 let old: std::collections::BTreeSet<u16> = p.patterns.iter().map(|q| q.number).collect();
                 let kept: std::collections::BTreeSet<u16> = old.iter().filter(|&&m| m != n).map(|&m| if m > n { m - 1 } else { m }).collect();
                 let fillers = old.difference(&kept).copied().collect();
-                let clips = p.arrangement().map(|a| (a.id.0, take(&a.clips, |c| c.source == ClipSource::Pattern(n))));
+                let clips = p.arrangements.iter().map(|a| (a.id.0, take(&a.clips, |c| c.source == ClipSource::Pattern(n)))).collect();
                 Ok(Removed::Pattern(Box::new(PatternGone { pattern, shown: s.pattern(), fillers, clips })))
             }
             Thing::Track(id) => {
@@ -278,15 +279,17 @@ fn put_pattern(s: &mut crate::session::Session, g: PatternGone) {
     }
     let at = p.patterns.iter().position(|q| q.number > n).unwrap_or(p.patterns.len());
     p.patterns.insert(at, pattern);
-    if let Some((arr, v)) = clips {
-        if let Some(a) = p.arrangements.iter_mut().find(|a| a.id.0 == arr) {
-            for c in &mut a.clips {
-                if let ClipSource::Pattern(m) = c.source {
-                    if m >= n {
-                        c.source = ClipSource::Pattern(m + 1);
-                    }
+    for a in p.arrangements.iter_mut() {
+        for c in &mut a.clips {
+            if let ClipSource::Pattern(m) = c.source {
+                if m >= n {
+                    c.source = ClipSource::Pattern(m + 1);
                 }
             }
+        }
+    }
+    for (arr, v) in clips {
+        if let Some(a) = p.arrangements.iter_mut().find(|a| a.id.0 == arr) {
             put(&mut a.clips, v);
         }
     }
