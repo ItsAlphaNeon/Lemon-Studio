@@ -1068,7 +1068,7 @@ impl os_host::Plugin for Plugin {
         let steps = if pf & abi::param_flags::SWITCH != 0 {
             1
         } else if pf & abi::param_flags::INTEGER_LIMITS != 0 && props.max_value_i32 > props.min_value_i32 {
-            (props.max_value_i32 - props.min_value_i32).min(1000) as u32
+            (i64::from(props.max_value_i32) - i64::from(props.min_value_i32)).min(1000) as u32
         } else {
             0
         };

@@ -688,8 +688,8 @@ impl Plugin {
     fn setup_buses(&mut self) {
         unsafe {
             let c = &self.component;
-            let n_in = c.get_bus_count(AUDIO, INPUT).max(0) as usize;
-            let n_out = c.get_bus_count(AUDIO, OUTPUT).max(0) as usize;
+            let n_in = c.get_bus_count(AUDIO, INPUT).clamp(0, 64) as usize;
+            let n_out = c.get_bus_count(AUDIO, OUTPUT).clamp(0, 64) as usize;
             let mut arr_in = vec![STEREO; n_in.max(1)];
             let mut arr_out = vec![STEREO; n_out.max(1)];
             for (dir, arr, n) in [(INPUT, &mut arr_in, n_in), (OUTPUT, &mut arr_out, n_out)] {
@@ -720,7 +720,7 @@ impl Plugin {
                 (0..n)
                     .map(|b| {
                         let mut info: BusInfo = std::mem::zeroed();
-                        if c.get_bus_info(AUDIO, dir, b as i32, &mut info) == kResultOk { info.channel_count.max(0) as usize } else { 2 }
+                        if c.get_bus_info(AUDIO, dir, b as i32, &mut info) == kResultOk { info.channel_count.clamp(0, 64) as usize } else { 2 }
                     })
                     .collect()
             };

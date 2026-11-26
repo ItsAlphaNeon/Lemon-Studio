@@ -409,8 +409,7 @@ unsafe fn dispatch(px: &mut Proxy, opcode: i32, index: i32, value: isize, ptr: *
     set_fields(&mut px.effect, &r.fields);
     unsafe {
         if proto::out_text(opcode) && !ptr.is_null() {
-            std::ptr::copy_nonoverlapping(out.as_ptr(), ptr as *mut u8, out.len());
-            *(ptr as *mut u8).add(out.len()) = 0;
+            proto::copy_out_text(ptr as *mut u8, proto::OUT_TEXT_CAP, &out);
         } else if let Some(n) = proto::out_struct(opcode).filter(|_| !ptr.is_null()) {
             std::ptr::copy_nonoverlapping(out.as_ptr(), ptr as *mut u8, out.len().min(n));
         } else if opcode == op::EDITOR_GET_RECT && !ptr.is_null() {

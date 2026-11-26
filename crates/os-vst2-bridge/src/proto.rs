@@ -119,6 +119,24 @@ pub fn chan_name(base: &str, c: Chan) -> String {
 /// Bytes of a list of MIDI events: each 32 bytes as the plugin interface lays one out (no pointers inside).
 pub const MIDI_EVENT_SIZE: usize = 32;
 
+/// Buffer size callers pass for `out_text` op-codes (255 text bytes + NUL).
+pub const OUT_TEXT_CAP: usize = 256;
+
+/// Copies up to `cap - 1` bytes of `src` (stopping at any NUL) into `dst` and writes a trailing NUL.
+///
+/// # Safety
+/// `dst` must be valid for writes of `cap` bytes (non-null when `cap > 0`).
+pub unsafe fn copy_out_text(dst: *mut u8, cap: usize, src: &[u8]) {
+    if dst.is_null() || cap == 0 {
+        return;
+    }
+    let n = src.iter().position(|&b| b == 0).unwrap_or(src.len()).min(cap - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst, n);
+        *dst.add(n) = 0;
+    }
+}
+
 /// Op-codes whose pointer carries text the plugin writes (a buffer of at least 64 bytes; plugins overrun the
 /// documented sizes, so the helper's buffer is large).
 pub fn out_text(opcode: i32) -> bool {
@@ -164,5 +182,22 @@ mod tests {
         assert!(std::mem::size_of::<Header>() <= HEADER_SPACE);
         assert_eq!(std::mem::offset_of!(Header, value), 16);
         assert_eq!(std::mem::offset_of!(Header, fields), 56);
+    }
+
+    #[test]
+    fn copy_out_text_truncates_oversized_payloads_and_terminates() {
+        // Guard bytes past `OUT_TEXT_CAP` verify no overflow beyond the caller's 256-byte buffer.
+        let mut buf = [0xAAu8; OUT_TEXT_CAP + 16];
+        let payload = vec![b'x'; 512];
+        unsafe { copy_out_text(buf.as_mut_ptr(), OUT_TEXT_CAP, &payload) };
+        assert!(buf[..OUT_TEXT_CAP - 1].iter().all(|&b| b == b'x'));
+        assert_eq!(buf[OUT_TEXT_CAP - 1], 0);
+        assert!(buf[OUT_TEXT_CAP..].iter().all(|&b| b == 0xAA), "bytes past cap untouched");
+
+        // Embedded NUL stops the copy early.
+        let mut short = [0x55u8; 16];
+        unsafe { copy_out_text(short.as_mut_ptr(), short.len(), b"hi\0ignored") };
+        assert_eq!(&short[..3], b"hi\0");
+        assert!(short[3..].iter().all(|&b| b == 0x55));
     }
 }

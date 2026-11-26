@@ -30,7 +30,10 @@ type Method = unsafe extern "system-unwind" fn(IntPtr, IntPtr, IntPtr, IntPtr, I
 /// `f` must be a plugin function taking at most six integer or pointer arguments, and the arguments must be what it
 /// expects.
 pub unsafe fn call(f: *const (), args: [IntPtr; 6]) -> Result<IntPtr, u32> {
-    // SAFETY: the caller passes a plugin method of this shape.
+    if f.is_null() {
+        return Err(ACCESS_VIOLATION);
+    }
+    // SAFETY: `f` is non-null and the caller passes a plugin method of this shape.
     let method = unsafe { std::mem::transmute::<*const (), Method>(f) };
     let [a, b, c, d, e, g] = args;
     let r = os_host::guard::catch(|| unsafe { method(a, b, c, d, e, g) });
@@ -71,6 +74,11 @@ mod tests {
     #[test]
     fn calls_with_fewer_arguments_than_six() {
         assert_eq!(unsafe { call(add as *const (), [1, 2, 3, 99, 99, 99]) }, Ok(6));
+    }
+
+    #[test]
+    fn null_function_pointer_returns_access_violation() {
+        assert_eq!(unsafe { call(std::ptr::null(), [0; 6]) }, Err(ACCESS_VIOLATION));
     }
 
     #[test]

@@ -371,8 +371,8 @@ mod run_loop {
     /// Timer ids the host hands out.
     static NEXT_TIMER: AtomicU32 = AtomicU32::new(1);
 
-    unsafe fn data<'a>(host: *const clap_host) -> &'a HostData {
-        unsafe { &*((*host).host_data as *const HostData) }
+    unsafe fn data<'a>(host: *const clap_host) -> Option<&'a HostData> {
+        unsafe { crate::host_data(host) }
     }
 
     /// The plugin and its extension `id`, once it is created.
@@ -386,7 +386,7 @@ mod run_loop {
     }
 
     unsafe extern "C" fn register_timer(host: *const clap_host, period_ms: u32, timer_id: *mut clap_id) -> bool {
-        let d = unsafe { data(host) };
+        let Some(d) = (unsafe { data(host) }) else { return false };
         let Some((plugin, ext)) = (unsafe { plugin_ext::<clap_plugin_timer_support>(d, CLAP_EXT_TIMER_SUPPORT) }) else { return false };
         let Some(on_timer) = (unsafe { (*ext).on_timer }) else { return false };
         if timer_id.is_null() {
@@ -403,11 +403,12 @@ mod run_loop {
     }
 
     unsafe extern "C" fn unregister_timer(host: *const clap_host, timer_id: clap_id) -> bool {
-        remove(unsafe { data(host) }, timer_id, true)
+        let Some(d) = (unsafe { data(host) }) else { return false };
+        remove(d, timer_id, true)
     }
 
     unsafe extern "C" fn register_fd(host: *const clap_host, fd: i32, flags: clap_posix_fd_flags) -> bool {
-        let d = unsafe { data(host) };
+        let Some(d) = (unsafe { data(host) }) else { return false };
         let Some((plugin, ext)) = (unsafe { plugin_ext::<clap_plugin_posix_fd_support>(d, CLAP_EXT_POSIX_FD_SUPPORT) }) else { return false };
         let Some(on_fd) = (unsafe { (*ext).on_fd }) else { return false };
         // The run loop's flags are CLAP's.
@@ -420,13 +421,14 @@ mod run_loop {
     }
 
     unsafe extern "C" fn modify_fd(host: *const clap_host, fd: i32, flags: clap_posix_fd_flags) -> bool {
-        let d = unsafe { data(host) };
+        let Some(d) = (unsafe { data(host) }) else { return false };
         let Ok(r) = d.run.lock() else { return false };
         r.iter().find(|e| e.0 == fd as u32 && !e.1).is_some_and(|e| runloop::modify_fd(e.2, flags))
     }
 
     unsafe extern "C" fn unregister_fd(host: *const clap_host, fd: i32) -> bool {
-        remove(unsafe { data(host) }, fd as u32, false)
+        let Some(d) = (unsafe { data(host) }) else { return false };
+        remove(d, fd as u32, false)
     }
 
     fn remove(d: &HostData, key: u32, timer: bool) -> bool {
@@ -465,13 +467,20 @@ mod run_loop {
         }
     }
 }
+pub(crate) unsafe fn host_data<'a>(host: *const clap_host) -> Option<&'a HostData> {
+    let h = unsafe { host.as_ref() }?;
+    unsafe { (h.host_data as *const HostData).as_ref() }
+}
+
 unsafe extern "C" fn host_params_rescan(host: *const clap_host, flags: u32) {
-    unsafe { (*((*host).host_data as *const HostData)).rescan.fetch_or(flags, Ordering::AcqRel) };
+    let Some(d) = (unsafe { host_data(host) }) else { return };
+    d.rescan.fetch_or(flags, Ordering::AcqRel);
     unsafe { attend(host) };
 }
 unsafe extern "C" fn host_params_clear(_host: *const clap_host, _id: u32, _flags: u32) {}
 unsafe extern "C" fn host_params_request_flush(host: *const clap_host) {
-    unsafe { (*((*host).host_data as *const HostData)).flush.store(true, Ordering::Release) };
+    let Some(d) = (unsafe { host_data(host) }) else { return };
+    d.flush.store(true, Ordering::Release);
     unsafe { attend(host) };
 }
 /// The editor's requests to the host window. A resize is applied on the UI tick (`Plugin::idle`): the plugin gets its
@@ -485,7 +494,8 @@ static HOST_GUI: clap_host_gui = clap_host_gui {
 };
 unsafe extern "C" fn host_gui_hints(_host: *const clap_host) {}
 unsafe extern "C" fn host_gui_request_resize(host: *const clap_host, width: u32, height: u32) -> bool {
-    if let Ok(mut r) = unsafe { (*((*host).host_data as *const HostData)).resize.lock() } {
+    let Some(d) = (unsafe { host_data(host) }) else { return false };
+    if let Ok(mut r) = d.resize.lock() {
         *r = Some((width, height));
     }
     unsafe { attend(host) };
@@ -519,34 +529,40 @@ unsafe extern "C" fn host_is_audio_thread(_host: *const clap_host) -> bool {
     os_engine::parallel::on_audio_thread()
 }
 unsafe extern "C" fn host_voice_info_changed(host: *const clap_host) {
-    unsafe { (*((*host).host_data as *const HostData)).voice_info.store(true, Ordering::Release) };
+    let Some(d) = (unsafe { host_data(host) }) else { return };
+    d.voice_info.store(true, Ordering::Release);
     unsafe { attend(host) };
 }
 /// The plugin's delay changed: read again on the UI tick, where `latency.get` may be called (spec:
 /// audio/delay-compensation.md "Lemon Studio").
 static HOST_LATENCY: clap_host_latency = clap_host_latency { changed: Some(host_latency_changed) };
 unsafe extern "C" fn host_latency_changed(host: *const clap_host) {
-    unsafe { (*((*host).host_data as *const HostData)).latency.store(true, Ordering::Release) };
+    let Some(d) = (unsafe { host_data(host) }) else { return };
+    d.latency.store(true, Ordering::Release);
     unsafe { attend(host) };
 }
 unsafe extern "C" fn host_request_restart(host: *const clap_host) {
-    unsafe { (*((*host).host_data as *const HostData)).restart.store(true, Ordering::Release) };
+    let Some(d) = (unsafe { host_data(host) }) else { return };
+    d.restart.store(true, Ordering::Release);
     unsafe { attend(host) };
 }
 /// Below this level a block is quiet (CLAP's CONTINUE_IF_NOT_QUIET; about -100 dB).
 const QUIET: f32 = 1e-5;
 
 unsafe extern "C" fn host_request_process(host: *const clap_host) {
-    unsafe { (*((*host).host_data as *const HostData)).process.store(true, Ordering::Release) };
+    let Some(d) = (unsafe { host_data(host) }) else { return };
+    d.process.store(true, Ordering::Release);
 }
 unsafe extern "C" fn host_request_callback(host: *const clap_host) {
-    unsafe { (*((*host).host_data as *const HostData)).callback.store(true, Ordering::Release) };
+    let Some(d) = (unsafe { host_data(host) }) else { return };
+    d.callback.store(true, Ordering::Release);
     unsafe { attend(host) };
 }
 
 /// The plugin left work for the UI thread: its attention count goes up and the UI wakes.
 pub(crate) unsafe fn attend(host: *const clap_host) {
-    unsafe { (*((*host).host_data as *const HostData)).attention.raise() };
+    let Some(d) = (unsafe { host_data(host) }) else { return };
+    d.attention.raise();
     wake();
 }
 
@@ -796,16 +812,25 @@ const MAX_ENDS: usize = 4096;
 
 /// `clap_input_events` over the `Vec<*const clap_event_header>` behind `ctx`.
 unsafe extern "C" fn events_size(l: *const clap_input_events) -> u32 {
+    if l.is_null() || unsafe { (*l).ctx }.is_null() {
+        return 0;
+    }
     unsafe { (*((*l).ctx as *const Vec<*const clap_event_header>)).len() as u32 }
 }
 
 unsafe extern "C" fn events_get(l: *const clap_input_events, i: u32) -> *const clap_event_header {
+    if l.is_null() || unsafe { (*l).ctx }.is_null() {
+        return ptr::null();
+    }
     let v = unsafe { &*((*l).ctx as *const Vec<*const clap_event_header>) };
     v.get(i as usize).copied().unwrap_or(ptr::null())
 }
 
 /// `clap_output_events.try_push` collecting parameter events and voice ends into the `Vec<OutEv>` behind `ctx`.
 unsafe extern "C" fn push_out(l: *const clap_output_events, e: *const clap_event_header) -> bool {
+    if l.is_null() || unsafe { (*l).ctx }.is_null() {
+        return false;
+    }
     unsafe {
         let v = &mut *((*l).ctx as *mut Vec<OutEv>);
         if e.is_null() || (*e).space_id != CLAP_CORE_EVENT_SPACE_ID {
@@ -939,13 +964,23 @@ impl Plugin {
                 return Err(format!("{}: could not create {id}", lib.path.display()));
             }
             #[cfg(all(unix, not(target_os = "macos")))]
+            struct RunLoopGuard<'a>(&'a HostData);
+            #[cfg(all(unix, not(target_os = "macos")))]
+            impl Drop for RunLoopGuard<'_> {
+                fn drop(&mut self) {
+                    run_loop::clear(self.0);
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let run_guard = RunLoopGuard(&host_data);
+            #[cfg(all(unix, not(target_os = "macos")))]
             host_data.plugin.store(plugin as *mut clap_plugin, Ordering::Release);
             if !(*plugin).init.is_some_and(|i| i(plugin)) {
+                #[cfg(all(unix, not(target_os = "macos")))]
+                run_loop::clear(&host_data);
                 if let Some(d) = (*plugin).destroy {
                     d(plugin);
                 }
-                #[cfg(all(unix, not(target_os = "macos")))]
-                run_loop::clear(&host_data);
                 return Err(format!("{id}: init failed"));
             }
             let ext = |name: &CStr| (*plugin).get_extension.map_or(ptr::null(), |g| g(plugin, name.as_ptr()));
@@ -960,6 +995,8 @@ impl Plugin {
             let bend = (!takes_clap_notes(note_ports, plugin)).then(os_engine::TuningBend::default);
             let note_outputs = note_ports.as_ref().and_then(|n| n.count).is_some_and(|count| count(plugin, false) > 0);
             let ranges = params::read_ranges(params, plugin);
+            #[cfg(all(unix, not(target_os = "macos")))]
+            std::mem::forget(run_guard);
             Ok(Plugin {
                 linked: lib._lib.is_none(),
                 desc,
@@ -1292,7 +1329,7 @@ impl Plugin {
                 if !(*self.params).get_info.is_some_and(|g| g(self.plugin, i, &mut info)) {
                     continue;
                 }
-                let n = CStr::from_ptr(info.name.as_ptr()).to_string_lossy();
+                let n = fixed_str(&info.name);
                 if n == name && info.flags & CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID != 0 {
                     self.start_param = Some(info.id);
                     return true;
@@ -1317,7 +1354,7 @@ impl Plugin {
             for i in 0..count {
                 let mut info: clap_param_info = std::mem::zeroed();
                 let found = (*self.params).get_info.is_some_and(|g| g(self.plugin, i, &mut info));
-                if found && CStr::from_ptr(info.name.as_ptr()).to_string_lossy() == name {
+                if found && fixed_str(&info.name) == name {
                     self.end_param = Some(info.id);
                     return true;
                 }
@@ -1344,10 +1381,10 @@ impl Plugin {
                     if info.flags & CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID == 0 {
                         continue;
                     }
-                    let n = CStr::from_ptr(info.name.as_ptr()).to_string_lossy();
-                    let k = if os_host::NOTE_MOD_X.contains(&&*n) {
+                    let n = fixed_str(&info.name);
+                    let k = if os_host::NOTE_MOD_X.contains(&n.as_str()) {
                         0
-                    } else if os_host::NOTE_MOD_Y.contains(&&*n) {
+                    } else if os_host::NOTE_MOD_Y.contains(&n.as_str()) {
                         1
                     } else {
                         continue;
@@ -1499,9 +1536,19 @@ impl Plugin {
             return None;
         }
         unsafe extern "C" fn write(s: *const clap_ostream, buf: *const c_void, size: u64) -> i64 {
+            if s.is_null() || unsafe { (*s).ctx }.is_null() {
+                return -1;
+            }
+            if size == 0 {
+                return 0;
+            }
+            if buf.is_null() {
+                return -1;
+            }
+            let Ok(len) = usize::try_from(size) else { return -1 };
             let v = unsafe { &mut *((*s).ctx as *mut Vec<u8>) };
-            v.extend_from_slice(unsafe { std::slice::from_raw_parts(buf as *const u8, size as usize) });
-            size as i64
+            v.extend_from_slice(unsafe { std::slice::from_raw_parts(buf as *const u8, len) });
+            i64::try_from(len).unwrap_or(i64::MAX)
         }
         let mut out: Vec<u8> = Vec::new();
         let stream = clap_ostream { ctx: &mut out as *mut Vec<u8> as *mut c_void, write: Some(write) };
@@ -1516,10 +1563,21 @@ impl Plugin {
         }
         struct Reader<'a>(&'a [u8], usize);
         unsafe extern "C" fn read(s: *const clap_istream, buf: *mut c_void, size: u64) -> i64 {
+            if s.is_null() || unsafe { (*s).ctx }.is_null() {
+                return -1;
+            }
+            if size == 0 {
+                return 0;
+            }
+            if buf.is_null() {
+                return -1;
+            }
             let r = unsafe { &mut *((*s).ctx as *mut Reader) };
-            let n = (size as usize).min(r.0.len() - r.1);
-            unsafe { ptr::copy_nonoverlapping(r.0.as_ptr().add(r.1), buf as *mut u8, n) };
-            r.1 += n;
+            let n = usize::try_from(size).unwrap_or(usize::MAX).min(r.0.len().saturating_sub(r.1));
+            if n > 0 {
+                unsafe { ptr::copy_nonoverlapping(r.0.as_ptr().add(r.1), buf as *mut u8, n) };
+                r.1 += n;
+            }
             n as i64
         }
         // A Lemon plugin's state is nih-plug's JSON after an 8-byte length (`os_hostlink::state`), and nih-plug believes
@@ -2030,9 +2088,9 @@ impl os_host::Plugin for Plugin {
             let f = info.flags;
             Some(os_host::ParamInfo {
                 id: info.id,
-                name: CStr::from_ptr(info.name.as_ptr()).to_string_lossy().into_owned(),
+                name: fixed_str(&info.name),
                 unit: String::new(),
-                group: CStr::from_ptr(info.module.as_ptr()).to_string_lossy().into_owned(),
+                group: fixed_str(&info.module),
                 min: lo,
                 max: hi,
                 default: if hi > lo { ((info.default_value - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 },
@@ -2065,7 +2123,7 @@ impl os_host::Plugin for Plugin {
         let mut buf = [0 as c_char; 128];
         let plain = self.plain(id, value);
         let ok = unsafe { (*self.params).value_to_text.is_some_and(|f| f(self.plugin, id, plain, buf.as_mut_ptr(), buf.len() as u32)) };
-        ok.then(|| unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned())
+        ok.then(|| fixed_str(&buf))
     }
 
     fn set_param(&mut self, id: u32, value: f64) -> bool {
@@ -2463,13 +2521,13 @@ impl Drop for Plugin {
     fn drop(&mut self) {
         self.close_editor();
         self.deactivate();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        run_loop::clear(&self.host_data);
         unsafe {
             if let Some(d) = (*self.plugin).destroy {
                 d(self.plugin);
             }
         }
-        #[cfg(all(unix, not(target_os = "macos")))]
-        run_loop::clear(&self.host_data);
     }
 }
 
@@ -3690,5 +3748,33 @@ mod tests {
         // The render goes on to the first quiet tick after the song: the second clip's voice has closed by then.
         assert!(both.len() > at(576) && both[both.len() - 100..].iter().all(|v| v.abs() < 1e-6), "silent after the second clip");
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Fixed-size plugin string buffers without NUL terminators and null callback pointers are handled safely.
+    #[test]
+    fn fixed_str_and_null_callbacks_are_safe() {
+        let full = [b'A' as c_char; 8];
+        assert_eq!(fixed_str(&full), "AAAAAAAA");
+        let nul = [b'B' as c_char, b'C' as c_char, 0, b'X' as c_char];
+        assert_eq!(fixed_str(&nul), "BC");
+        unsafe {
+            assert_eq!(events_size(ptr::null()), 0);
+            assert!(events_get(ptr::null(), 0).is_null());
+            assert!(!push_out(ptr::null(), ptr::null()));
+            let empty_in = clap_input_events { ctx: ptr::null_mut(), size: Some(events_size), get: Some(events_get) };
+            let empty_out = clap_output_events { ctx: ptr::null_mut(), try_push: Some(push_out) };
+            assert_eq!(events_size(&empty_in), 0);
+            assert!(events_get(&empty_in, 0).is_null());
+            assert!(!push_out(&empty_out, ptr::null()));
+            host_params_rescan(ptr::null(), 0);
+            host_params_request_flush(ptr::null());
+            assert!(!host_gui_request_resize(ptr::null(), 100, 100));
+            host_voice_info_changed(ptr::null());
+            host_latency_changed(ptr::null());
+            host_request_restart(ptr::null());
+            host_request_process(ptr::null());
+            host_request_callback(ptr::null());
+            attend(ptr::null());
+        }
     }
 }

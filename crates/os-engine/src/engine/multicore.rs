@@ -663,28 +663,31 @@ impl Multicore {
 }
 
 /// The audio clips with shapes on instrument channels (`Engine::inst_shapes`), shared by the channels of a tick: each
-/// channel's turn touches only its own clips.
+/// channel's turn touches only its own clips. Channel indices live in a separate read-only slice so no channel reads
+/// memory covered by another channel's `&mut InstClip`.
 #[derive(Clone, Copy)]
-pub(super) struct Shapes {
+pub(super) struct Shapes<'a> {
     ptr: *mut InstClip,
-    len: usize,
+    channels: &'a [usize],
 }
 
-impl Shapes {
-    pub fn of(v: &mut [InstClip]) -> Shapes {
-        Shapes { ptr: v.as_mut_ptr(), len: v.len() }
+impl<'a> Shapes<'a> {
+    pub fn of(v: &'a mut [InstClip], channels: &'a [usize]) -> Shapes<'a> {
+        debug_assert_eq!(v.len(), channels.len());
+        Shapes { ptr: v.as_mut_ptr(), channels: &channels[..v.len().min(channels.len())] }
+    }
+
+    /// True when channel `c` has at least one clip shape this tick.
+    pub fn has_channel(self, c: usize) -> bool {
+        self.channels.contains(&c)
     }
 
     /// Channel `c`'s clips, in order.
     ///
     /// # Safety
     /// Only channel `c`'s turn touches them, and one iterator at a time.
-    pub unsafe fn of_channel<'a>(self, c: usize) -> impl Iterator<Item = &'a mut InstClip> {
-        // The channel is read through the pointer: other channels' clips may be in use meanwhile.
-        (0..self.len)
-            .map(move |i| unsafe { self.ptr.add(i) })
-            .filter(move |&p| unsafe { std::ptr::addr_of!((*p).channel).read() } == c)
-            .map(|p| unsafe { &mut *p })
+    pub unsafe fn of_channel(self, c: usize) -> impl Iterator<Item = &'a mut InstClip> {
+        self.channels.iter().enumerate().filter(move |&(_, &ch)| ch == c).map(move |(i, _)| unsafe { &mut *self.ptr.add(i) })
     }
 }
 
@@ -1288,5 +1291,48 @@ pub(super) mod tests {
                 println!("  {} threads: {t:.3} s ({:.1}x real time), {:.2}x faster", w + 1, secs / t, one / t);
             }
         }
+    }
+
+    /// `Shapes` exposes channel indices from a separate read-only slice so different channels can mutate disjoint
+    /// `InstClip` entries concurrently without aliasing each other's fields.
+    #[test]
+    fn shapes_of_channel_mutates_disjoint_channels_without_aliasing() {
+        use super::Shapes;
+        let mk = |channel: usize, voice: u32| InstClip {
+            channel,
+            voice,
+            shape: super::super::ClipShape {
+                since: 0,
+                total: 100,
+                fade_in: 0,
+                fade_out: 0,
+                tension_in: 0.0,
+                tension_out: 0.0,
+                gain: 1.0,
+                declick: 0,
+            },
+            age: 0,
+            sent: None,
+        };
+        let mut clips = vec![mk(0, 1), mk(1, 2), mk(0, 3), mk(2, 4), mk(1, 5)];
+        let channels: Vec<usize> = clips.iter().map(|c| c.channel).collect();
+        let shapes = Shapes::of(&mut clips, &channels);
+        assert!(shapes.has_channel(0));
+        assert!(shapes.has_channel(2));
+        assert!(!shapes.has_channel(3));
+        struct SyncShapes<'a>(Shapes<'a>);
+        unsafe impl Sync for SyncShapes<'_> {}
+        let shared = SyncShapes(shapes);
+        std::thread::scope(|s| {
+            for ch in 0..3usize {
+                let sh = &shared;
+                s.spawn(move || {
+                    for clip in unsafe { sh.0.of_channel(ch) } {
+                        clip.sent = Some(ch as f32 + clip.voice as f32);
+                    }
+                });
+            }
+        });
+        assert_eq!(clips.iter().map(|c| c.sent).collect::<Vec<_>>(), vec![Some(1.0), Some(3.0), Some(3.0), Some(6.0), Some(6.0)]);
     }
 }

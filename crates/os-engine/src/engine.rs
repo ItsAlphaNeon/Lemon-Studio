@@ -1204,8 +1204,10 @@ pub struct Engine {
     /// `None`: a note, which ends with a note off; the note or clip that started it, `None` for a live note), live
     /// notes waiting for the next tick (channel, key, velocity; negative = note off), this tick's events.
     inst_offs: Vec<(u64, usize, u8, Option<u32>, Option<Origin>)>,
-    /// Audio clips with fades or gain playing on instrument channels.
+    /// Audio clips with fades or gain playing on instrument channels, and a read-only channel index mirror for
+    /// multicore dispatch without aliasing active `&mut InstClip`s.
     inst_shapes: Vec<InstClip>,
+    inst_shape_channels: Vec<usize>,
     /// The name the next audio clip voice on an instrument gets (`Instrument::voice_start`).
     next_voice: u32,
     /// Live notes for instrument channels waiting for the next tick (channel, key, velocity or -1 for an end, MIDI
@@ -1775,6 +1777,7 @@ impl Engine {
             io: None,
             inst_offs: Vec::with_capacity(64),
             inst_shapes: Vec::new(),
+            inst_shape_channels: Vec::new(),
             next_voice: 0,
             inst_live: Vec::with_capacity(64),
             inst_later: Vec::new(),
@@ -3856,6 +3859,8 @@ impl Engine {
         if self.inst_tuning.len() < c {
             self.inst_tuning.resize(c, InstTuning::default());
         }
+        self.inst_shape_channels.clear();
+        self.inst_shape_channels.extend(self.inst_shapes.iter().map(|s| s.channel));
         let cx = InstCx {
             n,
             rate: self.rate,
@@ -3867,7 +3872,7 @@ impl Engine {
             missed: &self.inst_missed,
             midi: &self.inst_midi,
             params: &self.params,
-            shapes: multicore::Shapes::of(&mut self.inst_shapes),
+            shapes: multicore::Shapes::of(&mut self.inst_shapes, &self.inst_shape_channels),
             held: &self.inst_held,
             auto_bypass: auto_bypass::enabled(),
         };
@@ -4512,7 +4517,7 @@ struct InstCx<'a> {
     missed: &'a [(usize, notes::Note)],
     midi: &'a [(usize, [u8; 3])],
     params: &'a param_auto::ParamAuto,
-    shapes: multicore::Shapes,
+    shapes: multicore::Shapes<'a>,
     /// Per channel: a note held or due to end (`Engine::inst_held`); the program's Auto-bypass when silent setting.
     held: &'a [bool],
     auto_bypass: bool,
@@ -4569,8 +4574,7 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
         && cx.params.channel_ticks(c).next().is_none()
         && cx.params.channel_span(c, 0, n).next().is_none()
         && fines.shift == ch.hosted_shift()
-        // SAFETY: only this channel's turn touches its clips.
-        && unsafe { cx.shapes.of_channel(c) }.next().is_none()
+        && !cx.shapes.has_channel(c)
         && !inst.active();
     if quiet_in && out.quiet.skip(true, Some(auto_bypass::hold_frames(auto_bypass::HOSTED_HOLD, cx.rate, out.delay))) {
         out.active = false;
