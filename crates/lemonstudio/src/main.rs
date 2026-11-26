@@ -1105,12 +1105,17 @@ impl ApplicationHandler for Shell {
                 window.request_redraw();
             }
             WindowEvent::Resized(_) => {
-                // Made floating or tiled again comes with a resize: whether it floats, from Hyprland (`os_app::desktop`).
+                // Made floating or tiled again comes with a resize: refresh asynchronously off the UI thread so live
+                // resizes never block on Hyprland's socket (`os_app::desktop`).
                 #[cfg(target_os = "linux")]
                 if frames::hyprland::running() {
-                    if let Some(f) = frames::hyprland::main_floats() {
+                    if let Some(f) = frames::hyprland::cached_main_floats() {
                         desktop::set_floating(f);
                     }
+                    frames::hyprland::refresh_main_floats(|f| {
+                        desktop::set_floating(f);
+                        os_app::wake_ui();
+                    });
                 }
                 self.follow_frame(&window);
                 self.inset = insets(&window);

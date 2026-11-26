@@ -43,9 +43,16 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets --locked
 
+      - name: Check minimal build (features off)
+        run: cargo check --locked -p lemonstudio --no-default-features --all-targets
+
       # The plugin bundles (VST3 + CLAP): the hosting tests load them, and skip without them.
       - name: Bundle plugins
         run: cargo run -p bundle-plugins --locked
+
+      # Every platform's crates: the notices test lists them with an offline `cargo tree --target all`.
+      - name: Fetch
+        run: cargo fetch --locked
 
       - name: Test
         run: cargo test --workspace --locked

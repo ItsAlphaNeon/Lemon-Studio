@@ -23,6 +23,8 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Sender, SyncSender};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -57,9 +59,97 @@ pub fn confine_journal_path(file: &std::path::Path, dir: &std::path::Path) -> Op
     canon_file.extension().is_some_and(|e| e == "jsonl").then_some(canon_file)
 }
 
+enum WriterMsg {
+    Entry(Value),
+    Flush(SyncSender<()>),
+}
+
+/// Writes journal JSON lines off the UI thread so edits and saves never stall on disk I/O. Joins on drop so the final
+/// `"closed"` line is guaranteed flushed before exit.
+struct JournalWriter {
+    tx: Option<Sender<WriterMsg>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl JournalWriter {
+    fn spawn(file: File) -> Option<Self> {
+        let (tx, rx) = mpsc::channel::<WriterMsg>();
+        let handle = std::thread::Builder::new()
+            .name("lemonstudio-journal".into())
+            .spawn(move || {
+                let mut w = BufWriter::new(file);
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        WriterMsg::Entry(e) => {
+                            let ok = serde_json::to_writer(&mut w, &e).is_ok() && w.write_all(b"\n").is_ok();
+                            if !ok {
+                                eprintln!("lemonstudio: journal: writing failed; the journal stops");
+                                return;
+                            }
+                            // Batch any already-queued entries before flushing once.
+                            let mut acks: Vec<SyncSender<()>> = Vec::new();
+                            while let Ok(next) = rx.try_recv() {
+                                match next {
+                                    WriterMsg::Entry(e) => {
+                                        if serde_json::to_writer(&mut w, &e).is_err() || w.write_all(b"\n").is_err() {
+                                            eprintln!("lemonstudio: journal: writing failed; the journal stops");
+                                            return;
+                                        }
+                                    }
+                                    WriterMsg::Flush(ack) => acks.push(ack),
+                                }
+                            }
+                            if w.flush().is_err() {
+                                eprintln!("lemonstudio: journal: writing failed; the journal stops");
+                                return;
+                            }
+                            for ack in acks {
+                                let _ = ack.send(());
+                            }
+                        }
+                        WriterMsg::Flush(ack) => {
+                            let _ = w.flush();
+                            let _ = ack.send(());
+                        }
+                    }
+                }
+                let _ = w.flush();
+            })
+            .ok()?;
+        Some(JournalWriter { tx: Some(tx), handle: Some(handle) })
+    }
+
+    fn send(&mut self, entry: Value) -> bool {
+        if self.tx.as_ref().is_some_and(|tx| tx.send(WriterMsg::Entry(entry)).is_ok()) {
+            true
+        } else {
+            self.tx = None;
+            false
+        }
+    }
+
+    fn flush(&self) {
+        if let Some(tx) = &self.tx {
+            let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+            if tx.send(WriterMsg::Flush(ack_tx)).is_ok() {
+                let _ = ack_rx.recv();
+            }
+        }
+    }
+}
+
+impl Drop for JournalWriter {
+    fn drop(&mut self) {
+        self.tx = None;
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Journal {
-    file: Option<BufWriter<File>>,
+    writer: Option<JournalWriter>,
     pub path: Option<PathBuf>,
     /// The journal of the run before this one (`crate::crash`).
     pub previous: Option<PathBuf>,
@@ -98,8 +188,10 @@ impl Journal {
                 let path = dir.join(format!("{stamp}-{}.jsonl", std::process::id()));
                 match std::fs::create_dir_all(&dir).and_then(|_| File::create(&path)) {
                     Ok(f) => {
-                        j.file = Some(BufWriter::new(f));
-                        j.path = Some(path);
+                        j.writer = JournalWriter::spawn(f);
+                        if j.writer.is_some() {
+                            j.path = Some(path);
+                        }
                     }
                     Err(e) => eprintln!("lemonstudio: journal: {e}"),
                 }
@@ -118,13 +210,11 @@ impl Journal {
             o.extend(f);
         }
         let mut persisted = false;
-        if let Some(w) = &mut self.file {
-            let ok = serde_json::to_writer(&mut *w, &e).is_ok() && w.write_all(b"\n").is_ok() && w.flush().is_ok();
-            if ok {
+        if let Some(w) = &mut self.writer {
+            if w.send(e.clone()) {
                 persisted = true;
             } else {
-                eprintln!("lemonstudio: journal: writing failed; the journal stops");
-                self.file = None;
+                self.writer = None;
             }
         }
         // Keep multi-MB base64 plugin state blobs on disk instead of pinning them in the 20,000-entry memory queue.
@@ -383,6 +473,13 @@ impl Journal {
         out
     }
 
+    /// Waits for all queued background writes to reach disk.
+    pub fn flush(&self) {
+        if let Some(w) = &self.writer {
+            w.flush();
+        }
+    }
+
     /// The state written as entry `seq` of journal `file` (this session's when it is this journal's file).
     pub fn state_at(&self, file: &std::path::Path, seq: u64) -> Option<Vec<u8>> {
         let is_current = self.path.as_deref() == Some(file) || file.as_os_str().is_empty();
@@ -390,6 +487,7 @@ impl Journal {
             if let Some(s) = self.entries.iter().find(|e| e["seq"] == seq).and_then(|e| e["state"].as_str()) {
                 return unbase64(s);
             }
+            self.flush();
         }
         let disk_path = if file.as_os_str().is_empty() { self.path.as_deref()? } else { file };
         let text = std::fs::read_to_string(disk_path).ok()?;
@@ -619,5 +717,36 @@ mod tests {
         let msg = a.recover_state(0, &found[1].file, found[1].seq);
         assert!(msg.ends_with("recovered from the journal"), "{msg}");
         assert_eq!(a.state.session.plugins.state(0), Some(first), "the first state back");
+    }
+
+    #[test]
+    fn background_writer_flushes_and_reads_back() {
+        let path = std::env::temp_dir().join(format!("lemonstudio-journal-bg-{}.jsonl", std::process::id()));
+        let file = File::create(&path).unwrap();
+        let payload = b"synth-patch-bytes-v1".to_vec();
+        {
+            let mut j = Journal::default();
+            j.writer = JournalWriter::spawn(file);
+            j.path = Some(path.clone());
+            j.write("session", json!({ "pid": std::process::id() }));
+            j.write(
+                "plugin_state",
+                json!({
+                    "owner": 1,
+                    "plugin": { "name": "Citrus" },
+                    "hash": "deadbeef",
+                    "state": base64(&payload),
+                }),
+            );
+            // Persisted plugin_state strips the blob from RAM and reads it back via flush() + disk.
+            assert_eq!(j.entries.back().unwrap()["has_state"], Value::Bool(true));
+            assert!(j.entries.back().unwrap().get("state").is_none());
+            assert_eq!(j.state_at(&path, 2).as_deref(), Some(payload.as_slice()));
+            j.write("closed", json!({}));
+        }
+        // Dropping Journal joins the background writer so "closed" is always on disk.
+        let disk = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(disk.contains("\"kind\":\"closed\""), "missing closed line: {disk}");
     }
 }
