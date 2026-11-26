@@ -651,6 +651,9 @@ pub struct Plugin {
     /// The render extension (offline or realtime), if the plugin has one.
     render: *const clap_plugin_render,
     offline: bool,
+    /// Linked into this program ([`Library::from_entry`]): a Lemon plugin, whose state the host frames itself
+    /// ([`Plugin::load_state`]).
+    linked: bool,
     /// The voice-info extension (the plugin's polyphony), if it has one.
     voice_info: *const clap_plugin_voice_info,
     /// The voices it plays, from the notes sent and the voice ends it reports (spec: audio/voices.md §2).
@@ -958,6 +961,7 @@ impl Plugin {
             let note_outputs = note_ports.as_ref().and_then(|n| n.count).is_some_and(|count| count(plugin, false) > 0);
             let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
+                linked: lib._lib.is_none(),
                 desc,
                 plugin,
                 gui,
@@ -1518,6 +1522,17 @@ impl Plugin {
             r.1 += n;
             n as i64
         }
+        // A Lemon plugin's state is nih-plug's JSON after an 8-byte length (`os_hostlink::state`), and nih-plug believes
+        // that length: it reserves it before reading. So the host writes the length, from the bytes it has, whatever a
+        // file or a client gave: a wrong one fails the JSON instead of asking for exabytes.
+        let framed;
+        let data = if self.linked {
+            let (_, json) = os_hostlink::state::json(data);
+            framed = [&(json.len() as u64).to_le_bytes()[..], json].concat();
+            &framed[..]
+        } else {
+            data
+        };
         let mut r = Reader(data, 0);
         let stream = clap_istream { ctx: &mut r as *mut Reader as *mut c_void, read: Some(read) };
         unsafe { (*self.state).load.is_some_and(|f| f(self.plugin, &stream)) }
@@ -2626,6 +2641,23 @@ mod tests {
         let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
         let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
         os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
+    }
+
+    /// A Lemon plugin's state is framed by the host: a length that lies (a file's or a client's) is refused instead of
+    /// being reserved, and its JSON loads with or without the length before it.
+    #[test]
+    fn a_linked_plugins_state_length_is_the_hosts() {
+        let eq = lemon_eq();
+        let mut p = eq.lock().unwrap();
+        let saved = p.save_state().expect("a state");
+        let (prefixed, json) = os_hostlink::state::json(&saved);
+        assert!(prefixed);
+        let mut lying = u64::MAX.to_le_bytes().to_vec();
+        lying.extend_from_slice(json);
+        assert!(!p.load_state(&lying));
+        assert!(!p.load_state(&[43, 83, 189, 186, 181, 152, 1, 19, 105]));
+        assert!(p.load_state(&saved));
+        assert!(p.load_state(json));
     }
 
     /// MIDI channel through (spec: ui/channel-rack.md §18): a note on goes on its MIDI channel, and its key's note off

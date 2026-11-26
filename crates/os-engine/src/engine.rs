@@ -1527,7 +1527,7 @@ impl Engine {
                         slot_mix: m.slot_mix.map(mix_level),
                         slot_smart: m.slot_cpu.map(|c| c.smart_disable),
                         routes,
-                        latency: (m.latency_out, m.latency_in),
+                        latency: m.latency(),
                         input: if m.monitored() { m.audio_in } else { -1 },
                         output: m.audio_out,
                         rec: rec::Arm::of(m),
@@ -2146,8 +2146,9 @@ impl Engine {
             return;
         }
         self.fade_len = ((f64::from(self.rate) * PAUSE_FADE_SECONDS).round() as u32).max(1);
-        // Out from where a fade in has got to.
-        self.fade_out = self.fade_len - self.fade_in.min(self.fade_len);
+        // Out from where a fade in has got to: at least a frame, as a fade in that has not started yet is at silence
+        // and a fade out of none would be no pause at all (fuzz campaign).
+        self.fade_out = (self.fade_len - self.fade_in.min(self.fade_len)).max(1);
         self.fade_in = 0;
     }
 
@@ -2223,6 +2224,13 @@ impl Engine {
     /// `note_on` on MIDI channel `midi` (0..15): an instrument channel's plugin gets the note, and its end, on it (MIDI
     /// channel through, spec: ui/channel-rack.md §18); other channels ignore it.
     pub fn note_on_midi(&mut self, channel: usize, key: u16, velocity: u8, midi: u8) {
+        if channel >= self.channels.len() {
+            return;
+        }
+        // A live key is down or not: pressed again while down (two keyboards, or a client), it retriggers, on every
+        // channel. One release then ends it, as the instruments' note rules count one end per start (a mono channel
+        // would keep a second start listed and its voice sounding).
+        self.note_off(channel, key);
         let Some(ch) = self.channels.get(channel) else { return };
         self.tail_done = false;
         if ch.instrument.0.is_some() {
@@ -2241,7 +2249,6 @@ impl Engine {
             Some(i) => ((i + 1) as u16, 1.0),
             None => (0, laws::playback_rate(key, 0)),
         };
-        self.note_off(channel, key); // retrigger
         self.voices.push(Voice {
             channel,
             pos: 0.0,
