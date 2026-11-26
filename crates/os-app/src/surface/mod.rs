@@ -41,6 +41,8 @@ pub struct Port {
     pub model: Model,
     /// The input's name, as `midi_in::unique` lists it.
     pub name: String,
+    /// The paired output's name, as `midi_in::unique` lists it (differs from `name` on Windows: `MIDIOUT2` vs `MIDIIN2`).
+    pub out_name: String,
     rx: Receiver<Vec<u8>>,
     #[cfg(feature = "midi-io")]
     _input: midir::MidiInputConnection<()>,
@@ -65,7 +67,7 @@ impl Port {
         let (i, model) = in_names.iter().enumerate().find_map(|(i, n)| Some((i, Model::of_port(n)?)))?;
         let output = midir::MidiOutput::new(crate::midi_in::CLIENT).ok()?;
         let outs = output.ports();
-        let out_names: Vec<String> = outs.iter().map(|p| output.port_name(p).unwrap_or_default()).collect();
+        let out_names = crate::midi_in::unique(outs.iter().map(|p| output.port_name(p).unwrap_or_default()).collect());
         // The same name both ways (ALSA), or the same keyboard's other half ("MIDIOUT2 (...)" on Windows).
         let o = out_names.iter().position(|n| *n == in_names[i]).or_else(|| out_names.iter().position(|n| Model::of_port(n) == Some(model)))?;
         let output = output.connect(&outs[o], crate::midi_in::CLIENT).ok()?;
@@ -76,7 +78,7 @@ impl Port {
             }
         };
         let input = input.connect(&ins[i], crate::midi_in::CLIENT, take, ()).ok()?;
-        Some(Port { model, name: in_names[i].clone(), rx, _input: input, output: Arc::new(Mutex::new(output)) })
+        Some(Port { model, name: in_names[i].clone(), out_name: out_names[o].clone(), rx, _input: input, output: Arc::new(Mutex::new(output)) })
     }
 
     /// Messages received since the last call, oldest first.

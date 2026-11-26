@@ -111,23 +111,19 @@ impl App {
         self.invalidate();
     }
 
-    /// The kept plugin windows whose plugins have loaded open, in the order kept; the rest wait (`WAIT` at most).
+    /// The kept plugin windows whose plugins have loaded open, in the order kept; an unloaded plugin does not block
+    /// loaded ones behind it (`WAIT` at most).
     pub fn session_tick(&mut self) {
         let Some(since) = self.session_since else { return };
         if since.elapsed() > WAIT {
             self.session_plugins.clear();
         }
-        while let Some(&k) = self.session_plugins.first() {
-            if !self.state.session.plugins.hosted.contains_key(&k) {
-                break;
-            }
-            self.session_plugins.remove(0);
+        if let Some(pos) = self.session_plugins.iter().position(|k| self.state.session.plugins.hosted.contains_key(k)) {
+            let k = self.session_plugins.remove(pos);
             match crate::plugins::fx_of(k) {
                 Some((track, slot)) => self.open_fx(track, slot),
                 None => self.state.session.pending_open = Some(k),
             }
-            // One a tick: `pending_open` holds one.
-            break;
         }
         if self.session_plugins.is_empty() {
             self.session_since = None;
@@ -173,5 +169,19 @@ mod tests {
         c.save_to(dir.join("Other.flp"));
         assert_eq!(kept(&c), None, "another project");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unloaded_first_plugin_does_not_block_later_loaded_plugin() {
+        let mut a = App::new(None);
+        a.state.session.plugins.available = crate::plugins::builtin();
+        let idx = a.state.session.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        a.state.session.plugins.create_with(1, idx, None).unwrap();
+        // Plugin 0 never loads; plugin 1 is already hosted.
+        a.session_plugins = vec![0, 1];
+        a.session_since = Some(std::time::Instant::now());
+        a.session_tick();
+        assert_eq!(a.state.session.pending_open, Some(1), "loaded plugin 1 opened without waiting on missing plugin 0");
+        assert_eq!(a.session_plugins, vec![0], "unloaded plugin 0 stays queued until WAIT elapses");
     }
 }

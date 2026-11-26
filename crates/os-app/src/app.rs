@@ -3168,9 +3168,14 @@ impl App {
                 self.state.session.dirty = true;
                 self.invalidate();
             }
-            self.clip_docked();
             #[cfg(lemon_cards)]
-            self.sync_embeds();
+            {
+                let frames = self.state.editor_host.embeds();
+                self.clip_docked_with(&frames);
+                self.sync_embeds(frames);
+            }
+            #[cfg(not(lemon_cards))]
+            self.clip_docked();
             // What the linked editors' instances hold now, for their next edit's undo.
             #[cfg(plugin_windows)]
             self.state.editor_host.refresh_known(&self.state.session.plugins, self.state.session.history.changes());
@@ -3203,12 +3208,10 @@ impl App {
     /// Linux: the plugin windows drawn in the app's (`plugin_window::EmbedFrame`) go into `State::embeds` to be painted,
     /// follow the canvas and the workspace, and are repainted where they or their editors changed.
     #[cfg(all(lemon_cards, plugin_windows))]
-    fn sync_embeds(&mut self) {
+    fn sync_embeds(&mut self, frames: std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>) {
         let k = self.state.ui_scale.max(0.1);
         let canvas = ((self.state.screen.0 * k).round() as u32, (self.state.screen.1 * k).round() as u32);
         let work = self.state.work_rect();
-        let frames = self.state.editor_host.embeds();
-        self.sync_plugin_tabs(&frames);
         let mut seen = std::mem::take(&mut self.embed_seen);
         for (row, (_, r, o)) in &seen {
             if !frames.contains_key(row) {
@@ -3221,9 +3224,8 @@ impl App {
         for (&row, f) in &frames {
             // A tab behind another and a window slid away do not paint.
             f.set_shown(!self.state.plugin_tabs.hidden(row) && !self.state.float_layer.keeps(row));
-            f.sync(k, canvas, self.canvas_off, work, &self.theme.colors);
             // Where it paints, with its row of tabs: the row coming or going repaints what lies under it.
-            let now = (f.serial(), f.paint_rect(), f.overlays_rect());
+            let now = f.sync(k, canvas, self.canvas_off, work, &self.theme.colors);
             if seen.get(&row) != Some(&now) {
                 if let Some((_, r, o)) = seen.get(&row) {
                     self.damage_rect(*r);
@@ -3354,31 +3356,40 @@ impl App {
 
     /// Docked plugin windows (native children) join `State::z` and are clipped to the workspace minus the drawn
     /// windows above them and the overlays (spec: ui/plugin-window.md "Docking"). Detached windows leave `State::z`.
-    #[cfg(plugin_windows)]
+    #[cfg(all(plugin_windows, not(lemon_cards)))]
     fn clip_docked(&mut self) {
-        let mut docked = self.state.editor_host.docked();
+        self.clip_docked_inner();
+    }
+
+    #[cfg(all(plugin_windows, lemon_cards))]
+    fn clip_docked_with(&mut self, frames: &std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>) {
         // A hidden tab brought forward (from the rack, say) shows; the others stay out of the stack. Then the groups
         // take in the windows opened and closed since the last look: a window closed (its button in the rack clicked
         // again) would otherwise still be the tab showing, and the one left would leave the stack until the next tick.
+        // The selected channel changed (Select up/down, a pad, a click in the rack) to one whose window is a tab
+        // not showing: that tab shows, in the window's place among the others (it is not raised).
+        let sel = self.state.selected_channel;
+        if self.tab_follow.replace(sel).is_some_and(|was| was != sel)
+            && let Some(showing) = self.state.plugin_tabs.group_of(sel).map(|g| g.active).filter(|&a| a != sel)
+        {
+            self.state.plugin_tabs.activate(sel);
+            for w in self.state.z.iter_mut().filter(|w| **w == Win::Hosted(showing)) {
+                *w = Win::Hosted(sel);
+            }
+            self.invalidate();
+        }
+        if let Some(&Win::Hosted(r)) = self.state.z.last() {
+            self.state.plugin_tabs.activate(r);
+        }
+        self.sync_plugin_tabs(frames);
+        self.clip_docked_inner();
+    }
+
+    #[cfg(plugin_windows)]
+    fn clip_docked_inner(&mut self) {
+        let mut docked = self.state.editor_host.docked();
         #[cfg(lemon_cards)]
         {
-            // The selected channel changed (Select up/down, a pad, a click in the rack) to one whose window is a tab
-            // not showing: that tab shows, in the window's place among the others (it is not raised).
-            let sel = self.state.selected_channel;
-            if self.tab_follow.replace(sel).is_some_and(|was| was != sel)
-                && let Some(showing) = self.state.plugin_tabs.group_of(sel).map(|g| g.active).filter(|&a| a != sel)
-            {
-                self.state.plugin_tabs.activate(sel);
-                for w in self.state.z.iter_mut().filter(|w| **w == Win::Hosted(showing)) {
-                    *w = Win::Hosted(sel);
-                }
-                self.invalidate();
-            }
-            if let Some(&Win::Hosted(r)) = self.state.z.last() {
-                self.state.plugin_tabs.activate(r);
-            }
-            let frames = self.state.editor_host.embeds();
-            self.sync_plugin_tabs(&frames);
             let tabs = &self.state.plugin_tabs;
             docked.retain(|&r| !tabs.hidden(r));
         }
@@ -5663,32 +5674,40 @@ impl App {
             TransportState::Stopped => "Stopped",
         };
         let title = self.title();
-        let title = title.trim_start_matches('[').trim_end_matches(']').to_string();
+        let trimmed = title.trim_start_matches('[').trim_end_matches(']');
         if let Some(m) = &self.mpris {
-            m.show(crate::mpris::Now { status, title });
+            m.show_str(status, trimmed);
         }
     }
 
-    /// Follow Omarchy (`crate::omarchy`): once a second, the system theme applied when it changed.
+    /// Follow Omarchy (`crate::omarchy`): once a second, the system theme applied when it changed (Linux only).
     pub fn omarchy_tick(&mut self, now: std::time::Instant) {
-        if now < self.omarchy.1 {
-            return;
+        #[cfg(not(any(target_os = "linux", test)))]
+        {
+            let _ = now;
         }
-        self.omarchy.1 = now + std::time::Duration::from_secs(1);
-        if !crate::omarchy::following() {
-            self.omarchy.0 = None;
-            return;
+        #[cfg(any(target_os = "linux", test))]
+        {
+            if now < self.omarchy.1 {
+                return;
+            }
+            self.omarchy.1 = now + std::time::Duration::from_secs(1);
+            if !crate::omarchy::following() {
+                self.omarchy.0 = None;
+                return;
+            }
+            let stamp = crate::omarchy::stamp();
+            if stamp == self.omarchy.0 {
+                return;
+            }
+            self.omarchy.0 = stamp;
+            self.apply_omarchy();
         }
-        let stamp = crate::omarchy::stamp();
-        if stamp == self.omarchy.0 {
-            return;
-        }
-        self.omarchy.0 = stamp;
-        self.apply_omarchy();
     }
 
     /// Omarchy's current theme over the skin in use. Not kept as `current.flstheme`: the next start follows the system
     /// again (and with the option off, it starts on the theme chosen before).
+    #[cfg(any(target_os = "linux", test))]
     fn apply_omarchy(&mut self) {
         let Some((name, text)) = crate::omarchy::theme() else { return };
         self.theme = skin_theme(self.design(), &name, Some(&text));

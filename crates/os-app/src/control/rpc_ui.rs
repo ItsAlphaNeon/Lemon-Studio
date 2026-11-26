@@ -64,7 +64,18 @@ impl App {
                 need(c, Level::Edit)?;
                 let owner = uint(params, "owner")? as u32;
                 let key = super::command::owner_key(&self.state.session, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
-                let file = params.get("file").and_then(Value::as_str).map(std::path::PathBuf::from).or_else(|| self.journal.path.clone()).ok_or_else(|| bad("no journal file"))?;
+                let file = match params.get("file").and_then(Value::as_str) {
+                    Some(raw) => {
+                        let req = std::path::Path::new(raw);
+                        if self.journal.path.as_deref() == Some(req) {
+                            req.to_path_buf()
+                        } else {
+                            let dir = crate::journal::journal_dir().ok_or_else(|| bad("no journal folder"))?;
+                            crate::journal::confine_journal_path(req, &dir).ok_or_else(|| bad("journal file must be inside the Journal folder"))?
+                        }
+                    }
+                    None => self.journal.path.clone().ok_or_else(|| bad("no journal file"))?,
+                };
                 let msg = self.recover_state(key, &file, uint(params, "seq")?);
                 Ok(json!({ "message": msg }))
             }

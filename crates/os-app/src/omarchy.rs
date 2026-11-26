@@ -26,7 +26,11 @@ fn dir() -> Option<PathBuf> {
     return TEST_DIR.with(|d| d.borrow().clone());
     #[cfg(not(test))]
     {
-        let d = PathBuf::from(std::env::var_os("HOME")?).join(".local/state/omarchy/current");
+        let state = std::env::var_os("XDG_STATE_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
+        let d = state.join("omarchy/current");
         d.join("theme/colors.toml").is_file().then_some(d)
     }
 }

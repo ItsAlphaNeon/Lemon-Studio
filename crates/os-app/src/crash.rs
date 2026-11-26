@@ -50,7 +50,41 @@ fn read(path: &Path) -> Vec<Value> {
 
 /// Whether process `pid` still runs (another Lemon Studio, whose journal is still being written).
 fn running(pid: u64) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "lemonstudio")
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "lemonstudio")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(p) = libc::pid_t::try_from(pid) else { return false };
+        // SAFETY: kill(pid, 0) checks process existence without delivering a signal (pid > 0).
+        (unsafe { libc::kill(p, 0) == 0 }) || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let Ok(p) = u32::try_from(pid) else { return false };
+        // SAFETY: OpenProcess/GetExitCodeProcess/CloseHandle with valid stack pointer and handle cleanup.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, p);
+            if h.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code) != 0 && code == STILL_ACTIVE as u32;
+            CloseHandle(h);
+            ok
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// The newest autosave of `project` (None: an untitled one) written after `since` (Unix ms): in the project's folder's
