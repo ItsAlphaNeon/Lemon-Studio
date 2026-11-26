@@ -33,28 +33,79 @@ pub struct Now {
     pub title: String,
 }
 
-/// The player on the bus.
+/// The player on the bus. All blocking D-Bus connection setup and signal emissions run on a dedicated background
+/// thread so a slow or unavailable session bus never stalls app startup or the UI tick.
 pub struct Mpris {
-    conn: zbus::blocking::Connection,
     rx: Receiver<Cmd>,
-    now: Arc<Mutex<Now>>,
+    tx: Sender<Now>,
+    last: Mutex<Now>,
+    #[cfg(test)]
+    ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Mpris {
-    /// On the session bus; `None` without one (or when the name is taken twice over).
+    /// Starts the player on the session bus in a background thread.
     pub fn start() -> Option<Mpris> {
-        let (tx, rx) = channel();
-        let now = Arc::new(Mutex::new(Now { status: "Stopped", title: String::new() }));
-        let player = Player { tx, now: now.clone() };
-        let build = |name: String, player: Player| {
-            zbus::blocking::connection::Builder::session()?.name(name)?.serve_at(PATH, Root)?.serve_at(PATH, player)?.build()
-        };
-        // A second Lemon Studio takes an instance name, as MPRIS asks.
-        let conn = build(NAME.to_string(), player.clone())
-            .or_else(|_| build(format!("{NAME}.instance{}", std::process::id()), player))
-            .map_err(|e| eprintln!("MPRIS: {e}"))
+        let (cmd_tx, cmd_rx) = channel();
+        let (upd_tx, upd_rx) = channel::<Now>();
+        let shared = Arc::new(Mutex::new(Now { status: "Stopped", title: String::new() }));
+        let player_now = shared.clone();
+        #[cfg(test)]
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        #[cfg(test)]
+        let ready_bg = ready.clone();
+        std::thread::Builder::new()
+            .name("lemonstudio-mpris".into())
+            .spawn(move || {
+                let player = Player { tx: cmd_tx, now: player_now };
+                let build = |name: String, player: Player| {
+                    zbus::blocking::connection::Builder::session()?.name(name)?.serve_at(PATH, Root)?.serve_at(PATH, player)?.build()
+                };
+                // A second Lemon Studio takes an instance name, as MPRIS asks.
+                let Ok(conn) = build(NAME.to_string(), player.clone())
+                    .or_else(|_| build(format!("{NAME}.instance{}", std::process::id()), player))
+                    .map_err(|e| eprintln!("MPRIS: {e}"))
+                else {
+                    return;
+                };
+                #[cfg(test)]
+                ready_bg.store(true, std::sync::atomic::Ordering::Release);
+                while let Ok(mut now) = upd_rx.recv() {
+                    // Coalesce burst updates so the bus only emits the newest state.
+                    while let Ok(newer) = upd_rx.try_recv() {
+                        now = newer;
+                    }
+                    let (status_changed, title_changed) = {
+                        let mut cur = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        let sc = cur.status != now.status;
+                        let tc = cur.title != now.title;
+                        if sc || tc {
+                            *cur = now;
+                        }
+                        (sc, tc)
+                    };
+                    if !status_changed && !title_changed {
+                        continue;
+                    }
+                    let Ok(iface) = conn.object_server().interface::<_, Player>(PATH) else { continue };
+                    let p = iface.get();
+                    let e = iface.signal_emitter();
+                    if status_changed {
+                        let _ = zbus::block_on(p.playback_status_changed(e));
+                    }
+                    if title_changed {
+                        let _ = zbus::block_on(p.metadata_changed(e));
+                    }
+                }
+            })
             .ok()?;
-        Some(Mpris { conn, rx, now })
+        Some(Mpris {
+            rx: cmd_rx,
+            tx: upd_tx,
+            last: Mutex::new(Now { status: "Stopped", title: String::new() }),
+            #[cfg(test)]
+            ready,
+        })
     }
 
     /// The commands that came in since the last call.
@@ -67,30 +118,41 @@ impl Mpris {
         self.show_str(now.status, &now.title);
     }
 
-    /// Like `show`, avoiding `String` allocation when unchanged.
+    /// Like `show`, avoiding `String` allocation and D-Bus work when unchanged.
     pub fn show_str(&self, status: &'static str, title: &str) {
-        let (status_changed, title_changed) = {
-            let mut cur = self.now.lock().unwrap_or_else(|e| e.into_inner());
-            let sc = cur.status != status;
-            let tc = cur.title != title;
-            if !sc && !tc {
-                return;
-            }
-            cur.status = status;
-            if tc {
-                cur.title.clear();
-                cur.title.push_str(title);
-            }
-            (sc, tc)
-        };
-        let Ok(iface) = self.conn.object_server().interface::<_, Player>(PATH) else { return };
-        let p = iface.get();
-        let e = iface.signal_emitter();
-        if status_changed {
-            let _ = zbus::block_on(p.playback_status_changed(e));
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last.status == status && last.title == title {
+            return;
         }
-        if title_changed {
-            let _ = zbus::block_on(p.metadata_changed(e));
+        last.status = status;
+        last.title.clear();
+        last.title.push_str(title);
+        let _ = self.tx.send(last.clone());
+    }
+}
+
+impl crate::app::App {
+    /// MPRIS (`crate::mpris`): the desktop's play, pause and stop, as the transport's buttons; then what it shows.
+    pub(crate) fn mpris_tick(&mut self) {
+        let Some(m) = &self.mpris else { return };
+        for c in m.take() {
+            let playing = self.state.session.transport.state() == crate::transport::State::Playing;
+            match c {
+                Cmd::Play if playing => {}
+                Cmd::Pause if !playing => {}
+                Cmd::Play | Cmd::Pause | Cmd::PlayPause => self.act(crate::app::Action::Play),
+                Cmd::Stop => self.act(crate::app::Action::Stop),
+            }
+        }
+        let status = match self.state.session.transport.state() {
+            crate::transport::State::Playing => "Playing",
+            crate::transport::State::Paused => "Paused",
+            crate::transport::State::Stopped => "Stopped",
+        };
+        let title = self.title();
+        let trimmed = title.trim_start_matches('[').trim_end_matches(']');
+        if let Some(m) = &self.mpris {
+            m.show_str(status, trimmed);
         }
     }
 }
@@ -163,11 +225,11 @@ impl Player {
 
     #[zbus(property)]
     fn playback_status(&self) -> String {
-        self.now.lock().unwrap().status.to_string()
+        self.now.lock().unwrap_or_else(|e| e.into_inner()).status.to_string()
     }
     #[zbus(property)]
     fn metadata(&self) -> HashMap<String, OwnedValue> {
-        let title = self.now.lock().unwrap().title.clone();
+        let title = self.now.lock().unwrap_or_else(|e| e.into_inner()).title.clone();
         let mut m = HashMap::new();
         if let Ok(v) = OwnedValue::try_from(Value::from(ObjectPath::from_static_str_unchecked("/org/lemonstudio/project"))) {
             m.insert("mpris:trackid".to_string(), v);
@@ -237,7 +299,12 @@ mod tests {
     #[ignore]
     fn the_desktop_drives_the_transport() {
         let m = Mpris::start().expect("a session bus");
+        let t0 = std::time::Instant::now();
+        while !m.ready.load(std::sync::atomic::Ordering::Acquire) && t0.elapsed() < std::time::Duration::from_secs(2) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         m.show(Now { status: "Playing", title: "Song".into() });
+        std::thread::sleep(std::time::Duration::from_millis(20));
         let conn = zbus::blocking::Connection::session().unwrap();
         let p = zbus::blocking::Proxy::new(&conn, NAME, PATH, "org.mpris.MediaPlayer2.Player").unwrap();
         let status: String = p.get_property("PlaybackStatus").unwrap();

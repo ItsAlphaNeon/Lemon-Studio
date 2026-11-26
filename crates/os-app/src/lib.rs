@@ -15,6 +15,7 @@
 
 pub mod anim;
 pub mod app;
+pub mod ce_ui;
 pub mod arrange;
 pub mod audio_clipboard;
 pub mod audio_log_ui;

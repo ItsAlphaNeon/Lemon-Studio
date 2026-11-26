@@ -111,6 +111,76 @@ pub fn theme_text(toml: &str) -> Option<String> {
     ))
 }
 
+impl crate::app::App {
+    /// Follow Omarchy (`crate::omarchy`): once a second, the system theme applied when it changed (Linux only).
+    pub fn omarchy_tick(&mut self, now: std::time::Instant) {
+        #[cfg(not(any(target_os = "linux", test)))]
+        {
+            let _ = now;
+        }
+        #[cfg(any(target_os = "linux", test))]
+        {
+            if now < self.omarchy.1 {
+                return;
+            }
+            self.omarchy.1 = now + std::time::Duration::from_secs(1);
+            if !following() {
+                self.omarchy.0 = None;
+                return;
+            }
+            let stamp = stamp();
+            if stamp == self.omarchy.0 {
+                return;
+            }
+            self.omarchy.0 = stamp;
+            self.apply_omarchy();
+        }
+    }
+
+    /// Omarchy's current theme over the skin in use. Not kept as `current.flstheme`: the next start follows the system
+    /// again (and with the option off, it starts on the theme chosen before).
+    #[cfg(any(target_os = "linux", test))]
+    fn apply_omarchy(&mut self) {
+        let Some((name, text)) = theme() else { return };
+        self.theme = crate::app::skin_theme(self.design(), &name, Some(&text));
+        os_theme::set_current(&self.theme.colors);
+        self.state.fl_text = Some(text.clone());
+        self.state.theme_base = Some(text);
+        crate::wallpaper::forget();
+        self.sync_preset();
+        self.invalidate();
+    }
+
+    /// Theme ▸ Options ▸ Follow Omarchy's theme: on applies the system's now; off goes back to the theme kept from
+    /// before (`current.flstheme`, else the skin's own colours).
+    pub fn toggle_follow_omarchy(&mut self) {
+        let on = !following();
+        crate::settings_file::set_flag(KEY, on);
+        self.omarchy = (None, std::time::Instant::now());
+        if on {
+            self.omarchy_tick(std::time::Instant::now());
+            self.state.message = Some(format!("Theme follows Omarchy: {}", self.theme.name));
+        } else {
+            self.theme = crate::app::design_theme(self.design(), true);
+            os_theme::set_current(&self.theme.colors);
+            self.state.fl_text = crate::app::saved_fl_text();
+            self.state.theme_base = self.state.fl_text.clone();
+            crate::wallpaper::forget();
+            self.sync_preset();
+            self.state.message = Some(format!("Theme no longer follows Omarchy: {}", self.theme.name));
+        }
+        self.invalidate();
+    }
+
+    /// A theme chosen by hand: Follow Omarchy goes off, so the choice holds.
+    pub(crate) fn stop_following_omarchy(&mut self) {
+        if following() {
+            crate::settings_file::set_flag(KEY, false);
+            self.omarchy.0 = None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
