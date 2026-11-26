@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// One producer, one consumer ring of samples: the device's callback pushes, the writer thread pops; neither locks.
-pub(crate) struct Ring {
+pub struct Ring {
     buf: Box<[UnsafeCell<f32>]>,
     /// Samples written and read so far (the slot is the count modulo the length).
     head: AtomicUsize,
