@@ -129,7 +129,7 @@ pub fn events_in(s: &crate::session::Session, plugins: &Plugins, looks: &Looks) 
 /// `saved_form` on the session, with the interface's choices `looks`.
 pub fn saved_form_in(s: &crate::session::Session, plugins: &Plugins, looks: &Looks) -> Vec<u8> {
     let mut b = Vec::new();
-    for e in events_in(s, plugins, looks).into_iter().filter(|e| e.id != lemon::KEY_FOCUS) {
+    for e in events_in(s, plugins, looks).into_iter().filter(|e| e.id != lemon::KEY_FOCUS && e.id != lemon::OBJECT_IDS) {
         b.push(e.id);
         b.extend_from_slice(e.data().unwrap_or_default());
     }
