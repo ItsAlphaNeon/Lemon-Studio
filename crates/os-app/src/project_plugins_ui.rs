@@ -621,4 +621,32 @@ mod tests {
         assert_eq!((std::path::PathBuf::from(&r.path), r.state), (exe, start));
     }
 
+    /// Zest saved in a project comes back built in, with a setting it was given.
+    #[test]
+    fn zest_saves_and_reopens() {
+        use crate::app::App;
+        let path = std::env::temp_dir().join(format!("lemon-zest-{}.flp", std::process::id()));
+        let mut a = App::new(None);
+        a.state.session.plugins.available = crate::plugins::builtin();
+        a.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        let row = 0;
+        a.state.session.project.get_mut().channels[row].kind = os_model::ChannelKind::Plugin;
+        a.state.session.project.get_mut().channels[row].plugin = Some("Zest".into());
+        a.state.session.plugins.create_with(row, a.state.session.plugins.index_of("Zest").unwrap(), None).unwrap();
+        let p = a.state.session.plugins.param_infos(row).into_iter().find(|p| !p.read_only && !p.bypass && p.max > p.min).unwrap();
+        let n = if (p.default - 0.3).abs() > 0.1 { 0.3 } else { 0.8 };
+        assert!(a.state.session.plugins.set_param_named(row, &p.name, p.min + n * (p.max - p.min)));
+        a.state.session.plugins.hosted[&row].plugin.lock().unwrap().idle();
+        let v = a.state.session.plugins.param_value(row, p.id).unwrap();
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", a.state.message);
+
+        let mut b = App::new(None);
+        b.state.session.plugins.available = crate::plugins::builtin();
+        b.open(path.clone());
+        b.sync_wrapped();
+        let _ = std::fs::remove_file(&path);
+        assert!(b.state.session.plugins.descriptor(row).is_some_and(|d| d.name == "Zest" && is_builtin(&d)), "Zest hosted, built in");
+        assert_eq!(b.state.session.plugins.param_value(row, p.id), Some(v), "Zest kept its setting");
+    }
 }

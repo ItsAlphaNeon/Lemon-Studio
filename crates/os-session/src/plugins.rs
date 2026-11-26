@@ -381,6 +381,7 @@ pub fn builtin() -> Vec<Available> {
     static SMITH: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static DRUMS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static ZEST: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static SOUNDFONT: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(stock!("stock-trio", lemon_3x_osc).map(|e| linked(&OSC3, e, crate::osc3::LEMON_TRIO)).unwrap_or_default());
@@ -388,9 +389,14 @@ pub fn builtin() -> Vec<Available> {
     v.extend(stock!("stock-smith", smith).map(|e| linked(&SMITH, e, crate::smith::SMITH)).unwrap_or_default());
     v.extend(stock!("stock-slicer", lemon_slicer).map(|e| linked(&SLICER, e, crate::slicer::LEMON_SLICER)).unwrap_or_default());
     v.extend(stock!("stock-drum-sampler", lemon_drum_sampler).map(|e| linked(&DRUMS, e, crate::drums::LEMON_DRUMS)).unwrap_or_default());
+    v.extend(stock!("stock-zest", zest_plugin).map(|e| linked(&ZEST, e, ZEST_NAME)).unwrap_or_default());
     v.extend(stock!("stock-soundfont", lemon_soundfont).map(|e| linked(&SOUNDFONT, e, crate::soundfont::LEMON_SOUNDFONT)).unwrap_or_default());
     v
 }
+
+/// Zest. Saved as a wrapped CLAP plugin naming `Zest.clap` in the per-user CLAP folder, as the compiled-in effects are
+/// (`project_plugins::is_wrapped`): without it a project keeps no state for it, not even which plugin played the channel.
+pub const ZEST_NAME: &str = "Zest";
 
 /// Lemon Parametric EQ, Pulp Filter and Press, compiled in the same way (`FILE_MAPPED`): offered for every mixer slot,
 /// and they play the slots a project saved with the original EQ, Love Philter and Maximus (spec:
