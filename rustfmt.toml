@@ -1,0 +1,6 @@
+# The house style: lines up to 120 columns, and rustfmt's smaller per-construct widths lifted to that, so short
+# calls, struct literals and chains stay on one line. Imports and modules keep the order they were written in.
+max_width = 120
+use_small_heuristics = "Max"
+reorder_imports = false
+reorder_modules = false
