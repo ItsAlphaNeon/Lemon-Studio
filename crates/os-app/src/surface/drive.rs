@@ -1025,7 +1025,7 @@ impl App {
 
     /// The plugin's window shows the parameter being turned: the tab of its window, the page it is on, and what changes.
     fn reveal_param(&mut self, key: usize, index: usize) {
-        #[cfg(all(target_os = "linux", plugin_windows))]
+        #[cfg(all(lemon_cards, plugin_windows))]
         if self.state.plugin_tabs.hidden(key) {
             self.state.raise(Win::Hosted(key));
         }

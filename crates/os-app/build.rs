@@ -26,14 +26,15 @@ fn main() {
     // macOS), with the `plugin-windows` feature.
     println!("cargo::rustc-check-cfg=cfg(plugin_windows)");
     let os = matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows" | "linux" | "macos"));
-    if os && std::env::var_os("CARGO_FEATURE_PLUGIN_WINDOWS").is_some() {
+    let has_plugin_windows = std::env::var_os("CARGO_FEATURE_PLUGIN_WINDOWS").is_some();
+    if os && has_plugin_windows {
         println!("cargo::rustc-cfg=plugin_windows");
     }
     // `lemon_cards`: the plugins compiled into Lemon Studio draw their editors in its own window, as Lemon cards
     // (`plugin_window::EmbedFrame`), and several of one plugin join as tabs (`plugin_tabs`). Linux and macOS; Windows is
     // next.
     println!("cargo::rustc-check-cfg=cfg(lemon_cards)");
-    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("linux" | "macos")) {
+    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("linux" | "macos")) && has_plugin_windows {
         println!("cargo::rustc-cfg=lemon_cards");
     }
 }
