@@ -1,5 +1,5 @@
-# The cutting-edge branch: Linux on every push (it puts Wayland first); other platforms are not tested on every push here.
-# Run the three-platform CI by hand (workflow_dispatch) when a change needs it.
+# The cutting-edge branch: full build and tests on Linux (Wayland/Hyprland) plus compile checks on Windows and macOS
+# on every push so changes stay PR-ready for main.
 name: CI (cutting-edge)
 
 on:
@@ -26,6 +26,13 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-24.04
+            full: true
+          - name: Windows (check)
+            os: windows-latest
+            full: false
+          - name: macOS (check)
+            os: macos-latest
+            full: false
     steps:
       - uses: actions/checkout@v4
 
@@ -41,18 +48,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
+        if: matrix.full
         run: cargo build --workspace --all-targets --locked
+
+      - name: Check workspace
+        if: ${{ !matrix.full }}
+        run: cargo check --workspace --all-targets --locked
 
       - name: Check minimal build (features off)
         run: cargo check --locked -p lemonstudio --no-default-features --all-targets
 
       # The plugin bundles (VST3 + CLAP): the hosting tests load them, and skip without them.
       - name: Bundle plugins
+        if: matrix.full
         run: cargo run -p bundle-plugins --locked
 
       # Every platform's crates: the notices test lists them with an offline `cargo tree --target all`.
       - name: Fetch
+        if: matrix.full
         run: cargo fetch --locked
 
       - name: Test
+        if: matrix.full
         run: cargo test --workspace --locked

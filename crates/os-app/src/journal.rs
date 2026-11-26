@@ -33,6 +33,8 @@ use crate::app::App;
 
 /// How long journals are kept.
 pub const KEEP_DAYS: u64 = 30;
+/// Maximum total size of old journal files kept on disk (256 MiB); the newest file is always preserved for crash recovery.
+pub const MAX_BYTES: u64 = 256 << 20;
 /// How often the plugins being edited are asked for their state.
 const PLUGIN_EVERY: Duration = Duration::from_secs(2);
 /// How often, at most, the project is read for its changes (a drag changes it every frame).
@@ -581,13 +583,33 @@ fn newest(dir: &std::path::Path) -> Option<PathBuf> {
 }
 
 fn prune(dir: &std::path::Path) {
+    prune_with(dir, Duration::from_secs(KEEP_DAYS * 86_400), MAX_BYTES);
+}
+
+fn prune_with(dir: &std::path::Path, keep: Duration, max_bytes: u64) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let keep = Duration::from_secs(KEEP_DAYS * 86_400);
+    let mut kept: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
     for e in rd.flatten() {
         let p = e.path();
-        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|m| m.elapsed().ok()).is_some_and(|age| age > keep);
-        if old && p.extension().is_some_and(|x| x == "jsonl") {
+        if !p.extension().is_some_and(|x| x == "jsonl") {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else { continue };
+        let modified = meta.modified().unwrap_or(UNIX_EPOCH);
+        let old = modified.elapsed().ok().is_some_and(|age| age > keep);
+        if old {
             let _ = std::fs::remove_file(p);
+        } else {
+            kept.push((modified, meta.len(), p));
+        }
+    }
+    // Enforce total disk budget, removing oldest journals first while always keeping the newest for crash recovery.
+    kept.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut total: u64 = 0;
+    for (idx, (_, len, path)) in kept.into_iter().enumerate() {
+        total = total.saturating_add(len);
+        if idx > 0 && total > max_bytes {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -748,5 +770,27 @@ mod tests {
         let disk = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert!(disk.contains("\"kind\":\"closed\""), "missing closed line: {disk}");
+    }
+
+    #[test]
+    fn prune_enforces_total_size_cap_keeping_newest() {
+        let dir = std::env::temp_dir().join(format!("lemonstudio-journal-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f1 = dir.join("1.jsonl");
+        let f2 = dir.join("2.jsonl");
+        let f3 = dir.join("3.jsonl");
+        std::fs::write(&f1, vec![b'a'; 60]).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&f2, vec![b'b'; 60]).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&f3, vec![b'c'; 60]).unwrap();
+        // Budget 100 bytes keeps only the newest 60-byte file (f3); f1 and f2 are pruned.
+        prune_with(&dir, Duration::from_secs(3600), 100);
+        assert!(!f1.exists() && !f2.exists() && f3.exists());
+        // Even if the single newest file alone exceeds max_bytes, it stays for crash recovery.
+        prune_with(&dir, Duration::from_secs(3600), 10);
+        assert!(f3.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
