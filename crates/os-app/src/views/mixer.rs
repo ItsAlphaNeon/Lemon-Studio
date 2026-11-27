@@ -312,7 +312,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let sb = Rect::new(area.x + 13.0, bottom - 14.0, area.w - 20.0, 9.0);
     super::scrollbar(ui, sb, false, s.mixer_scroll, area.w, docks.widths[1] + STRIP_W, crate::app::Scroll::MixerX);
     chevron(ui, area.x + 5.0, bottom - 9.5, false, ui.t.s(0x5d6366));
-    cables(ui, s, strips, &docks, bottom);
+    // View ▸ Routing cables off draws none (spec: ui/mixer.md §6.2.1).
+    if mx::view_opts::cables() {
+        cables(ui, s, strips, &docks, bottom);
+    } else {
+        s.cables.borrow_mut().clear();
+    }
 
     slot_panel(ui, s, Rect::new(r.right() - panel_w, r.y, panel_w, r.h));
     resize_zones(ui, s, Win::Mixer, outer);
@@ -512,6 +517,10 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         (false, true) => ui.t.s(0x26292b),
         (false, false) => ui.t.s(0x232527),
     };
+    // View ▸ Colorful mixer (spec: ui/mixer.md §6.2.1): a coloured track's body takes some of its colour; at Off only
+    // its header band does.
+    let tint = track.and_then(|m| m.color).map(super::rgb);
+    let body = tint.map_or(body, |c| body.mix(c, mx::view_opts::body_tint()));
     let lemon = super::lemon(ui);
     if lemon {
         // Lemon (spec: ui/lemon-design.md §8): each strip is a rounded card on the dark gap colour.
@@ -522,6 +531,10 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         ui.c.fill_rect(Rect::new(left, ly.y(HEAD_Y1) + 1.0, STRIP_W, bottom - ly.y(HEAD_Y1) - 1.0), body);
         ui.c.fill_rect(Rect::new(left + STRIP_W - 1.0, ly.y(HEAD_Y1) + 1.0, 1.0, bottom - ly.y(HEAD_Y1) - 1.0), ui.t.s(0x1c1f21));
     }
+    // View ▸ Lines between tracks: a light dividing line.
+    if mx::view_opts::lines() {
+        ui.c.fill_rect(Rect::new(left + STRIP_W - 1.0, ly.y(HEAD_Y1) + 1.0, 1.0, bottom - ly.y(HEAD_Y1) - 1.0), ui.t.s(0x41474a));
+    }
     // The whole strip selects (Ctrl adds, Shift renames); controls register on top of it (spec: ui/mixer.md §2).
     ui.hit(Rect::new(left, ly.y(HEAD_Y0), STRIP_W, bottom - ly.y(HEAD_Y0)), Action::Mix(MHit::Strip(n)), mx::name(&s.session, n));
     let hov = ui.hovering(Rect::new(left, ly.y(HEAD_Y0), STRIP_W, ly.y(PANEL_Y1) - ly.y(HEAD_Y0)));
@@ -529,7 +542,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     // Header number (insert strips only; the master's "M" sits in the fixed header band).
     if n != 0 {
         let hr = Rect::new(left, ly.y(HEAD_Y0), STRIP_W, ly.y(HEAD_Y1) - ly.y(HEAD_Y0) + 1.0);
-        ui.c.fill_rect(hr, ui.t.s(0x2b2e30));
+        ui.c.fill_rect(hr, tint.map_or(ui.t.s(0x2b2e30), |c| ui.t.s(0x2b2e30).mix(c, mx::view_opts::HEADER_TINT)));
         if selected && lemon {
             lk::lit_in(ui.c, ui.t, Rect::new(hr.x + 3.0, hr.y + 2.0, hr.w - 6.0, hr.h - 4.0), lk::r_btn(t), false);
         } else if selected {
@@ -602,7 +615,12 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     }
     let lead = if icon.is_some() { 15.0 } else { 0.0 };
     ui.c.push_clip(Rect::new(left + 2.0, ly.y(PANEL_Y0), 20.0, ly.y(METER_Y1) - ly.y(PANEL_Y0)));
-    ui.c.text_vertical(Font::new(15), sx - 7.0, meter.bottom() - 1.0 - lead, name_c, &name);
+    // View ▸ Names at top: the name ends at the column's top instead of starting above the LED.
+    let mut y0 = meter.bottom() - 1.0 - lead;
+    if mx::view_opts::names_top() {
+        y0 = y0.min(ly.y(PANEL_Y0) + 4.0 + ui.c.text_width(Font::new(15), &name));
+    }
+    ui.c.text_vertical(Font::new(15), sx - 7.0, y0, name_c, &name);
     ui.c.pop_clip();
 
     let enabled = track.is_none_or(|m| m.enabled);

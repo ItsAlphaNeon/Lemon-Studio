@@ -56,6 +56,7 @@ macro_rules! set_track {
 
 mod selection;
 pub mod slot_drag;
+pub mod view_opts;
 pub use selection::{create_submix, name_submix, route_from, Submix};
 
 /// The interface's edit made of `commands`: one undo step named `name` (none when nothing changed); the error as the
@@ -251,6 +252,9 @@ pub enum MCmd {
     /// Options ▸ View ▸ Waveforms and Extra properties (`MixerUi::waveforms`, `MixerUi::extra`).
     ViewWaveforms,
     ViewExtra,
+    /// Options ▸ View ▸ Names at top, Routing cables, Compact plugin list, Colorful mixer ▸, Lines between tracks
+    /// (spec: ui/mixer.md §6.2.1; `view_opts`).
+    ViewOpt(view_opts::Opt),
     /// File ▸ Save mixer track state, File ▸ Open mixer track state ▸ and Insert from state ▸ (Lemon Studio's design,
     /// `crate::mixer_state`): save track `n`'s state under its name; put a saved one on track `n` (its name and colour
     /// stay); insert a new track in front of `n` from one (with the state's name and colour).
@@ -1319,10 +1323,10 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::new("Link all parameters...", Cmd::Remote(crate::remote::RCmd::LinkTrack(s.selected_mixer))),
         PItem::sub(
             "View",
-            vec![
-                PItem::new("Waveforms", Cmd::Mixer(MCmd::ViewWaveforms)).key("Alt+W").mark(Mark::Check(s.mixer.waveforms)),
-                PItem::new("Extra properties", Cmd::Mixer(MCmd::ViewExtra)).mark(Mark::Check(s.mixer.extra)),
-            ],
+            std::iter::once(PItem::new("Waveforms", Cmd::Mixer(MCmd::ViewWaveforms)).key("Alt+W").mark(Mark::Check(s.mixer.waveforms)))
+                .chain(view_opts::items())
+                .chain(std::iter::once(PItem::new("Extra properties", Cmd::Mixer(MCmd::ViewExtra)).mark(Mark::Check(s.mixer.extra))))
+                .collect(),
         ),
         // In a native window of its own (Lemon Studio's design: ui/mixer.md §6.2).
         PItem::new("Detached", Cmd::Detach(crate::app::Win::Mixer, !s.is_detached(crate::app::Win::Mixer))).mark(Mark::Check(s.is_detached(crate::app::Win::Mixer))),
@@ -1742,6 +1746,10 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::ViewExtra => {
             s.mixer.extra = !s.mixer.extra;
+            None
+        }
+        MCmd::ViewOpt(o) => {
+            view_opts::run(o);
             None
         }
         MCmd::AutoClips => {
@@ -3393,7 +3401,8 @@ mod tests {
             let v = m.items.iter().find(|i| i.label == "View").unwrap();
             v.children.iter().map(|i| (i.label.to_string(), i.enabled, i.mark.clone())).collect::<Vec<_>>()
         };
-        assert_eq!(view(&a), [("Waveforms".into(), true, Mark::Check(false)), ("Extra properties".into(), true, Mark::Check(true))]);
+        let (v, first) = (view(&a), ("Waveforms".into(), true, Mark::Check(false)));
+        assert_eq!((v[0].clone(), v.last().cloned()), (first, Some(("Extra properties".into(), true, Mark::Check(true)))));
         run(&mut a, MCmd::ViewExtra);
         assert!(!a.state.mixer.extra);
         assert!(key(&mut a, &Key::Character("w".into()), false, true), "Alt+W");
