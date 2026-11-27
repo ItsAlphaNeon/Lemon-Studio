@@ -3544,7 +3544,8 @@ impl App {
         }
         if !s.note_props.placed {
             let (w, h) = views::note_props::SIZE; // centred as the full window, Step properties or not
-            s.note_props.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
+            s.note_props.pos =
+                (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
             s.note_props.placed = true;
         }
         if crate::note_props::open(s, i) {
@@ -7156,7 +7157,11 @@ impl App {
                     n.position = (i64::from(o.position) + dt) as u32;
                     // Snap to scale: a moved note lands on the scale at its new time, even on its own row; halfway goes
                     // down (spec: ui/piano-scale-snap.md §3).
-                    let key = if snap_scale { crate::scale_snap::snap_key(i32::from(o.key) + dk, scale_at(n.position), false) } else { i32::from(o.key) + dk };
+                    let key = if snap_scale {
+                        crate::scale_snap::snap_key(i32::from(o.key) + dk, scale_at(n.position), false)
+                    } else {
+                        i32::from(o.key) + dk
+                    };
                     n.key = key.clamp(0, crate::piano::TOP_KEY) as u16;
                 }
             }
@@ -8416,7 +8421,8 @@ impl App {
         }
         // A double-click on a note opens its Note properties (spec: ui/piano-note-properties.md §1).
         if let Action::PianoNote(i) = *a {
-            let count = matches!(tool, Tool::Draw | Tool::Paint | Tool::Select) && !self.shift && !self.ctrl && !self.alt;
+            let count =
+                matches!(tool, Tool::Draw | Tool::Paint | Tool::Select) && !self.shift && !self.ctrl && !self.alt;
             if crate::note_props::double_click(&mut self.state, i, count) {
                 self.open_note_props(i);
                 return;
@@ -9058,8 +9064,14 @@ impl App {
                 self.invalidate();
             }
             Action::PianoStampMenu => {
-                let b = self.hits.iter().rev().find(|h| h.action == Action::PianoStampMenu).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
-                self.state.playlist.popup = Some(crate::piano_tools::stamp_menu(&self.state, b.cx() - 11.0, b.cy() + 11.0));
+                let b = self
+                    .hits
+                    .iter()
+                    .rev()
+                    .find(|h| h.action == Action::PianoStampMenu)
+                    .map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
+                self.state.playlist.popup =
+                    Some(crate::piano_tools::stamp_menu(&self.state, b.cx() - 11.0, b.cy() + 11.0));
                 self.invalidate();
             }
             Action::PianoToolsMenu => {
@@ -16364,7 +16376,11 @@ mod tests {
         let mut keys: Vec<i32> = piano::notes(&app.state.session).iter().map(|n| i32::from(n.key)).collect();
         keys.sort_unstable();
         assert_eq!(keys, [key, key + 4, key + 7], "a Major chord");
-        assert_eq!(app.state.piano.stamp.map(|s| s.pick), Some(crate::chord_stamp::Pick::None), "only one: back to single notes");
+        assert_eq!(
+            app.state.piano.stamp.map(|s| s.pick),
+            Some(crate::chord_stamp::Pick::None),
+            "only one: back to single notes"
+        );
         let ch = piano::channel(&app.state);
         assert_eq!(app.state.piano.selection(app.state.pattern(), ch).len(), 3, "the stamped notes are selected");
         assert!(piano::notes(&app.state.session).iter().all(|n| n.unk14 == 1), "as one group");
