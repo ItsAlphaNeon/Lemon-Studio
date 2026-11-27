@@ -1614,10 +1614,16 @@ fn add_effect_on(s: &mut State, t: u16, k: u8, index: usize, state: Option<Vec<u
     if let Err(e) = crate::control_ui::command(s, "Add effect", None, vec![c]) {
         return Some(e);
     }
+    effect_made(s, t, k, index, state);
+    None
+}
+
+/// The plugin of slot `k` of track `t`, just added by a command: made by the interface (plugin list `index`, with
+/// `state`) rather than by the control host.
+fn effect_made(s: &mut State, t: u16, k: u8, index: usize, state: Option<Vec<u8>>) {
     let id = track(&s.session, t).and_then(|m| m.slots[usize::from(k)].as_ref()).map(|p| p.id);
     s.session.control.host.retain(|r| !matches!(r, crate::control::HostReq::Effect { slot, .. } if Some(*slot) == id));
     s.session.fx_requests.push(FxReq::Create { track: t, slot: k, index, state });
-    None
 }
 
 /// A monitor mode's name in `Command::SetTrack`.

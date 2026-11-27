@@ -18,11 +18,17 @@ pub struct Submix {
     pub step: Option<u64>,
 }
 
-/// The other selected tracks than `n` (never the master): what Track routing ▸ acts on.
+/// The other selected tracks than `n`: what Track routing ▸ acts on. A selected master is a destination (the spec
+/// leaves it out as a source only).
 fn others(s: &State, n: u16) -> Vec<u16> {
-    let mut v: Vec<u16> = selected(s).into_iter().filter(|&t| t != n && t != 0).collect();
+    let mut v: Vec<u16> = selected(s).into_iter().filter(|&t| t != n).collect();
     v.sort_unstable();
     v
+}
+
+/// The other selected tracks than `n` that can feed it (the master never does).
+fn sources(s: &State, n: u16) -> Vec<u16> {
+    others(s, n).into_iter().filter(|&t| t != 0).collect()
 }
 
 /// Track routing ▸ (spec: ui/mixer-selection.md §1): two columns, "Selected tracks to this track" and "This track to
@@ -38,7 +44,12 @@ pub fn track_routing(s: &State, n: u16) -> PItem {
         PItem::new("Sidechain selected to this track", into(false, true)),
         PItem::new("Sidechain selected to this track only", into(true, true)),
         PItem::sep(),
-        PItem::new("Create submix...", Cmd::Mixer(MCmd::Submix(n))),
+        // The master can't be a submix, and a submix needs a track to feed it.
+        if n == 0 || sources(s, n).is_empty() {
+            PItem::new("Create submix...", Cmd::Mixer(MCmd::Submix(n))).off()
+        } else {
+            PItem::new("Create submix...", Cmd::Mixer(MCmd::Submix(n)))
+        },
         PItem::col(),
         PItem::head("This track to selected tracks"),
     ];
@@ -57,23 +68,30 @@ pub fn track_routing(s: &State, n: u16) -> PItem {
 
 /// Route this track to selected (only) (spec: ui/mixer-selection.md §1): track `src` sends to each other selected
 /// track, at full level or (`side`) as a sidechain at level 0; `only` first drops its other sends, the master's
-/// included. One undo step.
+/// included. One undo step. When every destination would make a loop nothing changes, its sends included.
 pub fn route_from(s: &mut State, src: u16, only: bool, side: bool) -> Option<String> {
     if src == 0 {
         return None;
     }
     track_ids(s);
     let mut msg = None;
-    let mut c = if only { unroute_all(s, src, None) } else { Vec::new() };
-    for dst in others(s, src) {
-        if makes_loop(&s.session, src, dst) {
+    let mut dests = others(s, src);
+    dests.retain(|&dst| {
+        let ok = !makes_loop(&s.session, src, dst);
+        if !ok {
             msg = Some(format!(
                 "Can't route {} to {}: it would make a loop",
                 name(&s.session, src),
                 name(&s.session, dst)
             ));
-            continue;
         }
+        ok
+    });
+    if dests.is_empty() {
+        return msg;
+    }
+    let mut c = if only { unroute_all(s, src, None) } else { Vec::new() };
+    for dst in dests {
         c.push(Command::SetSend {
             from: id_of(s, src)?,
             to: id_of(s, dst)?,
@@ -99,7 +117,8 @@ pub fn submix_separators(sources: &[u16], t: u16) -> Vec<u16> {
 /// master send dropped), grouped when they are a contiguous run, as one undo step; then the name box opens on `t`
 /// (`name_submix`).
 pub fn create_submix(s: &mut State, t: u16) -> Option<String> {
-    let mut sources = others(s, t);
+    s.mixer.submix = None;
+    let mut sources = sources(s, t);
     if t == 0 || sources.is_empty() {
         return None;
     }
@@ -114,6 +133,10 @@ pub fn create_submix(s: &mut State, t: u16) -> Option<String> {
         }
         ok
     });
+    // No source routed: no step, and no name box.
+    if sources.is_empty() {
+        return msg;
+    }
     for &src in &sources {
         c.extend(unroute_all(s, src, None));
         c.push(Command::SetSend { from: id_of(s, src)?, to: id_of(s, t)?, level: Some(0.8) });
@@ -125,10 +148,13 @@ pub fn create_submix(s: &mut State, t: u16) -> Option<String> {
             .filter(|&n| n <= last)
             .filter_map(|n| set_track!(s, n, separator: true)),
     );
+    let before = s.session.history.newest_id();
     if let Some(e) = apply(s, SUBMIX, c) {
         return Some(e);
     }
-    s.mixer.submix = Some(Submix { track: t, sources, step: s.session.history.newest_id() });
+    // The routing's own step, none when it changed nothing (the names then make one of their own).
+    let step = s.session.history.newest_id().filter(|&id| Some(id) != before);
+    s.mixer.submix = Some(Submix { track: t, sources, step });
     msg
 }
 
@@ -497,6 +523,123 @@ mod tests {
         assert!(v > 0.7 && vol(&a, 3) == v && vol(&a, 5) == v, "Shift: all at the pressed one's value");
         drag(&mut a, 10.0, false, false);
         assert!(vol(&a, 3) < vol(&a, 5) && vol(&a, 5) < vol(&a, 4), "the kept differences come back: {kept:?}");
+
+        // A single fader outside the selection: Ctrl drags at the plain rate (the quarter is measured on a selection).
+        select(&mut a.state, 9, false);
+        set(&mut a, 4, 0.7);
+        a.invalidate();
+        a.paint(&mut c, None);
+        drag(&mut a, 40.0, true, false);
+        assert!(((0.7 - vol(&a, 4)) - plain).abs() < 1e-9, "the plain rate: {} against {plain}", 0.7 - vol(&a, 4));
+    }
+
+    /// Routes `src` to `dst` in a step of its own.
+    fn route_one(a: &mut App, src: u16, dst: u16) {
+        track_ids(&mut a.state);
+        let c = Command::SetSend { from: id_of(&a.state, src).unwrap(), to: id_of(&a.state, dst).unwrap(), level: Some(0.8) };
+        assert_eq!(apply(&mut a.state, ROUTING, vec![c]), None);
+    }
+
+    /// spec: ui/mixer-selection.md §4: locking is no undo step, so an undo of another step leaves the lock as it is now.
+    #[test]
+    fn undo_leaves_the_mute_lock_alone() {
+        let lock = |a: &App, t: u16| track(&a.state.session, t).unwrap().mute_lock;
+        let mut a = app();
+        track_ids(&mut a.state);
+        let c = set_track!(&a.state, 3, volume: 0.3).unwrap();
+        assert_eq!(apply(&mut a.state, "Mixer track volume", vec![c]), None);
+        led(&mut a, 3, false, true, false);
+        assert!(lock(&a, 3));
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(volume(&a.state.session, 3), 0.8, "the fader move is undone");
+        assert!(lock(&a, 3), "the lock stays");
+
+        // Locked, a step, unlocked: the undo does not lock it again.
+        led(&mut a, 4, false, true, false);
+        let c = set_track!(&a.state, 4, volume: 0.3).unwrap();
+        assert_eq!(apply(&mut a.state, "Mixer track volume", vec![c]), None);
+        led(&mut a, 4, false, true, false);
+        crate::history_ui::undo(&mut a.state);
+        assert!(!lock(&a, 4), "stays unlocked");
+
+        // A whole project put back (a track move) keeps it too.
+        track_ids(&mut a.state);
+        let c = Command::MoveTrack { track: id_of(&a.state, 9).unwrap(), to: 10 };
+        assert_eq!(apply(&mut a.state, "Move mixer track", vec![c]), None);
+        led(&mut a, 2, false, true, false);
+        crate::history_ui::undo(&mut a.state);
+        assert!(lock(&a, 2), "the lock stays through a project put back");
+    }
+
+    /// spec: ui/mixer-selection.md §1: Route this track to selected only, with every destination making a loop, leaves
+    /// the track routed as it was, in no step.
+    #[test]
+    fn route_from_only_with_every_destination_refused_changes_nothing() {
+        let mut a = app();
+        route_one(&mut a, 3, 2);
+        let steps = a.state.session.history.at();
+        select_all(&mut a, &[3, 2]);
+        let m = route_from(&mut a.state, 2, true, false);
+        assert!(m.is_some_and(|m| m.contains("loop")));
+        let s = &a.state.session;
+        assert_eq!((send(s, 2, 0), send(s, 2, 3)), (Some(0.8), None), "still to the master");
+        assert_eq!(s.history.at(), steps, "no step");
+    }
+
+    /// spec: ui/mixer-selection.md §1.1: Create submix... with no source routed opens no name box; when the routing is
+    /// there already, the names make a step of their own, never joining an older one.
+    #[test]
+    fn create_submix_names_never_join_another_step() {
+        let mut a = app();
+        route_one(&mut a, 6, 2);
+        let steps = a.state.session.history.at();
+        select_all(&mut a, &[2, 6]);
+        let c = cmd(&entry(&a, 6), "Create submix...");
+        let m = crate::playlist::run(&mut a, c);
+        assert!(a.state.playlist.edit.is_none() && a.state.mixer.submix.is_none(), "no name box: {m:?}");
+        assert_eq!(a.state.session.history.at(), steps);
+
+        let mut a = app();
+        select_all(&mut a, &[2, 6]);
+        let c = cmd(&entry(&a, 6), "Create submix...");
+        crate::playlist::run(&mut a, c.clone());
+        crate::playlist::commit_edit(&mut a.state);
+        track_ids(&mut a.state);
+        let r = set_track!(&a.state, 9, name: "Keys".to_string()).unwrap();
+        assert_eq!(apply(&mut a.state, "Rename mixer track", vec![r]), None);
+        let steps = a.state.session.history.at();
+        crate::playlist::run(&mut a, c);
+        assert_eq!(a.state.session.history.at(), steps, "routed already: no routing step");
+        a.state.playlist.edit.as_mut().expect("the name box").text = "Bass".into();
+        crate::playlist::commit_edit(&mut a.state);
+        assert_eq!(name(&a.state.session, 6), "Bass master");
+        assert_eq!(a.state.session.history.at(), steps + 1, "a step of their own");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(
+            (name(&a.state.session, 6), name(&a.state.session, 9)),
+            ("Bus 6".to_string(), "Keys".to_string()),
+            "the rename before stays"
+        );
+    }
+
+    /// spec: ui/mixer-selection.md §1: a selected master is a destination of Route this track to selected; it is never
+    /// a source, so Create submix... is greyed on it.
+    #[test]
+    fn a_selected_master_is_a_destination_only() {
+        let mut a = app();
+        select_all(&mut a, &[0, 2, 5]);
+        let c = cmd(&entry(&a, 5), "Sidechain this track to selected");
+        crate::playlist::run(&mut a, c);
+        let s = &a.state.session;
+        assert_eq!((send(s, 5, 2), send(s, 5, 0)), (Some(0.0), Some(0.0)));
+        select_all(&mut a, &[2, 5, 0]);
+        let e = entry(&a, 0);
+        assert!(e.enabled);
+        let sub = e.children.iter().find(|i| i.label == "Create submix...").unwrap();
+        assert!(!sub.enabled, "greyed on the master");
+        select_all(&mut a, &[0, 5]);
+        let e = entry(&a, 5);
+        assert!(!e.children.iter().find(|i| i.label == "Create submix...").unwrap().enabled, "no source but the master");
     }
 
     /// spec: ui/mixer-selection.md §4: a locked track's LED is a padlock, green while the track is on, grey muted.

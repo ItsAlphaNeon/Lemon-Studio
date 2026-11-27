@@ -536,7 +536,9 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         ui.c.fill_rect(Rect::new(left + STRIP_W - 1.0, ly.y(HEAD_Y1) + 1.0, 1.0, bottom - ly.y(HEAD_Y1) - 1.0), ui.t.s(0x41474a));
     }
     // The whole strip selects (Ctrl adds, Shift renames); controls register on top of it (spec: ui/mixer.md §2).
-    ui.hit(Rect::new(left, ly.y(HEAD_Y0), STRIP_W, bottom - ly.y(HEAD_Y0)), Action::Mix(MHit::Strip(n)), mx::name(&s.session, n));
+    // Only its part inside the strips area (a middle strip scrolled part way out) takes the pointer.
+    let view = ui.c.clip_rect();
+    ui.hit_in(view, Rect::new(left, ly.y(HEAD_Y0), STRIP_W, bottom - ly.y(HEAD_Y0)), Action::Mix(MHit::Strip(n)), mx::name(&s.session, n));
     let hov = ui.hovering(Rect::new(left, ly.y(HEAD_Y0), STRIP_W, ly.y(PANEL_Y1) - ly.y(HEAD_Y0)));
 
     // Header number (insert strips only; the master's "M" sits in the fixed header band).

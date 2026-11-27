@@ -26,8 +26,14 @@ const ROWS: usize = 4;
 pub struct Links {
     /// The clip (its channel index) whose Add is on: every control tweaked joins its targets (§3).
     pub adding: Option<u16>,
-    /// The selected row of the list shown.
+    /// The selected row of clip `of`'s list (`sel_row`: every other clip's list starts at its first row).
     pub sel: usize,
+    pub of: Option<u16>,
+}
+
+/// The selected row of clip `ch`'s list of `len` targets: the row chosen in it, kept inside the list.
+fn sel_row(s: &State, ch: u16, len: usize) -> usize {
+    if s.auto_links.of == Some(ch) { s.auto_links.sel.min(len.saturating_sub(1)) } else { 0 }
 }
 
 /// A part of the Target links list (`Action::Targets`).
@@ -126,17 +132,40 @@ pub fn auto_id(app: &App, t: crate::typein::Target) -> Option<u32> {
     }
 }
 
-/// Accept with an internal controller chosen (§4): the control joins that clip's targets. The message.
-pub fn accept_internal(app: &mut App, t: crate::typein::Target, ch: u16) -> String {
+/// Accept with an internal controller chosen (§4): the control joins that clip's targets. With Remove conflicts
+/// (`conflicts`) its earlier links go: it leaves every other clip's targets, in the same undo step, and its MIDI
+/// controller link goes. The message.
+pub fn accept_internal(app: &mut App, t: crate::typein::Target, ch: u16, conflicts: bool) -> String {
     let Some(tgt) = auto_id(app, t) else { return "This control can't be driven by an automation clip".into() };
-    match link(&mut app.state, ch, tgt) {
-        Some(m) => m,
-        None => format!(
-            "Linked {} to automation clip \"{}\"",
-            crate::init_ui::name(&app.state, tgt),
-            clip_name(&app.state, ch)
-        ),
+    let s = &mut app.state;
+    let mut c = Vec::new();
+    if conflicts {
+        for other in clips(s).into_iter().filter(|&o| o != ch) {
+            let mut list = targets(s, other);
+            if list.contains(&tgt) {
+                list.retain(|&x| x != tgt);
+                c.extend(s.session.project.channel(other).map(|k| Command::SetTargets { channel: k.id.0, targets: list }));
+            }
+        }
+        let st = &s.session.settings;
+        let midi = crate::remote::links(st);
+        if midi.iter().any(|l| l.target == t) {
+            crate::remote::set_links(st, &midi.into_iter().filter(|l| l.target != t).collect::<Vec<_>>());
+        }
     }
+    let mut mine = targets(s, ch);
+    let already = mine.contains(&tgt);
+    if !already {
+        mine.push(tgt);
+        c.extend(s.session.project.channel(ch).map(|k| Command::SetTargets { channel: k.id.0, targets: mine }));
+    }
+    if already && c.is_empty() {
+        return format!("{} is already a target of this clip", crate::init_ui::name(s, tgt));
+    }
+    if let Err(e) = crate::control_ui::command(s, TARGETS, None, c) {
+        return e;
+    }
+    format!("Linked {} to automation clip \"{}\"", crate::init_ui::name(s, tgt), clip_name(s, ch))
 }
 
 /// A control was tweaked (`crate::params_ui`): while a clip's Add is on, its automation target joins that clip (§3).
@@ -164,9 +193,10 @@ pub fn hit(app: &mut App, h: THit) -> Option<String> {
     let s = &mut app.state;
     let ch = s.session.project.channels.get(s.plugin_channel)?.index;
     let list = targets(s, ch);
+    let sel = sel_row(s, ch, list.len());
     match h {
         THit::Row(i) => {
-            s.auto_links.sel = i;
+            (s.auto_links.sel, s.auto_links.of) = (i, Some(ch));
             None
         }
         THit::Add if s.auto_links.adding == Some(ch) => {
@@ -178,17 +208,16 @@ pub fn hit(app: &mut App, h: THit) -> Option<String> {
             Some("Adding targets: move the controls this clip should drive, then click + again".into())
         }
         THit::Delete => {
-            let sel = s.auto_links.sel;
             if sel >= list.len() {
                 return Some("No target selected".into());
             }
             let mut t = list;
             t.remove(sel);
-            s.auto_links.sel = sel.min(t.len().saturating_sub(1));
+            (s.auto_links.sel, s.auto_links.of) = (sel.min(t.len().saturating_sub(1)), Some(ch));
             set_targets(s, ch, t)
         }
         THit::Locate => {
-            let t = *list.get(s.auto_links.sel)?;
+            let t = *list.get(sel)?;
             locate(app, t)
         }
     }
@@ -270,11 +299,12 @@ pub fn paint_links(ui: &mut Ui, s: &State, ch: u16, r: Rect) {
             if adding { "Move a control to add it" } else { "(none)" },
         );
     }
-    let first = s.auto_links.sel.saturating_sub(ROWS - 1);
+    let sel = sel_row(s, ch, targets.len());
+    let first = sel.saturating_sub(ROWS - 1);
     for (i, &tgt) in targets.iter().enumerate().skip(first).take(ROWS) {
         let row = Rect::new(list.x, list.y + 2.0 + ROW_H * (i - first) as f32, list.w, ROW_H);
         ui.hit(row, Action::Targets(THit::Row(i)), "");
-        if i == s.auto_links.sel {
+        if i == sel {
             ui.c.fill_rect(row, t.s(0x3d4f5c));
         }
         ui.c.text_clip(Font::new(13), row.x + 6.0, row.y + 1.0, row.w - 12.0, t.text, &crate::init_ui::name(s, tgt));
@@ -429,6 +459,147 @@ mod tests {
         let first = a.state.session.project.channels[0].index;
         assert_eq!(targets(&a.state, made).last(), Some(&target::channel(first, target::CHANNEL_PAN)));
         assert_eq!(next_internal(&a.state, Some(made)), None, "after the last clip: none again");
+    }
+
+    /// Two automation clips over the audio clip (volume, then panning): their channel indexes and rack rows.
+    fn two_clips(a: &mut App, i: usize) -> ((u16, usize), (u16, usize)) {
+        let last = |a: &App| (a.state.session.project.channels.last().unwrap().index, a.state.session.project.channels.len() - 1);
+        pl::run(a, Cmd::ClipAutomate(i, false));
+        let one = last(a);
+        pl::run(a, Cmd::ClipAutomate(i, true));
+        (one, last(a))
+    }
+
+    /// spec: ui/automation-targets.md §3: the row chosen in one clip's list is that list's own: another clip's window
+    /// shows its rows from the first, and its buttons act on its own row.
+    #[test]
+    fn target_links_selection_is_each_clips_own() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut a, i) = app(&mut c);
+        let ((one, _), (two, _)) = two_clips(&mut a, i);
+        for t in 1..=5 {
+            assert_eq!(link(&mut a.state, one, target::mixer(t, target::MIXER_VOLUME)), None);
+        }
+        clip_window(&mut a, &mut c, one);
+        hit(&mut a, THit::Row(5));
+        let hits = clip_window(&mut a, &mut c, two);
+        assert!(hits.iter().any(|x| x.0 == THit::Row(0)), "the other clip's one target is drawn");
+        a.state.session.pending_open = None;
+        assert_eq!(hit(&mut a, THit::Locate), None, "Locate acts on its row");
+        clip_window(&mut a, &mut c, two);
+        assert_eq!(hit(&mut a, THit::Delete), None);
+        assert!(targets(&a.state, two).is_empty(), "Delete takes its row");
+        assert_eq!(targets(&a.state, one).len(), 6, "the first clip keeps its targets");
+    }
+
+    /// spec: ui/automation-targets.md §3: Locate opens the window that holds the target: a channel's own window (here
+    /// another automation clip's), or the mixer on the target's track.
+    #[test]
+    fn locate_shows_a_channel_window_and_the_mixer() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut a, i) = app(&mut c);
+        let ((one, _), (two, row_two)) = two_clips(&mut a, i);
+        assert_eq!(link(&mut a.state, one, target::channel(two, target::CHANNEL_VOLUME)), None);
+        assert_eq!(link(&mut a.state, one, target::mixer(5, target::MIXER_VOLUME)), None);
+        clip_window(&mut a, &mut c, one);
+        a.state.hide(Win::Mixer);
+        hit(&mut a, THit::Row(1));
+        assert_eq!(hit(&mut a, THit::Locate), None);
+        assert!(!a.state.session.project.channels[row_two].kind.is_sampler());
+        assert!(a.state.shown(Win::Plugin) && a.state.plugin_channel == row_two, "the other clip's window");
+        a.invalidate();
+        a.paint(&mut c, None);
+        assert!(a.hits.iter().any(|h| matches!(h.action, Action::Targets(_))), "painted: a clip window");
+
+        clip_window(&mut a, &mut c, one);
+        hit(&mut a, THit::Row(2));
+        assert_eq!(hit(&mut a, THit::Locate), None);
+        assert_eq!(a.state.z.last(), Some(&Win::Mixer), "the mixer in front");
+        assert_eq!(a.state.selected_mixer, 5);
+        a.invalidate();
+        a.paint(&mut c, None);
+        assert!(a.hits.iter().any(|h| h.action == Action::Mix(crate::mixer::MHit::Strip(5))), "painted: the mixer");
+    }
+
+    /// spec: ui/automation-targets.md §3: with + on, a control pressed with the mouse joins the clip.
+    #[test]
+    fn target_links_add_takes_a_pressed_control() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut a, i) = app(&mut c);
+        pl::run(&mut a, Cmd::ClipAutomate(i, false));
+        let made = a.state.session.project.channels.last().unwrap().index;
+        clip_window(&mut a, &mut c, made);
+        hit(&mut a, THit::Add);
+        a.state.z = vec![Win::Mixer];
+        a.invalidate();
+        a.paint(&mut c, None);
+        let (t, r) = (1..=16)
+            .find_map(|t| {
+                let r = a.hits.iter().rev().find(|h| h.action == Action::Fader(t))?.rect;
+                (a.top_hit(r.cx(), r.cy())?.action == Action::Fader(t)).then_some((t, r))
+            })
+            .expect("a fader to press");
+        a.mouse_move(r.cx(), r.cy());
+        a.mouse_down();
+        a.mouse_up();
+        assert_eq!(targets(&a.state, made).last(), Some(&target::mixer(t, target::MIXER_VOLUME)));
+    }
+
+    /// spec: ui/automation-targets.md §4: Remove conflicts ticked, the control leaves the other clips' targets and its
+    /// MIDI link goes; unticked, both stay.
+    #[test]
+    fn link_to_controller_remove_conflicts() {
+        use crate::remote::{RAct, RCmd};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut a, i) = app(&mut c);
+        let ((one, _), (two, _)) = two_clips(&mut a, i);
+        let knob = crate::typein::Target::Knob(KnobId::ChanPan(0));
+        let pan = target::channel(a.state.session.project.channels[0].index, target::CHANNEL_PAN);
+        let link_to = |a: &mut App, clip: u16, conflicts: bool| {
+            a.remote_cmd(RCmd::Link(knob));
+            for _ in 0..8 {
+                if a.state.link_box.as_ref().unwrap().internal == Some(clip) {
+                    break;
+                }
+                a.link_box_act(RAct::Internal);
+            }
+            a.state.link_box.as_mut().unwrap().conflicts = conflicts;
+            a.link_box_act(RAct::Accept);
+        };
+        link_to(&mut a, one, false);
+        link_to(&mut a, two, false);
+        assert!(targets(&a.state, one).contains(&pan) && targets(&a.state, two).contains(&pan), "unticked: both");
+        // A MIDI controller link of the same control.
+        a.remote_cmd(RCmd::Link(knob));
+        a.state.link_box.as_mut().unwrap().cc = Some(20);
+        a.link_box_act(RAct::Accept);
+        assert!(crate::remote::link_of(&a.state.session.settings, knob).is_some());
+
+        let steps = a.state.session.history.at();
+        link_to(&mut a, one, true);
+        assert!(targets(&a.state, one).contains(&pan));
+        assert!(!targets(&a.state, two).contains(&pan), "it leaves the other clip");
+        assert!(crate::remote::link_of(&a.state.session.settings, knob).is_none(), "its MIDI link goes");
+        assert_eq!(a.state.session.history.at(), steps + 1, "one step");
+        crate::history_ui::undo(&mut a.state);
+        assert!(targets(&a.state, two).contains(&pan), "undone together");
+    }
+
+    /// The Remote control settings box opened at the bottom right stays on the screen with its Internal controller
+    /// group.
+    #[test]
+    fn link_box_with_internal_controller_stays_on_screen() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let (mut a, i) = app(&mut c);
+        pl::run(&mut a, Cmd::ClipAutomate(i, false));
+        a.state.screen = (1920.0, 1080.0);
+        a.mouse = (1915.0, 1075.0);
+        a.remote_cmd(crate::remote::RCmd::Link(crate::typein::Target::Knob(KnobId::ChanPan(0))));
+        let b = a.state.link_box.as_ref().unwrap();
+        assert!(crate::views::remote_box::internal_shown(&a.state, b));
+        let (w, h) = crate::views::remote_box::SIZE;
+        assert!(b.at.1 + h + crate::views::remote_box::INTERNAL_H <= 1080.0, "{:?}", b.at);
+        assert!(b.at.0 + w <= 1920.0);
     }
 
     /// spec: ui/automation-targets.md §2: a double-click on an automation clip opens its window; one click does not.

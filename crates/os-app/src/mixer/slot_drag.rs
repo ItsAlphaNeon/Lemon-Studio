@@ -8,13 +8,14 @@
 use super::*;
 use crate::app::{Action, Drag, Win};
 
-/// The strip whose column (`x`, `y`) is in, over the mixer, in the last painted frame.
+/// The strip (`x`, `y`) is on, over the mixer, in the last painted frame: inside the strip itself (its controls
+/// included), the part of a scrolled strip outside the strips area left out.
 pub fn strip_at(app: &App, x: f32, y: f32) -> Option<u16> {
     if app.top_hit(x, y).and_then(|h| h.win) != Some(Win::Mixer) {
         return None;
     }
     app.hits.iter().rev().find_map(|h| match h.action {
-        Action::Mix(MHit::Strip(n)) if x >= h.rect.x && x < h.rect.right() => Some(n),
+        Action::Mix(MHit::Strip(n)) if h.rect.contains(x, y) => Some(n),
         _ => None,
     })
 }
@@ -56,7 +57,7 @@ fn source(s: &State, t: u16, k: u8) -> Option<(usize, Vec<u8>)> {
 
 /// The dragged slot (`t`, `k`) released (§2): on a slot row of the shown track, a copy goes into that slot; on a
 /// strip, into its first free slot, or into every selected track's when the strip is part of a multi-selection, the
-/// strip then current. One undo step per copy, "Add effect". The message.
+/// strip then current. One undo step for them all, "Add effect" (a plugin it replaces goes in it too). The message.
 pub fn drop_slot(app: &mut App, t: u16, k: u8) -> Option<String> {
     let (x, y) = app.mouse;
     let slot = slot_at(app, x, y);
@@ -81,16 +82,24 @@ pub fn drop_slot(app: &mut App, t: u16, k: u8) -> Option<String> {
     if places.is_empty() {
         return Some("No free effect slot on this track".into());
     }
-    for (to, slot) in places {
+    let plugin = s.session.plugins.effects.get(index)?.desc.name.clone();
+    track_ids(s);
+    let mut c = Vec::new();
+    for &(to, slot) in &places {
+        let id = id_of(s, to)?;
         if track(&s.session, to).and_then(|m| m.slots.get(usize::from(slot))?.as_ref()).is_some() {
-            if let Some(e) = apply(s, "Remove effect", vec![Command::RemoveEffect { track: id_of(s, to)?, slot }]) {
-                return Some(e);
-            }
+            // Its removal takes the slot's name and colour with it, and the undo brings them back.
+            c.push(Command::RemoveEffect { track: id, slot });
+        } else {
+            forget_slot_ui(&mut s.session, to, slot);
         }
-        forget_slot_ui(&mut s.session, to, slot);
-        if let Some(e) = add_effect_on(s, to, slot, index, Some(state.clone())) {
-            return Some(e);
-        }
+        c.push(Command::AddEffect { track: id, slot: Some(slot), plugin: plugin.clone() });
+    }
+    if let Err(e) = crate::control_ui::command(s, "Add effect", None, c) {
+        return Some(e);
+    }
+    for (to, slot) in places {
+        effect_made(s, to, slot, index, Some(state.clone()));
     }
     None
 }
@@ -218,19 +227,33 @@ mod tests {
         assert!(track(&a.state.session, 5).unwrap().slots[0].is_none(), "undone");
     }
 
-    /// Released on a slot row of the shown track, the copy goes into that slot, replacing what is there.
+    /// The plugin's name in slot `k` of track `t`.
+    fn slot(a: &App, t: u16, k: usize) -> Option<String> {
+        track(&a.state.session, t).unwrap().slots[k].as_ref().map(|p| p.name.clone())
+    }
+
+    /// Released on a slot row of the shown track, the copy goes into that slot, replacing what is there, in one undo
+    /// step.
     #[test]
     fn slot_dropped_on_a_slot_row_goes_into_that_slot() {
         let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
         let mut a = app();
         effect_on_2(&mut a);
+        let name = slot(&a, 2, 0);
         a.state.selected_mixer = 2;
         paint(&mut a, &mut c);
         let r = rect(&a, &Action::Mix(MHit::SlotName(4)));
         a.mouse = (r.cx(), r.cy());
+        let steps = a.state.session.history.at();
         assert_eq!(drop_slot(&mut a, 2, 0), None);
         assert_eq!(created(&a), vec![(2, 4, Some(vec![1, 2, 3]))]);
-        // Again on the same row: the copy there goes first.
+        let copy = slot(&a, 2, 4);
+        assert!(copy.is_some(), "the model holds the copy");
+        assert_eq!(a.state.session.history.at(), steps + 1);
+        // Again on the row, now holding another plugin: that one goes first, in the same one step.
+        let other = a.state.session.plugins.effects[1].desc.name.clone();
+        track_mut(&mut a.state.session, 2).unwrap().slots[4] =
+            Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: other.clone(), state: Vec::new() });
         a.state.session.fx_requests.clear();
         paint(&mut a, &mut c);
         a.mouse = (r.cx(), r.cy());
@@ -241,6 +264,32 @@ mod tests {
             a.state.session.fx_requests
         );
         assert_eq!(created(&a), vec![(2, 4, Some(vec![1, 2, 3]))]);
+        assert_eq!(slot(&a, 2, 4), copy);
+        assert_eq!(a.state.session.history.at(), steps + 2, "one step for the replacement");
+        assert_eq!(a.state.session.history.newest_done(), Some("Add effect"));
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(slot(&a, 2, 4), Some(other), "one undo: the replaced plugin is back");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(slot(&a, 2, 4), None);
+        assert_eq!(slot(&a, 2, 0), name, "the source stays");
+    }
+
+    /// A strip takes the drop only inside itself: the mixer's title bar above a strip's column is no strip.
+    #[test]
+    fn strip_at_needs_the_point_inside_the_strip() {
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        let mut a = app();
+        paint(&mut a, &mut c);
+        let r = rect(&a, &Action::Mix(MHit::Strip(5)));
+        assert_eq!(strip_at(&a, r.cx(), r.cy()), Some(5));
+        let above = r.y - 4.0;
+        assert_eq!(a.top_hit(r.cx(), above).and_then(|h| h.win), Some(Win::Mixer), "still over the mixer");
+        assert_eq!(strip_at(&a, r.cx(), above), None);
+        // A strip scrolled part way under the master strip takes the pointer only where it shows.
+        a.state.mixer_scroll = rect(&a, &Action::Mix(MHit::Strip(1))).w / 2.0;
+        paint(&mut a, &mut c);
+        let (s1, m) = (rect(&a, &Action::Mix(MHit::Strip(1))), rect(&a, &Action::Mix(MHit::Strip(0))));
+        assert!(s1.x >= m.right() - 1.0, "clipped to the strips area: {s1:?} {m:?}");
     }
 
     /// Released on a strip of a multi-selection, every selected track gets a copy in its first free slot.
@@ -255,12 +304,17 @@ mod tests {
         paint(&mut a, &mut c);
         let r = rect(&a, &Action::Mix(MHit::Strip(6)));
         a.mouse = (r.cx(), r.cy());
+        let steps = a.state.session.history.at();
         assert_eq!(drop_slot(&mut a, 2, 0), None);
         let mut got = created(&a);
         got.sort();
         assert_eq!(got, vec![(3, 0, Some(vec![1, 2, 3])), (6, 1, Some(vec![1, 2, 3]))]);
         assert_eq!(selected(&a.state), vec![6, 3], "the selection stays, the strip dropped on first");
         assert_eq!(a.state.selected_mixer, 6);
+        assert_eq!(a.state.session.history.at(), steps + 1, "one step for every copy");
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!((slot(&a, 3, 0), slot(&a, 6, 1)), (None, None), "one undo takes both");
+        assert!(slot(&a, 6, 0).is_some());
         // Off the mixer, nothing happens.
         a.state.session.fx_requests.clear();
         a.mouse = (-50.0, -50.0);

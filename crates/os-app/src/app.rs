@@ -8901,12 +8901,12 @@ impl App {
                 }
             }
             // A press on the fader of a track in a multi-selection keeps the selection and makes that track current, and
-            // a drag moves them all (spec: ui/mixer.md §2, §4); Ctrl+press does not add a track. Ctrl drags at a quarter
-            // of the rate, Shift gives the selected faders the pressed one's value.
+            // a drag moves them all (spec: ui/mixer.md §2, §4); Ctrl+press does not add a track. On selected faders Ctrl
+            // drags at a quarter of the rate (measured there only) and Shift gives them the pressed one's value.
             Action::Fader(t) => {
                 let in_group = crate::mixer::in_group(s, t);
                 crate::mixer::select(s, t, in_group);
-                let (rate, same) = (if self.ctrl { 0.25 } else { 1.0 }, self.shift && in_group);
+                let (rate, same) = (if self.ctrl && in_group { 0.25 } else { 1.0 }, self.shift && in_group);
                 let v0 = crate::edit::mixer::volume(&s.session, t);
                 let mut others = if in_group { crate::mixer::group_levels(s) } else { Vec::new() };
                 let level = others.iter().find(|o| o.0 == t).map_or(v0, |o| o.1);

@@ -3294,10 +3294,13 @@ fn put(s: &mut crate::session::Session, t: Taken) {
         }
         Taken::Track(m) => {
             if let Ok(place) = track_place_muted(&s.project, m.id.0) {
-                // Undo leaves its light and its arming as they are (arming is no part of the track, track-io.md §2.3).
-                let (on, armed) = (s.project.mixer[place].enabled, s.project.mixer[place].armed);
-                s.project.get_mut().mixer[place] = *m;
-                (s.project.get_mut().mixer[place].enabled, s.project.get_mut().mixer[place].armed) = (on, armed);
+                // Undo leaves its light, its mute lock and its arming as they are (arming is no part of the track,
+                // track-io.md §2.3; the lock is no step, ui/mixer-selection.md §4).
+                let cur = &s.project.mixer[place];
+                let (on, locked, armed) = (cur.enabled, cur.mute_lock, cur.armed);
+                let t = &mut s.project.get_mut().mixer[place];
+                *t = *m;
+                (t.enabled, t.mute_lock, t.armed) = (on, locked, armed);
             }
         }
         Taken::Pattern(p) => {
@@ -3554,7 +3557,8 @@ fn restore(s: &mut crate::session::Session, side: Side) {
 /// with the project: a step that made one (a MIDI file imported) takes it away.
 struct Mutes {
     channels: std::collections::HashMap<u32, (bool, bool, bool)>,
-    tracks: std::collections::HashMap<u32, bool>,
+    /// Each track's light and mute lock.
+    tracks: std::collections::HashMap<u32, (bool, bool)>,
     /// The song mode and performance mode: no step either.
     song_mode: Option<bool>,
     performance: Option<bool>,
@@ -3564,7 +3568,7 @@ impl Mutes {
     fn of(p: &Project) -> Mutes {
         Mutes {
             channels: p.channels.iter().map(|c| (c.id.0, (c.enabled, c.rack.locked, c.rack.zipped))).collect(),
-            tracks: p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect(),
+            tracks: p.mixer.iter().map(|m| (m.id.0, (m.enabled, m.mute_lock))).collect(),
             song_mode: p.song_mode,
             performance: p.performance,
         }
@@ -3578,8 +3582,8 @@ impl Mutes {
             }
         }
         for m in &mut p.mixer {
-            if let Some(&on) = self.tracks.get(&m.id.0) {
-                m.enabled = on;
+            if let Some(&(on, locked)) = self.tracks.get(&m.id.0) {
+                (m.enabled, m.mute_lock) = (on, locked);
             }
         }
     }
