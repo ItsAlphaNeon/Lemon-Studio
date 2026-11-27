@@ -125,7 +125,18 @@ impl Link {
 /// and dry levels (Lemon Studio's design: spec plugins/patcher/README.md §4.2).
 pub fn linkable(t: Target) -> bool {
     // A member's level knob links as its level (`KnobId::target`).
-    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..) | KnobId::Member(..)) | Target::Latency(..))
+    !matches!(
+        t,
+        Target::Knob(
+            KnobId::Strum(_)
+                | KnobId::Arp(_)
+                | KnobId::PianoDlg(_)
+                | KnobId::NoteProp(_)
+                | KnobId::AutoLfo(..)
+                | KnobId::MidiOut(..)
+                | KnobId::Member(..)
+        ) | Target::Latency(..)
+    )
 }
 
 /// A target as `settings.txt` keeps it (`none` for one that is not linkable, which reads back as nothing).
@@ -143,7 +154,13 @@ fn target_text(t: Target) -> String {
             KnobId::ChanPan(r) => format!("chanpan:{r}"),
             KnobId::Swing => "swing".into(),
             KnobId::Eq(m, b, f) => format!("eq:{m}:{b}:{f}"),
-            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..) | KnobId::Member(..) => "none".into(),
+            KnobId::Strum(_)
+            | KnobId::Arp(_)
+            | KnobId::PianoDlg(_)
+            | KnobId::NoteProp(_)
+            | KnobId::AutoLfo(..)
+            | KnobId::MidiOut(..)
+            | KnobId::Member(..) => "none".into(),
         },
         Target::Fader(m) => format!("fader:{m}"),
         Target::Param(key, i) => format!("param:{key}:{i}"),
@@ -309,6 +326,9 @@ pub struct LinkBox {
     /// parameters..., Lemon Studio's design), to link in order to the controller set and the ones after it (`target`
     /// is the first); empty for a single link.
     pub all: Vec<Target>,
+    /// Internal controller ▸ Link assignment: the automation clip (its channel index) Accept makes the control one of
+    /// the targets of, instead of a MIDI link (spec: ui/automation-targets.md §4).
+    pub internal: Option<u16>,
 }
 
 impl LinkBox {
@@ -327,6 +347,7 @@ impl LinkBox {
             time: SMOOTH_DEFAULT,
             conflicts: true,
             all: Vec::new(),
+            internal: None,
         };
         // An existing link opens with its settings.
         if let Some(l) = link_of(st, target) {
@@ -362,6 +383,7 @@ impl LinkBox {
             time: SMOOTH_DEFAULT,
             conflicts: true,
             all: Vec::new(),
+            internal: None,
         }
     }
 
@@ -424,6 +446,8 @@ pub enum RAct {
     Conflicts,
     Reset,
     Accept,
+    /// The Internal controller box (spec: ui/automation-targets.md §4).
+    Internal,
 }
 
 impl RAct {

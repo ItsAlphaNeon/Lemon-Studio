@@ -23,6 +23,9 @@ pub const CLIP_SIZE: (f32, f32) = (430.0, 236.0);
 pub fn rect(s: &State) -> Rect {
     let mo = s.session.project.channels.get(s.plugin_channel).is_some_and(crate::lemon_midi_out::is_midi_out);
     let (w, h) = if s.is_clip_row(s.plugin_channel) || mo { CLIP_SIZE } else { SIZE };
+    // An automation clip's window adds its Target links (spec: ui/automation-targets.md §3).
+    let auto = s.session.project.channels.get(s.plugin_channel).is_some_and(|c| c.kind == ChannelKind::Automation);
+    let h = if auto { h + crate::auto_targets::LINKS_H } else { h };
     Rect::new(s.plugin_pos.0, s.plugin_pos.1, w, h)
 }
 
@@ -177,4 +180,6 @@ fn paint_clip(ui: &mut Ui, s: &State, body: Rect, kind: String) {
     for (i, (k, caption)) in knobs.into_iter().enumerate() {
         knob(ui, s, KnobId::AutoLfo(row, k), body.x + 110.0 + 60.0 * i as f32, ly + 50.0, caption);
     }
+    let links = Rect::new(body.x + 8.0, body.bottom() - crate::auto_targets::LINKS_H, body.w - 16.0, crate::auto_targets::LINKS_H - 4.0);
+    crate::auto_targets::paint_links(ui, s, ch.index, links);
 }

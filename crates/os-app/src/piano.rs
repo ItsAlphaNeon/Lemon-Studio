@@ -122,6 +122,14 @@ pub struct PianoState {
     pub was_shown: Option<bool>,
     /// The magnet button's setting (spec: ui/piano-snap.md): a program setting, kept in the user folder (crate::snap).
     pub snap: crate::snap::EditorSnap,
+    /// Snap to scale (spec: ui/piano-scale-snap.md §1).
+    pub scale_snap: crate::scale_snap::Settings,
+    /// The Stamp picked in the toolbar's stamp menu, if any (spec: ui/piano-chord-stamp.md §1).
+    pub stamp: Option<crate::chord_stamp::Stamp>,
+    /// ▸ View > Show chord name for selection (spec: ui/piano-chord-stamp.md §4).
+    pub chord_name: bool,
+    /// The group a click on a grouped note highlights (spec: ui/piano-note-groups.md §3).
+    pub group_hl: Option<crate::note_groups::Highlight>,
     sel: Vec<usize>,
     sel_key: (u16, u16),
 }
@@ -148,12 +156,16 @@ impl Default for PianoState {
             row_h: ROW,
             ghosts: true,
             highlights: true,
+            chord_name: true,
             scale_root: 0,
             rng: crate::clip_colors::clock() | 1,
             split: crate::piano_split::load(),
             split_click: None,
             was_shown: None,
             snap: crate::snap::EditorSnap::default(),
+            scale_snap: Default::default(),
+            stamp: None,
+            group_hl: None,
             sel: Vec::new(),
             sel_key: (0, 0),
         }
@@ -182,7 +194,19 @@ impl PianoState {
 
     /// Forget everything tied to the previous project.
     pub fn reset(&mut self) {
-        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, highlights: self.highlights, tool: self.tool, rng: self.rng, split: self.split, snap: self.snap, ..PianoState::default() };
+        *self = PianoState {
+            px_per_beat: self.px_per_beat,
+            row_h: self.row_h,
+            ghosts: self.ghosts,
+            highlights: self.highlights,
+            chord_name: self.chord_name,
+            scale_snap: self.scale_snap,
+            tool: self.tool,
+            rng: self.rng,
+            split: self.split,
+            snap: self.snap,
+            ..PianoState::default()
+        };
     }
 }
 
@@ -258,6 +282,12 @@ impl Geom {
 
     pub fn key_at(&self, y: f32) -> i32 {
         TOP_KEY - ((y - self.grid.y + self.scroll_y) / self.row).floor() as i32
+    }
+
+    /// Where `y` is in its key row: 0 at the bottom edge, 1 at the top (Snap to scale, spec: ui/piano-scale-snap.md §2).
+    pub fn key_frac(&self, y: f32) -> f32 {
+        let r = (y - self.grid.y + self.scroll_y) / self.row;
+        1.0 - (r - r.floor())
     }
 
     /// Keys with at least one visible pixel, lowest first.
@@ -541,6 +571,25 @@ pub fn copy_controls(from: &Note, to: &mut Note) {
     to.flags = (to.flags & !Note::SLIDE) | (from.flags & Note::SLIDE);
 }
 
+/// The note type new notes get (the colour tab's Slide and Portamento toggles, keys S and O; spec:
+/// ui/piano-note-properties.md §5): the last clicked note's, as its other controls are.
+pub fn new_type(s: &State) -> (bool, bool) {
+    s.piano.last_controls.map_or((false, false), |n| (n.slide(), n.porta()))
+}
+
+/// Toggle new notes' slide (`slide`) or portamento switch; returns the new state.
+pub fn toggle_new_type(s: &mut State, slide: bool) -> bool {
+    let mut n = s.piano.last_controls.unwrap_or_else(|| Note::step(0, 0));
+    let on = if slide { !n.slide() } else { !n.porta() };
+    if slide {
+        n.set_slide(on);
+    } else {
+        n.set_porta(on);
+    }
+    s.piano.last_controls = Some(n);
+    on
+}
+
 /// Delete notes by index.
 pub fn delete(s: &mut State, mut idx: Vec<usize>) {
     idx.sort_unstable();
@@ -699,6 +748,8 @@ pub fn paste(s: &mut State, clip: &[Note], at: u32) {
     for n in clip {
         p.notes.push(Note { position: n.position - first + at, channel: ch, ..*n });
     }
+    // Copies of grouped notes make groups of their own (spec: ui/piano-note-groups.md §2).
+    crate::note_groups::regroup_copies(&mut p.notes, start);
     let end = p.notes.len();
     s.piano.select(s.pattern(), ch, (start..end).collect());
     finish_edit(s);
@@ -1258,12 +1309,18 @@ mod tests {
 
 /// The grid's light rows from each tick on (spec: ui/piano-scale-highlighting.md §2, §6), as (tick, pitch classes with
 /// bit `pc`), the first at tick 0: the Scale highlighting setting, then each key marker of the pattern from its tick.
-/// With Note grid highlights off, every row is light. Before the first key marker the setting shades (Lemon Studio's
-/// choice: FL was not measured with a key marker after tick 0 alone).
+/// With Note grid highlights off, every row is light.
 pub fn highlight_spans(s: &State) -> Vec<(u32, u16)> {
     if !s.piano.highlights {
         return vec![(0, 0xFFF)];
     }
+    scale_spans(s)
+}
+
+/// The scale's keys from each tick on, as [`highlight_spans`] whether Note grid highlights are on or not: what Snap
+/// to scale snaps to (spec: ui/piano-scale-snap.md). Before the first key marker the setting shades (Lemon Studio's
+/// choice: FL was not measured with a key marker after tick 0 alone).
+pub fn scale_spans(s: &State) -> Vec<(u32, u16)> {
     let pat = s.session.project.pattern(s.pattern());
     let setting = s.session.project.scale_highlight.unwrap_or_default();
     let base = setting.light_keys().unwrap_or_else(|| automatic(pat.map_or(&[][..], |p| &p.notes)));

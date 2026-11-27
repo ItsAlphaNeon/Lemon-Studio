@@ -108,7 +108,17 @@ pub fn unit(t: Target) -> Unit {
         Target::Knob(KnobId::Swing | KnobId::SlotMix(..) | KnobId::Member(..)) | Target::Member(..) => Unit::Percent,
         Target::Knob(KnobId::MasterPitch) => Unit::Hz,
         // The equaliser's settings take the plain 0..1 position for now.
-        Target::Param(..) | Target::MemberParam(..) | Target::Knob(KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..)) => Unit::Plain,
+        Target::Param(..)
+        | Target::MemberParam(..)
+        | Target::Knob(
+            KnobId::Eq(..)
+            | KnobId::Strum(_)
+            | KnobId::Arp(_)
+            | KnobId::PianoDlg(_)
+            | KnobId::NoteProp(_)
+            | KnobId::AutoLfo(..)
+            | KnobId::MidiOut(..),
+        ) => Unit::Plain,
         Target::Latency(..) => Unit::Latency,
         Target::RackTrack(_) => Unit::Track,
         Target::RackLed(_) => Unit::Switch,

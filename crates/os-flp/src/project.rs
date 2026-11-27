@@ -2030,6 +2030,8 @@ const MX_FLAG_UNTHREADED: u8 = 0x10;
 const MX_FLAG_DOCK: u8 = 0xC0;
 const MX_FLAG_DOCK_SHIFT: u8 = 6;
 const MX_FLAG5_SEPARATOR: u8 = 0x04;
+/// Flag 0x0800: the mute lock (spec: flp/layouts.md, ui/mixer-selection.md §4).
+const MX_FLAG5_LOCK: u8 = 0x08;
 
 fn track_flags(d: Option<&[u8]>) -> Option<u8> {
     d.filter(|d| d.len() >= 8).map(|d| d[4])
@@ -2108,9 +2110,10 @@ fn with_flags(b: u8, m: &MixerTrack, last: bool) -> u8 {
     b
 }
 
-/// The second flag byte with the track's separator.
+/// The second flag byte with the track's separator and mute lock.
 fn with_flags5(b: u8, m: &MixerTrack) -> u8 {
-    if m.separator { b | MX_FLAG5_SEPARATOR } else { b & !MX_FLAG5_SEPARATOR }
+    let b = if m.separator { b | MX_FLAG5_SEPARATOR } else { b & !MX_FLAG5_SEPARATOR };
+    if m.mute_lock { b | MX_FLAG5_LOCK } else { b & !MX_FLAG5_LOCK }
 }
 
 /// A mixer track's slot area (spec: flp/events/mixer.md "Slot sub-block"): the events between its flags (236) and its
@@ -2394,7 +2397,9 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         // The last ("current") track keeps a new track's docking (`with_flags`).
         let last = index > 0 && n + 1 == l.mixer.len();
         let dock = flags.filter(|_| !last).map_or(fresh.dock, |b| ((b & MX_FLAG_DOCK) >> MX_FLAG_DOCK_SHIFT).min(os_model::DOCK_RIGHT));
-        let separator = track_flags5(m.flags.and_then(|i| events[i].data())).is_some_and(|b| b & MX_FLAG5_SEPARATOR != 0);
+        let flags5 = track_flags5(m.flags.and_then(|i| events[i].data()));
+        let separator = flags5.is_some_and(|b| b & MX_FLAG5_SEPARATOR != 0);
+        let mute_lock = flags5.is_some_and(|b| b & MX_FLAG5_LOCK != 0);
         let (latency_out, latency_in) = m.flags.and_then(|i| events[i].data()).map_or((0.0, 0.0), |d| track_latency(d, old));
         out.push(MixerTrack {
             index,
@@ -2407,6 +2412,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             threaded: !flag(MX_FLAG_UNTHREADED, false),
             dock,
             separator,
+            mute_lock,
             slots,
             routes,
             send_levels: mixer_param_records(params)
@@ -3461,7 +3467,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         }
         let latency = (m.latency_out, m.latency_in);
         let relatency = latency != (old.latency_out, old.latency_in);
-        let switches = |m: &MixerTrack| (m.enabled, m.polarity, m.swap, m.slots_enabled, m.threaded, m.dock, m.separator);
+        let switches = |m: &MixerTrack| (m.enabled, m.polarity, m.swap, m.slots_enabled, m.threaded, m.dock, m.separator, m.mute_lock);
         if relatency || switches(m) != switches(old) {
             if let Some(i) = ml.flags {
                 match (track_flags(events[i].data()), track_flags5(events[i].data())) {
@@ -5105,6 +5111,33 @@ mod tests {
             (0x4C, 0x04),
             (0x5C, 0)
         ]);
+    }
+
+    /// The mute lock is flag 0x0800 of event 236, byte 5 bit 0x08, beside the separator (spec: flp/layouts.md "A mixer
+    /// track's record", ui/mixer-selection.md §4: FL's locked.flp against unlocked.flp).
+    #[test]
+    fn mixer_mute_lock_round_trips() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..6).map(MixerTrack::new).collect();
+        p.mixer[5].routes.clear();
+        p.mixer[2].mute_lock = true;
+        p.mixer[3].mute_lock = true;
+        p.mixer[3].separator = true;
+        p.mixer[3].enabled = false;
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let rec = |f: &FlpFile, t: usize| events_of(f).unwrap().iter().filter(|e| e.id == id::MX_FLAGS).nth(t).unwrap().data().unwrap()[5];
+        assert_eq!([rec(&file, 1), rec(&file, 2), rec(&file, 3)], [0, 0x08, 0x0C]);
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer, p.mixer);
+        let mut edited = back.clone();
+        edited.mixer[2].mute_lock = false;
+        edited.mixer[1].mute_lock = true;
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(again.mixer, edited.mixer);
+        assert_eq!([rec(&file, 1), rec(&file, 2), rec(&file, 3)], [0x08, 0, 0x0C]);
     }
 
     /// Song or pattern mode (event 9, one byte right after 67; spec: flp/engine-events.md "Project"): `create` writes it

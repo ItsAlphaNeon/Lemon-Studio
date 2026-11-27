@@ -85,6 +85,22 @@ pub fn grid_rect(s: &State) -> Rect {
     layout(r, s.piano.split).grid
 }
 
+/// The chord name of the selected notes, while ▸ View > Show chord name for selection is on and they make a chord of
+/// the chords file (spec: ui/piano-chord-stamp.md §4).
+pub fn chord_name(s: &State) -> Option<String> {
+    if !s.piano.chord_name {
+        return None;
+    }
+    let ch = piano::channel(s);
+    let sel = s.piano.selection(s.pattern(), ch);
+    if sel.len() < 2 {
+        return None;
+    }
+    let notes = piano::notes(&s.session);
+    let picked: Vec<Note> = sel.iter().filter_map(|&i| notes.get(i).copied()).collect();
+    crate::chord_stamp::name_of(&picked)
+}
+
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     let channel = s.session.project.channels.get(s.selected_channel);
@@ -114,6 +130,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     } else {
         os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Right, t.text_dim);
     }
+    // The chord the selected notes make, after the channel (spec: ui/piano-chord-stamp.md §4).
+    if let Some(name) = chord_name(s) {
+        ui.c.text(font, ax + 14.0, r.y + 1.0, t.h(0xfb9531), &name);
+    }
     ui.c.pop_clip();
     let shift = if floating { -4.0 } else { 0.0 };
     toolbar(ui, s, r, shift);
@@ -142,11 +162,46 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.line(tab.x + 0.5, tab.bottom() - 0.5, tab.x + 31.0, tab.y + 0.5, 1.0, t.note_top.shade(0.15));
     }
     let ink = green.shade(-0.3);
-    ui.c.polyline(&[(tab.right() - 15.0, tab.y + 16.0), (tab.right() - 10.0, tab.y + 16.0), (tab.right() - 7.0, tab.y + 7.0), (tab.right() - 3.0, tab.y + 7.0)], 1.6, ink);
-    ui.c.fill_polygon(&[(tab.right() - 4.0, tab.bottom() - 18.0), (tab.right() - 4.0, tab.bottom() - 5.0), (tab.right() - 17.0, tab.bottom() - 5.0)], ink);
+    // The note type toggles (spec: ui/piano-note-properties.md §5): portamento (the step curve, O) and slide (the
+    // triangle, S), lit while new notes get them.
+    let (slide_on, porta_on) = piano::new_type(s);
+    let porta_r = Rect::new(tab.right() - 17.0, tab.y + 3.0, 16.0, 16.0);
+    let slide_r = Rect::new(tab.right() - 19.0, tab.bottom() - 20.0, 18.0, 17.0);
+    let porta_hov =
+        ui.hit(porta_r, Action::PianoNewType(false), "Portamento (O): new notes glide from the note before");
+    let slide_hov = ui.hit(slide_r, Action::PianoNewType(true), "Slide (S): new notes slide the notes they overlap");
+    let lit = t.h(0xfb9531);
+    let ink_of = |on: bool, hov: bool| {
+        if on {
+            lit
+        } else if hov {
+            ink.shade(0.4)
+        } else {
+            ink
+        }
+    };
+    ui.c.polyline(
+        &[
+            (tab.right() - 15.0, tab.y + 16.0),
+            (tab.right() - 10.0, tab.y + 16.0),
+            (tab.right() - 7.0, tab.y + 7.0),
+            (tab.right() - 3.0, tab.y + 7.0),
+        ],
+        1.6,
+        ink_of(porta_on, porta_hov),
+    );
+    ui.c.fill_polygon(
+        &[
+            (tab.right() - 4.0, tab.bottom() - 18.0),
+            (tab.right() - 4.0, tab.bottom() - 5.0),
+            (tab.right() - 17.0, tab.bottom() - 5.0),
+        ],
+        ink_of(slide_on, slide_hov),
+    );
     // Note colours: not available yet, greyed out.
-    ui.off(tab, "Note color");
-    ui.veil(tab, t.window_title);
+    let colours = Rect::new(tab.x, tab.y, (tab.w - 20.0).max(0.0), tab.h);
+    ui.off(colours, "Note color");
+    ui.veil(colours, t.window_title);
 
     overview(ui, s, &l, &g, notes, ch);
     // A time-signature marker shows its signature (spec: ui/pattern-time-signature.md §2).
@@ -172,6 +227,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     stack_edges(ui, &g, &l.grid, notes, ch);
     let label_font = Font::new(11);
+    // The group a click highlighted: a cyan outline, as FL (spec: ui/piano-note-groups.md §3).
+    let group_hl = crate::note_groups::highlighted(s);
     for (i, n) in notes.iter().enumerate().filter(|(_, n)| Some(n.channel) == ch) {
         let Some(nr) = g.note_rect(n) else { continue };
         let vis = nr.intersect(&l.grid);
@@ -247,6 +304,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             let w = ui.c.text_width(label_font, &label);
             let shown = if w <= room - 5.0 { label } else { format!("{}..", &label[..1]) };
             ui.c.text_clip(label_font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + 2.0, room - 4.0, text, &shown);
+        }
+        if group_hl.contains(&i) {
+            let rad = if lemon { 3.5f32.min(nr.w / 2.0).min(nr.h / 2.0) } else { 2.0 };
+            ui.c.stroke_rrect(nr.inset(0.5), rad, 1.5, ui.t.h(0x4fd6ff));
         }
     }
     // Notes still held while recording, growing to the playhead (spec: ui/recording.md §2 "Shown while held").
@@ -383,8 +444,8 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
         (222.0, Icon::ArrowRight, "Piano roll options", None),
         (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, glue, strum, arpeggiate, randomize...", Some(Action::PianoToolsMenu)),
         (263.0, Icon::Magnet, "", Some(Action::PianoSnapMenu)),
-        (283.0, Icon::Note, "Note properties", None),
-        (305.0, Icon::Blend, "Scale and chord helpers", None),
+        (283.0, Icon::Note, "Snap to scale (right-click: scale and options)", Some(Action::PianoScaleSnap)),
+        (305.0, Icon::Blend, "Stamp: chords and scales", Some(Action::PianoStampMenu)),
         (327.0, Icon::Undo, "Undo (Ctrl+Z)", Some(Action::PianoUndo)),
         (360.0, Icon::Pencil, "Draw (P)", Some(Action::PianoTool(Tool::Draw))),
         (380.0, Icon::Brush, "Paint (B): drag to paint notes along the row", Some(Action::PianoTool(Tool::Paint))),
@@ -403,7 +464,9 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
             icons::draw(ui.c, icon, b, t.text_faint);
             continue;
         };
-        let on = action == Action::PianoTool(active);
+        let on = action == Action::PianoTool(active)
+            || (action == Action::PianoScaleSnap && s.piano.scale_snap.notes)
+            || (action == Action::PianoStampMenu && s.piano.stamp.is_some_and(|st| st.on()));
         // The magnet's hint names the current snap (spec: ui/piano-snap.md §8).
         let hint: std::borrow::Cow<'static, str> = if action == Action::PianoSnapMenu { crate::piano_snap::hint(s).into() } else { hint.into() };
         let hov = ui.hit(b, action, hint);
