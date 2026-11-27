@@ -3,9 +3,10 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Piano roll note groups: ▸ Group > Group (Shift+G) puts the selected notes in a group of their own, Ungroup (Alt+G)
-//! takes the selected notes' groups apart. A click on a grouped note selects its whole group, and grouped notes move
-//! and resize together. The group number is the note record's bytes 14-15 (`Note::unk14`), as FL saves it; Flam, Chop
-//! and Arpeggiate's "Group notes" write the same numbers.
+//! takes the selected notes' groups apart. A click on a grouped note highlights its whole group (without selecting
+//! it, as FL), and grouped notes move, resize and delete together while Enable groups is on. The group number is the
+//! note record's bytes 14-15 (`Note::unk14`), as FL saves it; Flam, Chop and Arpeggiate's "Group notes" write the
+//! same numbers.
 // spec: ui/piano-note-groups.md; flp/events/patterns.md (note record, offset 14)
 
 use os_model::Note;
@@ -16,6 +17,10 @@ use crate::piano;
 /// `idx` (note indices into the pattern) and every note of the same channel sharing a group with one of them (spec:
 /// ui/piano-note-groups.md §3).
 pub fn with_groups(notes: &[Note], mut idx: Vec<usize>) -> Vec<usize> {
+    // Enable groups off: each note on its own, as the playlist's clips (the groups are kept). FL not measured here.
+    if !crate::enable_groups::on() {
+        return idx;
+    }
     let groups: Vec<(u16, u16)> =
         idx.iter().filter_map(|&i| notes.get(i)).filter(|n| n.unk14 != 0).map(|n| (n.channel, n.unk14)).collect();
     if groups.is_empty() {
@@ -27,6 +32,61 @@ pub fn with_groups(notes: &[Note], mut idx: Vec<usize>) -> Vec<usize> {
         }
     }
     idx
+}
+
+/// The group a click on a grouped note highlights (§3): FL outlines it without selecting it (no selection bit in the
+/// file). The pattern, channel and group number; cleared by a click elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Highlight {
+    pub pattern: u16,
+    pub channel: u16,
+    pub group: u16,
+}
+
+/// A press on note `i` (Draw or Select tool): its group is highlighted, a loose note clears the highlight.
+pub fn press(s: &mut State, i: usize) {
+    let n = piano::notes(&s.session).get(i).copied();
+    s.piano.group_hl = n.filter(|n| n.unk14 != 0 && crate::enable_groups::on()).map(|n| Highlight {
+        pattern: s.pattern(),
+        channel: n.channel,
+        group: n.unk14,
+    });
+}
+
+/// The notes the group highlight outlines, in pattern order.
+pub fn highlighted(s: &State) -> Vec<usize> {
+    let Some(h) = s.piano.group_hl.filter(|h| h.pattern == s.pattern() && crate::enable_groups::on()) else {
+        return Vec::new();
+    };
+    piano::notes(&s.session)
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.channel == h.channel && n.unk14 == h.group)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Copies `from..` of the pattern's notes form new groups of their own, one new number per group copied, numbered as
+/// Shift+G numbers a new group (as the playlist's clip copies; §2).
+pub fn regroup_copies(notes: &mut [Note], from: usize) {
+    let from = from.min(notes.len());
+    let mut used: Vec<u16> = notes[..from].iter().map(|n| n.unk14).collect();
+    let mut map: Vec<(u16, u16)> = Vec::new();
+    for n in &mut notes[from..] {
+        if n.unk14 == 0 {
+            continue;
+        }
+        let g = match map.iter().find(|(old, _)| *old == n.unk14) {
+            Some(&(_, new)) => new,
+            None => {
+                let new = (1..=u16::MAX).find(|g| !used.contains(g)).unwrap_or(u16::MAX);
+                used.push(new);
+                map.push((n.unk14, new));
+                new
+            }
+        };
+        n.unk14 = g;
+    }
 }
 
 /// The lowest group number no note of the pattern uses (§2).

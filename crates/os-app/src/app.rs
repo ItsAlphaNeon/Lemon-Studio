@@ -2394,9 +2394,10 @@ impl App {
         s.rack_scroll_x = 0.0;
         s.mixer_scroll = 0.0;
         s.rack.reset();
-        for w in [Win::Plugin, Win::Events, Win::Container, Win::PluginPalette] {
+        for w in [Win::Plugin, Win::Events, Win::Container, Win::PluginPalette, Win::NoteProps] {
             s.hide(w);
         }
+        crate::note_props::close(s);
         s.events_back = None;
         s.piano.reset();
         s.playlist.reset();
@@ -4116,6 +4117,10 @@ impl App {
         let s = &mut self.state;
         let edited = s.session.dirty || s.session.project.written_at().is_some();
         s.session.control.settle_tick(&mut s.session.project, edited);
+        // Note properties close when the piano roll shows another pattern (spec: ui/piano-note-properties.md §1).
+        if crate::note_props::follow(s) {
+            self.invalidate();
+        }
         self.control_tick();
         self.plugin_tick();
         // Playback loops over the time selection, as it is now (spec: ui/recording.md §5).
@@ -7121,7 +7126,7 @@ impl App {
         let mut dirty = rects(&self.state);
         let s = &mut self.state;
         let snap_scale = !resize && s.piano.scale_snap.notes;
-        let spans = if snap_scale { piano::highlight_spans(s) } else { Vec::new() };
+        let spans = if snap_scale { piano::scale_spans(s) } else { Vec::new() };
         let scale_at = |t: u32| spans.iter().take_while(|&&(at, _)| at <= t).last().map_or(0xFFF, |&(_, k)| k);
         let p = piano::pattern_mut(&mut s.session);
         if resize {
@@ -7158,7 +7163,13 @@ impl App {
                     // Snap to scale: a moved note lands on the scale at its new time, even on its own row; halfway goes
                     // down (spec: ui/piano-scale-snap.md §3).
                     let key = if snap_scale {
-                        crate::scale_snap::snap_key(i32::from(o.key) + dk, scale_at(n.position), false)
+                        crate::scale_snap::snap_key_in(
+                            i32::from(o.key) + dk,
+                            scale_at(n.position),
+                            false,
+                            0,
+                            crate::piano::TOP_KEY,
+                        )
                     } else {
                         i32::from(o.key) + dk
                     };
@@ -8419,6 +8430,10 @@ impl App {
             self.damage_piano();
             return;
         }
+        // A click on the grid clears the group highlight (spec: ui/piano-note-groups.md §3).
+        if *a == Action::PianoGrid {
+            self.state.piano.group_hl = None;
+        }
         // A double-click on a note opens its Note properties (spec: ui/piano-note-properties.md §1).
         if let Action::PianoNote(i) = *a {
             let count =
@@ -8497,11 +8512,8 @@ impl App {
                         if !self.ctrl {
                             sel.clear();
                         }
-                        for j in crate::note_groups::with_groups(piano::notes(&s.session), vec![i]) {
-                            if !sel.contains(&j) {
-                                sel.push(j);
-                            }
-                        }
+                        // A grouped note's group is highlighted, not selected (spec: ui/piano-note-groups.md §3).
+                        sel.push(i);
                         s.piano.select(s.pattern(), ch, sel);
                     }
                 }
@@ -8556,15 +8568,21 @@ impl App {
                 let idx = if sel.contains(&i) && tool.moves_groups() {
                     crate::note_groups::with_groups(piano::notes(&s.session), sel)
                 } else {
-                    // A grouped note brings its group, selected (spec: ui/piano-note-groups.md §3).
-                    let group = crate::note_groups::with_groups(piano::notes(&s.session), vec![i]);
-                    if group.len() > 1 {
-                        s.piano.select(s.pattern(), ch, group.clone());
+                    s.piano.clear_selection();
+                    // A grouped note brings its group along with Draw and Select, not with Paint (spec:
+                    // ui/piano-note-groups.md §3).
+                    if tool.moves_groups() {
+                        crate::note_groups::with_groups(piano::notes(&s.session), vec![i])
                     } else {
-                        s.piano.clear_selection();
+                        vec![i]
                     }
-                    group
                 };
+                // Its group is highlighted, not selected: FL sets no selection bit (§3).
+                if tool.moves_groups() {
+                    crate::note_groups::press(s, i);
+                } else {
+                    s.piano.group_hl = None;
+                }
                 let notes = piano::notes(&s.session);
                 // The clicked note first: it is the one auditioned while dragging.
                 let orig: Vec<(usize, Note)> =
@@ -16315,27 +16333,174 @@ mod tests {
         assert_eq!(piano::notes(&app.state.session)[0].velocity, 37, "one step for the window");
     }
 
-    /// A click on a grouped note selects its group, and a drag moves the group (spec: ui/piano-note-groups.md §3).
-    #[test]
-    fn a_grouped_note_drags_its_group() {
+    /// Two notes of the piano roll's channel in group 1, the second four keys above the first.
+    fn piano_with_group() -> (App, Canvas) {
         let (mut app, mut c) = piano_with_note(100);
         let mut other = piano::notes(&app.state.session)[0];
         other.key += 4;
         piano::pattern_mut(&mut app.state.session).notes.push(other);
         piano::pattern_mut(&mut app.state.session).notes.iter_mut().for_each(|n| n.unk14 = 1);
         frame(&mut app, &mut c, None);
-        let n = piano::notes(&app.state.session)[0];
+        (app, c)
+    }
+
+    /// Press on note `i`; returns its rectangle.
+    fn press_note(app: &mut App, i: usize) -> Rect {
+        let n = piano::notes(&app.state.session)[i];
         let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
         app.mouse_move(r.cx(), r.cy());
         app.mouse_down();
+        r
+    }
+
+    /// A click on a grouped note highlights its group without selecting it, as FL (no selection bit), and a drag moves
+    /// the group (spec: ui/piano-note-groups.md §3).
+    #[test]
+    fn a_grouped_note_drags_its_group() {
+        let (mut app, mut c) = piano_with_group();
+        let n = piano::notes(&app.state.session)[0];
+        let r = press_note(&mut app, 0);
+        frame(&mut app, &mut c, None); // drawn with its outline
         let ch = piano::channel(&app.state);
-        let mut sel = app.state.piano.selection(app.state.pattern(), ch);
-        sel.sort_unstable();
-        assert_eq!(sel, [0, 1], "the group is selected");
+        assert!(app.state.piano.selection(app.state.pattern(), ch).is_empty(), "highlighted, not selected");
+        assert_eq!(crate::note_groups::highlighted(&app.state), [0, 1], "the group is highlighted");
         app.mouse_move(r.cx() + 200.0, r.cy());
         app.mouse_up();
         let notes = piano::notes(&app.state.session);
         assert!(notes[0].position > n.position && notes[1].position == notes[0].position, "both moved");
+        assert!(app.state.piano.selection(app.state.pattern(), ch).is_empty());
+        // A click on the grid clears the highlight.
+        app.mouse_move(1500.0, 300.0);
+        app.mouse_down();
+        app.mouse_up();
+        assert!(crate::note_groups::highlighted(&app.state).is_empty());
+    }
+
+    /// The Paint tool drags one note of a group alone: the group moves with Draw and Select only.
+    #[test]
+    fn paint_drags_one_grouped_note() {
+        let (mut app, _c) = piano_with_group();
+        app.state.piano.tool = Tool::Paint;
+        let n = piano::notes(&app.state.session)[0];
+        let r = press_note(&mut app, 0);
+        app.mouse_move(r.cx() + 200.0, r.cy());
+        app.mouse_up();
+        // The notes may be sorted after the move: find them by key.
+        let at = |k: u16| piano::notes(&app.state.session).iter().find(|m| m.key == k).unwrap().position;
+        assert!(at(n.key) > n.position);
+        assert_eq!(at(n.key + 4), n.position, "its mate stayed");
+    }
+
+    /// With Enable groups off, a grouped note moves and deletes alone; the groups are kept (Lemon Studio's choice, as
+    /// the playlist: FL not measured).
+    #[test]
+    fn with_groups_off_a_grouped_note_acts_alone() {
+        let (mut app, mut c) = piano_with_group();
+        assert!(!crate::enable_groups::toggle());
+        let n = piano::notes(&app.state.session)[0];
+        let r = press_note(&mut app, 0);
+        app.mouse_move(r.cx() + 200.0, r.cy());
+        app.mouse_up();
+        // The notes may be sorted after the move: find them by key.
+        let at = |k: u16| piano::notes(&app.state.session).iter().find(|m| m.key == k).unwrap().position;
+        assert!(at(n.key) > n.position);
+        assert_eq!(at(n.key + 4), n.position, "its mate stayed");
+        assert!(piano::notes(&app.state.session).iter().all(|n| n.unk14 == 1), "the group is kept");
+        frame(&mut app, &mut c, None);
+        let m = piano::notes(&app.state.session)[1];
+        let r = app.piano_geom().unwrap().note_rect(&m).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        assert_eq!(piano::notes(&app.state.session).len(), 1, "right-click deletes the one note");
+        assert!(crate::enable_groups::toggle());
+    }
+
+    /// A double-click on a grouped note opens Note properties on that one note (spec: ui/piano-note-properties.md §1).
+    #[test]
+    fn a_double_click_on_a_grouped_note_opens_that_note() {
+        let (mut app, _c) = piano_with_group();
+        press_note(&mut app, 0);
+        app.mouse_up();
+        app.mouse_down();
+        app.mouse_up();
+        assert!(app.state.shown(Win::NoteProps));
+        assert!(!app.state.note_props.many(), "Note properties, not Step properties");
+    }
+
+    /// Shift+G groups the selected notes, Alt+G ungroups them (spec: ui/piano-note-groups.md §1).
+    #[test]
+    fn shift_g_groups_and_alt_g_ungroups() {
+        use crate::keys::Key;
+        let (mut app, _c) = piano_with_note(100);
+        let mut other = piano::notes(&app.state.session)[0];
+        other.key += 4;
+        piano::pattern_mut(&mut app.state.session).notes.push(other);
+        let ch = piano::channel(&app.state).unwrap();
+        app.state.piano.select(app.state.pattern(), ch, vec![0, 1]);
+        app.shift = true;
+        app.key(&Key::Character("G".into()), false, false);
+        app.shift = false;
+        let groups = |app: &App| piano::notes(&app.state.session).iter().map(|n| n.unk14).collect::<Vec<_>>();
+        assert_eq!(groups(&app), [1, 1]);
+        app.key(&Key::Character("g".into()), false, true);
+        assert_eq!(groups(&app), [0, 0]);
+        assert!(crate::enable_groups::on(), "Alt+G is not Shift+Alt+G");
+    }
+
+    /// Copies of grouped notes (Ctrl+B, Ctrl+C / Ctrl+V, a Shift+drag) make groups of their own, so deleting a copy
+    /// leaves the originals (as the playlist's clip copies, `regroup_copies`).
+    #[test]
+    fn copies_of_grouped_notes_make_groups_of_their_own() {
+        use crate::keys::Key;
+        let (mut app, mut c) = piano_with_group();
+        let ch = piano::channel(&app.state).unwrap();
+        // The group numbers in order (an edit may sort the notes).
+        let groups = |app: &App| {
+            let mut g: Vec<u16> = piano::notes(&app.state.session).iter().map(|n| n.unk14).collect();
+            g.sort_unstable();
+            g
+        };
+        app.state.piano.select(app.state.pattern(), ch, vec![0, 1]);
+        app.key(&Key::Character("b".into()), true, false);
+        assert_eq!(groups(&app), [1, 1, 2, 2], "Ctrl+B");
+        app.state.piano.select(app.state.pattern(), ch, vec![0, 1]);
+        app.key(&Key::Character("c".into()), true, false);
+        app.key(&Key::Character("v".into()), true, false);
+        assert_eq!(groups(&app), [1, 1, 2, 2, 3, 3], "Ctrl+V");
+        app.state.piano.clear_selection();
+        frame(&mut app, &mut c, None);
+        app.shift = true;
+        let r = press_note(&mut app, 0);
+        for k in 1..=10 {
+            app.mouse_move(r.cx() + 20.0 * k as f32, r.cy());
+        }
+        app.mouse_up();
+        app.shift = false;
+        assert_eq!(groups(&app), [1, 1, 2, 2, 3, 3, 4, 4], "a Shift+drag's copies");
+        // Deleting a copy deletes its own group only.
+        frame(&mut app, &mut c, None);
+        let m = *piano::notes(&app.state.session).iter().find(|n| n.unk14 == 2).unwrap();
+        let r = app.piano_geom().unwrap().note_rect(&m).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        assert_eq!(groups(&app), [1, 1, 3, 3, 4, 4]);
+    }
+
+    /// Note properties close with their project, and when the piano roll shows another pattern.
+    #[test]
+    fn note_properties_close_with_their_project_or_pattern() {
+        let (mut app, _c) = piano_with_note(37);
+        app.open_note_props(0);
+        assert!(app.state.shown(Win::NoteProps));
+        app.forget_project_ui();
+        assert!(!app.state.shown(Win::NoteProps) && !app.state.note_props.is_open());
+        let (mut app, _c) = piano_with_note(37);
+        app.open_note_props(0);
+        app.state.set_pattern(2);
+        app.tick();
+        assert!(!app.state.shown(Win::NoteProps) && !app.state.note_props.is_open());
     }
 
     /// S and O (typing keyboard off) make new notes slide and portamento notes; the colour tab's toggles show it (spec:
@@ -16401,13 +16566,29 @@ mod tests {
         assert!(app.state.piano.scale_snap.notes);
         frame(&mut app, &mut c, None);
         let g = app.piano_geom().unwrap();
-        let y = (0..400).map(|d| 300.0 + d as f32).find(|&y| g.key_at(y).rem_euclid(12) == 1).unwrap();
-        let key = g.key_at(y);
-        app.mouse_move(500.0, y);
+        let row = |hi: bool| {
+            (0..800)
+                .map(|d| 300.0 + d as f32 / 2.0)
+                .find(|&y| {
+                    g.key_at(y).rem_euclid(12) == 1 && if hi { g.key_frac(y) > 0.8 } else { g.key_frac(y) < 0.2 }
+                })
+                .unwrap()
+        };
+        for (x, y, d) in [(500.0, row(true), 1), (800.0, row(false), -1)] {
+            let key = g.key_at(y);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_up();
+            let n = *piano::notes(&app.state.session).last().unwrap();
+            assert_eq!(i32::from(n.key), key + d, "the top of a C# row gives D, its bottom C");
+        }
+        // Without the grid's highlights (Alt+B) the scale still snaps.
+        app.state.piano.highlights = false;
+        let y = row(true);
+        app.mouse_move(1100.0, y);
         app.mouse_down();
         app.mouse_up();
-        let n = piano::notes(&app.state.session)[0];
-        assert!([key - 1, key + 1].contains(&i32::from(n.key)), "a C# row gives C or D");
+        assert_eq!(i32::from(piano::notes(&app.state.session).last().unwrap().key), g.key_at(y) + 1);
     }
 
     /// The Playback tool holds the notes under its line, at their velocities, until they are left or the button goes up;

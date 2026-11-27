@@ -227,6 +227,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     stack_edges(ui, &g, &l.grid, notes, ch);
     let label_font = Font::new(11);
+    // The group a click highlighted: a cyan outline, as FL (spec: ui/piano-note-groups.md §3).
+    let group_hl = crate::note_groups::highlighted(s);
     for (i, n) in notes.iter().enumerate().filter(|(_, n)| Some(n.channel) == ch) {
         let Some(nr) = g.note_rect(n) else { continue };
         let vis = nr.intersect(&l.grid);
@@ -302,6 +304,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             let w = ui.c.text_width(label_font, &label);
             let shown = if w <= room - 5.0 { label } else { format!("{}..", &label[..1]) };
             ui.c.text_clip(label_font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + 2.0, room - 4.0, text, &shown);
+        }
+        if group_hl.contains(&i) {
+            let rad = if lemon { 3.5f32.min(nr.w / 2.0).min(nr.h / 2.0) } else { 2.0 };
+            ui.c.stroke_rrect(nr.inset(0.5), rad, 1.5, ui.t.h(0x4fd6ff));
         }
     }
     // Notes still held while recording, growing to the playhead (spec: ui/recording.md §2 "Shown while held").

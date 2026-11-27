@@ -121,7 +121,7 @@ pub fn keys(p: Pick, root: i32) -> Vec<i32> {
 pub fn stamp(s: &mut crate::app::State, ch: u16, tick: u32, key: i32, st: Stamp) -> Vec<usize> {
     let mut done: Vec<i32> = Vec::new();
     for k in keys(st.pick, key) {
-        let k = crate::scale_snap::drawn(s, tick, k, 0.5);
+        let k = crate::scale_snap::drawn_free(s, tick, k, 0.5);
         if (0..=crate::piano::TOP_KEY).contains(&k) && !done.contains(&k) {
             done.push(k);
         }
@@ -178,6 +178,24 @@ mod tests {
         assert_eq!(keys(Pick::Advanced(1), 60), [60, 64, 67], "the chords file's Major");
         assert_eq!(keys(Pick::Scale(0), 60), [60, 62, 64, 65, 67, 69, 71], "Major (Ionian) over one octave");
         assert_eq!(keys(Pick::Scale(0), 62), [62, 64, 66, 67, 69, 71, 73], "D major from D");
+    }
+
+    /// A stamp near the top of the key range drops the keys past it, snapped or not, instead of piling them on the top
+    /// key.
+    #[test]
+    fn a_stamp_drops_keys_past_the_range() {
+        let mut app = crate::app::App::new(None);
+        app.state.selected_channel = 4;
+        let ch = crate::piano::channel(&app.state).unwrap();
+        crate::edit::notes::put_scale_highlight(&mut app.state.session, os_model::ScaleHighlight { mode: 0, root: 0 });
+        let octave = Stamp { pick: Pick::Named(10), only_one: false };
+        for snap in [false, true] {
+            app.state.piano.scale_snap.notes = snap;
+            crate::piano::pattern_mut(&mut app.state.session).notes.clear();
+            stamp(&mut app.state, ch, 0, 124, octave);
+            let keys: Vec<u16> = crate::piano::notes(&app.state.session).iter().map(|n| n.key).collect();
+            assert_eq!(keys, [124], "snap {snap}: the octave above 124 is past the top");
+        }
     }
 
     #[test]

@@ -57,9 +57,9 @@ pub enum NCmd {
     NewSlide,
     NewPorta,
     /// Snap to scale (spec: ui/piano-scale-snap.md §1): "Snap PR notes to scale" (the toolbar button's left click),
-    /// "Snap incoming MIDI" ▸ All devices (`false`) / Typing keyboard to piano (`true`).
+    /// "Snap incoming MIDI" ▸ "Typing to piano keyboard".
     ScaleSnapNotes,
-    ScaleSnapMidi(bool),
+    ScaleSnapTyping,
     /// The stamp menu (spec: ui/piano-chord-stamp.md §1): a pick ((none) is Shift+N), "Only one".
     Stamp(crate::chord_stamp::Pick),
     /// ▸ View > Show chord name for selection (spec: ui/piano-chord-stamp.md §4).
@@ -188,8 +188,9 @@ pub fn scale_items(s: &State) -> Vec<PItem> {
         PItem::sub(
             "Snap incoming MIDI",
             vec![
-                item("Snap all devices", NCmd::ScaleSnapMidi(false)).mark(Mark::Check(m.midi_devices)),
-                item("Typing to piano keyboard", NCmd::ScaleSnapMidi(true)).mark(Mark::Check(m.midi_typing)),
+                // MIDI devices are not snapped yet: greyed (§1).
+                PItem::not_yet("Snap all devices"),
+                item("Typing to piano keyboard", NCmd::ScaleSnapTyping).mark(Mark::Check(m.midi_typing)),
             ],
         ),
         PItem::sep(),
@@ -541,15 +542,10 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             s.piano.scale_snap.notes = !s.piano.scale_snap.notes;
             return Some(format!("Snap to scale {}", if s.piano.scale_snap.notes { "on" } else { "off" }));
         }
-        NCmd::ScaleSnapMidi(typing) => {
-            let m = &mut s.piano.scale_snap;
-            let on = if typing { &mut m.midi_typing } else { &mut m.midi_devices };
+        NCmd::ScaleSnapTyping => {
+            let on = &mut s.piano.scale_snap.midi_typing;
             *on = !*on;
-            return Some(format!(
-                "Snap incoming MIDI ({}) {}",
-                if typing { "typing keyboard" } else { "all devices" },
-                if *on { "on" } else { "off" }
-            ));
+            return Some(format!("Snap incoming MIDI (typing keyboard) {}", if *on { "on" } else { "off" }));
         }
         NCmd::Stamp(pick) => {
             let st = s.piano.stamp.get_or_insert_with(Default::default);
@@ -791,6 +787,7 @@ mod tests {
             items[col + 3].children.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(),
             ["Snap all devices", "Typing to piano keyboard"]
         );
+        assert!(matches!(items[col + 3].children[0].cmd, Cmd::NotYet(_)), "MIDI devices: not yet");
 
         // A root while Black notes is checked is kept for the next scale; the menu stays where it was.
         app.state.playlist.popup = Some(Popup { x: 40.0, y: 50.0, items: scale_items(&app.state), sub: None, scroll: [0; 2] });

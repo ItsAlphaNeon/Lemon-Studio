@@ -44,12 +44,13 @@ pub struct NotePropsUi {
     last: Option<(u16, usize, std::time::Instant)>,
 }
 
-/// An open window: the notes it edits (pattern indices, the double-clicked one first), the edited copy of the
-/// double-clicked note, and (Step properties) the offset knobs' places.
+/// An open window: the notes it edits (their ids, the double-clicked one first: the roll stays usable meanwhile, so
+/// their places in the list can change), the edited copy of the double-clicked note, and (Step properties) the offset
+/// knobs' places.
 #[derive(Debug, Clone)]
 struct Session {
     pattern: u16,
-    targets: Vec<usize>,
+    targets: Vec<os_model::Id>,
     base: Note,
     draft: Note,
     offsets: [f32; 7],
@@ -106,11 +107,42 @@ pub fn moved(s: &mut State) {
 
 /// Open the window on note `i` (§1).
 pub fn open(s: &mut State, i: usize) -> bool {
+    // Every note gets its id first (`os_session::control::ids`): the window finds its notes by them at Accept.
+    os_session::control::settle_in(&mut s.session);
     let Some(&n) = piano::notes(&s.session).get(i) else { return false };
-    let targets = targets(s, i);
+    let notes = piano::notes(&s.session);
+    let targets = targets(s, i).into_iter().filter_map(|j| notes.get(j).map(|m| m.id)).collect();
     s.note_props.session =
         Some(Session { pattern: s.pattern(), targets, base: n, draft: n, offsets: default_offsets(), grid: false });
     true
+}
+
+/// Where the window's notes are now in the pattern shown, the double-clicked one first; notes deleted meanwhile are
+/// left out.
+fn places(s: &State, ids: &[os_model::Id]) -> Vec<usize> {
+    let notes = piano::notes(&s.session);
+    ids.iter().filter_map(|id| notes.iter().position(|n| !n.id.is_none() && n.id.0 == id.0)).collect()
+}
+
+/// The pattern shown is no longer the window's: the window closes, changing nothing (run on the app's tick).
+pub fn follow(s: &mut State) -> bool {
+    let gone = s.note_props.session.as_ref().is_some_and(|se| se.pattern != s.pattern());
+    if gone {
+        close(s);
+        s.hide(crate::app::Win::NoteProps);
+    }
+    gone
+}
+
+/// What the window edits of a note (§2): its levels, slide and portamento switches and colour group, put on `n`;
+/// its place, key and length stay `n`'s own.
+fn put_edits(n: &mut Note, from: &Note) {
+    for l in LEVELS {
+        l.set(n, l.get(from));
+    }
+    n.set_slide(from.slide());
+    n.set_porta(from.porta());
+    n.group = n.group & !0x0F | from.colour();
 }
 
 fn default_offsets() -> [f32; 7] {
@@ -119,8 +151,8 @@ fn default_offsets() -> [f32; 7] {
 
 /// The note the window shows: the edited copy of the double-clicked note.
 pub fn shown(s: &State) -> Option<Note> {
-    let se = s.note_props.session.as_ref()?;
-    (se.pattern == s.pattern()).then_some(se.draft)
+    // Drawn whole until the tick closes a window whose pattern is no longer shown (`follow`).
+    s.note_props.session.as_ref().map(|se| se.draft)
 }
 
 fn lane(k: u8) -> Lane {
@@ -182,11 +214,12 @@ pub fn knob_text(s: &State, k: u8) -> String {
 fn offset(l: Lane, v: u8, pos: f32) -> u8 {
     let d = f32::from(l.get(&Note::step(0, 0))) / l.max();
     let out = match l.center() {
-        Some(_) => f32::from(v) + (pos - d) * l.max(),
-        None if d > 0.0 => f32::from(v) * pos / d,
-        None => f32::from(v) + pos * l.max(),
+        Some(_) => (f32::from(v) + (pos - d) * l.max()).round(),
+        // Rounded down, as FL: 122 × 0.85 = 103.7 gave 103 (§4).
+        None if d > 0.0 => (f32::from(v) * pos / d + 1e-3).floor(),
+        None => (f32::from(v) + pos * l.max()).round(),
     };
-    out.round().clamp(0.0, l.max()) as u8
+    out.clamp(0.0, l.max()) as u8
 }
 
 /// A switch or button (§2, §3).
@@ -223,9 +256,11 @@ pub fn accept(s: &mut State) -> String {
     if se.pattern != s.pattern() {
         return String::new();
     }
+    os_session::control::settle_in(&mut s.session);
+    let at = places(s, &se.targets);
     let mut notes = piano::notes(&s.session).to_vec();
     if se.targets.len() > 1 {
-        for &i in &se.targets {
+        for &i in &at {
             let Some(n) = notes.get_mut(i) else { continue };
             for (k, &l) in LEVELS.iter().enumerate() {
                 let pos = se.offsets[k];
@@ -235,9 +270,8 @@ pub fn accept(s: &mut State) -> String {
                 }
             }
         }
-    } else if let Some(n) = notes.get_mut(se.targets[0]) {
-        let id = n.id;
-        *n = Note { id, ..se.draft };
+    } else if let Some(n) = at.first().and_then(|&i| notes.get_mut(i)) {
+        put_edits(n, &se.draft);
     }
     if notes.as_slice() == piano::notes(&s.session) {
         return "Note properties: nothing changed".into();
@@ -245,8 +279,8 @@ pub fn accept(s: &mut State) -> String {
     piano::snapshot_as(&mut s.session, STEP);
     piano::pattern_mut(&mut s.session).notes = notes;
     s.session.dirty = true;
-    s.piano.last_controls = piano::notes(&s.session).get(se.targets[0]).copied();
-    let k = se.targets.len();
+    s.piano.last_controls = at.first().and_then(|&i| piano::notes(&s.session).get(i)).copied();
+    let k = at.len();
     format!("Note properties: {k} note{} changed", if k == 1 { "" } else { "s" })
 }
 
@@ -308,8 +342,41 @@ mod tests {
         act(s, Act::Slide);
         set_knob(s, 1, default_pos(1) * 0.85);
         accept(s);
-        assert_eq!(vels(s), vec![104, 68, 51, 40], "x0.85 on the selection (FL: 122 -> 103, 80 -> 68, 60 -> 51)");
+        assert_eq!(vels(s), vec![103, 68, 51, 40], "x0.85 rounded down, as FL: 122 -> 103, 80 -> 68, 60 -> 51");
         assert!(!piano::notes(&s.session)[0].slide(), "no slide switch in Step properties");
+    }
+
+    /// The roll stays usable while the window is open: Accept edits the note the window opened on wherever it went,
+    /// with the window's levels and switches only, never its place, key or length.
+    #[test]
+    fn accept_follows_its_note_not_its_place() {
+        let mut app = app_with(vec![note(0, 60, 100), note(96, 64, 80)]);
+        let s = &mut app.state;
+        assert!(open(s, 1));
+        set_knob(s, 1, 30.0 / 127.0);
+        act(s, Act::Slide);
+        // A note drawn before it lands at the list's front, and the note itself is dragged and resized.
+        let p = piano::pattern_mut(&mut s.session);
+        p.notes.insert(0, note(48, 50, 90));
+        (p.notes[2].key, p.notes[2].position, p.notes[2].length) = (66, 192, 48);
+        accept(s);
+        let n = piano::notes(&s.session);
+        assert_eq!(n.len(), 3);
+        assert_eq!((n[0], n[1]), (note(48, 50, 90), note(0, 60, 100)), "the other notes are untouched");
+        assert_eq!((n[2].velocity, n[2].slide()), (30, true), "the window's levels and switches");
+        assert_eq!((n[2].key, n[2].position, n[2].length), (66, 192, 48), "the note's own place");
+    }
+
+    /// A note deleted while its window is open is not brought back by Accept.
+    #[test]
+    fn accept_skips_a_deleted_note() {
+        let mut app = app_with(vec![note(0, 60, 100), note(96, 64, 80)]);
+        let s = &mut app.state;
+        assert!(open(s, 1));
+        set_knob(s, 1, 30.0 / 127.0);
+        piano::pattern_mut(&mut s.session).notes.remove(1);
+        assert!(accept(s).contains("nothing"));
+        assert_eq!(piano::notes(&s.session), [note(0, 60, 100)]);
     }
 
     #[test]
