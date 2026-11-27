@@ -120,6 +120,14 @@ pub enum Then {
     MidiImport(bool),
     /// Where to export a MIDI file; true: the piano roll's channel.
     MidiExport(bool),
+    /// The file mixer track n's next recording goes to (the disk-record button's right click, `App::rec_file_chosen`).
+    RecordTo(u16),
+    /// FILE ▸ Export all playlist track groups...: the rendering folder (`crate::group_export`).
+    GroupExport,
+    /// "Confirm save as" over the Export form: Yes renders over the files there (`App::export_replace`).
+    ExportReplace,
+    /// "Confirm save as" for Export all playlist track groups into this folder: Yes renders over the files there.
+    GroupReplace(PathBuf),
     /// File ▸ FL Studio factory content folder: the folder picked (`App::set_factory_folder`).
     FactoryFolder,
     /// FILE ▸ Save as template...: the template's name, from the save dialog (`crate::project_files`).
@@ -190,7 +198,16 @@ pub struct Msg {
 
 impl Msg {
     pub fn new(kind: Kind, title: &str, text: Vec<(String, bool)>, buttons: &[Answer], then: Then) -> Msg {
-        Msg { kind, title: title.into(), text, buttons: buttons.to_vec(), focus: 0, then, remember: None, labels: Vec::new() }
+        Msg {
+            kind,
+            title: title.into(),
+            text,
+            buttons: buttons.to_vec(),
+            focus: 0,
+            then,
+            remember: None,
+            labels: Vec::new(),
+        }
     }
 
     /// The same box with buttons labelled `labels` (in the order of its buttons) instead of the answers' names.
@@ -206,7 +223,11 @@ impl Msg {
 
     /// The button Esc and the caption's × press: Cancel, else No, else the last one.
     pub fn escape(&self) -> Answer {
-        [Answer::Cancel, Answer::No].into_iter().find(|a| self.buttons.contains(a)).or(self.buttons.last().copied()).unwrap_or(Answer::Cancel)
+        [Answer::Cancel, Answer::No]
+            .into_iter()
+            .find(|a| self.buttons.contains(a))
+            .or(self.buttons.last().copied())
+            .unwrap_or(Answer::Cancel)
     }
 
     /// The text without its marks.
@@ -484,7 +505,9 @@ impl App {
         let then = match m.body {
             Body::Msg(m) => {
                 // The External input question remembers either answer (`prefs::EXTERNAL_INPUT`, Settings ▸ Recording).
-                if let (Then::ExtInput(_), Some((_, true)), Reply::Button(a @ (Answer::Yes | Answer::No))) = (&m.then, m.remember, &reply) {
+                if let (Then::ExtInput(_), Some((_, true)), Reply::Button(a @ (Answer::Yes | Answer::No))) =
+                    (&m.then, m.remember, &reply)
+                {
                     crate::prefs::set_choice(&crate::prefs::EXTERNAL_INPUT, if *a == Answer::Yes { 1 } else { 2 });
                 }
                 // Ok with Remember my choice ticked turns the message off; Cancel never does.
@@ -550,7 +573,13 @@ impl App {
             Outcome::Done(p) => self.answer(Reply::File(Some(p))),
             Outcome::Replace(p) => {
                 let name = p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                let mut m = Msg::new(Kind::Warning, "Confirm save as", spans(&["", &name, " already exists.\nDo you want to replace it?"]), &[Answer::Yes, Answer::No], Then::Replace(p));
+                let mut m = Msg::new(
+                    Kind::Warning,
+                    "Confirm save as",
+                    spans(&["", &name, " already exists.\nDo you want to replace it?"]),
+                    &[Answer::Yes, Answer::No],
+                    Then::Replace(p),
+                );
                 // Replacing loses the file: Enter alone does not.
                 m.focus = 1;
                 self.show_msg(m);
@@ -617,7 +646,9 @@ impl App {
             }
             // The time signature dialog (spec: ui/pattern-time-signature.md §1-2).
             DHit::SigValue(den) => self.sig_list(den),
-            DHit::Accept if matches!(m.body, Body::TimeSig(_) | Body::Markers(_)) => self.answer(Reply::Button(Answer::Ok)),
+            DHit::Accept if matches!(m.body, Body::TimeSig(_) | Body::Markers(_)) => {
+                self.answer(Reply::Button(Answer::Ok))
+            }
             // Prepare for performance mode's Marker settings (spec: ui/performance-mode.md §1).
             DHit::MarkerValue(spacing) => self.marker_list(spacing),
             // Rename project, Save as and New project: a part that closes the form answers it.

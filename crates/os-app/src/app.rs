@@ -1197,6 +1197,8 @@ pub struct State {
     pub motion: std::cell::RefCell<crate::motion::Motion>,
     pub browser_scroll: f32,
     pub browser_sel: Option<String>,
+    /// The other selected rows, Shift's anchor, the last click (`crate::browser_pick`).
+    pub browser_pick: crate::browser_pick::Pick,
     pub browser_drag: Option<(String, f32, f32)>,
     /// Search text and whether the search box has keyboard focus (spec: ui/browser.md §5).
     pub browser_search: String,
@@ -1655,6 +1657,7 @@ impl App {
                 motion: Default::default(),
                 browser_scroll: 0.0,
                 browser_sel: None,
+                browser_pick: Default::default(),
                 browser_drag: None,
                 browser_search: String::new(),
                 browser_search_focus: false,
@@ -1989,6 +1992,8 @@ impl App {
                         let more = if files.len() > 1 { format!(" + {} more", files.len() - 1) } else { String::new() };
                         format!("Exported {}:{:02} to {name}{more}", (secs / 60.0) as u32, (secs % 60.0) as u32)
                     }
+                    // spec: audio/export.md §1d
+                    Err(e) if e.starts_with(crate::export::ABORTED) => e,
                     Err(e) => format!("Export failed: {e}"),
                 });
                 self.invalidate();
@@ -2238,6 +2243,17 @@ impl App {
                     crate::zipped_ui::export(self, p);
                 }
             }
+            Then::ExportReplace => self.export_replace(reply == crate::dialog::Reply::Button(crate::dialog::Answer::Yes)),
+            Then::GroupExport => {
+                if let Some(p) = file {
+                    self.state.message = Some(crate::group_export::export(self, p));
+                }
+            }
+            Then::GroupReplace(dir) => {
+                if reply == crate::dialog::Reply::Button(crate::dialog::Answer::Yes) {
+                    self.state.message = Some(crate::group_export::export_over(self, dir));
+                }
+            }
             Then::FactoryFolder => {
                 if let Some(p) = file {
                     self.set_factory_folder(Some(p));
@@ -2364,6 +2380,11 @@ impl App {
             Then::MidiExport(piano) => {
                 if let Some(p) = file {
                     self.midi_export_chosen(p, piano);
+                }
+            }
+            Then::RecordTo(t) => {
+                if let Some(p) = file {
+                    self.rec_file_chosen(t, p);
                 }
             }
         }
@@ -4595,6 +4616,8 @@ impl App {
         if let Some((name, p)) = &self.state.session.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
             crate::loading_ui::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
+            let hover = crate::export_abort::button_rect(canvas.size()).contains(self.mouse.0, self.mouse.1);
+            crate::export_abort::paint(canvas, &self.theme.colors, hover);
         }
     }
 
@@ -9627,6 +9650,7 @@ impl App {
             // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
             MenuCmd::Settings(tab) => self.open_settings(tab),
             MenuCmd::ExportZip => crate::zipped_ui::export_dialog(self),
+            MenuCmd::ExportGroups => crate::group_export::ask_folder(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             MenuCmd::Sampler => {
                 if let Some(index) = self.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER) {

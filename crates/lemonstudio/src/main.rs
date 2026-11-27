@@ -800,6 +800,13 @@ impl ApplicationHandler for Shell {
             _ => false,
         };
         if press && self.app.loading() {
+            // A running export's Abort button and Escape still work (spec: audio/export.md §1d).
+            let escape = matches!(&event, WindowEvent::KeyboardInput { event, .. }
+                if event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape));
+            let click = matches!(&event, WindowEvent::MouseInput { button: MouseButton::Left, .. });
+            if (escape || click) && self.app.loading_press(escape) {
+                window.request_redraw();
+            }
             return;
         }
         // Linux: a wheel turn over a docked plugin window is the plugin window's alone; nothing behind it scrolls

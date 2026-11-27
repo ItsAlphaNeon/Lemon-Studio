@@ -105,6 +105,9 @@ pub struct Session {
     pub audio_rec: Option<crate::one_click::AudioRec>,
     /// Disk recording into the armed mixer tracks under way (spec: audio/track-io.md §2.5).
     pub track_rec: Option<crate::track_rec::TrackRec>,
+    /// The files chosen for mixer tracks' next recordings (the disk-record button's right click; spec:
+    /// audio/disk-recording.md §3): kept until the track records, not saved.
+    pub rec_files: std::collections::HashMap<u16, std::path::PathBuf>,
     /// Playback: the audio thread and what it plays (`crate::transport`). Last, so it goes after the plugins it plays.
     pub transport: crate::transport::Transport,
 }
@@ -223,6 +226,7 @@ impl Session {
             rec: Default::default(),
             audio_rec: None,
             track_rec: None,
+            rec_files: Default::default(),
             transport,
         }
     }
