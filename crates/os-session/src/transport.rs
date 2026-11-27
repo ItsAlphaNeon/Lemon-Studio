@@ -3300,7 +3300,9 @@ mod tests {
         let t0 = Instant::now();
         t.play(&project, PlayMode::Pattern(1), 0.0);
         wait_for(|| t.seconds() > 0.0);
-        assert!(t0.elapsed() < Duration::from_millis(200), "plays at once: {:?}", t0.elapsed());
+        // Loose on purpose: shared CI runners (macOS above all) took up to 239 ms here. The device count below is
+        // what proves the stream was reused; this only catches a Play that waits on something.
+        assert!(t0.elapsed() < Duration::from_millis(1000), "plays at once: {:?}", t0.elapsed());
         t.stop();
         sleep(50);
         assert_eq!(t.device_opens(), opens + 1);
