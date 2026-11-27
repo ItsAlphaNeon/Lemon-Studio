@@ -607,7 +607,13 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
 
     let enabled = track.is_none_or(|m| m.enabled);
     ui.hit(Rect::new(kx - 7.0, ly.y(LED_Y) - 7.0, 14.0, 14.0), Action::Mix(MHit::Led(n)), "Mute / solo");
-    led(ui, kx, ly.y(LED_Y), enabled);
+    if track.is_some_and(|m| m.mute_lock) {
+        // The mute lock (spec: ui/mixer-selection.md §4): a padlock in the LED's place, green on, grey muted.
+        let col = if enabled { ui.t.led(0xa0dd48) } else { ui.t.s(0x7f868a) };
+        icons::draw(ui.c, Icon::Lock, Rect::new(kx - 6.0, ly.y(LED_Y) - 6.0, 12.0, 12.0), col);
+    } else {
+        led(ui, kx, ly.y(LED_Y), enabled);
+    }
     let pan = KnobId::MixPan(n);
     ui.hit(Rect::new(kx - 14.0, ly.y(PAN_Y) - 14.0, 28.0, 28.0), Action::Knob(pan), s.knob_text(pan));
     mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob_at(pan, kx, ly.y(PAN_Y), 16.0), Some(true));

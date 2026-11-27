@@ -158,6 +158,44 @@ pub fn name_submix(s: &mut State, t: u16, text: &str) {
     }
 }
 
+/// Left click on track `n`'s mute / solo LED with these modifiers (spec: ui/mixer-selection.md §4, §4.1): Ctrl solos
+/// (again: all on), Alt alt-solos, Shift toggles the mute lock; a plain click mutes or turns on the track, or every
+/// selected track when `n` is one of several selected (the selection stays). Ctrl+Shift adds the track to the
+/// selection as on a strip (ui/mixer.md §2) and toggles it. No undo step, as the plain click.
+pub fn led_click(s: &mut State, n: u16, ctrl: bool, shift: bool, alt: bool) -> Option<String> {
+    let group = in_group(s, n);
+    if !group {
+        select(s, n, ctrl && shift);
+    }
+    track_ids(s);
+    let m = track(&s.session, n)?;
+    let (on, locked) = (!m.enabled, m.mute_lock);
+    if alt {
+        solo_with(s, n, true);
+    } else if ctrl && !shift {
+        solo_with(s, n, false);
+    } else if shift && !ctrl {
+        apply_quietly(s, vec![set_track!(s, n, mute_lock: !locked)?]);
+    } else {
+        let tracks = if group { selected(s) } else { vec![n] };
+        let c = tracks.into_iter().filter_map(|t| set_track!(s, t, enabled: on)).collect();
+        apply_quietly(s, c);
+    }
+    changed(&mut s.session);
+    None
+}
+
+/// Right click on track `n`'s LED (spec: ui/mixer.md §3, ui/mixer-selection.md §4.1): solo, or back to all on; on one of
+/// several selected tracks, the selected tracks are soloed together, and a second right click leaves them soloed.
+pub fn led_right(s: &mut State, n: u16) {
+    if in_group(s, n) {
+        let tracks = selected(s);
+        solo_set(s, &tracks, false, false);
+    } else {
+        solo(s, n);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +391,138 @@ mod tests {
             (Some(0.8), Some(0.8), "Bus 8".to_string(), "Bus 12".to_string())
         );
         assert!((1..=inserts(s)).all(|t| !track(s, t).unwrap().separator), "not contiguous: no group");
+    }
+
+    fn on(a: &App, t: u16) -> bool {
+        track(&a.state.session, t).unwrap().enabled
+    }
+
+    fn led(a: &mut App, n: u16, ctrl: bool, shift: bool, alt: bool) {
+        (a.ctrl, a.shift, a.alt) = (ctrl, shift, alt);
+        hit(a, MHit::Led(n));
+        (a.ctrl, a.shift, a.alt) = (false, false, false);
+    }
+
+    /// spec: ui/mixer-selection.md §4: Ctrl+click solos (again: all on), Alt+click keeps the tracks routed in, Shift+click
+    /// locks: a locked track keeps its state through solo and unsolo, a plain click still toggles it.
+    #[test]
+    fn led_modifier_clicks_and_the_mute_lock() {
+        let mut a = app();
+        led(&mut a, 4, true, false, false);
+        assert!(on(&a, 4) && !on(&a, 3) && !on(&a, 5), "Ctrl+click solos");
+        led(&mut a, 4, true, false, false);
+        assert!((1..=8).all(|t| on(&a, t)), "again: all on");
+
+        // Alt: 2 and 3 route into 6 only; alt solo of 6 keeps them.
+        select_all(&mut a, &[2, 3, 6]);
+        let c = cmd(&entry(&a, 6), "Route selected to this track only");
+        crate::playlist::run(&mut a, c);
+        led(&mut a, 6, false, false, true);
+        assert!(on(&a, 2) && on(&a, 3) && on(&a, 6) && !on(&a, 4), "alt solo");
+        led(&mut a, 6, false, false, true);
+        assert!((1..=8).all(|t| on(&a, t)));
+
+        // Shift: the lock, saved in the track; locked on stays on under a solo, locked muted stays muted after it.
+        led(&mut a, 7, false, true, false);
+        assert!(track(&a.state.session, 7).unwrap().mute_lock && on(&a, 7));
+        led(&mut a, 8, false, false, false);
+        led(&mut a, 8, false, true, false);
+        assert!(track(&a.state.session, 8).unwrap().mute_lock && !on(&a, 8));
+        right(&mut a, MHit::Led(1));
+        assert!(on(&a, 1) && !on(&a, 2) && on(&a, 7) && !on(&a, 8), "7 stays on, 8 stays muted");
+        right(&mut a, MHit::Led(1));
+        assert!(on(&a, 2) && on(&a, 7) && !on(&a, 8), "unsolo: 8 still muted");
+        led(&mut a, 8, false, false, false);
+        assert!(on(&a, 8), "a plain click still toggles a locked track");
+        led(&mut a, 8, false, true, false);
+        assert!(!track(&a.state.session, 8).unwrap().mute_lock, "Shift+click again unlocks");
+    }
+
+    /// spec: ui/mixer-selection.md §4.1: on one of several selected tracks, a click mutes them all and keeps the
+    /// selection; a right click solos them together and a second one leaves them soloed.
+    #[test]
+    fn led_clicks_on_a_selection() {
+        let mut a = app();
+        select_all(&mut a, &[13, 14, 15]);
+        led(&mut a, 14, false, false, false);
+        assert!(!on(&a, 13) && !on(&a, 14) && !on(&a, 15) && on(&a, 12));
+        assert_eq!(selected(&a.state).len(), 3, "the selection stays");
+        led(&mut a, 13, false, false, false);
+        assert!(on(&a, 13) && on(&a, 14) && on(&a, 15));
+        right(&mut a, MHit::Led(14));
+        assert!(on(&a, 13) && on(&a, 14) && on(&a, 15) && !on(&a, 12) && !on(&a, 1));
+        right(&mut a, MHit::Led(14));
+        assert!(on(&a, 13) && !on(&a, 12), "no toggle back");
+        right(&mut a, MHit::Led(2));
+        right(&mut a, MHit::Led(2));
+        assert!((1..=16).all(|t| on(&a, t)), "a solo and unsolo elsewhere brings all back");
+    }
+
+    /// spec: ui/mixer.md §4: on selected faders, Ctrl drags at a quarter of the rate and Shift gives them the pressed
+    /// one's value; after a Shift+drag a plain drag moves from the levels kept before it.
+    #[test]
+    fn fader_drags_on_a_selection() {
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        let mut a = app();
+        a.state.z = vec![crate::app::Win::Mixer];
+        let set = |a: &mut App, t: u16, v: f64| crate::edit::mixer::track_mut(&mut a.state.session, t).unwrap().volume = Some(v);
+        let vol = |a: &App, t: u16| volume(&a.state.session, t);
+        for (t, v) in [(3, 0.5), (4, 0.7), (5, 0.6)] {
+            set(&mut a, t, v);
+        }
+        select_all(&mut a, &[3, 5, 4]);
+        a.invalidate();
+        a.paint(&mut c, None);
+        let r = a.hits.iter().rev().find(|h| h.action == crate::app::Action::Fader(4)).map(|h| h.rect).unwrap();
+        let drag = |a: &mut App, dy: f32, ctrl: bool, shift: bool| {
+            (a.ctrl, a.shift) = (ctrl, shift);
+            a.mouse_move(r.cx(), r.y + 2.0);
+            a.mouse_down();
+            a.mouse_move(r.cx(), r.y + 2.0 + dy);
+            a.mouse_up();
+            (a.ctrl, a.shift) = (false, false);
+        };
+        drag(&mut a, 40.0, false, false);
+        let plain = 0.7 - vol(&a, 4);
+        crate::history_ui::undo(&mut a.state);
+        assert_eq!(vol(&a, 4), 0.7);
+        drag(&mut a, 40.0, true, false);
+        assert!(((0.7 - vol(&a, 4)) - plain / 4.0).abs() < 1e-9, "a quarter: {} against {plain}", 0.7 - vol(&a, 4));
+        assert!(vol(&a, 3) < 0.5 && vol(&a, 5) < 0.6, "the others follow");
+        assert_eq!(selected(&a.state).len(), 3);
+        crate::history_ui::undo(&mut a.state);
+        let kept = (vol(&a, 3), vol(&a, 5));
+        drag(&mut a, -40.0, false, true);
+        let v = vol(&a, 4);
+        assert!(v > 0.7 && vol(&a, 3) == v && vol(&a, 5) == v, "Shift: all at the pressed one's value");
+        drag(&mut a, 10.0, false, false);
+        assert!(vol(&a, 3) < vol(&a, 5) && vol(&a, 5) < vol(&a, 4), "the kept differences come back: {kept:?}");
+    }
+
+    /// spec: ui/mixer-selection.md §4: a locked track's LED is a padlock, green while the track is on, grey muted.
+    #[test]
+    fn mute_lock_paints_a_padlock() {
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        let mut a = app();
+        a.state.z = vec![crate::app::Win::Mixer];
+        let mut shot = |a: &mut App| {
+            a.invalidate();
+            a.paint(&mut c, None);
+            let r = a.hits.iter().rev().find(|h| h.action == crate::app::Action::Mix(MHit::Led(7))).map(|h| h.rect).unwrap();
+            let px: Vec<_> = (r.y as u32..r.bottom() as u32)
+                .flat_map(|y| (r.x as u32..r.right() as u32).map(move |x| (x, y)))
+                .filter_map(|(x, y)| c.pixmap.pixel(x, y).map(|p| (p.red(), p.green(), p.blue())))
+                .collect();
+            px
+        };
+        let plain = shot(&mut a);
+        led(&mut a, 7, false, true, false);
+        let locked = shot(&mut a);
+        assert_ne!(plain, locked, "the padlock replaces the LED");
+        assert!(locked.iter().any(|&(r, g, b)| g > r + 30 && g > b + 30), "green while on");
+        led(&mut a, 7, false, false, false);
+        let muted = shot(&mut a);
+        assert!(!muted.iter().any(|&(r, g, b)| g > r + 30 && g > b + 30), "grey while muted");
+        assert_ne!(muted, plain);
     }
 }

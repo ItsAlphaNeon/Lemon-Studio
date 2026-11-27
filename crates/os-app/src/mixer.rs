@@ -300,12 +300,26 @@ pub struct MixerUi {
 pub struct FaderGroup {
     levels: Vec<(u16, f64)>,
     pub moved: Option<(u16, f64)>,
+    /// The value a Shift+drag gave every selected fader: it leaves the kept levels as they were (spec: ui/mixer.md §4).
+    pub shifted: Option<f64>,
 }
 
 impl FaderGroup {
+    /// A drag on the selected faders took the pressed one, `track`, to `v`; `same`: a Shift+drag, all of them to `v`.
+    pub fn moved_to(&mut self, track: u16, v: f64, same: bool) {
+        if same {
+            self.shifted = Some(v);
+        } else {
+            (self.moved, self.shifted) = (Some((track, v)), None);
+        }
+    }
+
     /// Whether these are the levels of the tracks `sel` (sorted), with every fader where the last drag left it.
     fn holds(&self, s: &crate::session::Session, sel: &[u16]) -> bool {
         let level_of = |t: u16| self.levels.iter().find(|l| l.0 == t).map_or(0.0, |l| l.1);
+        if let Some(v) = self.shifted {
+            return self.levels.iter().map(|l| l.0).eq(sel.iter().copied()) && sel.iter().all(|&t| volume(s, t) == v);
+        }
         self.levels.iter().map(|l| l.0).eq(sel.iter().copied())
             && self.levels.iter().all(|&(t, level)| {
                 let left = match self.moved {
@@ -352,7 +366,7 @@ pub fn group_levels(s: &mut State) -> Vec<(u16, f64)> {
     sel.sort_unstable();
     if !s.mixer.faders.holds(&s.session, &sel) {
         let levels = sel.iter().map(|&t| (t, volume(&s.session, t))).collect();
-        s.mixer.faders = FaderGroup { levels, moved: None };
+        s.mixer.faders = FaderGroup { levels, moved: None, shifted: None };
     }
     s.mixer.faders.levels.clone()
 }
@@ -494,11 +508,7 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             None
         }
         MHit::Led(n) => {
-            select(s, n, ctrl);
-            track_ids(s);
-            let on = !track(&s.session, n)?.enabled;
-            apply_quietly(s, vec![set_track!(s, n, enabled: on)?]);
-            None
+            selection::led_click(s, n, ctrl, shift, app.alt)
         }
         MHit::Polarity(n) => {
             select(s, n, ctrl);
@@ -716,7 +726,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             s.playlist.popup = Some(track_menu(s, n, at.0, at.1));
         }
         MHit::Add => s.playlist.popup = Some(track_menu(s, s.selected_mixer, at.0, at.1)),
-        MHit::Led(n) => solo(s, n),
+        MHit::Led(n) => selection::led_right(s, n),
         MHit::Route(dst) => {
             let items = vec![
                 PItem::new("Route to this track", Cmd::Mixer(MCmd::Route { dst, only: false, side: false })),
@@ -836,15 +846,24 @@ pub fn solo(s: &mut State, n: u16) {
 /// previous state after solo" on, to the states from before the first solo (a solo moved to another track keeps them;
 /// spec: ui/settings-choices.md "Miscellaneous").
 pub fn solo_with(s: &mut State, n: u16, alt: bool) {
-    let mut keep = reach(&s.session, n, true);
-    if alt {
-        keep.extend(reach(&s.session, n, false));
+    solo_set(s, &[n], alt, true);
+}
+
+/// Solo `tracks` together (`solo_with` for each, one set kept on); `toggle`: back to all on when that set is already
+/// the audible one. Tracks with the mute lock stay as they are (spec: ui/mixer-selection.md §4).
+pub fn solo_set(s: &mut State, tracks: &[u16], alt: bool, toggle: bool) {
+    let mut keep = Vec::new();
+    for &n in tracks {
+        keep.extend(reach(&s.session, n, true));
+        if alt {
+            keep.extend(reach(&s.session, n, false));
+        }
     }
     keep.push(0);
     // By track id: the solo's memory stays with its tracks when they move.
     track_ids(s);
     let keep: Vec<u32> = keep.iter().filter_map(|&t| s.session.project.mixer.iter().find(|m| m.index == t)).map(|m| m.id.0).collect();
-    let soloed = audible_ids(&s.session, &keep);
+    let soloed = toggle && audible_ids(&s.session, &keep);
     // A solo still in effect (the last solo's set, untouched since) keeps the states saved when it started.
     let in_solo = s.mixer.solo.as_ref().is_some_and(|(k, _)| audible_ids(&s.session, k));
     let before = match s.mixer.solo.take() {
@@ -853,7 +872,14 @@ pub fn solo_with(s: &mut State, n: u16, alt: bool) {
     };
     let back = soloed && in_solo && crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO);
     // Every track's mute state, the hidden last one's too, as a click on a light sets it (no undo step).
-    let lights: Vec<(u16, bool, bool)> = s.session.project.mixer.iter().map(|m| (m.index, m.enabled, if back { before.iter().find(|b| b.0 == m.id.0).is_none_or(|b| b.1) } else { soloed || keep.contains(&m.id.0) })).collect();
+    let lights: Vec<(u16, bool, bool)> = s
+        .session
+        .project
+        .mixer
+        .iter()
+        .filter(|m| !m.mute_lock)
+        .map(|m| (m.index, m.enabled, if back { before.iter().find(|b| b.0 == m.id.0).is_none_or(|b| b.1) } else { soloed || keep.contains(&m.id.0) }))
+        .collect();
     let cmds = lights.into_iter().filter(|&(_, now, on)| now != on).filter_map(|(t, _, on)| set_track!(s, t, enabled: on)).collect();
     apply_quietly(s, cmds);
     if !soloed {
@@ -862,9 +888,9 @@ pub fn solo_with(s: &mut State, n: u16, alt: bool) {
     changed(&mut s.session);
 }
 
-/// Whether exactly the tracks `keep` (by id) are on, the master aside.
+/// Whether exactly the tracks `keep` (by id) are on, the master and the mute-locked tracks aside.
 fn audible_ids(s: &crate::session::Session, keep: &[u32]) -> bool {
-    s.project.mixer.iter().all(|m| m.index == 0 || keep.contains(&m.id.0) == m.enabled)
+    s.project.mixer.iter().all(|m| m.index == 0 || m.mute_lock || keep.contains(&m.id.0) == m.enabled)
 }
 
 /// The rack's selected channels (the piano roll's channel when none is selected), in rack order.

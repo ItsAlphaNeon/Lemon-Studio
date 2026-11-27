@@ -285,6 +285,9 @@ pub enum Command {
         monitor: Option<String>,
         #[serde(default)]
         armed: Option<bool>,
+        /// The mute lock: solo and unsolo leave the track as it is.
+        #[serde(default)]
+        mute_lock: Option<bool>,
     },
     /// The track back to a new track's settings, routed to the master; its name, colour, levels... go, its effects stay.
     ResetTrack { track: u32 },
@@ -1538,6 +1541,7 @@ impl Command {
             rec_source: None,
             monitor: None,
             armed: None,
+            mute_lock: None,
         }
     }
 
@@ -1597,7 +1601,7 @@ impl Command {
             | Command::SetProject { .. } => Taken::Settings(Box::new(Settings::of(s))),
             Command::SetChannel { channel, .. } | Command::LoadSample { channel, .. } | Command::SetMisc { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
             Command::SetStartValue { target, .. } => Taken::Start(*target, crate::init::placed(s, *target)),
-            Command::SetTrack { track, name: None, color: None, volume: None, pan: None, stereo: None, enabled: Some(_), polarity: None, swap: None, effects_enabled: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, audio_in: None, audio_out: None, rec_source: None, monitor: None, armed: None } => {
+            Command::SetTrack { track, name: None, color: None, volume: None, pan: None, stereo: None, enabled: Some(_), polarity: None, swap: None, effects_enabled: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, audio_in: None, audio_out: None, rec_source: None, monitor: None, armed: None, mute_lock: None } => {
                 Taken::Track(Box::new(p.mixer[track_place_muted(p, *track)?].clone()))
             }
             Command::SetTrack { track, .. } | Command::ResetTrack { track } | Command::SetEq { track, .. } | Command::SetSlot { track, .. } | Command::AddEffect { track, .. } | Command::RemoveEffect { track, .. } => {
@@ -2277,7 +2281,7 @@ impl Command {
                 crate::edit::mixer::delete_track_in(s, n);
                 none
             }
-            Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled, separator, dock, threaded, latency_in, latency_out, audio_in, audio_out, rec_source, monitor, armed } => {
+            Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled, separator, dock, threaded, latency_in, latency_out, audio_in, audio_out, rec_source, monitor, armed, mute_lock } => {
                 let monitor = match monitor.as_deref() {
                     None => None,
                     Some("off") => Some(os_model::MONITOR_OFF),
@@ -2337,6 +2341,9 @@ impl Command {
                 }
                 if let Some(v) = separator {
                     m.separator = v;
+                }
+                if let Some(v) = mute_lock {
+                    m.mute_lock = v;
                 }
                 if let Some(v) = dock {
                     m.dock = v;
