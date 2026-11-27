@@ -158,8 +158,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     lit.extend(s.piano.typed.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| k));
     lit.extend(f.sounding.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| i32::from(k)));
     ui.live(Live::Sounding, l.keys);
-    keyboard(ui, &l, &g, &lit);
-    grid(ui, &l, &g, range);
+    keyboard(ui, &l, &g, &lit, piano::label_root(s));
+    grid(ui, &l, &g, range, &piano::highlight_spans(s), s.piano.highlights);
 
     // Notes: ghosts of the other channels first (when shown, Alt+V), then this channel's (§5).
     ui.hit(l.grid, Action::PianoGrid, "Piano roll: click to add a note, drag a note to move it or its end to resize, right-click to delete");
@@ -506,7 +506,9 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
     ui.c.pop_clip();
 }
 
-fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
+/// `root`: the pitch class whose keys carry the octave labels, C unless a scale is chosen (spec:
+/// ui/piano-scale-highlighting.md §4).
+fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32], root: u8) {
     let t = ui.t;
     let k = l.keys;
     ui.hit(k, Action::PianoKeys, "Keyboard");
@@ -549,13 +551,20 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
                     ui.c.fill_rect_gradient(Rect::new(k.x, y, 45.0, row - 1.0), left, left, 0.0);
                     ui.c.fill_rect(Rect::new(k.x + 45.0, y - half, k.w - 46.0, row - 1.0 + half), t.key_c);
                 }
-                if row >= 10.0 {
+                if row >= 10.0 && root == 0 {
                     ui.c.text_right(Font::new(12), k.right() - 4.0, y + 1.0 + (row - ROW) / 2.0, t.key_label, &key_name(key));
                 }
                 ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep);
             }
             5 => ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep),
             _ => {}
+        }
+        // A scale's root (not C) on a white key: the label on a band of the C key's colour over its right end.
+        if root != 0 && row >= 10.0 && key.rem_euclid(12) == i32::from(root) && !is_black(key) {
+            if !lit.contains(&key) {
+                ui.c.fill_rect(Rect::new(k.x + 45.0, y, k.w - 46.0, row - 1.0), t.key_c);
+            }
+            ui.c.text_right(Font::new(12), k.right() - 4.0, y + 1.0 + (row - ROW) / 2.0, t.key_label, &key_name(key));
         }
     }
     for key in lo..=hi {
@@ -573,6 +582,13 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
                 let w = if i == 0 { 10.0 } else if i == 5 { 3.0 } else { 8.0 };
                 ui.c.fill_rect(Rect::new(x, y, w, row), c);
             }
+        }
+    }
+    // A scale's root on a black key: light text on the key itself.
+    if root != 0 && is_black(i32::from(root)) && row >= 10.0 {
+        for key in (lo..=hi).filter(|k| k.rem_euclid(12) == i32::from(root)) {
+            let y = g.y_of(key);
+            ui.c.text_right(Font::new(12), k.x + 47.0, y + 1.0 + (row - ROW) / 2.0, t.key_white, &key_name(key));
         }
     }
     ui.c.pop_clip();
@@ -610,34 +626,52 @@ fn columns(ui: &mut Ui, g: &Geom, area: Rect, bands: &[(f32, f32, Color)], bar: 
     }
 }
 
-fn grid(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>) {
-    grid_rows(ui, l, g, l.grid, false);
+/// `spans`: the light rows from each tick on ([`piano::highlight_spans`]); `highlights`: Note grid highlights.
+fn grid(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, spans: &[(u32, u16)], highlights: bool) {
+    grid_rows(ui, l, g, l.grid, false, spans, highlights);
     if let Some((x0, x1)) = range {
         let r = Rect::span(x0, x1, l.grid.y, l.grid.bottom()).intersect(&l.grid);
         if r.w > 0.0 {
-            grid_rows(ui, l, g, r, true);
+            grid_rows(ui, l, g, r, true, spans, highlights);
         }
     }
 }
 
-/// The note-grid rows and columns, clipped to `clip` (`selecting` = the red time-selection tint).
-fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
+/// The note-grid rows and columns, clipped to `clip` (`selecting` = the red time-selection tint). Rows of the pitch
+/// classes light in `spans` from each tick on take the light row colour, the others the dark one (spec:
+/// ui/piano-scale-highlighting.md §3).
+fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool, spans: &[(u32, u16)], highlights: bool) {
     let t = ui.t;
     let gr = l.grid;
     let (white, black) = if selecting { (t.pr_row_sel, t.pr_row_black_sel) } else { (t.pr_row, t.pr_row_black) };
-    ui.c.push_clip(clip);
-    let (lo, hi) = g.visible_keys();
-    let mut bands = Vec::with_capacity((hi - lo + 1).max(0) as usize);
-    for key in lo..=hi {
-        let y = g.y_of(key);
-        let fill = if is_black(key) { black } else { white };
-        ui.c.fill_rect(Rect::new(gr.x, y, gr.w, g.row - 1.0), fill);
-        ui.c.fill_rect(Rect::new(gr.x, y + g.row - 1.0, gr.w, 1.0), sub(t, white, 0x0a));
-        bands.push((y, g.row - 1.0, fill));
-    }
     let bar = if selecting { ui.t.s(0x0e080c) } else { bar_line(t) };
-    columns(ui, g, gr, &bands, bar);
-    ui.c.pop_clip();
+    let (lo, hi) = g.visible_keys();
+    for (i, &(from, light)) in spans.iter().enumerate() {
+        let x0 = if i == 0 { gr.x } else { g.x_of(from as f32).round().max(gr.x) };
+        let x1 = spans.get(i + 1).map_or(gr.right(), |&(to, _)| g.x_of(to as f32).round().min(gr.right()));
+        let part = Rect::span(x0, x1.max(x0), gr.y, gr.bottom()).intersect(&clip);
+        if part.w <= 0.0 {
+            continue;
+        }
+        ui.c.push_clip(part);
+        let mut bands = Vec::with_capacity((hi - lo + 1).max(0) as usize);
+        for key in lo..=hi {
+            let y = g.y_of(key);
+            let pc = key.rem_euclid(12);
+            let fill = if light & 1 << pc != 0 { white } else { black };
+            ui.c.fill_rect(Rect::new(gr.x, y, gr.w, g.row - 1.0), fill);
+            // The line under B (the octave) is a little darker, more so with Note grid highlights off (§3).
+            let d = match (pc, highlights) {
+                (11, true) => 0x0c,
+                (11, false) => 0x12,
+                _ => 0x0a,
+            };
+            ui.c.fill_rect(Rect::new(gr.x, y + g.row - 1.0, gr.w, 1.0), sub(t, white, d));
+            bands.push((y, g.row - 1.0, fill));
+        }
+        columns(ui, g, gr, &bands, bar);
+        ui.c.pop_clip();
+    }
 }
 
 fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Option<u16>, sel: &[usize]) {

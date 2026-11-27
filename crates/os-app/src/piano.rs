@@ -108,6 +108,10 @@ pub struct PianoState {
     pub row_h: f32,
     /// Ghost channels: other channels' notes of the pattern drawn dimmed (§5, Alt+V).
     pub ghosts: bool,
+    /// Note grid highlights (Alt+B, spec: ui/piano-scale-highlighting.md §1): off, every row is drawn light.
+    pub highlights: bool,
+    /// The root note Scale highlighting ▸ gives the next scale picked (§1), while no scale is chosen.
+    pub scale_root: u8,
     /// Random state of the Randomize and humanize tools (§11).
     pub rng: u64,
     /// The grid / event panel split (a program setting, spec: ui/event-panel-splitter.md).
@@ -143,6 +147,8 @@ impl Default for PianoState {
             range: None,
             row_h: ROW,
             ghosts: true,
+            highlights: true,
+            scale_root: 0,
             rng: crate::clip_colors::clock() | 1,
             split: crate::piano_split::load(),
             split_click: None,
@@ -176,7 +182,7 @@ impl PianoState {
 
     /// Forget everything tied to the previous project.
     pub fn reset(&mut self) {
-        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, tool: self.tool, rng: self.rng, split: self.split, snap: self.snap, ..PianoState::default() };
+        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, highlights: self.highlights, tool: self.tool, rng: self.rng, split: self.split, snap: self.snap, ..PianoState::default() };
     }
 }
 
@@ -786,6 +792,46 @@ pub fn zoom_time(s: &mut State, g: &Geom, x: f32, from: f32, notches: f32) {
 
 #[cfg(test)]
 mod tests {
+    /// What the grid shades from each tick on (spec: ui/piano-scale-highlighting.md §2, §6), and what it looks like:
+    /// a scale's rows, a key marker's from its tick, every row light with Note grid highlights off.
+    #[test]
+    fn scale_highlighting_shades_rows() {
+        use crate::app::{Action, App, Win};
+        use os_model::{scale_keys, ScaleHighlight, TimeMarker};
+        let mut app = App::new(None);
+        assert_eq!(highlight_spans(&app.state), vec![(0, scale_keys(0, 0))], "Black notes");
+        app.state.session.project.get_mut().scale_highlight = Some(ScaleHighlight { mode: 0, root: 2 });
+        let bar = u32::from(app.state.session.project.ppq) * 4;
+        pattern_mut(&mut app.state.session).markers.push(TimeMarker::key(bar, 9, 12));
+        assert_eq!(highlight_spans(&app.state), vec![(0, scale_keys(0, 2)), (bar, scale_keys(12, 9))]);
+        assert_eq!(label_root(&app.state), 2);
+
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        app.act(Action::ToggleWin(Win::PianoRoll));
+        app.paint(&mut c, None);
+        app.paint(&mut c, None);
+        let g = app.piano_geom().expect("the piano roll is open");
+        let (lo, hi) = g.visible_keys();
+        let base = (lo + 11) / 12 * 12;
+        assert!(base + 11 <= hi, "an octave in view: {lo}..{hi}");
+        let mut px = vec![0u32; 1920 * 1080];
+        let row = |px: &[u32], key: i32, tick: u32| {
+            let x = g.x_of((tick + g.step / 2) as f32) as usize;
+            px[(g.y_of(key) + g.row / 2.0) as usize * 1920 + x] & 0xffffff
+        };
+        c.copy_to_xrgb(&mut px);
+        let (light, dark) = (row(&px, base + 4, 0), row(&px, base + 3, 0));
+        assert_ne!(light, dark, "E is in D major, D# is not");
+        let pcs = |px: &[u32], tick: u32| -> u16 { (0..12).filter(|&pc| row(px, base + pc, tick) == light).fold(0, |k, pc| k | 1 << pc) };
+        assert_eq!(pcs(&px, 0), scale_keys(0, 2), "D major before the marker");
+        assert_eq!(pcs(&px, bar), scale_keys(12, 9), "A minor pentatonic from the key marker on");
+
+        app.state.piano.highlights = false;
+        app.paint(&mut c, None);
+        c.copy_to_xrgb(&mut px);
+        assert_eq!((pcs(&px, 0), pcs(&px, bar)), (0xFFF, 0xFFF), "Note grid highlights off: every row light");
+    }
+
     #[test]
     fn new_notes_copy_controls_not_place_or_mute() {
         use super::*;
@@ -1208,4 +1254,40 @@ mod tests {
         }
         set_check(&AUTO_ZOOM_PIANO, false);
     }
+}
+
+/// The grid's light rows from each tick on (spec: ui/piano-scale-highlighting.md §2, §6), as (tick, pitch classes with
+/// bit `pc`), the first at tick 0: the Scale highlighting setting, then each key marker of the pattern from its tick.
+/// With Note grid highlights off, every row is light. Before the first key marker the setting shades (Lemon Studio's
+/// choice: FL was not measured with a key marker after tick 0 alone).
+pub fn highlight_spans(s: &State) -> Vec<(u32, u16)> {
+    if !s.piano.highlights {
+        return vec![(0, 0xFFF)];
+    }
+    let pat = s.session.project.pattern(s.pattern());
+    let setting = s.session.project.scale_highlight.unwrap_or_default();
+    let base = setting.light_keys().unwrap_or_else(|| automatic(pat.map_or(&[][..], |p| &p.notes)));
+    let mut keys: Vec<(u32, u16)> = pat.map_or(&[][..], |p| &p.markers).iter().filter_map(|m| Some((m.position, m.light_keys()?))).collect();
+    keys.sort_by_key(|&(at, _)| at);
+    let mut v = vec![(0, base)];
+    for (at, k) in keys {
+        match v.last_mut() {
+            Some(last) if last.0 == at => last.1 = k,
+            _ => v.push((at, k)),
+        }
+    }
+    v
+}
+
+/// Automatic's light rows for `notes` (spec: ui/piano-scale-highlighting.md §2): every row for none, else the scale
+/// `os_model::detect_scale` finds (Lemon Studio's rule).
+pub fn automatic(notes: &[Note]) -> u16 {
+    let used = notes.iter().fold(0u16, |m, n| m | 1 << (n.key % 12));
+    let first = notes.iter().min_by_key(|n| (n.position, n.key)).map_or(0, |n| (n.key % 12) as u8);
+    os_model::detect_scale(used, first).map_or(0xFFF, |(i, root)| os_model::scale_keys(i, root))
+}
+
+/// The pitch class the keyboard's root labels sit on (spec: ui/piano-scale-highlighting.md §4).
+pub fn label_root(s: &State) -> u8 {
+    s.session.project.scale_highlight.unwrap_or_default().label_root()
 }

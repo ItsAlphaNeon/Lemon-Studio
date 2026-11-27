@@ -49,6 +49,10 @@ mod id {
     pub const CURRENT_ARRANGEMENT: u8 = 100;
     /// Playlist view: scroll, time zoom, track height (spec: flp/events/playlist.md "Playlist view").
     pub const PLAYLIST_VIEW: u8 = 242;
+    /// The piano roll's scale highlighting: i32 mode, i32 root (spec: ui/piano-scale-highlighting.md §5).
+    pub const SCALE_HIGHLIGHT: u8 = 243;
+    /// The event that ends an FL file, after 243 (spec: flp/events/mixer.md "Where the mixer sits"; meaning unknown).
+    pub const FILE_END: u8 = 47;
 
     pub const CH_START: u8 = 64;
     pub const CH_END: u8 = 51;
@@ -409,6 +413,8 @@ struct Layout {
     current_pattern: Option<usize>,
     current_arrangement: Option<usize>,
     playlist_view: Option<usize>,
+    /// Event 243, near the end of the file.
+    scale_highlight: Option<usize>,
     channels: Vec<ChannelLoc>,
     patterns: BTreeMap<u16, PatternLoc>,
     /// Index just past the last pattern metadata block.
@@ -695,6 +701,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                 }
             }
             (Region::Mixer, id::MX_PARAMS) => l.mixer_params = Some(i),
+            (_, id::SCALE_HIGHLIGHT) => l.scale_highlight = Some(i),
             _ => {}
         }
         i += 1;
@@ -826,6 +833,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         main_pitch: l.main_pitch.map(|i| int(&events[i]) as u16 as i16),
         main_volume: main_volume(l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[])),
         playlist_view: l.playlist_view.and_then(|i| events[i].data()).and_then(PlaylistView::from_bytes),
+        scale_highlight: l.scale_highlight.and_then(|i| events[i].data()).and_then(os_model::ScaleHighlight::from_bytes),
         work_time: l.work_time.and_then(|i| events[i].data()).and_then(work_time_from),
         show_info: l.show_info.map(|i| int(&events[i]) != 0),
         // Events 167 and 202 (spec: ui/data-folder.md §2); 202 is read as it is, empty or not.
@@ -3276,6 +3284,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             (None, None) => {}
         }
     }
+    // Scale highlighting (event 243): in place, else before the 47 that ends FL's files, else at the end.
+    if let Some(h) = project.scale_highlight.filter(|&h| Some(h) != current.scale_highlight) {
+        match l.scale_highlight {
+            Some(i) => set_data(&mut events[i], h.to_bytes()),
+            None => {
+                let at = if events.last().is_some_and(|e| e.id == id::FILE_END) { events.len() - 1 } else { events.len() };
+                inserts.push((at, Event::new(id::SCALE_HIGHLIGHT, Value::var(h.to_bytes()))));
+            }
+        }
+    }
     if let Some(at) = arr_end.filter(|_| !skip_arrangements) {
         let added: Vec<Event> = project
             .arrangements
@@ -4144,6 +4162,9 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     // The mixer follows the arrangements (spec: flp/events/mixer.md "Where the mixer sits").
     if !project.arrangements.is_empty() && !project.mixer.is_empty() {
         ev.extend(mixer_events(&project.mixer, project.main_volume, enc));
+    }
+    if let Some(h) = project.scale_highlight {
+        ev.push(Event::new(id::SCALE_HIGHLIGHT, Value::var(h.to_bytes())));
     }
     let mut header = Vec::with_capacity(6);
     header.extend(0u16.to_le_bytes()); // format
@@ -6483,6 +6504,41 @@ mod tests {
         let at = ids.iter().position(|&i| i == id::PLAYLIST_VIEW).expect("event 242 added");
         assert_eq!(ids[at + 1], id::CURRENT_ARRANGEMENT);
         assert_eq!(load(&file).unwrap().playlist_view, Some(v));
+    }
+
+    /// Scale highlighting (event 243: i32 mode, i32 root) is written at the end, reads back, takes edits in place and
+    /// is added before a closing 47 (spec: ui/piano-scale-highlighting.md §5).
+    #[test]
+    fn scale_highlight_round_trips() {
+        use os_model::ScaleHighlight;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        let d_major = ScaleHighlight { mode: 0, root: 2 };
+        p.scale_highlight = Some(d_major);
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let e = file.events().last().unwrap();
+        assert_eq!((e.id, e.data().unwrap()), (id::SCALE_HIGHLIGHT, &[0, 0, 0, 0, 2, 0, 0, 0][..]));
+        assert_eq!(load(&file).unwrap().scale_highlight, Some(d_major));
+
+        let mut edited = load(&file).unwrap();
+        edited.scale_highlight = Some(ScaleHighlight { mode: ScaleHighlight::AUTOMATIC, root: 0 });
+        apply(&edited, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(file.events().filter(|e| e.id == id::SCALE_HIGHLIGHT).count(), 1);
+        let e = file.events().last().unwrap();
+        assert_eq!(e.data().unwrap(), &[0xfd, 0xff, 0xff, 0xff, 0, 0, 0, 0][..]);
+
+        // A file without 243 that ends in 47, as FL's do, gets it right before the 47.
+        let mut bare = p.clone();
+        bare.scale_highlight = None;
+        let mut file = create(&bare).unwrap();
+        events_of_mut(&mut file).unwrap().push(Event::new(id::FILE_END, Value::U8(0)));
+        let mut file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(load(&file).unwrap().scale_highlight, None);
+        apply(&p, &mut file).unwrap();
+        let ids: Vec<u8> = file.events().map(|e| e.id).collect();
+        assert_eq!(ids[ids.len() - 2..], [id::SCALE_HIGHLIGHT, id::FILE_END]);
+        assert_eq!(load(&file).unwrap().scale_highlight, Some(d_major));
     }
 
     /// Event 223 records: `position, channel << 16 | param, value` (spec: flp/events/patterns.md).

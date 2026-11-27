@@ -3868,6 +3868,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             return None;
         }
         Cmd::Preset(c) => return crate::presets_ui::run(app, c),
+        Cmd::Piano(c @ (crate::piano_tools::NCmd::ScaleMenu | crate::piano_tools::NCmd::ScaleRoot(_))) => {
+            crate::piano_tools::scale_menu(app, c, was.as_ref());
+            app.invalidate();
+            return None;
+        }
         Cmd::Piano(c) => {
             let m = crate::piano_tools::run(app, c);
             app.invalidate();
