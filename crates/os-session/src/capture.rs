@@ -31,7 +31,11 @@ unsafe impl Sync for Ring {}
 
 impl Ring {
     pub fn new(len: usize) -> Ring {
-        Ring { buf: (0..len.max(1)).map(|_| UnsafeCell::new(0.0)).collect(), head: AtomicUsize::new(0), tail: AtomicUsize::new(0) }
+        Ring {
+            buf: (0..len.max(1)).map(|_| UnsafeCell::new(0.0)).collect(),
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+        }
     }
 
     /// Pushes `n` samples, the `k`-th being `at(k)`, as far as there is room; returns how many went in. Producer only.
@@ -156,12 +160,22 @@ impl Input {
     /// "In 1 - In 2", "In 3" (spec §2 The button and the menu).
     pub fn label(&self) -> String {
         let n = self.first + 1;
-        if self.stereo { format!("In {n} - In {}", n + 1) } else { format!("In {n}") }
+        if self.stereo {
+            format!("In {n} - In {}", n + 1)
+        } else {
+            format!("In {n}")
+        }
     }
 
     /// As kept in `settings.txt` (`rec_input`).
     pub fn key(&self) -> String {
-        format!("{}|{}|{}|{}", if self.asio { "asio" } else { "system" }, self.first, if self.stereo { "stereo" } else { "mono" }, self.device)
+        format!(
+            "{}|{}|{}|{}",
+            if self.asio { "asio" } else { "system" },
+            self.first,
+            if self.stereo { "stereo" } else { "mono" },
+            self.device
+        )
     }
 
     pub fn parse(key: &str) -> Option<Input> {
@@ -194,7 +208,8 @@ pub fn set_last_input(st: &crate::settings_file::SettingsStore, i: &Input) {
 pub fn devices() -> Vec<(String, bool, u16)> {
     let cfg = crate::audio_cfg::AudioCfg::current();
     if let Some(name) = cfg.asio_driver() {
-        let opened = crate::device::last().filter(|d| d.host == crate::device::ASIO && d.name == name).map(|d| d.inputs);
+        let opened =
+            crate::device::last().filter(|d| d.host == crate::device::ASIO && d.name == name).map(|d| d.inputs);
         return vec![(name.to_string(), true, opened.unwrap_or(2))];
     }
     #[cfg(feature = "device")]
@@ -211,9 +226,12 @@ fn system_inputs() -> Vec<(String, bool, u16)> {
     use cpal::traits::HostTrait;
     use crate::device::system_input::input_config;
     let cfg = crate::audio_cfg::AudioCfg::current();
-    let channels = |d: &cpal::Device| input_config(d).inspect_err(|e| eprintln!("audio input {e}")).map_or(0, |c| c.channels());
-    let mut v: Vec<(String, bool, u16)> =
-        crate::audio_cfg::input_device(&cfg).map(|d| (crate::audio_cfg::device_name(&d), false, channels(&d))).into_iter().collect();
+    let channels =
+        |d: &cpal::Device| input_config(d).inspect_err(|e| eprintln!("audio input {e}")).map_or(0, |c| c.channels());
+    let mut v: Vec<(String, bool, u16)> = crate::audio_cfg::input_device(&cfg)
+        .map(|d| (crate::audio_cfg::device_name(&d), false, channels(&d)))
+        .into_iter()
+        .collect();
     let host = crate::audio_cfg::host(&cfg);
     for d in host.input_devices().into_iter().flatten().filter(crate::audio_cfg::recordable) {
         let name = crate::audio_cfg::device_name(&d);
@@ -286,7 +304,8 @@ where
             config.clone(),
             move |data: &[T], _| {
                 // An input past the device's channels is its last one.
-                capture().push(data.len() / channels, |c, f| data[f * channels + c.min(channels - 1)].to_sample::<f32>());
+                capture()
+                    .push(data.len() / channels, |c, f| data[f * channels + c.min(channels - 1)].to_sample::<f32>());
             },
             |e| eprintln!("audio input stream: {e}"),
             None,
@@ -306,6 +325,15 @@ pub struct Recorder {
     head: Arc<AtomicI64>,
     /// The WAV's rate, set before `finish` when it was not known at the start (an ASIO driver's).
     rate: Arc<AtomicU32>,
+    /// Frames written to the raw file and flushed, so a part of it can be read while the take goes on.
+    written: Arc<AtomicU64>,
+    part: PathBuf,
+    /// The raw file is left on disk when the WAV is made (`keep_part`).
+    keep: Arc<AtomicBool>,
+    /// The WAV's sample format in bits: 16 or 24 (integer), else 32-bit float (`set_bits`).
+    bits: Arc<AtomicU32>,
+    /// The WAV made at the end (`set_file`).
+    file: Arc<std::sync::Mutex<PathBuf>>,
     thread: Option<std::thread::JoinHandle<Result<(PathBuf, u64), String>>>,
 }
 
@@ -316,7 +344,11 @@ impl Recorder {
     }
 
     /// Starts writing what `drain` hands over (stereo frames, appended to its argument) into `file`.
-    pub fn start_from(file: PathBuf, rate: u32, mut drain: impl FnMut(&mut Vec<f32>) + Send + 'static) -> Result<Recorder, String> {
+    pub fn start_from(
+        file: PathBuf,
+        rate: u32,
+        mut drain: impl FnMut(&mut Vec<f32>) + Send + 'static,
+    ) -> Result<Recorder, String> {
         if let Some(d) = file.parent() {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
@@ -325,7 +357,20 @@ impl Recorder {
         let stop = Arc::new(AtomicBool::new(false));
         let head = Arc::new(AtomicI64::new(0));
         let rate = Arc::new(AtomicU32::new(rate));
-        let (s, h, r) = (stop.clone(), head.clone(), rate.clone());
+        let written = Arc::new(AtomicU64::new(0));
+        let keep = Arc::new(AtomicBool::new(false));
+        let bits = Arc::new(AtomicU32::new(32));
+        let target = Arc::new(std::sync::Mutex::new(file));
+        let (s, h, r, wr, p, k, b, f) = (
+            stop.clone(),
+            head.clone(),
+            rate.clone(),
+            written.clone(),
+            part.clone(),
+            keep.clone(),
+            bits.clone(),
+            target.clone(),
+        );
         let thread = std::thread::Builder::new()
             .name("audio recorder".into())
             .spawn(move || {
@@ -340,6 +385,11 @@ impl Recorder {
                         w.write_all(&x.to_le_bytes()).map_err(|e| e.to_string())?;
                     }
                     samples += buf.len() as u64;
+                    if !buf.is_empty() {
+                        // Readable by `segment_wav` while the take goes on (a loop record pass).
+                        w.flush().map_err(|e| e.to_string())?;
+                        wr.store(samples / 2, Ordering::Release);
+                    }
                     if last {
                         break;
                     }
@@ -349,12 +399,45 @@ impl Recorder {
                 drop(raw);
                 let frames = samples / 2;
                 let head = h.load(Ordering::Acquire);
-                let n = to_wav(&part, &file, r.load(Ordering::Acquire), head, frames).map_err(|e| e.to_string());
-                let _ = std::fs::remove_file(&part);
+                let file = f.lock().map_or_else(|e| e.into_inner().clone(), |f| f.clone());
+                let n = segment_wav(&part, &file, r.load(Ordering::Acquire), b.load(Ordering::Acquire), head, frames)
+                    .map_err(|e| e.to_string());
+                if !k.load(Ordering::Acquire) {
+                    let _ = std::fs::remove_file(&part);
+                }
                 Ok((file, n?))
             })
             .map_err(|e| e.to_string())?;
-        Ok(Recorder { stop, head, rate, thread: Some(thread) })
+        Ok(Recorder { stop, head, rate, written, part: p, keep, bits, file: target, thread: Some(thread) })
+    }
+
+    /// Frames on disk so far (in the raw file, before the head is left out).
+    pub fn written(&self) -> u64 {
+        self.written.load(Ordering::Acquire)
+    }
+
+    /// The raw file being written (`segment_wav` reads a part of it).
+    pub fn part(&self) -> &Path {
+        &self.part
+    }
+
+    /// The WAV's sample format: 16 or 24-bit integer, else 32-bit float (Disk recording's format, spec:
+    /// audio/disk-recording.md §2). Set before `finish`.
+    pub fn set_bits(&self, bits: u32) {
+        self.bits.store(bits, Ordering::Release);
+    }
+
+    /// The WAV to make at the end instead of the one it started with (a loop record take's last pass). Set before
+    /// `finish`.
+    pub fn set_file(&self, file: PathBuf) {
+        if let Ok(mut f) = self.file.lock() {
+            *f = file;
+        }
+    }
+
+    /// Leaves the raw file on disk once the WAV is made, for `segment_wav` (the caller removes it).
+    pub fn keep_part(&self) {
+        self.keep.store(true, Ordering::Release);
     }
 
     /// The take starts at frame `head` of what came in (negative: that much silence first).
@@ -382,18 +465,76 @@ impl Recorder {
 }
 
 /// Makes WAV `wav` (32-bit float stereo at `rate`) of the raw frames in `part` from frame `head` on; returns its frames.
+#[cfg(test)]
 fn to_wav(part: &Path, wav: &Path, rate: u32, head: i64, frames: u64) -> std::io::Result<u64> {
+    segment_wav(part, wav, rate, 32, head, frames)
+}
+
+/// Makes WAV `wav` (stereo at `rate`, `bits` 16 or 24 for integer samples, else 32-bit float) of frames `start..end`
+/// of the raw frames in `part` (a negative start: that much silence first); returns its frames. A loop record pass is a
+/// part of its take (spec: audio/disk-recording.md §1); integer samples are rounded and clipped, not dithered (audio/disk-recording.md §2).
+pub fn segment_wav(part: &Path, wav: &Path, rate: u32, bits: u32, start: i64, end: u64) -> std::io::Result<u64> {
+    let (head, frames) = (start, end);
     let skip = head.max(0) as u64;
     let pad = (-head).max(0) as u64;
     let n = frames.saturating_sub(skip) + pad;
     let mut out = BufWriter::new(std::fs::File::create(wav)?);
-    os_engine::wav::write_f32_stereo_header(&mut out, rate, n)?;
-    out.write_all(&vec![0u8; (pad * 8) as usize])?;
     let mut r = std::fs::File::open(part)?;
     r.seek(SeekFrom::Start(skip.min(frames) * 8))?;
-    std::io::copy(&mut r.take(frames.saturating_sub(skip) * 8), &mut out)?;
+    let mut r = r.take(frames.saturating_sub(skip) * 8);
+    let bytes = match bits {
+        16 | 24 => bits as usize / 8,
+        _ => {
+            os_engine::wav::write_f32_stereo_header(&mut out, rate, n)?;
+            out.write_all(&vec![0u8; (pad * 8) as usize])?;
+            std::io::copy(&mut r, &mut out)?;
+            out.flush()?;
+            return Ok(n);
+        }
+    };
+    int_header(&mut out, rate, bytes as u16 * 8, n)?;
+    out.write_all(&vec![0u8; pad as usize * 2 * bytes])?;
+    let mut buf = vec![0u8; 1 << 16];
+    let mut have = 0;
+    loop {
+        let got = r.read(&mut buf[have..])?;
+        have += got;
+        let whole = have / 4 * 4;
+        for x in buf[..whole].chunks_exact(4) {
+            let v = f32::from_le_bytes([x[0], x[1], x[2], x[3]]).clamp(-1.0, 1.0);
+            let full = if bytes == 2 { 32767.0 } else { 8_388_607.0 };
+            let i = (v * full).round() as i32;
+            out.write_all(&i.to_le_bytes()[..bytes])?;
+        }
+        buf.copy_within(whole..have, 0);
+        have -= whole;
+        if got == 0 {
+            break;
+        }
+    }
     out.flush()?;
     Ok(n)
+}
+
+/// The header of an integer PCM stereo WAV of `frames` frames.
+fn int_header(w: &mut impl Write, rate: u32, bits: u16, frames: u64) -> std::io::Result<()> {
+    let align = 2 * bits / 8;
+    let data = u32::try_from(frames * u64::from(align))
+        .ok()
+        .filter(|&n| n <= u32::MAX - 36)
+        .ok_or_else(|| std::io::Error::other("too long for WAV"))?;
+    w.write_all(b"RIFF")?;
+    w.write_all(&(36 + data).to_le_bytes())?;
+    w.write_all(b"WAVEfmt ")?;
+    w.write_all(&16u32.to_le_bytes())?;
+    w.write_all(&1u16.to_le_bytes())?;
+    w.write_all(&2u16.to_le_bytes())?;
+    w.write_all(&rate.to_le_bytes())?;
+    w.write_all(&(rate * u32::from(align)).to_le_bytes())?;
+    w.write_all(&align.to_le_bytes())?;
+    w.write_all(&bits.to_le_bytes())?;
+    w.write_all(b"data")?;
+    w.write_all(&data.to_le_bytes())
 }
 
 #[cfg(test)]
@@ -441,6 +582,17 @@ mod tests {
         let b = std::fs::read(&wav).unwrap();
         assert_eq!(b.len(), 44 + 5 * 8);
         assert_eq!(&b[44..52], &[0u8; 8]);
+        // 16 and 24-bit integer: rounded and clipped.
+        let raw: Vec<u8> = [0.5f32, -1.0, 2.0, 0.25].iter().flat_map(|x| x.to_le_bytes()).collect();
+        std::fs::write(&part, raw).unwrap();
+        assert_eq!(segment_wav(&part, &wav, 44100, 16, 0, 2).unwrap(), 2);
+        let b = std::fs::read(&wav).unwrap();
+        assert_eq!((u16::from_le_bytes([b[20], b[21]]), u16::from_le_bytes([b[34], b[35]]), b.len()), (1, 16, 44 + 8));
+        let v: Vec<i16> = b[44..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        assert_eq!(v, [16384, -32767, 32767, 8192]);
+        assert_eq!(segment_wav(&part, &wav, 44100, 24, 1, 2).unwrap(), 1);
+        let b = std::fs::read(&wav).unwrap();
+        assert_eq!((u16::from_le_bytes([b[34], b[35]]), &b[44..]), (24, &[0xff, 0xff, 0x7f, 0x00, 0x00, 0x20][..]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -463,7 +615,14 @@ mod tests {
     /// Stereo takes a pair; one input goes to both sides.
     #[test]
     fn a_block_goes_in_as_stereo() {
-        let c = Capture { ring: Ring::new(64), on: AtomicBool::new(false), first: AtomicU32::new(0), stereo: AtomicBool::new(true), frames: AtomicU64::new(0), dropped: AtomicU64::new(0) };
+        let c = Capture {
+            ring: Ring::new(64),
+            on: AtomicBool::new(false),
+            first: AtomicU32::new(0),
+            stereo: AtomicBool::new(true),
+            frames: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+        };
         c.push(2, |ch, f| (ch * 10 + f) as f32);
         assert_eq!(c.frames(), 0, "off");
         c.start(1, true);

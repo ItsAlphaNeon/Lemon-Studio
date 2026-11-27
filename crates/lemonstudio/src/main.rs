@@ -800,6 +800,13 @@ impl ApplicationHandler for Shell {
             _ => false,
         };
         if press && self.app.loading() {
+            // A running export's Abort button and Escape still work (spec: audio/export.md §1d).
+            let escape = matches!(&event, WindowEvent::KeyboardInput { event, .. }
+                if event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape));
+            let click = matches!(&event, WindowEvent::MouseInput { button: MouseButton::Left, .. });
+            if (escape || click) && self.app.loading_press(escape) {
+                window.request_redraw();
+            }
             return;
         }
         // Linux: a wheel turn over a docked plugin window is the plugin window's alone; nothing behind it scrolls
@@ -1292,7 +1299,7 @@ fn screenshot(args: &[String]) {
     let mut import_midi: Option<(String, bool)> = None;
     let mut settings: Option<usize> = None;
     let mut info_edit: Option<usize> = None;
-    let mut clicks: Vec<(f32, f32, bool)> = Vec::new();
+    let mut clicks: Vec<(f32, f32, bool, [bool; 3])> = Vec::new();
     let mut wheels: Vec<(f32, f32, f32)> = Vec::new();
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
@@ -1354,12 +1361,14 @@ fn screenshot(args: &[String]) {
                 }
             }
             // Click at x,y (left button; `--rclick`: the right one) before the frame is captured; may be given more than
-            // once, done in order.
+            // once, done in order. "x,y,shift" (or ctrl, alt; joined with +) holds those keys for that click.
             a @ ("--click" | "--rclick") => {
                 let right = a == "--rclick";
-                let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
+                let arg = it.next().cloned().unwrap_or_default();
+                let v: Vec<f32> = arg.split(',').filter_map(|n| n.parse().ok()).collect();
+                let held = |k: &str| arg.split(',').nth(2).is_some_and(|m| m.split('+').any(|p| p == k));
                 if let [x, y] = v[..] {
-                    clicks.push((x, y, right));
+                    clicks.push((x, y, right, [held("ctrl"), held("shift"), held("alt")]));
                 }
             }
             // The wheel turned `dy` notches at x,y after the first paint, before the clicks (scrolls a page, e.g.
@@ -1592,6 +1601,8 @@ fn screenshot(args: &[String]) {
     // No "Opened <path>" in the title: the frame shows the project, not where it lives on disk.
     app.state.message = None;
     let (w, h) = size.unwrap_or(((1920.0 * scale).round() as u32, (1080.0 * scale).round() as u32));
+    // A still frame: what clicks open (menus fade in) shows as it settles, not at its first animation frame.
+    os_app::anim::set_level(os_app::anim::Level::Off);
     let mut canvas = Canvas::new(w, h, scale).expect("canvas");
     app.paint(&mut canvas, None);
     for (x, y, dy) in wheels {
@@ -1599,7 +1610,8 @@ fn screenshot(args: &[String]) {
         app.wheel(0.0, dy, false, false);
         app.paint(&mut canvas, None);
     }
-    for (x, y, right) in clicks {
+    for (x, y, right, [ctrl, shift, alt]) in clicks {
+        (app.ctrl, app.shift, app.alt) = (ctrl, shift, alt);
         app.mouse_move(x, y);
         if right {
             app.mouse_down_right();

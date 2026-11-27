@@ -1649,6 +1649,7 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
         let hint = match e.target {
             pl::EditTarget::MixerInsert(_) => "How many mixer tracks to insert: type a number, Enter inserts, Esc cancels",
             pl::EditTarget::MixerGroup(_) => "Group name: type, Enter creates the group, Esc cancels",
+            pl::EditTarget::MixerSubmix(_) => "Submix name: type, Enter names the routed tracks and this one, Esc keeps their names",
             pl::EditTarget::Chords => "Chords, one a bar (C G Am F, or I V vi IV; \"Am:\" first sets the key): Enter writes them into the piano roll, Esc cancels",
             _ => "Type, Enter accepts, Esc cancels",
         };

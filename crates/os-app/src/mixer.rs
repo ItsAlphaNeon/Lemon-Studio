@@ -54,6 +54,11 @@ macro_rules! set_track {
     }};
 }
 
+mod selection;
+pub mod slot_drag;
+pub mod view_opts;
+pub use selection::{create_submix, name_submix, route_from, Submix};
+
 /// The interface's edit made of `commands`: one undo step named `name` (none when nothing changed); the error as the
 /// message when they can't be applied.
 fn apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Option<String> {
@@ -157,6 +162,11 @@ pub enum MCmd {
     RenderWave(u16),
     /// Route the selected tracks to `dst`: only = drop their other routes, side = sidechain (level 0).
     Route { dst: u16, only: bool, side: bool },
+    /// Route this track to selected (only), Sidechain this track to selected (only): `src` to the other selected
+    /// tracks (spec: ui/mixer-selection.md §1).
+    RouteFrom { src: u16, only: bool, side: bool },
+    /// Create submix...: the other selected tracks routed to this one, then its name box (`selection::create_submix`).
+    Submix(u16),
     /// Layout menu: Wide (the only layout drawn; the others are greyed out).
     Layout(u8),
     /// Options ▸ Cable physics: open / close the cables' debug panel (Lemon Studio's own).
@@ -198,6 +208,12 @@ pub enum MCmd {
     ArmTrack(u16, bool),
     /// Disk recording ▸ Auto-create audio clips (a program setting).
     AutoClips,
+    /// Disk recording ▸ one of its other checks (`crate::disk_rec_menu::CHECKS`, by index).
+    RecCheck(u8),
+    /// Disk recording ▸ Format: 16Bit int, 24Bit int, 32Bit float (`prefs::REC_DEPTH`).
+    RecDepth(u8),
+    /// Disk recording ▸ Render armed tracks to wave file(s)... (Alt+R).
+    RenderArmed,
     /// A track's input (true) or output latency setting: Reset (`None`), or Set in ms / samples / beats (the value box).
     Latency(u16, bool, Option<crate::typein::LatUnit>),
     /// The track menu's Group entries (spec: ui/mixer.md §6.1 "Group, Layout and CPU entries"): Separator on or off for
@@ -242,6 +258,9 @@ pub enum MCmd {
     /// Options ▸ View ▸ Waveforms and Extra properties (`MixerUi::waveforms`, `MixerUi::extra`).
     ViewWaveforms,
     ViewExtra,
+    /// Options ▸ View ▸ Names at top, Routing cables, Compact plugin list, Colorful mixer ▸, Lines between tracks
+    /// (spec: ui/mixer.md §6.2.1; `view_opts`).
+    ViewOpt(view_opts::Opt),
     /// File ▸ Save mixer track state, File ▸ Open mixer track state ▸ and Insert from state ▸ (Lemon Studio's design,
     /// `crate::mixer_state`): save track `n`'s state under its name; put a saved one on track `n` (its name and colour
     /// stay); insert a new track in front of `n` from one (with the state's name and colour).
@@ -281,6 +300,8 @@ pub struct MixerUi {
     pub faders: FaderGroup,
     /// The track Shift+wheel last moved, and where the mouse was then (`wheel_move`).
     pub move_grab: Option<(u16, (f32, f32))>,
+    /// Create submix... waiting for its name box.
+    pub submix: Option<Submix>,
 }
 
 /// What drags on selected faders keep while the selection lasts (spec: ui/mixer.md §4): each selected track's level at
@@ -290,12 +311,26 @@ pub struct MixerUi {
 pub struct FaderGroup {
     levels: Vec<(u16, f64)>,
     pub moved: Option<(u16, f64)>,
+    /// The value a Shift+drag gave every selected fader: it leaves the kept levels as they were (spec: ui/mixer.md §4).
+    pub shifted: Option<f64>,
 }
 
 impl FaderGroup {
+    /// A drag on the selected faders took the pressed one, `track`, to `v`; `same`: a Shift+drag, all of them to `v`.
+    pub fn moved_to(&mut self, track: u16, v: f64, same: bool) {
+        if same {
+            self.shifted = Some(v);
+        } else {
+            (self.moved, self.shifted) = (Some((track, v)), None);
+        }
+    }
+
     /// Whether these are the levels of the tracks `sel` (sorted), with every fader where the last drag left it.
     fn holds(&self, s: &crate::session::Session, sel: &[u16]) -> bool {
         let level_of = |t: u16| self.levels.iter().find(|l| l.0 == t).map_or(0.0, |l| l.1);
+        if let Some(v) = self.shifted {
+            return self.levels.iter().map(|l| l.0).eq(sel.iter().copied()) && sel.iter().all(|&t| volume(s, t) == v);
+        }
         self.levels.iter().map(|l| l.0).eq(sel.iter().copied())
             && self.levels.iter().all(|&(t, level)| {
                 let left = match self.moved {
@@ -315,7 +350,7 @@ impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, meters: Vec::new(),
             meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None, waveforms: false, waves: Vec::new(), extra: true,
-            faders: FaderGroup::default(), move_grab: None }
+            faders: FaderGroup::default(), move_grab: None, submix: None }
     }
 }
 
@@ -342,7 +377,7 @@ pub fn group_levels(s: &mut State) -> Vec<(u16, f64)> {
     sel.sort_unstable();
     if !s.mixer.faders.holds(&s.session, &sel) {
         let levels = sel.iter().map(|&t| (t, volume(&s.session, t))).collect();
-        s.mixer.faders = FaderGroup { levels, moved: None };
+        s.mixer.faders = FaderGroup { levels, moved: None, shifted: None };
     }
     s.mixer.faders.levels.clone()
 }
@@ -484,11 +519,7 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             None
         }
         MHit::Led(n) => {
-            select(s, n, ctrl);
-            track_ids(s);
-            let on = !track(&s.session, n)?.enabled;
-            apply_quietly(s, vec![set_track!(s, n, enabled: on)?]);
-            None
+            selection::led_click(s, n, ctrl, shift, app.alt)
         }
         MHit::Polarity(n) => {
             select(s, n, ctrl);
@@ -706,7 +737,9 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             s.playlist.popup = Some(track_menu(s, n, at.0, at.1));
         }
         MHit::Add => s.playlist.popup = Some(track_menu(s, s.selected_mixer, at.0, at.1)),
-        MHit::Led(n) => solo(s, n),
+        // The file and folder of the track's next recording (spec: audio/disk-recording.md §3).
+        MHit::Arm(n) => app.choose_rec_file(n),
+        MHit::Led(n) => selection::led_right(s, n),
         MHit::Route(dst) => {
             let items = vec![
                 PItem::new("Route to this track", Cmd::Mixer(MCmd::Route { dst, only: false, side: false })),
@@ -826,15 +859,24 @@ pub fn solo(s: &mut State, n: u16) {
 /// previous state after solo" on, to the states from before the first solo (a solo moved to another track keeps them;
 /// spec: ui/settings-choices.md "Miscellaneous").
 pub fn solo_with(s: &mut State, n: u16, alt: bool) {
-    let mut keep = reach(&s.session, n, true);
-    if alt {
-        keep.extend(reach(&s.session, n, false));
+    solo_set(s, &[n], alt, true);
+}
+
+/// Solo `tracks` together (`solo_with` for each, one set kept on); `toggle`: back to all on when that set is already
+/// the audible one. Tracks with the mute lock stay as they are (spec: ui/mixer-selection.md §4).
+pub fn solo_set(s: &mut State, tracks: &[u16], alt: bool, toggle: bool) {
+    let mut keep = Vec::new();
+    for &n in tracks {
+        keep.extend(reach(&s.session, n, true));
+        if alt {
+            keep.extend(reach(&s.session, n, false));
+        }
     }
     keep.push(0);
     // By track id: the solo's memory stays with its tracks when they move.
     track_ids(s);
     let keep: Vec<u32> = keep.iter().filter_map(|&t| s.session.project.mixer.iter().find(|m| m.index == t)).map(|m| m.id.0).collect();
-    let soloed = audible_ids(&s.session, &keep);
+    let soloed = toggle && audible_ids(&s.session, &keep);
     // A solo still in effect (the last solo's set, untouched since) keeps the states saved when it started.
     let in_solo = s.mixer.solo.as_ref().is_some_and(|(k, _)| audible_ids(&s.session, k));
     let before = match s.mixer.solo.take() {
@@ -843,7 +885,14 @@ pub fn solo_with(s: &mut State, n: u16, alt: bool) {
     };
     let back = soloed && in_solo && crate::prefs::check(&crate::prefs::RESTORE_AFTER_SOLO);
     // Every track's mute state, the hidden last one's too, as a click on a light sets it (no undo step).
-    let lights: Vec<(u16, bool, bool)> = s.session.project.mixer.iter().map(|m| (m.index, m.enabled, if back { before.iter().find(|b| b.0 == m.id.0).is_none_or(|b| b.1) } else { soloed || keep.contains(&m.id.0) })).collect();
+    let lights: Vec<(u16, bool, bool)> = s
+        .session
+        .project
+        .mixer
+        .iter()
+        .filter(|m| !m.mute_lock)
+        .map(|m| (m.index, m.enabled, if back { before.iter().find(|b| b.0 == m.id.0).is_none_or(|b| b.1) } else { soloed || keep.contains(&m.id.0) }))
+        .collect();
     let cmds = lights.into_iter().filter(|&(_, now, on)| now != on).filter_map(|(t, _, on)| set_track!(s, t, enabled: on)).collect();
     apply_quietly(s, cmds);
     if !soloed {
@@ -852,9 +901,9 @@ pub fn solo_with(s: &mut State, n: u16, alt: bool) {
     changed(&mut s.session);
 }
 
-/// Whether exactly the tracks `keep` (by id) are on, the master aside.
+/// Whether exactly the tracks `keep` (by id) are on, the master and the mute-locked tracks aside.
 fn audible_ids(s: &crate::session::Session, keep: &[u32]) -> bool {
-    s.project.mixer.iter().all(|m| m.index == 0 || keep.contains(&m.id.0) == m.enabled)
+    s.project.mixer.iter().all(|m| m.index == 0 || m.mute_lock || keep.contains(&m.id.0) == m.enabled)
 }
 
 /// The rack's selected channels (the piano roll's channel when none is selected), in rack order.
@@ -1061,14 +1110,20 @@ fn number_of(s: &State, result: Option<&serde_json::Value>) -> u16 {
     s.session.project.mixer.iter().find(|m| Some(u64::from(m.id.0)) == id).map_or(0, |m| m.index)
 }
 
-/// Open mixer track state: the saved state in `path` onto track `n`, its old effects going; one undo step.
+/// Open mixer track state: the saved state in `path` onto track `n`, its old effects going, or onto every selected
+/// track when `n` is part of a multi-selection (spec: ui/mixer-selection.md §2); one undo step.
 fn load_state(s: &mut State, n: u16, path: &std::path::Path) -> Option<String> {
     if crate::mixer_state::load(path).is_none() {
         return Some(unreadable(path));
     }
     track_ids(s);
-    let c = Command::LoadTrackState { track: id_of(s, n)?, path: path.to_string_lossy().into_owned(), named: false };
-    apply(s, "Open mixer track state", vec![c]).or_else(|| Some(state_taken(s, n, path)))
+    let tracks = if in_group(s, n) { selected(s) } else { vec![n] };
+    let p = path.to_string_lossy().into_owned();
+    let mut cmds = Vec::new();
+    for t in tracks {
+        cmds.push(Command::LoadTrackState { track: id_of(s, t)?, path: p.clone(), named: false });
+    }
+    apply(s, "Open mixer track state", cmds).or_else(|| Some(state_taken(s, n, path)))
 }
 
 /// Insert mixer track state: a new track before track `n` takes the saved state in `path` with its name and colour;
@@ -1213,7 +1268,7 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
                 PItem::new("Route selected channels starting from this track", mx(MCmd::RouteChannels { dst: n, spread: true })).key("Shift+Ctrl+L"),
             ],
         ),
-        track_routing(s, n),
+        selection::track_routing(s, n),
         PItem::sub(
             "Select",
             vec![
@@ -1266,36 +1321,20 @@ fn insert_only(n: u16, it: PItem) -> PItem {
     if n == 0 { it.off() } else { it }
 }
 
-/// Track routing ▸ (Lemon Studio's design; greyed in the original's menu as captured, its entries not seen): the ▲ menu's
-/// four entries (spec: ui/mixer.md §5) for the other selected tracks into track `n`. Greyed when no other track is
-/// selected (the master never sends).
-fn track_routing(s: &State, n: u16) -> PItem {
-    let mx = |only, side| Cmd::Mixer(MCmd::Route { dst: n, only, side });
-    let items = vec![
-        PItem::new("Route selected tracks to this track", mx(false, false)),
-        PItem::new("Route selected tracks to this track only", mx(true, false)),
-        PItem::sep(),
-        PItem::new("Sidechain selected tracks to this track", mx(false, true)),
-        PItem::new("Sidechain selected tracks to this track only", mx(true, true)),
-    ];
-    let it = PItem::sub("Track routing", items);
-    if is_selected(s, n) && selected(s).iter().any(|&t| t != n && t != 0) { it } else { it.off() }
-}
-
 /// Mixer options (title-bar ▸), §6.2: its own items, then the track menu's.
 pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     let mut items = vec![
         PItem::head("Options"),
-        PItem::sub("Disk recording", vec![PItem::new("Auto-create audio clips", Cmd::Mixer(MCmd::AutoClips)).mark(Mark::Check(crate::prefs::check(&crate::prefs::AUTO_AUDIO_CLIPS)))]),
+        PItem::sub("Disk recording", crate::disk_rec_menu::items(s)),
         PItem::sub("Plugin delay compensation", vec![PItem::new("Automatic", Cmd::Mixer(MCmd::PdcAuto)).mark(Mark::Check(!s.session.project.pdc_off))]),
         // The current track's own controls (Lemon Studio's design, ui/mixer.md §6.1; spec: ui/remote-control.md §6).
         PItem::new("Link all parameters...", Cmd::Remote(crate::remote::RCmd::LinkTrack(s.selected_mixer))),
         PItem::sub(
             "View",
-            vec![
-                PItem::new("Waveforms", Cmd::Mixer(MCmd::ViewWaveforms)).key("Alt+W").mark(Mark::Check(s.mixer.waveforms)),
-                PItem::new("Extra properties", Cmd::Mixer(MCmd::ViewExtra)).mark(Mark::Check(s.mixer.extra)),
-            ],
+            std::iter::once(PItem::new("Waveforms", Cmd::Mixer(MCmd::ViewWaveforms)).key("Alt+W").mark(Mark::Check(s.mixer.waveforms)))
+                .chain(view_opts::items())
+                .chain(std::iter::once(PItem::new("Extra properties", Cmd::Mixer(MCmd::ViewExtra)).mark(Mark::Check(s.mixer.extra))))
+                .collect(),
         ),
         // In a native window of its own (Lemon Studio's design: ui/mixer.md §6.2).
         PItem::new("Detached", Cmd::Detach(crate::app::Win::Mixer, !s.is_detached(crate::app::Win::Mixer))).mark(Mark::Check(s.is_detached(crate::app::Win::Mixer))),
@@ -1452,6 +1491,11 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         app.invalidate();
         return m;
     }
+    if let MCmd::RouteFrom { src, only, side } = c {
+        let m = route_from(&mut app.state, src, only, side);
+        app.invalidate();
+        return m;
+    }
     if let MCmd::AddEffect(slot, index) = c {
         let m = add_effect(&mut app.state, slot, index);
         app.invalidate();
@@ -1578,10 +1622,16 @@ fn add_effect_on(s: &mut State, t: u16, k: u8, index: usize, state: Option<Vec<u
     if let Err(e) = crate::control_ui::command(s, "Add effect", None, vec![c]) {
         return Some(e);
     }
+    effect_made(s, t, k, index, state);
+    None
+}
+
+/// The plugin of slot `k` of track `t`, just added by a command: made by the interface (plugin list `index`, with
+/// `state`) rather than by the control host.
+fn effect_made(s: &mut State, t: u16, k: u8, index: usize, state: Option<Vec<u8>>) {
     let id = track(&s.session, t).and_then(|m| m.slots[usize::from(k)].as_ref()).map(|p| p.id);
     s.session.control.host.retain(|r| !matches!(r, crate::control::HostReq::Effect { slot, .. } if Some(*slot) == id));
     s.session.fx_requests.push(FxReq::Create { track: t, slot: k, index, state });
-    None
 }
 
 /// A monitor mode's name in `Command::SetTrack`.
@@ -1632,9 +1682,18 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::RemoveTeslas => return app.ask_remove_teslas(),
         MCmd::Input(t, v) => {
             // An input chosen where there was none asks whether to record it alone (§1.4).
-            let ask = track(&s.session, t).is_some_and(|m| m.audio_in < 0 && v >= 0 && m.rec_source != os_model::REC_EXTERNAL);
-            if set_io(s, t, set_track!(s, t, audio_in: v)) && ask {
-                app.ask_external(t);
+            let fresh = track(&s.session, t).is_some_and(|m| m.audio_in < 0 && v >= 0);
+            let ask = fresh && track(&s.session, t).is_some_and(|m| m.rec_source != os_model::REC_EXTERNAL);
+            if set_io(s, t, set_track!(s, t, audio_in: v)) {
+                // ... and arms the track (spec: audio/disk-recording.md §4).
+                if fresh {
+                    if let Some(m) = app.arm_tracks(&[t], true) {
+                        app.state.message = Some(m);
+                    }
+                }
+                if ask {
+                    app.ask_external(t);
+                }
             }
             return None;
         }
@@ -1671,6 +1730,14 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             crate::playlist::start_edit(s, EditTarget::MixerGroup(n), at);
             None
         }
+        // spec: ui/mixer-selection.md §1.1: the routing at once, then the name box.
+        MCmd::Submix(n) => {
+            let m = create_submix(s, n);
+            if s.mixer.submix.as_ref().is_some_and(|m| m.track == n) {
+                crate::playlist::start_edit(s, EditTarget::MixerSubmix(n), at);
+            }
+            m
+        }
         MCmd::SelectGroup(n) => {
             let Some(g) = group(&s.session, n) else { return Some("Not in a group".into()) };
             s.selected_mixer = n;
@@ -1692,7 +1759,8 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         | MCmd::Reset(_)
         | MCmd::ResetRouting(_)
         | MCmd::UnrouteTo(_)
-        | MCmd::Route { .. } => None,
+        | MCmd::Route { .. }
+        | MCmd::RouteFrom { .. } => None,
         MCmd::OpenState(n, p) => load_state(s, n, &p),
         MCmd::InsertState(n, p) => insert_state(s, n, &p),
         MCmd::ViewWaveforms => {
@@ -1703,10 +1771,17 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             s.mixer.extra = !s.mixer.extra;
             None
         }
+        MCmd::ViewOpt(o) => {
+            view_opts::run(o);
+            None
+        }
         MCmd::AutoClips => {
             let on = crate::prefs::toggle(&crate::prefs::AUTO_AUDIO_CLIPS);
             Some(format!("Auto-create audio clips {}", if on { "on" } else { "off" }))
         }
+        MCmd::RecCheck(i) => crate::disk_rec_menu::toggle(i),
+        MCmd::RecDepth(i) => crate::disk_rec_menu::set_depth(i),
+        MCmd::RenderArmed => return crate::disk_rec_menu::render_armed(app),
         MCmd::AltSolo(n) => {
             solo_with(s, n, true);
             None
@@ -1892,6 +1967,9 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Character(c) if alt && letter(c, "s") => run(app, MCmd::AltSolo(n)),
         Key::Character(c) if alt && letter(c, "l") => run(app, MCmd::SelectChannels(n)),
         Key::Character(c) if alt && letter(c, "w") => run(app, MCmd::ViewWaveforms),
+        // Disk recording: Alt+R renders the armed tracks, Shift+Alt+R the selected ones (spec: audio/disk-recording.md §2).
+        Key::Character(c) if alt && letter(c, "r") && app.shift => run(app, MCmd::RenderWave(n)),
+        Key::Character(c) if alt && letter(c, "r") => run(app, MCmd::RenderArmed),
         Key::Named(NamedKey::F2) => run(app, MCmd::Rename(n)),
         Key::Named(NamedKey::Delete) => run(app, MCmd::Delete(n)),
         Key::Named(NamedKey::ArrowLeft) if alt => run(app, MCmd::MoveLeft(n)),
@@ -2484,8 +2562,9 @@ mod tests {
         assert!(a.state.dialogs.is_empty());
         assert_eq!(track(&a.state.session, 3).unwrap().rec_source, os_model::REC_POST_EQ);
         crate::prefs::set_choice(&crate::prefs::EXTERNAL_INPUT, 0);
-        // The edits undo; arming is kept through them.
-        hit(&mut a, MHit::Arm(3));
+        // Choosing an input armed the track (spec: audio/disk-recording.md §4). The edits undo; arming is kept through
+        // them.
+        assert!(track(&a.state.session, 3).unwrap().armed);
         run(&mut a, MCmd::Monitor(3, os_model::MONITOR_ON));
         run(&mut a, MCmd::Output(3, 1));
         crate::history_ui::undo(&mut a.state);
@@ -3211,31 +3290,6 @@ mod tests {
         assert_eq!(t, [2, 4]);
     }
 
-    /// Track routing ▸ (Lemon Studio's design): greyed until another track is selected; then the ▲ menu's four entries
-    /// route or sidechain the other selected tracks into this one, one undo step each.
-    #[test]
-    fn track_routing_routes_the_selected_tracks_here() {
-        let mut a = app();
-        let entry = |a: &App, n: u16| track_items(&a.state, n).into_iter().find(|i| i.label == "Track routing").unwrap();
-        select(&mut a.state, 5, false);
-        assert!(!entry(&a, 5).enabled, "only this track selected");
-        select(&mut a.state, 2, true);
-        select(&mut a.state, 3, true);
-        select(&mut a.state, 5, true);
-        let e = entry(&a, 5);
-        assert!(e.enabled);
-        let labels: Vec<&str> = e.children.iter().filter(|i| !i.sep).map(|i| i.label.as_ref()).collect();
-        assert_eq!(labels, ["Route selected tracks to this track", "Route selected tracks to this track only", "Sidechain selected tracks to this track", "Sidechain selected tracks to this track only"]);
-        assert!(!entry(&a, 9).enabled, "a track outside the selection");
-        let steps = a.state.session.history.at();
-        crate::playlist::run(&mut a, e.children[0].cmd.clone());
-        assert_eq!((send(&a.state.session, 2, 5), send(&a.state.session, 3, 5), send(&a.state.session, 2, 0)), (Some(0.8), Some(0.8), Some(0.8)));
-        assert_eq!(a.state.session.history.at(), steps + 1);
-        crate::playlist::run(&mut a, e.children[4].cmd.clone());
-        assert_eq!((send(&a.state.session, 2, 5), send(&a.state.session, 2, 0)), (Some(0.0), None), "sidechained only: the master route goes");
-        assert_eq!(send(&a.state.session, 5, 5), None, "this track does not route to itself");
-    }
-
     /// The slot menu's Change color... and Random color (Lemon Studio's design): the slot gets a colour (Default clears
     /// it), which moves with the slot and goes with its plugin.
     #[test]
@@ -3377,7 +3431,8 @@ mod tests {
             let v = m.items.iter().find(|i| i.label == "View").unwrap();
             v.children.iter().map(|i| (i.label.to_string(), i.enabled, i.mark.clone())).collect::<Vec<_>>()
         };
-        assert_eq!(view(&a), [("Waveforms".into(), true, Mark::Check(false)), ("Extra properties".into(), true, Mark::Check(true))]);
+        let (v, first) = (view(&a), ("Waveforms".into(), true, Mark::Check(false)));
+        assert_eq!((v[0].clone(), v.last().cloned()), (first, Some(("Extra properties".into(), true, Mark::Check(true)))));
         run(&mut a, MCmd::ViewExtra);
         assert!(!a.state.mixer.extra);
         assert!(key(&mut a, &Key::Character("w".into()), false, true), "Alt+W");

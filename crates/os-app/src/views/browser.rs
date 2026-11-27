@@ -164,9 +164,13 @@ pub const OPT_AUTOHIDE: &str = "autohide";
 pub const OPT_HIDEDRAG: &str = "hidedrag";
 pub const OPT_CONTRAST: &str = "contrast";
 pub const OPT_PREVIEW: &str = "preview";
+/// Sort files by Type, by Date (neither: by Name), and Group off (`crate::browser_pick`).
+pub const OPT_SORT_TYPE: &str = "sort_type";
+pub const OPT_SORT_DATE: &str = "sort_date";
+pub const OPT_NOGROUP: &str = "nogroup";
 pub const DEFAULT_OPTS: &[&str] = &[OPT_FOLDERS, OPT_TAGS, OPT_INDEX, OPT_REINDEX, OPT_HIDEDRAG];
 /// Every toggle, in menu order (`browser.txt` keeps the ones that are on).
-pub const ALL_OPTS: &[&str] = &[OPT_PARENTS, OPT_EXPAND, OPT_FOLDERS, OPT_TOP, OPT_TYPE, OPT_TAGS, OPT_INDEX, OPT_REINDEX, OPT_AUTOHIDE, OPT_HIDEDRAG, OPT_CONTRAST, OPT_PREVIEW];
+pub const ALL_OPTS: &[&str] = &[OPT_PARENTS, OPT_EXPAND, OPT_FOLDERS, OPT_TOP, OPT_TYPE, OPT_TAGS, OPT_INDEX, OPT_REINDEX, OPT_AUTOHIDE, OPT_HIDEDRAG, OPT_CONTRAST, OPT_PREVIEW, OPT_SORT_TYPE, OPT_SORT_DATE, OPT_NOGROUP];
 
 pub fn opt(s: &State, k: &str) -> bool {
     s.browser_opts.contains(k)
@@ -331,6 +335,8 @@ pub struct Entry {
     pub dir: bool,
     pub size: u64,
     pub modified: Option<std::time::SystemTime>,
+    /// When the file was made: Sort files by ▸ Date (`crate::browser_pick`).
+    pub created: Option<std::time::SystemTime>,
 }
 
 /// The listing of `dir`: subfolders, then files, each sorted by name, hidden/system entries left out
@@ -348,12 +354,12 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
                     if !crate::browser_index::listed(&name, &md) {
                         return None;
                     }
-                    Some(Entry { name, path: e.path(), dir: md.is_dir(), size: md.len(), modified: md.modified().ok() })
+                    Some(Entry { name, path: e.path(), dir: md.is_dir(), size: md.len(), modified: md.modified().ok(), created: md.created().ok() })
                 })
                 .collect()
         })
         .unwrap_or_default();
-    v.sort_by_cached_key(|e| (!e.dir, e.name.to_lowercase()));
+    crate::browser_pick::sort(s, &mut v);
     let v = Rc::new(v);
     s.browser_dirs.borrow_mut().insert(dir.to_path_buf(), v.clone());
     v
@@ -995,7 +1001,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             _ => row.label.clone(),
         };
         let hov = ui.hit(rect, Action::BrowserRow(i), hint);
-        if sel == Some(row.key.as_str()) || hov {
+        if sel == Some(row.key.as_str()) || hov || crate::browser_pick::selected(s, &row.key) {
             ui.c.fill_rect(rect, t.browser_row_hi);
         }
         let base = match row.cat {

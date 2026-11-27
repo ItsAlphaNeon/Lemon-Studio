@@ -45,6 +45,8 @@ pub enum Win {
     Touch,
     /// The piano roll's Strum dialog (spec: ui/piano-strum.md).
     Strum,
+    /// The piano roll's Note properties window (spec: ui/piano-note-properties.md).
+    NoteProps,
     /// The piano roll's Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
     Arp,
     /// The piano roll's Flam, Flip and Scale levels dialogs, one at a time (spec: ui/piano-flam.md, ui/piano-flip.md,
@@ -182,6 +184,8 @@ pub enum Action {
     Touch(crate::touch::TouchAct),
     /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
     Strum(crate::strum::Act),
+    /// A control of the piano roll's Note properties window (spec: ui/piano-note-properties.md).
+    NoteProps(crate::note_props::Act),
     /// The container window's names and buttons (`crate::container::CAct`).
     Container(crate::container::CAct),
     /// The plugin palette's controls (spec: ui/plugin-menu.md §6).
@@ -280,6 +284,8 @@ pub enum Action {
     TypeIn(crate::typein::TiAct),
     /// The Remote control settings box (spec: ui/remote-control.md).
     Remote(crate::remote::RAct),
+    /// An automation clip window's Target links list (spec: ui/automation-targets.md §3).
+    Targets(crate::auto_targets::THit),
     /// Piano roll: empty grid, a note (index into the pattern's notes), keyboard, velocity panel.
     PianoGrid,
     PianoNote(usize),
@@ -291,6 +297,12 @@ pub enum Action {
     PianoLaneMenu,
     /// Toolbar "Piano roll tools" button: the Tools menu (spec: ui/piano-roll.md §11).
     PianoToolsMenu,
+    /// The colour tab's Slide (`true`) or Portamento toggle: the type of new notes (spec: ui/piano-note-properties.md §5).
+    PianoNewType(bool),
+    /// Toolbar Snap to scale: left click toggles "Snap PR notes to scale", right click its menu (spec: ui/piano-scale-snap.md §1).
+    PianoScaleSnap,
+    /// Toolbar Stamp: the stamp menu (spec: ui/piano-chord-stamp.md §1).
+    PianoStampMenu,
     /// Toolbar magnet: the Snap menu; right-click: Stock note lengths (spec: ui/piano-snap.md §1).
     PianoSnapMenu,
     /// The channel name in the title: the channel menu; right-click: channel settings; wheel: channels with notes
@@ -950,8 +962,9 @@ pub enum Drag {
     /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
     RackMixer { ch: usize, y0: f32, v0: u16 },
     /// A mixer fader: `track` follows the mouse from `v0`. `others` are the other selected tracks, which move with it, with
-    /// their kept levels, `level` being `track`'s (spec: ui/mixer.md §4).
-    Fader { track: u16, y0: f32, v0: f64, level: f64, others: Vec<(u16, f64)> },
+    /// their kept levels, `level` being `track`'s (spec: ui/mixer.md §4). `rate`: a quarter with Ctrl; `same`: Shift,
+    /// the others take `track`'s value.
+    Fader { track: u16, y0: f32, v0: f64, level: f64, others: Vec<(u16, f64)>, rate: f64, same: bool },
     /// A press on a track's equaliser graph `g`: band `band` follows the cursor.
     EqGraph { track: u16, band: u8, g: Rect },
     /// The Limit dialog's keys held (either button): the key under the mouse becomes the green key; its name strip held:
@@ -966,6 +979,9 @@ pub enum Drag {
     /// Ctrl+Shift+press on a mixer strip, held: every strip from `from` to the one under the cursor joins the selection,
     /// which keeps the tracks selected before (spec: ui/mixer.md §2).
     MixSweep { from: u16 },
+    /// The mixer slot menu's "Save preset as..." dragged out of the menu: a copy of slot `slot` of track `track` goes
+    /// where it is released (spec: ui/mixer-selection.md §2, `crate::mixer::slot_drag`).
+    SlotCopy { track: u16, slot: u8 },
     Tempo { y0: f32, t0: f64, step: f64 },
     /// The song position slider's handle (`dx` = grab offset from its centre), or the button held on its track (the
     /// next step is due at `next`) (spec: ui/song-position-slider.md §3).
@@ -1114,6 +1130,8 @@ pub struct State {
     pub events_back: Option<crate::events::EventsUi>,
     /// The piano roll's Strum dialog: where it is, its settings and its preview session.
     pub strum: crate::strum::StrumUi,
+    /// The piano roll's Note properties window (spec: ui/piano-note-properties.md).
+    pub note_props: crate::note_props::NotePropsUi,
     /// The piano roll's Arpeggiate dialog: where it is, its settings and pattern, its preview session.
     pub arp: crate::arpeggiate::ArpUi,
     /// The piano roll's Flam, Flip and Scale levels dialogs: where each was, their settings, the preview session.
@@ -1179,6 +1197,8 @@ pub struct State {
     pub motion: std::cell::RefCell<crate::motion::Motion>,
     pub browser_scroll: f32,
     pub browser_sel: Option<String>,
+    /// The other selected rows, Shift's anchor, the last click (`crate::browser_pick`).
+    pub browser_pick: crate::browser_pick::Pick,
     pub browser_drag: Option<(String, f32, f32)>,
     /// Search text and whether the search box has keyboard focus (spec: ui/browser.md §5).
     pub browser_search: String,
@@ -1222,6 +1242,8 @@ pub struct State {
     /// The Remote control settings box, while open, and Multilink to controllers (`crate::remote`).
     pub link_box: Option<crate::remote::LinkBox>,
     pub multilink: crate::remote::Multi,
+    /// An automation clip window's Target links list: Add on, the selected row (`crate::auto_targets`).
+    pub auto_links: crate::auto_targets::Links,
     pub maximized: bool,
     pub piano: PianoState,
     pub playlist: crate::playlist::PlaylistState,
@@ -1635,6 +1657,7 @@ impl App {
                 motion: Default::default(),
                 browser_scroll: 0.0,
                 browser_sel: None,
+                browser_pick: Default::default(),
                 browser_drag: None,
                 browser_search: String::new(),
                 browser_search_focus: false,
@@ -1661,6 +1684,7 @@ impl App {
                 events: Default::default(),
                 events_back: None,
                 strum: Default::default(),
+                note_props: Default::default(),
                 arp: Default::default(),
                 piano_dlg: Default::default(),
                 toggles: vec!["typing"],
@@ -1670,6 +1694,7 @@ impl App {
                 midi: Default::default(),
                 link_box: None,
                 multilink: Default::default(),
+                auto_links: Default::default(),
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
@@ -1967,6 +1992,8 @@ impl App {
                         let more = if files.len() > 1 { format!(" + {} more", files.len() - 1) } else { String::new() };
                         format!("Exported {}:{:02} to {name}{more}", (secs / 60.0) as u32, (secs % 60.0) as u32)
                     }
+                    // spec: audio/export.md §1d
+                    Err(e) if e.starts_with(crate::export::ABORTED) => e,
                     Err(e) => format!("Export failed: {e}"),
                 });
                 self.invalidate();
@@ -2216,6 +2243,17 @@ impl App {
                     crate::zipped_ui::export(self, p);
                 }
             }
+            Then::ExportReplace => self.export_replace(reply == crate::dialog::Reply::Button(crate::dialog::Answer::Yes)),
+            Then::GroupExport => {
+                if let Some(p) = file {
+                    self.state.message = Some(crate::group_export::export(self, p));
+                }
+            }
+            Then::GroupReplace(dir) => {
+                if reply == crate::dialog::Reply::Button(crate::dialog::Answer::Yes) {
+                    self.state.message = Some(crate::group_export::export_over(self, dir));
+                }
+            }
             Then::FactoryFolder => {
                 if let Some(p) = file {
                     self.set_factory_folder(Some(p));
@@ -2344,6 +2382,11 @@ impl App {
                     self.midi_export_chosen(p, piano);
                 }
             }
+            Then::RecordTo(t) => {
+                if let Some(p) = file {
+                    self.rec_file_chosen(t, p);
+                }
+            }
         }
         self.invalidate();
     }
@@ -2381,9 +2424,10 @@ impl App {
         s.rack_scroll_x = 0.0;
         s.mixer_scroll = 0.0;
         s.rack.reset();
-        for w in [Win::Plugin, Win::Events, Win::Container, Win::PluginPalette] {
+        for w in [Win::Plugin, Win::Events, Win::Container, Win::PluginPalette, Win::NoteProps] {
             s.hide(w);
         }
+        crate::note_props::close(s);
         s.events_back = None;
         s.piano.reset();
         s.playlist.reset();
@@ -3518,6 +3562,40 @@ impl App {
         self.invalidate();
     }
 
+    // ---------------------------------------------------------------- Note properties (spec: ui/piano-note-properties.md)
+
+    /// A double-click on note `i`: the Note properties window opens in front on it, or on the selection when `i` is in
+    /// it (§2); centred over the main window the first time, then where it was left. Open on other notes already: their
+    /// changes are kept as they would be by Accept.
+    pub fn open_note_props(&mut self, i: usize) {
+        let s = &mut self.state;
+        self.drag = None;
+        if s.note_props.is_open() {
+            s.message = Some(crate::note_props::accept(s));
+        }
+        if !s.note_props.placed {
+            let (w, h) = views::note_props::SIZE; // centred as the full window, Step properties or not
+            s.note_props.pos =
+                (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
+            s.note_props.placed = true;
+        }
+        if crate::note_props::open(s, i) {
+            s.raise(Win::NoteProps);
+        }
+        self.invalidate();
+    }
+
+    fn note_props_act(&mut self, a: crate::note_props::Act) {
+        let s = &mut self.state;
+        if a == crate::note_props::Act::Accept {
+            s.message = Some(crate::note_props::accept(s));
+            s.hide(Win::NoteProps);
+        } else {
+            crate::note_props::act(s, a);
+        }
+        self.invalidate();
+    }
+
     // ---------------------------------------------------------------- Arpeggiate dialog (spec: ui/piano-arpeggiate.md)
 
     /// Tools ▸ Arpeggiate… and Alt+A: open the dialog in front (centred over the main window the first time, then where
@@ -4069,6 +4147,10 @@ impl App {
         let s = &mut self.state;
         let edited = s.session.dirty || s.session.project.written_at().is_some();
         s.session.control.settle_tick(&mut s.session.project, edited);
+        // Note properties close when the piano roll shows another pattern (spec: ui/piano-note-properties.md §1).
+        if crate::note_props::follow(s) {
+            self.invalidate();
+        }
         self.control_tick();
         self.plugin_tick();
         // Playback loops over the time selection, as it is now (spec: ui/recording.md §5).
@@ -4534,6 +4616,8 @@ impl App {
         if let Some((name, p)) = &self.state.session.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
             crate::loading_ui::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
+            let hover = crate::export_abort::button_rect(canvas.size()).contains(self.mouse.0, self.mouse.1);
+            crate::export_abort::paint(canvas, &self.theme.colors, hover);
         }
     }
 
@@ -5700,9 +5784,13 @@ impl App {
             self.invalidate();
             self.mark_detached(None);
         }
+        if self.drag.is_none() && crate::mixer::slot_drag::arm_move(self, self.armed.clone()) {
+            self.armed = None;
+        }
         if let Some(d) = self.drag.clone() {
             match d {
                 Drag::Browser { item, label, m0, started } => self.browser_drag_move(label, m0, started, item),
+                Drag::SlotCopy { .. } => self.invalidate(),
                 Drag::Pl(d) => {
                     if let Some(g) = self.pl_grid {
                         crate::playlist::drag_move(self, d, g);
@@ -5994,8 +6082,8 @@ impl App {
                         self.damage_win(Win::Mixer);
                     }
                 }
-                Drag::Fader { track, y0, v0, level, others } => {
-                    let per_px = views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
+                Drag::Fader { track, y0, v0, level, others, rate, same } => {
+                    let per_px = rate * views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
                     let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
                     if let Some(t) = crate::edit::mixer::track_mut(&mut self.state.session, track) {
                         t.volume = Some(v);
@@ -6004,12 +6092,12 @@ impl App {
                     self.record_control(&Action::Fader(track));
                     for &(t, other) in &others {
                         if let Some(m) = crate::edit::mixer::track_mut(&mut self.state.session, t) {
-                            m.volume = Some(crate::mixer::group_fader(other, level, v));
+                            m.volume = Some(if same { v } else { crate::mixer::group_fader(other, level, v) });
                         }
                         self.record_control(&Action::Fader(t));
                     }
                     if !others.is_empty() {
-                        self.state.mixer.faders.moved = Some((track, v));
+                        self.state.mixer.faders.moved_to(track, v, same);
                     }
                     self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
                     let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
@@ -6778,6 +6866,10 @@ impl App {
                 }
                 return self.invalidate();
             }
+            Some(Action::PianoScaleSnap) => {
+                self.state.playlist.popup = Some(crate::piano_tools::scale_snap_menu(&self.state, x, y));
+                return self.invalidate();
+            }
             Some(Action::PianoSnapMenu | Action::GlobalSnap) => {
                 // spec: ui/piano-snap.md §7, ui/global-snap.md §4
                 self.state.playlist.popup = Some(crate::piano_snap::lengths_menu(x, y));
@@ -7006,6 +7098,12 @@ impl App {
             self.drag = None;
             return self.browser_drop(item, started);
         }
+        if let Some(Drag::SlotCopy { track, slot }) = self.drag.clone() {
+            self.drag = None;
+            self.hint = std::borrow::Cow::Borrowed("");
+            self.state.message = crate::mixer::slot_drag::drop_slot(self, track, slot);
+            return self.invalidate();
+        }
         if let Some(Drag::Pl(d)) = self.drag.clone() {
             self.drag = None;
             if let Some(g) = self.pl_grid {
@@ -7057,6 +7155,10 @@ impl App {
     pub fn drag_notes(&mut self, x0: f32, y0: f32, orig: &[(usize, Note)], resize: bool) {
         let Some(g) = self.piano_geom() else { return };
         let (x, y) = self.mouse;
+        // A drag is not the first click of a double-click (spec: ui/piano-note-properties.md §1).
+        if (x - x0).abs() > 3.0 || (y - y0).abs() > 3.0 {
+            crate::note_props::moved(&mut self.state);
+        }
         let unit = crate::piano_snap::unit(&self.state).unwrap_or(1);
         let from = orig.first().map_or(0, |&(_, o)| if resize { o.position + o.length.max(unit) } else { o.position });
         let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
@@ -7069,6 +7171,9 @@ impl App {
         };
         let mut dirty = rects(&self.state);
         let s = &mut self.state;
+        let snap_scale = !resize && s.piano.scale_snap.notes;
+        let spans = if snap_scale { piano::scale_spans(s) } else { Vec::new() };
+        let scale_at = |t: u32| spans.iter().take_while(|&&(at, _)| at <= t).last().map_or(0xFFF, |&(_, k)| k);
         let p = piano::pattern_mut(&mut s.session);
         if resize {
             for &(i, o) in orig {
@@ -7101,7 +7206,20 @@ impl App {
             for &(i, o) in orig {
                 if let Some(n) = p.notes.get_mut(i) {
                     n.position = (i64::from(o.position) + dt) as u32;
-                    n.key = (i32::from(o.key) + dk) as u16;
+                    // Snap to scale: a moved note lands on the scale at its new time, even on its own row; halfway goes
+                    // down (spec: ui/piano-scale-snap.md §3).
+                    let key = if snap_scale {
+                        crate::scale_snap::snap_key_in(
+                            i32::from(o.key) + dk,
+                            scale_at(n.position),
+                            false,
+                            0,
+                            crate::piano::TOP_KEY,
+                        )
+                    } else {
+                        i32::from(o.key) + dk
+                    };
+                    n.key = key.clamp(0, crate::piano::TOP_KEY) as u16;
                 }
             }
         }
@@ -7180,7 +7298,9 @@ impl App {
             .find(|(_, n)| Some(n.channel) == ch && g.note_rect(n).is_some_and(|r| r.contains(x, y)))
             .map(|(i, _)| i);
         if let Some(i) = hit {
-            piano::delete(&mut self.state, vec![i]);
+            // A grouped note takes its group along (spec: ui/piano-note-groups.md §3).
+            let idx = crate::note_groups::with_groups(piano::notes(&self.state.session), vec![i]);
+            piano::delete(&mut self.state, idx);
             self.state.session.dirty = true;
             self.damage_piano();
         }
@@ -8219,7 +8339,8 @@ impl App {
         if self.typing_held.iter().any(|h| h.0 == code) {
             return true; // auto-repeat
         }
-        let key = 48 + semi + 12 * self.typing_octave;
+        // Snap incoming MIDI ▸ Typing to piano keyboard puts the note on the scale (spec: ui/piano-scale-snap.md §4).
+        let key = crate::scale_snap::typed(&self.state, 48 + semi + 12 * self.typing_octave);
         // A channel locked to the computer keyboard takes its notes (spec: ui/channel-rack.md §18 Receive notes from).
         let row = self.state.rack.note_row(crate::rack::NoteSrc::Typing, self.state.selected_channel);
         if !(0..=127).contains(&key) || row >= self.state.session.project.channels.len() {
@@ -8367,6 +8488,19 @@ impl App {
             self.damage_piano();
             return;
         }
+        // A click on the grid clears the group highlight (spec: ui/piano-note-groups.md §3).
+        if *a == Action::PianoGrid {
+            self.state.piano.group_hl = None;
+        }
+        // A double-click on a note opens its Note properties (spec: ui/piano-note-properties.md §1).
+        if let Action::PianoNote(i) = *a {
+            let count =
+                matches!(tool, Tool::Draw | Tool::Paint | Tool::Select) && !self.shift && !self.ctrl && !self.alt;
+            if crate::note_props::double_click(&mut self.state, i, count) {
+                self.open_note_props(i);
+                return;
+            }
+        }
         if matches!(a, Action::PianoGrid | Action::PianoNote(_)) && tool != Tool::Draw {
             let s = &mut self.state;
             let note = if let Action::PianoNote(i) = *a { Some(i) } else { None };
@@ -8390,6 +8524,7 @@ impl App {
                     s.piano.clear_selection();
                     let key = g.key_at(y).clamp(0, crate::piano::TOP_KEY);
                     let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
+                    let key = crate::scale_snap::drawn(s, start, key, g.key_frac(y));
                     let i = piano::add_note(s, ch, start, key);
                     let i = piano::paint_mono(s, i);
                     let n = piano::notes(&s.session)[i];
@@ -8435,6 +8570,7 @@ impl App {
                         if !self.ctrl {
                             sel.clear();
                         }
+                        // A grouped note's group is highlighted, not selected (spec: ui/piano-note-groups.md §3).
                         sel.push(i);
                         s.piano.select(s.pattern(), ch, sel);
                     }
@@ -8446,9 +8582,33 @@ impl App {
         let s = &mut self.state;
         match *a {
             Action::PianoGrid => {
+                if let Some(st) = s.piano.stamp.filter(|st| st.on()) {
+                    // A Stamp draws its chord or scale as a selected group (spec: ui/piano-chord-stamp.md §3); a drag
+                    // moves it.
+                    piano::snapshot_as(&mut s.session, crate::chord_stamp::STEP);
+                    s.piano.clear_selection();
+                    let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
+                    let idx = crate::chord_stamp::stamp(s, ch, start, g.key_at(y), st);
+                    if st.only_one {
+                        s.piano.stamp = Some(crate::chord_stamp::Stamp { pick: crate::chord_stamp::Pick::None, ..st });
+                    }
+                    s.piano.select(s.pattern(), ch, idx.clone());
+                    let notes = piano::notes(&s.session);
+                    let orig: Vec<(usize, Note)> = idx.iter().filter_map(|&i| notes.get(i).map(|&n| (i, n))).collect();
+                    s.session.dirty = true;
+                    if let Some(&(_, n)) = orig.first() {
+                        s.piano.last_len = n.length;
+                        self.key_velocity = n.velocity;
+                        let play = self.audition();
+                        self.hold_key(Some(i32::from(n.key)), play);
+                    }
+                    self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig });
+                    return;
+                }
                 piano::snapshot_as(&mut s.session, "Piano roll add note");
                 s.piano.clear_selection();
-                let i = piano::add_note(s, ch, crate::piano_snap::place(s, &g, g.tick_at(x), self.alt), g.key_at(y));
+                let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
+                let i = piano::add_note(s, ch, start, crate::scale_snap::drawn(s, start, g.key_at(y), g.key_frac(y)));
                 let i = piano::paint_mono(s, i);
                 let n = piano::notes(&s.session)[i];
                 s.piano.last_len = n.length;
@@ -8464,11 +8624,23 @@ impl App {
                 piano::snapshot(&mut s.session);
                 let sel = s.piano.selection(s.pattern(), Some(ch));
                 let idx = if sel.contains(&i) && tool.moves_groups() {
-                    sel
+                    crate::note_groups::with_groups(piano::notes(&s.session), sel)
                 } else {
                     s.piano.clear_selection();
-                    vec![i]
+                    // A grouped note brings its group along with Draw and Select, not with Paint (spec:
+                    // ui/piano-note-groups.md §3).
+                    if tool.moves_groups() {
+                        crate::note_groups::with_groups(piano::notes(&s.session), vec![i])
+                    } else {
+                        vec![i]
+                    }
                 };
+                // Its group is highlighted, not selected: FL sets no selection bit (§3).
+                if tool.moves_groups() {
+                    crate::note_groups::press(s, i);
+                } else {
+                    s.piano.group_hl = None;
+                }
                 let notes = piano::notes(&s.session);
                 // The clicked note first: it is the one auditioned while dragging.
                 let orig: Vec<(usize, Note)> =
@@ -8706,6 +8878,7 @@ impl App {
             Action::Tapper(a) => self.tapper_act(a),
             Action::Touch(a) => self.touch_act(a),
             Action::Strum(a) => self.strum_act(a),
+            Action::NoteProps(a) => self.note_props_act(a),
             Action::Container(a) => self.container_act(a),
             Action::Palette(a) => self.palette_act(a),
             Action::Arp(a) => self.arp_act(a),
@@ -8867,6 +9040,11 @@ impl App {
                     self.damage_eq();
                 }
             }
+            Action::Targets(h) => {
+                if let Some(m) = crate::auto_targets::hit(self, h) {
+                    self.state.message = Some(m);
+                }
+            }
             Action::Mix(h) => {
                 let plain_strip = matches!(h, crate::mixer::MHit::Strip(_)) && !self.ctrl && !self.shift;
                 let sweep = match h {
@@ -8893,10 +9071,12 @@ impl App {
                 }
             }
             // A press on the fader of a track in a multi-selection keeps the selection and makes that track current, and
-            // a drag moves them all (spec: ui/mixer.md §2, §4).
+            // a drag moves them all (spec: ui/mixer.md §2, §4); Ctrl+press does not add a track. On selected faders Ctrl
+            // drags at a quarter of the rate (measured there only) and Shift gives them the pressed one's value.
             Action::Fader(t) => {
                 let in_group = crate::mixer::in_group(s, t);
-                crate::mixer::select(s, t, self.ctrl || in_group);
+                crate::mixer::select(s, t, in_group);
+                let (rate, same) = (if self.ctrl && in_group { 0.25 } else { 1.0 }, self.shift && in_group);
                 let v0 = crate::edit::mixer::volume(&s.session, t);
                 let mut others = if in_group { crate::mixer::group_levels(s) } else { Vec::new() };
                 let level = others.iter().find(|o| o.0 == t).map_or(v0, |o| o.1);
@@ -8907,7 +9087,7 @@ impl App {
                     let tracks = std::iter::once(t).chain(others.iter().map(|o| o.0));
                     crate::control::edit_press_all(&mut s.session, crate::history::MIXER_VOLUME, tracks.map(crate::control::command::Region::Track));
                 }
-                self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0, level, others });
+                self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0, level, others, rate, same });
             }
             Action::ChannelSelect(_) | Action::RackSelect(_) => {}
             Action::RackRollView => s.rack_roll_view = !s.rack_roll_view,
@@ -8957,6 +9137,26 @@ impl App {
                 self.hint = Cow::Owned(s.knob_text(id));
             }
             Action::PianoLaneMenu => s.lane_menu = true,
+            Action::PianoNewType(slide) => {
+                let cmd = if slide { crate::piano_tools::NCmd::NewSlide } else { crate::piano_tools::NCmd::NewPorta };
+                self.state.message = crate::piano_tools::run(self, cmd);
+                self.invalidate();
+            }
+            Action::PianoScaleSnap => {
+                self.state.message = crate::piano_tools::run(self, crate::piano_tools::NCmd::ScaleSnapNotes);
+                self.invalidate();
+            }
+            Action::PianoStampMenu => {
+                let b = self
+                    .hits
+                    .iter()
+                    .rev()
+                    .find(|h| h.action == Action::PianoStampMenu)
+                    .map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
+                self.state.playlist.popup =
+                    Some(crate::piano_tools::stamp_menu(&self.state, b.cx() - 11.0, b.cy() + 11.0));
+                self.invalidate();
+            }
             Action::PianoToolsMenu => {
                 let (x, y) = self.mouse;
                 s.playlist.popup = Some(crate::piano_tools::tools_menu(s, x - 6.0, y + 10.0));
@@ -9075,6 +9275,11 @@ impl App {
             Action::Util(Util::AudioEditor) => self.audio_editor(0, false),
             Action::Util(Util::NewAudioEditor) => self.audio_editor(0, true),
             Action::CloseWin(Win::Perf) => self.close_perf(),
+            Action::CloseWin(Win::NoteProps) => {
+                crate::note_props::close(s);
+                s.hide(Win::NoteProps);
+                self.damage_win(Win::PianoRoll);
+            }
             Action::CloseWin(Win::Strum) => {
                 crate::strum::cancel(s);
                 s.hide(Win::Strum);
@@ -9461,6 +9666,7 @@ impl App {
             // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
             MenuCmd::Settings(tab) => self.open_settings(tab),
             MenuCmd::ExportZip => crate::zipped_ui::export_dialog(self),
+            MenuCmd::ExportGroups => crate::group_export::ask_folder(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             MenuCmd::Sampler => {
                 if let Some(index) = self.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
@@ -16164,6 +16370,291 @@ mod tests {
         assert_eq!(moved.2, 37, "the dragged note keeps its velocity");
         app.mouse_up();
         assert_eq!(app.mouse_note, None);
+    }
+
+    /// A double-click on a note opens its Note properties; the window's velocity knob edits it, Accept is one undo step
+    /// (spec: ui/piano-note-properties.md §1, §2).
+    #[test]
+    fn a_double_click_on_a_note_opens_its_properties() {
+        let (mut app, mut c) = piano_with_note(37);
+        let n = piano::notes(&app.state.session)[0];
+        let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(!app.state.shown(Win::NoteProps), "one click only selects");
+        app.mouse_down();
+        app.mouse_up();
+        assert!(app.state.shown(Win::NoteProps) && app.state.in_front(Win::NoteProps));
+        assert_eq!(piano::notes(&app.state.session)[0], n, "the double-click moved nothing");
+        frame(&mut app, &mut c, None);
+        app.state.set_knob(crate::knobs::KnobId::NoteProp(1), 0.5);
+        assert_eq!(piano::notes(&app.state.session)[0].velocity, 37, "no preview: the note waits for Accept");
+        frame(&mut app, &mut c, None);
+        hit_rect(&app, &Action::NoteProps(crate::note_props::Act::Accept)); // the window draws its Accept button
+        app.act(Action::NoteProps(crate::note_props::Act::Accept));
+        assert_eq!(piano::notes(&app.state.session)[0].velocity, 64);
+        assert!(!app.state.shown(Win::NoteProps));
+        assert!(piano::undo(&mut app.state));
+        assert_eq!(piano::notes(&app.state.session)[0].velocity, 37, "one step for the window");
+    }
+
+    /// Two notes of the piano roll's channel in group 1, the second four keys above the first.
+    fn piano_with_group() -> (App, Canvas) {
+        let (mut app, mut c) = piano_with_note(100);
+        let mut other = piano::notes(&app.state.session)[0];
+        other.key += 4;
+        piano::pattern_mut(&mut app.state.session).notes.push(other);
+        piano::pattern_mut(&mut app.state.session).notes.iter_mut().for_each(|n| n.unk14 = 1);
+        frame(&mut app, &mut c, None);
+        (app, c)
+    }
+
+    /// Press on note `i`; returns its rectangle.
+    fn press_note(app: &mut App, i: usize) -> Rect {
+        let n = piano::notes(&app.state.session)[i];
+        let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        r
+    }
+
+    /// A click on a grouped note highlights its group without selecting it, as FL (no selection bit), and a drag moves
+    /// the group (spec: ui/piano-note-groups.md §3).
+    #[test]
+    fn a_grouped_note_drags_its_group() {
+        let (mut app, mut c) = piano_with_group();
+        let n = piano::notes(&app.state.session)[0];
+        let r = press_note(&mut app, 0);
+        frame(&mut app, &mut c, None); // drawn with its outline
+        let ch = piano::channel(&app.state);
+        assert!(app.state.piano.selection(app.state.pattern(), ch).is_empty(), "highlighted, not selected");
+        assert_eq!(crate::note_groups::highlighted(&app.state), [0, 1], "the group is highlighted");
+        app.mouse_move(r.cx() + 200.0, r.cy());
+        app.mouse_up();
+        let notes = piano::notes(&app.state.session);
+        assert!(notes[0].position > n.position && notes[1].position == notes[0].position, "both moved");
+        assert!(app.state.piano.selection(app.state.pattern(), ch).is_empty());
+        // A click on the grid clears the highlight.
+        app.mouse_move(1500.0, 300.0);
+        app.mouse_down();
+        app.mouse_up();
+        assert!(crate::note_groups::highlighted(&app.state).is_empty());
+    }
+
+    /// The Paint tool drags one note of a group alone: the group moves with Draw and Select only.
+    #[test]
+    fn paint_drags_one_grouped_note() {
+        let (mut app, _c) = piano_with_group();
+        app.state.piano.tool = Tool::Paint;
+        let n = piano::notes(&app.state.session)[0];
+        let r = press_note(&mut app, 0);
+        app.mouse_move(r.cx() + 200.0, r.cy());
+        app.mouse_up();
+        // The notes may be sorted after the move: find them by key.
+        let at = |k: u16| piano::notes(&app.state.session).iter().find(|m| m.key == k).unwrap().position;
+        assert!(at(n.key) > n.position);
+        assert_eq!(at(n.key + 4), n.position, "its mate stayed");
+    }
+
+    /// With Enable groups off, a grouped note moves and deletes alone; the groups are kept (Lemon Studio's choice, as
+    /// the playlist: FL not measured).
+    #[test]
+    fn with_groups_off_a_grouped_note_acts_alone() {
+        let (mut app, mut c) = piano_with_group();
+        assert!(!crate::enable_groups::toggle());
+        let n = piano::notes(&app.state.session)[0];
+        let r = press_note(&mut app, 0);
+        app.mouse_move(r.cx() + 200.0, r.cy());
+        app.mouse_up();
+        // The notes may be sorted after the move: find them by key.
+        let at = |k: u16| piano::notes(&app.state.session).iter().find(|m| m.key == k).unwrap().position;
+        assert!(at(n.key) > n.position);
+        assert_eq!(at(n.key + 4), n.position, "its mate stayed");
+        assert!(piano::notes(&app.state.session).iter().all(|n| n.unk14 == 1), "the group is kept");
+        frame(&mut app, &mut c, None);
+        let m = piano::notes(&app.state.session)[1];
+        let r = app.piano_geom().unwrap().note_rect(&m).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        assert_eq!(piano::notes(&app.state.session).len(), 1, "right-click deletes the one note");
+        assert!(crate::enable_groups::toggle());
+    }
+
+    /// A double-click on a grouped note opens Note properties on that one note (spec: ui/piano-note-properties.md §1).
+    #[test]
+    fn a_double_click_on_a_grouped_note_opens_that_note() {
+        let (mut app, _c) = piano_with_group();
+        press_note(&mut app, 0);
+        app.mouse_up();
+        app.mouse_down();
+        app.mouse_up();
+        assert!(app.state.shown(Win::NoteProps));
+        assert!(!app.state.note_props.many(), "Note properties, not Step properties");
+    }
+
+    /// Shift+G groups the selected notes, Alt+G ungroups them (spec: ui/piano-note-groups.md §1).
+    #[test]
+    fn shift_g_groups_and_alt_g_ungroups() {
+        use crate::keys::Key;
+        let (mut app, _c) = piano_with_note(100);
+        let mut other = piano::notes(&app.state.session)[0];
+        other.key += 4;
+        piano::pattern_mut(&mut app.state.session).notes.push(other);
+        let ch = piano::channel(&app.state).unwrap();
+        app.state.piano.select(app.state.pattern(), ch, vec![0, 1]);
+        app.shift = true;
+        app.key(&Key::Character("G".into()), false, false);
+        app.shift = false;
+        let groups = |app: &App| piano::notes(&app.state.session).iter().map(|n| n.unk14).collect::<Vec<_>>();
+        assert_eq!(groups(&app), [1, 1]);
+        app.key(&Key::Character("g".into()), false, true);
+        assert_eq!(groups(&app), [0, 0]);
+        assert!(crate::enable_groups::on(), "Alt+G is not Shift+Alt+G");
+    }
+
+    /// Copies of grouped notes (Ctrl+B, Ctrl+C / Ctrl+V, a Shift+drag) make groups of their own, so deleting a copy
+    /// leaves the originals (as the playlist's clip copies, `regroup_copies`).
+    #[test]
+    fn copies_of_grouped_notes_make_groups_of_their_own() {
+        use crate::keys::Key;
+        let (mut app, mut c) = piano_with_group();
+        let ch = piano::channel(&app.state).unwrap();
+        // The group numbers in order (an edit may sort the notes).
+        let groups = |app: &App| {
+            let mut g: Vec<u16> = piano::notes(&app.state.session).iter().map(|n| n.unk14).collect();
+            g.sort_unstable();
+            g
+        };
+        app.state.piano.select(app.state.pattern(), ch, vec![0, 1]);
+        app.key(&Key::Character("b".into()), true, false);
+        assert_eq!(groups(&app), [1, 1, 2, 2], "Ctrl+B");
+        app.state.piano.select(app.state.pattern(), ch, vec![0, 1]);
+        app.key(&Key::Character("c".into()), true, false);
+        app.key(&Key::Character("v".into()), true, false);
+        assert_eq!(groups(&app), [1, 1, 2, 2, 3, 3], "Ctrl+V");
+        app.state.piano.clear_selection();
+        frame(&mut app, &mut c, None);
+        app.shift = true;
+        let r = press_note(&mut app, 0);
+        for k in 1..=10 {
+            app.mouse_move(r.cx() + 20.0 * k as f32, r.cy());
+        }
+        app.mouse_up();
+        app.shift = false;
+        assert_eq!(groups(&app), [1, 1, 2, 2, 3, 3, 4, 4], "a Shift+drag's copies");
+        // Deleting a copy deletes its own group only.
+        frame(&mut app, &mut c, None);
+        let m = *piano::notes(&app.state.session).iter().find(|n| n.unk14 == 2).unwrap();
+        let r = app.piano_geom().unwrap().note_rect(&m).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.mouse_up();
+        assert_eq!(groups(&app), [1, 1, 3, 3, 4, 4]);
+    }
+
+    /// Note properties close with their project, and when the piano roll shows another pattern.
+    #[test]
+    fn note_properties_close_with_their_project_or_pattern() {
+        let (mut app, _c) = piano_with_note(37);
+        app.open_note_props(0);
+        assert!(app.state.shown(Win::NoteProps));
+        app.forget_project_ui();
+        assert!(!app.state.shown(Win::NoteProps) && !app.state.note_props.is_open());
+        let (mut app, _c) = piano_with_note(37);
+        app.open_note_props(0);
+        app.state.set_pattern(2);
+        app.tick();
+        assert!(!app.state.shown(Win::NoteProps) && !app.state.note_props.is_open());
+    }
+
+    /// S and O (typing keyboard off) make new notes slide and portamento notes; the colour tab's toggles show it (spec:
+    /// ui/piano-note-properties.md §5).
+    #[test]
+    fn s_and_o_set_the_type_of_new_notes() {
+        use crate::keys::Key;
+        let (mut app, mut c) = piano_with_note(100);
+        app.state.toggles.retain(|t| *t != "typing");
+        app.key(&Key::Character("s".into()), false, false);
+        app.key(&Key::Character("o".into()), false, false);
+        assert_eq!(piano::new_type(&app.state), (true, true));
+        app.mouse_move(700.0, 500.0);
+        app.mouse_down();
+        app.mouse_up();
+        let n = *piano::notes(&app.state.session).last().unwrap();
+        assert!(n.slide() && n.porta(), "the new note took both");
+        frame(&mut app, &mut c, None);
+        app.act(Action::PianoNewType(true));
+        assert_eq!(piano::new_type(&app.state), (false, true), "the tab's slide toggle");
+    }
+
+    /// A Stamp draws its chord from the clicked key, one undo step; "Only one" goes back to single notes (spec:
+    /// ui/piano-chord-stamp.md §2).
+    #[test]
+    fn a_stamp_draws_its_chord() {
+        use crate::piano_tools::NCmd;
+        let (mut app, mut c) = piano_with_note(100);
+        piano::pattern_mut(&mut app.state.session).notes.clear();
+        crate::playlist::run(&mut app, crate::playlist::Cmd::Piano(NCmd::StampOnlyOne));
+        crate::playlist::run(&mut app, crate::playlist::Cmd::Piano(NCmd::Stamp(crate::chord_stamp::Pick::Named(5))));
+        frame(&mut app, &mut c, None);
+        let g = app.piano_geom().unwrap();
+        let key = g.key_at(500.0);
+        app.mouse_move(500.0, 500.0);
+        app.mouse_down();
+        app.mouse_up();
+        let mut keys: Vec<i32> = piano::notes(&app.state.session).iter().map(|n| i32::from(n.key)).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, [key, key + 4, key + 7], "a Major chord");
+        assert_eq!(
+            app.state.piano.stamp.map(|s| s.pick),
+            Some(crate::chord_stamp::Pick::None),
+            "only one: back to single notes"
+        );
+        let ch = piano::channel(&app.state);
+        assert_eq!(app.state.piano.selection(app.state.pattern(), ch).len(), 3, "the stamped notes are selected");
+        assert!(piano::notes(&app.state.session).iter().all(|n| n.unk14 == 1), "as one group");
+        let name = crate::views::piano::chord_name(&app.state).expect("a chord name for the selection");
+        assert!(name.ends_with(" Major"), "{name}");
+        assert!(piano::undo(&mut app.state));
+        assert!(piano::notes(&app.state.session).is_empty(), "one undo step");
+    }
+
+    /// With Snap PR notes to scale on, a note drawn on a row out of the scale lands on the scale (spec:
+    /// ui/piano-scale-snap.md §2).
+    #[test]
+    fn snap_to_scale_puts_drawn_notes_on_the_scale() {
+        let (mut app, mut c) = piano_with_note(100);
+        piano::pattern_mut(&mut app.state.session).notes.clear();
+        crate::edit::notes::put_scale_highlight(&mut app.state.session, os_model::ScaleHighlight { mode: 0, root: 0 });
+        app.act(Action::PianoScaleSnap);
+        assert!(app.state.piano.scale_snap.notes);
+        frame(&mut app, &mut c, None);
+        let g = app.piano_geom().unwrap();
+        let row = |hi: bool| {
+            (0..800)
+                .map(|d| 300.0 + d as f32 / 2.0)
+                .find(|&y| {
+                    g.key_at(y).rem_euclid(12) == 1 && if hi { g.key_frac(y) > 0.8 } else { g.key_frac(y) < 0.2 }
+                })
+                .unwrap()
+        };
+        for (x, y, d) in [(500.0, row(true), 1), (800.0, row(false), -1)] {
+            let key = g.key_at(y);
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_up();
+            let n = *piano::notes(&app.state.session).last().unwrap();
+            assert_eq!(i32::from(n.key), key + d, "the top of a C# row gives D, its bottom C");
+        }
+        // Without the grid's highlights (Alt+B) the scale still snaps.
+        app.state.piano.highlights = false;
+        let y = row(true);
+        app.mouse_move(1100.0, y);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(i32::from(piano::notes(&app.state.session).last().unwrap().key), g.key_at(y) + 1);
     }
 
     /// The Playback tool holds the notes under its line, at their velocities, until they are left or the button goes up;

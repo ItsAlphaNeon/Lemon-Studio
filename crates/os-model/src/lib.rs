@@ -1541,6 +1541,9 @@ pub struct MixerTrack {
     pub separator: bool,
     pub dock: u8,
     pub threaded: bool,
+    /// The mute lock (the LED's Shift+click, event 236 flag 0x0800): solo and unsolo leave the track on or muted as it
+    /// is (spec: ui/mixer-selection.md §4).
+    pub mute_lock: bool,
     /// Per slot: enabled (the slot LED) and mix level 0..=1 (spec: ui/mixer.md §7).
     pub slot_on: [bool; 10],
     pub slot_mix: [f64; 10],
@@ -1603,6 +1606,7 @@ impl PartialEq for MixerTrack {
             separator,
             dock,
             threaded,
+            mute_lock,
             slot_on,
             slot_mix,
             eq,
@@ -1637,6 +1641,7 @@ impl PartialEq for MixerTrack {
             && *separator == o.separator
             && *dock == o.dock
             && *threaded == o.threaded
+            && *mute_lock == o.mute_lock
             && *slot_on == o.slot_on
             && *slot_mix == o.slot_mix
             && *eq == o.eq
@@ -1691,6 +1696,7 @@ impl MixerTrack {
             separator: false,
             dock: if index == 0 { DOCK_LEFT } else { DOCK_MIDDLE },
             threaded: true,
+            mute_lock: false,
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,

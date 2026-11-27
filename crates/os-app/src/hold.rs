@@ -152,7 +152,9 @@ impl App {
         }
         let first = p.notes.len();
         p.notes.extend(orig.iter().map(|&(_, o)| o));
-        let copies: Vec<(usize, Note)> = orig.iter().enumerate().map(|(k, &(_, o))| (first + k, o)).collect();
+        // Copies of grouped notes make groups of their own (spec: ui/piano-note-groups.md §2).
+        crate::note_groups::regroup_copies(&mut p.notes, first);
+        let copies: Vec<(usize, Note)> = (first..).zip(p.notes[first..].iter().copied()).collect();
         if selected {
             s.piano.select(s.pattern(), ch, (first..first + copies.len()).collect());
         }

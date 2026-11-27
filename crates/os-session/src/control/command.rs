@@ -285,6 +285,9 @@ pub enum Command {
         monitor: Option<String>,
         #[serde(default)]
         armed: Option<bool>,
+        /// The mute lock: solo and unsolo leave the track as it is.
+        #[serde(default)]
+        mute_lock: Option<bool>,
     },
     /// The track back to a new track's settings, routed to the master; its name, colour, levels... go, its effects stay.
     ResetTrack { track: u32 },
@@ -495,6 +498,9 @@ pub enum Command {
     /// The points of the automation clip on channel `channel` (an id) become `points`, in beat order; a point named by
     /// its id keeps its values for what is not given. A clip keeps two points at least.
     SetPoints { channel: u32, points: Vec<PointIn> },
+    /// The automation clip on channel `channel` (an id) drives `targets` (automation target ids, in order; empty: none),
+    /// its Target links (spec: ui/automation-targets.md §3).
+    SetTargets { channel: u32, targets: Vec<u32> },
     /// A new arrangement after the others, a copy of arrangement `copy` when given, else empty; named `name`, else
     /// "Arrangement N" (a copy: "<name> #2"). The result names its id.
     AddArrangement {
@@ -1489,6 +1495,7 @@ impl Command {
             Command::SetClips { .. } | Command::SetMarkers { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::AddArrangement { .. } => "Add arrangement",
             Command::SetPoints { .. } => crate::edit::playlist::ARRANGER_EDIT,
+            Command::SetTargets { .. } => "Automation clip targets",
             Command::DeleteArrangement { .. } => "Delete arrangement",
             Command::SetArrangement { .. } => "Arrangement name",
             Command::MoveContent { .. } => crate::edit::playlist::ARRANGER_EDIT,
@@ -1549,6 +1556,7 @@ impl Command {
             rec_source: None,
             monitor: None,
             armed: None,
+            mute_lock: None,
         }
     }
 
@@ -1608,7 +1616,7 @@ impl Command {
             | Command::SetProject { .. } => Taken::Settings(Box::new(Settings::of(s))),
             Command::SetChannel { channel, .. } | Command::LoadSample { channel, .. } | Command::SetMisc { channel, .. } => Taken::Channel(Box::new(p.channels[channel_row(p, *channel)?].clone())),
             Command::SetStartValue { target, .. } => Taken::Start(*target, crate::init::placed(s, *target)),
-            Command::SetTrack { track, name: None, color: None, volume: None, pan: None, stereo: None, enabled: Some(_), polarity: None, swap: None, effects_enabled: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, audio_in: None, audio_out: None, rec_source: None, monitor: None, armed: None } => {
+            Command::SetTrack { track, name: None, color: None, volume: None, pan: None, stereo: None, enabled: Some(_), polarity: None, swap: None, effects_enabled: None, separator: None, dock: None, threaded: None, latency_in: None, latency_out: None, audio_in: None, audio_out: None, rec_source: None, monitor: None, armed: None, mute_lock: None } => {
                 Taken::Track(Box::new(p.mixer[track_place_muted(p, *track)?].clone()))
             }
             Command::SetTrack { track, .. } | Command::ResetTrack { track } | Command::SetEq { track, .. } | Command::SetSlot { track, .. } | Command::AddEffect { track, .. } | Command::RemoveEffect { track, .. } => {
@@ -1649,6 +1657,10 @@ impl Command {
             Command::AddArrangement { .. } | Command::DeleteArrangement { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::SetArrangement { arrangement, .. } => Taken::Arrangement(Box::new(arrangement_of(p, *arrangement)?.clone())),
             Command::SetPoints { channel, .. } => Taken::Points(*channel, auto_of(p, *channel)?.points.clone()),
+            Command::SetTargets { channel, .. } => {
+                auto_of(p, *channel)?;
+                Taken::Project(Box::new(Side::of(s)))
+            }
             // A wrap moves plugins and what names them across the project.
             Command::WrapEffects { .. } | Command::WrapInstrument { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::LoadTrackState { track, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone())),
@@ -2288,7 +2300,7 @@ impl Command {
                 crate::edit::mixer::delete_track_in(s, n);
                 none
             }
-            Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled, separator, dock, threaded, latency_in, latency_out, audio_in, audio_out, rec_source, monitor, armed } => {
+            Command::SetTrack { track, name, color, volume, pan, stereo, enabled, polarity, swap, effects_enabled, separator, dock, threaded, latency_in, latency_out, audio_in, audio_out, rec_source, monitor, armed, mute_lock } => {
                 let monitor = match monitor.as_deref() {
                     None => None,
                     Some("off") => Some(os_model::MONITOR_OFF),
@@ -2348,6 +2360,9 @@ impl Command {
                 }
                 if let Some(v) = separator {
                     m.separator = v;
+                }
+                if let Some(v) = mute_lock {
+                    m.mute_lock = v;
                 }
                 if let Some(v) = dock {
                     m.dock = v;
@@ -2943,6 +2958,15 @@ impl Command {
                 s.control.settle(s.project.get_mut());
                 none
             }
+            Command::SetTargets { channel, targets } => {
+                let index = s.project.channels[channel_row(&s.project, channel)?].index;
+                auto_of(&s.project, channel)?;
+                if let Some(a) = s.project.get_mut().automation_mut(index) {
+                    a.targets = targets;
+                }
+                s.control.settle(s.project.get_mut());
+                none
+            }
             Command::AddArrangement { name, copy } => {
                 let n = s.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
                 let mut a = match copy {
@@ -3281,10 +3305,13 @@ fn put(s: &mut crate::session::Session, t: Taken) {
         }
         Taken::Track(m) => {
             if let Ok(place) = track_place_muted(&s.project, m.id.0) {
-                // Undo leaves its light and its arming as they are (arming is no part of the track, track-io.md §2.3).
-                let (on, armed) = (s.project.mixer[place].enabled, s.project.mixer[place].armed);
-                s.project.get_mut().mixer[place] = *m;
-                (s.project.get_mut().mixer[place].enabled, s.project.get_mut().mixer[place].armed) = (on, armed);
+                // Undo leaves its light, its mute lock and its arming as they are (arming is no part of the track,
+                // track-io.md §2.3; the lock is no step, ui/mixer-selection.md §4).
+                let cur = &s.project.mixer[place];
+                let (on, locked, armed) = (cur.enabled, cur.mute_lock, cur.armed);
+                let t = &mut s.project.get_mut().mixer[place];
+                *t = *m;
+                (t.enabled, t.mute_lock, t.armed) = (on, locked, armed);
             }
         }
         Taken::Pattern(p) => {
@@ -3541,7 +3568,8 @@ fn restore(s: &mut crate::session::Session, side: Side) {
 /// with the project: a step that made one (a MIDI file imported) takes it away.
 struct Mutes {
     channels: std::collections::HashMap<u32, (bool, bool, bool)>,
-    tracks: std::collections::HashMap<u32, bool>,
+    /// Each track's light and mute lock.
+    tracks: std::collections::HashMap<u32, (bool, bool)>,
     /// The song mode and performance mode: no step either.
     song_mode: Option<bool>,
     performance: Option<bool>,
@@ -3551,7 +3579,7 @@ impl Mutes {
     fn of(p: &Project) -> Mutes {
         Mutes {
             channels: p.channels.iter().map(|c| (c.id.0, (c.enabled, c.rack.locked, c.rack.zipped))).collect(),
-            tracks: p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect(),
+            tracks: p.mixer.iter().map(|m| (m.id.0, (m.enabled, m.mute_lock))).collect(),
             song_mode: p.song_mode,
             performance: p.performance,
         }
@@ -3565,8 +3593,8 @@ impl Mutes {
             }
         }
         for m in &mut p.mixer {
-            if let Some(&on) = self.tracks.get(&m.id.0) {
-                m.enabled = on;
+            if let Some(&(on, locked)) = self.tracks.get(&m.id.0) {
+                (m.enabled, m.mute_lock) = (on, locked);
             }
         }
     }

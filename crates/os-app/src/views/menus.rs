@@ -40,6 +40,8 @@ pub enum MenuCmd {
     SaveAsTemplate,
     DeleteUnused,
     ExportZip,
+    /// FILE ▸ Export all playlist track groups... (`crate::group_export`).
+    ExportGroups,
     RestoreBackup,
     Undo,
     Redo,
@@ -192,7 +194,7 @@ pub const FILE_EXPORT_MP3: usize = 13;
 pub const FILE_EXPORT_MIDI: usize = 14;
 /// FILE > Export zipped project...: the project and its samples in one .zip (`crate::zipped`).
 pub const EXPORT_ZIP_LABEL: &str = "Export zipped project...";
-pub const FILE_EXIT: usize = 19;
+pub const FILE_EXIT: usize = 20;
 /// OPTIONS > Theme settings (flat index: header counts).
 #[cfg(test)]
 pub const OPT_THEME: usize = 5;
@@ -255,6 +257,7 @@ const FILE: &[Item] = &[
     it("Export audio...", "Ctrl+R").on(),
     it("Export MP3...", "Shift+Ctrl+R").on(),
     it("Export MIDI...", "Shift+Ctrl+M").on(),
+    it("Export all playlist track groups...", "").on().cmd(MenuCmd::ExportGroups),
     it(EXPORT_ZIP_LABEL, "").on().cmd(MenuCmd::ExportZip),
     SEP,
     it("Restore backup...", "").on().cmd(MenuCmd::RestoreBackup),
