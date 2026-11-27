@@ -444,6 +444,8 @@ pub enum Cmd {
     ClipUnique(usize),
     /// An audio clip as heard (trims, fades, gain, the channel's settings) rendered to a new sample, which it then plays.
     ClipUniqueSample(usize),
+    /// Audio clip ▸ Automate ▸ Volume (false) / Panning (true): an automation clip over it (`crate::auto_targets`).
+    ClipAutomate(usize, bool),
     ClipEditSource(usize),
     ClipSelectSimilar(usize),
     ClipRename(usize),
@@ -730,6 +732,9 @@ pub enum EditTarget {
     MixerInsert(u16),
     /// The mixer track menu's Create group...: the track's name, then the group's separators (`mixer::create_group`).
     MixerGroup(u16),
+    /// The track routing menu's Create submix...: the name of its sources and, with " master", of the track
+    /// (`mixer::name_submix`).
+    MixerSubmix(u16),
     /// TOOLS > Chord progression tool...: the progression written into the piano roll (`chord_tool::write`).
     Chords,
     /// The current arrangement's name (§12).
@@ -1834,6 +1839,12 @@ pub fn track_after_used(s: &State) -> u16 {
 /// with the filter on it, as the original's rack shows after every Create automation clip (spec: ui/channel-rack.md
 /// §19, measured 2026-11-02).
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
+    create_automation_over(s, tgt, name, value, None)
+}
+
+/// `create_automation` with the clip from tick `a` to `b`, on the first free track from `track` on, when `over` gives
+/// them (Audio clip ▸ Automate, spec: ui/automation-targets.md §1).
+pub fn create_automation_over(s: &mut State, tgt: u32, name: &str, value: f64, over: Option<(u32, u32, u16)>) -> u16 {
     // One undo step, "Create automation clip": the channel, its group and the filter, the clip and the control's start
     // value while "Initialize controls automatically" is on (spec: ui/settings-choices.md "Advanced: Initialize
     // controls automatically").
@@ -1843,8 +1854,9 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     crate::follow::keep_rack_view(s);
     let name = unique_channel_name(&s.session, name);
     let index = s.session.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-    let (a, b) = match s.playlist.range {
-        Some((r0, r1)) if r1 > r0 => (r0, r1),
+    let (a, b) = match (over, s.playlist.range) {
+        (Some((a, b, _)), _) => (a, b),
+        (None, Some((r0, r1))) if r1 > r0 => (r0, r1),
         _ => automation_span(s),
     };
     let beats = f64::from(b - a) / f64::from(ppq(&s.session));
@@ -1852,7 +1864,7 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
     let color = crate::control::command::color_text(Some(s.session.clip_colors.new_channel(index)));
     let first = vec![Command::AddChannel { name: Some(name), plugin: None, sample: None, track: None, kind: Some("automation".into()), color, target: Some(tgt), points, children: Vec::new() }];
-    let track = free_track(s, track_after_used(s), a, b);
+    let track = free_track(s, over.map_or_else(|| track_after_used(s), |o| o.2), a, b);
     let made = crate::control_ui::command_then(s, crate::history::CREATE_AUTOMATION, first, |s, r| {
         let id = r.first().and_then(|v| v["channel"].as_u64()).map(|id| id as u32);
         let Some(row) = s.session.project.channels.iter().position(|c| Some(c.id.0) == id) else { return Vec::new() };
@@ -2638,7 +2650,15 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
         // "(disabled)"), the second click is a plain one.
         if !right && matches!(tool, PlTool::Draw | PlTool::Paint | PlTool::Select) {
             let audio = audio_clip_row(&s.session, &c);
-            if audio.is_some() || matches!(c.source, ClipSource::Pattern(_)) {
+            // An automation clip opens its settings, unless the press is on one of its points (spec:
+            // ui/automation-targets.md §2).
+            let auto = match c.source {
+                ClipSource::Channel(ch) if s.session.project.automation(ch).is_some() && point_near(&s.session, &g, ci, x, y).is_none() => {
+                    s.session.project.channels.iter().position(|k| k.index == ch)
+                }
+                _ => None,
+            };
+            if audio.is_some() || auto.is_some() || matches!(c.source, ClipSource::Pattern(_)) {
                 let now = crate::anim::now();
                 let double = s.playlist.last_clip.is_some_and(|(i, t)| i == ci && now.duration_since(t).as_millis() < 450);
                 s.playlist.last_clip = (!double).then_some((ci, now));
@@ -2652,6 +2672,11 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                             s.session.pending_open = Some(row);
                             app.focus_channel(row);
                         }
+                    } else if let Some(row) = auto {
+                        // Not a hosted plugin: its window is the channel window, opened now.
+                        s.rack.select_only(row);
+                        app.focus_channel(row);
+                        app.open_channel_window(row);
                     } else {
                         run(app, Cmd::ClipEditSource(ci));
                     }
@@ -3619,7 +3644,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::SlotName(t, k) => crate::edit::mixer::slot_name(&s.session, t, k).unwrap_or_default(),
         EditTarget::MemberName(t, k, id) => crate::edit::container::member(&s.session, t, k, id).map(|m| m.shown().to_string()).unwrap_or_default(),
         EditTarget::MixerInsert(_) => "2".into(),
-        EditTarget::MixerGroup(_) => String::new(),
+        EditTarget::MixerGroup(_) | EditTarget::MixerSubmix(_) => String::new(),
         EditTarget::Chords => crate::chord_tool::last(),
         EditTarget::TypeIn(t, norm) => crate::typein_ui::text(s, t, norm),
     };
@@ -3644,6 +3669,11 @@ pub fn commit_edit(s: &mut State) {
             }
             return;
         }
+    }
+    // Create submix...'s names join its routing step (spec: ui/mixer-selection.md §1.1): no playlist step first.
+    if let EditTarget::MixerSubmix(n) = e.target {
+        crate::mixer::name_submix(s, n, &e.text);
+        return;
     }
     snapshot(&mut s.session);
     let text = e.text.trim().to_string();
@@ -3725,6 +3755,8 @@ pub fn commit_edit(s: &mut State) {
             crate::history::settle(&mut s.session);
             crate::mixer::create_group(s, n, &text);
         }
+        // Above, before the playlist step.
+        EditTarget::MixerSubmix(_) => {}
         EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
         // A pattern number the project holds no pattern for gets one, named.
         EditTarget::PatternName(n) => {
@@ -4315,6 +4347,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             make_unique(s, &[i]).first().map(|n| format!("Made unique: pattern {n}"))
         }
         Cmd::ClipUniqueSample(i) => Some(make_unique_sample(s, i)),
+        Cmd::ClipAutomate(i, pan) => crate::auto_targets::automate_clip(s, i, pan),
         Cmd::ClipEditSource(i) => {
             if let Some(ClipSource::Pattern(n)) = clips(&s.session).get(i).map(|c| c.source) {
                 s.set_pattern(n);
@@ -5289,6 +5322,7 @@ pub fn clip_menu(s: &crate::session::Session, i: usize, x: f32, y: f32) -> Popup
         PickKind::Audio => {
             items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
             items.push(PItem::new("Make unique as sample", Cmd::ClipUniqueSample(i)));
+            items.push(crate::auto_targets::automate_item(i));
         }
         PickKind::Automation => {}
     }

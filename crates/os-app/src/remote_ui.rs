@@ -227,6 +227,8 @@ impl App {
         match c {
             RCmd::Link(t) => {
                 let (w, h) = crate::views::remote_box::SIZE;
+                // The Internal controller group makes it taller while the project has automation clips.
+                let h = if crate::auto_targets::clips(&self.state).is_empty() { h } else { h + crate::views::remote_box::INTERNAL_H };
                 let (sw, sh) = self.state.screen;
                 let at = ((self.mouse.0 - 20.0).clamp(0.0, (sw - w).max(0.0)), (self.mouse.1 - 20.0).clamp(0.0, (sh - h).max(0.0)));
                 self.state.link_box = Some(LinkBox::new(&self.state.session.settings, t, at));
@@ -269,6 +271,11 @@ impl App {
     /// Accept: makes the link and closes the box (spec §3).
     pub fn link_accept(&mut self) {
         let Some(b) = self.state.link_box.take() else { return };
+        // An automation clip chosen as internal controller (spec: ui/automation-targets.md §4).
+        if let Some(ch) = b.internal.filter(|_| b.all.is_empty()) {
+            self.state.message = Some(crate::auto_targets::accept_internal(self, b.target, ch, b.conflicts));
+            return self.invalidate();
+        }
         if !b.all.is_empty() {
             let made = b.links();
             for l in &made {
@@ -300,6 +307,14 @@ impl App {
 
     /// A click on the box.
     pub fn link_box_act(&mut self, a: RAct) {
+        if a == RAct::Internal {
+            let cur = self.state.link_box.as_ref().and_then(|b| b.internal);
+            let next = crate::auto_targets::next_internal(&self.state, cur);
+            if let Some(b) = self.state.link_box.as_mut() {
+                b.internal = next;
+            }
+            return self.invalidate();
+        }
         let Some(b) = self.state.link_box.as_mut() else { return };
         match a {
             RAct::Body | RAct::Port | RAct::Channel | RAct::Ctrl | RAct::Time => {}
@@ -310,6 +325,7 @@ impl App {
             RAct::Conflicts => b.conflicts = !b.conflicts,
             RAct::Reset => b.reset(),
             RAct::Accept => return self.link_accept(),
+            RAct::Internal => {}
             RAct::Mode => {
                 let i = Mode::ALL.iter().position(|&m| m == b.mode).unwrap_or(0);
                 b.mode = Mode::ALL[(i + 1) % Mode::ALL.len()];

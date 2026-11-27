@@ -191,6 +191,7 @@ impl App {
         let Tick { moved, recorded, automate } = params_in(&mut self.state.session);
         if let Some((key, index)) = moved {
             note(&mut self.state.tweaks, Tweak::Plugin { key, index });
+            crate::auto_targets::tweaked(self);
             self.tweak_hint();
         }
         for (key, index, range, v) in recorded {
@@ -217,11 +218,12 @@ impl App {
     pub fn note_host_tweak(&mut self, a: &Action) {
         if self.automation_target(a).is_some() {
             note(&mut self.state.tweaks, Tweak::Host(a.clone()));
+            crate::auto_targets::tweaked(self);
         }
     }
 
     /// Target, clip name and current value of a tweak.
-    fn tweak_automation(&self, t: &Tweak) -> Option<(u32, String, f64)> {
+    pub(crate) fn tweak_automation(&self, t: &Tweak) -> Option<(u32, String, f64)> {
         match t {
             Tweak::Plugin { key, index } => automation(&self.state, *key, *index),
             Tweak::Host(a) => self.automation_target(a),

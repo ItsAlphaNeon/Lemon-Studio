@@ -310,6 +310,7 @@ fn op_name(c: &Command) -> &'static str {
         Command::SetClip { .. } => "set_clip",
         Command::SetPlaylistTrack { .. } => "set_playlist_track",
         Command::SetPoints { .. } => "set_points",
+        Command::SetTargets { .. } => "set_targets",
         Command::AddArrangement { .. } => "add_arrangement",
         Command::DeleteArrangement { .. } => "delete_arrangement",
         Command::SetArrangement { .. } => "set_arrangement",

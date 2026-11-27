@@ -682,6 +682,9 @@ impl App {
                     });
                 } else if win == Some(Win::ChannelRack) {
                     self.sample_to_rack(path, y);
+                } else if let Some(n) = crate::mixer::slot_drag::strip_at(self, x, y) {
+                    // A sampler channel playing into that track (spec: ui/mixer-selection.md §3).
+                    self.state.message = crate::mixer::slot_drag::sample_to_strip(self, path, n);
                 }
             }
             // As if picked in the F8 menu (spec: ui/plugin-menu.md §5): a new channel at the bottom of the rack.
