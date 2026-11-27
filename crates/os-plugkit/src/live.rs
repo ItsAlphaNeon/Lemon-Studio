@@ -13,6 +13,7 @@
 //! instances never see or wait on each other's edits. Entries are keyed by the parameter's address, which stays put
 //! while the params object lives (behind the plugin's `Arc`).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use nih_plug::prelude::*;
@@ -28,7 +29,11 @@ struct LiveEdit {
 
 /// One plugin instance's editor edits the host has not handed back yet.
 #[derive(Default)]
-pub struct LiveEdits(Mutex<Vec<LiveEdit>>);
+pub struct LiveEdits {
+    list: Mutex<Vec<LiveEdit>>,
+    /// Fast path for the audio thread: true only while `list` is non-empty (updated under `list`'s lock).
+    any: AtomicBool,
+}
 
 impl LiveEdits {
     /// Records an editor edit: `p` sounds at `norm` (normalised) until its host value moves from what it is now.
@@ -39,18 +44,28 @@ impl LiveEdits {
     }
 
     fn set_at(&self, addr: usize, norm: f32, host: f32) {
-        if let Ok(mut l) = self.0.lock() {
+        if let Ok(mut l) = self.list.lock() {
             l.retain(|e| e.addr != addr);
             if (norm - host).abs() > 1e-7 {
                 l.push(LiveEdit { addr, norm, base: host });
             }
+            self.any.store(!l.is_empty(), Ordering::Release);
         }
     }
 
     /// The normalised value the sound should use for the parameter at `addr` (`host` = its host value), or `None` to
     /// use the host's. Never blocks: while this instance's editor holds the list, the host value is used for this block.
+    #[inline]
     fn norm_at(&self, addr: usize, host: f32) -> Option<f32> {
-        let mut l = self.0.try_lock().ok()?;
+        if !self.any.load(Ordering::Acquire) {
+            return None;
+        }
+        self.norm_at_slow(addr, host)
+    }
+
+    #[cold]
+    fn norm_at_slow(&self, addr: usize, host: f32) -> Option<f32> {
+        let mut l = self.list.try_lock().ok()?;
         let i = l.iter().position(|e| e.addr == addr)?;
         let e = l[i];
         if (host - e.base).abs() <= 1e-7 && (host - e.norm).abs() > 1e-7 {
@@ -58,11 +73,13 @@ impl LiveEdits {
         } else {
             // Confirmed, or the host changed it since: the host's value from now on.
             l.swap_remove(i);
+            self.any.store(!l.is_empty(), Ordering::Release);
             None
         }
     }
 
     /// The normalised value the sound uses for `p` (its pending editor edit, else the host's value).
+    #[inline]
     pub fn norm(&self, p: ParamPtr) -> f32 {
         // SAFETY: callers hold pointers from a live params object.
         let host = unsafe { p.unmodulated_normalized_value() };
@@ -70,8 +87,12 @@ impl LiveEdits {
     }
 
     /// The plain value the sound uses for `p` (its pending editor edit, else the host's value).
+    #[inline]
     pub fn value<P: Param>(&self, p: &P) -> P::Plain {
-        match self.norm_at(p as *const P as usize, p.unmodulated_normalized_value()) {
+        if !self.any.load(Ordering::Acquire) {
+            return p.modulated_plain_value();
+        }
+        match self.norm_at_slow(p as *const P as usize, p.unmodulated_normalized_value()) {
             Some(n) => p.preview_plain(n),
             None => p.modulated_plain_value(),
         }
@@ -124,7 +145,32 @@ mod tests {
         assert_eq!(b.value(&p), 0);
         // Another instance holding its list (its editor, or its audio thread) never hides this instance's edit.
         b.set(p.as_ptr(), 1.0);
-        let _held = a.0.lock().unwrap();
+        let _held = a.list.lock().unwrap();
         assert_eq!(b.value(&p), 4);
+    }
+
+    #[test]
+    fn empty_fast_path_tracks_pending_edits() {
+        let live = LiveEdits::default();
+        let p = param();
+        let a = param_addr(p.as_ptr());
+        assert!(!live.any.load(Ordering::Acquire));
+        // Even if the mutex is held while empty, `norm_at` / `value` skip locking via the atomic fast path.
+        {
+            let _held = live.list.lock().unwrap();
+            assert_eq!(live.norm_at(a, 0.0), None);
+            assert_eq!(live.value(&p), 0);
+        }
+        live.set(p.as_ptr(), 0.5);
+        assert!(live.any.load(Ordering::Acquire));
+        assert_eq!(live.value(&p), 2);
+        // Confirming the last edit clears the atomic flag back to false.
+        assert_eq!(live.norm_at(a, 0.5), None);
+        assert!(!live.any.load(Ordering::Acquire));
+        // Editing back to host also leaves the flag false.
+        live.set(p.as_ptr(), 0.75);
+        assert!(live.any.load(Ordering::Acquire));
+        live.set_at(a, 0.0, 0.0);
+        assert!(!live.any.load(Ordering::Acquire));
     }
 }

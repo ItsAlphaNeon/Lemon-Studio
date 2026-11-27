@@ -678,6 +678,8 @@ pub struct Plugin {
     /// (`Instrument::midi`, as CLAP MIDI events on note port 0).
     midi_queue: Vec<(u32, [u8; 3])>,
     midis: Vec<clap_event_midi>,
+    /// Scratch buffer holding this chunk's event sequence before merging with parameter values.
+    seq: Vec<Seq>,
     /// This chunk's events in time order (pointers into `notes` / `mods`).
     order: Vec<*const clap_event_header>,
     /// Parameter that takes a note's sample start as per-note modulation (`use_start_param`).
@@ -977,8 +979,9 @@ impl Plugin {
                 notes: Vec::with_capacity(256),
                 mods: Vec::with_capacity(64),
                 exprs: Vec::with_capacity(64),
-                midi_queue: Vec::new(),
+                midi_queue: Vec::with_capacity(16),
                 midis: Vec::with_capacity(16),
+                seq: Vec::with_capacity(320),
                 order: Vec::with_capacity(320),
                 start_param: None,
                 end_param: None,
@@ -1040,7 +1043,7 @@ impl Plugin {
                 auto: Vec::with_capacity(params::MAX_AUTO),
                 processed: false,
                 pvals: Vec::with_capacity(params::MAX_AUTO + 64),
-                param_out: Vec::new(),
+                param_out: Vec::with_capacity(64),
                 controls: [None; 16],
                 capture: false,
                 notes_out: Vec::new(),
@@ -1588,9 +1591,8 @@ impl Plugin {
         self.mods.clear();
         self.exprs.clear();
         self.midis.clear();
-        let mut rest = Vec::new();
         // Event order; a note's modulation follows its note on at the same time.
-        let mut seq: Vec<Seq> = Vec::new();
+        self.seq.clear();
         // The channel's levels first: they apply from the block's first frame, to the notes that start there too.
         // `levels_msg` holds the message's bytes while the call is made.
         self.levels_ev = None;
@@ -1608,11 +1610,12 @@ impl Plugin {
                 buffer: self.levels_msg.as_ptr(),
                 size: m.len() as u32,
             });
-            seq.push(Seq::Levels);
+            self.seq.push(Seq::Levels);
         }
         // Controller messages go before the block's notes (their frames are where the controller moved).
-        let mut later = Vec::new();
-        for &(time, data) in &self.midi_queue {
+        let mut midi_w = 0;
+        for r in 0..self.midi_queue.len() {
+            let (time, data) = self.midi_queue[r];
             if time < n {
                 self.midis.push(clap_event_midi {
                     header: clap_event_header {
@@ -1625,18 +1628,21 @@ impl Plugin {
                     port_index: 0,
                     data,
                 });
-                seq.push(Seq::Midi(self.midis.len() - 1));
+                self.seq.push(Seq::Midi(self.midis.len() - 1));
             } else {
-                later.push((time - n, data));
+                self.midi_queue[midi_w] = (time - n, data);
+                midi_w += 1;
             }
         }
-        self.midi_queue = later;
+        self.midi_queue.truncate(midi_w);
         // Sounding voices' new mod amounts (the channel's mods changed) go first.
         for (id, key, param, amount) in self.mod_resend.drain(..) {
             self.mods.push(param_mod(0, param, id, key, amount));
-            seq.push(Seq::Mod(self.mods.len() - 1));
+            self.seq.push(Seq::Mod(self.mods.len() - 1));
         }
-        for e in self.queue.drain(..) {
+        let mut q_w = 0;
+        for r in 0..self.queue.len() {
+            let e = self.queue[r];
             // A note starts on its MIDI channel (MIDI channel through); what follows on its key goes on the same one.
             if e.time < n && e.kind == Kind::On {
                 self.key_ch[usize::from(e.key & 127)] = e.levels.channel & 15;
@@ -1659,7 +1665,7 @@ impl Plugin {
                     key: i16::from(e.key),
                     value: f64::from(e.velocity),
                 });
-                seq.push(Seq::Expr(self.exprs.len() - 1));
+                self.seq.push(Seq::Expr(self.exprs.len() - 1));
             } else if e.time < n && e.kind == Kind::Gain {
                 // A named voice's gain (`use_voice_gains`): CLAP volume expression with its note id; a voice that has
                 // ended is not sent one.
@@ -1679,7 +1685,7 @@ impl Plugin {
                     key: i16::from(key),
                     value: f64::from(e.velocity).clamp(0.0, 4.0),
                 });
-                seq.push(Seq::Expr(self.exprs.len() - 1));
+                self.seq.push(Seq::Expr(self.exprs.len() - 1));
             } else if e.time < n {
                 // A note with a sample start or its own levels gets an id, so its modulation reaches only that voice;
                 // so does a voice the engine named, whose gains and choke go to it alone. Its choke takes that id.
@@ -1723,14 +1729,14 @@ impl Plugin {
                     key: i16::from(e.key),
                     velocity: f64::from(e.velocity),
                 });
-                seq.push(Seq::Note(self.notes.len() - 1));
+                self.seq.push(Seq::Note(self.notes.len() - 1));
                 if let (Some(param), true) = (self.start_param, id >= 0 && e.start > 0.0) {
                     self.mods.push(param_mod(e.time, param, id, e.key, f64::from(e.start)));
-                    seq.push(Seq::Mod(self.mods.len() - 1));
+                    self.seq.push(Seq::Mod(self.mods.len() - 1));
                 }
                 if let (Some(param), true) = (self.end_param, id >= 0 && e.end > 0.0) {
                     self.mods.push(param_mod(e.time, param, id, e.key, f64::from(e.end)));
-                    seq.push(Seq::Mod(self.mods.len() - 1));
+                    self.seq.push(Seq::Mod(self.mods.len() - 1));
                 }
                 // The note's own levels (spec: audio/voice-levels.md "The note's own levels"): its pan as the voice's
                 // pan expression, its mod X / Y plus the channel's as per-note modulation.
@@ -1752,7 +1758,7 @@ impl Plugin {
                             key: i16::from(e.key),
                             value: f64::from((pan + 1.0) * 0.5).clamp(0.0, 1.0),
                         });
-                        seq.push(Seq::Expr(self.exprs.len() - 1));
+                        self.seq.push(Seq::Expr(self.exprs.len() - 1));
                     }
                     let own = [e.levels.mod_x, e.levels.mod_y];
                     let mut sent = [0.0; 2];
@@ -1761,7 +1767,7 @@ impl Plugin {
                         sent[k] = f64::from(own[k] + self.chan_mods[k]) * span;
                         if sent[k] != 0.0 {
                             self.mods.push(param_mod(e.time, param, id, e.key, sent[k]));
-                            seq.push(Seq::Mod(self.mods.len() - 1));
+                            self.seq.push(Seq::Mod(self.mods.len() - 1));
                         }
                     }
                     if np.mods.iter().any(Option::is_some) {
@@ -1772,28 +1778,30 @@ impl Plugin {
                     }
                 }
             } else {
-                rest.push(Ev { time: e.time - n, ..e });
+                self.queue[q_w] = Ev { time: e.time - n, ..e };
+                q_w += 1;
             }
         }
-        self.queue = rest;
+        self.queue.truncate(q_w);
         // `queue` is sorted by time, so `seq` already is. Host parameter changes go first, at time 0, then automation
         // in time order; parameter values go before the notes at the same frame.
         self.fill_param_events();
         self.take_automation(n);
         // Controller messages were put first: a stable sort keeps every frame's order otherwise.
         if !self.midis.is_empty() {
+            let (seq, mods, notes, exprs, midis) = (&mut self.seq, &self.mods, &self.notes, &self.exprs, &self.midis);
             let time = |s: &Seq| match *s {
-                Seq::Mod(m) => self.mods[m].header.time,
-                Seq::Note(i) => self.notes[i].header.time,
-                Seq::Expr(x) => self.exprs[x].header.time,
-                Seq::Midi(m) => self.midis[m].header.time,
+                Seq::Mod(m) => mods[m].header.time,
+                Seq::Note(i) => notes[i].header.time,
+                Seq::Expr(x) => exprs[x].header.time,
+                Seq::Midi(m) => midis[m].header.time,
                 Seq::Levels => 0,
             };
             seq.sort_by_key(time);
         }
         self.order.clear();
         let mut pi = 0;
-        for &s in &seq {
+        for &s in &self.seq {
             let h = match s {
                 Seq::Mod(m) => &self.mods[m].header as *const clap_event_header,
                 Seq::Note(i) => &self.notes[i].header as *const clap_event_header,
@@ -2102,15 +2110,18 @@ impl os_host::Plugin for Plugin {
     }
 
     fn take_param_events(&mut self) -> Vec<os_host::ParamEvent> {
-        let raw = std::mem::take(&mut self.param_out);
-        raw.into_iter()
-            .filter_map(|e| match e {
-                OutEv::Begin(id) => Some(os_host::ParamEvent::Begin(id)),
-                OutEv::Value(id, v) => Some(os_host::ParamEvent::Value(id, self.normalize(id, v))),
-                OutEv::End(id) => Some(os_host::ParamEvent::End(id)),
-                OutEv::NoteEnd(..) | OutEv::Bend(..) | OutEv::Fine(..) | OutEv::Note(..) => None,
-            })
-            .collect()
+        let mut out = Vec::new();
+        for i in 0..self.param_out.len() {
+            let ev = match self.param_out[i] {
+                OutEv::Begin(id) => os_host::ParamEvent::Begin(id),
+                OutEv::Value(id, v) => os_host::ParamEvent::Value(id, self.normalize(id, v)),
+                OutEv::End(id) => os_host::ParamEvent::End(id),
+                OutEv::NoteEnd(..) | OutEv::Bend(..) | OutEv::Fine(..) | OutEv::Note(..) => continue,
+            };
+            out.push(ev);
+        }
+        self.param_out.clear();
+        out
     }
 
     fn attention(&self) -> Option<Arc<os_host::Attention>> {

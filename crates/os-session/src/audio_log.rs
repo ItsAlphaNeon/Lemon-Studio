@@ -33,6 +33,12 @@ fn feed() -> &'static Feed {
     F.get_or_init(|| Feed { ring: Ring::new(1 << 21), on: AtomicBool::new(false) })
 }
 
+/// Eagerly allocates the lock-free ring buffer off the audio callback thread so the first device callback never runs
+/// `OnceLock::get_or_init` on the hard real-time thread.
+pub fn init() {
+    let _ = feed();
+}
+
 /// The device's block as it plays it (`width` channels interleaved; the first pair is kept), while the logger is on.
 /// The device's callback calls it; it neither locks nor allocates, and what finds no room is lost.
 pub fn push(sum: &[f32], width: usize) {

@@ -1222,6 +1222,7 @@ pub struct Engine {
     /// instrument (spec: audio/note-rules.md).
     inst_notes: Vec<(usize, u32, notes::Note)>,
     note_voices: Vec<notes::Voices>,
+    note_rules: Vec<notes::Rules>,
     /// Per instrument channel: the frames of the ticks its instrument missed (still busy after `BUSY_WAIT`) and the
     /// notes it missed (channel, note); both are made up when it is reached again, so it stays in time with the song.
     inst_owed: Vec<usize>,
@@ -1783,6 +1784,7 @@ impl Engine {
             inst_tuning: Vec::new(),
             inst_notes: Vec::with_capacity(64),
             note_voices: vec![notes::Voices::default(); project.channels.len()],
+            note_rules: Vec::with_capacity(project.channels.len()),
             inst_owed: Vec::new(),
             inst_missed: Vec::new(),
             busy_until: None,
@@ -3715,7 +3717,10 @@ impl Engine {
                 // choked on the song's last tick if it still sounds then ("The end of the song"), and when it is looped
                 // or the song ends otherwise, as every clip is. Notes end with a note off.
                 let inst = self.channels[t.channel].instrument.0.as_ref();
-                let ends = t.stop > 0.0 && inst.and_then(|i| i.lock().ok()).is_some_and(|i| i.voice_ends());
+                let ends = t.stop > 0.0
+                    && inst
+                        .and_then(|i| lock_busy(i, &mut self.busy_until, self.busy_wait, self.exporting))
+                        .is_some_and(|i| i.voice_ends());
                 match t.cut {
                     Some(_) if ends => {
                         let song = !self.looping && !self.live_only && self.end_tick > t.tick;
@@ -3832,9 +3837,10 @@ impl Engine {
             });
         }
         self.inst_events.sort_by_key(|e| e.off);
-        let rules: Vec<notes::Rules> = self.channels.iter().map(|c| c.rules).collect();
+        self.note_rules.clear();
+        self.note_rules.extend(self.channels.iter().map(|c| c.rules));
         self.note_voices.resize(self.channels.len(), notes::Voices::default());
-        notes::apply(&self.inst_events, &rules, &mut self.note_voices, n as u32, &mut self.inst_notes);
+        notes::apply(&self.inst_events, &self.note_rules, &mut self.note_voices, n as u32, &mut self.inst_notes);
         let held = !self.inst_offs.is_empty()
             || self.sounding.iter().any(|&(c, _, end)| end == u64::MAX && self.channels.get(c).is_some_and(|ch| ch.instrument.0.is_some()));
         if held || !self.inst_events.is_empty() {
