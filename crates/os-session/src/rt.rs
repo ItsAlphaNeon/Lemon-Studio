@@ -1,5 +1,6 @@
 // Copyright (C) 2026 ItsAlphaNeon
 // Copyright (C) 2026 thacer13
+// Copyright (C) 2026 adaster98
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -11,7 +12,8 @@
 //! RealtimeKit on the system bus, which PipeWire uses too) for it. Before rtkit agrees the process caps the CPU time a
 //! real-time thread may take without blocking (`RLIMIT_RTTIME`): past the soft cap (a project too heavy to render in
 //! time spins its feeder) the kernel sends SIGXCPU, and the handler puts every promoted thread back to normal priority
-//! instead of letting the hard cap kill the program.
+//! instead of letting the hard cap kill the program. Only when rtkit is asked: the cap is the process's, and the
+//! processes it starts inherit it (a bridged plugin's Wine host), whose own real-time threads it kills.
 //!
 //! The handler runs only when the thread returns from the kernel. Time the kernel spends on a thread's behalf counts
 //! too (a page fault that has to free memory first, after a long idle on a full machine), and can run past the hard cap
@@ -112,15 +114,17 @@ pub fn promote(tid: i32) -> Result<(), String> {
         // priority.
         let _ = std::thread::Builder::new().name("rt watchdog".into()).spawn(watch);
     });
-    // Again at every promotion: the kernel raises the soft cap by a second at each SIGXCPU, which would leave the hard
-    // one to kill the program next time.
-    cap_rttime();
     // Known before it is real-time: a SIGXCPU while rtkit answers must find it.
     remember(tid);
     let param = libc::sched_param { sched_priority: PRIORITY };
     // SAFETY: sets the scheduling policy of a thread of this process.
     let direct = unsafe { libc::sched_setscheduler(tid, libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK, &param) } == 0;
     if !direct {
+        // Only for rtkit, which refuses a process without the cap: the processes this one starts inherit it (a bridged
+        // plugin's Wine host), and their own real-time threads are killed by it. Again at every promotion: the kernel
+        // raises the soft cap by a second at each SIGXCPU, which would leave the hard one to kill the program next
+        // time.
+        cap_rttime();
         rtkit(tid).inspect_err(|_| {
             REFUSED.fetch_add(1, Ordering::AcqRel);
         })?;
