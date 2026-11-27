@@ -717,6 +717,12 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Text(folder, true),
                     Text("The input device is chosen on the Audio page.".into(), true),
                 ]),
+                // The mixer menu's Disk recording options (spec: audio/disk-recording.md §2).
+                g("Disk recording", vec![
+                    Check2(p::AUTO_UNARM.label, true, p::REC_LATENCY_COMP.label, true),
+                    Check2(p::AUTO_NAME_TRACKS.label, true, p::GROUP_LOOP_TAKES.label, true),
+                    combo(p::choice(&p::REC_DEPTH), 100.0, p::REC_DEPTH.label),
+                ]),
             ]
         }
         GENERAL => vec![

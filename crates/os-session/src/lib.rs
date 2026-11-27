@@ -92,6 +92,7 @@ pub mod step_edit;
 pub mod time;
 pub mod track_links;
 pub mod track_rec;
+pub mod loop_takes;
 pub mod transport;
 pub mod typein;
 pub mod user_dir;

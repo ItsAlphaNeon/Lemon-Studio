@@ -706,6 +706,8 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             s.playlist.popup = Some(track_menu(s, n, at.0, at.1));
         }
         MHit::Add => s.playlist.popup = Some(track_menu(s, s.selected_mixer, at.0, at.1)),
+        // The file and folder of the track's next recording (spec: audio/disk-recording.md §3).
+        MHit::Arm(n) => app.choose_rec_file(n),
         MHit::Led(n) => solo(s, n),
         MHit::Route(dst) => {
             let items = vec![

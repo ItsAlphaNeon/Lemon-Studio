@@ -555,6 +555,19 @@ pub const COUNT_IN_LENGTH: Combo = Combo { key: "rec_precount_bars", label: "Cou
 /// Recording ▸ Audio recording: a take recorded into mixer tracks becomes audio clips (`crate::track_rec`; the mixer
 /// menu's Disk recording ▸ Auto-create audio clips). Spec: audio/track-io.md §2.5.
 pub const AUTO_AUDIO_CLIPS: Check = Check { key: "rec_auto_clips", label: "Auto-create audio clips", default: true };
+/// Disk recording ▸ Group loop recorded takes: loop record passes go on tracks grouped under the mixer track's audio
+/// track (or the first pass's track; spec: audio/disk-recording.md §1).
+pub const GROUP_LOOP_TAKES: Check = Check { key: "rec_group_takes", label: "Group loop recorded takes", default: true };
+/// Disk recording ▸ Auto-unarm: Stop disarms the armed mixer tracks (spec: audio/disk-recording.md §2).
+pub const AUTO_UNARM: Check = Check { key: "rec_auto_unarm", label: "Auto-unarm", default: false };
+/// Disk recording ▸ Latency compensation: the input's delay is left out of the front of a take (spec:
+/// audio/disk-recording.md §2); off, the take starts with what came in first.
+pub const REC_LATENCY_COMP: Check = Check { key: "rec_latency_comp", label: "Latency compensation", default: true };
+/// Disk recording ▸ Auto name playlist tracks: an unnamed playlist track a take goes on is named after its mixer track
+/// (spec: audio/disk-recording.md §2).
+pub const AUTO_NAME_TRACKS: Check = Check { key: "rec_auto_name", label: "Auto name playlist tracks", default: true };
+/// Disk recording ▸ 16Bit int / 24Bit int / 32Bit float: the recordings' sample format (spec: audio/disk-recording.md §2).
+pub const REC_DEPTH: Combo = Combo { key: "rec_depth", label: "Recording format", choices: &["16Bit int", "24Bit int", "32Bit float"], default: 2 };
 /// Recording ▸ Audio recording: the answer to the mixer's External input question (`App::ask_external`), which its
 /// Remember my choice sets; Ask asks again. Spec: audio/track-io.md §1.4, §2.3.
 pub const EXTERNAL_INPUT: Combo = Combo {
@@ -634,9 +647,13 @@ pub const CHECKS: &[&Check] = &[
     &REC_WAIT_ARMED,
     &REC_COUNT_IN,
     &AUTO_AUDIO_CLIPS,
+    &GROUP_LOOP_TAKES,
+    &AUTO_UNARM,
+    &REC_LATENCY_COMP,
+    &AUTO_NAME_TRACKS,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING, &TOOLBARS_SCALING, &ASK_DATA_FOLDER, &VELOCITY_LINK, &RELEASE_LINK, &CONTROLLER_TYPE, &SYNC_TYPE, &COUNT_IN_LENGTH, &EXTERNAL_INPUT];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING, &TOOLBARS_SCALING, &ASK_DATA_FOLDER, &VELOCITY_LINK, &RELEASE_LINK, &CONTROLLER_TYPE, &SYNC_TYPE, &COUNT_IN_LENGTH, &EXTERNAL_INPUT, &REC_DEPTH];
 /// The declared value boxes.
 pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BACKUP_MAXIMUM, &BROWSER_PREVIEW_TRACK, &METRONOME_TRACK, &OMNI_CHANNEL, &MARKER_CHANNEL, &MUTING_CHANNEL, &PERFORMANCE_CHANNEL];
 

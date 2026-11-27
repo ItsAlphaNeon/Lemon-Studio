@@ -2344,6 +2344,11 @@ impl App {
                     self.midi_export_chosen(p, piano);
                 }
             }
+            Then::RecordTo(t) => {
+                if let Some(p) = file {
+                    self.rec_file_chosen(t, p);
+                }
+            }
         }
         self.invalidate();
     }
