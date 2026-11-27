@@ -54,6 +54,7 @@ pub use os_session::one_click;
 pub mod one_click_ui;
 pub use os_session::track_rec;
 pub mod track_rec_ui;
+pub mod disk_rec_menu;
 pub use os_session::audio_log;
 pub use os_session::score_log;
 pub mod score_log_ui;

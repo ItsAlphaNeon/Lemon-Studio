@@ -198,6 +198,12 @@ pub enum MCmd {
     ArmTrack(u16, bool),
     /// Disk recording ▸ Auto-create audio clips (a program setting).
     AutoClips,
+    /// Disk recording ▸ one of its other checks (`crate::disk_rec_menu::CHECKS`, by index).
+    RecCheck(u8),
+    /// Disk recording ▸ Format: 16Bit int, 24Bit int, 32Bit float (`prefs::REC_DEPTH`).
+    RecDepth(u8),
+    /// Disk recording ▸ Render armed tracks to wave file(s)... (Alt+R).
+    RenderArmed,
     /// A track's input (true) or output latency setting: Reset (`None`), or Set in ms / samples / beats (the value box).
     Latency(u16, bool, Option<crate::typein::LatUnit>),
     /// The track menu's Group entries (spec: ui/mixer.md §6.1 "Group, Layout and CPU entries"): Separator on or off for
@@ -1288,7 +1294,7 @@ fn track_routing(s: &State, n: u16) -> PItem {
 pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     let mut items = vec![
         PItem::head("Options"),
-        PItem::sub("Disk recording", vec![PItem::new("Auto-create audio clips", Cmd::Mixer(MCmd::AutoClips)).mark(Mark::Check(crate::prefs::check(&crate::prefs::AUTO_AUDIO_CLIPS)))]),
+        PItem::sub("Disk recording", crate::disk_rec_menu::items(s)),
         PItem::sub("Plugin delay compensation", vec![PItem::new("Automatic", Cmd::Mixer(MCmd::PdcAuto)).mark(Mark::Check(!s.session.project.pdc_off))]),
         // The current track's own controls (Lemon Studio's design, ui/mixer.md §6.1; spec: ui/remote-control.md §6).
         PItem::new("Link all parameters...", Cmd::Remote(crate::remote::RCmd::LinkTrack(s.selected_mixer))),
@@ -1634,9 +1640,18 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::RemoveTeslas => return app.ask_remove_teslas(),
         MCmd::Input(t, v) => {
             // An input chosen where there was none asks whether to record it alone (§1.4).
-            let ask = track(&s.session, t).is_some_and(|m| m.audio_in < 0 && v >= 0 && m.rec_source != os_model::REC_EXTERNAL);
-            if set_io(s, t, set_track!(s, t, audio_in: v)) && ask {
-                app.ask_external(t);
+            let fresh = track(&s.session, t).is_some_and(|m| m.audio_in < 0 && v >= 0);
+            let ask = fresh && track(&s.session, t).is_some_and(|m| m.rec_source != os_model::REC_EXTERNAL);
+            if set_io(s, t, set_track!(s, t, audio_in: v)) {
+                // ... and arms the track (spec: audio/disk-recording.md §4).
+                if fresh {
+                    if let Some(m) = app.arm_tracks(&[t], true) {
+                        app.state.message = Some(m);
+                    }
+                }
+                if ask {
+                    app.ask_external(t);
+                }
             }
             return None;
         }
@@ -1709,6 +1724,9 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             let on = crate::prefs::toggle(&crate::prefs::AUTO_AUDIO_CLIPS);
             Some(format!("Auto-create audio clips {}", if on { "on" } else { "off" }))
         }
+        MCmd::RecCheck(i) => crate::disk_rec_menu::toggle(i),
+        MCmd::RecDepth(i) => crate::disk_rec_menu::set_depth(i),
+        MCmd::RenderArmed => return crate::disk_rec_menu::render_armed(app),
         MCmd::AltSolo(n) => {
             solo_with(s, n, true);
             None
@@ -1894,6 +1912,9 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Character(c) if alt && letter(c, "s") => run(app, MCmd::AltSolo(n)),
         Key::Character(c) if alt && letter(c, "l") => run(app, MCmd::SelectChannels(n)),
         Key::Character(c) if alt && letter(c, "w") => run(app, MCmd::ViewWaveforms),
+        // Disk recording: Alt+R renders the armed tracks, Shift+Alt+R the selected ones (spec: audio/disk-recording.md §2).
+        Key::Character(c) if alt && letter(c, "r") && app.shift => run(app, MCmd::RenderWave(n)),
+        Key::Character(c) if alt && letter(c, "r") => run(app, MCmd::RenderArmed),
         Key::Named(NamedKey::F2) => run(app, MCmd::Rename(n)),
         Key::Named(NamedKey::Delete) => run(app, MCmd::Delete(n)),
         Key::Named(NamedKey::ArrowLeft) if alt => run(app, MCmd::MoveLeft(n)),
@@ -2486,8 +2507,9 @@ mod tests {
         assert!(a.state.dialogs.is_empty());
         assert_eq!(track(&a.state.session, 3).unwrap().rec_source, os_model::REC_POST_EQ);
         crate::prefs::set_choice(&crate::prefs::EXTERNAL_INPUT, 0);
-        // The edits undo; arming is kept through them.
-        hit(&mut a, MHit::Arm(3));
+        // Choosing an input armed the track (spec: audio/disk-recording.md §4). The edits undo; arming is kept through
+        // them.
+        assert!(track(&a.state.session, 3).unwrap().armed);
         run(&mut a, MCmd::Monitor(3, os_model::MONITOR_ON));
         run(&mut a, MCmd::Output(3, 1));
         crate::history_ui::undo(&mut a.state);

@@ -151,6 +151,24 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The disk-record button's right click: the file chosen in "Record <track> to" (".wav" added) is the track's next
+    /// recording and shows in its hint, and the track is armed; a recording takes it once (spec:
+    /// audio/disk-recording.md §3).
+    #[test]
+    fn right_click_on_arm_chooses_the_file() {
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        let dir = std::env::temp_dir().join(format!("lemon-recto-{}", std::process::id()));
+        crate::dialog::fake::answer(Some(dir.join("vox take")));
+        crate::mixer::right(&mut app, crate::mixer::MHit::Arm(3));
+        assert_eq!(app.state.session.rec_files.get(&3), Some(&dir.join("vox take.wav")));
+        assert_eq!(armed_file(&app.state, 3), "vox take.wav");
+        assert!(crate::mixer::track(&app.state.session, 3).is_some_and(|m| m.armed));
+        crate::dialog::fake::answer(None);
+        crate::mixer::right(&mut app, crate::mixer::MHit::Arm(4));
+        assert!(!crate::mixer::track(&app.state.session, 4).is_some_and(|m| m.armed), "Cancel leaves it");
+    }
+
     /// Waits (up to 3 s) for `done`, ticking the recording.
     fn tick_until(app: &mut App, mut done: impl FnMut(&App) -> bool) {
         for _ in 0..600 {

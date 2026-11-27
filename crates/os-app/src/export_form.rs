@@ -98,6 +98,9 @@ pub struct ExportForm {
     /// PATTERNS > Render as audio clip...: the current pattern only, and the file becomes an audio clip channel
     /// (spec: ui/pattern-render.md §1); the choices are not kept for the next export.
     pub to_clip: bool,
+    /// Disk recording ▸ Render armed tracks (`crate::disk_rec_menu`): into the Recorded folder, which is not kept as
+    /// the export folder.
+    pub armed: bool,
     /// The mixer track menu's File ▸ Render to wave file...: these tracks' outputs are the files (`ex::Job::tracks`),
     /// Split mixer tracks does not apply and the choices are not kept for the next export. Empty: an export.
     pub tracks: Vec<u16>,
@@ -318,6 +321,7 @@ impl App {
             device_rate,
             list: None,
             to_clip: false,
+            armed: false,
             tracks: Vec::new(),
         };
         self.show_form(Body::Project(Form::Export(Box::new(f))));
@@ -415,7 +419,9 @@ impl App {
             return self.render_pattern_with(&f);
         }
         if !f.tracks.is_empty() {
-            crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
+            if !f.armed {
+                crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
+            }
             let job = self.export_job(&f);
             return self.start_export(job, f.song);
         }
