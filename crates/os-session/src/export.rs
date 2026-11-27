@@ -248,6 +248,9 @@ pub struct Job {
     /// The mixer track menu's File ▸ Render to wave file...: these tracks' outputs are the files, without the mix
     /// (empty: an export of the mix).
     pub tracks: Vec<u16>,
+    /// Each of `tracks`' file names without the extension, in order (Render armed tracks: the names their recordings
+    /// would get); empty: as `tracks` names them.
+    pub stems: Vec<String>,
 }
 
 impl Job {
@@ -265,6 +268,7 @@ impl Job {
             tempo: (120.0, 0.0),
             track_names: Vec::new(),
             tracks: Vec::new(),
+            stems: Vec::new(),
         }
     }
 
@@ -276,13 +280,28 @@ impl Job {
     /// The files `write` makes, the split tracks' stems aside: the formats ticked, or each mixer track's (`tracks`).
     pub fn targets(&self) -> Vec<PathBuf> {
         let stems: Vec<String> = match self.tracks.len() {
-            0 | 1 => vec![self.name.clone()],
-            _ => self.tracks.iter().map(|&t| format!("{} - {t:02} {}", self.name, self.track_name(usize::from(t)))).collect(),
+            0 => vec![self.name.clone()],
+            _ => (0..self.tracks.len()).map(|k| self.stem(k)).collect(),
         };
         stems
             .iter()
             .flat_map(|stem| self.options.ticked().map(move |f| self.folder.join(format!("{stem}.{}", EXTENSIONS[f]))))
             .collect()
+    }
+
+    /// The file name of the `k`th of `tracks` without the extension: its own (`stems`), else the form's name for one
+    /// track and "<name> - <NN> <track name>" for several.
+    fn stem(&self, k: usize) -> String {
+        if let Some(s) = self.stems.get(k) {
+            return s.clone();
+        }
+        match self.tracks.len() {
+            1 => self.name.clone(),
+            _ => {
+                let t = self.tracks[k];
+                format!("{} - {t:02} {}", self.name, self.track_name(usize::from(t)))
+            }
+        }
     }
 
     /// Mixer track `t`'s name as a file name takes it (the characters one cannot hold as `_`).
@@ -355,13 +374,10 @@ fn write_tracks(job: &Job, rate: u32, mut tracks: Vec<Vec<f32>>, song: u64) -> R
     let o = &job.options;
     let out_rate = if o.rate == 0 { rate } else { o.rate };
     let mut written = Vec::new();
-    for &t in &job.tracks {
+    for (k, &t) in job.tracks.iter().enumerate() {
         let audio = tracks.get_mut(usize::from(t)).map(std::mem::take).unwrap_or_default();
         let audio = shape(o, audio, song, rate, out_rate);
-        let stem = match job.tracks.len() {
-            1 => job.name.clone(),
-            _ => format!("{} - {t:02} {}", job.name, job.track_name(usize::from(t))),
-        };
+        let stem = job.stem(k);
         for f in o.ticked() {
             let path = job.folder.join(format!("{stem}.{}", EXTENSIONS[f]));
             encode(o, f, &path, &audio, out_rate, &Meta::default())?;

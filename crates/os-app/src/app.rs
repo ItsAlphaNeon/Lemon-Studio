@@ -2227,6 +2227,11 @@ impl App {
                     self.state.message = Some(crate::group_export::export(self, p));
                 }
             }
+            Then::GroupReplace(dir) => {
+                if reply == crate::dialog::Reply::Button(crate::dialog::Answer::Yes) {
+                    self.state.message = Some(crate::group_export::export_over(self, dir));
+                }
+            }
             Then::FactoryFolder => {
                 if let Some(p) = file {
                     self.set_factory_folder(Some(p));

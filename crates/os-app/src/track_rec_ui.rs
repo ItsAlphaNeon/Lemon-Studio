@@ -109,6 +109,7 @@ mod tests {
         if Opt::Audio.on(&crate::settings_file::store()) {
             Opt::Audio.toggle(&crate::settings_file::store());
         }
+        let _blend = BlendOff::new();
         let msg = app.arm_tracks(&[1], true);
         assert!(msg.is_some_and(|m| m.contains("Audio on")) && Opt::Audio.on(&crate::settings_file::store()));
         assert!(app.arm_tracks(&[1], true).is_none(), "already armed: says nothing");
@@ -139,6 +140,7 @@ mod tests {
         assert!(path.parent().unwrap().ends_with("Recorded") && name.ends_with("_Bus 1.wav"), "{name}");
         let clip = app.state.session.project.arrangement().unwrap().clips.last().unwrap().clone();
         assert_eq!(clip.position, 96);
+        assert!(!clip.muted, "a take of one pass is not muted, Blend off or not");
         assert!(app
             .state
             .session
@@ -205,6 +207,7 @@ mod tests {
         app.state.session.transport.pretend_at(0.0, true);
         app.state.session.rec.armed = true;
         app.track_rec_tick();
+        app.state.session.track_rec.as_mut().expect("a take").looping = true;
         let takes = app.state.session.track_rec.as_ref().expect("a take").takes.clone();
         let ch0 = app.state.session.project.channels.len();
         // A clip on track 2 that the grouped tracks push down.
@@ -251,6 +254,157 @@ mod tests {
         st.set_check(&crate::prefs::AUTO_NAME_TRACKS, keep2.1);
         if Opt::Blend.on(&st) != keep.1 {
             Opt::Blend.toggle(&st);
+        }
+    }
+
+    /// Blend off for a test, as it was after.
+    struct BlendOff(bool);
+
+    impl BlendOff {
+        fn new() -> BlendOff {
+            let st = crate::settings_file::store();
+            let was = Opt::Blend.on(&st);
+            if was {
+                Opt::Blend.toggle(&st);
+            }
+            BlendOff(was)
+        }
+    }
+
+    impl Drop for BlendOff {
+        fn drop(&mut self) {
+            let st = crate::settings_file::store();
+            if Opt::Blend.on(&st) != self.0 {
+                Opt::Blend.toggle(&st);
+            }
+        }
+    }
+
+    /// Records `passes` passes on mixer tracks `tracks` (the song position going back to 0 between them), with Loop
+    /// record as `looping`, to Stop and the last files placed (the default Disk recording options), the files in a
+    /// folder of the test's own (`tag`). Returns the take clips as (track, mixer track, muted), top to bottom, and the
+    /// files.
+    fn record_passes(
+        app: &mut App,
+        tag: &str,
+        tracks: &[u16],
+        looping: bool,
+        passes: usize,
+    ) -> (Vec<(u16, u16, bool)>, Vec<std::path::PathBuf>) {
+        let ch0 = app.state.session.project.channels.len();
+        let dir = std::env::temp_dir().join(format!("lemon-rec-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for &t in tracks {
+            app.state.session.rec_files.insert(t, dir.join(format!("Bus {t}.wav")));
+        }
+        app.arm_tracks(tracks, true);
+        app.state.session.transport.pretend_at(0.0, true);
+        app.state.session.rec.armed = true;
+        app.track_rec_tick();
+        let r = app.state.session.track_rec.as_mut().expect("a take");
+        r.looping = looping;
+        let takes = r.takes.clone();
+        for k in 0..passes {
+            for &t in tracks {
+                takes.push(usize::from(t), 0, &vec![0.25; 4800]);
+                takes.push(usize::from(t), 48, &vec![0.25; 4800]);
+            }
+            // The passes that ended are placed while the next one records.
+            if k > 0 {
+                let want = ch0 + tracks.len() * k;
+                tick_until(app, |a| a.state.session.project.channels.len() == want);
+            }
+        }
+        app.state.session.transport.stop();
+        tick_until(app, |a| a.state.session.track_rec.is_none());
+        let p = &app.state.session.project;
+        assert_eq!(p.channels.len(), ch0 + tracks.len() * passes, "{:?}", app.state.message);
+        let mut clips: Vec<(u16, u16, bool)> = p
+            .arrangement()
+            .unwrap()
+            .clips
+            .iter()
+            .filter_map(|c| match c.source {
+                os_model::ClipSource::Channel(ch) if usize::from(ch) >= ch0 => {
+                    Some((c.track, p.channels[usize::from(ch)].mixer_track, c.muted))
+                }
+                _ => None,
+            })
+            .collect();
+        clips.sort();
+        let files = p.channels[ch0..].iter().map(|c| std::path::PathBuf::from(c.sample_path.clone().unwrap())).collect();
+        (clips, files)
+    }
+
+    fn grouped(app: &App, n: usize) -> Vec<bool> {
+        app.state.session.project.arrangement().unwrap().tracks[..n].iter().map(|t| t.grouped).collect()
+    }
+
+    /// A take of one pass goes where a take always went: the audio track taken, the first free track, no track inserted
+    /// or grouped or renamed, not muted.
+    #[test]
+    fn a_single_take_is_placed_as_before() {
+        let _blend = BlendOff::new();
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        app.state.set_song_mode(true);
+        let s = &mut app.state.session;
+        crate::track_links::set_link(s, 0, os_model::TrackLink::audio(2));
+        for (track, at) in [(0u16, 0u32), (1, 0), (2, 960)] {
+            crate::edit::playlist::place_in(s, os_model::ClipSource::Pattern(1), track, at, None);
+        }
+        let (clips, files) = record_passes(&mut app, "single", &[2], true, 1);
+        assert_eq!(clips, [(2, 2, false)], "the first track free over the take");
+        let arr = app.state.session.project.arrangement().unwrap();
+        let pats: Vec<u16> =
+            arr.clips.iter().filter(|c| c.source == os_model::ClipSource::Pattern(1)).map(|c| c.track).collect();
+        assert_eq!(pats, [0, 1, 2], "no track inserted");
+        assert_eq!(grouped(&app, 4), [false; 4]);
+        assert_eq!(app.state.session.project.arrangement().unwrap().tracks[2].name, None, "not renamed");
+        for f in files {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
+    /// Two armed tracks, no audio tracks, three loop passes: each track's later passes are grouped under its own first
+    /// pass, though the other track's group grows above it.
+    #[test]
+    fn two_tracks_keep_their_own_groups() {
+        let _blend = BlendOff::new();
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        app.state.set_song_mode(true);
+        let (clips, files) = record_passes(&mut app, "two", &[2, 3], true, 3);
+        // Which track's first pass is placed first depends on its writer; each one's three are together either way.
+        let top = clips[0].1;
+        let other = if top == 2 { 3 } else { 2 };
+        assert_eq!(
+            clips.iter().map(|c| (c.0, c.1)).collect::<Vec<_>>(),
+            [(0, top), (1, top), (2, top), (3, other), (4, other), (5, other)]
+        );
+        assert_eq!(grouped(&app, 6), [false, true, true, false, true, true]);
+        assert!(clips.iter().all(|c| c.2), "Blend off: a loop take's passes are all muted");
+        let names: std::collections::HashSet<_> = files.iter().collect();
+        assert_eq!(names.len(), 6, "a file each");
+        for f in files {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
+    /// A jump back with Loop record off: the pieces are files and clips of their own, placed as takes always were, not
+    /// grouped and not muted.
+    #[test]
+    fn a_jump_back_without_loop_record_mutes_nothing() {
+        let _blend = BlendOff::new();
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        app.state.set_song_mode(true);
+        let (clips, files) = record_passes(&mut app, "jump", &[2], false, 2);
+        assert_eq!(clips, [(0, 2, false), (1, 2, false)]);
+        assert_eq!(grouped(&app, 2), [false, false]);
+        for f in files {
+            let _ = std::fs::remove_file(f);
         }
     }
 }

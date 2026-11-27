@@ -2006,6 +2006,23 @@ pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name:
     clips(&s.session).iter().position(|c| c.id.0 == clip)
 }
 
+/// `add_audio_clip` for several (file, track) pairs at `tick`, as one undo step; files that are not audio are left out.
+/// The clips placed, as arrangement indices.
+pub fn add_audio_clips(s: &mut State, files: &[(&str, u16)], tick: u32) -> Vec<usize> {
+    let mut cmds = Vec::new();
+    for &(path, track) in files {
+        if s.session.samples.wave(&s.session.settings, path).is_some() {
+            cmds.push(Command::AddAudioClip { path: path.to_string(), track: track + 1, position: tick, mixer: None });
+        }
+    }
+    if cmds.is_empty() {
+        return Vec::new();
+    }
+    let Ok(r) = crate::control_ui::command(s, "Arranger edit", None, cmds) else { return Vec::new() };
+    let ids: Vec<u32> = r.iter().filter_map(|v| v["clip"].as_u64()).map(|c| c as u32).collect();
+    clips(&s.session).iter().enumerate().filter(|(_, c)| ids.contains(&c.id.0)).map(|(i, _)| i).collect()
+}
+
 /// `add_audio_clip_as` with no undo step of its own (the caller took one), its channel on mixer track `mixer` (`None`:
 /// the track after the highest any channel uses).
 pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer: Option<u16>) -> Option<usize> {
@@ -4684,21 +4701,26 @@ pub enum Render {
     /// Export all playlist tracks (and FILE ▸ Export all playlist track groups, `crate::group_export`): `todo` files
     /// are still to render, one at a time, from `audible` clips, into `dir`.
     Tracks { todo: Vec<Part>, audible: Vec<Clip>, dir: PathBuf, written: usize },
+    /// Disk recording ▸ Render armed tracks: the files go on the playlist at `at` (`crate::disk_rec_menu::place`).
+    Armed { at: u32 },
 }
 
-/// One file of a track export: the clips of `tracks`, ticks `0..end`, written as `name`.wav.
+/// One file of a track export: the clips of `tracks`, ticks `0..end` (and what rings on past it with `ring`),
+/// written as `name`.wav.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Part {
     pub tracks: Vec<u16>,
     pub name: String,
     pub end: u32,
+    pub ring: bool,
 }
 
 /// A render's job: one 32-bit float WAV, `name` in `dir`, ticks `0..ticks` exactly (the span fixes the length, so
-/// the files of a track export line up), insert and master effects as the engine plays them.
-fn render_job(s: &State, dir: &Path, name: &str, ticks: u32) -> crate::export::Job {
+/// the files of a track export line up), or with `ring` on until the tail is quiet; insert and master effects as the
+/// engine plays them.
+pub(crate) fn render_job(s: &State, dir: &Path, name: &str, ticks: u32, ring: bool) -> crate::export::Job {
     let mut j = crate::pattern_render_ui::job(s, dir, name);
-    j.options.tail = crate::export::Tail::Cut;
+    j.options.tail = if ring { crate::export::Tail::Ring } else { crate::export::Tail::Cut };
     j.options.master_fx = true;
     j.span = Some((0, u64::from(ticks.max(1))));
     j.tempo = (s.session.project.tick_tempo(s.tempo()), f64::from(ticks) / f64::from(s.session.project.ppq.max(1)));
@@ -4727,7 +4749,7 @@ pub fn export_tracks(app: &mut App) -> String {
         .into_iter()
         .map(|t| {
             let name = file_safe(&track_name(&s.session, t));
-            Part { tracks: vec![t], name: format!("{:02} {name}", t + 1), end }
+            Part { tracks: vec![t], name: format!("{:02} {name}", t + 1), end, ring: false }
         })
         .collect();
     let stem = s.session.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
@@ -4761,7 +4783,7 @@ fn next_track(app: &mut App) -> String {
     let (dir, mine): (PathBuf, Vec<Clip>) = (dir.clone(), audible.iter().filter(|c| part.tracks.contains(&c.track)).copied().collect());
     let s = &app.state;
     let t = part.tracks[0];
-    let job = render_job(s, &dir, &part.name, part.end);
+    let job = render_job(s, &dir, &part.name, part.end, part.ring);
     let mut p = crate::rack::play_project(s);
     if let Some(arr) = p.arrangement_mut() {
         arr.clips = mine;
@@ -4825,7 +4847,7 @@ pub fn consolidate(app: &mut App) -> String {
         return format!("Consolidate: {e}");
     }
     let n = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0) + 1;
-    let job = render_job(s, &dir, &format!("Consolidated {n}"), b - a);
+    let job = render_job(s, &dir, &format!("Consolidated {n}"), b - a, false);
     let track = free_track(s, track_after_used(s), a, b);
     app.playlist_render = Some(Render::Consolidate { a, b, used: use_idx, track });
     app.start_export_of(job, p, true);
@@ -4882,6 +4904,8 @@ impl App {
         let msg = match (r, result) {
             (Render::Consolidate { .. }, Err(e)) => format!("Consolidate: {e}"),
             (Render::Tracks { .. }, Err(e)) => format!("Export tracks: {e}"),
+            (Render::Armed { .. }, Err(e)) => format!("Render armed tracks: {e}"),
+            (Render::Armed { at }, Ok((_, files))) => crate::disk_rec_menu::place(&mut self.state, at, &files),
             (Render::Consolidate { a, b, used, track }, Ok((_, files))) => match files.first() {
                 Some(f) => consolidate_place(&mut self.state, a, b, &used, track, f),
                 None => "Consolidate: no file was written".into(),

@@ -11,8 +11,10 @@
 //! one writer thread per track (`capture::Recorder`) drains it to disk.
 //!
 //! Loop record: each time playback goes back (the loop's end, or a jump back), the tap notes where in the file the new
-//! pass starts. A pass that has ended becomes a file and a clip of its own while the next one records, on a track
-//! grouped under the first pass's (Group loop recorded takes), the earlier passes muted unless Blend is on.
+//! pass starts. A pass that has ended becomes a file and a clip of its own while the next one records. With Loop record
+//! on, a take of several passes goes on tracks grouped under the first pass's (Group loop recorded takes), all its
+//! passes muted unless Blend is on; a take of one pass, and the pieces of a jump back with Loop record off, go where a
+//! take always went (the audio track, or the first free track), as they are.
 // spec: audio/track-io.md §2.5, audio/disk-recording.md §1
 
 use std::path::PathBuf;
@@ -115,6 +117,10 @@ pub struct TrackRec {
     recs: Vec<(u16, Option<Recorder>)>,
     /// Per ring of `takes`: its passes made so far.
     lanes: Vec<Lane>,
+    /// Loop record was on when the take started: its passes are loop takes (grouped, muted with Blend off).
+    pub looping: bool,
+    /// Every file the take writes or will write: no two passes get one name.
+    used: Vec<PathBuf>,
     rate: u32,
     /// PAT mode: the clips go to the song position the take started at, not to the pattern's ticks.
     song_pos: Option<u32>,
@@ -134,9 +140,11 @@ struct Lane {
     file: PathBuf,
     /// Passes made into files.
     made: usize,
-    /// The audio clip channels of its placed passes, oldest first, and the playlist tracks they went on.
+    /// The files of its passes so far, the first one's `file`.
+    files: Vec<PathBuf>,
+    /// The audio clip channels of its placed passes, oldest first: the first one's clip finds the lane's track where
+    /// it is now (tracks inserted above move it).
     channels: Vec<u16>,
-    tracks: Vec<u16>,
 }
 
 /// The take's file for a track: "<project>_<YYYY-MM-DD HH-MM-SS>_<track name>.wav" (spec: audio/track-io.md §1.5), the
@@ -173,12 +181,28 @@ fn free_file(dir: &std::path::Path, name: &str, not: &[&std::path::Path]) -> Pat
 }
 
 /// Loop record pass `k`'s file of a take written to `file`: the file itself for the first, then "<stem>_2.wav",
-/// "<stem>_3.wav"... as FL names them (spec: audio/disk-recording.md §1).
-fn pass_file(file: &std::path::Path, k: usize) -> PathBuf {
+/// "<stem>_3.wav"... as FL names them (spec: audio/disk-recording.md §1); a name taken on disk or by `used` (the take's
+/// other files) gets " (2)", " (3)"... instead of being written over.
+fn pass_file(file: &std::path::Path, k: usize, used: &[PathBuf]) -> PathBuf {
     match (k, file.file_stem()) {
         (0, _) | (_, None) => file.to_path_buf(),
-        (k, Some(stem)) => file.with_file_name(format!("{}_{}.wav", stem.to_string_lossy(), k + 1)),
+        (k, Some(stem)) => {
+            let dir = file.parent().unwrap_or(std::path::Path::new(""));
+            let not: Vec<&std::path::Path> = used.iter().map(PathBuf::as_path).collect();
+            free_file(dir, &format!("{}_{}.wav", stem.to_string_lossy(), k + 1), &not)
+        }
     }
+}
+
+/// Lane `i`'s pass `k` file, chosen once (in pass order) and kept for the take.
+fn pass_path(r: &mut TrackRec, i: usize, k: usize) -> PathBuf {
+    while r.lanes[i].files.len() <= k {
+        let n = r.lanes[i].files.len();
+        let p = pass_file(&r.lanes[i].file, n, &r.used);
+        r.used.push(p.clone());
+        r.lanes[i].files.push(p);
+    }
+    r.lanes[i].files[k].clone()
 }
 
 /// The recording format's bits (Disk recording ▸ 16Bit int / 24Bit int / 32Bit float; spec: audio/disk-recording.md §2).
@@ -235,9 +259,14 @@ fn begin(s: &mut Session, pos: u32) {
     }
     let mut recs = Vec::new();
     let mut lanes = Vec::new();
+    let mut used: Vec<PathBuf> = Vec::new();
     for (i, (&t, name)) in armed.iter().zip(&names).enumerate() {
         let takes = takes.clone();
-        let file = s.rec_files.remove(&t).unwrap_or_else(|| free_file(&dir, &file_name(&project, now, name), &[]));
+        let file = s.rec_files.remove(&t).unwrap_or_else(|| {
+            let not: Vec<&std::path::Path> = used.iter().map(PathBuf::as_path).collect();
+            free_file(&dir, &file_name(&project, now, name), &not)
+        });
+        used.push(file.clone());
         match Recorder::start_from(file.clone(), rate, move |out| takes.tracks[i].ring.pop_into(out)) {
             Ok(w) => recs.push((t, Some(w))),
             Err(e) => {
@@ -245,41 +274,48 @@ fn begin(s: &mut Session, pos: u32) {
                 recs.push((t, None));
             }
         }
-        lanes.push(Lane { mixer: t, name: name.clone(), file, ..Lane::default() });
+        lanes.push(Lane { mixer: t, name: name.clone(), files: vec![file.clone()], file, ..Lane::default() });
     }
     let song_pos = (!s.song_mode()).then_some(pos);
+    let looping = Opt::Loop.on(&s.settings);
     s.transport.record_tracks(Some(takes.clone()));
-    s.track_rec = Some(TrackRec { takes, recs, lanes, rate, song_pos, ending: false, project, dir });
+    s.track_rec = Some(TrackRec { takes, recs, lanes, looping, used, rate, song_pos, ending: false, project, dir });
     s.touched.repaint = true;
 }
 
 /// The frames left out of the front of mixer track `t`'s take: the input's delay for a track that records an input
 /// (spec: audio/track-io.md §2.5 "Where the take goes"), with its input latency setting on top ("Adjust position of
-/// recorded audio"); none with Disk recording ▸ Latency compensation off (audio/disk-recording.md §2).
+/// recorded audio"). Disk recording ▸ Latency compensation off leaves out the input's delay only; the track's own
+/// setting still applies (audio/disk-recording.md §2).
 fn head_of(s: &Session, rate: u32, t: u16) -> i64 {
-    if !s.settings.check(&crate::prefs::REC_LATENCY_COMP) {
-        return 0;
-    }
     let p = &s.project;
+    let Some(m) = p.mixer.iter().find(|m| m.index == t).filter(|m| m.audio_in >= 0) else { return 0 };
+    let own = (f64::from(m.latency_in) * f64::from(rate) / 1000.0).round() as i64;
+    if !s.settings.check(&crate::prefs::REC_LATENCY_COMP) {
+        return own;
+    }
     let tempo = p.tick_tempo(s.tempo().max(1.0));
     let tick = os_engine::laws::tick_to_frame(1.0, p.ppq.max(1), tempo, rate).max(1);
-    let delay = s.transport.input_delay(tick) as i64;
-    let m = p.mixer.iter().find(|m| m.index == t);
-    m.filter(|m| m.audio_in >= 0)
-        .map_or(0, |m| delay + (f64::from(m.latency_in) * f64::from(rate) / 1000.0).round() as i64)
+    s.transport.input_delay(tick) as i64 + own
 }
 
 /// A pass made into a file: its mixer track's ring, the file, its frames and the tick it goes to.
 type Made = (usize, PathBuf, u64, u32);
 
-/// Makes ring `i`'s pass `k` (it has ended) into a file of its own, cut from what its writer has on disk.
-fn make_pass(s: &Session, r: &TrackRec, i: usize, k: usize, raw: &std::path::Path) -> Option<Result<Made, String>> {
+/// Makes ring `i`'s pass `k` (it has ended) into `file`, cut from what its writer has on disk.
+fn make_pass(
+    s: &Session,
+    r: &TrackRec,
+    i: usize,
+    k: usize,
+    raw: &std::path::Path,
+    file: PathBuf,
+) -> Option<Result<Made, String>> {
     let ring = &r.takes.tracks[i];
     let (start, tick) = ring.pass(k)?;
     let (end, _) = ring.pass(k + 1)?;
     let lane = &r.lanes[i];
     let head = head_of(s, r.rate, lane.mixer);
-    let file = pass_file(&lane.file, k);
     let at = r.song_pos.unwrap_or(u32::try_from(tick).unwrap_or(0));
     Some(
         crate::capture::segment_wav(
@@ -301,15 +337,17 @@ fn passes(s: &mut Session, brush: Option<crate::edit::playlist::Brush>) {
     let Some(mut r) = s.track_rec.take() else { return };
     let mut made = Vec::new();
     for i in 0..r.lanes.len() {
-        let Some(w) = r.recs[i].1.as_ref() else { continue };
         let t = r.recs[i].0;
         while let Some((end, _)) = r.takes.tracks[i].pass(r.lanes[i].made + 1) {
+            let Some(w) = r.recs[i].1.as_ref() else { break };
             // Not on disk yet: the next tick.
             if end as i64 + head_of(s, r.rate, t) > w.written() as i64 {
                 break;
             }
             let raw = w.part().to_path_buf();
-            match make_pass(s, &r, i, r.lanes[i].made, &raw) {
+            let k = r.lanes[i].made;
+            let file = pass_path(&mut r, i, k);
+            match make_pass(s, &r, i, k, &raw, file) {
                 Some(Ok(m)) => made.push(m),
                 Some(Err(e)) => s.touched.views.push(View::Message(format!("Disk recording: {e}"))),
                 None => break,
@@ -328,19 +366,20 @@ fn passes(s: &mut Session, brush: Option<crate::edit::playlist::Brush>) {
 /// left out of a track that records an input (spec: audio/track-io.md §2.5 "Where the take goes").
 fn end(s: &mut Session) {
     s.transport.record_tracks(None);
-    let Some(r) = s.track_rec.take() else { return };
+    let Some(mut r) = s.track_rec.take() else { return };
     r.takes.on.store(false, Ordering::Release);
-    for (i, (t, w)) in r.recs.iter().enumerate() {
-        let Some(w) = w else { continue };
+    for i in 0..r.recs.len() {
+        let last = r.takes.tracks[i].begun().max(1) - 1;
+        let file = pass_path(&mut r, i, last);
+        let (t, Some(w)) = &r.recs[i] else { continue };
         let ring = &r.takes.tracks[i];
-        let last = ring.begun().max(1) - 1;
         // Passes not made yet (the writer was behind) are cut from the raw file once it is done.
         if last > r.lanes[i].made {
             w.keep_part();
         }
         let from = ring.pass(last).map_or(0, |(f, _)| f) as i64;
         w.set_head(from + head_of(s, r.rate, *t));
-        w.set_file(pass_file(&r.lanes[i].file, last));
+        w.set_file(file);
         w.set_bits(rec_bits(s));
         w.finish();
     }
@@ -357,9 +396,10 @@ fn place(s: &mut Session, brush: Option<crate::edit::playlist::Brush>) {
     let mut errors = Vec::new();
     let mut lost = 0;
     let recs = std::mem::take(&mut r.recs);
+    let takes = r.takes.clone();
     for (i, (_, w)) in recs.into_iter().enumerate() {
         let Some(w) = w else { continue };
-        let ring = &r.takes.tracks[i];
+        let ring = &takes.tracks[i];
         lost += ring.dropped.load(Ordering::Relaxed);
         let last = ring.begun().max(1) - 1;
         let raw = w.part().to_path_buf();
@@ -367,7 +407,9 @@ fn place(s: &mut Session, brush: Option<crate::edit::playlist::Brush>) {
         // Passes the writer had not reached while playing.
         if last > r.lanes[i].made {
             while r.lanes[i].made < last {
-                match make_pass(s, &r, i, r.lanes[i].made, &raw) {
+                let k = r.lanes[i].made;
+                let file = pass_path(&mut r, i, k);
+                match make_pass(s, &r, i, k, &raw, file) {
                     Some(Ok(m)) => made.push(m),
                     Some(Err(e)) => errors.push(e),
                     None => {}
@@ -413,9 +455,10 @@ fn place(s: &mut Session, brush: Option<crate::edit::playlist::Brush>) {
 }
 
 /// Places files as audio clips, one undo step "Recorded items" (with Auto-create audio clips off, the files stay in the
-/// folder): each at its tick, its channel on its mixer track; a pass after a lane's first on a track grouped under the
-/// first's with Group loop recorded takes on, else on the first track free over it; the lane's earlier passes muted
-/// unless Blend is on (spec: audio/disk-recording.md §1). Returns the message to show.
+/// folder): each at its tick, its channel on its mixer track, on the mixer track's audio track or the first track free
+/// over it. A loop take of several passes (Loop record on) goes, with Group loop recorded takes on, on tracks grouped
+/// under its first pass's (or the audio track's when that is taken), named after the mixer track with Auto name playlist
+/// tracks, all its passes muted unless Blend is on (spec: audio/disk-recording.md §1). Returns the message to show.
 fn put(s: &mut Session, r: &mut TrackRec, made: Vec<Made>, brush: Option<crate::edit::playlist::Brush>) -> String {
     if !s.settings.check(&crate::prefs::AUTO_AUDIO_CLIPS) {
         return format!("Recorded {} file(s) into the Recorded folder", made.len());
@@ -431,14 +474,27 @@ fn put(s: &mut Session, r: &mut TrackRec, made: Vec<Made>, brush: Option<crate::
     for (i, path, frames, at) in &made {
         let t = r.lanes[*i].mixer;
         let len = (*frames as f64 / f64::from(r.rate) * tempo / 60.0 * ppq).ceil() as u32;
+        // A loop take: Loop record on and more than one pass on this track. A take of one pass, or the pieces of a jump
+        // back with Loop record off, are placed as a take always was.
+        let looped = r.looping && r.takes.tracks[*i].begun() > 1;
         let lane = &mut r.lanes[*i];
         let end = at + len.max(1);
-        // Into the mixer track's audio track when it has one free over the take (spec: ui/playlist.md §6c); with Group
-        // loop recorded takes on, else onto a track grouped under it (or under the take's first track), after the group.
-        let lead = crate::track_links::audio_tracks_of(s, t).first().copied().or(lane.tracks.first().copied());
+        // The lane's first pass, on whatever track it is now.
+        let first = lane.channels.first().and_then(|&ch| {
+            crate::edit::playlist::clips(s)
+                .iter()
+                .find(|c| c.source == os_model::ClipSource::Channel(ch))
+                .map(|c| c.track)
+        });
+        // Into the mixer track's audio track when it has one free over the take (spec: ui/playlist.md §6c); a loop take
+        // with Group loop recorded takes on, else onto a track grouped under it (or under the take's first pass),
+        // after the group.
+        let lead = crate::track_links::audio_tracks_of(s, t).first().copied().or(first);
         let track = match lead {
             Some(lead)
-                if group && (lead != crate::track_links::record_track(s, t, *at, end) || !lane.tracks.is_empty()) =>
+                if group
+                    && looped
+                    && (lead != crate::track_links::record_track(s, t, *at, end) || !lane.channels.is_empty()) =>
             {
                 crate::loop_takes::take_track(s, crate::loop_takes::group_end(s, lead) + 1)
             }
@@ -454,15 +510,14 @@ fn put(s: &mut Session, r: &mut TrackRec, made: Vec<Made>, brush: Option<crate::
             continue;
         };
         lane.channels.push(ch);
-        // Blend off: all of the take's passes are muted, the newest one too (FL, measured).
-        if !blend {
+        // Blend off: all of a loop take's passes are muted, the newest one too (FL, measured with six passes).
+        if looped && !blend {
             crate::loop_takes::mute_takes(s, &lane.channels);
         }
         let track = crate::edit::playlist::clips(s)[clip].track;
-        if rename {
+        if rename && looped {
             crate::loop_takes::name_take_track(s, track, &lane.name);
         }
-        lane.tracks.push(track);
         placed += 1;
         last_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     }
@@ -537,6 +592,40 @@ mod tests {
         let mine = dir.join("a (2).wav");
         assert_eq!(free_file(&dir, "a.wav", &[mine.as_path()]), dir.join("a (3).wav"));
         assert_eq!(free_file(&dir, "b.wav", &[]), dir.join("b.wav"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Latency compensation off leaves out the input's delay, not the track's own input latency setting.
+    #[test]
+    #[allow(deprecated)]
+    fn latency_compensation_off_keeps_the_tracks_own_latency() {
+        let settings = crate::settings_file::SettingsStore::memory();
+        let dir = crate::factory_folder::dir(&settings);
+        let mut s =
+            Session::new(crate::projects::test_project(), crate::transport::Transport::new(dir), settings);
+        let m = s.project.get_mut().mixer.iter_mut().find(|m| m.index == 1).unwrap();
+        m.audio_in = 0;
+        m.latency_in = 10.0;
+        s.settings.set_check(&crate::prefs::REC_LATENCY_COMP, false);
+        assert_eq!(head_of(&s, 48000, 1), 480, "10 ms at 48 kHz");
+        s.settings.set_check(&crate::prefs::REC_LATENCY_COMP, true);
+        assert!(head_of(&s, 48000, 1) > 480, "the input's delay on top");
+        assert_eq!(head_of(&s, 48000, 2), 0, "no input");
+    }
+
+    /// A pass's "<stem>_N.wav" that is on disk already, or that the take uses (another track "Vox_2"), is not written
+    /// over: it gets a number of its own.
+    #[test]
+    fn a_pass_never_writes_over_a_file() {
+        let dir = std::env::temp_dir().join(format!("lemon_pass_file_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Vox_2.wav"), b"keep").unwrap();
+        let take = dir.join("Vox.wav");
+        assert_eq!(pass_file(&take, 0, &[]), take);
+        assert_eq!(pass_file(&take, 1, &[]), dir.join("Vox_2 (2).wav"), "on disk");
+        assert_eq!(pass_file(&take, 2, &[dir.join("Vox_3.wav")]), dir.join("Vox_3 (2).wav"), "used by the take");
+        assert_eq!(pass_file(&take, 3, &[]), dir.join("Vox_4.wav"));
+        assert_eq!(std::fs::read(dir.join("Vox_2.wav")).unwrap(), b"keep");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

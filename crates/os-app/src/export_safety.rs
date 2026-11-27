@@ -18,40 +18,44 @@ pub fn in_use(p: &Path) -> bool {
     p.is_file() && std::fs::OpenOptions::new().append(true).open(p).is_err()
 }
 
+/// The first of `targets` another program holds: the "Error" message, as FL's.
+pub fn in_use_text(targets: &[PathBuf]) -> Option<String> {
+    let p = targets.iter().find(|p| in_use(p))?;
+    let name = p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    Some(format!("Couldn't create the file \"{name}\".\nPlease check that no other application is currently using it."))
+}
+
+/// "Confirm save as" for the `targets` that are there already (None: none is), Yes (`then`) replacing them, No the
+/// focused answer, as a file dialog asks it.
+pub fn replace_msg(targets: &[PathBuf], then: Then) -> Option<Msg> {
+    let there: Vec<String> = targets
+        .iter()
+        .filter(|p| p.is_file())
+        .filter_map(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect();
+    let text = match &there[..] {
+        [] => return None,
+        [one] => format!("{one} already exists.\nDo you want to replace it?"),
+        more => format!("{} and {} more already exist.\nDo you want to replace them?", more[0], more.len() - 1),
+    };
+    let mut m = Msg::new(Kind::Warning, "Confirm save as", spans(&[&text]), &[Answer::Yes, Answer::No], then);
+    // Replacing loses the files: Enter alone does not.
+    m.focus = 1;
+    Some(m)
+}
+
 impl App {
     /// The form's Start: true when the render may go ahead now. Otherwise the form is back and a message is over it.
     pub fn export_cleared(&mut self, f: &ExportForm) -> bool {
         let targets: Vec<PathBuf> = self.export_job(f).targets();
-        if let Some(p) = targets.iter().find(|p| in_use(p)) {
-            let name = p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        if let Some(text) = in_use_text(&targets) {
             self.show_form(Body::Project(Form::Export(Box::new(f.clone()))));
-            let text = format!(
-                "Couldn't create the file \"{name}\".\nPlease check that no other application is currently using it."
-            );
             self.tell(Kind::Error, "Error", spans(&[&text]));
             return false;
         }
-        let there: Vec<String> = targets
-            .iter()
-            .filter(|p| p.is_file())
-            .filter_map(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .collect();
-        if there.is_empty() {
-            return true;
-        }
+        let Some(m) = replace_msg(&targets, Then::ExportReplace) else { return true };
         self.show_form(Body::Project(Form::Export(Box::new(f.clone()))));
-        let text = match &there[..] {
-            [one] => format!("{one} already exists.\nDo you want to replace it?"),
-            more => format!("{} and {} more already exist.\nDo you want to replace them?", more[0], more.len() - 1),
-        };
-        let m = Msg::new(
-            Kind::Warning,
-            "Confirm save as",
-            spans(&[&text]),
-            &[Answer::Yes, Answer::No],
-            Then::ExportReplace,
-        );
         self.show_msg(m);
         false
     }
@@ -112,6 +116,8 @@ mod tests {
         let mut app = app(&dir);
         app.dialog_click(DHit::Form(FHit::Main));
         assert_eq!(top_title(&app).as_deref(), Some("Confirm save as"));
+        let Some(Body::Msg(m)) = app.state.dialogs.last().map(|d| &d.body) else { panic!("a message") };
+        assert_eq!(m.focus, 1, "No is focused: Enter alone does not replace");
         assert!(app.state.session.export.is_none(), "nothing rendered yet");
         app.dialog_click(DHit::Button(1));
         assert_eq!(top_title(&app).as_deref(), Some("form"), "No: back to the form");

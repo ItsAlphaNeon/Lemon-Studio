@@ -126,6 +126,8 @@ pub enum Then {
     GroupExport,
     /// "Confirm save as" over the Export form: Yes renders over the files there (`App::export_replace`).
     ExportReplace,
+    /// "Confirm save as" for Export all playlist track groups into this folder: Yes renders over the files there.
+    GroupReplace(PathBuf),
     /// File ▸ FL Studio factory content folder: the folder picked (`App::set_factory_folder`).
     FactoryFolder,
     /// FILE ▸ Save as template...: the template's name, from the save dialog (`crate::project_files`).

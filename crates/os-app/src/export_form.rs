@@ -99,8 +99,10 @@ pub struct ExportForm {
     /// (spec: ui/pattern-render.md §1); the choices are not kept for the next export.
     pub to_clip: bool,
     /// Disk recording ▸ Render armed tracks (`crate::disk_rec_menu`): into the Recorded folder, which is not kept as
-    /// the export folder.
+    /// the export folder, and placed as audio clips once written (`Render::Armed`).
     pub armed: bool,
+    /// Each track's file name without the extension (`ex::Job::stems`); empty: as `tracks` names them.
+    pub stems: Vec<String>,
     /// The mixer track menu's File ▸ Render to wave file...: these tracks' outputs are the files (`ex::Job::tracks`),
     /// Split mixer tracks does not apply and the choices are not kept for the next export. Empty: an export.
     pub tracks: Vec<u16>,
@@ -322,6 +324,7 @@ impl App {
             list: None,
             to_clip: false,
             armed: false,
+            stems: Vec::new(),
             tracks: Vec::new(),
         };
         self.show_form(Body::Project(Form::Export(Box::new(f))));
@@ -430,8 +433,18 @@ impl App {
             if !f.armed {
                 crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
             }
+            if f.armed {
+                // The Recorded folder is made on the first recording or render.
+                let _ = std::fs::create_dir_all(&f.folder);
+            }
             let job = self.export_job(&f);
-            return self.start_export(job, f.song);
+            self.start_export(job, f.song);
+            if f.armed && self.state.session.export.is_some() && self.playlist_render.is_none() {
+                // spec: audio/disk-recording.md §2.1
+                let at = f.span().map_or(0, |(a, _)| a);
+                self.playlist_render = Some(crate::playlist::Render::Armed { at });
+            }
+            return;
         }
         f.o.save(&self.state.session.settings);
         crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
@@ -509,6 +522,7 @@ impl App {
             tempo: (tempo, f64::from(ticks) / f64::from(ppq.max(1))),
             track_names: (0..=tracks).map(|t| crate::edit::mixer::name(&s.session, t)).collect(),
             tracks: f.tracks.clone(),
+            stems: f.stems.clone(),
         }
     }
 

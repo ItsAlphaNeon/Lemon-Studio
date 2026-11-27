@@ -89,13 +89,7 @@ impl App {
                 let Some(row) = rows.get(i).cloned() else { return true };
                 // Ctrl and Shift select several rows; a double click opens a project or MIDI file (spec §12).
                 let click = crate::browser_pick::click(s, &rows, i, self.ctrl, self.shift);
-                if matches!(click, crate::browser_pick::Click::Extend | crate::browser_pick::Click::Keep) {
-                    if crate::browser_pick::draggable(&row.item) {
-                        self.drag = Some(Drag::Browser { item: row.item, label: row.label, m0: self.mouse, started: false });
-                    }
-                    self.invalidate();
-                    return true;
-                }
+                let several = matches!(click, crate::browser_pick::Click::Extend | crate::browser_pick::Click::Keep);
                 if click == crate::browser_pick::Click::Double
                     && let Some(path) = crate::browser_pick::openable(&row)
                 {
@@ -104,7 +98,10 @@ impl App {
                     return true;
                 }
                 let s = &mut self.state;
-                select(s, &row.key);
+                // The selection is `click`'s when several rows are; the row's own action is done all the same.
+                if !several {
+                    select(s, &row.key);
+                }
                 if row.open.is_some() && !s.browser_open.remove(&row.key) {
                     s.browser_open.insert(row.key.clone());
                 }
@@ -369,6 +366,10 @@ impl App {
     /// Browser keys (spec §4, §5); returns whether the key was used.
     pub fn browser_key(&mut self, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool {
         use crate::keys::{Key, NamedKey};
+        // The playlist's value box and the rack's fill box have the keys while open (their Enter is theirs).
+        if self.state.playlist.edit.is_some() || self.state.rack.fill.is_some() {
+            return false;
+        }
         let shift = self.shift;
         let focus = self.state.browser_search_focus;
         let over = self.over_browser() || focus;
@@ -705,14 +706,16 @@ impl App {
                 let more = crate::browser_pick::other_samples(s, &path);
                 if let Some((track, tick)) = spot {
                     let name = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string();
-                    s.message = Some(match pl::add_audio_clip(s, &path, track, tick) {
-                        Some(_) if more.is_empty() => format!("Added audio clip {name}"),
-                        Some(_) => format!("Added {} audio clips", more.len() + 1),
-                        None => format!("Could not read {name} as audio"),
+                    let first = s.session.samples.wave(&s.session.settings, &path).is_some();
+                    // All of them one undo step.
+                    let mut files = vec![(path.as_str(), track)];
+                    files.extend(more.iter().enumerate().map(|(k, p)| (p.as_str(), track.saturating_add(k as u16 + 1))));
+                    pl::add_audio_clips(s, &files, tick);
+                    s.message = Some(match first {
+                        true if more.is_empty() => format!("Added audio clip {name}"),
+                        true => format!("Added {} audio clips", more.len() + 1),
+                        false => format!("Could not read {name} as audio"),
                     });
-                    for (k, p) in more.iter().enumerate() {
-                        pl::add_audio_clip(s, p, track.saturating_add(k as u16 + 1), tick);
-                    }
                 } else if win == Some(Win::ChannelRack) {
                     self.sample_to_rack(path, y);
                     for p in more {
@@ -1502,6 +1505,89 @@ mod tests {
         assert!(app.state.browser_search.is_empty());
         app.paint(&mut c, None);
         assert!(!app.hits.iter().any(|h| h.action == Action::BrowserClear));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Several selected samples dropped on the playlist: a clip each, down from the track under the mouse, all one undo
+    /// step that takes them all back.
+    #[test]
+    fn several_samples_drop_as_one_undo_step() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = folder("browser_drop_many", &["A.wav", "B.wav", "C.wav"]);
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(view::disk_key(&dir));
+        app.paint(&mut c, None);
+        let grid = app.pl_grid().expect("the playlist on screen");
+        let key = |app: &App, label: &str| view::rows(&app.state).into_iter().find(|r| r.label == label).expect(label).key;
+        app.state.browser_sel = Some(key(&app, "A"));
+        app.state.browser_pick.more = vec![key(&app, "B"), key(&app, "C")];
+        app.mouse = (grid.x + 60.0, grid.y + 30.0);
+        let count = |app: &App| (crate::edit::playlist::clips(&app.state.session).len(), app.state.session.project.channels.len());
+        let (before, steps) = (count(&app), app.state.session.history.done());
+        let a = dir.join("A.wav").to_string_lossy().into_owned();
+        app.browser_drop(Item::Sample(a), true);
+        assert_eq!(count(&app), (before.0 + 3, before.1 + 3), "{:?}", app.state.message);
+        assert_eq!(app.state.session.history.done(), steps + 1, "one undo step");
+        app.key(&crate::keys::Key::Character("z".into()), true, false);
+        assert_eq!(count(&app), before, "undo takes all three back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl and Shift clicks select as `browser_pick::click` says and still do the row's own action: a folder opens, a
+    /// sample sounds.
+    #[test]
+    fn ctrl_and_shift_clicks_keep_the_rows_action() {
+        let dir = folder("browser_ctrl_rows", &["Kicks/Kick.wav", "Snare.wav"]);
+        let mut app = App::new(None);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(view::disk_key(&dir));
+        let at = |app: &App, label: &str| view::rows(&app.state).iter().position(|r| r.label == label).expect(label);
+        let key = |app: &App, label: &str| view::rows(&app.state)[at(app, label)].key.clone();
+        let kicks = at(&app, "Kicks");
+        app.ctrl = true;
+        app.browser_act(&Action::BrowserRow(kicks));
+        app.ctrl = false;
+        assert!(app.state.browser_open.contains(&key(&app, "Kicks")), "Ctrl opens the folder");
+        assert_eq!(app.state.browser_sel, Some(key(&app, "Kicks")));
+        app.shift = true;
+        app.browser_act(&Action::BrowserRow(at(&app, "Snare")));
+        app.shift = false;
+        assert!(app.state.browser_play.as_ref().is_some_and(|p| p.path.ends_with("Snare.wav")), "Shift sounds the sample");
+        assert_eq!(app.state.browser_sel, Some(key(&app, "Snare")));
+        assert!(app.state.browser_pick.more.contains(&key(&app, "Kicks")), "Shift selects from the last clicked row");
+        assert!(app.state.browser_pick.more.contains(&key(&app, "Kick")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Enter with the playlist's value box or the rack's fill box open goes to the box, not to the browser row under
+    /// the mouse (a selected MIDI file is not opened).
+    #[test]
+    fn enter_belongs_to_an_open_box() {
+        use crate::keys::{Key, NamedKey};
+        let dir = folder("browser_enter_box", &["song.mid"]);
+        let mut app = App::new(None);
+        app.state.session.project = crate::locked::Locked::new(crate::projects::test_project());
+        app.state.show_browser = true;
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(view::disk_key(&dir));
+        let row = view::rows(&app.state).into_iter().find(|r| crate::browser_pick::openable(r).is_some()).expect("the MIDI row");
+        app.state.browser_sel = Some(row.key);
+        app.mouse = (10.0, crate::views::work_y(&app.state) + 40.0);
+        assert!(app.over_browser());
+        let enter = |app: &mut App| app.key(&Key::Named(NamedKey::Enter), false, false);
+        crate::playlist::start_edit(&mut app.state, crate::playlist::EditTarget::PatternName(0), (300.0, 300.0));
+        enter(&mut app);
+        assert!(app.state.playlist.edit.is_none(), "the value box took Enter");
+        assert!(app.state.dialogs.is_empty(), "the MIDI file was not opened");
+        crate::rack::open_fill(&mut app.state, 0);
+        enter(&mut app);
+        assert!(app.state.rack.fill.is_none(), "the fill box took Enter");
+        assert!(app.state.dialogs.is_empty(), "the MIDI file was not opened");
+        // With no box open, Enter is the browser's.
+        enter(&mut app);
+        assert!(!app.state.dialogs.is_empty(), "the MIDI file opens");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
