@@ -156,6 +156,12 @@ pub const MOD_Y_POLY: u32 = 2;
 /// Poly modulation id of the hidden "Clip end": a host ends one note's voice that far into the sample (a trimmed audio
 /// clip's end, spec §7).
 pub const CLIP_END_POLY: u32 = 3;
+/// Poly modulation id of the hidden "Clip reverse": a host plays one note's voice backwards (a reversed audio clip;
+/// spec: ui/audio-clip-pitch-reverse.md). Its `start` and end then count from the sample's end.
+pub const CLIP_REVERSE_POLY: u32 = 4;
+/// The names a host finds these two by.
+pub const CLIP_REVERSE: &str = "Clip reverse";
+pub const REVERSED_COPY: &str = "Keep a reversed copy";
 
 /// A 0..1 knob shown in percent.
 pub fn knob(name: &str, default: f32) -> FloatParam {
@@ -415,6 +421,12 @@ pub struct SamplerParams {
     pub start_offset: FloatParam,
     #[id = "clip_end"]
     pub clip_end: FloatParam,
+    #[id = "clip_reverse"]
+    pub clip_reverse: FloatParam,
+    /// The played sample is also kept reversed, for reversed voices (`CLIP_REVERSE_POLY`): the host turns it on while
+    /// the channel has reversed clips.
+    #[id = "rev_copy"]
+    pub rev_copy: BoolParam,
     #[id = "loop_start"]
     pub loop_start: FloatParam,
     #[id = "loop_end"]
@@ -543,6 +555,9 @@ impl Default for SamplerParams {
             // ... and end one note's voice further on (a trimmed audio clip's end): per note only, the value itself
             // does nothing. Hidden: it is the host's link, not a setting.
             clip_end: knob("Clip end", 0.0).with_poly_modulation_id(CLIP_END_POLY).hide(),
+            // ... and play one note's voice backwards (a reversed audio clip): per note only, like "Clip end".
+            clip_reverse: knob(CLIP_REVERSE, 0.0).with_poly_modulation_id(CLIP_REVERSE_POLY).hide(),
+            rev_copy: BoolParam::new(REVERSED_COPY, false).hide(),
             loop_start: FloatParam::new("Loop start position", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_value_to_string(samples(frames.clone())),
             loop_end: FloatParam::new("Loop end position", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
@@ -835,12 +850,14 @@ pub struct FxKey {
     pub ratio: f32,
     pub time: f32,
     pub shift: f32,
+    /// **(Lemon Studio)** The played sample is also kept reversed ("Keep a reversed copy").
+    pub reversed: bool,
 }
 
 impl FxKey {
     /// No setting at all (the file as it is) at 44100 Hz.
     pub fn neutral() -> FxKey {
-        FxKey { fx: SampleFx::default(), knob_loop: None, rate: 44100, stretch: false, ratio: 1.0, time: 0.0, shift: 0.0 }
+        FxKey { fx: SampleFx::default(), knob_loop: None, rate: 44100, stretch: false, ratio: 1.0, time: 0.0, shift: 0.0, reversed: false }
     }
 
     /// Stretch ratio for a sample of `secs` seconds: TIME's target length when set, else MUL.
@@ -946,6 +963,7 @@ impl SamplerParams {
             ratio: if stretch { mul_of(self.ts_mul.live()) as f32 } else { 1.0 },
             time,
             shift: if stretch { ts_cents(self.ts_pitch.live()) as f32 } else { 0.0 },
+            reversed: self.rev_copy.value(),
         }
     }
 }

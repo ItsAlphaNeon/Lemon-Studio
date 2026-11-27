@@ -292,6 +292,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn use_end_param(&mut self, name: &str) -> bool {
         self.run(false, |p| p.use_end_param(name))
     }
+    fn use_reverse_param(&mut self, name: &str) -> bool {
+        self.run(false, |p| p.use_reverse_param(name))
+    }
     fn use_channel_levels(&mut self) -> bool {
         self.run(false, |p| p.use_channel_levels())
     }

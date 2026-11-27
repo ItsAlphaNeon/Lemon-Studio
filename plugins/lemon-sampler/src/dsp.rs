@@ -26,6 +26,11 @@ use os_engine::{laws, Sample};
 use crate::stream::{Feed, Played};
 
 /// Time stretch to `ratio` × the length, the pitch moved by the factor `shift` (spec §5.6: Signalsmith Stretch).
+/// `s` played backwards (a reversed audio clip's voices read it; spec: ui/audio-clip-pitch-reverse.md).
+pub fn reversed(s: &Sample) -> Sample {
+    Sample { rate: s.rate, left: s.left.iter().rev().copied().collect(), right: s.right.iter().rev().copied().collect() }
+}
+
 pub fn stretch(s: &Sample, ratio: f64, shift: f64) -> Sample {
     let frames = (s.frames() as f64 * ratio).round().max(1.0) as usize;
     let (left, right) = os_dsp::stretch::whole(&s.left, &s.right, s.rate, frames, shift);
@@ -385,6 +390,8 @@ struct Voice {
     xf: u32,
     /// The host's gain on the voice (CLAP volume expression: an audio clip's fades and gain), once it gives one.
     vol: Option<HostGain>,
+    /// A reversed audio clip's voice: it reads `Engine::reversed` (its positions count from the sample's end).
+    rev: bool,
     /// Where it reads a sample kept on disk, and frames left of its fade back in after its frames came late.
     feed: Feed,
     gap: u32,
@@ -578,6 +585,9 @@ impl Rt {
 
 pub struct Engine {
     pub sample: Option<Arc<Sample>>,
+    /// **(Lemon Studio)** `sample` reversed, kept while the host asks for it ("Keep a reversed copy"): reversed audio
+    /// clips' voices play it (spec: ui/audio-clip-pitch-reverse.md).
+    pub reversed: Option<Arc<Sample>>,
     /// **(Lemon Studio)** The played sample kept on disk (Keep on disk), played in place of `sample` (`set_disk`).
     disk: Option<Arc<Played>>,
     /// Voices wait for frames from disk that are not in yet, instead of playing silence until they are: an offline
@@ -629,6 +639,7 @@ impl Engine {
         let voices = voices.clamp(1, MAX_VOICES);
         Engine {
             sample: None,
+            reversed: None,
             disk: None,
             wait: false,
             looped: None,
@@ -911,6 +922,7 @@ impl Engine {
             rt,
             xf: 0,
             vol: None,
+            rev: false,
             feed,
             gap: 0,
         });
@@ -965,6 +977,23 @@ impl Engine {
         for v in self.voices.iter_mut().filter(|v| v.id == Some(id) && v.age == 0) {
             let at = b.start_offset.clamp(0.0, 1.0) * n + f64::from(frac.max(0.0)) * file;
             v.end = Some(at.round_ties_even().clamp(v.pos, n));
+        }
+    }
+
+    /// A note that has not played yet plays backwards (a reversed audio clip): it reads the reversed copy of the played
+    /// sample, when one is kept ("Keep a reversed copy"); its start and end count from the sample's end.
+    /// Without the copy (the host has not asked for one yet, or it is still being made) the voice stays silent: it
+    /// never plays the forward sample.
+    /// An offline render (`wait`) never drops one: the copy is made here when the host's switch has not reached the
+    /// sampler yet.
+    pub fn reverse(&mut self, id: i32) {
+        let mut any = false;
+        for v in self.voices.iter_mut().filter(|v| v.id == Some(id) && v.age == 0) {
+            v.rev = true;
+            any = true;
+        }
+        if any && self.wait && self.reversed.is_none() {
+            self.reversed = self.sample.as_deref().map(|s| Arc::new(reversed(s)));
         }
     }
 
@@ -1046,6 +1075,7 @@ impl Engine {
         if src.is_none() {
             self.end_all();
         }
+        let rev = self.reversed.clone().filter(|r| src.as_ref().is_some_and(|s| s.frames() == r.frames())).map(Src::Ram);
         let mut f = 0;
         while f < len {
             if self.left == 0 {
@@ -1077,6 +1107,16 @@ impl Engine {
                 while i > 0 {
                     i -= 1;
                     let v = &mut self.voices[i];
+                    // A reversed voice reads the reversed copy (as long as the forward sample).
+                    let s = match (&rev, v.rev) {
+                        (Some(r), true) => r,
+                        (None, true) => {
+                            let v = self.voices.remove(i);
+                            retire(&v, &mut self.streams, self.disk.as_ref(), &mut self.ended);
+                            continue;
+                        }
+                        _ => s,
+                    };
                     let rt = match s {
                         Src::Ram(_) => v.rt.and_then(|k| self.streams.get_mut(usize::from(k))),
                         Src::Disk(_) => None,

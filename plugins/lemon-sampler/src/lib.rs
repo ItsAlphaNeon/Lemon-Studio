@@ -35,6 +35,8 @@ pub struct Processed {
     /// New whenever what the voices play changes: the engine takes each processed sample once.
     pub serial: u64,
     pub sample: Option<Arc<Sample>>,
+    /// **(Lemon Studio)** `sample` reversed, when the host asks for it (`FxKey::reversed`).
+    pub reversed: Option<Arc<Sample>>,
     /// **(Lemon Studio)** The played sample kept on disk (Keep on disk), in place of `sample`.
     pub disk: Option<Arc<stream::Played>>,
     /// The played sample's loop (start and end frame, both inclusive), whether or not voices use it.
@@ -447,7 +449,8 @@ impl Shared {
             return;
         }
         let (layout, source, path) = (*self.layout.lock().unwrap(), *self.source.lock().unwrap(), self.loaded_path());
-        let stream = layout.and_then(|l| self.streams(params, &source, &l).map(|lp| (l, lp)));
+        // A channel that keeps a reversed copy plays from memory: the copy is made from the decoded frames.
+        let stream = layout.filter(|_| !key.reversed).and_then(|l| self.streams(params, &source, &l).map(|lp| (l, lp)));
         // Only the settings it was made for change: what plays stays.
         let restamp = || {
             if let Some(p) = self.processed.lock().unwrap().as_mut().filter(|p| p.version == version) {
@@ -475,7 +478,7 @@ impl Shared {
             if let Some(disk) = disk {
                 let played = stream::Played::new(disk, &points, old.as_deref());
                 params.frames.store(l.frames as u32, Ordering::Relaxed);
-                self.store(Processed { version, key, disk_key: dk, serial: 0, sample: None, disk: Some(Arc::new(played)), looped: lp, file_frames: l.frames as f64 });
+                self.store(Processed { version, key, disk_key: dk, serial: 0, sample: None, reversed: None, disk: Some(Arc::new(played)), looped: lp, file_frames: l.frames as f64 });
                 // The file plays from disk: its decoded frames are let go.
                 let mut raw = self.raw.lock().unwrap();
                 if self.raw_version.load(Ordering::Acquire) == version {
@@ -496,7 +499,9 @@ impl Shared {
             Some((b, raw_frames)) => (Some(b.sample), b.looped, raw_frames as f64 * b.per_file_frame),
             None => (None, None, 0.0),
         };
-        self.store(Processed { version, key, disk_key: dk, serial: 0, sample, disk: None, looped, file_frames });
+        // Reversed audio clips play a reversed copy (spec: ui/audio-clip-pitch-reverse.md).
+        let reversed = sample.as_deref().filter(|_| key.reversed).map(|s| Arc::new(dsp::reversed(s)));
+        self.store(Processed { version, key, disk_key: dk, serial: 0, sample, reversed, disk: None, looped, file_frames });
     }
 
     /// Makes `p` the processed sample, with a serial of its own.
@@ -697,6 +702,7 @@ pub fn block(p: &SamplerParams, tempo: f64, bend: f64) -> dsp::Block {
 /// The voices play a processed sample from now on.
 fn take(engine: &mut dsp::Engine, p: &Processed) {
     engine.sample = p.sample.clone();
+    engine.reversed = p.reversed.clone();
     engine.set_disk(p.disk.clone());
     engine.looped = p.looped;
     engine.file_frames = p.file_frames;
@@ -709,7 +715,13 @@ impl LemonSampler {
         let want = (self.shared.raw_version.load(Ordering::Acquire), p.fx_key(self.shared.tempo(), self.shared.rate()), p.disk_key());
         if self.requested != Some(want) {
             self.requested = Some(want);
-            ctx.execute_background(Task::Precompute);
+            // An offline render waits for it: what it renders never lags the settings (a reversed copy asked for just
+            // before an export, for one).
+            if self.offline {
+                self.shared.precompute(&self.params);
+            } else {
+                ctx.execute_background(Task::Precompute);
+            }
         }
         // A note started where nothing of the file on disk is held: a played sample that holds it is made.
         if self.engine.disk().is_some_and(|d| d.news()) {
@@ -739,6 +751,7 @@ impl LemonSampler {
             NoteEvent::PolyModulation { voice_id, poly_modulation_id, normalized_offset, .. } => match poly_modulation_id {
                 params::START_OFFSET_POLY => self.engine.start_later(voice_id, normalized_offset, blk),
                 params::CLIP_END_POLY => self.engine.end_at(voice_id, normalized_offset, blk),
+                params::CLIP_REVERSE_POLY if normalized_offset > 0.5 => self.engine.reverse(voice_id),
                 // The note's mod X / mod Y in knob units (the filter knobs' 0..1), added to the knobs for its voice.
                 params::MOD_X_POLY => self.engine.modulate(voice_id, Some(normalized_offset), None),
                 params::MOD_Y_POLY => self.engine.modulate(voice_id, None, Some(normalized_offset)),

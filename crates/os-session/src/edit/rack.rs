@@ -1022,6 +1022,7 @@ fn sync_project(ses: &mut crate::session::Session) -> bool {
         }
         // Also while Play is still starting (not `playing` yet); ignored when stopped.
         ses.transport.update(&play.unwrap_or_else(|| play_project_in(ses)));
+        crate::clip_reverse::sync(ses);
         return true;
     }
     false

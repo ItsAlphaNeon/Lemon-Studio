@@ -839,6 +839,10 @@ pub struct ClipIn {
     pub window: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<Vec<u8>>,
+    /// An audio clip's own semitones, cents, pan (−100..100) and reverse (0 / 1) (spec:
+    /// ui/playlist-clip-properties.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub props: Option<[i8; 4]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u32>,
 }
@@ -859,6 +863,7 @@ impl ClipIn {
             muted: Some(c.muted),
             window: Some(c.window.map_or_else(Vec::new, |(a, b)| vec![a, b])),
             record: Some(c.raw.to_vec()),
+            props: Some([c.props.semitones, c.props.cents, c.props.pan, i8::from(c.props.reverse)]),
             id: (c.id.0 != 0).then_some(c.id.0),
         }
     }
@@ -901,6 +906,12 @@ impl ClipIn {
                 return Err(format!("a clip's record is {} bytes", c.raw.len()));
             }
             c.raw.copy_from_slice(r);
+        }
+        if let Some([semis, cents, pan, rev]) = self.props {
+            c.set_pitch_semitones(i32::from(semis));
+            c.set_fine_cents(i32::from(cents));
+            c.props.pan = pan.clamp(-100, 100);
+            c.set_reversed(rev != 0);
         }
         Ok(c)
     }

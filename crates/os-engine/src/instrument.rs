@@ -287,12 +287,15 @@ pub struct NoteLevels {
     /// The MIDI channel, 0..15 (0 = channel 1): a MIDI device's own for a live note on a channel with MIDI channel
     /// through ticked (spec: ui/channel-rack.md §18), else 0. A hosted plugin gets the note, and its end, on it.
     pub channel: u8,
+    /// A reversed audio clip's voice (`Instrument::voice_start`): it plays the sample backwards, its `start` and `end`
+    /// counting from the sample's end (spec: ui/audio-clip-pitch-reverse.md "How it plays").
+    pub reverse: bool,
 }
 
 impl NoteLevels {
     /// The levels of a note's pan, mod X and mod Y bytes.
     pub fn of_bytes(pan: u8, mod_x: u8, mod_y: u8) -> NoteLevels {
-        NoteLevels { pan: (f32::from(pan) - 64.0) / 64.0, mod_x: (f32::from(mod_x) - 128.0) / 128.0, mod_y: (f32::from(mod_y) - 128.0) / 128.0, channel: 0 }
+        NoteLevels { pan: (f32::from(pan) - 64.0) / 64.0, mod_x: (f32::from(mod_x) - 128.0) / 128.0, mod_y: (f32::from(mod_y) - 128.0) / 128.0, channel: 0, reverse: false }
     }
 }
 

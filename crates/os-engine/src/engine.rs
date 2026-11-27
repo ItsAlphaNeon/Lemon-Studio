@@ -106,8 +106,12 @@ struct Trigger {
     /// An audio clip's trimmed end as a fraction of the sample (0 = none; instrument channels: the sampler plugin
     /// ends the voice there).
     stop: f32,
-    /// Which buffer of the channel it plays: 0 = the channel's sample, `k` = `keyed[k - 1]` (realtime stretch).
+    /// Which buffer of the channel it plays: 0 = the channel's sample, `k` = `keyed[k - 1]` (realtime stretch); with
+    /// [`REVERSED`] set, `reversed[k - 1]`.
     buf: u16,
+    /// A reversed audio clip: `from`, `start` and `stop` count from the end of the sample (they are places in the
+    /// reversed sample), which it plays backwards.
+    reverse: bool,
     /// An audio clip's fades, gain and late-start declick (`None` = plays as it is).
     shape: Option<ClipShape>,
     /// A slide note: no sound of its own, it glides the channel's voices of its colour.
@@ -361,6 +365,9 @@ struct ChannelState {
     /// notes play.
     realtime: Option<(f64, f64)>,
     keyed: Vec<(u16, Arc<Sample>)>,
+    /// Reversed audio clips: the buffer each copy reverses (`buffer`'s numbering) and the copy, played by a voice whose
+    /// buffer has [`REVERSED`] set (spec: ui/audio-clip-pitch-reverse.md "How it plays").
+    reversed: Vec<(u16, Arc<Sample>)>,
     /// An audio clip channel's own voice level, on what its hosted instrument plays (1 on other channels; spec:
     /// audio/audio-clips.md "Level").
     clip_level: f32,
@@ -490,6 +497,7 @@ impl ChannelState {
     /// The buffer a voice plays (`Trigger::buf`).
     fn buffer(&self, buf: u16) -> Option<&Arc<Sample>> {
         match buf {
+            b if b & REVERSED != 0 => self.reversed.get(usize::from(b & !REVERSED).checked_sub(1)?).map(|r| &r.1),
             0 => self.sample.as_ref(),
             b => self.keyed.get(usize::from(b) - 1).map(|k| &k.1),
         }
@@ -1449,6 +1457,7 @@ impl Engine {
                     from_scale,
                     realtime,
                     keyed: Vec::new(),
+                    reversed: Vec::new(),
                     clip_level: if ch.kind == ChannelKind::AudioClip { os_dsp::level::audio_clip_level() } else { 1.0 },
                     adjust,
                     init_adjust: adjust,
@@ -1565,7 +1574,14 @@ impl Engine {
                         let at = |s: f64| s * f64::from(r) * state.from_scale;
                         let played = frames as f64 * if state.realtime.is_some() { state.from_scale } else { 1.0 };
                         let from = at(n.from_s);
-                        (from, (from / played) as f32, n.to_s.map_or(0.0, |s| (at(s) / played).max(1e-9) as f32))
+                        if n.reverse {
+                            // The window read from its end: places in the reversed sample.
+                            let to = n.to_s.map_or(played, |s| at(s).min(played));
+                            let rf = (played - to).max(0.0);
+                            (rf, (rf / played) as f32, if from > 0.0 { ((played - from) / played).max(1e-9) as f32 } else { 0.0 })
+                        } else {
+                            (from, (from / played) as f32, n.to_s.map_or(0.0, |s| (at(s) / played).max(1e-9) as f32))
+                        }
                     }
                     _ => (0.0, 0.0, 0.0),
                 };
@@ -1574,8 +1590,8 @@ impl Engine {
                     at: n.tick,
                     channel: n.channel,
                     // The note's fine pitch is the voice's pitch offset, kept apart from its key (spec: audio/voice-levels.md).
-                    rate: laws::playback_rate(n.key, laws::fine_pitch_cents(n.fine)),
-                    fine: laws::fine_pitch_cents(n.fine) as f32 / 100.0,
+                    rate: laws::playback_rate(n.key, laws::fine_pitch_cents(n.fine) + n.cents),
+                    fine: (laws::fine_pitch_cents(n.fine) + n.cents) as f32 / 100.0,
                     cut: n.cut,
                     // A playlist audio clip's voice has its own volume in place of a velocity: unity through a channel at
                     // its default volume, centred (spec: audio/audio-clips.md "Level").
@@ -1584,11 +1600,12 @@ impl Engine {
                     key: n.key,
                     end: (n.len > 0).then_some(n.tick + n.len),
                     velocity: n.velocity,
-                    levels: crate::NoteLevels::of_bytes(n.pan, n.mod_x, n.mod_y),
+                    levels: crate::NoteLevels { reverse: n.reverse, ..crate::NoteLevels::of_bytes(n.pan, n.mod_x, n.mod_y) },
                     from,
                     start,
                     stop,
                     buf: 0,
+                    reverse: n.reverse,
                     // Every playlist clip has a shape (a plain one without fades or gain), so an instrument that takes
                     // voice gains gets the channel's clip level on the clips' voices alone (`instrument_job`).
                     shape: n.cut.map(|_| n.clip.unwrap_or(ClipFx { fade_in: (0.0, 0.0), fade_out: (0.0, 0.0), gain: 1.0 })).map(|fx| {
@@ -1622,6 +1639,12 @@ impl Engine {
             if let Some(i) = keyed_copy(&mut channels[t.channel], library, t.key) {
                 t.buf = (i + 1) as u16;
                 t.rate = 1.0;
+            }
+            // A reversed audio clip plays the reversed copy of its buffer (a hosted sampler reverses it itself).
+            if t.reverse && channels[t.channel].sample.is_some() {
+                if let Some(b) = reversed_copy(&mut channels[t.channel], t.buf) {
+                    t.buf = b;
+                }
             }
         }
         // A layer's notes play on its children: they get the copies for the keys the layer plays.
@@ -2790,6 +2813,17 @@ impl Engine {
 
     /// The index (+ 1) in this engine's channel `c` of the copy `buf` that `old`'s channel `c` plays, added when missing.
     fn adopt(&mut self, old: &[ChannelState], c: usize, buf: u16) -> u16 {
+        // A reversed copy: kept with the buffer it reverses.
+        if buf & REVERSED != 0 {
+            let Some(r) = old.get(c).and_then(|o| o.reversed.get(usize::from(buf & !REVERSED).checked_sub(1)?)).cloned() else { return 0 };
+            let of = self.adopt(old, c, r.0);
+            let ch = &mut self.channels[c];
+            let i = ch.reversed.iter().position(|x| Arc::ptr_eq(&x.1, &r.1)).unwrap_or_else(|| {
+                ch.reversed.push((of, r.1));
+                ch.reversed.len() - 1
+            });
+            return REVERSED | (i as u16 + 1);
+        }
         let Some(k) = (buf > 0).then(|| old.get(c).and_then(|o| o.keyed.get(usize::from(buf) - 1))).flatten().cloned() else { return 0 };
         let ch = &mut self.channels[c];
         let i = ch.keyed.iter().position(|x| Arc::ptr_eq(&x.1, &k.1)).unwrap_or_else(|| {
@@ -4183,6 +4217,20 @@ const SINC_W: f64 = 13.5;
 // spec: audio/sampler-playback.md (resampling)
 /// The place in `ch.keyed` of the copy of its sample stretched for `key`, made when missing (realtime stretch methods
 /// only): the channel's pitch with its fine tune, root and main pitch, and the stretch's own included.
+/// The bit of a voice's buffer number that plays the buffer reversed (`ChannelState::reversed`).
+const REVERSED: u16 = 0x8000;
+
+/// The reversed copy of channel buffer `buf` (made the first time a reversed clip asks for it): its buffer number.
+fn reversed_copy(ch: &mut ChannelState, buf: u16) -> Option<u16> {
+    if let Some(i) = ch.reversed.iter().position(|r| r.0 == buf) {
+        return Some(REVERSED | (i as u16 + 1));
+    }
+    let s = ch.buffer(buf)?;
+    let rev = Sample { rate: s.rate, left: s.left.iter().rev().copied().collect(), right: s.right.iter().rev().copied().collect() };
+    ch.reversed.push((buf, Arc::new(rev)));
+    Some(REVERSED | ch.reversed.len() as u16)
+}
+
 fn keyed_copy(ch: &mut ChannelState, library: &mut SampleLibrary, key: u16) -> Option<usize> {
     let (Some((factor, cents)), Some(s)) = (ch.realtime, ch.sample.clone()) else { return None };
     Some(match ch.keyed.iter().position(|k| k.0 == key) {
@@ -5164,6 +5212,9 @@ struct Sched {
     from_s: f64,
     /// Seconds into the sample where an audio clip's window ends (`None`: the sample's end).
     to_s: Option<f64>,
+    /// An audio clip's own pitch beyond its key, in cents, and its reverse switch (spec: ui/audio-clip-pitch-reverse.md).
+    cents: i32,
+    reverse: bool,
     /// An audio clip's fades and gain.
     clip: Option<ClipFx>,
     /// A slide note.
@@ -5191,6 +5242,8 @@ impl Sched {
             len: u64::from(n.length),
             from_s: 0.0,
             to_s: None,
+            cents: 0,
+            reverse: false,
             clip: None,
             slide: n.slide(),
             colour: n.colour(),
@@ -5524,7 +5577,14 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
                             let to_s = c.window.filter(|w| w.0 >= 0.0 && w.1 >= 0.0).map(|w| w.1 / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, to_s, clip: ClipFx::of(c, fx), slide: false, colour: 0, porta: false, swing: None });
+                            // The clip's own pitch moves its key by the whole semitones, the rest goes as cents; its
+                            // pan is the voice's own pan (spec: ui/audio-clip-pitch-reverse.md "How it plays").
+                            let pitch = c.pitch_cents();
+                            let semis = (f64::from(pitch) / 100.0).round() as i32;
+                            let key = (60 + semis).clamp(0, 127) as u16;
+                            let cents = pitch - (i32::from(key) - 60) * 100;
+                            let pan = (64.0 + f64::from(c.clip_pan()) * 64.0).round().clamp(0.0, 128.0) as u8;
+                            out.push(Sched { tick: start, channel: usize::from(ch), key, fine: 120, velocity: 100, pan, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, to_s, cents, reverse: c.reversed(), clip: ClipFx::of(c, fx), slide: false, colour: 0, porta: false, swing: None });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -7093,11 +7153,11 @@ mod tests {
         e.set_instrument(0, log.clone());
         e.render_all(480);
         let got = log.lock().unwrap().0.clone();
-        let half = crate::NoteLevels { pan: 0.5, mod_x: 0.5, mod_y: -0.5, channel: 0 };
+        let half = crate::NoteLevels { pan: 0.5, mod_x: 0.5, mod_y: -0.5, channel: 0, reverse: false };
         let centred = crate::NoteLevels::of_bytes(64, 128, 128);
         assert_eq!(centred, crate::NoteLevels::default());
         assert_eq!(got, vec![(60, half), (62, centred)]);
-        assert_eq!(crate::NoteLevels::of_bytes(0, 0, 255), crate::NoteLevels { pan: -1.0, mod_x: -1.0, mod_y: 127.0 / 128.0, channel: 0 });
+        assert_eq!(crate::NoteLevels::of_bytes(0, 0, 255), crate::NoteLevels { pan: -1.0, mod_x: -1.0, mod_y: 127.0 / 128.0, channel: 0, reverse: false });
     }
 
     /// MIDI channel through (spec: ui/channel-rack.md §18): a live note's MIDI channel reaches the hosted instrument
@@ -8061,6 +8121,31 @@ mod tests {
         assert!((g(2400) - want(0.5)).abs() < 1e-3, "voice fade-in midway: {}", g(2400));
         assert!((g(24000) - 2.0).abs() < 1e-4, "voice gain: {}", g(24000));
         assert!((g(end) - w).abs() < 2e-3, "voice fade-out half way: {} vs {w}", g(end));
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    // spec: ui/playlist-clip-properties.md "How it plays"
+    #[test]
+    fn audio_clip_pitch_and_reverse_play() {
+        use os_model::{Clip, ClipSource};
+        let wav = std::env::temp_dir().join(format!("os-engine-clip-rev-{}.wav", std::process::id()));
+        // Half a second of a ramp from 0 up (the same on both sides).
+        let ramp: Vec<f32> = (0..24000).flat_map(|k| [k as f32 / 24000.0; 2]).collect();
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &ramp).unwrap();
+        let mut p = song(vec![], vec![Clip::new(0, 384, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut lib = SampleLibrary::new(None);
+        let at = |p: &Project, lib: &mut SampleLibrary, f: usize| Engine::new(p, lib, 48000, PlayMode::Song).render_all(480)[f * 2];
+        let plain = at(&p, &mut lib, 4800);
+        assert!((plain - 0.2).abs() < 0.01, "forward, 0.1 s in: {plain}");
+        p.arrangements[0].clips[0].set_reversed(true);
+        let rev = at(&p, &mut lib, 4800) / plain * 0.2;
+        assert!((rev - 0.8).abs() < 0.01, "reversed, 0.1 s in: {rev}");
+        p.arrangements[0].clips[0].set_reversed(false);
+        p.arrangements[0].clips[0].set_pitch_semitones(12);
+        let up = at(&p, &mut lib, 4800) / plain * 0.2;
+        assert!((up - 0.4).abs() < 0.01, "an octave up, 0.1 s in: {up}");
         let _ = std::fs::remove_file(&wav);
     }
 

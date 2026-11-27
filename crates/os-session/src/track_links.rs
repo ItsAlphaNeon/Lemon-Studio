@@ -194,7 +194,7 @@ mod tests {
     use os_model::{Clip, Id};
 
     fn clip(track: u16, position: u32, source: ClipSource) -> Clip {
-        Clip { id: Id::NONE, position, length: 96, track, source, muted: false, window: None, raw: Clip::TEMPLATE }
+        Clip { id: Id::NONE, position, length: 96, track, source, muted: false, window: None, raw: Clip::TEMPLATE, props: Default::default() }
     }
 
 }

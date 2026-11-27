@@ -1549,6 +1549,7 @@ fn decode_clip(r: &[u8]) -> Clip {
         muted: r[19] & CLIP_MUTED != 0,
         window,
         raw,
+        props: Default::default(),
     }
 }
 
