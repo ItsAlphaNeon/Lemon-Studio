@@ -1967,6 +1967,8 @@ impl App {
                         let more = if files.len() > 1 { format!(" + {} more", files.len() - 1) } else { String::new() };
                         format!("Exported {}:{:02} to {name}{more}", (secs / 60.0) as u32, (secs % 60.0) as u32)
                     }
+                    // spec: audio/export.md §1d
+                    Err(e) if e.starts_with(crate::export::ABORTED) => e,
                     Err(e) => format!("Export failed: {e}"),
                 });
                 self.invalidate();
@@ -2214,6 +2216,12 @@ impl App {
             Then::ExportZip => {
                 if let Some(p) = file {
                     crate::zipped_ui::export(self, p);
+                }
+            }
+            Then::ExportReplace => self.export_replace(reply == crate::dialog::Reply::Button(crate::dialog::Answer::Yes)),
+            Then::GroupExport => {
+                if let Some(p) = file {
+                    self.state.message = Some(crate::group_export::export(self, p));
                 }
             }
             Then::FactoryFolder => {
@@ -4539,6 +4547,8 @@ impl App {
         if let Some((name, p)) = &self.state.session.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
             crate::loading_ui::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
+            let hover = crate::export_abort::button_rect(canvas.size()).contains(self.mouse.0, self.mouse.1);
+            crate::export_abort::paint(canvas, &self.theme.colors, hover);
         }
     }
 
@@ -9450,6 +9460,7 @@ impl App {
             // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
             MenuCmd::Settings(tab) => self.open_settings(tab),
             MenuCmd::ExportZip => crate::zipped_ui::export_dialog(self),
+            MenuCmd::ExportGroups => crate::group_export::ask_folder(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             MenuCmd::Sampler => {
                 if let Some(index) = self.state.session.plugins.index_of(crate::plugins::LEMON_SAMPLER) {

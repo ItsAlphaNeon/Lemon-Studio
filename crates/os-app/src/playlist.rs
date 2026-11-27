@@ -4681,9 +4681,17 @@ pub enum Render {
     /// Consolidate: the clips `used` (arranger indices) over `a..b` render to a file; they are muted and a clip of it
     /// goes on `track` at `a`.
     Consolidate { a: u32, b: u32, used: Vec<usize>, track: u16 },
-    /// Export all playlist tracks: `todo` tracks are still to render, one at a time, from `audible` clips, each file
-    /// `end` ticks long, into `dir`.
-    Tracks { todo: Vec<u16>, audible: Vec<Clip>, end: u32, dir: PathBuf, written: usize },
+    /// Export all playlist tracks (and FILE ▸ Export all playlist track groups, `crate::group_export`): `todo` files
+    /// are still to render, one at a time, from `audible` clips, into `dir`.
+    Tracks { todo: Vec<Part>, audible: Vec<Clip>, dir: PathBuf, written: usize },
+}
+
+/// One file of a track export: the clips of `tracks`, ticks `0..end`, written as `name`.wav.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Part {
+    pub tracks: Vec<u16>,
+    pub name: String,
+    pub end: u32,
 }
 
 /// A render's job: one 32-bit float WAV, `name` in `dir`, ticks `0..ticks` exactly (the span fixes the length, so
@@ -4697,7 +4705,7 @@ fn render_job(s: &State, dir: &Path, name: &str, ticks: u32) -> crate::export::J
     j
 }
 
-fn render_dir(s: &State) -> PathBuf {
+pub(crate) fn render_dir(s: &State) -> PathBuf {
     s.session.path.as_ref().and_then(|p| p.parent()).map(|d| d.join("Rendered")).unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered"))
 }
 
@@ -4712,31 +4720,48 @@ pub fn export_tracks(app: &mut App) -> String {
     let s = &app.state;
     let audible: Vec<Clip> = clips(&s.session).iter().filter(|c| !c.muted && track_on(&s.session, c.track)).copied().collect();
     let Some(end) = audible.iter().map(|c| c.end()).max() else { return "Export tracks: the arranger has no clips to play".into() };
-    let mut todo: Vec<u16> = audible.iter().map(|c| c.track).collect();
-    todo.sort_unstable();
-    todo.dedup();
-    todo.reverse(); // popped from the end: the first track first
+    let mut tracks: Vec<u16> = audible.iter().map(|c| c.track).collect();
+    tracks.sort_unstable();
+    tracks.dedup();
+    let todo = tracks
+        .into_iter()
+        .map(|t| {
+            let name = file_safe(&track_name(&s.session, t));
+            Part { tracks: vec![t], name: format!("{:02} {name}", t + 1), end }
+        })
+        .collect();
     let stem = s.session.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
     let dir = render_dir(s).join(format!("{stem} tracks"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return format!("Export tracks: {e}");
     }
-    app.playlist_render = Some(Render::Tracks { todo, audible, end, dir, written: 0 });
+    start_parts(app, todo, audible, dir)
+}
+
+/// `name` with the characters a file name can't hold as "_".
+pub fn file_safe(name: &str) -> String {
+    name.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect()
+}
+
+/// Starts a track export of `todo` (in order) from the `audible` clips into `dir`.
+pub fn start_parts(app: &mut App, mut todo: Vec<Part>, audible: Vec<Clip>, dir: PathBuf) -> String {
+    todo.reverse(); // popped from the end: the first part first
+    app.playlist_render = Some(Render::Tracks { todo, audible, dir, written: 0 });
     next_track(app)
 }
 
 /// Starts the next track of an Export all playlist tracks, or ends it.
 fn next_track(app: &mut App) -> String {
-    let Some(Render::Tracks { todo, audible, end, dir, written }) = &mut app.playlist_render else { return String::new() };
-    let Some(t) = todo.pop() else {
+    let Some(Render::Tracks { todo, audible, dir, written }) = &mut app.playlist_render else { return String::new() };
+    let Some(part) = todo.pop() else {
         let m = format!("Exported {written} track{} to {}", if *written == 1 { "" } else { "s" }, dir.display());
         app.playlist_render = None;
         return m;
     };
-    let (end, dir, mine): (u32, PathBuf, Vec<Clip>) = (*end, dir.clone(), audible.iter().filter(|c| c.track == t).copied().collect());
+    let (dir, mine): (PathBuf, Vec<Clip>) = (dir.clone(), audible.iter().filter(|c| part.tracks.contains(&c.track)).copied().collect());
     let s = &app.state;
-    let name: String = track_name(&s.session, t).chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
-    let job = render_job(s, &dir, &format!("{:02} {name}", t + 1), end);
+    let t = part.tracks[0];
+    let job = render_job(s, &dir, &part.name, part.end);
     let mut p = crate::rack::play_project(s);
     if let Some(arr) = p.arrangement_mut() {
         arr.clips = mine;
@@ -4861,8 +4886,8 @@ impl App {
                 Some(f) => consolidate_place(&mut self.state, a, b, &used, track, f),
                 None => "Consolidate: no file was written".into(),
             },
-            (Render::Tracks { todo, audible, end, dir, written }, Ok(_)) => {
-                self.playlist_render = Some(Render::Tracks { todo, audible, end, dir, written: written + 1 });
+            (Render::Tracks { todo, audible, dir, written }, Ok(_)) => {
+                self.playlist_render = Some(Render::Tracks { todo, audible, dir, written: written + 1 });
                 next_track(self)
             }
         };

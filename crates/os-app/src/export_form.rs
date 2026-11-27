@@ -418,6 +418,14 @@ impl App {
         if f.to_clip {
             return self.render_pattern_with(&f);
         }
+        // A file in use, or one there already, first (`crate::export_safety`).
+        if self.export_cleared(&f) {
+            self.export_go(f);
+        }
+    }
+
+    /// The form's render starts: the choices kept (a track render's aside), the files written.
+    pub fn export_go(&mut self, f: ExportForm) {
         if !f.tracks.is_empty() {
             if !f.armed {
                 crate::settings_file::write("export_folder", &f.folder.to_string_lossy());

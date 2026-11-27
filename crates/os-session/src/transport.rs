@@ -128,6 +128,8 @@ pub struct Shared {
     /// An export is running, its progress in 1/1000 of the song, and its outcome once done.
     exporting: AtomicBool,
     export_permille: AtomicU32,
+    /// Abort (`Transport::abort_export`): the running export stops at its next block.
+    export_abort: AtomicBool,
     export_result: Mutex<Option<Result<(f64, Vec<PathBuf>), String>>>,
     /// Peak of the last block, f32 bits, per side.
     peak_l: AtomicU32,
@@ -688,8 +690,18 @@ impl Transport {
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.export_permille.store(0, Ordering::Relaxed);
+        self.shared.export_abort.store(false, Ordering::Relaxed);
         self.shared.exporting.store(true, Ordering::Release);
         let _ = self.tx.send(Cmd::Export(Box::new(project.clone()), mode, rate, Box::new(job)));
+    }
+
+    /// Abort: the running export stops at its next block and writes what it rendered so far, under the names it was
+    /// to have, as FL keeps an aborted render's file; it ends in `Export::Done(Err)` starting with
+    /// `crate::export::ABORTED` (spec: audio/export.md §1d).
+    pub fn abort_export(&self) {
+        if self.shared.exporting.load(Ordering::Acquire) {
+            self.shared.export_abort.store(true, Ordering::Release);
+        }
     }
 
     /// The running export's progress, or its outcome once (then `Idle` again).
@@ -1625,6 +1637,7 @@ fn export(project: &Project, mode: PlayMode, rate: u32, job: &crate::export::Job
     // Cut needs nothing past the song's end.
     let cap = if o.tail == crate::export::Tail::Cut { len } else { len + u64::from(rate) * EXPORT_TAIL_MAX_SECS };
     let mut audio: Vec<f32> = Vec::with_capacity(2 * (len as usize + rate as usize));
+    let mut aborted = false;
     loop {
         let done = e.render_ticks(32, &mut audio);
         let frames = audio.len() as u64 / 2;
@@ -1632,9 +1645,22 @@ fn export(project: &Project, mode: PlayMode, rate: u32, job: &crate::export::Job
         if done || frames >= cap {
             break;
         }
+        if shared.export_abort.swap(false, Ordering::AcqRel) {
+            aborted = true;
+            break;
+        }
     }
     let tracks = e.take_track_audio();
     drop(e);
+    if aborted {
+        // What was rendered, cut there (spec: audio/export.md §1d).
+        let frames = audio.len() as u64 / 2;
+        let files = crate::export::write(job, rate, audio, tracks, frames.max(1))?;
+        let secs = frames as f64 / f64::from(rate);
+        let names: Vec<String> = files.iter().filter_map(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
+        let of = len as f64 / f64::from(rate);
+        return Err(format!("{}: {secs:.1} s of {of:.1} s kept in {}", crate::export::ABORTED, names.join(", ")));
+    }
     // The file's length: the song, plus the tail when it rings out.
     let frames = if o.tail == crate::export::Tail::Ring { audio.len() as u64 / 2 } else { len };
     let files = crate::export::write(job, rate, audio, tracks, len)?;
@@ -3495,6 +3521,47 @@ mod tests {
         assert!((frames as f64 / 48000.0 - secs).abs() < 0.01, "file holds {frames} frames");
         let samples = bytes[44..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]).abs());
         assert!(samples.fold(0.0f32, f32::max) > 0.01, "the notes are heard");
+    }
+
+    /// Abort stops a running export at its next block; the file keeps what was rendered, under its own name, as a
+    /// valid WAV (spec: audio/export.md §1d).
+    #[test]
+    fn an_aborted_export_keeps_what_it_rendered() {
+        struct Slow(Arc<AtomicBool>);
+        impl os_engine::HostedEffect for Slow {
+            fn process_fx(&mut self, _rate: u32, _left: &mut [f32], _right: &mut [f32]) {
+                self.0.store(true, Ordering::Release);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let (_, project) = looping_engine();
+        let entered = Arc::new(AtomicBool::new(false));
+        let t = Transport::new(None);
+        t.set_effects(vec![(0, 0, Arc::new(Mutex::new(Slow(entered.clone()))) as SharedEffect)]);
+        let path = std::env::temp_dir().join(format!("openstudio-abort-test-{}.wav", std::process::id()));
+        t.export(&project, PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
+        let t0 = Instant::now();
+        while !entered.load(Ordering::Acquire) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "the export runs");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        t.abort_export();
+        let r = loop {
+            match t.export_status() {
+                Export::Done(r) => break r,
+                _ if t0.elapsed() > Duration::from_secs(30) => panic!("export did not end"),
+                _ => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        let e = r.expect_err("aborted");
+        assert!(e.starts_with(crate::export::ABORTED) && e.contains(&*path.file_name().unwrap().to_string_lossy()), "{e}");
+        let bytes = std::fs::read(&path).expect("the part rendered is kept");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize, bytes.len() - 8);
+        let secs = (bytes.len() - 44) as f64 / 8.0 / 48000.0;
+        assert!(secs < 1.8, "cut short: {secs} s");
+        assert_eq!(t.state(), State::Stopped);
     }
 
     /// Playback started in the middle of the song comes in from silence over the fade, then at full level.

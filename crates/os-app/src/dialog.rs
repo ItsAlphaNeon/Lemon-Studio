@@ -122,6 +122,10 @@ pub enum Then {
     MidiExport(bool),
     /// The file mixer track n's next recording goes to (the disk-record button's right click, `App::rec_file_chosen`).
     RecordTo(u16),
+    /// FILE ▸ Export all playlist track groups...: the rendering folder (`crate::group_export`).
+    GroupExport,
+    /// "Confirm save as" over the Export form: Yes renders over the files there (`App::export_replace`).
+    ExportReplace,
     /// File ▸ FL Studio factory content folder: the folder picked (`App::set_factory_folder`).
     FactoryFolder,
     /// FILE ▸ Save as template...: the template's name, from the save dialog (`crate::project_files`).

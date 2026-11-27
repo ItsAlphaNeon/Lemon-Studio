@@ -273,6 +273,18 @@ impl Job {
         self.folder.join(format!("{}.{}", self.name, EXTENSIONS[f]))
     }
 
+    /// The files `write` makes, the split tracks' stems aside: the formats ticked, or each mixer track's (`tracks`).
+    pub fn targets(&self) -> Vec<PathBuf> {
+        let stems: Vec<String> = match self.tracks.len() {
+            0 | 1 => vec![self.name.clone()],
+            _ => self.tracks.iter().map(|&t| format!("{} - {t:02} {}", self.name, self.track_name(usize::from(t)))).collect(),
+        };
+        stems
+            .iter()
+            .flat_map(|stem| self.options.ticked().map(move |f| self.folder.join(format!("{stem}.{}", EXTENSIONS[f]))))
+            .collect()
+    }
+
     /// Mixer track `t`'s name as a file name takes it (the characters one cannot hold as `_`).
     fn track_name(&self, t: usize) -> String {
         let name = self.track_names.get(t).cloned().unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Bus {t}") });
@@ -287,6 +299,9 @@ impl Job {
 
 /// Below this (-96 dB) a split track is silent and not written.
 const SILENT: f32 = 1.584_893_1e-5;
+
+/// How an aborted export's outcome (`Transport::abort_export`) starts.
+pub const ABORTED: &str = "Render aborted";
 
 /// Writes the files of `job` from the render at `rate`: `mix` and the mixer tracks' outputs (interleaved stereo, by
 /// track number; empty unless Split mixer tracks), `song` frames long before the tail. Returns the files written.
