@@ -223,8 +223,8 @@ fn locate(app: &mut App, t: u32) -> Option<String> {
         return Some(format!("{} has no window", crate::init_ui::name(s, t)));
     };
     s.rack.select_only(row);
-    s.session.pending_open = Some(row);
     app.focus_channel(row);
+    app.open_channel_window(row);
     None
 }
 
@@ -394,9 +394,16 @@ mod tests {
         hit(&mut a, THit::Row(0));
         hit(&mut a, THit::Delete);
         assert_eq!(targets(&a.state, made), [target::channel(first, target::CHANNEL_PAN)]);
+        a.state.hide(Win::Plugin);
         a.state.session.pending_open = None;
         hit(&mut a, THit::Locate);
-        assert_eq!(a.state.session.pending_open, Some(0), "Locate opens the first channel's window");
+        // A sampler's window is its hosted Lemon Sampler, opened once hosted; any other channel's opens at once.
+        let opened = if a.state.session.project.channels[0].kind.is_sampler() {
+            a.state.session.pending_open == Some(0)
+        } else {
+            a.state.shown(Win::Plugin) && a.state.plugin_channel == 0
+        };
+        assert!(opened, "Locate opens the first channel's window");
     }
 
     /// spec: ui/automation-targets.md §4: the Remote control settings box's Internal controller cycles through the
@@ -446,9 +453,10 @@ mod tests {
             a.mouse_up();
             a.paint(c, None);
         };
+        let open = |a: &App| a.state.shown(Win::Plugin) && a.state.plugin_channel == row;
         tap(&mut a, &mut c);
-        assert_eq!(a.state.session.pending_open, None, "one click only");
+        assert!(!open(&a), "one click only");
         tap(&mut a, &mut c);
-        assert_eq!(a.state.session.pending_open, Some(row), "a double click opens the clip's window");
+        assert!(open(&a), "a double click opens the clip's window");
     }
 }

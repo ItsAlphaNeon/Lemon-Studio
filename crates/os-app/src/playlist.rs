@@ -2673,9 +2673,10 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                             app.focus_channel(row);
                         }
                     } else if let Some(row) = auto {
+                        // Not a hosted plugin: its window is the channel window, opened now.
                         s.rack.select_only(row);
-                        s.session.pending_open = Some(row);
                         app.focus_channel(row);
+                        app.open_channel_window(row);
                     } else {
                         run(app, Cmd::ClipEditSource(ci));
                     }
