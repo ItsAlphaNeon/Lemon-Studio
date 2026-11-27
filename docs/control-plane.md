@@ -119,7 +119,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_start_value` | `target` (an automation target id), `value` (0 to 1; left out: no start value) | the song's start value for that control; an error for a control that has none |
 | `add_track` | `at` (optional) | A mixer insert, at number `at` or after the last. Result: `track` |
 | `delete_track` | `track` | Later tracks move left; its channels go to the master |
-| `set_track` | `track`; `name`, `color`, `volume` (0..1, 0.8 = unity), `pan`, `stereo` (-1..1), `enabled`, `polarity`, `swap`, `effects_enabled`, `separator`, `dock` (`left`, `middle` or `right`), `threaded`, `latency_in`, `latency_out` (ms, -1000..1000), `audio_in`, `audio_out` (place in the device's input or output menu, -1 none), `rec_source` (0 External input only ..= 5 Post track), `monitor` (`off`, `armed` or `on`), `armed` (optional) | |
+| `set_track` | `track`; `name`, `color`, `volume` (0..1, 0.8 = unity), `pan`, `stereo` (-1..1), `enabled`, `polarity`, `swap`, `effects_enabled`, `separator`, `dock` (`left`, `middle` or `right`), `threaded`, `latency_in`, `latency_out` (ms, -1000..1000), `audio_in`, `audio_out` (place in the device's input or output menu, -1 none), `rec_source` (0 External input only ..= 5 Post track), `monitor` (`off`, `armed` or `on`), `armed`, `mute_lock` (optional) | |
 | `move_track` | `track`, `to` | the track moves to insert number `to`, the ones between moving over |
 | `remove_tracks` | `tracks` (ids) | the tracks go and the mixer gets shorter (Trim unused tracks); the others close up in order |
 | `load_channel_state` | `path`; `name` (optional) | the channel a saved channel state holds as the rack's last row; its plugin starts from the saved state. The result names its id |
@@ -154,6 +154,7 @@ change only the fields they are given. Positions and lengths are ticks (`state.p
 | `set_clip` | `clip`; `position`, `track`, `length`, `muted` (optional) | |
 | `set_playlist_track` | `track`; `name`, `color`, `enabled`, `grouped`, `motion`, `press`, `trigger_sync`, `position_sync`, `queue`, `tolerant`, `clip_lock` (`{"pattern"}` (a number) or `{"channel"}`, `{}` none), `link` (`{"mixer"}`: an audio track on that insert, `{"channel"}`: an instrument track, `{}` none) (optional) | `grouped`: with the track above (not track 1). The performance settings as the project numbers them |
 | `set_points` | `channel`, `points`: `[{"beat", "value"; "tension", "mode", "flag", "id"}]` | The automation clip's points (beats from its start, values 0..1, at least two); a point named by its id keeps what is not given |
+| `set_targets` | `channel`, `targets`: `[target id]` | The automation clip's targets (its Target links), in order; empty unlinks it |
 | `add_arrangement` | `name`, `copy` (an arrangement's id) (optional) | After the others; a copy of `copy`, else empty. Result: `arrangement` |
 | `delete_arrangement` | `arrangement` | A project keeps one; the one shown going, the one before it is shown |
 | `set_arrangement` | `arrangement`, `name` | |

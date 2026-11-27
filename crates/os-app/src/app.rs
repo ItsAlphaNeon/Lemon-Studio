@@ -280,6 +280,8 @@ pub enum Action {
     TypeIn(crate::typein::TiAct),
     /// The Remote control settings box (spec: ui/remote-control.md).
     Remote(crate::remote::RAct),
+    /// An automation clip window's Target links list (spec: ui/automation-targets.md §3).
+    Targets(crate::auto_targets::THit),
     /// Piano roll: empty grid, a note (index into the pattern's notes), keyboard, velocity panel.
     PianoGrid,
     PianoNote(usize),
@@ -950,8 +952,9 @@ pub enum Drag {
     /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
     RackMixer { ch: usize, y0: f32, v0: u16 },
     /// A mixer fader: `track` follows the mouse from `v0`. `others` are the other selected tracks, which move with it, with
-    /// their kept levels, `level` being `track`'s (spec: ui/mixer.md §4).
-    Fader { track: u16, y0: f32, v0: f64, level: f64, others: Vec<(u16, f64)> },
+    /// their kept levels, `level` being `track`'s (spec: ui/mixer.md §4). `rate`: a quarter with Ctrl; `same`: Shift,
+    /// the others take `track`'s value.
+    Fader { track: u16, y0: f32, v0: f64, level: f64, others: Vec<(u16, f64)>, rate: f64, same: bool },
     /// A press on a track's equaliser graph `g`: band `band` follows the cursor.
     EqGraph { track: u16, band: u8, g: Rect },
     /// The Limit dialog's keys held (either button): the key under the mouse becomes the green key; its name strip held:
@@ -966,6 +969,9 @@ pub enum Drag {
     /// Ctrl+Shift+press on a mixer strip, held: every strip from `from` to the one under the cursor joins the selection,
     /// which keeps the tracks selected before (spec: ui/mixer.md §2).
     MixSweep { from: u16 },
+    /// The mixer slot menu's "Save preset as..." dragged out of the menu: a copy of slot `slot` of track `track` goes
+    /// where it is released (spec: ui/mixer-selection.md §2, `crate::mixer::slot_drag`).
+    SlotCopy { track: u16, slot: u8 },
     Tempo { y0: f32, t0: f64, step: f64 },
     /// The song position slider's handle (`dx` = grab offset from its centre), or the button held on its track (the
     /// next step is due at `next`) (spec: ui/song-position-slider.md §3).
@@ -1222,6 +1228,8 @@ pub struct State {
     /// The Remote control settings box, while open, and Multilink to controllers (`crate::remote`).
     pub link_box: Option<crate::remote::LinkBox>,
     pub multilink: crate::remote::Multi,
+    /// An automation clip window's Target links list: Add on, the selected row (`crate::auto_targets`).
+    pub auto_links: crate::auto_targets::Links,
     pub maximized: bool,
     pub piano: PianoState,
     pub playlist: crate::playlist::PlaylistState,
@@ -1670,6 +1678,7 @@ impl App {
                 midi: Default::default(),
                 link_box: None,
                 multilink: Default::default(),
+                auto_links: Default::default(),
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
@@ -5696,9 +5705,13 @@ impl App {
             self.invalidate();
             self.mark_detached(None);
         }
+        if self.drag.is_none() && crate::mixer::slot_drag::arm_move(self, self.armed.clone()) {
+            self.armed = None;
+        }
         if let Some(d) = self.drag.clone() {
             match d {
                 Drag::Browser { item, label, m0, started } => self.browser_drag_move(label, m0, started, item),
+                Drag::SlotCopy { .. } => self.invalidate(),
                 Drag::Pl(d) => {
                     if let Some(g) = self.pl_grid {
                         crate::playlist::drag_move(self, d, g);
@@ -5990,8 +6003,8 @@ impl App {
                         self.damage_win(Win::Mixer);
                     }
                 }
-                Drag::Fader { track, y0, v0, level, others } => {
-                    let per_px = views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
+                Drag::Fader { track, y0, v0, level, others, rate, same } => {
+                    let per_px = rate * views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
                     let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
                     if let Some(t) = crate::edit::mixer::track_mut(&mut self.state.session, track) {
                         t.volume = Some(v);
@@ -6000,12 +6013,12 @@ impl App {
                     self.record_control(&Action::Fader(track));
                     for &(t, other) in &others {
                         if let Some(m) = crate::edit::mixer::track_mut(&mut self.state.session, t) {
-                            m.volume = Some(crate::mixer::group_fader(other, level, v));
+                            m.volume = Some(if same { v } else { crate::mixer::group_fader(other, level, v) });
                         }
                         self.record_control(&Action::Fader(t));
                     }
                     if !others.is_empty() {
-                        self.state.mixer.faders.moved = Some((track, v));
+                        self.state.mixer.faders.moved_to(track, v, same);
                     }
                     self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
                     let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
@@ -7001,6 +7014,12 @@ impl App {
         if let Some(Drag::Browser { item, started, .. }) = self.drag.clone() {
             self.drag = None;
             return self.browser_drop(item, started);
+        }
+        if let Some(Drag::SlotCopy { track, slot }) = self.drag.clone() {
+            self.drag = None;
+            self.hint = std::borrow::Cow::Borrowed("");
+            self.state.message = crate::mixer::slot_drag::drop_slot(self, track, slot);
+            return self.invalidate();
         }
         if let Some(Drag::Pl(d)) = self.drag.clone() {
             self.drag = None;
@@ -8851,6 +8870,11 @@ impl App {
                     self.damage_eq();
                 }
             }
+            Action::Targets(h) => {
+                if let Some(m) = crate::auto_targets::hit(self, h) {
+                    self.state.message = Some(m);
+                }
+            }
             Action::Mix(h) => {
                 let plain_strip = matches!(h, crate::mixer::MHit::Strip(_)) && !self.ctrl && !self.shift;
                 let sweep = match h {
@@ -8877,10 +8901,12 @@ impl App {
                 }
             }
             // A press on the fader of a track in a multi-selection keeps the selection and makes that track current, and
-            // a drag moves them all (spec: ui/mixer.md §2, §4).
+            // a drag moves them all (spec: ui/mixer.md §2, §4); Ctrl+press does not add a track. On selected faders Ctrl
+            // drags at a quarter of the rate (measured there only) and Shift gives them the pressed one's value.
             Action::Fader(t) => {
                 let in_group = crate::mixer::in_group(s, t);
-                crate::mixer::select(s, t, self.ctrl || in_group);
+                crate::mixer::select(s, t, in_group);
+                let (rate, same) = (if self.ctrl && in_group { 0.25 } else { 1.0 }, self.shift && in_group);
                 let v0 = crate::edit::mixer::volume(&s.session, t);
                 let mut others = if in_group { crate::mixer::group_levels(s) } else { Vec::new() };
                 let level = others.iter().find(|o| o.0 == t).map_or(v0, |o| o.1);
@@ -8891,7 +8917,7 @@ impl App {
                     let tracks = std::iter::once(t).chain(others.iter().map(|o| o.0));
                     crate::control::edit_press_all(&mut s.session, crate::history::MIXER_VOLUME, tracks.map(crate::control::command::Region::Track));
                 }
-                self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0, level, others });
+                self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0, level, others, rate, same });
             }
             Action::ChannelSelect(_) | Action::RackSelect(_) => {}
             Action::RackRollView => s.rack_roll_view = !s.rack_roll_view,

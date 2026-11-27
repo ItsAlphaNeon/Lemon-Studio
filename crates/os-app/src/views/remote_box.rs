@@ -16,6 +16,14 @@ use crate::remote::{LinkBox, RAct};
 
 /// The box's size (spec §2).
 pub const SIZE: (f32, f32) = (270.0, 373.0);
+/// The Internal controller group's height, shown while the project has automation clips (spec:
+/// ui/automation-targets.md §4).
+pub const INTERNAL_H: f32 = 52.0;
+
+/// Whether the box shows the Internal controller group: one control's link, with clips in the project.
+pub fn internal_shown(s: &State, b: &LinkBox) -> bool {
+    b.all.is_empty() && !crate::auto_targets::clips(s).is_empty()
+}
 
 fn hit(ui: &mut Ui, r: Rect, a: RAct, hint: &'static str) -> bool {
     ui.hit(r, Action::Remote(a), hint)
@@ -24,7 +32,8 @@ fn hit(ui: &mut Ui, r: Rect, a: RAct, hint: &'static str) -> bool {
 pub fn paint(ui: &mut Ui, s: &State, b: &LinkBox) {
     let t = ui.t;
     let lemon = super::lemon(ui);
-    let r = Rect::new(b.at.0, b.at.1, SIZE.0, SIZE.1);
+    let extra = if internal_shown(s, b) { INTERNAL_H } else { 0.0 };
+    let r = Rect::new(b.at.0, b.at.1, SIZE.0, SIZE.1 + extra);
     let rad = if lemon { lk::r_panel(t) } else { 0.0 };
     hit(ui, r, RAct::Body, "");
     ui.c.fill_rrect(r.outset(4.0), rad + 4.0, Color::rgb(0).with_alpha(60));
@@ -106,7 +115,15 @@ pub fn paint(ui: &mut Ui, s: &State, b: &LinkBox) {
         super::settings::grey(ui, Rect::new(tb.x, tb.y, 80.0, tb.h));
     }
 
-    check(ui, r.x + 20.0, r.y + 326.0, b.conflicts, RAct::Conflicts, "Remove conflicts", "Auto-remove other conflicting assignments");
+    if extra > 0.0 {
+        // Internal controller ▸ Link assignment: an automation clip.
+        let gy = r.y + 322.0;
+        group(ui, r, gy, 42.0, "Internal controller");
+        let cb = Rect::new(r.x + 20.0, gy + 14.0, r.w - 40.0, 21.0);
+        let hov = hit(ui, cb, RAct::Internal, "Link assignment: an automation clip that drives the control (click for the next)");
+        combo(ui, cb, &crate::auto_targets::internal_name(s, b.internal), hov);
+    }
+    check(ui, r.x + 20.0, r.y + 326.0 + extra, b.conflicts, RAct::Conflicts, "Remove conflicts", "Auto-remove other conflicting assignments");
     let reset = Rect::new(r.x + 10.0, r.bottom() - 32.0, 80.0, 24.0);
     let accept = Rect::new(r.right() - 90.0, r.bottom() - 32.0, 80.0, 24.0);
     for (bt, a, label, hint) in [(reset, RAct::Reset, "Reset", "Reset all settings"), (accept, RAct::Accept, "Accept", "Make the link")] {
