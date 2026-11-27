@@ -212,10 +212,24 @@ mod tests {
             app.save_to(d.join(name));
             let mut back = App::new(None);
             back.open(d.join(name));
-            let props: Vec<_> = clips(&back.state.session).iter().map(|c| c.props).collect();
-            assert_eq!(props[0], Default::default(), "{name}");
-            assert_eq!(props[1], if kept { want } else { Default::default() }, "{name}");
+            // The file keeps clips sorted by position, not in the project's order: find each clip by where it is.
+            let back_clips = clips(&back.state.session);
+            let at = |pos: u32, pattern: bool| {
+                back_clips
+                    .iter()
+                    .find(|c| c.position == pos && matches!(c.source, ClipSource::Pattern(_)) == pattern)
+                    .unwrap_or_else(|| panic!("{name}: no clip at {pos}"))
+                    .props
+            };
+            assert_eq!(at(384, false), if kept { want } else { Default::default() }, "{name}");
+            assert_eq!(at(0, false), Default::default(), "{name}");
+            assert_eq!(at(0, true), Default::default(), "{name}");
         }
+        // A build without the settings warns that the file uses them.
+        app.save_to(d.join("Props.lemon"));
+        let bytes = std::fs::read(d.join("Props.lemon")).unwrap();
+        let named = bytes.windows(os_session::clip_reverse::FEATURE.len()).any(|w| w == os_session::clip_reverse::FEATURE.as_bytes());
+        assert!(named, "the file names the feature");
         let _ = std::fs::remove_dir_all(&d);
     }
 

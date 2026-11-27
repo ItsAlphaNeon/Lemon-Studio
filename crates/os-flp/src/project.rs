@@ -1596,19 +1596,34 @@ fn encode_clip(c: &Clip) -> [u8; CLIP_LEN] {
 
 /// Clip records of `len` bytes sorted by position. A clip without an id, or with one already used (a copy), gets
 /// the next free id (spec: playlist.md, byte 32). 80-byte records hold 0 at bytes 76..79 (spec: flp/layouts.md).
-fn encode_clips(clips: &[Clip], len: usize) -> Vec<u8> {
-    let mut sorted = clips.to_vec();
-    sorted.sort_by_key(|c| c.position);
-    let mut next = sorted.iter().map(Clip::id).max().unwrap_or(0) + 1;
+/// The order a playlist's clips are written in (by position; clips at the same position keep their order) and the id
+/// each record gets: the clip's own, or a new one (after the highest) for a clip without one or with one an earlier
+/// clip has. `(index into clips, id)`.
+pub fn clip_file_order(clips: &[Clip]) -> Vec<(usize, u32)> {
+    let mut order: Vec<usize> = (0..clips.len()).collect();
+    order.sort_by_key(|&i| clips[i].position);
+    let mut next = clips.iter().map(Clip::id).max().unwrap_or(0) + 1;
     let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(sorted.len() * len);
-    for c in &mut sorted {
-        if c.id() == 0 || !seen.insert(c.id()) {
-            c.set_id(next);
-            seen.insert(next);
-            next += 1;
-        }
-        let mut r = encode_clip(c);
+    order
+        .into_iter()
+        .map(|i| {
+            let mut id = clips[i].id();
+            if id == 0 || !seen.insert(id) {
+                id = next;
+                seen.insert(next);
+                next += 1;
+            }
+            (i, id)
+        })
+        .collect()
+}
+
+fn encode_clips(clips: &[Clip], len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(clips.len() * len);
+    for (i, id) in clip_file_order(clips) {
+        let mut c = clips[i].clone();
+        c.set_id(id);
+        let mut r = encode_clip(&c);
         if len < CLIP_LEN {
             r[76..80].fill(0);
         }

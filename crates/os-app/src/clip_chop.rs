@@ -189,6 +189,101 @@ mod tests {
         v.into_iter().map(|p| p.1).collect()
     }
 
+    /// A second of a ramp from 0 up (every place in the sample sounds different) at 48 kHz, written once per test.
+    fn ramp_wav(name: &str) -> std::path::PathBuf {
+        let wav = std::env::temp_dir().join(format!("os-app-{name}-{}.wav", std::process::id()));
+        let ramp: Vec<f32> = (0..48000).flat_map(|k| [k as f32 / 48000.0; 2]).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &ramp).unwrap();
+        wav
+    }
+
+    /// `app()` with the ramp as the clip's sample, the clip reversed / pitched, and trimmed to 100..900 ms.
+    fn ramp_app(wav: &std::path::Path, rev: bool, semis: i32, trimmed: bool) -> App {
+        let mut app = app();
+        let path = wav.to_string_lossy().into_owned();
+        app.state.session.project.get_mut().channels[0].sample_path = Some(path.clone());
+        app.state.session.samples.wave(&app.state.session.settings, &path);
+        let c = &mut arr_mut(&mut app.state.session).clips[0];
+        c.set_reversed(rev);
+        c.set_pitch_semitones(semis);
+        if trimmed {
+            c.window = Some((100.0, 900.0));
+        }
+        app
+    }
+
+    /// The song as the engine plays it, interleaved stereo.
+    fn render(app: &App) -> Vec<f32> {
+        let mut lib = os_engine::SampleLibrary::new(None);
+        os_engine::Engine::new(&app.state.session.project, &mut lib, 48000, os_engine::PlayMode::Song).render_all(480)
+    }
+
+    /// Frames (in `range`) where `a` and `b` differ.
+    fn differ(a: &[f32], b: &[f32], range: std::ops::Range<usize>) -> Vec<usize> {
+        range.filter(|&f| (a.get(f * 2).copied().unwrap_or(0.0) - b.get(f * 2).copied().unwrap_or(0.0)).abs() > 2e-3).collect()
+    }
+
+    const CASES: [(bool, i32, bool); 5] = [(true, 0, false), (false, 12, false), (true, 12, false), (true, -5, true), (false, 7, true)];
+
+    /// Chopped into beats, a reversed or pitched clip's pieces play the same samples as the whole clip did (spec:
+    /// ui/audio-clip-pitch-reverse.md "How it plays"): each piece takes the part of the window the whole clip played
+    /// there, from the window's end for a reversed clip and at the clip's own speed for a pitched one.
+    #[test]
+    fn chopped_reversed_and_pitched_clips_play_as_the_whole() {
+        let wav = ramp_wav("chop-rev");
+        for (rev, semis, trimmed) in CASES {
+            let mut app = ramp_app(&wav, rev, semis, trimmed);
+            let whole = render(&app);
+            assert!(whole.iter().any(|v| v.abs() > 0.1), "the clip plays");
+            assert!(chop(&mut app.state, &[0], Unit::Beat, 1) > 1);
+            let pieces = render(&app);
+            // Pieces start at places between samples where the whole clip did not, so the frame where a piece
+            // runs off the sample's end may differ: allow one frame per piece, not a wrong part of the sample.
+            let off = differ(&whole, &pieces, 0..whole.len().max(pieces.len()) / 2);
+            let n = clips(&app.state.session).len();
+            assert!(off.len() <= 2 * n, "reversed {rev}, {semis:+} semitones, trimmed {trimmed}: {} frames differ, from {:?}", off.len(), off.first());
+        }
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    /// Trimmed at either edge, a reversed or pitched clip plays what the whole clip played inside what is left; slipped
+    /// right, it plays the same later.
+    #[test]
+    fn trims_and_slip_keep_reversed_and_pitched_content_in_place() {
+        let wav = ramp_wav("trim-rev");
+        // 130 BPM at 96 PPQ: 13 ticks are 3000 frames.
+        let frames = |ticks: u32| (f64::from(ticks) * 48000.0 * 60.0 / 130.0 / 96.0).round() as usize;
+        for (rev, semis, trimmed) in CASES {
+            let what = format!("reversed {rev}, {semis:+} semitones, trimmed {trimmed}");
+            let mut app = ramp_app(&wav, rev, semis, trimmed);
+            assert_eq!(app.state.session.tempo(), 130.0);
+            let orig = clips(&app.state.session)[0];
+            let whole = render(&app);
+            // Left edge in by 13 ticks, right edge in by 26.
+            crate::playlist::resize_left(&mut app.state.session, 0, &orig, 13);
+            let left = clips(&app.state.session)[0];
+            crate::playlist::resize_right(&mut app.state.session, 0, &left, left.length - 26);
+            let cut = render(&app);
+            let (a, b) = (frames(orig.position + 13), frames(orig.end() - 26));
+            let off = differ(&whole, &cut, a + 2..b - 2);
+            assert!(off.len() <= 2, "{what}, trimmed: {} frames differ, from {:?}", off.len(), off.first());
+            // Slipped 13 ticks right. Untrimmed, the content cannot go further: the clip starts at the sample's
+            // start, or a reversed one at its end.
+            let mut app = ramp_app(&wav, rev, semis, trimmed);
+            crate::playlist::slip(&mut app.state.session, 0, &orig, 13);
+            if !trimmed {
+                let w = clips(&app.state.session)[0].window.unwrap();
+                assert!(if rev { (w.1 - 1000.0).abs() < 1e-6 } else { w.0 == 0.0 }, "{what}: {w:?}");
+                continue;
+            }
+            let slipped = render(&app);
+            let d = frames(13);
+            let off = differ(&whole[..whole.len() - 2 * d], &slipped[2 * d..], frames(orig.position) + 2..frames(orig.end()) - d - 2);
+            assert!(off.len() <= 2, "{what}, slipped: {} frames differ, from {:?}", off.len(), off.first());
+        }
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// The audio clip menu has Chop into ▸ with Bar, Beat, Beat Random and (off) Regions; Bar chops the clip.
     #[test]
     fn chop_into_menu() {

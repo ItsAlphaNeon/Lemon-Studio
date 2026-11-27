@@ -12,13 +12,18 @@ use os_model::{ClipProps, ClipSource, Project};
 
 use crate::lemon_state::{start, Reader};
 
-/// [`lemon::CLIP_PROPS`]: a u32 count, then per clip with settings its arrangement (u16, 0-based), its index in the
-/// arrangement's clip list (u32), semitones, cents and pan (i8 each) and flags (u8: 1 reverse).
+/// [`lemon::CLIP_PROPS`]: a u32 count, then per clip with settings its arrangement (u16, 0-based), the id its clip
+/// record is written with (u32, `os_flp::project::clip_file_order`: the file's order is not the project's),
+/// semitones, cents and pan (i8 each) and flags (u8: 1 reverse). Written on every save, with count 0 when no clip has
+/// settings, so the file's old event is not kept (spec: flp/lemon-format.md, event 204).
 pub fn event(project: &Project) -> Event {
     let mut v = Vec::new();
     for (a, arr) in project.arrangements.iter().enumerate() {
-        for (i, c) in arr.clips.iter().enumerate().filter(|(_, c)| c.props != ClipProps::default()) {
-            v.push((a as u16, i as u32, c.props));
+        for (i, id) in os_flp::project::clip_file_order(&arr.clips) {
+            let props = arr.clips[i].props;
+            if props != ClipProps::default() {
+                v.push((a as u16, id, props));
+            }
         }
     }
     let mut b = start(v.len());
@@ -38,7 +43,7 @@ pub fn read(project: &mut Project, d: &[u8]) {
         else {
             break;
         };
-        if let Some(clip) = project.arrangements.get_mut(usize::from(a)).and_then(|a| a.clips.get_mut(i as usize)) {
+        if let Some(clip) = project.arrangements.get_mut(usize::from(a)).and_then(|a| a.clips.iter_mut().find(|c| c.id() == i)) {
             clip.set_pitch_semitones(i32::from(s as i8));
             clip.set_fine_cents(i32::from(c as i8));
             clip.set_clip_pan(f32::from(p as i8) / 100.0);
@@ -46,6 +51,14 @@ pub fn read(project: &mut Project, d: &[u8]) {
         }
     }
 }
+
+/// Whether a clip of `project` has its own pitch, pan or reverse (the `.lemon` file's feature [`FEATURE`]).
+pub fn used(project: &Project) -> bool {
+    project.arrangements.iter().flat_map(|a| a.clips.iter()).any(|c| c.props != ClipProps::default())
+}
+
+/// The feature name a `.lemon` file gives the clips' own settings (`lemon_state::FEATURES`).
+pub const FEATURE: &str = "Audio clip pitch, pan and reverse";
 
 /// The rack rows (channel indexes into `project.channels`) whose clips, in any arrangement, include a reversed one.
 pub fn rows_with_reversed(project: &Project) -> Vec<usize> {

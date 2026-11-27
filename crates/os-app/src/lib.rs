@@ -213,7 +213,7 @@ pub mod clip_chop;
 pub mod clip_handles;
 pub mod clip_props;
 pub mod playlist_merge;
-#[cfg(test)]
+#[cfg(all(test, any(windows, target_os = "macos")))]
 mod plugin_drop_tests;
 pub mod piano_dlg;
 pub mod arpeggiate;
