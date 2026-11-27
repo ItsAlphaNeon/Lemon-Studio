@@ -23,6 +23,7 @@ pub mod diagnostics;
 pub use os_session::audio_cfg;
 pub use os_session::midi_notes;
 pub mod auto_close;
+pub mod auto_targets;
 pub use os_session::autoscroll;
 pub use os_session::backup;
 pub mod backup_ui;

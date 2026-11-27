@@ -280,6 +280,8 @@ pub enum Action {
     TypeIn(crate::typein::TiAct),
     /// The Remote control settings box (spec: ui/remote-control.md).
     Remote(crate::remote::RAct),
+    /// An automation clip window's Target links list (spec: ui/automation-targets.md §3).
+    Targets(crate::auto_targets::THit),
     /// Piano roll: empty grid, a note (index into the pattern's notes), keyboard, velocity panel.
     PianoGrid,
     PianoNote(usize),
@@ -1223,6 +1225,8 @@ pub struct State {
     /// The Remote control settings box, while open, and Multilink to controllers (`crate::remote`).
     pub link_box: Option<crate::remote::LinkBox>,
     pub multilink: crate::remote::Multi,
+    /// An automation clip window's Target links list: Add on, the selected row (`crate::auto_targets`).
+    pub auto_links: crate::auto_targets::Links,
     pub maximized: bool,
     pub piano: PianoState,
     pub playlist: crate::playlist::PlaylistState,
@@ -1671,6 +1675,7 @@ impl App {
                 midi: Default::default(),
                 link_box: None,
                 multilink: Default::default(),
+                auto_links: Default::default(),
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
@@ -8850,6 +8855,11 @@ impl App {
                     self.drag = Some(Drag::EqGraph { track, band, g });
                     crate::mixer::eq_graph_drag(&mut self.state, track, band, g, self.mouse);
                     self.damage_eq();
+                }
+            }
+            Action::Targets(h) => {
+                if let Some(m) = crate::auto_targets::hit(self, h) {
+                    self.state.message = Some(m);
                 }
             }
             Action::Mix(h) => {

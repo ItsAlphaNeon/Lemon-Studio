@@ -498,6 +498,9 @@ pub enum Command {
     /// The points of the automation clip on channel `channel` (an id) become `points`, in beat order; a point named by
     /// its id keeps its values for what is not given. A clip keeps two points at least.
     SetPoints { channel: u32, points: Vec<PointIn> },
+    /// The automation clip on channel `channel` (an id) drives `targets` (automation target ids, in order; empty: none),
+    /// its Target links (spec: ui/automation-targets.md §3).
+    SetTargets { channel: u32, targets: Vec<u32> },
     /// A new arrangement after the others, a copy of arrangement `copy` when given, else empty; named `name`, else
     /// "Arrangement N" (a copy: "<name> #2"). The result names its id.
     AddArrangement {
@@ -1481,6 +1484,7 @@ impl Command {
             Command::SetClips { .. } | Command::SetMarkers { .. } => crate::edit::playlist::ARRANGER_EDIT,
             Command::AddArrangement { .. } => "Add arrangement",
             Command::SetPoints { .. } => crate::edit::playlist::ARRANGER_EDIT,
+            Command::SetTargets { .. } => "Automation clip targets",
             Command::DeleteArrangement { .. } => "Delete arrangement",
             Command::SetArrangement { .. } => "Arrangement name",
             Command::MoveContent { .. } => crate::edit::playlist::ARRANGER_EDIT,
@@ -1642,6 +1646,10 @@ impl Command {
             Command::AddArrangement { .. } | Command::DeleteArrangement { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::SetArrangement { arrangement, .. } => Taken::Arrangement(Box::new(arrangement_of(p, *arrangement)?.clone())),
             Command::SetPoints { channel, .. } => Taken::Points(*channel, auto_of(p, *channel)?.points.clone()),
+            Command::SetTargets { channel, .. } => {
+                auto_of(p, *channel)?;
+                Taken::Project(Box::new(Side::of(s)))
+            }
             // A wrap moves plugins and what names them across the project.
             Command::WrapEffects { .. } | Command::WrapInstrument { .. } => Taken::Project(Box::new(Side::of(s))),
             Command::LoadTrackState { track, .. } => Taken::Track(Box::new(p.mixer[track_place(p, *track)?].clone())),
@@ -2935,6 +2943,15 @@ impl Command {
                 list.sort_by(|a, b| a.beat.total_cmp(&b.beat));
                 if let Some(a) = s.project.get_mut().automation_mut(index) {
                     a.points = list;
+                }
+                s.control.settle(s.project.get_mut());
+                none
+            }
+            Command::SetTargets { channel, targets } => {
+                let index = s.project.channels[channel_row(&s.project, channel)?].index;
+                auto_of(&s.project, channel)?;
+                if let Some(a) = s.project.get_mut().automation_mut(index) {
+                    a.targets = targets;
                 }
                 s.control.settle(s.project.get_mut());
                 none
