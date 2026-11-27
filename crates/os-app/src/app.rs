@@ -4658,13 +4658,12 @@ impl App {
             self.load_theme_file(&path);
             return;
         }
-        // macOS: a file dropped on Lemon Slicer's window comes to the main window; it goes into the Slicer, as on
-        // Windows, where the window's frame takes it (`Request::DropFile`). Other plugin windows are left as they were.
-        #[cfg(target_os = "macos")]
+        // A file dropped over a plugin window goes into that plugin, never into what lies under the window (spec:
+        // ui/plugin-window-sample-drop.md). macOS gives the main window the drops on plugin windows (Finder); on
+        // Windows the window's frame or editor takes them first (`Request::DropFile`, `WM_DROPFILES`).
+        #[cfg(any(windows, target_os = "macos"))]
         if let Some(row) = self.plugin_window_under_cursor() {
-            if self.loop_to_slicer(row, &path.to_string_lossy()) {
-                return;
-            }
+            return self.file_on_plugin_window(row, path);
         }
         let (x, y) = self.mouse;
         if self.top_hit(x, y).and_then(|h| h.win) == Some(Win::ChannelRack) {
@@ -4818,6 +4817,10 @@ impl App {
     /// The hosted key whose plugin window is under the mouse pointer (docked or detached).
     #[cfg(any(windows, target_os = "macos"))]
     pub fn plugin_window_under_cursor(&self) -> Option<usize> {
+        #[cfg(test)]
+        if let Some(row) = crate::plugin_drop_tests::PLUGIN_UNDER_CURSOR.with(std::cell::Cell::get) {
+            return Some(row);
+        }
         let (x, y) = self.pointer_on_screen()?;
         self.state.editor_host.row_at_screen(x, y)
     }
@@ -4827,8 +4830,8 @@ impl App {
     /// it, through its state). Returns whether it was one.
     #[cfg(any(windows, target_os = "macos"))]
     pub fn sample_to_plugin_window(&mut self, path: &str) -> bool {
-        let Some((x, y)) = self.pointer_on_screen() else { return false };
-        let Some(row) = self.state.editor_host.row_at_screen(x, y) else { return false };
+        let Some(row) = self.plugin_window_under_cursor() else { return false };
+        let (x, y) = self.pointer_on_screen().unwrap_or_default();
         if self.loop_to_slicer(row, path) {
             return true;
         }
@@ -4864,8 +4867,9 @@ impl App {
     }
 
     /// A file dropped on a plugin window's frame (its title bar or strip, or an editor that takes no files; spec:
-    /// plugins/presets.md "Drag and drop"): a preset loads into the plugin, a sample into a sampler channel's.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// plugins/presets.md "Drag and drop"), or anywhere on a plugin window on macOS: a preset loads into the plugin, a
+    /// sample into Lemon Slicer or a sampler channel's Lemon Sampler; another plugin leaves it, with a message.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     pub fn file_on_plugin_window(&mut self, row: usize, path: PathBuf) {
         if crate::presets::is_preset_file(&path) {
             self.state.message = crate::presets_ui::load_into(self, row, &path);

@@ -213,6 +213,8 @@ pub mod clip_chop;
 pub mod clip_handles;
 pub mod clip_props;
 pub mod playlist_merge;
+#[cfg(test)]
+mod plugin_drop_tests;
 pub mod piano_dlg;
 pub mod arpeggiate;
 pub mod tapper;
