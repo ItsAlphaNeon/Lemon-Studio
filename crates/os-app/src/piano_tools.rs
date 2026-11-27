@@ -49,6 +49,9 @@ pub enum NCmd {
     StockLength(crate::playlist::Snap),
     /// Make a channel rack row the piano roll's channel (the title's channel menu).
     Target(usize),
+    /// ▸ Group > Group (Shift+G) / Ungroup (Alt+G) (spec: ui/piano-note-groups.md §2).
+    Group,
+    Ungroup,
     /// S / O (typing keyboard off), or the colour tab's toggles: new notes are slide / portamento notes (spec:
     /// ui/piano-note-properties.md §5).
     NewSlide,
@@ -71,6 +74,7 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Duplicate", Duplicate).key("Ctrl+B"),
         item("Glue", Glue).key("Ctrl+G"),
         item("Discard lengths", DiscardLengths).key("Shift+D"),
+        PItem::sub("Group", vec![item("Group", Group).key("Shift+G"), item("Ungroup", Ungroup).key("Alt+G")]),
         PItem::head("Tools"),
         item("Quick quantize", Quantize { strength: 100, starts_only: false }).key("Ctrl+Q"),
         item("Quick quantize start times", Quantize { strength: 100, starts_only: true }).key("Shift+Q"),
@@ -177,6 +181,8 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Character(c) if alt && !ctrl && is(c, "v") => NCmd::Ghosts,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "b") => NCmd::Highlights,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
+        Key::Character(c) if shift && !ctrl && !alt && is(c, "g") => NCmd::Group,
+        Key::Character(c) if alt && !ctrl && !shift && is(c, "g") => NCmd::Ungroup,
         Key::Character(c) if !ctrl && !alt && !shift && !app.typing_on() && is(c, "s") => NCmd::NewSlide,
         Key::Character(c) if !ctrl && !alt && !shift && !app.typing_on() && is(c, "o") => NCmd::NewPorta,
         Key::Character(c) if ctrl && !alt && is(c, "d") => {
@@ -428,6 +434,22 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             let m = target(s, row);
             app.invalidate();
             return Some(m);
+        }
+        NCmd::Group => {
+            let n = crate::note_groups::group(s);
+            return Some(if n > 0 {
+                format!("Piano roll: grouped {n} notes")
+            } else {
+                "Piano roll: select two notes or more to group".into()
+            });
+        }
+        NCmd::Ungroup => {
+            let n = crate::note_groups::ungroup(s);
+            return Some(if n > 0 {
+                format!("Piano roll: ungrouped {n} notes")
+            } else {
+                "Piano roll: no grouped note selected".into()
+            });
         }
         NCmd::NewSlide | NCmd::NewPorta => {
             let slide = cmd == NCmd::NewSlide;
