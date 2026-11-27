@@ -175,7 +175,7 @@ mod tests {
         want.extend([lemon::SCALING, lemon::CHANNEL_CHECKS]);
         #[cfg(any(windows, target_os = "macos"))]
         want.push(lemon::KEY_FOCUS);
-        want.extend([lemon::TRACK_LOCKS, lemon::NOTE_LOCKS, lemon::FEATURES]);
+        want.extend([lemon::TRACK_LOCKS, lemon::CLIP_PROPS, lemon::NOTE_LOCKS, lemon::FEATURES]);
         assert_eq!(ids, want);
         let mut back = App::new(None);
         back.open(path.clone());

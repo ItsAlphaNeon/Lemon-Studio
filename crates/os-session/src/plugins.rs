@@ -671,6 +671,8 @@ impl Plugins {
                 // Each audio clip's voice ends at its trimmed end, in the sampler (spec: audio/audio-clips.md "What a
                 // clip plays").
                 p.use_end_param(CLIP_END);
+                // A reversed clip's voice plays backwards, in the sampler (spec: ui/audio-clip-pitch-reverse.md).
+                p.use_reverse_param(lemon_sampler::params::CLIP_REVERSE);
             }
             if [LEMON_SAMPLER, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS].contains(&a.desc.name.as_str()) {
                 p.use_channel_levels();

@@ -258,6 +258,14 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         false
     }
 
+    /// Sends a reversed audio clip voice's switch (`NoteLevels::reverse`) as per-note modulation of the parameter named
+    /// `name` (to 1); the instance then plays that voice backwards (UI thread). For Lemon Sampler only (spec:
+    /// ui/audio-clip-pitch-reverse.md). False when the plugin or format cannot.
+    fn use_reverse_param(&mut self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
     /// Sends the channel's volume and pan (`Instrument::channel_levels`) to the instance, which works them into its
     /// voices' final levels; the engine then leaves its output as it is (UI thread). For Lemon Sampler only (spec:
     /// plugins/host-link.md "Channel levels"). False when the format cannot.

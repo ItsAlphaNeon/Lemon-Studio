@@ -1790,6 +1790,21 @@ pub struct Clip {
     pub window: Option<(f64, f64)>,
     /// The stored record (fields not modeled are written back from here; a new clip gets FL's defaults).
     pub raw: [u8; CLIP_RECORD_LEN],
+    /// An audio clip's own pitch, pan and reverse (Clip Properties; spec: ui/playlist-clip-properties.md). Not in the
+    /// FLP record: where FL keeps them is not measured. A `.lemon` file keeps them in its own event.
+    pub props: ClipProps,
+}
+
+/// An audio clip's own pitch, pan and reverse (spec: ui/playlist-clip-properties.md §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClipProps {
+    /// Semitones from the channel's pitch (`Clip::PITCH_RANGE` either way).
+    pub semitones: i8,
+    /// Cents, −100..100 (Fine).
+    pub cents: i8,
+    /// −100 (left) .. 100 (right).
+    pub pan: i8,
+    pub reverse: bool,
 }
 
 impl Clip {
@@ -1826,7 +1841,7 @@ impl Clip {
             raw[24..28].copy_from_slice(&(-1.0f32).to_le_bytes());
             raw[28..32].copy_from_slice(&(-1.0f32).to_le_bytes());
         }
-        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw }
+        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw, props: ClipProps::default() }
     }
 
     pub fn end(&self) -> u32 {
@@ -1958,6 +1973,56 @@ impl Clip {
 
     pub fn set_gain(&mut self, g: f32) {
         self.set_f32(52, g);
+    }
+
+    /// The semitones either way an audio clip's own pitch reaches (spec: ui/audio-clip-pitch-reverse.md "What the
+    /// owner sees": -48..+48).
+    pub const PITCH_RANGE: i32 = 48;
+
+    pub fn pitch_semitones(&self) -> i32 {
+        i32::from(self.props.semitones)
+    }
+
+    pub fn set_pitch_semitones(&mut self, v: i32) {
+        self.props.semitones = v.clamp(-Clip::PITCH_RANGE, Clip::PITCH_RANGE) as i8;
+    }
+
+    pub fn fine_cents(&self) -> i32 {
+        i32::from(self.props.cents)
+    }
+
+    pub fn set_fine_cents(&mut self, v: i32) {
+        self.props.cents = v.clamp(-100, 100) as i8;
+    }
+
+    /// The clip's pitch from its channel's, in cents (semitones and Fine).
+    pub fn pitch_cents(&self) -> i32 {
+        self.pitch_semitones() * 100 + self.fine_cents()
+    }
+
+    /// Sets the pitch in cents, within the range: whole semitones and the cents left over (with the same sign).
+    pub fn set_pitch_cents(&mut self, cents: i32) {
+        let c = cents.clamp(-Clip::PITCH_RANGE * 100, Clip::PITCH_RANGE * 100);
+        self.set_pitch_semitones(c / 100);
+        self.set_fine_cents(c % 100);
+    }
+
+    /// The clip's own pan, −1 (left) .. 1 (right).
+    pub fn clip_pan(&self) -> f32 {
+        f32::from(self.props.pan) / 100.0
+    }
+
+    pub fn set_clip_pan(&mut self, pan: f32) {
+        self.props.pan = (pan.clamp(-1.0, 1.0) * 100.0).round() as i8;
+    }
+
+    /// The clip plays backwards (Reverse).
+    pub fn reversed(&self) -> bool {
+        self.props.reverse
+    }
+
+    pub fn set_reversed(&mut self, on: bool) {
+        self.props.reverse = on;
     }
 }
 

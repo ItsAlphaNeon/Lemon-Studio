@@ -49,12 +49,16 @@ const CLIP_CHANNEL: u8 = 1;
 
 /// The features a project can use that a Lemon Studio without them cannot play: one is named here when it is added,
 /// and [`used`] names it for a project that uses it. A build that opens a file naming one it does not know says so
-/// (`unknown_features`). None yet.
-pub const FEATURES: &[&str] = &[];
+/// (`unknown_features`).
+pub const FEATURES: &[&str] = &[crate::clip_reverse::FEATURE];
 
 /// The features of [`FEATURES`] that `s` uses.
-fn used(_s: &crate::session::Session) -> Vec<&'static str> {
-    Vec::new()
+fn used(s: &crate::session::Session) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if crate::clip_reverse::used(&s.project) {
+        v.push(crate::clip_reverse::FEATURE);
+    }
+    v
 }
 
 /// The features `file` names that this version does not know: the parts of the project it does not play.
@@ -120,6 +124,7 @@ pub fn events_in(s: &crate::session::Session, plugins: &Plugins, looks: &Looks) 
     #[cfg(any(windows, target_os = "macos"))]
     v.push(Event::new(lemon::KEY_FOCUS, Value::var([LAYOUT, u8::from(looks.editor_keys)])));
     v.push(track_locks(s));
+    v.push(crate::clip_reverse::event(&s.project));
     v.push(note_locks(looks));
     v.push(features(s));
     v
@@ -174,6 +179,9 @@ pub fn apply_session(s: &mut crate::session::Session, file: &FlpFile) {
                 tr.clip_lock = Some(src);
             }
         }
+    }
+    if let Some(d) = read(lemon::CLIP_PROPS) {
+        crate::clip_reverse::read(s.project.get_mut(), &d[1..]);
     }
     if let Some(d) = read(lemon::ICONS) {
         read_icons(s, &d[1..]);

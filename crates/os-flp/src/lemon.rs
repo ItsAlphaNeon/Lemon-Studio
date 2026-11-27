@@ -41,6 +41,9 @@ pub const TRACK_LOCKS: u8 = 201;
 pub const NOTE_LOCKS: u8 = 202;
 /// `LMex` event: what the project uses that a Lemon Studio without it cannot play, by name (os-app `lemon_state`).
 pub const FEATURES: u8 = 203;
+/// `LMex` event: the playlist audio clips' own pitch, pan and reverse (Clip Properties), where an FLP's clip record
+/// has no measured place for them.
+pub const CLIP_PROPS: u8 = 204;
 
 /// Whether `file` is a `.lemon` file (its first chunk is `LMhd`).
 pub fn is_lemon(file: &FlpFile) -> bool {

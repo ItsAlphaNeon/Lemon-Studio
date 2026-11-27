@@ -681,6 +681,8 @@ pub struct Plugin {
     start_param: Option<u32>,
     /// Parameter that takes an audio clip voice's end as per-note modulation (`use_end_param`).
     end_param: Option<u32>,
+    /// Parameter that takes a reversed audio clip voice's switch as per-note modulation (`use_reverse_param`).
+    rev_param: Option<u32>,
     /// Notes carry their own pan and mod X / Y (`use_note_levels`).
     note_levels: Option<NoteParams>,
     /// The channel's mod X / Y, added to each note's (`Instrument::channel_levels`).
@@ -978,6 +980,7 @@ impl Plugin {
                 order: Vec::with_capacity(320),
                 start_param: None,
                 end_param: None,
+                rev_param: None,
                 note_levels: None,
                 chan_mods: [0.0; 2],
                 level_voices: Vec::new(),
@@ -1304,9 +1307,22 @@ impl Plugin {
     /// (`Instrument::voice_ends`; spec: audio/audio-clips.md "What a clip plays"). False if the plugin has no parameter
     /// of that name.
     pub fn use_end_param(&mut self, name: &str) -> bool {
-        self.end_param = None;
+        self.end_param = self.param_named(name);
+        self.end_param.is_some()
+    }
+
+    /// Sends a reversed audio clip voice's switch (`NoteLevels::reverse`) as per-note modulation (to 1) of the
+    /// parameter named `name` (UI thread): Lemon Sampler's hidden "Clip reverse", found as `use_end_param` finds its
+    /// "Clip end" (spec: ui/audio-clip-pitch-reverse.md). False if the plugin has no parameter of that name.
+    pub fn use_reverse_param(&mut self, name: &str) -> bool {
+        self.rev_param = self.param_named(name);
+        self.rev_param.is_some()
+    }
+
+    /// The id of the parameter named `name`.
+    fn param_named(&self, name: &str) -> Option<u32> {
         if self.params.is_null() {
-            return false;
+            return None;
         }
         unsafe {
             let count = (*self.params).count.map_or(0, |c| c(self.plugin));
@@ -1314,12 +1330,11 @@ impl Plugin {
                 let mut info: clap_param_info = std::mem::zeroed();
                 let found = (*self.params).get_info.is_some_and(|g| g(self.plugin, i, &mut info));
                 if found && CStr::from_ptr(info.name.as_ptr()).to_string_lossy() == name {
-                    self.end_param = Some(info.id);
-                    return true;
+                    return Some(info.id);
                 }
             }
         }
-        false
+        None
     }
 
     /// Sends each note's own levels (`Instrument::note_start`; UI thread): its pan as a CLAP pan note expression
@@ -1717,6 +1732,10 @@ impl Plugin {
                     self.mods.push(param_mod(e.time, param, id, e.key, f64::from(e.end)));
                     seq.push(Seq::Mod(self.mods.len() - 1));
                 }
+                if let (Some(param), true) = (self.rev_param, id >= 0 && e.levels.reverse) {
+                    self.mods.push(param_mod(e.time, param, id, e.key, 1.0));
+                    seq.push(Seq::Mod(self.mods.len() - 1));
+                }
                 // The note's own levels (spec: audio/voice-levels.md "The note's own levels"): its pan as the voice's
                 // pan expression, its mod X / Y plus the channel's as per-note modulation.
                 if let (Some(np), true) = (self.note_levels, id >= 0) {
@@ -1984,6 +2003,10 @@ impl os_host::Plugin for Plugin {
 
     fn use_end_param(&mut self, name: &str) -> bool {
         Plugin::use_end_param(self, name)
+    }
+
+    fn use_reverse_param(&mut self, name: &str) -> bool {
+        Plugin::use_reverse_param(self, name)
     }
 
     fn use_channel_levels(&mut self) -> bool {
@@ -2658,7 +2681,7 @@ mod tests {
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         assert!(os_host::Plugin::activate(&mut p, 48000));
         let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
-        let own = os_engine::NoteLevels { pan: 0.5, mod_x: 0.25, mod_y: -0.5, channel: 0 };
+        let own = os_engine::NoteLevels { pan: 0.5, mod_x: 0.25, mod_y: -0.5, channel: 0, reverse: false };
         // Off: a plain note.
         p.note_start(3, 60, 0.8, 0.0, own);
         p.process_fx(48000, &mut l, &mut r);

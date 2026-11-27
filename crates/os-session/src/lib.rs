@@ -18,6 +18,7 @@ pub mod chords;
 pub mod citrus;
 pub mod claw;
 pub mod clip_colors;
+pub mod clip_reverse;
 pub mod container;
 pub mod control;
 pub mod data_folder;

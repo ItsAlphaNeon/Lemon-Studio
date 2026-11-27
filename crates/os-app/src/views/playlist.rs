@@ -1067,7 +1067,12 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         // Level with the icon (its middle is iy + 5).
         let nf = Font::new(12);
         let ty = iy + 5.0 - ui.c.cap_mid(nf);
-        ui.c.text_clip(nf, inner.x + 14.0, ty, inner.w - 16.0, ic, &pl::source_name(&s.session, c.source));
+        let mut name = pl::source_name(&s.session, c.source);
+        // An audio clip's own pitch after its name (spec: ui/audio-clip-pitch-reverse.md "What the owner sees").
+        if let Some(p) = crate::clip_props::pitch_label(c).filter(|_| kind == PickKind::Audio) {
+            name = format!("{name} {p}");
+        }
+        ui.c.text_clip(nf, inner.x + 14.0, ty, inner.w - 16.0, ic, &name);
     }
     // Content.
     let content = if c.muted { dim(text).with_alpha(90) } else { dim(cc(t, NOTE)) };
@@ -1186,13 +1191,22 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     let Some(path) = s.session.project.channel(ch).and_then(|chan| chan.sample_path.clone()) else { return };
     let Some(w) = s.session.samples.wave(&s.session.settings, &path) else { return };
     let Some(area) = ui.c.paint_bounds() else { return };
-    let (w0, _) = pl::window(&s.session, c);
-    let ms_per_tick = pl::to_src(&s.session, c.source, 1.0);
+    // A reversed clip is drawn from its window's end backwards, and a pitch that changes the speed runs through the
+    // sample that much faster, stopping at the window's end: the drawing shows what plays (spec:
+    // ui/audio-clip-pitch-reverse.md "What the owner sees").
+    let (w0, w1) = pl::window(&s.session, c);
+    let rev = c.reversed();
+    let ppt = f64::from(g.ppt);
+    let ms_per_tick = pl::to_src(&s.session, c.source, 1.0) * pl::clip_pitch_speed(&s.session, c);
+    // The sample's millisecond `d` px into the body, or `None` past the window.
+    let at = move |d: f64| -> Option<f64> {
+        let ms = d / ppt * ms_per_tick;
+        (ms <= w1 - w0 + 1e-9).then_some(if rev { w1 - ms } else { w0 + ms })
+    };
     let frames_per_ms = f64::from(w.rate) / 1000.0;
     let br = body.r;
     let mid = f64::from(br.y) + f64::from(br.h) / 2.0;
     let amp = f64::from(br.h / 2.0 - 2.0);
-    let ppt = f64::from(g.ppt);
     // Columns one device pixel wide, counted from the body's left edge (so a repaint of a strip draws the columns a
     // whole repaint draws), over the painted part and a few columns beyond it (the shape's ends change the pixels
     // next to them).
@@ -1224,8 +1238,9 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     };
     // Peaks from `da` to `db` px into the body.
     let range = |da: f64, db: f64| -> Option<(f32, f32)> {
-        let ms_a = w0 + da / ppt * ms_per_tick;
-        let ms_b = w0 + db / ppt * ms_per_tick;
+        let ms_a = at(da)?;
+        let ms_b = at(db).unwrap_or(if rev { w0 } else { w1 });
+        let (ms_a, ms_b) = (ms_a.min(ms_b), ms_a.max(ms_b));
         let fa = (ms_a * frames_per_ms).max(0.0) as usize / w.per;
         let fb = ((ms_b * frames_per_ms).max(0.0) as usize / w.per).max(fa + 1);
         if fa >= w.peaks.len() {
@@ -1273,10 +1288,11 @@ fn waveform(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, ch: u16, body: Body, co
     let tones = colours.filter(|(w, _)| w.on()).and_then(|_| s.session.samples.tones(&s.session.settings, &path));
     match (colours, tones) {
         (Some((waves, dim)), Some(tones)) => {
-            let frames = |d: f64| (w0 + d / ppt * ms_per_tick) * frames_per_ms;
+            let frames = |d: f64| at(d).unwrap_or(if rev { w0 } else { w1 }) * frames_per_ms;
             ui.c.fill_polygon_columns(&outline, &mut |x| {
                 let d = ((f64::from(x) - body.x) / px).floor() * px;
-                let t = tones.span(frames(d), frames(d + px));
+                let (fa, fb) = (frames(d), frames(d + px));
+                let t = tones.span(fa.min(fb), fa.max(fb));
                 waves.colour(t.centroid(), t.band_powers()).map_or(col, dim)
             });
         }

@@ -652,6 +652,8 @@ pub struct SampleLibrary {
     pub failures: Vec<(String, String)>,
     /// Stretched copies made so far: (source, length in frames, pitch factor bits, copy).
     stretched: Vec<(Arc<Sample>, usize, u64, Arc<Sample>)>,
+    /// Reversed copies made so far (reversed audio clips): (source, copy).
+    reversed: Vec<(Arc<Sample>, Arc<Sample>)>,
     /// Engines built from this library play every stretch method by resampling, at the stretched length: for a host
     /// whose sampler plugin stretches for itself (spec: audio/time-stretch.md "Lemon Studio").
     pub resample_stretches: bool,
@@ -849,6 +851,16 @@ impl SampleLibrary {
         let (left, right) = os_dsp::stretch::whole(&raw.left, &raw.right, raw.rate, frames, transpose);
         let s = Arc::new(Sample { rate: raw.rate, left, right });
         self.stretched.push((raw.clone(), frames, bits, s.clone()));
+        s
+    }
+
+    /// `raw` played backwards, made once per sample: an engine built again after an edit plays the same copy.
+    pub fn reversed(&mut self, raw: &Arc<Sample>) -> Arc<Sample> {
+        if let Some(e) = self.reversed.iter().find(|e| Arc::ptr_eq(&e.0, raw)) {
+            return e.1.clone();
+        }
+        let s = Arc::new(Sample { rate: raw.rate, left: raw.left.iter().rev().copied().collect(), right: raw.right.iter().rev().copied().collect() });
+        self.reversed.push((raw.clone(), s.clone()));
         s
     }
 }

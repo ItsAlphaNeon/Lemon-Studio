@@ -312,13 +312,28 @@ pub fn audio_speed(s: &crate::session::Session, src: ClipSource) -> f64 {
         let duration = if sound.stretch_time().is_some() { sample_secs(s, ch) } else { 0.0 };
         1.0 / sound.stretch_factor(duration, s.project.tick_tempo(s.tempo()))
     };
-    let pitched = sound.channel_pitch_applies() && !os_model::stretch_mode::realtime(sound.stretch_mode());
-    if !pitched {
+    if !pitch_moves_speed(sound) {
         return stretch;
     }
     let main = ch.misc.main_pitch.then(|| i32::from(s.project.main_pitch.unwrap_or(0)));
     let cents = f64::from(os_engine::laws::channel_pitch(f64::from(ch.pitch_cents), ch.misc.fine, ch.misc.root, main)) + 6000.0;
     stretch * os_engine::laws::cents_rate(cents)
+}
+
+/// Whether a pitch plays the channel's sample faster or slower (Resample and the methods that stretch first), rather
+/// than keeping its length (the realtime stretch methods).
+fn pitch_moves_speed(sound: &os_model::ChannelSound) -> bool {
+    sound.channel_pitch_applies() && !os_model::stretch_mode::realtime(sound.stretch_mode())
+}
+
+/// How much faster audio clip `c` plays its sample for its own pitch: `2^(cents / 1200)` where a pitch moves the
+/// speed, 1 where the channel keeps the length (spec: ui/audio-clip-pitch-reverse.md "How it plays").
+pub fn clip_pitch_speed(s: &crate::session::Session, c: &Clip) -> f64 {
+    let ClipSource::Channel(ch) = c.source else { return 1.0 };
+    match channel_of(s, ch) {
+        Some(ch) if c.pitch_cents() != 0 && pitch_moves_speed(&ch.sound) => os_engine::laws::cents_rate(f64::from(c.pitch_cents())),
+        _ => 1.0,
+    }
 }
 
 /// Works every audio clip's length out again from its trims and its channel's stretch, pitch and the tempo, as FL
@@ -543,16 +558,25 @@ pub fn split(s: &mut crate::session::Session, i: usize, tick: u32) -> Option<usi
     if tick <= c.position || tick >= c.end() {
         return None;
     }
-    let (w0, w1) = window(s, &c);
+    let (w0, w1) = play_window(s, &c);
     let left_len = tick - c.position;
-    let cut = to_src(s, c.source, f64::from(left_len));
+    let (rate, rev) = clip_rate(s, &c);
+    let cut = rate * f64::from(left_len);
     let mut left = c;
     left.length = left_len;
-    left.window = Some((w0, w0 + cut));
     let mut right = c;
     right.position = tick;
     right.length = c.end() - tick;
-    right.window = Some((w0 + cut, w1.max(w0 + cut)));
+    if rev {
+        // A reversed clip plays its window from the end: the left part is the window's end, the right part what
+        // comes before it (never below the sample's start, which a window would read as "the whole sample").
+        let m = w1 - cut;
+        left.window = Some((m.max(w0), w1));
+        right.window = Some((m.max(0.0).min(w0), m.max(0.0)));
+    } else {
+        left.window = Some((w0, w0 + cut));
+        right.window = Some((w0 + cut, w1.max(w0 + cut)));
+    }
     right.set_id(0);
     let a = arr_mut(s);
     a.clips[i] = left;
@@ -568,14 +592,48 @@ pub fn slice(s: &mut crate::session::Session, tick: u32, t0: u16, t1: u16) -> us
     hit.iter().filter(|&&i| split(s, i, tick).is_some()).count()
 }
 
+/// How much of its source clip `c` goes through per tick (`to_src` of one tick, times an audio clip's own pitch speed,
+/// `clip_pitch_speed`) and whether it plays its window backwards (a reversed audio clip, spec:
+/// ui/audio-clip-pitch-reverse.md "How it plays"). Splits, trims and slips keep the content in place with these.
+pub fn clip_rate(s: &crate::session::Session, c: &Clip) -> (f64, bool) {
+    if source_kind(s, c.source) != PickKind::Audio {
+        return (to_src(s, c.source, 1.0), false);
+    }
+    (to_src(s, c.source, 1.0) * clip_pitch_speed(s, c), c.reversed())
+}
+
+/// `window`, but a reversed audio clip without trims ends at its sample's end (when loaded): that is where it starts
+/// playing, whatever its length.
+fn play_window(s: &crate::session::Session, c: &Clip) -> (f64, f64) {
+    match (c.window, sample_ms(s, c)) {
+        (None, Some(end)) if c.reversed() && source_kind(s, c.source) == PickKind::Audio => (0.0, end),
+        _ => window(s, c),
+    }
+}
+
+/// The sample's length in window units (ms) for an audio clip, when its waveform is loaded.
+fn sample_ms(s: &crate::session::Session, c: &Clip) -> Option<f64> {
+    let ClipSource::Channel(ch) = c.source else { return None };
+    let ms = channel_of(s, ch).map_or(0.0, |ch| sample_secs(s, ch)) * 1000.0;
+    (ms > 0.0).then_some(ms)
+}
+
 /// Move the content of a clip by `dt` ticks inside it (Slip tool).
 pub fn slip(s: &mut crate::session::Session, i: usize, orig: &Clip, dt: i64) {
-    let (w0, w1) = window(s, orig);
-    let d = to_src(s, orig.source, -dt as f64);
+    let (w0, w1) = play_window(s, orig);
+    let (rate, rev) = clip_rate(s, orig);
+    // A reversed clip's content moves right when its window moves later in the sample.
+    let d = rate * if rev { dt as f64 } else { -dt as f64 };
     let (mut a, mut b) = (w0 + d, w1 + d);
     if a < 0.0 {
         b -= a;
         a = 0.0;
+    }
+    // A reversed clip starts at its window's end, which stops at the sample's end as a forward clip's start stops at
+    // the sample's start.
+    if let Some(end) = sample_ms(s, orig).filter(|&end| rev && b > end) {
+        a = (a - (b - end)).max(0.0);
+        b = end;
     }
     if let Some(c) = arr_mut(s).clips.get_mut(i) {
         c.window = Some((a, b));
@@ -585,8 +643,11 @@ pub fn slip(s: &mut crate::session::Session, i: usize, orig: &Clip, dt: i64) {
 
 /// Resize from the right: the window end follows the length.
 pub fn resize_right(s: &mut crate::session::Session, i: usize, orig: &Clip, len: u32) {
-    let (w0, _) = window(s, orig);
-    let end = w0 + to_src(s, orig.source, f64::from(len));
+    let (w0, w1) = play_window(s, orig);
+    let (rate, rev) = clip_rate(s, orig);
+    let span = rate * f64::from(len);
+    // A reversed clip's right edge is its window's start.
+    let w = if rev { ((w1 - span).max(0.0), w1) } else { (w0, w0 + span) };
     // An audio clip without trims plays its whole sample (`fit_audio`), and an uncut pattern clip its whole pattern
     // whatever its length (spec: audio/song-structure.md): resized, either gets a window and plays only that. An
     // unset automation window already means "from the start for the clip's length".
@@ -597,7 +658,7 @@ pub fn resize_right(s: &mut crate::session::Session, i: usize, orig: &Clip, len:
     if let Some(c) = arr_mut(s).clips.get_mut(i) {
         c.length = len.max(1);
         if orig.window.is_some() || cuts {
-            c.window = Some((w0, end));
+            c.window = Some(w);
         }
     }
     s.dirty = true;
@@ -605,15 +666,19 @@ pub fn resize_right(s: &mut crate::session::Session, i: usize, orig: &Clip, len:
 
 /// Resize from the left (trim start): the content stays in place (§2a).
 pub fn resize_left(s: &mut crate::session::Session, i: usize, orig: &Clip, dt: i64) {
-    let (w0, w1) = window(s, orig);
-    // The window start may not go below the source start.
-    let min_dt = -(w0 / to_src(s, orig.source, 1.0)).floor() as i64;
+    let (w0, w1) = play_window(s, orig);
+    let (rate, rev) = clip_rate(s, orig);
+    // The window start may not go below the source start; a reversed clip's left edge is its window's end, which
+    // may not go past the sample's end (when its length is known).
+    let room = if rev { sample_ms(s, orig).map_or(f64::INFINITY, |end| (end - w1).max(0.0)) } else { w0 };
+    let min_dt = if room.is_finite() { -(room / rate).floor() as i64 } else { i64::MIN };
     let dt = dt.max(min_dt).max(-i64::from(orig.position)).min(i64::from(orig.length) - 1);
-    let d = to_src(s, orig.source, dt as f64);
+    let d = rate * dt as f64;
+    let w = if rev { (w0, (w1 - d).max(w0)) } else { ((w0 + d).max(0.0), w1) };
     if let Some(c) = arr_mut(s).clips.get_mut(i) {
         c.position = (i64::from(orig.position) + dt) as u32;
         c.length = (i64::from(orig.length) - dt) as u32;
-        c.window = Some(((w0 + d).max(0.0), w1));
+        c.window = Some(w);
     }
     s.dirty = true;
 }

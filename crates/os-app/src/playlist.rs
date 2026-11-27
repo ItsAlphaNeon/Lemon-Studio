@@ -24,7 +24,7 @@ use crate::control::command::Command;
 
 /// The shown arrangement's clips and tracks have their ids, for commands (a clip just made gets its own on the next
 /// tick); only then, as a settle numbers everything new.
-fn clip_ids(s: &mut State) {
+pub(crate) fn clip_ids(s: &mut State) {
     if clips(&s.session).iter().any(|c| c.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
@@ -441,6 +441,33 @@ pub enum Cmd {
     MarkerAction(usize, u8),
     ClipMute(usize),
     ClipDelete(usize),
+    /// Edit ▸ Pitch selected audio clips one semitone down / up (7 / 8), Reverse selected audio clips (9) (spec:
+    /// ui/playlist-clip-properties.md §1).
+    PitchSelected(i32),
+    ReverseSelected,
+    /// Alt+7 / Alt+8: the selected audio clips one cent down / up (spec: ui/audio-clip-pitch-reverse.md).
+    PitchSelectedCents(i32),
+    /// The clip menu's pitch and Reverse entries: the clip, and the semitones (0 = Reverse).
+    ClipPitch(usize, i32),
+    ClipReverse(usize),
+    /// The clip menu's Reset pitch.
+    ClipResetPitch(usize),
+    /// A fade, tension or gain handle's menu entry (spec: ui/playlist-fades-gain.md).
+    Handle(usize, crate::clip_handles::HCmd),
+    /// Edit ▸ Automatic crossfades (spec: ui/playlist-fades-gain.md §3).
+    AutoCrossfades,
+    /// The audio clip menu's Chop into ▸ entries, on the clip (spec: ui/playlist-chop.md §1).
+    Chop(usize, crate::clip_chop::Unit),
+    /// Edit ▸ Merge pattern clips (false) / Merge similar pattern clips (true); the track menu's Merge pattern clips
+    /// (spec: ui/playlist-merge-tracks.md §1, §2).
+    MergeClips(bool),
+    MergeTrack(u16),
+    /// Tools ▸ Clone selected playlist track(s); the track menu's Clone... (spec: ui/playlist-merge-tracks.md §3).
+    CloneTracks,
+    CloneTrack(u16),
+    /// The ▸ menu's Collapse all grouped tracks (true) / Expand all grouped tracks (spec: ui/playlist-merge-tracks.md
+    /// §4).
+    CollapseAll(bool),
     ClipUnique(usize),
     /// An audio clip as heard (trims, fades, gain, the channel's settings) rendered to a new sample, which it then plays.
     ClipUniqueSample(usize),
@@ -741,6 +768,8 @@ pub enum EditTarget {
     ArrangementName,
     /// The value box of "Enter value..." and whether it reads normalized values (spec: ui/type-in-value.md).
     TypeIn(crate::typein::Target, bool),
+    /// A clip handle's Type in value... (spec: ui/playlist-fades-gain.md §2).
+    Handle(usize, Handle),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1500,7 +1529,8 @@ pub fn paste(s: &mut State) {
     s.session.dirty = true;
 }
 
-/// Ctrl+Insert: insert the time selection's length of empty space at its start (all tracks); without a time
+/// Ctrl+Insert, and Ctrl+Alt+Insert (Slice and insert space, spec: ui/playlist-chop.md §2): insert the time
+/// selection's length of empty space at its start (all tracks), slicing the clips that cross it; without a time
 /// selection, one bar at the song position (§5, OS).
 pub fn insert_space(s: &mut State) -> (u32, u32) {
     let (r0, r1) = s.playlist.range.filter(|r| r.1 > r.0).unwrap_or_else(|| (s.session.song_pos, s.session.song_pos + bar(&s.session)));
@@ -1806,6 +1836,8 @@ pub fn make_unique_sample(s: &mut State, i: usize) -> String {
                 cl.set_fade_out(None);
                 cl.set_fade_in_tension(0.0);
                 cl.set_fade_out_tension(0.0);
+                // Its pitch, pan and reverse are in the new sample too.
+                cl.props = Default::default();
                 let mut c = crate::control::command::ClipIn::of(&cl, p);
                 (c.pattern, c.channel) = (None, Some(id));
                 c
@@ -2108,7 +2140,19 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Unmute", Cmd::Mute(false)).key("Shift+Alt+M"),
                 PItem::sep(),
                 PItem::new("Insert space", Cmd::InsertSpace).key("Ctrl+Ins"),
+                // FL's two entries; Lemon Studio's Insert space already slices, so both do the same (what FL's plain
+                // Insert space does with a crossing clip is not measured: ui/playlist-chop.md §3).
+                PItem::new("Slice and insert space", Cmd::InsertSpace).key("Ctrl+Alt+Ins"),
                 PItem::new("Delete space", Cmd::DeleteSpace).key("Ctrl+Del"),
+                PItem::new("Merge pattern clips", Cmd::MergeClips(false)).key("Ctrl+G"),
+                PItem::new("Merge similar pattern clips", Cmd::MergeClips(true)).key("Shift+Ctrl+G"),
+                PItem::not_yet("Merge automation clips").key("Ctrl+Alt+G"),
+                PItem::sep(),
+                PItem::new("Pitch selected audio clips one semitone down", Cmd::PitchSelected(-1)).key("7"),
+                PItem::new("Pitch selected audio clips one semitone up", Cmd::PitchSelected(1)).key("8"),
+                PItem::new("Reverse selected audio clips", Cmd::ReverseSelected).key("9"),
+                PItem::sep(),
+                PItem::new("Automatic crossfades", Cmd::AutoCrossfades).mark(Mark::Check(s.session.project.auto_crossfades.unwrap_or(false))),
             ],
         ),
         PItem::sub(
@@ -2117,6 +2161,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Consolidate arranger selection", Cmd::Consolidate).key("Ctrl+Alt+C"),
                 PItem::new("Export all arranger tracks", Cmd::ExportTracks),
                 PItem::new("Quick quantize start times", Cmd::QuantizeStarts),
+                PItem::new("Clone selected playlist track(s)", Cmd::CloneTracks).key("Shift+Ctrl+B"),
             ],
         ),
         PItem::sub("Tool", tools),
@@ -2150,6 +2195,8 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub("Quantize song jumps", jump_items(s)),
         PItem::sep(),
         PItem::new("Reset empty tracks", Cmd::ResetEmptyTracks),
+        PItem::new("Collapse all grouped tracks", Cmd::CollapseAll(true)),
+        PItem::new("Expand all grouped tracks", Cmd::CollapseAll(false)),
         PItem::sep(),
         PItem::new("Prepare for performance mode", Cmd::PerfPrepare),
         PItem::new("Performance mode", Cmd::PerfToggle).key("Ctrl+P").mark(Mark::Check(crate::perform_ui::on(s))),
@@ -2381,11 +2428,13 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::new("Group with above track", Cmd::TrackGroup(t)).mark(Mark::Check(track_info(&s.session, t).is_some_and(|x| x.grouped))),
         PItem::new("Collapse group", Cmd::GroupCollapse(t))
             .mark(Mark::Check(group_track(&s.session, t).or(Some(t)).and_then(|g| track_info(&s.session, g)).is_some_and(|x| x.collapsed))),
+        PItem::new("Merge pattern clips", Cmd::MergeTrack(t)),
         PItem::sep(),
         PItem::new("Insert one", Cmd::TrackInsert(t)),
         PItem::new("Delete one", Cmd::TrackDelete(t)),
         PItem::new("Move up", Cmd::TrackUp(t)),
         PItem::new("Move down", Cmd::TrackDown(t)),
+        PItem::new("Clone...", Cmd::CloneTrack(t)),
         PItem::sep(),
         PItem::sub("Performance settings", perf_items(&s.session, t)),
     ];
@@ -2635,6 +2684,18 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
         return app.invalidate();
     }
 
+    // Audio clip handles: Alt+click resets one, a right click opens its menu (spec: ui/playlist-fades-gain.md §1, §2).
+    if let Some((ci, h)) = hit.and_then(|ci| handle_at(s, &g, ci, x, y).map(|h| (ci, h))) {
+        if right {
+            s.playlist.popup = Some(crate::clip_handles::menu(s, ci, h, x, y));
+            return;
+        }
+        if alt {
+            crate::clip_handles::reset(s, ci, h);
+            app.invalidate();
+            return;
+        }
+    }
     // Audio clip handles: fades, fade tensions, gain (§9a).
     if let (Some(ci), false) = (hit, right) {
         if let Some(h) = handle_at(s, &g, ci, x, y) {
@@ -3664,8 +3725,10 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::MixerGroup(_) | EditTarget::MixerSubmix(_) => String::new(),
         EditTarget::Chords => crate::chord_tool::last(),
         EditTarget::TypeIn(t, norm) => crate::typein_ui::text(s, t, norm),
+        EditTarget::Handle(i, h) => clips(&s.session).get(i).map(|c| crate::clip_handles::text(c, h)).unwrap_or_default(),
     };
-    s.playlist.edit = Some(TextEdit { target, text, at, sel: false });
+    let sel = matches!(target, EditTarget::Handle(..));
+    s.playlist.edit = Some(TextEdit { target, text, at, sel });
 }
 
 /// Enter in the text box.
@@ -3736,6 +3799,7 @@ pub fn commit_edit(s: &mut State) {
             let base = if text.is_empty() { "Marker".to_string() } else { text };
             add_markers(s, vec![TimeMarker::new(a, &format!("{base} -  start")), TimeMarker::new(b, &format!("{base} -  end"))]);
         }
+        EditTarget::Handle(i, h) => crate::clip_handles::commit(s, i, h, &text),
         EditTarget::PointValue(ch, i) => {
             if let Some(v) = parse_value(&s.session, ch, &text) {
                 let beat = s.session.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.beat);
@@ -3802,6 +3866,13 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     // Commands that need the whole app.
     match cmd {
         Cmd::Browser(b) => return app.browser_cmd(b),
+        // A handle's Type in value...: the box where its menu was (spec: ui/playlist-fades-gain.md §2).
+        Cmd::Handle(i, crate::clip_handles::HCmd::TypeIn(h)) => {
+            let at = was.as_ref().map_or(app.mouse, |p| (p.x, p.y));
+            start_edit(&mut app.state, EditTarget::Handle(i, h), at);
+            app.invalidate();
+            return None;
+        }
         Cmd::Plugin(c) => return crate::plugin_menu::run(app, c),
         Cmd::Project(c) => return crate::project_picker::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
@@ -4357,6 +4428,62 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ClipDelete(i) => {
             arr_edit(s, ARRANGER_EDIT, |s| delete(s, vec![i]));
+            None
+        }
+        Cmd::PitchSelected(d) => {
+            let idx = crate::clip_props::selected_audio(s);
+            crate::clip_props::pitch(s, &idx, d);
+            None
+        }
+        Cmd::ReverseSelected => {
+            let idx = crate::clip_props::selected_audio(s);
+            crate::clip_props::reverse(s, &idx);
+            None
+        }
+        Cmd::ClipPitch(i, d) => {
+            let idx = crate::clip_props::menu_targets(s, i);
+            crate::clip_props::pitch(s, &idx, d);
+            None
+        }
+        Cmd::ClipReverse(i) => {
+            let idx = crate::clip_props::menu_targets(s, i);
+            crate::clip_props::reverse(s, &idx);
+            None
+        }
+        Cmd::PitchSelectedCents(d) => {
+            let idx = crate::clip_props::selected_audio(s);
+            crate::clip_props::pitch_cents(s, &idx, d);
+            None
+        }
+        Cmd::ClipResetPitch(i) => {
+            let idx = crate::clip_props::menu_targets(s, i);
+            crate::clip_props::reset_pitch(s, &idx);
+            None
+        }
+        Cmd::Handle(i, c) => crate::clip_handles::run(s, i, c),
+        Cmd::AutoCrossfades => {
+            let on = !s.session.project.auto_crossfades.unwrap_or(false);
+            match crate::control_ui::command(s, "Automatic crossfades", None, vec![Command::SetAutoCrossfades { on }]) {
+                Ok(_) => Some(format!("Automatic crossfades: {}", if on { "on" } else { "off" })),
+                Err(e) => Some(e),
+            }
+        }
+        Cmd::Chop(i, unit) => {
+            let idx = crate::clip_chop::targets(s, i);
+            let seed = s.session.song_pos as u64 ^ 0x9e37_79b9;
+            crate::clip_chop::chop(s, &idx, unit, seed);
+            None
+        }
+
+        Cmd::MergeClips(everywhere) => crate::playlist_merge::merge_selected(s, everywhere),
+        Cmd::MergeTrack(t) => crate::playlist_merge::merge_track(s, t),
+        Cmd::CloneTracks => {
+            let tracks = crate::playlist_merge::selected_tracks(s);
+            crate::playlist_merge::clone_tracks(s, &tracks)
+        }
+        Cmd::CloneTrack(t) => crate::playlist_merge::clone_tracks(s, &[t]),
+        Cmd::CollapseAll(on) => {
+            crate::playlist_merge::collapse_all(s, on);
             None
         }
         Cmd::ClipUnique(i) if clips(&s.session).get(i).is_some_and(|c| source_kind(&s.session, c.source) == PickKind::Audio) => make_unique_audio(s, i),
@@ -5001,6 +5128,8 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") => Cmd::Copy,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("x") => Cmd::Cut,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => Cmd::Paste,
+        Key::Character(c) if ctrl && shift && !alt && c.eq_ignore_ascii_case("b") => Cmd::CloneTracks,
+        Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("g") => Cmd::MergeClips(shift),
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("b") => Cmd::Duplicate,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => Cmd::Undo,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("m") => Cmd::Mute(!shift),
@@ -5013,6 +5142,19 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("g") => Cmd::GroupClips,
         Key::Character(c) if alt && !ctrl && (c.eq_ignore_ascii_case("g") || c.eq_ignore_ascii_case("u")) => Cmd::UngroupClips,
         Key::Named(NamedKey::End) if !ctrl && !alt => Cmd::ZoomSelection,
+        // 7 / 8 pitch the selected audio clips, 9 reverses them, while the typing keyboard is off (spec:
+        // ui/playlist-clip-properties.md §1).
+        // By the key's place (the digit row), whatever the layout types there. Alt+7 / Alt+8 move by a cent.
+        Key::Character(_) if !ctrl && !shift && !app.typing_on() && [7, 8, 9].iter().any(|&d| app.digit_key(key, d)) => {
+            match ([7, 8].into_iter().find(|&d| app.digit_key(key, d)), alt) {
+                (Some(7), false) => Cmd::PitchSelected(-1),
+                (Some(8), false) => Cmd::PitchSelected(1),
+                (Some(7), true) => Cmd::PitchSelectedCents(-1),
+                (Some(_), true) => Cmd::PitchSelectedCents(1),
+                (_, false) => Cmd::ReverseSelected,
+                (None, true) => return false,
+            }
+        }
         Key::Named(NamedKey::Tab) if shift && !ctrl && !alt => Cmd::CycleSnap,
         // The global snap on / off (spec: ui/global-snap.md §1).
         Key::Named(NamedKey::Backspace) if !ctrl && !alt => {
@@ -5026,6 +5168,7 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
             Cmd::Tool(PlTool::from_letter(c).expect("checked"))
         }
         Key::Named(NamedKey::Delete) if ctrl => Cmd::DeleteSpace,
+        // Ctrl+Alt+Ins (Slice and insert space) is Insert space here: it already slices (spec: ui/playlist-chop.md §2).
         Key::Named(NamedKey::Insert) if ctrl => Cmd::InsertSpace,
         Key::Named(NamedKey::Delete) => Cmd::Delete,
         Key::Named(NamedKey::PageUp) => Cmd::ZoomIn,
@@ -5371,6 +5514,8 @@ pub fn clip_menu(s: &crate::session::Session, i: usize, x: f32, y: f32) -> Popup
         PickKind::Audio => {
             items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
             items.push(PItem::new("Make unique as sample", Cmd::ClipUniqueSample(i)));
+            items.extend(crate::clip_props::menu_items(&c, i));
+            items.extend(crate::clip_chop::menu_items(i));
             items.push(crate::auto_targets::automate_item(i));
         }
         PickKind::Automation => {}
