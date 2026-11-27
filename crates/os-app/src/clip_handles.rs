@@ -55,14 +55,45 @@ pub fn value(c: &Clip, h: Handle) -> f32 {
     }
 }
 
+/// A tension's range, as dragging its handle gives it.
+pub const TENSION_MAX: f32 = 40.0;
+
 /// Sets handle `h` of `c` to `v` (as `value` gives it).
 pub fn set(c: &mut Clip, h: Handle, v: f32) {
     match h {
         Handle::FadeIn => c.set_fade_in(Some((v.max(0.0), c.fade_in_tension()))),
         Handle::FadeOut => c.set_fade_out(Some((v.max(0.0), c.fade_out_tension()))),
-        Handle::TensionIn | Handle::Crossfade => c.set_fade_in_tension(v.clamp(-1.0, 1.0)),
-        Handle::TensionOut => c.set_fade_out_tension(v.clamp(-1.0, 1.0)),
+        Handle::TensionIn | Handle::Crossfade => c.set_fade_in_tension(v.clamp(-TENSION_MAX, TENSION_MAX)),
+        Handle::TensionOut => c.set_fade_out_tension(v.clamp(-TENSION_MAX, TENSION_MAX)),
         Handle::Gain => c.set_gain(gain_clamped(v)),
+    }
+}
+
+/// `v` for handle `h` of `c` as dragging keeps it: a fade within the clip, up to where the other fade starts.
+fn within(s: &crate::session::Session, c: &Clip, h: Handle, v: f32) -> f32 {
+    let room = |other: Option<(f32, f32)>| {
+        let len = (f64::from(c.length) * crate::playlist::fade_ms_per_tick(s)) as f32;
+        (len - other.map_or(0.0, |f| f.0)).max(0.0)
+    };
+    match h {
+        Handle::FadeIn => v.clamp(0.0, room(c.stored_fade_out())),
+        Handle::FadeOut => v.clamp(0.0, room(c.stored_fade_in())),
+        _ => v,
+    }
+}
+
+/// Puts `v` on handle `h` of clip `i` as dragging would: a fade kept within the clip, a crossfade's tension on both
+/// clips (the earlier one's fade-out takes the opposite, §9a).
+fn put(s: &mut crate::session::Session, i: usize, h: Handle, v: f32) {
+    let all = clips(s);
+    let Some(c) = all.get(i) else { return };
+    let v = within(s, c, h, v);
+    let partner = if h == Handle::Crossfade { os_model::crossfade::partner_before(&s.project, all, i) } else { None };
+    let arr = arr_mut(s);
+    set(&mut arr.clips[i], h, v);
+    if let Some(a) = partner {
+        let t = arr.clips[i].fade_in_tension();
+        arr.clips[a].set_fade_out_tension(os_model::crossfade::opposite(t));
     }
 }
 
@@ -145,11 +176,7 @@ pub fn run(s: &mut State, i: usize, c: HCmd) -> Option<String> {
             if k != kind(h) {
                 return None;
             }
-            arr_edit(s, ARRANGER_EDIT, |s| {
-                if let Some(c) = arr_mut(&mut s.session).clips.get_mut(i) {
-                    set(c, h, v);
-                }
-            });
+            arr_edit(s, ARRANGER_EDIT, |s| put(&mut s.session, i, h, v));
             None
         }
         // Opened by `playlist::run`, which knows where the menu was.
@@ -159,13 +186,14 @@ pub fn run(s: &mut State, i: usize, c: HCmd) -> Option<String> {
     }
 }
 
-/// Create crossfade (§2): fade `h` of clip `i` covers its overlap with the clip next to it on the track.
+/// Create crossfade (§2): clip `i` and the clip its fade `h` meets on the track both get a fade over their overlap
+/// (fade `h` on clip `i`, the other edge's fade on the other clip), each kept within its clip as dragging keeps it.
 fn crossfade(s: &mut State, i: usize, h: Handle) -> Option<String> {
     let all = clips(&s.session);
     let c = *all.get(i)?;
     let out = h == Handle::FadeOut;
-    // The neighbour this fade meets: the nearest clip on the track overlapping its start (fade in) or its end (out).
-    let other = all
+    // The neighbour this fade meets: the clip on the track overlapping its start (fade in) or its end (out) most.
+    let (j, overlap) = all
         .iter()
         .enumerate()
         .filter(|(j, o)| *j != i && o.track == c.track)
@@ -176,13 +204,13 @@ fn crossfade(s: &mut State, i: usize, h: Handle) -> Option<String> {
                 o.end() > c.position && o.position < c.position
             }
         })
-        .map(|(_, o)| if out { c.end() - o.position } else { o.end() - c.position })
-        .max()?;
-    let ms = (f64::from(other.min(c.length)) * crate::playlist::fade_ms_per_tick(&s.session)) as f32;
+        .map(|(j, o)| (j, if out { c.end() - o.position } else { o.end() - c.position }))
+        .max_by_key(|p| p.1)?;
+    let ms = (f64::from(overlap) * crate::playlist::fade_ms_per_tick(&s.session)) as f32;
+    let theirs = if out { Handle::FadeIn } else { Handle::FadeOut };
     arr_edit(s, ARRANGER_EDIT, |s| {
-        if let Some(c) = arr_mut(&mut s.session).clips.get_mut(i) {
-            set(c, h, ms);
-        }
+        put(&mut s.session, i, h, ms);
+        put(&mut s.session, j, theirs, ms);
     });
     None
 }
@@ -244,11 +272,7 @@ pub fn commit(s: &mut State, i: usize, h: Handle, text: &str) {
         _ => t.parse::<f32>().ok(),
     };
     let Some(v) = v.filter(|v| v.is_finite()) else { return };
-    arr_edit(s, ARRANGER_EDIT, |s| {
-        if let Some(c) = arr_mut(&mut s.session).clips.get_mut(i) {
-            set(c, h, v);
-        }
-    });
+    arr_edit(s, ARRANGER_EDIT, |s| put(&mut s.session, i, h, v));
 }
 
 #[cfg(test)]
@@ -344,6 +368,33 @@ mod tests {
         assert!(!paste(&app, Handle::Gain).enabled);
         run(&mut app.state, 1, HCmd::Paste(Handle::FadeOut));
         assert_eq!(clips(&app.state.session)[1].stored_fade_out().map(|f| f.0), Some(120.0));
+    }
+
+    /// Typed, pasted and crossfade values keep to what dragging allows: a tension up to ±40, a fade within its clip and
+    /// not past the other fade. Create crossfade gives both clips a fade over their overlap.
+    #[test]
+    fn values_keep_to_the_drag_range_and_crossfades_set_both_clips() {
+        let mut app = app();
+        commit(&mut app.state, 0, Handle::TensionIn, "20");
+        assert_eq!(clip(&app).fade_in_tension(), 20.0);
+        commit(&mut app.state, 0, Handle::TensionOut, "-99");
+        assert_eq!(clip(&app).fade_out_tension(), -TENSION_MAX);
+        let len = (384.0 * crate::playlist::fade_ms_per_tick(&app.state.session)) as f32;
+        commit(&mut app.state, 0, Handle::FadeIn, "100000");
+        assert!((clip(&app).stored_fade_in().unwrap().0 - (len - 80.0)).abs() < 1e-3, "up to the fade-out");
+        run(&mut app.state, 0, HCmd::Copy(Handle::FadeIn));
+        run(&mut app.state, 0, HCmd::Paste(Handle::FadeOut));
+        assert!(clip(&app).stored_fade_out().unwrap().0 <= len - clip(&app).stored_fade_in().unwrap().0 + 1e-3);
+        // The second clip moved to overlap the first by a beat.
+        let mut app = self::app();
+        arr_mut(&mut app.state.session).clips[1].position = 288;
+        run(&mut app.state, 0, HCmd::Crossfade(Handle::FadeOut));
+        let beat = (96.0 * crate::playlist::fade_ms_per_tick(&app.state.session)) as f32;
+        let all = clips(&app.state.session);
+        assert!((all[0].stored_fade_out().unwrap().0 - beat).abs() < 1e-3);
+        assert!((all[1].stored_fade_in().unwrap().0 - beat).abs() < 1e-3, "the other clip fades in over the overlap");
+        crate::history_ui::undo(&mut app.state);
+        assert_eq!(clips(&app.state.session)[1].stored_fade_in(), None, "one step");
     }
 
     /// Type in value...: milliseconds for a fade, dB for the gain ("-inf" for none), within the gain's range.

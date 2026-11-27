@@ -1828,6 +1828,8 @@ pub fn make_unique_sample(s: &mut State, i: usize) -> String {
                 cl.set_fade_out(None);
                 cl.set_fade_in_tension(0.0);
                 cl.set_fade_out_tension(0.0);
+                // Its pitch, pan and reverse are in the new sample too.
+                cl.props = Default::default();
                 let mut c = crate::control::command::ClipIn::of(&cl, p);
                 (c.pattern, c.channel) = (None, Some(id));
                 c

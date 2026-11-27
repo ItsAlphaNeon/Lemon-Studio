@@ -1642,7 +1642,7 @@ impl Engine {
             }
             // A reversed audio clip plays the reversed copy of its buffer (a hosted sampler reverses it itself).
             if t.reverse && channels[t.channel].sample.is_some() {
-                if let Some(b) = reversed_copy(&mut channels[t.channel], t.buf) {
+                if let Some(b) = reversed_copy(&mut channels[t.channel], library, t.buf) {
                     t.buf = b;
                 }
             }
@@ -4220,14 +4220,14 @@ const SINC_W: f64 = 13.5;
 /// The bit of a voice's buffer number that plays the buffer reversed (`ChannelState::reversed`).
 const REVERSED: u16 = 0x8000;
 
-/// The reversed copy of channel buffer `buf` (made the first time a reversed clip asks for it): its buffer number.
-fn reversed_copy(ch: &mut ChannelState, buf: u16) -> Option<u16> {
+/// The reversed copy of channel buffer `buf` (made the first time a reversed clip asks for it, kept in `library` for
+/// the engines built after it): its buffer number.
+fn reversed_copy(ch: &mut ChannelState, library: &mut SampleLibrary, buf: u16) -> Option<u16> {
     if let Some(i) = ch.reversed.iter().position(|r| r.0 == buf) {
         return Some(REVERSED | (i as u16 + 1));
     }
-    let s = ch.buffer(buf)?;
-    let rev = Sample { rate: s.rate, left: s.left.iter().rev().copied().collect(), right: s.right.iter().rev().copied().collect() };
-    ch.reversed.push((buf, Arc::new(rev)));
+    let rev = library.reversed(ch.buffer(buf)?);
+    ch.reversed.push((buf, rev));
     Some(REVERSED | ch.reversed.len() as u16)
 }
 
@@ -8142,6 +8142,10 @@ mod tests {
         p.arrangements[0].clips[0].set_reversed(true);
         let rev = at(&p, &mut lib, 4800) / plain * 0.2;
         assert!((rev - 0.8).abs() < 0.01, "reversed, 0.1 s in: {rev}");
+        // An engine built again (after an edit) plays the same reversed copy, not one made again.
+        let copy = |p: &Project, lib: &mut SampleLibrary| Engine::new(p, lib, 48000, PlayMode::Song).channels[0].reversed.first().map(|r| r.1.clone());
+        let (a, b) = (copy(&p, &mut lib).expect("a reversed copy"), copy(&p, &mut lib).expect("a reversed copy"));
+        assert!(Arc::ptr_eq(&a, &b), "made once");
         p.arrangements[0].clips[0].set_reversed(false);
         p.arrangements[0].clips[0].set_pitch_semitones(12);
         let up = at(&p, &mut lib, 4800) / plain * 0.2;

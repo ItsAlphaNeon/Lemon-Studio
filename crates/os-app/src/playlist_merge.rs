@@ -10,7 +10,7 @@
 use os_model::{Clip, ClipSource};
 
 use crate::app::State;
-use crate::control::command::{ClipIn, Command, NoteIn};
+use crate::control::command::{ClipIn, Command, ControlIn, LockIn, NoteIn};
 use crate::playlist::{clips, track_info, ARRANGER_EDIT};
 
 /// What a merge works out before it applies: the clips it replaces, each group's start, end and track.
@@ -19,17 +19,19 @@ struct Plan {
     groups: Vec<Vec<usize>>,
     /// The new pattern's notes (from the first group; every group plays the same).
     notes: Vec<NoteIn>,
+    /// Its channel control points, placed as the notes are.
+    controls: Vec<ControlIn>,
     /// The clips' span and track, by group.
     spans: Vec<(u32, u32, u16)>,
 }
 
-/// The pattern clips of `idx`, sorted by position then track.
+/// The pattern clips of `idx` that play (a muted clip is left as it is), sorted by position then track.
 fn pattern_clips(s: &State, idx: &[usize]) -> Vec<usize> {
     let all = clips(&s.session);
     let mut v: Vec<usize> = idx
         .iter()
         .copied()
-        .filter(|&i| all.get(i).is_some_and(|c| matches!(c.source, ClipSource::Pattern(_))))
+        .filter(|&i| all.get(i).is_some_and(|c| matches!(c.source, ClipSource::Pattern(_)) && !c.muted))
         .collect();
     v.sort_by_key(|&i| (all[i].position, all[i].track, i));
     v.dedup();
@@ -69,14 +71,38 @@ fn merged_notes(s: &State, group: &[usize]) -> Vec<NoteIn> {
     out
 }
 
-/// How clip `c` sits in its group: pattern, position and track from the group's first clip, length and window.
-fn shape(c: &Clip, first: &Clip) -> (ClipSource, i64, i32, u32, Option<(f64, f64)>) {
+/// The channel control points clips `group` play, placed as `merged_notes` places the notes: each clip's points inside
+/// its window, from the first clip's position.
+fn merged_controls(s: &State, group: &[usize]) -> Vec<ControlIn> {
+    let p = &s.session.project;
+    let all = clips(&s.session);
+    let p0 = group.iter().map(|&i| all[i].position).min().unwrap_or(0);
+    let mut out = Vec::new();
+    for &i in group {
+        let c = &all[i];
+        let ClipSource::Pattern(n) = c.source else { continue };
+        let Some(pat) = p.pattern(n) else { continue };
+        let from = window(c).0.max(0.0) as u32;
+        let to = from + c.length;
+        for x in pat.controls.iter().filter(|x| x.position >= from && x.position < to) {
+            let position = c.position - p0 + x.position - from;
+            out.push(ControlIn { position, value: x.value, channel: None, param: None, kind: Some(x.kind), id: None });
+        }
+    }
+    out.sort_by_key(|x| (x.position, x.kind.unwrap_or(0)));
+    out
+}
+
+/// How clip `c` sits in its group: pattern, position and track from the group's first clip, length, window and
+/// whether it is muted.
+fn shape(c: &Clip, first: &Clip) -> (ClipSource, i64, i32, u32, Option<(f64, f64)>, bool) {
     (
         c.source,
         i64::from(c.position) - i64::from(first.position),
         i32::from(c.track) - i32::from(first.track),
         c.length,
         c.window,
+        c.muted,
     )
 }
 
@@ -118,6 +144,7 @@ fn plan(s: &State, group: Vec<usize>, everywhere: bool) -> Option<Plan> {
     }
     let all = clips(&s.session);
     let notes = merged_notes(s, &group);
+    let controls = merged_controls(s, &group);
     let mut groups = vec![group];
     if everywhere {
         groups.extend(similar(s, &groups[0]));
@@ -131,7 +158,7 @@ fn plan(s: &State, group: Vec<usize>, everywhere: bool) -> Option<Plan> {
             (a, b, all[g[0]].track)
         })
         .collect();
-    Some(Plan { groups, notes, spans })
+    Some(Plan { groups, notes, controls, spans })
 }
 
 /// Applies a merge: a new pattern numbered after the last holds the notes, and each group's clips give way to one
@@ -150,7 +177,7 @@ fn apply(s: &mut State, plan: Plan) -> Result<u16, String> {
     let number = top + 1;
     crate::playlist::clip_ids(s);
     let gone: Vec<usize> = plan.groups.iter().flatten().copied().collect();
-    let Plan { notes, spans, .. } = plan;
+    let Plan { notes, controls, spans, .. } = plan;
     let then = move |s: &State, r: &[serde_json::Value]| -> Vec<Command> {
         let Some(id) = r.first().and_then(|v| v["pattern"].as_u64()) else { return Vec::new() };
         let p = &s.session.project;
@@ -165,7 +192,12 @@ fn apply(s: &mut State, plan: Plan) -> Result<u16, String> {
             c.id = None;
             list.push(c);
         }
-        vec![Command::AddNotes { pattern: id as u32, notes }, Command::SetClips { clips: list }]
+        let mut out = vec![Command::AddNotes { pattern: id as u32, notes }];
+        if !controls.is_empty() {
+            out.push(Command::SetControls { pattern: id as u32, controls });
+        }
+        out.push(Command::SetClips { clips: list });
+        out
     };
     let first = vec![Command::AddPattern { name: None, color: None, number: Some(number) }];
     crate::control_ui::command_then(s, ARRANGER_EDIT, first, then)?;
@@ -222,9 +254,24 @@ pub fn clone_tracks(s: &mut State, tracks: &[u16]) -> Option<String> {
         let at = t + k as u16 + 1;
         first.push(Command::InsertPlaylistTrack { at: at + 1 });
         let mut set = crate::playlist::track_cmd(at);
-        if let (Command::SetPlaylistTrack { name, color, .. }, Some(info)) = (&mut set, track_info(&s.session, t)) {
+        if let (
+            Command::SetPlaylistTrack { name, color, enabled, grouped, motion, press, trigger_sync, position_sync, queue, tolerant, clip_lock, .. },
+            Some(info),
+        ) = (&mut set, track_info(&s.session, t))
+        {
             *name = info.name.clone();
             *color = info.color.and_then(|c| crate::control::command::color_text(Some(c)));
+            *enabled = Some(info.enabled);
+            // The clone sits right below: in the original's group when the original is a member of one or leads one
+            // (an ungrouped track there would take the leader's members over).
+            *grouped = Some(info.grouped || track_info(&s.session, t + 1).is_some_and(|n| n.grouped));
+            let p = info.perf;
+            (*motion, *press, *trigger_sync, *position_sync) = (Some(p.motion), Some(p.press), Some(p.trigger_sync), Some(p.position_sync));
+            (*queue, *tolerant) = (Some(p.queue), Some(p.tolerant));
+            *clip_lock = info.clip_lock.and_then(|src| match src {
+                ClipSource::Pattern(n) => Some(LockIn { pattern: Some(n), channel: None }),
+                ClipSource::Channel(i) => s.session.project.channels.iter().find(|c| c.index == i).map(|c| LockIn { pattern: None, channel: Some(c.id.0) }),
+            });
         }
         first.push(set);
         moved.push((t + k as u16, at));
@@ -234,9 +281,21 @@ pub fn clone_tracks(s: &mut State, tracks: &[u16]) -> Option<String> {
         let p = &s.session.project;
         let all = clips(&s.session);
         let mut list: Vec<ClipIn> = all.iter().map(|c| ClipIn::of(c, p)).collect();
+        // Copies of grouped clips form groups of their own, as Shift+drag copies do (`regroup_copies`).
+        let mut used: Vec<u16> = all.iter().map(Clip::group).collect();
+        let mut groups = std::collections::HashMap::new();
         for &(from, to) in &moved {
             for c in all.iter().filter(|c| c.track == from) {
-                let mut copy = ClipIn::of(c, p);
+                let mut c = *c;
+                if c.group() != 0 {
+                    let g = *groups.entry(c.group()).or_insert_with(|| {
+                        let g = crate::playlist::free_group(&used);
+                        used.push(g);
+                        g
+                    });
+                    c.set_group(g);
+                }
+                let mut copy = ClipIn::of(&c, p);
                 (copy.id, copy.track) = (None, to + 1);
                 list.push(copy);
             }
@@ -331,6 +390,30 @@ mod tests {
         assert!(app.state.session.project.pattern(3).is_none());
     }
 
+    /// A merge carries the patterns' control points as it carries their notes; a muted clip is not merged, and a
+    /// group with a muted clip is not like one without.
+    #[test]
+    fn merge_carries_control_points_and_leaves_muted_clips() {
+        use os_model::ControlPoint;
+        let mut app = app();
+        {
+            let p = app.state.session.project.get_mut();
+            let ch = p.channels[0].index;
+            p.patterns[0].controls = vec![ControlPoint::new(0, ch, ControlPoint::PAN, 100), ControlPoint::new(500, ch, ControlPoint::PAN, 200)];
+            p.patterns[1].controls = vec![ControlPoint::new(48, ch, ControlPoint::VOLUME, 6400)];
+            arr_mut(&mut app.state.session).clips[3].muted = true;
+        }
+        app.state.session.control.settle(app.state.session.project.get_mut());
+        assert_eq!(merge_selected(&mut app.state, true), Some("Merged into pattern 3".into()), "the muted pair is not alike");
+        let pat = app.state.session.project.pattern(3).expect("pattern 3");
+        // Pattern 1's point at 500 is past its clip's end.
+        assert_eq!(pat.controls.iter().map(|c| (c.position, c.param(), c.value)).collect::<Vec<_>>(), [(0, ControlPoint::PAN, 100), (384 + 48, ControlPoint::VOLUME, 6400)]);
+        // The muted clip on its own is not merged.
+        app.state.playlist.sel = (0..clips(&app.state.session).len()).filter(|&i| clips(&app.state.session)[i].track == 3).collect();
+        assert_eq!(app.state.playlist.sel.len(), 2);
+        assert_eq!(merge_selected(&mut app.state, false), Some("Merge pattern clips: select two or more pattern clips".into()));
+    }
+
     /// Shift+Ctrl+G: the same pair laid out alike on another track becomes a clip of the merged pattern too; the lone
     /// clip stays.
     #[test]
@@ -390,6 +473,35 @@ mod tests {
         crate::history_ui::undo(&mut app.state);
         assert_eq!(layout(&app).len(), 5);
         assert!(track_menu(&app.state, 0, 0.0, 0.0).items.iter().any(|i| i.label == "Clone..."));
+    }
+
+    /// A clone keeps the track's state (on or off, performance settings, clip lock) and its group: a clone of a member
+    /// or of a group's leader is a member of that group. Grouped clips' copies form a new group of their own.
+    #[test]
+    fn clone_keeps_track_state_and_groups() {
+        let mut app = app();
+        {
+            let arr = arr_mut(&mut app.state.session);
+            arr.tracks[0].enabled = false;
+            arr.tracks[0].perf.motion = 2;
+            arr.tracks[0].clip_lock = Some(ClipSource::Pattern(2));
+            arr.tracks[4].grouped = true; // track 5 is a member of track 4's group
+            arr.clips[2].set_group(7);
+            arr.clips[3].set_group(7);
+        }
+        // Track 1 (muted) and track 4 (leads a group).
+        app.state.playlist.sel = vec![0, 2];
+        assert_eq!(clone_tracks(&mut app.state, &[0, 3]), Some("Cloned 2 tracks".into()));
+        let t = |k: u16| track_info(&app.state.session, k).unwrap().clone();
+        assert!(!t(1).enabled && t(1).perf.motion == 2 && t(1).clip_lock == Some(ClipSource::Pattern(2)), "{:?}", t(1));
+        assert!(!t(1).grouped, "track 1 is not in a group");
+        // Track 4 is now track 5; its clone track 6 and the old member track 7 are both in its group.
+        assert!(!t(4).grouped && t(5).grouped && t(6).grouped);
+        let all = clips(&app.state.session);
+        let copies: Vec<u16> = all.iter().filter(|c| c.track == 5).map(Clip::group).collect();
+        assert_eq!(copies.len(), 2);
+        assert!(copies[0] == copies[1] && copies[0] != 7 && copies[0] != 0, "{copies:?}");
+        assert!(all.iter().filter(|c| c.track == 4).all(|c| c.group() == 7));
     }
 
     /// The ▸ menu's Collapse all / Expand all grouped tracks set every group; undo puts them back.

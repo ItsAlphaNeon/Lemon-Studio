@@ -210,6 +210,8 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         for (name, kept) in [("Props.lemon", true), ("Props.flp", false)] {
             app.save_to(d.join(name));
+            let said = app.state.message.clone().unwrap_or_default();
+            assert_eq!(said.contains("not stored yet: audio clip pitch, pan and reverse"), !kept, "{name}: {said}");
             let mut back = App::new(None);
             back.open(d.join(name));
             // The file keeps clips sorted by position, not in the project's order: find each clip by where it is.
@@ -303,6 +305,74 @@ mod tests {
             let up = render(false, 12, reopen);
             assert!((up[4800] * k - 0.4).abs() < 0.02, "an octave up (reopened: {reopen}), 0.1 s in: {}", up[4800] * k);
         }
+    }
+
+    /// Lemon Sampler keeps a reversed copy of the sample while the channel has a reversed clip: switched on when one
+    /// is reversed, on again when the project is opened (with no edit, the song not played offline), and off when the
+    /// last one plays forward again with the song stopped.
+    #[test]
+    fn reversed_copy_follows_the_clips() {
+        use std::time::Duration;
+        let fresh = || {
+            let mut a = App::new(None);
+            a.state.session.plugins = crate::plugins::Plugins::default();
+            a.state.session.plugins.available = crate::plugins::builtin();
+            a.state.session.plugins.set_rate(48000);
+            a
+        };
+        let copy_on = |a: &App, row: usize| {
+            let p = &a.state.session.plugins;
+            let info = p.param_infos(row).into_iter().find(|i| i.name == lemon_sampler::params::REVERSED_COPY).expect("Lemon Sampler");
+            p.param_value(row, info.id).expect("its value") > 0.5
+        };
+        let mut a = fresh();
+        let wav = std::env::temp_dir().join(format!("os-app-rev-copy-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
+        let i = crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let row = a.state.session.project.channels.len() - 1;
+        a.plugin_tick();
+        assert!(!copy_on(&a, row), "a new instance starts without it");
+        a.state.playlist.sel = vec![i];
+        run(&mut a, Cmd::ReverseSelected);
+        os_session::clip_reverse::sync(&a.state.session);
+        assert!(copy_on(&a, row));
+        let saved = std::env::temp_dir().join(format!("os-app-rev-copy-{}.lemon", std::process::id()));
+        a.save_to(saved.clone());
+        let mut b = fresh();
+        b.open(saved.clone());
+        let t0 = std::time::Instant::now();
+        while b.state.session.loading.is_some() && t0.elapsed() < Duration::from_secs(30) {
+            b.plugin_tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        b.plugin_tick();
+        let row = b.state.session.project.channels.iter().rposition(|c| c.sample_path.is_some()).expect("the clip's channel");
+        assert!(copy_on(&b, row), "on in the reopened project");
+        run(&mut a, Cmd::ReverseSelected);
+        os_session::clip_reverse::sync(&a.state.session);
+        assert!(!copy_on(&a, a.state.session.project.channels.len() - 1), "off with no reversed clip left");
+        let _ = (std::fs::remove_file(&wav), std::fs::remove_file(&saved));
+    }
+
+    /// Make unique as sample renders the clip with its pitch, pan and reverse, so the new clip has none of its own (they
+    /// would apply twice).
+    #[test]
+    fn make_unique_as_sample_bakes_the_settings_in() {
+        let mut a = App::new(None);
+        let wav = std::env::temp_dir().join(format!("os-app-unique-props-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
+        let i = crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        a.state.playlist.sel = vec![i];
+        run(&mut a, Cmd::ReverseSelected);
+        run(&mut a, Cmd::PitchSelected(3));
+        assert!(clips(&a.state.session)[i].reversed());
+        let m = run(&mut a, Cmd::ClipUniqueSample(i)).unwrap_or_default();
+        assert!(m.starts_with("Made unique as sample"), "{m}");
+        let c = clips(&a.state.session)[i];
+        assert_ne!(c.source, ClipSource::Channel(0));
+        assert_eq!(c.props, Default::default());
+        let made = a.state.session.project.channels.last().unwrap().sample_path.clone().unwrap();
+        let _ = (std::fs::remove_file(&wav), std::fs::remove_file(&made));
     }
 
     /// The title's pitch: whole semitones signed, cents as one decimal, nothing at 0.

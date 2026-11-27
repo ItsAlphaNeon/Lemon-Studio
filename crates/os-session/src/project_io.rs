@@ -104,7 +104,11 @@ pub fn write_in(ses: &mut Session, target: &Path, before: os_model::Project, ext
     };
     // Deleted, cloned and moved channels are written by `apply` (os-flp `restructure`); it edits a copy so a failed
     // save leaves the loaded file as it was.
-    let lost = os_flp::project::unsaved_parts(&ses.project, &file);
+    let mut lost = os_flp::project::unsaved_parts(&ses.project, &file);
+    // An FLP file has no place for an audio clip's own pitch, pan and reverse (a `.lemon` file's event 204 does).
+    if crate::project_files::is_flp(target) && crate::clip_reverse::used(&ses.project) {
+        lost.push("audio clip pitch, pan and reverse");
+    }
     // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
     let mut proj = ses.project.clone();
     crate::edit::rack::as_saved(&mut proj);

@@ -83,19 +83,27 @@ pub fn rows_with_reversed(project: &Project) -> Vec<usize> {
         .collect()
 }
 
-/// Turns on "Keep a reversed copy" in the Lemon Sampler of every channel with a reversed clip. It stays on when the
-/// last reversed clip goes (the copy costs memory only); a new instance starts without it.
+/// Turns on "Keep a reversed copy" (a hidden parameter) in the Lemon Sampler of every channel with a reversed clip,
+/// and off again in those without one while the song is stopped (a voice still playing the copy is not cut; the copy
+/// costs memory). A new instance starts without it.
 pub fn sync(ses: &crate::session::Session) {
-    for row in rows_with_reversed(&ses.project) {
+    let want = rows_with_reversed(&ses.project);
+    let stopped = !ses.transport.playing();
+    for (&row, h) in &ses.plugins.hosted {
+        let sampler = ses.project.channels.get(row).is_some_and(|c| c.kind.is_sampler()) && h.name == crate::plugins::LEMON_SAMPLER;
+        let need = want.contains(&row);
+        if !sampler || !(need || stopped) {
+            continue;
+        }
         let on = ses
             .plugins
             .param_infos(row)
             .into_iter()
             .find(|i| i.name == lemon_sampler::params::REVERSED_COPY)
             .and_then(|i| ses.plugins.param_value(row, i.id))
-            .is_some_and(|v| v > 0.5);
-        if !on {
-            ses.plugins.set_param_named(row, lemon_sampler::params::REVERSED_COPY, 1.0);
+            .map(|v| v > 0.5);
+        if on.is_some_and(|on| on != need) {
+            ses.plugins.set_param_named(row, lemon_sampler::params::REVERSED_COPY, if need { 1.0 } else { 0.0 });
         }
     }
 }
