@@ -212,6 +212,7 @@ pub mod chop;
 pub mod clip_chop;
 pub mod clip_handles;
 pub mod clip_props;
+pub mod playlist_merge;
 pub mod piano_dlg;
 pub mod arpeggiate;
 pub mod tapper;

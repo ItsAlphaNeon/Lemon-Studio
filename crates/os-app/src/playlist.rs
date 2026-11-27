@@ -24,7 +24,7 @@ use crate::control::command::Command;
 
 /// The shown arrangement's clips and tracks have their ids, for commands (a clip just made gets its own on the next
 /// tick); only then, as a settle numbers everything new.
-fn clip_ids(s: &mut State) {
+pub(crate) fn clip_ids(s: &mut State) {
     if clips(&s.session).iter().any(|c| c.id.is_none()) {
         crate::control_ui::settle_ids(s);
     }
@@ -456,6 +456,16 @@ pub enum Cmd {
     Chop(usize, crate::clip_chop::Unit),
     /// Edit ▸ Slice and insert space (spec: ui/playlist-chop.md §2).
     SliceInsertSpace,
+    /// Edit ▸ Merge pattern clips (false) / Merge similar pattern clips (true); the track menu's Merge pattern clips
+    /// (spec: ui/playlist-merge-tracks.md §1, §2).
+    MergeClips(bool),
+    MergeTrack(u16),
+    /// Tools ▸ Clone selected playlist track(s); the track menu's Clone... (spec: ui/playlist-merge-tracks.md §3).
+    CloneTracks,
+    CloneTrack(u16),
+    /// The ▸ menu's Collapse all grouped tracks (true) / Expand all grouped tracks (spec: ui/playlist-merge-tracks.md
+    /// §4).
+    CollapseAll(bool),
     ClipUnique(usize),
     /// An audio clip as heard (trims, fades, gain, the channel's settings) rendered to a new sample, which it then plays.
     ClipUniqueSample(usize),
@@ -2098,6 +2108,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Insert space", Cmd::InsertSpace).key("Ctrl+Ins"),
                 PItem::new("Slice and insert space", Cmd::SliceInsertSpace).key("Ctrl+Alt+Ins"),
                 PItem::new("Delete space", Cmd::DeleteSpace).key("Ctrl+Del"),
+                PItem::new("Merge pattern clips", Cmd::MergeClips(false)).key("Ctrl+G"),
+                PItem::new("Merge similar pattern clips", Cmd::MergeClips(true)).key("Shift+Ctrl+G"),
+                PItem::not_yet("Merge automation clips").key("Ctrl+Alt+G"),
                 PItem::sep(),
                 PItem::new("Pitch selected audio clips one semitone down", Cmd::PitchSelected(-1)).key("7"),
                 PItem::new("Pitch selected audio clips one semitone up", Cmd::PitchSelected(1)).key("8"),
@@ -2112,6 +2125,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Consolidate arranger selection", Cmd::Consolidate).key("Ctrl+Alt+C"),
                 PItem::new("Export all arranger tracks", Cmd::ExportTracks),
                 PItem::new("Quick quantize start times", Cmd::QuantizeStarts),
+                PItem::new("Clone selected playlist track(s)", Cmd::CloneTracks).key("Shift+Ctrl+B"),
             ],
         ),
         PItem::sub("Tool", tools),
@@ -2145,6 +2159,8 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub("Quantize song jumps", jump_items(s)),
         PItem::sep(),
         PItem::new("Reset empty tracks", Cmd::ResetEmptyTracks),
+        PItem::new("Collapse all grouped tracks", Cmd::CollapseAll(true)),
+        PItem::new("Expand all grouped tracks", Cmd::CollapseAll(false)),
         PItem::sep(),
         PItem::new("Prepare for performance mode", Cmd::PerfPrepare),
         PItem::new("Performance mode", Cmd::PerfToggle).key("Ctrl+P").mark(Mark::Check(crate::perform_ui::on(s))),
@@ -2376,11 +2392,13 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::new("Group with above track", Cmd::TrackGroup(t)).mark(Mark::Check(track_info(&s.session, t).is_some_and(|x| x.grouped))),
         PItem::new("Collapse group", Cmd::GroupCollapse(t))
             .mark(Mark::Check(group_track(&s.session, t).or(Some(t)).and_then(|g| track_info(&s.session, g)).is_some_and(|x| x.collapsed))),
+        PItem::new("Merge pattern clips", Cmd::MergeTrack(t)),
         PItem::sep(),
         PItem::new("Insert one", Cmd::TrackInsert(t)),
         PItem::new("Delete one", Cmd::TrackDelete(t)),
         PItem::new("Move up", Cmd::TrackUp(t)),
         PItem::new("Move down", Cmd::TrackDown(t)),
+        PItem::new("Clone...", Cmd::CloneTrack(t)),
         PItem::sep(),
         PItem::sub("Performance settings", perf_items(&s.session, t)),
     ];
@@ -4394,6 +4412,17 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             crate::clip_chop::slice_and_insert_space(s);
             None
         }
+        Cmd::MergeClips(everywhere) => crate::playlist_merge::merge_selected(s, everywhere),
+        Cmd::MergeTrack(t) => crate::playlist_merge::merge_track(s, t),
+        Cmd::CloneTracks => {
+            let tracks = crate::playlist_merge::selected_tracks(s);
+            crate::playlist_merge::clone_tracks(s, &tracks)
+        }
+        Cmd::CloneTrack(t) => crate::playlist_merge::clone_tracks(s, &[t]),
+        Cmd::CollapseAll(on) => {
+            crate::playlist_merge::collapse_all(s, on);
+            None
+        }
         Cmd::ClipUnique(i) if clips(&s.session).get(i).is_some_and(|c| source_kind(&s.session, c.source) == PickKind::Audio) => make_unique_audio(s, i),
         Cmd::ClipUnique(i) => {
             make_unique(s, &[i]).first().map(|n| format!("Made unique: pattern {n}"))
@@ -5003,6 +5032,8 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") => Cmd::Copy,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("x") => Cmd::Cut,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => Cmd::Paste,
+        Key::Character(c) if ctrl && shift && !alt && c.eq_ignore_ascii_case("b") => Cmd::CloneTracks,
+        Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("g") => Cmd::MergeClips(shift),
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("b") => Cmd::Duplicate,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => Cmd::Undo,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("m") => Cmd::Mute(!shift),
