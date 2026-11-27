@@ -55,6 +55,7 @@ macro_rules! set_track {
 }
 
 mod selection;
+pub mod slot_drag;
 pub use selection::{create_submix, name_submix, route_from, Submix};
 
 /// The interface's edit made of `commands`: one undo step named `name` (none when nothing changed); the error as the
@@ -1097,14 +1098,20 @@ fn number_of(s: &State, result: Option<&serde_json::Value>) -> u16 {
     s.session.project.mixer.iter().find(|m| Some(u64::from(m.id.0)) == id).map_or(0, |m| m.index)
 }
 
-/// Open mixer track state: the saved state in `path` onto track `n`, its old effects going; one undo step.
+/// Open mixer track state: the saved state in `path` onto track `n`, its old effects going, or onto every selected
+/// track when `n` is part of a multi-selection (spec: ui/mixer-selection.md §2); one undo step.
 fn load_state(s: &mut State, n: u16, path: &std::path::Path) -> Option<String> {
     if crate::mixer_state::load(path).is_none() {
         return Some(unreadable(path));
     }
     track_ids(s);
-    let c = Command::LoadTrackState { track: id_of(s, n)?, path: path.to_string_lossy().into_owned(), named: false };
-    apply(s, "Open mixer track state", vec![c]).or_else(|| Some(state_taken(s, n, path)))
+    let tracks = if in_group(s, n) { selected(s) } else { vec![n] };
+    let p = path.to_string_lossy().into_owned();
+    let mut cmds = Vec::new();
+    for t in tracks {
+        cmds.push(Command::LoadTrackState { track: id_of(s, t)?, path: p.clone(), named: false });
+    }
+    apply(s, "Open mixer track state", cmds).or_else(|| Some(state_taken(s, n, path)))
 }
 
 /// Insert mixer track state: a new track before track `n` takes the saved state in `path` with its name and colour;

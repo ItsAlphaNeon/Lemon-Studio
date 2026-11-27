@@ -969,6 +969,9 @@ pub enum Drag {
     /// Ctrl+Shift+press on a mixer strip, held: every strip from `from` to the one under the cursor joins the selection,
     /// which keeps the tracks selected before (spec: ui/mixer.md §2).
     MixSweep { from: u16 },
+    /// The mixer slot menu's "Save preset as..." dragged out of the menu: a copy of slot `slot` of track `track` goes
+    /// where it is released (spec: ui/mixer-selection.md §2, `crate::mixer::slot_drag`).
+    SlotCopy { track: u16, slot: u8 },
     Tempo { y0: f32, t0: f64, step: f64 },
     /// The song position slider's handle (`dx` = grab offset from its centre), or the button held on its track (the
     /// next step is due at `next`) (spec: ui/song-position-slider.md §3).
@@ -5702,9 +5705,13 @@ impl App {
             self.invalidate();
             self.mark_detached(None);
         }
+        if self.drag.is_none() && crate::mixer::slot_drag::arm_move(self, self.armed.clone()) {
+            self.armed = None;
+        }
         if let Some(d) = self.drag.clone() {
             match d {
                 Drag::Browser { item, label, m0, started } => self.browser_drag_move(label, m0, started, item),
+                Drag::SlotCopy { .. } => self.invalidate(),
                 Drag::Pl(d) => {
                     if let Some(g) = self.pl_grid {
                         crate::playlist::drag_move(self, d, g);
@@ -7007,6 +7014,12 @@ impl App {
         if let Some(Drag::Browser { item, started, .. }) = self.drag.clone() {
             self.drag = None;
             return self.browser_drop(item, started);
+        }
+        if let Some(Drag::SlotCopy { track, slot }) = self.drag.clone() {
+            self.drag = None;
+            self.hint = std::borrow::Cow::Borrowed("");
+            self.state.message = crate::mixer::slot_drag::drop_slot(self, track, slot);
+            return self.invalidate();
         }
         if let Some(Drag::Pl(d)) = self.drag.clone() {
             self.drag = None;
