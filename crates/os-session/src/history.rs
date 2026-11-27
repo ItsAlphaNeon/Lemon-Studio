@@ -117,6 +117,7 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::Strum(_) => "Piano roll strum",
         KnobId::Arp(_) => "Piano roll arpeggiate",
         KnobId::PianoDlg(_) => "Piano roll tool",
+        KnobId::NoteProp(_) => "Note properties",
         KnobId::AutoLfo(..) => "Automation clip LFO",
         KnobId::MidiOut(..) => "MIDI Out setting",
         KnobId::Member(..) => crate::container::LEVEL,
@@ -460,7 +461,9 @@ pub fn track_io_of(m: &os_model::MixerTrack) -> [i32; 4] {
 /// of the notches just before it on the same knob.
 pub fn knob(s: &mut crate::session::Session, id: KnobId, wheel: bool) {
     // The piano roll tool dialogs' knobs only preview; their Accept is the step (spec: ui/piano-strum.md §1).
-    if !s.settings.check(&prefs::UNDO_KNOB_TWEAKS) || matches!(id, KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_)) {
+    if !s.settings.check(&prefs::UNDO_KNOB_TWEAKS)
+        || matches!(id, KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::NoteProp(_))
+    {
         return;
     }
     let h = &s.history;

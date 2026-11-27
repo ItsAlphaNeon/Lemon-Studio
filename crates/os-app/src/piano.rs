@@ -541,6 +541,25 @@ pub fn copy_controls(from: &Note, to: &mut Note) {
     to.flags = (to.flags & !Note::SLIDE) | (from.flags & Note::SLIDE);
 }
 
+/// The note type new notes get (the colour tab's Slide and Portamento toggles, keys S and O; spec:
+/// ui/piano-note-properties.md §5): the last clicked note's, as its other controls are.
+pub fn new_type(s: &State) -> (bool, bool) {
+    s.piano.last_controls.map_or((false, false), |n| (n.slide(), n.porta()))
+}
+
+/// Toggle new notes' slide (`slide`) or portamento switch; returns the new state.
+pub fn toggle_new_type(s: &mut State, slide: bool) -> bool {
+    let mut n = s.piano.last_controls.unwrap_or_else(|| Note::step(0, 0));
+    let on = if slide { !n.slide() } else { !n.porta() };
+    if slide {
+        n.set_slide(on);
+    } else {
+        n.set_porta(on);
+    }
+    s.piano.last_controls = Some(n);
+    on
+}
+
 /// Delete notes by index.
 pub fn delete(s: &mut State, mut idx: Vec<usize>) {
     idx.sort_unstable();

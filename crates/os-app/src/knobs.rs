@@ -81,6 +81,7 @@ impl KnobUi for KnobId {
             KnobId::Member(.., wet) => f32::from(u8::from(wet)),
             KnobId::Arp(k) => crate::arpeggiate::Settings::default().get(k),
             KnobId::PianoDlg(k) => k.default_pos(),
+            KnobId::NoteProp(k) => crate::note_props::default_pos(k),
             KnobId::AutoLfo(_, k) => k.pos(&os_model::clip_lfo::ClipLfo::default()),
             KnobId::MidiOut(_, k) => k.pos(&crate::lemon_midi_out::Settings::default()),
             KnobId::Eq(_, b, f) => eq_pos(f, os_model::EQ_DEFAULT[usize::from(b.min(2))][usize::from(f.min(2))]),
@@ -154,6 +155,7 @@ impl State {
             KnobId::Strum(k) => (self.strum.set.get(k) + 1.0) / 2.0,
             KnobId::Arp(k) => self.arp.set.get(k),
             KnobId::PianoDlg(k) => self.piano_dlg.get(k),
+            KnobId::NoteProp(k) => crate::note_props::knob(self, k),
             // What the chain plays while its list is open (`container::shown_level`).
             KnobId::Member(t, k, id, wet) => crate::container_ui::shown_level(self, t, k, id, wet),
             _ => self.session.knob(id).unwrap_or(0.0),
@@ -202,6 +204,7 @@ impl State {
                     crate::piano_dlg::preview(self);
                 }
             }
+            KnobId::NoteProp(k) => crate::note_props::set_knob(self, k, v),
             // No undo step here: a drag's is taken at the press (`history::knob`).
             KnobId::Member(t, k, member, wet) => crate::container_ui::put_level(self, t, k, member, wet, v),
             _ => self.session.set_knob(id, v),
@@ -220,6 +223,7 @@ impl State {
             KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.session.project.ppq.max(4))),
             KnobId::Arp(k) => self.arp.set.text(k),
             KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.session.project.ppq.max(4))),
+            KnobId::NoteProp(k) => crate::note_props::knob_text(self, k),
             KnobId::AutoLfo(row, k) => k.text(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
             KnobId::MidiOut(row, k) => k.text(&crate::lemon_midi_out::row_settings(&self.session.project, row).unwrap_or_default()),
             _ => self.knob_text_at(id, self.knob(id)).unwrap_or_default(),
@@ -272,7 +276,12 @@ impl State {
                     _ => format!("{band} width: {n:.2}"),
                 }
             }
-            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..) => return None,
+            KnobId::Strum(_)
+            | KnobId::Arp(_)
+            | KnobId::PianoDlg(_)
+            | KnobId::NoteProp(_)
+            | KnobId::AutoLfo(..)
+            | KnobId::MidiOut(..) => return None,
         })
     }
 }

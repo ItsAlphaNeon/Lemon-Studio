@@ -49,6 +49,10 @@ pub enum NCmd {
     StockLength(crate::playlist::Snap),
     /// Make a channel rack row the piano roll's channel (the title's channel menu).
     Target(usize),
+    /// S / O (typing keyboard off), or the colour tab's toggles: new notes are slide / portamento notes (spec:
+    /// ui/piano-note-properties.md §5).
+    NewSlide,
+    NewPorta,
 }
 
 fn item(label: &'static str, c: NCmd) -> PItem {
@@ -173,6 +177,8 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Character(c) if alt && !ctrl && is(c, "v") => NCmd::Ghosts,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "b") => NCmd::Highlights,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
+        Key::Character(c) if !ctrl && !alt && !shift && !app.typing_on() && is(c, "s") => NCmd::NewSlide,
+        Key::Character(c) if !ctrl && !alt && !shift && !app.typing_on() && is(c, "o") => NCmd::NewPorta,
         Key::Character(c) if ctrl && !alt && is(c, "d") => {
             app.state.piano.clear_selection();
             app.invalidate();
@@ -422,6 +428,15 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             let m = target(s, row);
             app.invalidate();
             return Some(m);
+        }
+        NCmd::NewSlide | NCmd::NewPorta => {
+            let slide = cmd == NCmd::NewSlide;
+            let on = piano::toggle_new_type(s, slide);
+            return Some(format!(
+                "Piano roll: new notes {} {}",
+                if slide { "slide" } else { "portamento" },
+                if on { "on" } else { "off" }
+            ));
         }
     };
     s.session.dirty = true;

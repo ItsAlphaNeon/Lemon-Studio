@@ -30,6 +30,7 @@ pub mod export_form;
 pub mod save_form;
 pub mod arpeggiate;
 pub mod strum;
+pub mod note_props;
 pub mod piano_dlg;
 pub mod tapper;
 pub mod touch;
@@ -233,6 +234,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::Tapper => ui.part(Seg::Win(win), a, |ui| tapper::paint(ui, s, f)),
             Win::Touch => ui.part(Seg::Win(win), a, |ui| touch::paint(ui, s, f)),
             Win::Strum => ui.part(Seg::Win(win), a, |ui| strum::paint(ui, s, f)),
+            Win::NoteProps => ui.part(Seg::Win(win), a, |ui| note_props::paint(ui, s, f)),
             Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
             Win::Events => ui.part(Seg::Win(win), a, |ui| events::paint(ui, s, f)),

@@ -35,6 +35,9 @@ pub enum KnobId {
     /// A knob or fader of the piano roll's Flam or Scale levels dialog (dialog state; spec: ui/piano-flam.md §1,
     /// ui/piano-level-scaling.md §1).
     PianoDlg(crate::knob_id::piano_dlg::Knob),
+    /// A level of the piano roll's Note properties window: `.0` is its place in `note_props::LEVELS` (pan, velocity,
+    /// release, mod X, mod Y, fine pitch); its value is the edited notes' (spec: ui/piano-note-properties.md).
+    NoteProp(u8),
     /// A control of the LFO of the automation clip on channel row `.0` (model `Automation::lfo`; spec:
     /// audio/automation.md "The LFO"). Its switch and mode are two-position controls that a click flips.
     AutoLfo(usize, LfoKnob),
@@ -317,7 +320,7 @@ impl KnobId {
                 let level = Some(f64::from(v));
                 Some(Command::SetMember { container, member, wet: level.filter(|_| wet), dry: level.filter(|_| !wet), name: None, color: None, icon: None, auto_bypass: None, threaded: None })
             }
-            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) => None,
+            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::NoteProp(_) => None,
         }
     }
 }
@@ -350,7 +353,7 @@ impl crate::session::Session {
                 let eq = self.project.mixer.iter().find(|m| m.index == t).map_or(os_model::EQ_DEFAULT, |m| m.eq);
                 eq_pos(f as u8, eq[b][f])
             }
-            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) => return None,
+            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::NoteProp(_) => return None,
             KnobId::AutoLfo(row, k) => k.pos(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
             KnobId::MidiOut(row, k) => k.pos(&crate::lemon_midi_out::row_settings(&self.project, row).unwrap_or_default()),
             KnobId::Member(t, k, id, wet) => crate::edit::container::level(self, t, k, id, wet).unwrap_or(0.0),

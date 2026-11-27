@@ -142,11 +142,46 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.line(tab.x + 0.5, tab.bottom() - 0.5, tab.x + 31.0, tab.y + 0.5, 1.0, t.note_top.shade(0.15));
     }
     let ink = green.shade(-0.3);
-    ui.c.polyline(&[(tab.right() - 15.0, tab.y + 16.0), (tab.right() - 10.0, tab.y + 16.0), (tab.right() - 7.0, tab.y + 7.0), (tab.right() - 3.0, tab.y + 7.0)], 1.6, ink);
-    ui.c.fill_polygon(&[(tab.right() - 4.0, tab.bottom() - 18.0), (tab.right() - 4.0, tab.bottom() - 5.0), (tab.right() - 17.0, tab.bottom() - 5.0)], ink);
+    // The note type toggles (spec: ui/piano-note-properties.md §5): portamento (the step curve, O) and slide (the
+    // triangle, S), lit while new notes get them.
+    let (slide_on, porta_on) = piano::new_type(s);
+    let porta_r = Rect::new(tab.right() - 17.0, tab.y + 3.0, 16.0, 16.0);
+    let slide_r = Rect::new(tab.right() - 19.0, tab.bottom() - 20.0, 18.0, 17.0);
+    let porta_hov =
+        ui.hit(porta_r, Action::PianoNewType(false), "Portamento (O): new notes glide from the note before");
+    let slide_hov = ui.hit(slide_r, Action::PianoNewType(true), "Slide (S): new notes slide the notes they overlap");
+    let lit = t.h(0xfb9531);
+    let ink_of = |on: bool, hov: bool| {
+        if on {
+            lit
+        } else if hov {
+            ink.shade(0.4)
+        } else {
+            ink
+        }
+    };
+    ui.c.polyline(
+        &[
+            (tab.right() - 15.0, tab.y + 16.0),
+            (tab.right() - 10.0, tab.y + 16.0),
+            (tab.right() - 7.0, tab.y + 7.0),
+            (tab.right() - 3.0, tab.y + 7.0),
+        ],
+        1.6,
+        ink_of(porta_on, porta_hov),
+    );
+    ui.c.fill_polygon(
+        &[
+            (tab.right() - 4.0, tab.bottom() - 18.0),
+            (tab.right() - 4.0, tab.bottom() - 5.0),
+            (tab.right() - 17.0, tab.bottom() - 5.0),
+        ],
+        ink_of(slide_on, slide_hov),
+    );
     // Note colours: not available yet, greyed out.
-    ui.off(tab, "Note color");
-    ui.veil(tab, t.window_title);
+    let colours = Rect::new(tab.x, tab.y, (tab.w - 20.0).max(0.0), tab.h);
+    ui.off(colours, "Note color");
+    ui.veil(colours, t.window_title);
 
     overview(ui, s, &l, &g, notes, ch);
     // A time-signature marker shows its signature (spec: ui/pattern-time-signature.md §2).

@@ -45,6 +45,8 @@ pub enum Win {
     Touch,
     /// The piano roll's Strum dialog (spec: ui/piano-strum.md).
     Strum,
+    /// The piano roll's Note properties window (spec: ui/piano-note-properties.md).
+    NoteProps,
     /// The piano roll's Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
     Arp,
     /// The piano roll's Flam, Flip and Scale levels dialogs, one at a time (spec: ui/piano-flam.md, ui/piano-flip.md,
@@ -182,6 +184,8 @@ pub enum Action {
     Touch(crate::touch::TouchAct),
     /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
     Strum(crate::strum::Act),
+    /// A control of the piano roll's Note properties window (spec: ui/piano-note-properties.md).
+    NoteProps(crate::note_props::Act),
     /// The container window's names and buttons (`crate::container::CAct`).
     Container(crate::container::CAct),
     /// The plugin palette's controls (spec: ui/plugin-menu.md §6).
@@ -291,6 +295,8 @@ pub enum Action {
     PianoLaneMenu,
     /// Toolbar "Piano roll tools" button: the Tools menu (spec: ui/piano-roll.md §11).
     PianoToolsMenu,
+    /// The colour tab's Slide (`true`) or Portamento toggle: the type of new notes (spec: ui/piano-note-properties.md §5).
+    PianoNewType(bool),
     /// Toolbar magnet: the Snap menu; right-click: Stock note lengths (spec: ui/piano-snap.md §1).
     PianoSnapMenu,
     /// The channel name in the title: the channel menu; right-click: channel settings; wheel: channels with notes
@@ -1114,6 +1120,8 @@ pub struct State {
     pub events_back: Option<crate::events::EventsUi>,
     /// The piano roll's Strum dialog: where it is, its settings and its preview session.
     pub strum: crate::strum::StrumUi,
+    /// The piano roll's Note properties window (spec: ui/piano-note-properties.md).
+    pub note_props: crate::note_props::NotePropsUi,
     /// The piano roll's Arpeggiate dialog: where it is, its settings and pattern, its preview session.
     pub arp: crate::arpeggiate::ArpUi,
     /// The piano roll's Flam, Flip and Scale levels dialogs: where each was, their settings, the preview session.
@@ -1661,6 +1669,7 @@ impl App {
                 events: Default::default(),
                 events_back: None,
                 strum: Default::default(),
+                note_props: Default::default(),
                 arp: Default::default(),
                 piano_dlg: Default::default(),
                 toggles: vec!["typing"],
@@ -3514,6 +3523,39 @@ impl App {
             s.hide(Win::Strum);
         } else {
             crate::strum::act(s, a);
+        }
+        self.invalidate();
+    }
+
+    // ---------------------------------------------------------------- Note properties (spec: ui/piano-note-properties.md)
+
+    /// A double-click on note `i`: the Note properties window opens in front on it, or on the selection when `i` is in
+    /// it (§2); centred over the main window the first time, then where it was left. Open on other notes already: their
+    /// changes are kept as they would be by Accept.
+    pub fn open_note_props(&mut self, i: usize) {
+        let s = &mut self.state;
+        self.drag = None;
+        if s.note_props.is_open() {
+            s.message = Some(crate::note_props::accept(s));
+        }
+        if !s.note_props.placed {
+            let (w, h) = views::note_props::SIZE; // centred as the full window, Step properties or not
+            s.note_props.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
+            s.note_props.placed = true;
+        }
+        if crate::note_props::open(s, i) {
+            s.raise(Win::NoteProps);
+        }
+        self.invalidate();
+    }
+
+    fn note_props_act(&mut self, a: crate::note_props::Act) {
+        let s = &mut self.state;
+        if a == crate::note_props::Act::Accept {
+            s.message = Some(crate::note_props::accept(s));
+            s.hide(Win::NoteProps);
+        } else {
+            crate::note_props::act(s, a);
         }
         self.invalidate();
     }
@@ -7053,6 +7095,10 @@ impl App {
     pub fn drag_notes(&mut self, x0: f32, y0: f32, orig: &[(usize, Note)], resize: bool) {
         let Some(g) = self.piano_geom() else { return };
         let (x, y) = self.mouse;
+        // A drag is not the first click of a double-click (spec: ui/piano-note-properties.md §1).
+        if (x - x0).abs() > 3.0 || (y - y0).abs() > 3.0 {
+            crate::note_props::moved(&mut self.state);
+        }
         let unit = crate::piano_snap::unit(&self.state).unwrap_or(1);
         let from = orig.first().map_or(0, |&(_, o)| if resize { o.position + o.length.max(unit) } else { o.position });
         let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
@@ -8351,6 +8397,14 @@ impl App {
             self.damage_piano();
             return;
         }
+        // A double-click on a note opens its Note properties (spec: ui/piano-note-properties.md §1).
+        if let Action::PianoNote(i) = *a {
+            let count = matches!(tool, Tool::Draw | Tool::Paint | Tool::Select) && !self.shift && !self.ctrl && !self.alt;
+            if crate::note_props::double_click(&mut self.state, i, count) {
+                self.open_note_props(i);
+                return;
+            }
+        }
         if matches!(a, Action::PianoGrid | Action::PianoNote(_)) && tool != Tool::Draw {
             let s = &mut self.state;
             let note = if let Action::PianoNote(i) = *a { Some(i) } else { None };
@@ -8690,6 +8744,7 @@ impl App {
             Action::Tapper(a) => self.tapper_act(a),
             Action::Touch(a) => self.touch_act(a),
             Action::Strum(a) => self.strum_act(a),
+            Action::NoteProps(a) => self.note_props_act(a),
             Action::Container(a) => self.container_act(a),
             Action::Palette(a) => self.palette_act(a),
             Action::Arp(a) => self.arp_act(a),
@@ -8941,6 +8996,11 @@ impl App {
                 self.hint = Cow::Owned(s.knob_text(id));
             }
             Action::PianoLaneMenu => s.lane_menu = true,
+            Action::PianoNewType(slide) => {
+                let cmd = if slide { crate::piano_tools::NCmd::NewSlide } else { crate::piano_tools::NCmd::NewPorta };
+                self.state.message = crate::piano_tools::run(self, cmd);
+                self.invalidate();
+            }
             Action::PianoToolsMenu => {
                 let (x, y) = self.mouse;
                 s.playlist.popup = Some(crate::piano_tools::tools_menu(s, x - 6.0, y + 10.0));
@@ -9059,6 +9119,11 @@ impl App {
             Action::Util(Util::AudioEditor) => self.audio_editor(0, false),
             Action::Util(Util::NewAudioEditor) => self.audio_editor(0, true),
             Action::CloseWin(Win::Perf) => self.close_perf(),
+            Action::CloseWin(Win::NoteProps) => {
+                crate::note_props::close(s);
+                s.hide(Win::NoteProps);
+                self.damage_win(Win::PianoRoll);
+            }
             Action::CloseWin(Win::Strum) => {
                 crate::strum::cancel(s);
                 s.hide(Win::Strum);
@@ -16148,6 +16213,53 @@ mod tests {
         assert_eq!(moved.2, 37, "the dragged note keeps its velocity");
         app.mouse_up();
         assert_eq!(app.mouse_note, None);
+    }
+
+    /// A double-click on a note opens its Note properties; the window's velocity knob edits it, Accept is one undo step
+    /// (spec: ui/piano-note-properties.md §1, §2).
+    #[test]
+    fn a_double_click_on_a_note_opens_its_properties() {
+        let (mut app, mut c) = piano_with_note(37);
+        let n = piano::notes(&app.state.session)[0];
+        let r = app.piano_geom().unwrap().note_rect(&n).unwrap();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(!app.state.shown(Win::NoteProps), "one click only selects");
+        app.mouse_down();
+        app.mouse_up();
+        assert!(app.state.shown(Win::NoteProps) && app.state.in_front(Win::NoteProps));
+        assert_eq!(piano::notes(&app.state.session)[0], n, "the double-click moved nothing");
+        frame(&mut app, &mut c, None);
+        app.state.set_knob(crate::knobs::KnobId::NoteProp(1), 0.5);
+        assert_eq!(piano::notes(&app.state.session)[0].velocity, 37, "no preview: the note waits for Accept");
+        frame(&mut app, &mut c, None);
+        hit_rect(&app, &Action::NoteProps(crate::note_props::Act::Accept)); // the window draws its Accept button
+        app.act(Action::NoteProps(crate::note_props::Act::Accept));
+        assert_eq!(piano::notes(&app.state.session)[0].velocity, 64);
+        assert!(!app.state.shown(Win::NoteProps));
+        assert!(piano::undo(&mut app.state));
+        assert_eq!(piano::notes(&app.state.session)[0].velocity, 37, "one step for the window");
+    }
+
+    /// S and O (typing keyboard off) make new notes slide and portamento notes; the colour tab's toggles show it (spec:
+    /// ui/piano-note-properties.md §5).
+    #[test]
+    fn s_and_o_set_the_type_of_new_notes() {
+        use crate::keys::Key;
+        let (mut app, mut c) = piano_with_note(100);
+        app.state.toggles.retain(|t| *t != "typing");
+        app.key(&Key::Character("s".into()), false, false);
+        app.key(&Key::Character("o".into()), false, false);
+        assert_eq!(piano::new_type(&app.state), (true, true));
+        app.mouse_move(700.0, 500.0);
+        app.mouse_down();
+        app.mouse_up();
+        let n = *piano::notes(&app.state.session).last().unwrap();
+        assert!(n.slide() && n.porta(), "the new note took both");
+        frame(&mut app, &mut c, None);
+        app.act(Action::PianoNewType(true));
+        assert_eq!(piano::new_type(&app.state), (false, true), "the tab's slide toggle");
     }
 
     /// The Playback tool holds the notes under its line, at their velocities, until they are left or the button goes up;
