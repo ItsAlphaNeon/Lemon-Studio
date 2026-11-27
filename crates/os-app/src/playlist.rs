@@ -730,6 +730,9 @@ pub enum EditTarget {
     MixerInsert(u16),
     /// The mixer track menu's Create group...: the track's name, then the group's separators (`mixer::create_group`).
     MixerGroup(u16),
+    /// The track routing menu's Create submix...: the name of its sources and, with " master", of the track
+    /// (`mixer::name_submix`).
+    MixerSubmix(u16),
     /// TOOLS > Chord progression tool...: the progression written into the piano roll (`chord_tool::write`).
     Chords,
     /// The current arrangement's name (§12).
@@ -3619,7 +3622,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::SlotName(t, k) => crate::edit::mixer::slot_name(&s.session, t, k).unwrap_or_default(),
         EditTarget::MemberName(t, k, id) => crate::edit::container::member(&s.session, t, k, id).map(|m| m.shown().to_string()).unwrap_or_default(),
         EditTarget::MixerInsert(_) => "2".into(),
-        EditTarget::MixerGroup(_) => String::new(),
+        EditTarget::MixerGroup(_) | EditTarget::MixerSubmix(_) => String::new(),
         EditTarget::Chords => crate::chord_tool::last(),
         EditTarget::TypeIn(t, norm) => crate::typein_ui::text(s, t, norm),
     };
@@ -3644,6 +3647,11 @@ pub fn commit_edit(s: &mut State) {
             }
             return;
         }
+    }
+    // Create submix...'s names join its routing step (spec: ui/mixer-selection.md §1.1): no playlist step first.
+    if let EditTarget::MixerSubmix(n) = e.target {
+        crate::mixer::name_submix(s, n, &e.text);
+        return;
     }
     snapshot(&mut s.session);
     let text = e.text.trim().to_string();
@@ -3725,6 +3733,8 @@ pub fn commit_edit(s: &mut State) {
             crate::history::settle(&mut s.session);
             crate::mixer::create_group(s, n, &text);
         }
+        // Above, before the playlist step.
+        EditTarget::MixerSubmix(_) => {}
         EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
         // A pattern number the project holds no pattern for gets one, named.
         EditTarget::PatternName(n) => {

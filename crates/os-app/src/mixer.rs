@@ -54,6 +54,9 @@ macro_rules! set_track {
     }};
 }
 
+mod selection;
+pub use selection::{create_submix, name_submix, route_from, Submix};
+
 /// The interface's edit made of `commands`: one undo step named `name` (none when nothing changed); the error as the
 /// message when they can't be applied.
 fn apply(s: &mut State, name: &'static str, commands: Vec<Command>) -> Option<String> {
@@ -157,6 +160,11 @@ pub enum MCmd {
     RenderWave(u16),
     /// Route the selected tracks to `dst`: only = drop their other routes, side = sidechain (level 0).
     Route { dst: u16, only: bool, side: bool },
+    /// Route this track to selected (only), Sidechain this track to selected (only): `src` to the other selected
+    /// tracks (spec: ui/mixer-selection.md §1).
+    RouteFrom { src: u16, only: bool, side: bool },
+    /// Create submix...: the other selected tracks routed to this one, then its name box (`selection::create_submix`).
+    Submix(u16),
     /// Layout menu: Wide (the only layout drawn; the others are greyed out).
     Layout(u8),
     /// Options ▸ Cable physics: open / close the cables' debug panel (Lemon Studio's own).
@@ -281,6 +289,8 @@ pub struct MixerUi {
     pub faders: FaderGroup,
     /// The track Shift+wheel last moved, and where the mouse was then (`wheel_move`).
     pub move_grab: Option<(u16, (f32, f32))>,
+    /// Create submix... waiting for its name box.
+    pub submix: Option<Submix>,
 }
 
 /// What drags on selected faders keep while the selection lasts (spec: ui/mixer.md §4): each selected track's level at
@@ -315,7 +325,7 @@ impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, meters: Vec::new(),
             meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None, waveforms: false, waves: Vec::new(), extra: true,
-            faders: FaderGroup::default(), move_grab: None }
+            faders: FaderGroup::default(), move_grab: None, submix: None }
     }
 }
 
@@ -1213,7 +1223,7 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
                 PItem::new("Route selected channels starting from this track", mx(MCmd::RouteChannels { dst: n, spread: true })).key("Shift+Ctrl+L"),
             ],
         ),
-        track_routing(s, n),
+        selection::track_routing(s, n),
         PItem::sub(
             "Select",
             vec![
@@ -1264,22 +1274,6 @@ fn state_items(cmd: impl Fn(std::path::PathBuf) -> Cmd) -> Vec<PItem> {
 /// Entries that do not apply to the master (its strip is fixed and starts no group).
 fn insert_only(n: u16, it: PItem) -> PItem {
     if n == 0 { it.off() } else { it }
-}
-
-/// Track routing ▸ (Lemon Studio's design; greyed in the original's menu as captured, its entries not seen): the ▲ menu's
-/// four entries (spec: ui/mixer.md §5) for the other selected tracks into track `n`. Greyed when no other track is
-/// selected (the master never sends).
-fn track_routing(s: &State, n: u16) -> PItem {
-    let mx = |only, side| Cmd::Mixer(MCmd::Route { dst: n, only, side });
-    let items = vec![
-        PItem::new("Route selected tracks to this track", mx(false, false)),
-        PItem::new("Route selected tracks to this track only", mx(true, false)),
-        PItem::sep(),
-        PItem::new("Sidechain selected tracks to this track", mx(false, true)),
-        PItem::new("Sidechain selected tracks to this track only", mx(true, true)),
-    ];
-    let it = PItem::sub("Track routing", items);
-    if is_selected(s, n) && selected(s).iter().any(|&t| t != n && t != 0) { it } else { it.off() }
 }
 
 /// Mixer options (title-bar ▸), §6.2: its own items, then the track menu's.
@@ -1449,6 +1443,11 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     }
     if let MCmd::Route { dst, only, side } = c {
         let m = route(&mut app.state, dst, only, side);
+        app.invalidate();
+        return m;
+    }
+    if let MCmd::RouteFrom { src, only, side } = c {
+        let m = route_from(&mut app.state, src, only, side);
         app.invalidate();
         return m;
     }
@@ -1671,6 +1670,14 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             crate::playlist::start_edit(s, EditTarget::MixerGroup(n), at);
             None
         }
+        // spec: ui/mixer-selection.md §1.1: the routing at once, then the name box.
+        MCmd::Submix(n) => {
+            let m = create_submix(s, n);
+            if s.mixer.submix.as_ref().is_some_and(|m| m.track == n) {
+                crate::playlist::start_edit(s, EditTarget::MixerSubmix(n), at);
+            }
+            m
+        }
         MCmd::SelectGroup(n) => {
             let Some(g) = group(&s.session, n) else { return Some("Not in a group".into()) };
             s.selected_mixer = n;
@@ -1692,7 +1699,8 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         | MCmd::Reset(_)
         | MCmd::ResetRouting(_)
         | MCmd::UnrouteTo(_)
-        | MCmd::Route { .. } => None,
+        | MCmd::Route { .. }
+        | MCmd::RouteFrom { .. } => None,
         MCmd::OpenState(n, p) => load_state(s, n, &p),
         MCmd::InsertState(n, p) => insert_state(s, n, &p),
         MCmd::ViewWaveforms => {
@@ -3209,31 +3217,6 @@ mod tests {
         let mut t = form(&a).tracks;
         t.sort_unstable();
         assert_eq!(t, [2, 4]);
-    }
-
-    /// Track routing ▸ (Lemon Studio's design): greyed until another track is selected; then the ▲ menu's four entries
-    /// route or sidechain the other selected tracks into this one, one undo step each.
-    #[test]
-    fn track_routing_routes_the_selected_tracks_here() {
-        let mut a = app();
-        let entry = |a: &App, n: u16| track_items(&a.state, n).into_iter().find(|i| i.label == "Track routing").unwrap();
-        select(&mut a.state, 5, false);
-        assert!(!entry(&a, 5).enabled, "only this track selected");
-        select(&mut a.state, 2, true);
-        select(&mut a.state, 3, true);
-        select(&mut a.state, 5, true);
-        let e = entry(&a, 5);
-        assert!(e.enabled);
-        let labels: Vec<&str> = e.children.iter().filter(|i| !i.sep).map(|i| i.label.as_ref()).collect();
-        assert_eq!(labels, ["Route selected tracks to this track", "Route selected tracks to this track only", "Sidechain selected tracks to this track", "Sidechain selected tracks to this track only"]);
-        assert!(!entry(&a, 9).enabled, "a track outside the selection");
-        let steps = a.state.session.history.at();
-        crate::playlist::run(&mut a, e.children[0].cmd.clone());
-        assert_eq!((send(&a.state.session, 2, 5), send(&a.state.session, 3, 5), send(&a.state.session, 2, 0)), (Some(0.8), Some(0.8), Some(0.8)));
-        assert_eq!(a.state.session.history.at(), steps + 1);
-        crate::playlist::run(&mut a, e.children[4].cmd.clone());
-        assert_eq!((send(&a.state.session, 2, 5), send(&a.state.session, 2, 0)), (Some(0.0), None), "sidechained only: the master route goes");
-        assert_eq!(send(&a.state.session, 5, 5), None, "this track does not route to itself");
     }
 
     /// The slot menu's Change color... and Random color (Lemon Studio's design): the slot gets a colour (Default clears
