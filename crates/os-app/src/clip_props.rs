@@ -78,6 +78,16 @@ pub fn menu_items(c: &Clip, i: usize) -> Vec<crate::playlist::PItem> {
     ]
 }
 
+/// What an audio clip's title shows after its name for its own pitch: `+3`, `-2.5` (semitones, one decimal when it
+/// has cents); nothing at 0 (spec: ui/audio-clip-pitch-reverse.md "What the owner sees").
+pub fn pitch_label(c: &Clip) -> Option<String> {
+    match c.pitch_cents() {
+        0 => None,
+        p if p % 100 == 0 => Some(format!("{:+}", p / 100)),
+        p => Some(format!("{:+.1}", f64::from(p) / 100.0)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,15 +220,21 @@ mod tests {
     }
 
     /// The whole way through Lemon Sampler, as FILE ▸ Export audio plays it: a clip of a rising ramp reversed plays
-    /// falling, and pitched an octave up plays it twice as fast.
+    /// falling, and pitched an octave up plays it twice as fast. With `reopen` the project is saved as a `.lemon` file
+    /// and opened in a new app first, which exports it without any edit (the reversed copy is switched on as the
+    /// project's samplers start).
     #[test]
     fn reversed_and_pitched_clips_export_through_lemon_sampler() {
         use std::time::Duration;
-        let render = |rev: bool, semis: i32| -> Vec<f32> {
+        let fresh = || {
             let mut a = App::new(None);
             a.state.session.plugins = crate::plugins::Plugins::default();
             a.state.session.plugins.available = crate::plugins::builtin();
             a.state.session.plugins.set_rate(48000);
+            a
+        };
+        let render = |rev: bool, semis: i32, reopen: bool| -> Vec<f32> {
+            let mut a = fresh();
             let wav = std::env::temp_dir().join(format!("os-app-clip-rev-{}-{rev}-{semis}.wav", std::process::id()));
             let ramp: Vec<f32> = (0..24000).flat_map(|k| [k as f32 / 24000.0; 2]).collect();
             os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &ramp).unwrap();
@@ -233,6 +249,19 @@ mod tests {
             }
             run(&mut a, Cmd::PitchSelected(semis));
             os_session::clip_reverse::sync(&a.state.session);
+            let saved = std::env::temp_dir().join(format!("os-app-clip-rev-{}-{rev}-{semis}.lemon", std::process::id()));
+            if reopen {
+                a.save_to(saved.clone());
+                a = fresh();
+                a.open(saved.clone());
+                let t0 = std::time::Instant::now();
+                while a.state.session.loading.is_some() && t0.elapsed() < Duration::from_secs(30) {
+                    a.plugin_tick();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                a.plugin_tick();
+                assert!(clips(&a.state.session).iter().any(|c| c.reversed() == rev), "settings read back");
+            }
             let p = crate::rack::play_project(&a.state);
             let out =
                 std::env::temp_dir().join(format!("os-app-clip-rev-{}-{rev}-{semis}-export.wav", std::process::id()));
@@ -247,16 +276,114 @@ mod tests {
                 }
             }
             let bytes = std::fs::read(&out).expect("file written");
-            let _ = (std::fs::remove_file(&out), std::fs::remove_file(&wav));
+            let _ = (std::fs::remove_file(&out), std::fs::remove_file(&wav), std::fs::remove_file(&saved));
             bytes[44..].chunks_exact(8).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
         };
-        let plain = render(false, 0);
+        let plain = render(false, 0, false);
         let k = 0.2 / plain[4800];
         assert!(plain[4800] > 0.05, "forward plays: {}", plain[4800]);
-        let rev = render(true, 0);
-        assert!((rev[4800] * k - 0.8).abs() < 0.02, "reversed, 0.1 s in: {}", rev[4800] * k);
-        assert!(rev[9600] < rev[4800], "falling");
-        let up = render(false, 12);
-        assert!((up[4800] * k - 0.4).abs() < 0.02, "an octave up, 0.1 s in: {}", up[4800] * k);
+        for reopen in [false, true] {
+            let rev = render(true, 0, reopen);
+            assert!((rev[4800] * k - 0.8).abs() < 0.02, "reversed (reopened: {reopen}), 0.1 s in: {}", rev[4800] * k);
+            assert!(rev[9600] < rev[4800], "falling");
+            let up = render(false, 12, reopen);
+            assert!((up[4800] * k - 0.4).abs() < 0.02, "an octave up (reopened: {reopen}), 0.1 s in: {}", up[4800] * k);
+        }
+    }
+
+    /// The title's pitch: whole semitones signed, cents as one decimal, nothing at 0.
+    #[test]
+    fn pitch_label_after_the_name() {
+        let mut c = Clip::new(0, 384, 0, ClipSource::Channel(0));
+        assert_eq!(pitch_label(&c), None);
+        c.set_pitch_semitones(3);
+        assert_eq!(pitch_label(&c).as_deref(), Some("+3"));
+        c.set_pitch_semitones(-2);
+        c.set_fine_cents(-50);
+        assert_eq!(pitch_label(&c).as_deref(), Some("-2.5"));
+        c.set_pitch_semitones(0);
+        c.set_fine_cents(0);
+        assert_eq!(pitch_label(&c), None);
+    }
+
+    /// Writes `.lemon` projects for checking the playlist's clip edits in the real app (`lemonstudio <file> --view
+    /// playlist --wait --screenshot <png>`, `lemonstudio --render <file> <wav> --builtin-only`) into the folder named by
+    /// `OS_PLAYLIST_CHECK_DIR`: `ramp.wav` (a rising 2 s ramp), `props.lemon` (the ramp plain on track 1, reversed and
+    /// panned left on track 2, an octave up on track 3), `reversed.lemon`, `pitched.lemon`, `chop.lemon` (chopped by
+    /// beat), `merge.lemon` (two pattern clips merged) and `clone.lemon` (track 1 cloned). Each project is opened again
+    /// and saved as `<name>-resaved.lemon`; the clips' settings must survive.
+    #[test]
+    #[ignore]
+    fn write_check_projects() {
+        let Ok(dir) = std::env::var("OS_PLAYLIST_CHECK_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("ramp.wav");
+        let ramp: Vec<f32> = (0..96000).flat_map(|k| [k as f32 / 96000.0; 2]).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &ramp).unwrap();
+        let wav = wav.to_string_lossy().to_string();
+        let save = |app: &mut App, name: &str| {
+            // Windows are kept as f32 in the file, as in FL's.
+            let path = dir.join(format!("{name}.lemon"));
+            app.save_to(path.clone());
+            let mut back = App::new(None);
+            back.open(path);
+            let of = |a: &App| {
+                let mut v: Vec<_> =
+                    clips(&a.state.session).iter().map(|c| (c.position, c.track, c.length, c.window.map(|(a, b)| (a as f32, b as f32)), c.source, c.props)).collect();
+                v.sort_by_key(|x| (x.0, x.1));
+                v
+            };
+            let (want, got) = (of(app), of(&back));
+            assert_eq!(got, want, "{name} opens as saved");
+            back.save_to(dir.join(format!("{name}-resaved.lemon")));
+            eprintln!("{name}: {want:?}");
+        };
+        let audio = |tracks: &[(bool, i32, f32)]| {
+            let mut a = App::new(None);
+            for (t, &(rev, semis, pan)) in tracks.iter().enumerate() {
+                let i = crate::playlist::add_audio_clip(&mut a.state, &wav, t as u16, 0).expect("audio clip added");
+                let c = &mut arr_mut(&mut a.state.session).clips[i];
+                c.set_reversed(rev);
+                c.set_pitch_semitones(semis);
+                c.set_clip_pan(pan);
+            }
+            a
+        };
+        save(&mut audio(&[(false, 0, 0.0), (true, 0, -0.5), (false, 12, 0.0)]), "props");
+        save(&mut audio(&[(true, 0, 0.0)]), "reversed");
+        save(&mut audio(&[(false, 12, 0.0)]), "pitched");
+        let mut a = audio(&[(false, 0, 0.0)]);
+        run(&mut a, Cmd::Chop(0, crate::clip_chop::Unit::Beat));
+        assert!(clips(&a.state.session).len() > 1, "chopped");
+        save(&mut a, "chop");
+
+        let patterns = || {
+            let mut a = App::new(None);
+            let mut p = crate::projects::test_project();
+            let ch = p.channels[0].index;
+            p.patterns = vec![
+                os_model::Pattern { number: 1, notes: vec![os_model::Note::step(ch, 0), os_model::Note::step(ch, 96)], ..Default::default() },
+                os_model::Pattern { number: 2, notes: vec![os_model::Note::step(ch, 48)], ..Default::default() },
+            ];
+            a.state.session.project = crate::locked::Locked::new(p);
+            a.state.session.control.settle(a.state.session.project.get_mut());
+            arr_mut(&mut a.state.session).clips = vec![
+                Clip::new(0, 384, 0, ClipSource::Pattern(1)),
+                Clip::new(384, 384, 0, ClipSource::Pattern(2)),
+                Clip::new(1536, 384, 1, ClipSource::Pattern(1)),
+            ];
+            arr_mut(&mut a.state.session).tracks[0].name = Some("Drums".into());
+            a
+        };
+        let mut a = patterns();
+        a.state.playlist.sel = vec![0, 1];
+        run(&mut a, Cmd::MergeClips(false));
+        assert!(clips(&a.state.session).iter().any(|c| c.source == ClipSource::Pattern(3)), "merged");
+        save(&mut a, "merge");
+        let mut a = patterns();
+        run(&mut a, Cmd::CloneTrack(0));
+        assert_eq!(clips(&a.state.session).len(), 5, "cloned");
+        save(&mut a, "clone");
     }
 }

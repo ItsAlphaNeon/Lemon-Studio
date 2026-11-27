@@ -312,13 +312,28 @@ pub fn audio_speed(s: &crate::session::Session, src: ClipSource) -> f64 {
         let duration = if sound.stretch_time().is_some() { sample_secs(s, ch) } else { 0.0 };
         1.0 / sound.stretch_factor(duration, s.project.tick_tempo(s.tempo()))
     };
-    let pitched = sound.channel_pitch_applies() && !os_model::stretch_mode::realtime(sound.stretch_mode());
-    if !pitched {
+    if !pitch_moves_speed(sound) {
         return stretch;
     }
     let main = ch.misc.main_pitch.then(|| i32::from(s.project.main_pitch.unwrap_or(0)));
     let cents = f64::from(os_engine::laws::channel_pitch(f64::from(ch.pitch_cents), ch.misc.fine, ch.misc.root, main)) + 6000.0;
     stretch * os_engine::laws::cents_rate(cents)
+}
+
+/// Whether a pitch plays the channel's sample faster or slower (Resample and the methods that stretch first), rather
+/// than keeping its length (the realtime stretch methods).
+fn pitch_moves_speed(sound: &os_model::ChannelSound) -> bool {
+    sound.channel_pitch_applies() && !os_model::stretch_mode::realtime(sound.stretch_mode())
+}
+
+/// How much faster audio clip `c` plays its sample for its own pitch: `2^(cents / 1200)` where a pitch moves the
+/// speed, 1 where the channel keeps the length (spec: ui/audio-clip-pitch-reverse.md "How it plays").
+pub fn clip_pitch_speed(s: &crate::session::Session, c: &Clip) -> f64 {
+    let ClipSource::Channel(ch) = c.source else { return 1.0 };
+    match channel_of(s, ch) {
+        Some(ch) if c.pitch_cents() != 0 && pitch_moves_speed(&ch.sound) => os_engine::laws::cents_rate(f64::from(c.pitch_cents())),
+        _ => 1.0,
+    }
 }
 
 /// Works every audio clip's length out again from its trims and its channel's stretch, pitch and the tempo, as FL

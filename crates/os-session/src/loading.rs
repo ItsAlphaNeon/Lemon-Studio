@@ -217,6 +217,9 @@ pub fn sync_samplers(ses: &mut crate::session::Session, deadline: Option<std::ti
     if added {
         ses.transport.set_instruments(ses.plugins.instruments());
         ses.dirty = true;
+        // A new instance starts without its reversed copy: an opened project's reversed clips need it before they
+        // play (spec: ui/audio-clip-pitch-reverse.md "How it plays").
+        crate::clip_reverse::sync(ses);
     }
     done
 }
