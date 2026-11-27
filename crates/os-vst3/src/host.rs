@@ -492,6 +492,9 @@ impl IPlugFrame for Frame {
 
 // ---- memory stream (state) ----
 
+/// Upper bound on an in-memory plugin state stream (256 MiB).
+const MAX_STREAM_BYTES: usize = 256 * 1024 * 1024;
+
 #[VST3(implements(IBStream))]
 pub struct Stream {
     data: RefCell<Vec<u8>>,
@@ -514,13 +517,15 @@ impl Stream {
 
 impl IBStream for Stream {
     unsafe fn read(&self, buffer: *mut c_void, num_bytes: i32, num_bytes_read: *mut i32) -> tresult {
-        if buffer.is_null() || num_bytes < 0 {
+        if num_bytes < 0 || (num_bytes > 0 && buffer.is_null()) {
             return kInvalidArgument;
         }
         let data = self.data.borrow();
         let pos = self.pos.get().min(data.len());
         let n = (num_bytes as usize).min(data.len() - pos);
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), buffer as *mut u8, n) };
+        if n > 0 {
+            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().add(pos), buffer as *mut u8, n) };
+        }
         self.pos.set(pos + n);
         if !num_bytes_read.is_null() {
             unsafe { *num_bytes_read = n as i32 };
@@ -529,16 +534,21 @@ impl IBStream for Stream {
     }
 
     unsafe fn write(&self, buffer: *const c_void, num_bytes: i32, num_bytes_written: *mut i32) -> tresult {
-        if buffer.is_null() || num_bytes < 0 {
+        if num_bytes < 0 || (num_bytes > 0 && buffer.is_null()) {
             return kInvalidArgument;
         }
         let mut data = self.data.borrow_mut();
         let (pos, n) = (self.pos.get(), num_bytes as usize);
-        if data.len() < pos + n {
-            data.resize(pos + n, 0);
+        let Some(end) = pos.checked_add(n).filter(|&end| end <= MAX_STREAM_BYTES) else {
+            return kInvalidArgument;
+        };
+        if data.len() < end {
+            data.resize(end, 0);
         }
-        unsafe { std::ptr::copy_nonoverlapping(buffer as *const u8, data.as_mut_ptr().add(pos), n) };
-        self.pos.set(pos + n);
+        if n > 0 {
+            unsafe { std::ptr::copy_nonoverlapping(buffer as *const u8, data.as_mut_ptr().add(pos), n) };
+        }
+        self.pos.set(end);
         if !num_bytes_written.is_null() {
             unsafe { *num_bytes_written = n as i32 };
         }
@@ -546,15 +556,17 @@ impl IBStream for Stream {
     }
 
     unsafe fn seek(&self, pos: i64, mode: i32, result: *mut i64) -> tresult {
-        let len = self.data.borrow().len() as i64;
         let base = match mode {
-            0 => 0,
-            1 => self.pos.get() as i64,
-            2 => len,
+            0 => Ok(0i64),
+            1 => i64::try_from(self.pos.get()),
+            2 => i64::try_from(self.data.borrow().len()),
             _ => return kInvalidArgument,
         };
-        let to = (base + pos).max(0);
-        self.pos.set(to as usize);
+        let Ok(base) = base else { return kInvalidArgument };
+        let Some(to) = base.checked_add(pos) else { return kInvalidArgument };
+        let to = to.max(0);
+        let Ok(next) = usize::try_from(to) else { return kInvalidArgument };
+        self.pos.set(next);
         if !result.is_null() {
             unsafe { *result = to };
         }
@@ -565,7 +577,8 @@ impl IBStream for Stream {
         if pos.is_null() {
             return kInvalidArgument;
         }
-        unsafe { *pos = self.pos.get() as i64 };
+        let Ok(cur) = i64::try_from(self.pos.get()) else { return kInvalidArgument };
+        unsafe { *pos = cur };
         kResultOk
     }
 }

@@ -18,7 +18,7 @@ use clap_sys::ext::context_menu::{
 use clap_sys::host::clap_host;
 use clap_sys::id::clap_id;
 
-use crate::{HostData, Plugin};
+use crate::Plugin;
 
 /// Action id of "Create automation clip".
 const CREATE_AUTOMATION: clap_id = 1;
@@ -48,8 +48,8 @@ unsafe extern "C" fn populate(_host: *const clap_host, target: *const clap_conte
 }
 
 unsafe extern "C" fn perform(host: *const clap_host, target: *const clap_context_menu_target, action_id: clap_id) -> bool {
-    let Some(id) = (unsafe { param_target(target) }).filter(|_| action_id == CREATE_AUTOMATION && !host.is_null()) else { return false };
-    let data = unsafe { &*((*host).host_data as *const HostData) };
+    let Some(id) = (unsafe { param_target(target) }).filter(|_| action_id == CREATE_AUTOMATION) else { return false };
+    let Some(data) = (unsafe { crate::host_data(host) }) else { return false };
     if let Ok(mut q) = data.automate.lock() {
         q.push(id);
     }

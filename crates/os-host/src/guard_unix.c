@@ -96,7 +96,9 @@ static void chain(int sig, siginfo_t *info, void *context)
                 old->sa_sigaction(sig, info, context);
                 return;
             }
-        } else if (old->sa_handler != SIG_DFL && old->sa_handler != SIG_IGN) {
+        } else if (old->sa_handler == SIG_IGN) {
+            return;
+        } else if (old->sa_handler != SIG_DFL) {
             old->sa_handler(sig);
             return;
         }

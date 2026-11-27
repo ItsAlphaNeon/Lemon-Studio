@@ -303,22 +303,21 @@ impl Pool {
             panic: Mutex::new(None),
             spin: SPIN,
         });
-        let handles = (0..workers)
-            .filter_map(|w| {
-                let (shared, init) = (shared.clone(), init.clone());
-                std::thread::Builder::new()
-                    .name(format!("lemonstudio-mix-{}", w + 1))
-                    .spawn(move || {
-                        AUDIO.with(|a| a.set(true));
-                        if let Some(init) = init {
-                            init();
-                        }
-                        let _ = shared.sleepers[w].thread.set(std::thread::current());
-                        worker(&shared, w);
-                    })
-                    .ok()
-            })
-            .collect();
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let w = handles.len();
+            let (shared, init) = (shared.clone(), init.clone());
+            if let Ok(h) = std::thread::Builder::new().name(format!("lemonstudio-mix-{}", w + 1)).spawn(move || {
+                AUDIO.with(|a| a.set(true));
+                if let Some(init) = init {
+                    init();
+                }
+                let _ = shared.sleepers[w].thread.set(std::thread::current());
+                worker(&shared, w);
+            }) {
+                handles.push(h);
+            }
+        }
         Arc::new(Pool { shared, handles })
     }
 

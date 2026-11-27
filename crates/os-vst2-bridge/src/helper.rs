@@ -32,8 +32,9 @@ struct Helper {
     main: Main,
     effect: AtomicPtr<Effect>,
     /// What the plugin reads through pointers the host gave: the transport (`GET_TIME`) and its folder (`DIRECTORY`).
+    /// Directories are append-only so pointers returned to the plugin stay valid for the helper's lifetime.
     time: UnsafeCell<TimeInfo>,
-    directory: Mutex<CString>,
+    directory: Mutex<Vec<CString>>,
     /// The last event list sent, alive until the next (plugins read it during the next process call).
     events: Mutex<(Vec<MidiEvent>, Vec<isize>)>,
     /// One spontaneous call at a time.
@@ -131,7 +132,7 @@ pub fn main() -> i32 {
         main,
         effect: AtomicPtr::new(std::ptr::null_mut()),
         time: UnsafeCell::new(TimeInfo::default()),
-        directory: Mutex::new(CString::default()),
+        directory: Mutex::new(Vec::new()),
         events: Mutex::new((Vec::new(), Vec::new())),
         cb_lock: Mutex::new(()),
         quit: AtomicBool::new(false),
@@ -372,9 +373,15 @@ pub unsafe extern "C" fn callback(effect: *mut Effect, opcode: i32, index: i32, 
                 if data.is_empty() {
                     return 0;
                 }
-                let mut d = h.directory.lock().unwrap_or_else(|x| x.into_inner());
-                *d = CString::new(until_nul(&data)).unwrap_or_default();
-                d.as_ptr() as isize
+                let bytes = until_nul(&data);
+                let mut dirs = h.directory.lock().unwrap_or_else(|x| x.into_inner());
+                if let Some(existing) = dirs.iter().find(|s| s.as_bytes() == bytes) {
+                    return existing.as_ptr() as isize;
+                }
+                let s = CString::new(bytes).unwrap_or_default();
+                let ptr = s.as_ptr();
+                dirs.push(s);
+                ptr as isize
             }
             o if proto::host_out_text(o) && !ptr.is_null() => {
                 let n = data.len().min(63);

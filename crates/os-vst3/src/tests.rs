@@ -221,6 +221,14 @@ fn host_objects_follow_the_interfaces() {
         assert_eq!((n, &buf[..2]), (2, &b"ef"[..]));
         s.get().tell(&mut pos);
         assert_eq!(pos, 6);
+        // Overflowing seek, negative counts, null buffers, and writes past the stream cap return errors.
+        assert_eq!(s.get().seek(i64::MAX, 1, &mut pos), vst3_sys::base::kInvalidArgument);
+        assert_eq!(s.get().read(std::ptr::null_mut(), 4, &mut n), vst3_sys::base::kInvalidArgument);
+        assert_eq!(s.get().write(std::ptr::null(), 4, &mut n), vst3_sys::base::kInvalidArgument);
+        assert_eq!(s.get().read(std::ptr::null_mut(), 0, &mut n), vst3_sys::base::kResultOk);
+        assert_eq!(s.get().write(std::ptr::null(), 0, &mut n), vst3_sys::base::kResultOk);
+        assert_eq!(s.get().seek(i64::MAX, 0, &mut pos), vst3_sys::base::kResultOk);
+        assert_eq!(s.get().write(b"x".as_ptr() as *const c_void, 1, &mut n), vst3_sys::base::kInvalidArgument);
     }
     let pc = ParamChanges::create();
     pc.get().add(3, 0, 0.1);

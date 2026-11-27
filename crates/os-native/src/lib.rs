@@ -224,7 +224,7 @@ impl Plugin {
             }
         };
         trace(&format!("instance at {obj:p}"));
-        if obj.is_null() {
+        if obj.is_null() || unsafe { (*obj).info.is_null() || (*obj).vtable.is_null() } {
             return Err(NativeError::Create(dll.to_owned()));
         }
         let info = unsafe {
