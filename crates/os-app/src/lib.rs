@@ -42,6 +42,7 @@ pub mod equiv;
 #[cfg(test)]
 pub mod open_bench;
 pub mod browser;
+pub mod browser_pick;
 pub mod browser_index;
 pub mod wav_facts;
 pub mod burn_midi;

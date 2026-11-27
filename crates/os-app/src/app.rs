@@ -1179,6 +1179,8 @@ pub struct State {
     pub motion: std::cell::RefCell<crate::motion::Motion>,
     pub browser_scroll: f32,
     pub browser_sel: Option<String>,
+    /// The other selected rows, Shift's anchor, the last click (`crate::browser_pick`).
+    pub browser_pick: crate::browser_pick::Pick,
     pub browser_drag: Option<(String, f32, f32)>,
     /// Search text and whether the search box has keyboard focus (spec: ui/browser.md §5).
     pub browser_search: String,
@@ -1635,6 +1637,7 @@ impl App {
                 motion: Default::default(),
                 browser_scroll: 0.0,
                 browser_sel: None,
+                browser_pick: Default::default(),
                 browser_drag: None,
                 browser_search: String::new(),
                 browser_search_focus: false,
