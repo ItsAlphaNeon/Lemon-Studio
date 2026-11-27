@@ -445,17 +445,19 @@ pub enum Cmd {
     /// ui/playlist-clip-properties.md §1).
     PitchSelected(i32),
     ReverseSelected,
+    /// Alt+7 / Alt+8: the selected audio clips one cent down / up (spec: ui/audio-clip-pitch-reverse.md).
+    PitchSelectedCents(i32),
     /// The clip menu's pitch and Reverse entries: the clip, and the semitones (0 = Reverse).
     ClipPitch(usize, i32),
     ClipReverse(usize),
+    /// The clip menu's Reset pitch.
+    ClipResetPitch(usize),
     /// A fade, tension or gain handle's menu entry (spec: ui/playlist-fades-gain.md).
     Handle(usize, crate::clip_handles::HCmd),
     /// Edit ▸ Automatic crossfades (spec: ui/playlist-fades-gain.md §3).
     AutoCrossfades,
     /// The audio clip menu's Chop into ▸ entries, on the clip (spec: ui/playlist-chop.md §1).
     Chop(usize, crate::clip_chop::Unit),
-    /// Edit ▸ Slice and insert space (spec: ui/playlist-chop.md §2).
-    SliceInsertSpace,
     /// Edit ▸ Merge pattern clips (false) / Merge similar pattern clips (true); the track menu's Merge pattern clips
     /// (spec: ui/playlist-merge-tracks.md §1, §2).
     MergeClips(bool),
@@ -1522,7 +1524,8 @@ pub fn paste(s: &mut State) {
     s.session.dirty = true;
 }
 
-/// Ctrl+Insert: insert the time selection's length of empty space at its start (all tracks); without a time
+/// Ctrl+Insert, and Ctrl+Alt+Insert (Slice and insert space, spec: ui/playlist-chop.md §2): insert the time
+/// selection's length of empty space at its start (all tracks), slicing the clips that cross it; without a time
 /// selection, one bar at the song position (§5, OS).
 pub fn insert_space(s: &mut State) -> (u32, u32) {
     let (r0, r1) = s.playlist.range.filter(|r| r.1 > r.0).unwrap_or_else(|| (s.session.song_pos, s.session.song_pos + bar(&s.session)));
@@ -2108,7 +2111,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Unmute", Cmd::Mute(false)).key("Shift+Alt+M"),
                 PItem::sep(),
                 PItem::new("Insert space", Cmd::InsertSpace).key("Ctrl+Ins"),
-                PItem::new("Slice and insert space", Cmd::SliceInsertSpace).key("Ctrl+Alt+Ins"),
+                // FL's two entries; Lemon Studio's Insert space already slices, so both do the same (what FL's plain
+                // Insert space does with a crossing clip is not measured: ui/playlist-chop.md §3).
+                PItem::new("Slice and insert space", Cmd::InsertSpace).key("Ctrl+Alt+Ins"),
                 PItem::new("Delete space", Cmd::DeleteSpace).key("Ctrl+Del"),
                 PItem::new("Merge pattern clips", Cmd::MergeClips(false)).key("Ctrl+G"),
                 PItem::new("Merge similar pattern clips", Cmd::MergeClips(true)).key("Shift+Ctrl+G"),
@@ -4396,6 +4401,16 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             crate::clip_props::reverse(s, &idx);
             None
         }
+        Cmd::PitchSelectedCents(d) => {
+            let idx = crate::clip_props::selected_audio(s);
+            crate::clip_props::pitch_cents(s, &idx, d);
+            None
+        }
+        Cmd::ClipResetPitch(i) => {
+            let idx = crate::clip_props::menu_targets(s, i);
+            crate::clip_props::reset_pitch(s, &idx);
+            None
+        }
         Cmd::Handle(i, c) => crate::clip_handles::run(s, i, c),
         Cmd::AutoCrossfades => {
             let on = !s.session.project.auto_crossfades.unwrap_or(false);
@@ -4410,10 +4425,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             crate::clip_chop::chop(s, &idx, unit, seed);
             None
         }
-        Cmd::SliceInsertSpace => {
-            crate::clip_chop::slice_and_insert_space(s);
-            None
-        }
+
         Cmd::MergeClips(everywhere) => crate::playlist_merge::merge_selected(s, everywhere),
         Cmd::MergeTrack(t) => crate::playlist_merge::merge_track(s, t),
         Cmd::CloneTracks => {
@@ -5050,11 +5062,17 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Named(NamedKey::End) if !ctrl && !alt => Cmd::ZoomSelection,
         // 7 / 8 pitch the selected audio clips, 9 reverses them, while the typing keyboard is off (spec:
         // ui/playlist-clip-properties.md §1).
-        Key::Character(c) if !ctrl && !alt && !shift && !app.typing_on() && matches!(c.as_str(), "7" | "8" | "9") => match c.as_str() {
-            "7" => Cmd::PitchSelected(-1),
-            "8" => Cmd::PitchSelected(1),
-            _ => Cmd::ReverseSelected,
-        },
+        // By the key's place (the digit row), whatever the layout types there. Alt+7 / Alt+8 move by a cent.
+        Key::Character(_) if !ctrl && !shift && !app.typing_on() && [7, 8, 9].iter().any(|&d| app.digit_key(key, d)) => {
+            match ([7, 8].into_iter().find(|&d| app.digit_key(key, d)), alt) {
+                (Some(7), false) => Cmd::PitchSelected(-1),
+                (Some(8), false) => Cmd::PitchSelected(1),
+                (Some(7), true) => Cmd::PitchSelectedCents(-1),
+                (Some(_), true) => Cmd::PitchSelectedCents(1),
+                (_, false) => Cmd::ReverseSelected,
+                (None, true) => return false,
+            }
+        }
         Key::Named(NamedKey::Tab) if shift && !ctrl && !alt => Cmd::CycleSnap,
         // The global snap on / off (spec: ui/global-snap.md §1).
         Key::Named(NamedKey::Backspace) if !ctrl && !alt => {
@@ -5068,7 +5086,7 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
             Cmd::Tool(PlTool::from_letter(c).expect("checked"))
         }
         Key::Named(NamedKey::Delete) if ctrl => Cmd::DeleteSpace,
-        Key::Named(NamedKey::Insert) if ctrl && alt => Cmd::SliceInsertSpace,
+        // Ctrl+Alt+Ins (Slice and insert space) is Insert space here: it already slices (spec: ui/playlist-chop.md §2).
         Key::Named(NamedKey::Insert) if ctrl => Cmd::InsertSpace,
         Key::Named(NamedKey::Delete) => Cmd::Delete,
         Key::Named(NamedKey::PageUp) => Cmd::ZoomIn,

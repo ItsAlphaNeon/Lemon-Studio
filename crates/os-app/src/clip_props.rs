@@ -9,7 +9,11 @@
 use os_model::Clip;
 
 use crate::app::State;
-use crate::playlist::{arr_edit, arr_mut, clips, source_kind, PickKind, ARRANGER_EDIT};
+use crate::playlist::{arr_edit, arr_mut, clips, source_kind, PickKind};
+
+/// The undo steps' names (spec: ui/audio-clip-pitch-reverse.md "What the owner sees").
+pub const PITCH_STEP: &str = "Pitch clips";
+pub const REVERSE_STEP: &str = "Reverse clips";
 
 /// The selected clips that are audio clips (the keys and the Edit menu's entries act on them only, §1).
 pub fn selected_audio(s: &State) -> Vec<usize> {
@@ -23,34 +27,55 @@ fn is_audio(s: &State, c: &Clip) -> bool {
 
 /// Pitches clips `idx` by `semitones` each, from their own pitch, within the range (§1). True when one changed.
 pub fn pitch(s: &mut State, idx: &[usize], semitones: i32) -> bool {
-    if idx.is_empty() {
-        return false;
-    }
-    arr_edit(s, ARRANGER_EDIT, |s| {
-        let arr = arr_mut(&mut s.session);
-        let mut changed = false;
-        for &i in idx {
-            if let Some(c) = arr.clips.get_mut(i) {
-                let to = (c.pitch_semitones() + semitones).clamp(-Clip::PITCH_RANGE, Clip::PITCH_RANGE);
-                changed |= to != c.pitch_semitones();
-                c.set_pitch_semitones(to);
-            }
-        }
-        changed
-    })
+    pitch_cents(s, idx, semitones * 100)
 }
 
-/// Switches Reverse of clips `idx`, each from its own state (§1). True when there was one.
-pub fn reverse(s: &mut State, idx: &[usize]) -> bool {
-    if idx.is_empty() {
+/// Pitches clips `idx` by `cents` each (Alt+7 / Alt+8 move one cent), from their own pitch, within the range. One
+/// undo step when one changes; none at the range's end.
+pub fn pitch_cents(s: &mut State, idx: &[usize], cents: i32) -> bool {
+    set_pitches(s, idx, |c| c.pitch_cents() + cents)
+}
+
+/// Clips `idx` each to the pitch `to` gives it (in cents, kept within the range): one undo step when one changes.
+fn set_pitches(s: &mut State, idx: &[usize], to: impl Fn(&Clip) -> i32) -> bool {
+    let all = clips(&s.session);
+    let changes: Vec<(usize, Clip)> = idx
+        .iter()
+        .filter_map(|&i| {
+            let c = *all.get(i)?;
+            let mut n = c;
+            n.set_pitch_cents(to(&c));
+            (n != c).then_some((i, n))
+        })
+        .collect();
+    if changes.is_empty() {
         return false;
     }
-    arr_edit(s, ARRANGER_EDIT, |s| {
+    arr_edit(s, PITCH_STEP, |s| {
+        let arr = arr_mut(&mut s.session);
+        for (i, n) in changes {
+            if let Some(c) = arr.clips.get_mut(i) {
+                c.props = n.props;
+            }
+        }
+    });
+    true
+}
+
+/// Reset pitch (the clip menu): clips `idx` back to no pitch of their own. One undo step when one had one.
+pub fn reset_pitch(s: &mut State, idx: &[usize]) -> bool {
+    set_pitches(s, idx, |_| 0)
+}
+
+/// Switches Reverse of clips `idx`: every one to the opposite of the first's state, so a mixed selection ends up
+/// alike (spec: ui/audio-clip-pitch-reverse.md "Several clips"). True when there was one.
+pub fn reverse(s: &mut State, idx: &[usize]) -> bool {
+    let Some(on) = idx.first().and_then(|&i| clips(&s.session).get(i)).map(|c| !c.reversed()) else { return false };
+    arr_edit(s, REVERSE_STEP, |s| {
         let arr = arr_mut(&mut s.session);
         for &i in idx {
             if let Some(c) = arr.clips.get_mut(i) {
-                let on = c.reversed();
-                c.set_reversed(!on);
+                c.set_reversed(on);
             }
         }
     });
@@ -66,16 +91,20 @@ pub fn menu_targets(s: &State, i: usize) -> Vec<usize> {
     }
 }
 
-/// The audio clip menu's entries for clip `c` (number `i`): pitch down / up and Reverse (ticked while it plays
-/// backwards).
+/// The audio clip menu's entries for clip `c` (number `i`): pitch down / up, Reset pitch while it has one, and Reverse
+/// (ticked while it plays backwards).
 pub fn menu_items(c: &Clip, i: usize) -> Vec<crate::playlist::PItem> {
     use crate::playlist::{Cmd, Mark, PItem};
-    vec![
+    let mut items = vec![
         PItem::sep(),
         PItem::new("Pitch one semitone down", Cmd::ClipPitch(i, -1)).key("7"),
         PItem::new("Pitch one semitone up", Cmd::ClipPitch(i, 1)).key("8"),
         PItem::new("Reverse", Cmd::ClipReverse(i)).key("9").mark(Mark::Check(c.reversed())),
-    ]
+    ];
+    if c.pitch_cents() != 0 {
+        items.insert(3, PItem::new("Reset pitch", Cmd::ClipResetPitch(i)));
+    }
+    items
 }
 
 /// What an audio clip's title shows after its name for its own pitch: `+3`, `-2.5` (semitones, one decimal when it
@@ -132,16 +161,74 @@ mod tests {
         assert_eq!(pitches(&app), [1, 0, 0]);
         crate::history_ui::undo(&mut app.state);
         assert_eq!(pitches(&app), [1, 1, 0], "one step per press");
-        // The range's end holds.
+        // The range's end holds, -48..+48 (spec: ui/audio-clip-pitch-reverse.md), and a press there is no undo step.
+        assert_eq!(Clip::PITCH_RANGE, 48);
         app.state.playlist.sel = vec![0];
         for _ in 0..(Clip::PITCH_RANGE + 5) {
             run(&mut app, Cmd::PitchSelected(1));
         }
         assert_eq!(pitches(&app)[0], Clip::PITCH_RANGE);
+        let steps = app.state.session.history.done();
+        crate::playlist::key(&mut app, &key("8"), false, false);
+        assert_eq!(app.state.session.history.done(), steps, "no step at the end of the range");
+        assert_eq!(app.state.session.history.newest_done(), Some(PITCH_STEP));
     }
 
-    /// 9 switches Reverse of each selected audio clip from its own state; with the typing keyboard on the digits are
-    /// not the playlist's.
+    /// Alt+7 / Alt+8 move the selected audio clips by a cent; the keys go by their place on the digit row (on AZERTY
+    /// the unshifted 7 types "è").
+    #[test]
+    fn alt_digits_move_cents_and_keys_go_by_place() {
+        let mut app = app();
+        let key = |c: &str| crate::keys::Key::Character(c.into());
+        app.code = Some(crate::keys::KeyCode::Digit8);
+        assert!(crate::playlist::key(&mut app, &key("8"), false, true));
+        assert_eq!(clips(&app.state.session)[0].pitch_cents(), 1);
+        app.code = Some(crate::keys::KeyCode::Digit7);
+        crate::playlist::key(&mut app, &key("è"), false, true);
+        crate::playlist::key(&mut app, &key("è"), false, true);
+        assert_eq!(clips(&app.state.session)[0].pitch_cents(), -1);
+        assert_eq!(pitch_label(&clips(&app.state.session)[0]).as_deref(), Some("-0.0"));
+        crate::playlist::key(&mut app, &key("è"), false, false);
+        assert_eq!(clips(&app.state.session)[0].pitch_cents(), -101, "a semitone down from -1 cent");
+        app.code = Some(crate::keys::KeyCode::Digit9);
+        crate::playlist::key(&mut app, &key("ç"), false, false);
+        assert!(clips(&app.state.session)[0].reversed());
+        app.code = None;
+    }
+
+    /// Reverse on a mixed selection sets every clip to the opposite of the first selected clip's state (spec:
+    /// ui/audio-clip-pitch-reverse.md "Several clips"), one "Reverse clips" step.
+    #[test]
+    fn reverse_on_a_mixed_selection_follows_the_first_clip() {
+        let mut app = app();
+        let rev = |app: &App| clips(&app.state.session).iter().map(Clip::reversed).collect::<Vec<_>>();
+        arr_mut(&mut app.state.session).clips[1].set_reversed(true);
+        app.state.playlist.sel = vec![0, 1];
+        run(&mut app, Cmd::ReverseSelected);
+        assert_eq!(rev(&app), [true, true, false]);
+        assert_eq!(app.state.session.history.newest_done(), Some(REVERSE_STEP));
+        app.state.playlist.sel = vec![1, 0];
+        arr_mut(&mut app.state.session).clips[0].set_reversed(false);
+        run(&mut app, Cmd::ReverseSelected);
+        assert_eq!(rev(&app), [false, false, false], "clip 1 (selected first) was on: both go off");
+    }
+
+    /// The clip menu has Reset pitch while the clip has a pitch; it acts on the selection the clip is in.
+    #[test]
+    fn reset_pitch_entry() {
+        let mut app = app();
+        let has = |app: &App| clip_menu(&app.state.session, 0, 0.0, 0.0).items.iter().any(|i| i.label == "Reset pitch");
+        assert!(!has(&app));
+        run(&mut app, Cmd::PitchSelectedCents(-250));
+        assert!(has(&app));
+        let entry = clip_menu(&app.state.session, 0, 0.0, 0.0).items.into_iter().find(|i| i.label == "Reset pitch").unwrap();
+        run(&mut app, entry.cmd);
+        assert_eq!(pitches(&app), [0, 0, 0]);
+        assert_eq!(clips(&app.state.session)[0].pitch_cents(), 0);
+    }
+
+    /// 9 switches Reverse of the selected audio clips (all as the first one's opposite); with the typing keyboard on
+    /// the digits are not the playlist's.
     #[test]
     fn nine_reverses_and_typing_keyboard_takes_the_digits() {
         let mut app = app();

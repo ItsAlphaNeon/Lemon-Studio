@@ -113,15 +113,10 @@ pub fn menu_items(i: usize) -> Vec<crate::playlist::PItem> {
     )]
 }
 
-/// The clips a Chop into entry on clip `i` acts on: the selection when `i` is in it, else `i` alone.
+/// The clips a Chop into entry on clip `i` acts on: the selected audio clips when `i` is selected, else `i` alone
+/// (`clip_props::menu_targets`).
 pub fn targets(s: &State, i: usize) -> Vec<usize> {
-    if s.playlist.sel.contains(&i) { s.playlist.sel.clone() } else { vec![i] }
-}
-
-/// Edit ▸ Slice and insert space (Ctrl+Alt+Ins, §2): the clips crossing the time selection's start are sliced there,
-/// and everything from the start on moves right by the selection's length. One undo step.
-pub fn slice_and_insert_space(s: &mut State) -> (u32, u32) {
-    arr_edit(s, ARRANGER_EDIT, crate::playlist::insert_space)
+    crate::clip_props::menu_targets(s, i)
 }
 
 #[cfg(test)]
@@ -296,6 +291,17 @@ mod tests {
         assert_eq!(spans(&app).len(), 3);
     }
 
+    /// Chop into on a clip of a selection chops the selected audio clips only (`clip_props::menu_targets`).
+    #[test]
+    fn chop_into_leaves_selected_pattern_clips() {
+        let mut app = app();
+        arr_mut(&mut app.state.session).clips.push(Clip::new(0, 768, 1, ClipSource::Pattern(1)));
+        app.state.playlist.sel = vec![0, 1];
+        crate::playlist::run(&mut app, crate::playlist::Cmd::Chop(0, Unit::Bar));
+        let on = |t: u16| clips(&app.state.session).iter().filter(|c| c.track == t).count();
+        assert_eq!((on(0), on(1)), (3, 1));
+    }
+
     /// Ctrl+Alt+Ins: the clip crossing the selection's start is sliced there and its right part moves right by the
     /// selection's length; the Edit menu lists it.
     #[test]
@@ -310,5 +316,8 @@ mod tests {
         let pop = crate::playlist::options_menu(&app.state, 0.0, 0.0);
         let edit = &pop.items.iter().find(|i| i.label == "Edit").unwrap().children;
         assert!(edit.iter().any(|i| i.label == "Slice and insert space" && i.key == "Ctrl+Alt+Ins"));
+        // Insert space already slices, so the two entries are one action (FL's plain Insert space is not measured).
+        let cmd = |l: &str| edit.iter().find(|i| i.label == l).unwrap().cmd.clone();
+        assert_eq!(cmd("Insert space"), cmd("Slice and insert space"));
     }
 }

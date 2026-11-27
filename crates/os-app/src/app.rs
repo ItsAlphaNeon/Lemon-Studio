@@ -8128,6 +8128,18 @@ impl App {
         }
     }
 
+    /// Whether `key` is digit `d` of the digit row by its place, whatever the layout types there (AZERTY's unshifted
+    /// row, Alt held); the typed character where the place is not known.
+    pub fn digit_key(&self, key: &crate::keys::Key, d: u8) -> bool {
+        use crate::keys::{Key, KeyCode::*};
+        const ROW: [crate::keys::KeyCode; 10] = [Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9];
+        let d = usize::from(d.min(9));
+        match self.code {
+            Some(code) => code == ROW[d],
+            None => matches!(key, Key::Character(c) if c.as_str() == d.to_string()),
+        }
+    }
+
     /// Play one note of channel `channel` (Note::channel) once (also while playing or paused).
     /// Typing keyboard switch (toolbar, Options menu, Ctrl+T); turning it off releases held notes.
     pub fn toggle_typing(&mut self) {

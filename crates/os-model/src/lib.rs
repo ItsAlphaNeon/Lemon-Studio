@@ -1969,9 +1969,9 @@ impl Clip {
         self.set_f32(52, g);
     }
 
-    /// The semitones either way an audio clip's own pitch reaches (Clip Properties' Pitch, spec:
-    /// ui/playlist-clip-properties.md §2).
-    pub const PITCH_RANGE: i32 = 24;
+    /// The semitones either way an audio clip's own pitch reaches (spec: ui/audio-clip-pitch-reverse.md "What the
+    /// owner sees": -48..+48).
+    pub const PITCH_RANGE: i32 = 48;
 
     pub fn pitch_semitones(&self) -> i32 {
         i32::from(self.props.semitones)
@@ -1992,6 +1992,13 @@ impl Clip {
     /// The clip's pitch from its channel's, in cents (semitones and Fine).
     pub fn pitch_cents(&self) -> i32 {
         self.pitch_semitones() * 100 + self.fine_cents()
+    }
+
+    /// Sets the pitch in cents, within the range: whole semitones and the cents left over (with the same sign).
+    pub fn set_pitch_cents(&mut self, cents: i32) {
+        let c = cents.clamp(-Clip::PITCH_RANGE * 100, Clip::PITCH_RANGE * 100);
+        self.set_pitch_semitones(c / 100);
+        self.set_fine_cents(c % 100);
     }
 
     /// The clip's own pan, −1 (left) .. 1 (right).
