@@ -297,6 +297,8 @@ pub enum Action {
     PianoToolsMenu,
     /// The colour tab's Slide (`true`) or Portamento toggle: the type of new notes (spec: ui/piano-note-properties.md §5).
     PianoNewType(bool),
+    /// Toolbar Snap to scale: left click toggles "Snap PR notes to scale", right click its menu (spec: ui/piano-scale-snap.md §1).
+    PianoScaleSnap,
     /// Toolbar magnet: the Snap menu; right-click: Stock note lengths (spec: ui/piano-snap.md §1).
     PianoSnapMenu,
     /// The channel name in the title: the channel menu; right-click: channel settings; wheel: channels with notes
@@ -6816,6 +6818,10 @@ impl App {
                 }
                 return self.invalidate();
             }
+            Some(Action::PianoScaleSnap) => {
+                self.state.playlist.popup = Some(crate::piano_tools::scale_snap_menu(&self.state, x, y));
+                return self.invalidate();
+            }
             Some(Action::PianoSnapMenu | Action::GlobalSnap) => {
                 // spec: ui/piano-snap.md §7, ui/global-snap.md §4
                 self.state.playlist.popup = Some(crate::piano_snap::lengths_menu(x, y));
@@ -7111,6 +7117,9 @@ impl App {
         };
         let mut dirty = rects(&self.state);
         let s = &mut self.state;
+        let snap_scale = !resize && s.piano.scale_snap.notes;
+        let spans = if snap_scale { piano::highlight_spans(s) } else { Vec::new() };
+        let scale_at = |t: u32| spans.iter().take_while(|&&(at, _)| at <= t).last().map_or(0xFFF, |&(_, k)| k);
         let p = piano::pattern_mut(&mut s.session);
         if resize {
             for &(i, o) in orig {
@@ -7143,7 +7152,10 @@ impl App {
             for &(i, o) in orig {
                 if let Some(n) = p.notes.get_mut(i) {
                     n.position = (i64::from(o.position) + dt) as u32;
-                    n.key = (i32::from(o.key) + dk) as u16;
+                    // Snap to scale: a moved note lands on the scale at its new time, even on its own row; halfway goes
+                    // down (spec: ui/piano-scale-snap.md §3).
+                    let key = if snap_scale { crate::scale_snap::snap_key(i32::from(o.key) + dk, scale_at(n.position), false) } else { i32::from(o.key) + dk };
+                    n.key = key.clamp(0, crate::piano::TOP_KEY) as u16;
                 }
             }
         }
@@ -8251,7 +8263,8 @@ impl App {
         if self.typing_held.iter().any(|h| h.0 == code) {
             return true; // auto-repeat
         }
-        let key = 48 + semi + 12 * self.typing_octave;
+        // Snap incoming MIDI ▸ Typing to piano keyboard puts the note on the scale (spec: ui/piano-scale-snap.md §4).
+        let key = crate::scale_snap::typed(&self.state, 48 + semi + 12 * self.typing_octave);
         // A channel locked to the computer keyboard takes its notes (spec: ui/channel-rack.md §18 Receive notes from).
         let row = self.state.rack.note_row(crate::rack::NoteSrc::Typing, self.state.selected_channel);
         if !(0..=127).contains(&key) || row >= self.state.session.project.channels.len() {
@@ -8430,6 +8443,7 @@ impl App {
                     s.piano.clear_selection();
                     let key = g.key_at(y).clamp(0, crate::piano::TOP_KEY);
                     let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
+                    let key = crate::scale_snap::drawn(s, start, key, g.key_frac(y));
                     let i = piano::add_note(s, ch, start, key);
                     let i = piano::paint_mono(s, i);
                     let n = piano::notes(&s.session)[i];
@@ -8492,7 +8506,8 @@ impl App {
             Action::PianoGrid => {
                 piano::snapshot_as(&mut s.session, "Piano roll add note");
                 s.piano.clear_selection();
-                let i = piano::add_note(s, ch, crate::piano_snap::place(s, &g, g.tick_at(x), self.alt), g.key_at(y));
+                let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
+                let i = piano::add_note(s, ch, start, crate::scale_snap::drawn(s, start, g.key_at(y), g.key_frac(y)));
                 let i = piano::paint_mono(s, i);
                 let n = piano::notes(&s.session)[i];
                 s.piano.last_len = n.length;
@@ -9011,6 +9026,10 @@ impl App {
             Action::PianoNewType(slide) => {
                 let cmd = if slide { crate::piano_tools::NCmd::NewSlide } else { crate::piano_tools::NCmd::NewPorta };
                 self.state.message = crate::piano_tools::run(self, cmd);
+                self.invalidate();
+            }
+            Action::PianoScaleSnap => {
+                self.state.message = crate::piano_tools::run(self, crate::piano_tools::NCmd::ScaleSnapNotes);
                 self.invalidate();
             }
             Action::PianoToolsMenu => {
@@ -16295,6 +16314,26 @@ mod tests {
         frame(&mut app, &mut c, None);
         app.act(Action::PianoNewType(true));
         assert_eq!(piano::new_type(&app.state), (false, true), "the tab's slide toggle");
+    }
+
+    /// With Snap PR notes to scale on, a note drawn on a row out of the scale lands on the scale (spec:
+    /// ui/piano-scale-snap.md §2).
+    #[test]
+    fn snap_to_scale_puts_drawn_notes_on_the_scale() {
+        let (mut app, mut c) = piano_with_note(100);
+        piano::pattern_mut(&mut app.state.session).notes.clear();
+        crate::edit::notes::put_scale_highlight(&mut app.state.session, os_model::ScaleHighlight { mode: 0, root: 0 });
+        app.act(Action::PianoScaleSnap);
+        assert!(app.state.piano.scale_snap.notes);
+        frame(&mut app, &mut c, None);
+        let g = app.piano_geom().unwrap();
+        let y = (0..400).map(|d| 300.0 + d as f32).find(|&y| g.key_at(y).rem_euclid(12) == 1).unwrap();
+        let key = g.key_at(y);
+        app.mouse_move(500.0, y);
+        app.mouse_down();
+        app.mouse_up();
+        let n = piano::notes(&app.state.session)[0];
+        assert!([key - 1, key + 1].contains(&i32::from(n.key)), "a C# row gives C or D");
     }
 
     /// The Playback tool holds the notes under its line, at their velocities, until they are left or the button goes up;

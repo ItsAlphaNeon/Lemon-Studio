@@ -122,6 +122,8 @@ pub struct PianoState {
     pub was_shown: Option<bool>,
     /// The magnet button's setting (spec: ui/piano-snap.md): a program setting, kept in the user folder (crate::snap).
     pub snap: crate::snap::EditorSnap,
+    /// Snap to scale (spec: ui/piano-scale-snap.md §1).
+    pub scale_snap: crate::scale_snap::Settings,
     sel: Vec<usize>,
     sel_key: (u16, u16),
 }
@@ -154,6 +156,7 @@ impl Default for PianoState {
             split_click: None,
             was_shown: None,
             snap: crate::snap::EditorSnap::default(),
+            scale_snap: Default::default(),
             sel: Vec::new(),
             sel_key: (0, 0),
         }
@@ -258,6 +261,12 @@ impl Geom {
 
     pub fn key_at(&self, y: f32) -> i32 {
         TOP_KEY - ((y - self.grid.y + self.scroll_y) / self.row).floor() as i32
+    }
+
+    /// Where `y` is in its key row: 0 at the bottom edge, 1 at the top (Snap to scale, spec: ui/piano-scale-snap.md §2).
+    pub fn key_frac(&self, y: f32) -> f32 {
+        let r = (y - self.grid.y + self.scroll_y) / self.row;
+        1.0 - (r - r.floor())
     }
 
     /// Keys with at least one visible pixel, lowest first.

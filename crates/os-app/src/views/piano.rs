@@ -418,7 +418,7 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
         (222.0, Icon::ArrowRight, "Piano roll options", None),
         (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, glue, strum, arpeggiate, randomize...", Some(Action::PianoToolsMenu)),
         (263.0, Icon::Magnet, "", Some(Action::PianoSnapMenu)),
-        (283.0, Icon::Note, "Note properties", None),
+        (283.0, Icon::Note, "Snap to scale (right-click: scale and options)", Some(Action::PianoScaleSnap)),
         (305.0, Icon::Blend, "Scale and chord helpers", None),
         (327.0, Icon::Undo, "Undo (Ctrl+Z)", Some(Action::PianoUndo)),
         (360.0, Icon::Pencil, "Draw (P)", Some(Action::PianoTool(Tool::Draw))),
@@ -438,7 +438,8 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
             icons::draw(ui.c, icon, b, t.text_faint);
             continue;
         };
-        let on = action == Action::PianoTool(active);
+        let on = action == Action::PianoTool(active)
+            || (action == Action::PianoScaleSnap && s.piano.scale_snap.notes);
         // The magnet's hint names the current snap (spec: ui/piano-snap.md §8).
         let hint: std::borrow::Cow<'static, str> = if action == Action::PianoSnapMenu { crate::piano_snap::hint(s).into() } else { hint.into() };
         let hov = ui.hit(b, action, hint);

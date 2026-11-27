@@ -137,6 +137,7 @@ pub mod piano_snap;
 pub use os_session::piano_split;
 pub mod piano_tools;
 pub mod note_groups;
+pub mod scale_snap;
 pub mod note_props;
 pub mod rack;
 pub use os_session::remote;

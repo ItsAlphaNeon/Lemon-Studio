@@ -56,6 +56,10 @@ pub enum NCmd {
     /// ui/piano-note-properties.md §5).
     NewSlide,
     NewPorta,
+    /// Snap to scale (spec: ui/piano-scale-snap.md §1): "Snap PR notes to scale" (the toolbar button's left click),
+    /// "Snap incoming MIDI" ▸ All devices (`false`) / Typing keyboard to piano (`true`).
+    ScaleSnapNotes,
+    ScaleSnapMidi(bool),
 }
 
 fn item(label: &'static str, c: NCmd) -> PItem {
@@ -100,6 +104,11 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
+/// The Snap to scale button's right-click menu (spec: ui/piano-scale-snap.md §1): the Scale highlighting popup.
+pub fn scale_snap_menu(s: &State, x: f32, y: f32) -> Popup {
+    Popup { x, y, items: scale_items(s), sub: None, scroll: [0; 2] }
+}
+
 /// Scale highlighting ▸ (spec: ui/piano-scale-highlighting.md §1): "Root note" with C … B, checked only while a scale
 /// is chosen, then "Scale" with Default, Black notes, Automatic and the scale list.
 pub fn scale_items(s: &State) -> Vec<PItem> {
@@ -109,6 +118,19 @@ pub fn scale_items(s: &State) -> Vec<PItem> {
     let root = |k: u8| Mark::Radio(h.is_scale() && h.label_root() == k);
     items.extend(os_model::NOTE_NAMES.iter().enumerate().map(|(k, n)| item(n, NCmd::ScaleRoot(k as u8)).mark(root(k as u8))));
     items.extend([PItem::col(), PItem::head("Scale")]);
+    // Snap to scale's switches head the Scale column (spec: ui/piano-scale-snap.md §1).
+    let m = s.piano.scale_snap;
+    items.extend([
+        item("Snap PR notes to scale", NCmd::ScaleSnapNotes).mark(Mark::Check(m.notes)),
+        PItem::sub(
+            "Snap incoming MIDI",
+            vec![
+                item("Snap all devices", NCmd::ScaleSnapMidi(false)).mark(Mark::Check(m.midi_devices)),
+                item("Typing to piano keyboard", NCmd::ScaleSnapMidi(true)).mark(Mark::Check(m.midi_typing)),
+            ],
+        ),
+        PItem::sep(),
+    ]);
     let check = |m: i32| Mark::Radio(h.mode == m);
     items.extend([
         item("Default", NCmd::Scale(H::DEFAULT)).mark(check(H::DEFAULT)),
@@ -451,6 +473,20 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
                 "Piano roll: no grouped note selected".into()
             });
         }
+        NCmd::ScaleSnapNotes => {
+            s.piano.scale_snap.notes = !s.piano.scale_snap.notes;
+            return Some(format!("Snap to scale {}", if s.piano.scale_snap.notes { "on" } else { "off" }));
+        }
+        NCmd::ScaleSnapMidi(typing) => {
+            let m = &mut s.piano.scale_snap;
+            let on = if typing { &mut m.midi_typing } else { &mut m.midi_devices };
+            *on = !*on;
+            return Some(format!(
+                "Snap incoming MIDI ({}) {}",
+                if typing { "typing keyboard" } else { "all devices" },
+                if *on { "on" } else { "off" }
+            ));
+        }
         NCmd::NewSlide | NCmd::NewPorta => {
             let slide = cmd == NCmd::NewSlide;
             let on = piano::toggle_new_type(s, slide);
@@ -655,7 +691,20 @@ mod tests {
         let view = tools_menu(&app.state, 0.0, 0.0).items;
         let hl = view.iter().find(|i| i.label == "Note grid highlights").unwrap();
         assert_eq!((hl.key, hl.mark), ("Alt+B", Mark::Check(true)));
-        assert!(view.iter().any(|i| i.label == "Scale highlighting" && i.children.len() == 1 + 12 + 2 + 4 + os_model::SCALES.len()));
+        assert!(view.iter().any(
+            |i| i.label == "Scale highlighting" && i.children.len() == 1 + 12 + 2 + 3 + 4 + os_model::SCALES.len()
+        ));
+        // Snap to scale's switches head the Scale column (spec: ui/piano-scale-snap.md §1).
+        let items = scale_items(&app.state);
+        let col = items.iter().position(|i| i.col).unwrap();
+        assert_eq!(
+            (items[col + 2].label.as_ref(), items[col + 3].label.as_ref()),
+            ("Snap PR notes to scale", "Snap incoming MIDI")
+        );
+        assert_eq!(
+            items[col + 3].children.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(),
+            ["Snap all devices", "Typing to piano keyboard"]
+        );
 
         // A root while Black notes is checked is kept for the next scale; the menu stays where it was.
         app.state.playlist.popup = Some(Popup { x: 40.0, y: 50.0, items: scale_items(&app.state), sub: None, scroll: [0; 2] });
