@@ -139,6 +139,7 @@ pub mod piano_tools;
 pub mod note_groups;
 pub mod scale_snap;
 pub mod note_props;
+pub mod chord_stamp;
 pub mod rack;
 pub use os_session::remote;
 pub mod remote_ui;

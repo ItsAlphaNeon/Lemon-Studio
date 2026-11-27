@@ -299,6 +299,8 @@ pub enum Action {
     PianoNewType(bool),
     /// Toolbar Snap to scale: left click toggles "Snap PR notes to scale", right click its menu (spec: ui/piano-scale-snap.md §1).
     PianoScaleSnap,
+    /// Toolbar Stamp: the stamp menu (spec: ui/piano-chord-stamp.md §1).
+    PianoStampMenu,
     /// Toolbar magnet: the Snap menu; right-click: Stock note lengths (spec: ui/piano-snap.md §1).
     PianoSnapMenu,
     /// The channel name in the title: the channel menu; right-click: channel settings; wheel: channels with notes
@@ -8504,6 +8506,29 @@ impl App {
         let s = &mut self.state;
         match *a {
             Action::PianoGrid => {
+                if let Some(st) = s.piano.stamp.filter(|st| st.on()) {
+                    // A Stamp draws its chord or scale as a selected group (spec: ui/piano-chord-stamp.md §3); a drag
+                    // moves it.
+                    piano::snapshot_as(&mut s.session, crate::chord_stamp::STEP);
+                    s.piano.clear_selection();
+                    let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
+                    let idx = crate::chord_stamp::stamp(s, ch, start, g.key_at(y), st);
+                    if st.only_one {
+                        s.piano.stamp = Some(crate::chord_stamp::Stamp { pick: crate::chord_stamp::Pick::None, ..st });
+                    }
+                    s.piano.select(s.pattern(), ch, idx.clone());
+                    let notes = piano::notes(&s.session);
+                    let orig: Vec<(usize, Note)> = idx.iter().filter_map(|&i| notes.get(i).map(|&n| (i, n))).collect();
+                    s.session.dirty = true;
+                    if let Some(&(_, n)) = orig.first() {
+                        s.piano.last_len = n.length;
+                        self.key_velocity = n.velocity;
+                        let play = self.audition();
+                        self.hold_key(Some(i32::from(n.key)), play);
+                    }
+                    self.drag = Some(Drag::NoteMove { x0: x, y0: y, orig });
+                    return;
+                }
                 piano::snapshot_as(&mut s.session, "Piano roll add note");
                 s.piano.clear_selection();
                 let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
@@ -9030,6 +9055,11 @@ impl App {
             }
             Action::PianoScaleSnap => {
                 self.state.message = crate::piano_tools::run(self, crate::piano_tools::NCmd::ScaleSnapNotes);
+                self.invalidate();
+            }
+            Action::PianoStampMenu => {
+                let b = self.hits.iter().rev().find(|h| h.action == Action::PianoStampMenu).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
+                self.state.playlist.popup = Some(crate::piano_tools::stamp_menu(&self.state, b.cx() - 11.0, b.cy() + 11.0));
                 self.invalidate();
             }
             Action::PianoToolsMenu => {
@@ -16314,6 +16344,34 @@ mod tests {
         frame(&mut app, &mut c, None);
         app.act(Action::PianoNewType(true));
         assert_eq!(piano::new_type(&app.state), (false, true), "the tab's slide toggle");
+    }
+
+    /// A Stamp draws its chord from the clicked key, one undo step; "Only one" goes back to single notes (spec:
+    /// ui/piano-chord-stamp.md §2).
+    #[test]
+    fn a_stamp_draws_its_chord() {
+        use crate::piano_tools::NCmd;
+        let (mut app, mut c) = piano_with_note(100);
+        piano::pattern_mut(&mut app.state.session).notes.clear();
+        crate::playlist::run(&mut app, crate::playlist::Cmd::Piano(NCmd::StampOnlyOne));
+        crate::playlist::run(&mut app, crate::playlist::Cmd::Piano(NCmd::Stamp(crate::chord_stamp::Pick::Named(5))));
+        frame(&mut app, &mut c, None);
+        let g = app.piano_geom().unwrap();
+        let key = g.key_at(500.0);
+        app.mouse_move(500.0, 500.0);
+        app.mouse_down();
+        app.mouse_up();
+        let mut keys: Vec<i32> = piano::notes(&app.state.session).iter().map(|n| i32::from(n.key)).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, [key, key + 4, key + 7], "a Major chord");
+        assert_eq!(app.state.piano.stamp.map(|s| s.pick), Some(crate::chord_stamp::Pick::None), "only one: back to single notes");
+        let ch = piano::channel(&app.state);
+        assert_eq!(app.state.piano.selection(app.state.pattern(), ch).len(), 3, "the stamped notes are selected");
+        assert!(piano::notes(&app.state.session).iter().all(|n| n.unk14 == 1), "as one group");
+        let name = crate::views::piano::chord_name(&app.state).expect("a chord name for the selection");
+        assert!(name.ends_with(" Major"), "{name}");
+        assert!(piano::undo(&mut app.state));
+        assert!(piano::notes(&app.state.session).is_empty(), "one undo step");
     }
 
     /// With Snap PR notes to scale on, a note drawn on a row out of the scale lands on the scale (spec:

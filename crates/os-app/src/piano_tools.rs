@@ -60,6 +60,11 @@ pub enum NCmd {
     /// "Snap incoming MIDI" ▸ All devices (`false`) / Typing keyboard to piano (`true`).
     ScaleSnapNotes,
     ScaleSnapMidi(bool),
+    /// The stamp menu (spec: ui/piano-chord-stamp.md §1): a pick ((none) is Shift+N), "Only one".
+    Stamp(crate::chord_stamp::Pick),
+    /// ▸ View > Show chord name for selection (spec: ui/piano-chord-stamp.md §4).
+    ChordName,
+    StampOnlyOne,
 }
 
 fn item(label: &'static str, c: NCmd) -> PItem {
@@ -99,6 +104,7 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
         item("Note grid highlights", Highlights).key("Alt+B").mark(Mark::Check(s.piano.highlights)),
         PItem { children: scale_items(s), ..item("Scale highlighting", ScaleMenu) },
+        item("Show chord name for selection", ChordName).mark(Mark::Check(s.piano.chord_name)),
         item("Add time marker", AddMarker).key("Alt+T"),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
@@ -107,6 +113,63 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
 /// The Snap to scale button's right-click menu (spec: ui/piano-scale-snap.md §1): the Scale highlighting popup.
 pub fn scale_snap_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items: scale_items(s), sub: None, scroll: [0; 2] }
+}
+
+/// The Chord Stamp button's menu (spec: ui/piano-chord-stamp.md §1, §2): Only one, (none), the automatic chords (not
+/// yet), "Melodic - chords" with Advanced ▸ (the chords file, FL's order), "Melodic - scales", then in the second
+/// column the rest of the scales, "Percussions" and "Special" (not yet).
+pub fn stamp_menu(s: &State, x: f32, y: f32) -> Popup {
+    use crate::chord_stamp::{advanced_label, advanced_order, Pick, NAMED};
+    let st = s.piano.stamp.unwrap_or_default();
+    let pick =
+        |p: Pick, label: &'static str| PItem::new(label, Cmd::Piano(NCmd::Stamp(p))).mark(Mark::Radio(st.pick == p));
+    let adv = advanced_order();
+    let split = adv.len().min(53);
+    let mut advanced: Vec<PItem> = Vec::new();
+    for (n, &k) in adv.iter().enumerate() {
+        if n == split {
+            advanced.push(PItem::col());
+        }
+        advanced.push(pick(Pick::Advanced(k), advanced_label(k)));
+    }
+    let mut items = vec![
+        item("Only one", NCmd::StampOnlyOne).mark(Mark::Check(st.only_one)),
+        PItem::sep(),
+        pick(Pick::None, "(none)").key("Shift+N"),
+        PItem::not_yet("Automatic chord (top down)"),
+        PItem::not_yet("Automatic chord (bottom up)"),
+        PItem::head("Melodic - chords"),
+        PItem::sub("Advanced", advanced),
+    ];
+    items.extend(NAMED.iter().enumerate().map(|(i, (name, _))| pick(Pick::Named(i), name)));
+    items.push(PItem::head("Melodic - scales"));
+    for (i, (name, _)) in os_model::SCALES.iter().enumerate() {
+        if i == 32 {
+            items.push(PItem::col());
+        }
+        items.push(pick(Pick::Scale(i), name));
+    }
+    items.push(PItem::head("Percussions"));
+    for name in [
+        "Fill each 1 steps",
+        "Fill each 2 steps",
+        "Fill each 3 steps",
+        "Fill each 4 steps",
+        "Fill each 8 steps",
+        "Flam fast",
+        "Flam med",
+        "Flam slow",
+        "Roll fast dynamic",
+        "Roll fast relative",
+        "Roll med dynamic",
+        "Roll med relative",
+        "Roll slow dynamic",
+        "Roll slow relative",
+    ] {
+        items.push(PItem::not_yet(name));
+    }
+    items.extend([PItem::head("Special"), PItem::not_yet("Slide up")]);
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Scale highlighting ▸ (spec: ui/piano-scale-highlighting.md §1): "Root note" with C … B, checked only while a scale
@@ -205,6 +268,7 @@ pub fn key(app: &mut App, key: &crate::keys::Key, ctrl: bool, alt: bool) -> bool
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
         Key::Character(c) if shift && !ctrl && !alt && is(c, "g") => NCmd::Group,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "g") => NCmd::Ungroup,
+        Key::Character(c) if shift && !ctrl && !alt && is(c, "n") => NCmd::Stamp(crate::chord_stamp::Pick::None),
         Key::Character(c) if !ctrl && !alt && !shift && !app.typing_on() && is(c, "s") => NCmd::NewSlide,
         Key::Character(c) if !ctrl && !alt && !shift && !app.typing_on() && is(c, "o") => NCmd::NewPorta,
         Key::Character(c) if ctrl && !alt && is(c, "d") => {
@@ -487,6 +551,28 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
                 if *on { "on" } else { "off" }
             ));
         }
+        NCmd::Stamp(pick) => {
+            let st = s.piano.stamp.get_or_insert_with(Default::default);
+            st.pick = pick;
+            if st.on() {
+                s.piano.tool = piano::Tool::Draw;
+            }
+            return Some(match pick {
+                crate::chord_stamp::Pick::None => "Stamp: (none)".into(),
+                crate::chord_stamp::Pick::Named(i) => format!("Stamp: {}", crate::chord_stamp::NAMED[i].0),
+                crate::chord_stamp::Pick::Advanced(k) => format!("Stamp: {}", crate::chord_stamp::advanced_label(k)),
+                crate::chord_stamp::Pick::Scale(i) => format!("Stamp: {}", os_model::SCALES[i].0),
+            });
+        }
+        NCmd::ChordName => {
+            s.piano.chord_name = !s.piano.chord_name;
+            return Some(format!("Show chord name for selection {}", if s.piano.chord_name { "on" } else { "off" }));
+        }
+        NCmd::StampOnlyOne => {
+            let st = s.piano.stamp.get_or_insert_with(Default::default);
+            st.only_one = !st.only_one;
+            return Some(format!("Stamp: only one {}", if st.only_one { "on" } else { "off" }));
+        }
         NCmd::NewSlide | NCmd::NewPorta => {
             let slide = cmd == NCmd::NewSlide;
             let on = piano::toggle_new_type(s, slide);
@@ -727,6 +813,28 @@ mod tests {
         assert_eq!((app.state.piano.highlights, m.as_deref()), (false, Some("Note grid highlights off")));
         run(&mut app, NCmd::Highlights);
         assert!(app.state.piano.highlights);
+    }
+
+    /// The Chord Stamp menu (spec: ui/piano-chord-stamp.md §1, §2): FL's headings, the 13 named chords, Advanced ▸ with
+    /// the 66 chords in two columns, the 37 scales; Shift+N picks (none).
+    #[test]
+    fn stamp_menu_as_fl() {
+        use crate::chord_stamp::Pick;
+        let mut app = App::new(None);
+        let items = stamp_menu(&app.state, 0.0, 0.0).items;
+        let heads: Vec<&str> = items.iter().filter(|i| i.head).map(|i| i.label.as_ref()).collect();
+        assert_eq!(heads, ["Melodic - chords", "Melodic - scales", "Percussions", "Special"]);
+        let adv = items.iter().find(|i| i.label == "Advanced").unwrap();
+        assert_eq!(adv.children.iter().filter(|i| !i.col).count(), 66);
+        assert_eq!(adv.children.iter().position(|i| i.col), Some(53));
+        let picks =
+            items.iter().filter(|i| matches!(i.cmd, Cmd::Piano(NCmd::Stamp(Pick::Named(_) | Pick::Scale(_))))).count();
+        assert_eq!(picks, 13 + 37);
+        run(&mut app, NCmd::Stamp(Pick::Scale(3)));
+        assert!(app.state.piano.stamp.is_some_and(|s| s.on()));
+        app.shift = true;
+        assert!(key(&mut app, &crate::keys::Key::Character("N".into()), false, false));
+        assert_eq!(app.state.piano.stamp.map(|s| s.pick), Some(Pick::None), "Shift+N");
     }
 
     pub fn note(pos: u32, len: u32, key: u16) -> Note {

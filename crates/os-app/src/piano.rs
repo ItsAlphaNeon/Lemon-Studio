@@ -124,6 +124,10 @@ pub struct PianoState {
     pub snap: crate::snap::EditorSnap,
     /// Snap to scale (spec: ui/piano-scale-snap.md §1).
     pub scale_snap: crate::scale_snap::Settings,
+    /// The Stamp picked in the toolbar's stamp menu, if any (spec: ui/piano-chord-stamp.md §1).
+    pub stamp: Option<crate::chord_stamp::Stamp>,
+    /// ▸ View > Show chord name for selection (spec: ui/piano-chord-stamp.md §4).
+    pub chord_name: bool,
     sel: Vec<usize>,
     sel_key: (u16, u16),
 }
@@ -150,6 +154,7 @@ impl Default for PianoState {
             row_h: ROW,
             ghosts: true,
             highlights: true,
+            chord_name: true,
             scale_root: 0,
             rng: crate::clip_colors::clock() | 1,
             split: crate::piano_split::load(),
@@ -157,6 +162,7 @@ impl Default for PianoState {
             was_shown: None,
             snap: crate::snap::EditorSnap::default(),
             scale_snap: Default::default(),
+            stamp: None,
             sel: Vec::new(),
             sel_key: (0, 0),
         }

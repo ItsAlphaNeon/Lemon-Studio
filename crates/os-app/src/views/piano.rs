@@ -85,6 +85,22 @@ pub fn grid_rect(s: &State) -> Rect {
     layout(r, s.piano.split).grid
 }
 
+/// The chord name of the selected notes, while ▸ View > Show chord name for selection is on and they make a chord of
+/// the chords file (spec: ui/piano-chord-stamp.md §4).
+pub fn chord_name(s: &State) -> Option<String> {
+    if !s.piano.chord_name {
+        return None;
+    }
+    let ch = piano::channel(s);
+    let sel = s.piano.selection(s.pattern(), ch);
+    if sel.len() < 2 {
+        return None;
+    }
+    let notes = piano::notes(&s.session);
+    let picked: Vec<Note> = sel.iter().filter_map(|&i| notes.get(i).copied()).collect();
+    crate::chord_stamp::name_of(&picked)
+}
+
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
     let channel = s.session.project.channels.get(s.selected_channel);
@@ -113,6 +129,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Down, orange);
     } else {
         os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Right, t.text_dim);
+    }
+    // The chord the selected notes make, after the channel (spec: ui/piano-chord-stamp.md §4).
+    if let Some(name) = chord_name(s) {
+        ui.c.text(font, ax + 14.0, r.y + 1.0, t.h(0xfb9531), &name);
     }
     ui.c.pop_clip();
     let shift = if floating { -4.0 } else { 0.0 };
@@ -419,7 +439,7 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
         (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, glue, strum, arpeggiate, randomize...", Some(Action::PianoToolsMenu)),
         (263.0, Icon::Magnet, "", Some(Action::PianoSnapMenu)),
         (283.0, Icon::Note, "Snap to scale (right-click: scale and options)", Some(Action::PianoScaleSnap)),
-        (305.0, Icon::Blend, "Scale and chord helpers", None),
+        (305.0, Icon::Blend, "Stamp: chords and scales", Some(Action::PianoStampMenu)),
         (327.0, Icon::Undo, "Undo (Ctrl+Z)", Some(Action::PianoUndo)),
         (360.0, Icon::Pencil, "Draw (P)", Some(Action::PianoTool(Tool::Draw))),
         (380.0, Icon::Brush, "Paint (B): drag to paint notes along the row", Some(Action::PianoTool(Tool::Paint))),
@@ -439,7 +459,8 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
             continue;
         };
         let on = action == Action::PianoTool(active)
-            || (action == Action::PianoScaleSnap && s.piano.scale_snap.notes);
+            || (action == Action::PianoScaleSnap && s.piano.scale_snap.notes)
+            || (action == Action::PianoStampMenu && s.piano.stamp.is_some_and(|st| st.on()));
         // The magnet's hint names the current snap (spec: ui/piano-snap.md §8).
         let hint: std::borrow::Cow<'static, str> = if action == Action::PianoSnapMenu { crate::piano_snap::hint(s).into() } else { hint.into() };
         let hov = ui.hit(b, action, hint);
