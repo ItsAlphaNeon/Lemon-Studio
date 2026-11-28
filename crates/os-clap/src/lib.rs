@@ -3144,7 +3144,7 @@ mod tests {
         assert!(p.param_text(start.id, 0.25).is_some_and(|t| !t.is_empty()));
         let saved = String::from_utf8_lossy(&p.save_state().unwrap()[8..]).into_owned();
         assert!(saved.contains("\"start_offset\":{\"f32\":0.25"), "{saved}");
-        assert_eq!(p.desc().uid(), "clap:org.openstudio.open-sampler");
+        assert_eq!(p.desc().uid(), "clap:org.lemonstudio.lemon-sampler");
     }
 
     #[test]

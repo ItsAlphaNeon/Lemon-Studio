@@ -208,7 +208,7 @@ pub struct ChorusKind;
 
 impl Kind for ChorusKind {
     const SPEC: &'static Spec = SPEC;
-    const CLAP_ID: &'static str = "org.openstudio.lemon-chorus";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-chorus";
     const CLAP_DESCRIPTION: &'static str = "Lemon Studio's chorus";
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Chorus, ClapFeature::Stereo];
     const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioChrus";

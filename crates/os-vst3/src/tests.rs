@@ -90,8 +90,8 @@ fn lists_instrument_and_effect_classes() {
     assert_eq!(m.plugins().len(), 1);
     assert_eq!(d.name, "Lemon Sampler");
     assert!(d.is_instrument(), "{:?}", d.features);
-    // Its FUID string spells "OpenStudioSamplr" in hex (the module lays the GUID out so that it reads in order).
-    assert_eq!(d.uid(), "vst3:4F70656E53747564696F53616D706C72");
+    // Its FUID string spells "LemonStudioSmplr" in hex (the module lays the GUID out so that it reads in order).
+    assert_eq!(d.uid(), "vst3:4C656D6F6E53747564696F536D706C72");
     assert!(!d.vendor.is_empty() && !d.version.is_empty());
     assert_eq!(d.path, bundle("Lemon Sampler").unwrap());
     let Some(eq) = module("Lemon Parametric EQ") else { return };

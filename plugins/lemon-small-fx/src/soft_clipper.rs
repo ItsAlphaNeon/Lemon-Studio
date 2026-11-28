@@ -103,7 +103,7 @@ pub struct SoftClipperKind;
 
 impl Kind for SoftClipperKind {
     const SPEC: &'static Spec = SPEC;
-    const CLAP_ID: &'static str = "org.openstudio.lemon-soft-clipper";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-soft-clipper";
     const CLAP_DESCRIPTION: &'static str = "Lemon Studio's soft clipper";
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Distortion, ClapFeature::Stereo];
     const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioClipr";

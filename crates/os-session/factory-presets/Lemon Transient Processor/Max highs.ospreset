@@ -1,5 +1,5 @@
 OSPRESET 1
-plugin=Lemon Transient Processor	id=clap:org.openstudio.lemon-transient-processor	format=clap	body=params
+plugin=Lemon Transient Processor	id=clap:org.lemonstudio.lemon-transient-processor	format=clap	body=params
 # Values: OpenStudio-specs plugins/factory-presets.md.
 Attack = 160
 Drive = 38

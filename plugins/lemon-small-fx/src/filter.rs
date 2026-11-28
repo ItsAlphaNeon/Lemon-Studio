@@ -183,7 +183,7 @@ pub struct FilterKind;
 
 impl Kind for FilterKind {
     const SPEC: &'static Spec = SPEC;
-    const CLAP_ID: &'static str = "org.openstudio.lemon-filter";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-filter";
     const CLAP_DESCRIPTION: &'static str = "Lemon Studio's filter";
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Filter, ClapFeature::Stereo];
     const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioFiltr";

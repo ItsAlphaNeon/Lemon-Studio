@@ -102,7 +102,7 @@ impl Descriptor {
         self.kind == Kind::Effect
     }
 
-    /// The plugin's identity for project files and plugin lists: `format:id` (e.g. `clap:org.openstudio.open-sampler`,
+    /// The plugin's identity for project files and plugin lists: `format:id` (e.g. `clap:org.lemonstudio.lemon-sampler`,
     /// `vst3:` + 32 hex digits). The path is not part of it (plugins move between folders and machines).
     pub fn uid(&self) -> String {
         format!("{}:{}", self.format.as_str(), self.id)

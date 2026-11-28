@@ -887,7 +887,7 @@ impl Plugin for LemonSampler {
 // CLAP id and VST3 class id keep the spelling of the plugin's earlier "Open" name: hosts find saved sessions'
 // plugins by them (spec: plugins/plugin-formats.md, identity).
 impl ClapPlugin for LemonSampler {
-    const CLAP_ID: &'static str = "org.openstudio.open-sampler";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-sampler";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's sampler instrument");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
@@ -895,7 +895,7 @@ impl ClapPlugin for LemonSampler {
 }
 
 impl Vst3Plugin for LemonSampler {
-    const VST3_CLASS_ID: [u8; 16] = *b"OpenStudioSamplr";
+    const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioSmplr";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument, Vst3SubCategory::Sampler];
 }
 

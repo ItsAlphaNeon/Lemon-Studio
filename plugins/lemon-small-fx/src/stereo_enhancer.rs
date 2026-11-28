@@ -160,7 +160,7 @@ pub struct StereoEnhancerKind;
 
 impl Kind for StereoEnhancerKind {
     const SPEC: &'static Spec = SPEC;
-    const CLAP_ID: &'static str = "org.openstudio.lemon-stereo-enhancer";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-stereo-enhancer";
     const CLAP_DESCRIPTION: &'static str = "Lemon Studio's stereo enhancer";
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Utility, ClapFeature::Mixing, ClapFeature::Stereo];
     const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioStEnh";

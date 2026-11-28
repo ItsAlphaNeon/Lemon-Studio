@@ -304,7 +304,7 @@ impl Plugin for LemonSoundfont {
 }
 
 impl ClapPlugin for LemonSoundfont {
-    const CLAP_ID: &'static str = "org.openstudio.lemon-soundfont";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-soundfont";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's SoundFont player");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

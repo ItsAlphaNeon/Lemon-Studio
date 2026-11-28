@@ -128,7 +128,7 @@ impl Plugin for LemonReverb {
 }
 
 impl ClapPlugin for LemonReverb {
-    const CLAP_ID: &'static str = "org.openstudio.lemon-reverb";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-reverb";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's plate reverb");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

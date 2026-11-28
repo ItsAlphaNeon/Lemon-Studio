@@ -130,7 +130,7 @@ pub struct FastDistortionKind;
 
 impl Kind for FastDistortionKind {
     const SPEC: &'static Spec = SPEC;
-    const CLAP_ID: &'static str = "org.openstudio.lemon-fast-distortion";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-fast-distortion";
     const CLAP_DESCRIPTION: &'static str = "Lemon Studio's fast distortion";
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Distortion, ClapFeature::Stereo];
     const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioFDist";

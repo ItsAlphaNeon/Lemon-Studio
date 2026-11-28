@@ -159,7 +159,7 @@ impl Plugin for LemonFormulaController {
 }
 
 impl ClapPlugin for LemonFormulaController {
-    const CLAP_ID: &'static str = "org.openstudio.lemon-formula-controller";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-formula-controller";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's formula controller");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

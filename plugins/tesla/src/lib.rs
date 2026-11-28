@@ -658,7 +658,7 @@ impl Plugin for Tesla {
 }
 
 impl ClapPlugin for Tesla {
-    const CLAP_ID: &'static str = "org.openstudio.tesla";
+    const CLAP_ID: &'static str = "org.lemonstudio.tesla";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's audio editor and recorder");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

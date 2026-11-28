@@ -216,7 +216,7 @@ impl Plugin for LemonLimiter {
 }
 
 impl ClapPlugin for LemonLimiter {
-    const CLAP_ID: &'static str = "org.openstudio.lemon-limiter";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-limiter";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's limiter, compressor and noise gate");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

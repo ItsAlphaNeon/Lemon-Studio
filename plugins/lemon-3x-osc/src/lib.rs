@@ -312,7 +312,7 @@ impl Plugin for LemonTrio {
 // CLAP id and VST3 class id keep the spelling of the plugin's earlier "Open" name: hosts find saved sessions'
 // plugins by them (spec: plugins/plugin-formats.md, identity).
 impl ClapPlugin for LemonTrio {
-    const CLAP_ID: &'static str = "org.openstudio.open-3x-osc";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-trio";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's three-oscillator synthesizer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
@@ -320,7 +320,7 @@ impl ClapPlugin for LemonTrio {
 }
 
 impl Vst3Plugin for LemonTrio {
-    const VST3_CLASS_ID: [u8; 16] = *b"OpenStudio3xOsc!";
+    const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioTrio!";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Instrument, Vst3SubCategory::Synth];
 }
 

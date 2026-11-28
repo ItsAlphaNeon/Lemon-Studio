@@ -854,12 +854,12 @@ impl Plugins {
 
     /// Index of the available instrument with identity `uid` (`Descriptor::uid`, e.g. `vst3:<class id>`).
     pub fn index_of_uid(&self, uid: &str) -> Option<usize> {
-        self.available.iter().position(|a| a.desc.uid() == uid)
+        self.available.iter().position(|a| same_uid(&a.desc.uid(), uid))
     }
 
     /// Index of the effect plugin with identity `uid`.
     pub fn effect_index_of_uid(&self, uid: &str) -> Option<usize> {
-        self.effects.iter().position(|a| a.desc.uid() == uid)
+        self.effects.iter().position(|a| same_uid(&a.desc.uid(), uid))
     }
 
     /// What the instance under `key` (rack row or `fx_key`) is: format, id, name, file (for project files).
@@ -1253,6 +1253,47 @@ pub const OLD_NAMES: [(&str, &str); 5] = [
     ("Open Parametric EQ 2", LEMON_EQ),
     ("Open 3x Osc", crate::osc3::LEMON_TRIO),
 ];
+
+/// Maps legacy `org.openstudio.*` CLAP ids and `OpenStudio*` VST3 class ids (bare or prefixed with `clap:` / `vst3:`)
+/// to their current `org.lemonstudio.*` / `LemonStudio*` identity, so presets, plugin preferences, saved projects, and
+/// containers written before the rename keep loading cleanly.
+pub fn canonical_uid(uid: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let (prefix, rest) = match uid.split_once(':') {
+        Some((p, r)) if p.eq_ignore_ascii_case("clap") || p.eq_ignore_ascii_case("vst3") => (Some(p), r),
+        _ => (None, uid),
+    };
+    let mapped: Option<Cow<'static, str>> = if rest.eq_ignore_ascii_case("org.openstudio.open-sampler") {
+        Some(Cow::Borrowed("org.lemonstudio.lemon-sampler"))
+    } else if rest.eq_ignore_ascii_case("org.openstudio.open-parametric-eq-2") {
+        Some(Cow::Borrowed("org.lemonstudio.lemon-parametric-eq"))
+    } else if rest.eq_ignore_ascii_case("org.openstudio.open-3x-osc") {
+        Some(Cow::Borrowed("org.lemonstudio.lemon-trio"))
+    } else if rest.len() > "org.openstudio.".len() && rest[.."org.openstudio.".len()].eq_ignore_ascii_case("org.openstudio.") {
+        Some(Cow::Owned(format!("org.lemonstudio.{}", &rest["org.openstudio.".len()..])))
+    } else if rest.eq_ignore_ascii_case("4F70656E53747564696F53616D706C72") {
+        // Legacy VST3 FUID for "OpenStudioSamplr" -> "LemonStudioSmplr"
+        Some(Cow::Borrowed("4C656D6F6E53747564696F536D706C72"))
+    } else if rest.eq_ignore_ascii_case("4F70656E53747564696F506172455132") {
+        // Legacy VST3 FUID for "OpenStudioParEQ2" -> "LemonStudioParEQ"
+        Some(Cow::Borrowed("4C656D6F6E53747564696F5061724551"))
+    } else if rest.eq_ignore_ascii_case("4F70656E53747564696F33784F736321") {
+        // Legacy VST3 FUID for "OpenStudio3xOsc!" -> "LemonStudioTrio!"
+        Some(Cow::Borrowed("4C656D6F6E53747564696F5472696F21"))
+    } else {
+        None
+    };
+    match (prefix, mapped) {
+        (Some(p), Some(m)) => Cow::Owned(format!("{}:{m}", p.to_ascii_lowercase())),
+        (None, Some(m)) => m,
+        (_, None) => Cow::Borrowed(uid),
+    }
+}
+
+/// Whether two plugin identities refer to the same plugin (accepting legacy `org.openstudio.*` / `OpenStudio*` aliases).
+pub fn same_uid(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b) || canonical_uid(a).eq_ignore_ascii_case(&canonical_uid(b))
+}
 
 /// The Lemon effects compiled in (`LINKED_EFFECTS`) that recreate an FL mixer effect, by the plugin name a project file
 /// stores for it (file-format identifiers, kept for interop): an opened project's slot holding one is played and edited

@@ -236,7 +236,7 @@ impl Plugin for LemonDrumSampler {
 }
 
 impl ClapPlugin for LemonDrumSampler {
-    const CLAP_ID: &'static str = "org.openstudio.lemon-drum-sampler";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-drum-sampler";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's pad drum sampler");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

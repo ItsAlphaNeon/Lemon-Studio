@@ -465,7 +465,7 @@ impl Plugin for CitrusPlugin {
 }
 
 impl ClapPlugin for CitrusPlugin {
-    const CLAP_ID: &'static str = "org.openstudio.citrus";
+    const CLAP_ID: &'static str = "org.lemonstudio.citrus";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's six-operator synthesizer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

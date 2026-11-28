@@ -1,5 +1,5 @@
 OSPRESET 1
-plugin=Lemon Trio	id=clap:org.openstudio.open-3x-osc	format=clap	body=params
+plugin=Lemon Trio	id=clap:org.lemonstudio.lemon-trio	format=clap	body=params
 # The original preset Default: a fresh instance.
 Osc 1 panning = 64
 Osc 1 shape = 0
