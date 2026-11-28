@@ -1,5 +1,5 @@
 OSPRESET 1
-plugin=Lemon Limiter	id=clap:org.openstudio.lemon-limiter	format=clap	body=params
+plugin=Lemon Limiter	id=clap:org.lemonstudio.lemon-limiter	format=clap	body=params
 # Values: OpenStudio-specs plugins/factory-presets.md.
 Gain = 564
 Soft saturation threshold = 1000

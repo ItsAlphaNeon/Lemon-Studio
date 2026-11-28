@@ -267,7 +267,7 @@ impl Plugin for LemonDrop {
 }
 
 impl ClapPlugin for LemonDrop {
-    const CLAP_ID: &'static str = "org.openstudio.lemon-drop";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-drop";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's audio visualizer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
@@ -331,7 +331,7 @@ mod tests {
                 let mut part = b.splitn(3, |&c| c == b'\n');
                 assert_eq!(part.next(), Some(&b"OSPRESET 1"[..]), "{p:?}");
                 let head = std::str::from_utf8(part.next().unwrap()).unwrap();
-                assert!(head.starts_with("plugin=Lemon Drop\tid=clap:org.openstudio.lemon-drop\t") && !head.contains("body="), "{p:?}");
+                assert!(head.starts_with("plugin=Lemon Drop\tid=clap:org.lemonstudio.lemon-drop\t") && !head.contains("body="), "{p:?}");
                 let fl = fl_from_plugin_state(part.next().unwrap()).unwrap_or_else(|| panic!("{p:?}"));
                 let st = State::from_bytes(&fl).unwrap_or_else(|| panic!("{p:?}"));
                 assert_eq!(st.to_bytes(), fl, "{p:?}");

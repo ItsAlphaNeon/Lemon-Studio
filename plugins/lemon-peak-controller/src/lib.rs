@@ -169,7 +169,7 @@ impl Plugin for LemonPeakController {
 }
 
 impl ClapPlugin for LemonPeakController {
-    const CLAP_ID: &'static str = "org.openstudio.lemon-peak-controller";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-peak-controller";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's peak controller");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

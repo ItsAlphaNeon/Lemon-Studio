@@ -186,7 +186,7 @@ pub struct TransientProcessorKind;
 
 impl Kind for TransientProcessorKind {
     const SPEC: &'static Spec = SPEC;
-    const CLAP_ID: &'static str = "org.openstudio.lemon-transient-processor";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-transient-processor";
     const CLAP_DESCRIPTION: &'static str = "Lemon Studio's transient processor";
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::TransientShaper, ClapFeature::Stereo];
     const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioTrPro";

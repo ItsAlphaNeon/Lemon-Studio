@@ -166,7 +166,7 @@ impl Plugin for LemonVocoder {
 }
 
 impl ClapPlugin for LemonVocoder {
-    const CLAP_ID: &'static str = "org.openstudio.lemon-vocoder";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-vocoder";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's vocoder");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

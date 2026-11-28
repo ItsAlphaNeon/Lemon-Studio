@@ -1,5 +1,5 @@
 OSPRESET 1
-plugin=Lemon Chorus	id=clap:org.openstudio.lemon-chorus	format=clap	body=params
+plugin=Lemon Chorus	id=clap:org.lemonstudio.lemon-chorus	format=clap	body=params
 # Values: OpenStudio-specs plugins/factory-presets.md.
 Delay = 40
 Depth = 388

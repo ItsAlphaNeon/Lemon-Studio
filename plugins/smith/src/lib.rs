@@ -442,7 +442,7 @@ impl Plugin for SmithPlugin {
 }
 
 impl ClapPlugin for SmithPlugin {
-    const CLAP_ID: &'static str = "org.openstudio.smith";
+    const CLAP_ID: &'static str = "org.lemonstudio.smith";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's additive synthesizer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

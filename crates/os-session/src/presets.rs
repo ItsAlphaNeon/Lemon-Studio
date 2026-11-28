@@ -299,7 +299,7 @@ pub fn save_body(path: &Path, h: &Header, body: &Body) -> std::io::Result<()> {
 pub fn load(path: &Path, id: &str) -> Result<(Header, Body), String> {
     let bytes = read(path)?;
     let (h, rest) = decode(&bytes).ok_or_else(|| format!("{} is not a Lemon Studio preset", shown_name(path)))?;
-    if !id.is_empty() && !h.id.is_empty() && !h.id.eq_ignore_ascii_case(id) {
+    if !id.is_empty() && !h.id.is_empty() && !crate::plugins::same_uid(&h.id, id) {
         return Err(format!("{} belongs to {}", shown_name(path), if h.plugin.is_empty() { &h.id } else { &h.plugin }));
     }
     let body = if h.body == PARAMS_BODY {
@@ -327,7 +327,7 @@ pub fn read_any(path: &Path, d: &os_host::Descriptor) -> Result<Vec<(String, Bod
             }
             let bytes = read(path)?;
             let p = os_vst3::preset::Preset::parse(&bytes).ok_or_else(|| format!("{stem} is not a VST 3 preset"))?;
-            if !p.class_id.eq_ignore_ascii_case(&d.id) {
+            if !crate::plugins::same_uid(&p.class_id, &d.id) {
                 return Err(other());
             }
             Ok(vec![(stem, Body::State(bytes))])
@@ -365,10 +365,10 @@ pub fn uid_of(path: &Path) -> Option<String> {
     let bytes = read(path).ok()?;
     match ext.as_str() {
         #[cfg(feature = "vst3")]
-        "vstpreset" => Some(format!("vst3:{}", os_vst3::preset::Preset::parse(&bytes)?.class_id)),
+        "vstpreset" => Some(crate::plugins::canonical_uid(&format!("vst3:{}", os_vst3::preset::Preset::parse(&bytes)?.class_id)).into_owned()),
         #[cfg(feature = "vst2")]
         "fxp" | "fxb" => Some(format!("vst2:{}", os_vst2::id_text(os_vst2::fxp::parse(&bytes)?.unique_id))),
-        _ => decode(&bytes).map(|(h, _)| h.id).filter(|id| !id.is_empty()),
+        _ => decode(&bytes).map(|(h, _)| crate::plugins::canonical_uid(&h.id).into_owned()).filter(|id| !id.is_empty()),
     }
 }
 
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn preset_files_round_trip() {
-        let h = Header { plugin: "Lemon Sampler".into(), id: "org.openstudio.open-sampler".into(), format: "clap".into(), body: String::new() };
+        let h = Header { plugin: "Lemon Sampler".into(), id: "org.lemonstudio.lemon-sampler".into(), format: "clap".into(), body: String::new() };
         let state = b"\x05\0\0\0\0\0\0\0{\"a\"}\n\x00binary";
         let b = encode(&h, state);
         let (h2, s2) = decode(&b).unwrap();
@@ -617,9 +617,35 @@ mod tests {
         let p = file_for(&dir, "Deep: bass?");
         assert_eq!(p.file_name().unwrap(), "Deep_ bass_.ospreset");
         save(&p, &h, state).unwrap();
-        assert_eq!(state_of(load(&p, "org.openstudio.open-sampler")), state);
+        assert_eq!(state_of(load(&p, "org.lemonstudio.lemon-sampler")), state);
         assert!(load(&p, "some.other.plugin").is_err(), "presets of another plugin are refused");
         assert!(load(&p, "").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_openstudio_uids_remain_compatible() {
+        use crate::plugins::{canonical_uid, same_uid};
+        let dir = tmp("legacy_ids");
+        let p = dir.join("Old.ospreset");
+        let old = Header { plugin: "Lemon Sampler".into(), id: "clap:org.openstudio.open-sampler".into(), format: "clap".into(), body: String::new() };
+        let state = b"payload";
+        save(&p, &old, state).unwrap();
+        assert_eq!(state_of(load(&p, "clap:org.lemonstudio.lemon-sampler")), state);
+        assert_eq!(uid_of(&p).as_deref(), Some("clap:org.lemonstudio.lemon-sampler"));
+        assert!(same_uid("clap:org.openstudio.open-parametric-eq-2", "clap:org.lemonstudio.lemon-parametric-eq"));
+        assert!(same_uid("clap:org.openstudio.open-3x-osc", "clap:org.lemonstudio.lemon-trio"));
+        assert!(same_uid("clap:org.openstudio.press", "clap:org.lemonstudio.press"));
+        assert_eq!(canonical_uid("vst3:4F70656E53747564696F53616D706C72"), "vst3:4C656D6F6E53747564696F536D706C72");
+        assert_eq!(canonical_uid("vst3:4F70656E53747564696F506172455132"), "vst3:4C656D6F6E53747564696F5061724551");
+        assert_eq!(canonical_uid("vst3:4F70656E53747564696F33784F736321"), "vst3:4C656D6F6E53747564696F5472696F21");
+        // Plugin manager favorites/hidden written under legacy IDs stay matched and toggle cleanly.
+        let mut prefs = crate::plugin_db::Prefs::default();
+        prefs.favorites.push("clap:org.openstudio.open-sampler".into());
+        assert!(prefs.is_favorite("clap:org.lemonstudio.lemon-sampler"));
+        prefs.toggle_favorite("clap:org.lemonstudio.lemon-sampler");
+        assert!(!prefs.is_favorite("clap:org.lemonstudio.lemon-sampler"));
+        assert!(prefs.favorites.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

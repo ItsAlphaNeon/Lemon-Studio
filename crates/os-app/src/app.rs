@@ -10163,7 +10163,7 @@ mod tests {
         // A factory preset (a state preset) gives the slot its Maximus state, saved back under the file's name
         // (spec: plugins/factory-presets.md "Press (Maximus) and Pulp Filter").
         let p = crate::presets::factory(&crate::settings_file::store(), PRESS).into_iter().find(|p| p.name == "Mastering/Max loudness").expect("the preset");
-        let Ok((_, crate::presets::Body::State(blob))) = crate::presets::load(&p.path, "clap:org.openstudio.press") else { panic!("a state preset") };
+        let Ok((_, crate::presets::Body::State(blob))) = crate::presets::load(&p.path, "clap:org.lemonstudio.press") else { panic!("a state preset") };
         assert!(a.state.session.plugins.set_state(key, &blob));
         let max = press::fl_from_plugin_state(&blob).unwrap();
         assert_eq!(a.state.session.plugins.maximus_file_state(key), Some(max.clone()));

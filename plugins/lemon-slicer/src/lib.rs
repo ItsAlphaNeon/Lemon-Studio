@@ -278,7 +278,7 @@ impl Plugin for LemonSlicer {
 }
 
 impl ClapPlugin for LemonSlicer {
-    const CLAP_ID: &'static str = "org.openstudio.lemon-slicer";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-slicer";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's loop slicer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;

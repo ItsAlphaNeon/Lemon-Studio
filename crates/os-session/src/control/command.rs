@@ -719,7 +719,11 @@ fn member_at(s: &crate::session::Session, container: u32, member: u32) -> Result
 /// The identity and name of the plugin `plugin` names (its identity, else its name): an effect, or an instrument.
 fn plugin_named(s: &crate::session::Session, plugin: &str, instrument: bool) -> Result<(String, String), Error> {
     let list = if instrument { &s.plugins.available } else { &s.plugins.effects };
-    let a = list.iter().find(|a| a.desc.uid() == plugin).or_else(|| list.iter().find(|a| a.desc.name == plugin)).ok_or_else(|| format!("no {} {plugin}", if instrument { "instrument" } else { "effect" }))?;
+    let a = list
+        .iter()
+        .find(|a| crate::plugins::same_uid(&a.desc.uid(), plugin))
+        .or_else(|| list.iter().find(|a| a.desc.name == plugin))
+        .ok_or_else(|| format!("no {} {plugin}", if instrument { "instrument" } else { "effect" }))?;
     Ok((a.desc.uid(), a.desc.name.clone()))
 }
 

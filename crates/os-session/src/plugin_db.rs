@@ -136,11 +136,11 @@ impl Prefs {
     }
 
     pub fn is_favorite(&self, uid: &str) -> bool {
-        self.favorites.iter().any(|u| u == uid)
+        self.favorites.iter().any(|u| crate::plugins::same_uid(u, uid))
     }
 
     pub fn is_hidden(&self, uid: &str) -> bool {
-        self.hidden.iter().any(|u| u == uid)
+        self.hidden.iter().any(|u| crate::plugins::same_uid(u, uid))
     }
 
     /// Stars or unstars plugin `uid`.
@@ -180,11 +180,11 @@ impl Prefs {
 }
 
 fn toggle(list: &mut Vec<String>, uid: &str) {
-    match list.iter().position(|u| u == uid) {
+    match list.iter().position(|u| crate::plugins::same_uid(u, uid)) {
         Some(i) => {
             list.remove(i);
         }
-        None => list.push(uid.to_string()),
+        None => list.push(crate::plugins::canonical_uid(uid).into_owned()),
     }
 }
 

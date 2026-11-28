@@ -192,7 +192,7 @@ pub struct PhaserKind;
 
 impl Kind for PhaserKind {
     const SPEC: &'static Spec = SPEC;
-    const CLAP_ID: &'static str = "org.openstudio.lemon-phaser";
+    const CLAP_ID: &'static str = "org.lemonstudio.lemon-phaser";
     const CLAP_DESCRIPTION: &'static str = "Lemon Studio's phaser";
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Phaser, ClapFeature::Stereo];
     const VST3_CLASS_ID: [u8; 16] = *b"LemonStudioPhasr";

@@ -264,7 +264,7 @@ fn same_file(a: &std::path::Path, b: &str) -> bool {
 pub fn find(list: &[Available], r: &PluginRef) -> Option<usize> {
     let format = Format::parse(&r.format);
     let tests: [&dyn Fn(&Descriptor) -> bool; 4] = [
-        &|d| !r.id.is_empty() && Some(d.format) == format && d.id.eq_ignore_ascii_case(&r.id),
+        &|d| !r.id.is_empty() && Some(d.format) == format && crate::plugins::same_uid(&d.id, &r.id),
         &|d| !r.path.is_empty() && same_file(&d.path, &r.path) && d.name == r.name,
         &|d| Some(d.format) == format && d.name == r.name,
         &|d| d.name == r.name,

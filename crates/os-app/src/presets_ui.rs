@@ -317,7 +317,7 @@ pub fn dropped(app: &mut App, path: &Path) -> Option<String> {
     }
     let name = shown_name(path);
     let Some(uid) = uid_of(path) else { return Some(format!("{name}: drop it on a plugin window, a channel or a mixer slot")) };
-    let same = |d: &os_host::Descriptor| d.uid().eq_ignore_ascii_case(&uid);
+    let same = |d: &os_host::Descriptor| crate::plugins::same_uid(&d.uid(), &uid);
     if let Some(i) = app.state.session.plugins.available.iter().position(|a| same(&a.desc)) {
         crate::plugin_menu::add_generator(app, i, None);
         let row = app.state.session.project.channels.len() - 1;

@@ -234,7 +234,7 @@ impl Plugin for Press {
 }
 
 impl ClapPlugin for Press {
-    const CLAP_ID: &'static str = "org.openstudio.press";
+    const CLAP_ID: &'static str = "org.lemonstudio.press";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Lemon Studio's multiband maximiser");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
@@ -306,7 +306,7 @@ mod tests {
                 let mut part = b.splitn(3, |&c| c == b'\n');
                 assert_eq!(part.next(), Some(&b"OSPRESET 1"[..]), "{p:?}");
                 let head = std::str::from_utf8(part.next().unwrap()).unwrap();
-                assert!(head.starts_with("plugin=Press\tid=clap:org.openstudio.press\t") && !head.contains("body="), "{p:?}");
+                assert!(head.starts_with("plugin=Press\tid=clap:org.lemonstudio.press\t") && !head.contains("body="), "{p:?}");
                 let fl = fl_from_plugin_state(part.next().unwrap()).unwrap_or_else(|| panic!("{p:?}"));
                 let st = State::from_bytes(&fl).unwrap_or_else(|| panic!("{p:?}"));
                 if p == root.join("Default.ospreset") {

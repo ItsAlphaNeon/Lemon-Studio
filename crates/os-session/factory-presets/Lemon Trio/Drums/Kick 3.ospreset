@@ -1,5 +1,5 @@
 OSPRESET 1
-plugin=Lemon Trio	id=clap:org.openstudio.open-3x-osc	format=clap	body=params
+plugin=Lemon Trio	id=clap:org.lemonstudio.lemon-trio	format=clap	body=params
 # Values: OpenStudio-specs plugins/factory-presets.md.
 # The original channel shifts this preset by -3600 cents (root note / channel pitch), too far to fold into the oscillators (set the channel's root note or pitch to match).
 Osc 1 panning = 64
