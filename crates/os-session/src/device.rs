@@ -159,10 +159,89 @@ pub trait Source: Send {
 
 /// Counts the device's blocks (0: none yet), so the sources of one block can tell they share it (`blocks`).
 static BLOCKS: AtomicU64 = AtomicU64::new(0);
+/// Counts how many times the live listening guard tripped on non-finite or runaway output (`guard_trips`).
+static GUARD_TRIPS: AtomicU64 = AtomicU64::new(0);
 
 /// The device block being played now (sources asked within one block see the same count).
 pub fn blocks() -> u64 {
     BLOCKS.load(Ordering::Relaxed)
+}
+
+/// How many times the live speaker safety guard tripped since start (live output only; offline exports are untouched).
+pub fn guard_trips() -> u64 {
+    GUARD_TRIPS.load(Ordering::Relaxed)
+}
+
+/// Live speaker safety guard: scrubs `NaN`/`Inf` to silence and trips a soft attenuation ceiling when a faulty plugin
+/// or feedback loop produces runaway levels (> +12 dBFS). Transparent (bit-exact passthrough) for normal audio, and
+/// never touches offline renders or exports.
+struct ListeningGuard {
+    /// Current output attenuation gain (1.0 = transparent passthrough; `FLOOR` when tripped).
+    gain: f32,
+    /// Consecutive safe frames seen while tripped, before smoothly recovering.
+    safe_frames: u32,
+}
+
+impl ListeningGuard {
+    /// Peak amplitude that trips the guard (+12 dBFS: far above normal mix headroom).
+    const TRIP: f32 = 4.0;
+    /// Safe amplitude threshold for counting recovery time.
+    const SAFE: f32 = 1.5;
+    /// Attenuated gain while tripped (~-24 dB).
+    const FLOOR: f32 = 0.0625;
+    /// Safe frames required before recovery (~1 s at 48 kHz).
+    const HOLD_FRAMES: u32 = 48_000;
+    /// Per-frame linear gain step during recovery (~50 ms at 48 kHz).
+    const RECOVER_STEP: f32 = (1.0 - Self::FLOOR) / 2_400.0;
+
+    fn new() -> Self {
+        Self { gain: 1.0, safe_frames: 0 }
+    }
+
+    /// Processes interleaved live output in place (zero allocations, zero locks). Returns true if tripped this block.
+    fn process(&mut self, buf: &mut [f32], width: usize) -> bool {
+        let width = width.max(1);
+        let mut tripped_now = false;
+        for frame in buf.chunks_exact_mut(width) {
+            let mut bad = false;
+            let mut loud = false;
+            for s in frame.iter_mut() {
+                if !s.is_finite() {
+                    *s = 0.0;
+                    bad = true;
+                } else if s.abs() > Self::TRIP {
+                    bad = true;
+                } else if s.abs() > Self::SAFE {
+                    loud = true;
+                }
+            }
+            if bad {
+                if self.gain > Self::FLOOR {
+                    GUARD_TRIPS.fetch_add(1, Ordering::Relaxed);
+                    tripped_now = true;
+                }
+                self.gain = Self::FLOOR;
+                self.safe_frames = 0;
+            } else if self.gain < 1.0 {
+                if loud {
+                    self.safe_frames = 0;
+                } else {
+                    self.safe_frames = self.safe_frames.saturating_add(1);
+                    if self.safe_frames >= Self::HOLD_FRAMES {
+                        self.gain = (self.gain + Self::RECOVER_STEP).min(1.0);
+                    }
+                }
+            }
+            if self.gain < 1.0 {
+                let g = self.gain;
+                for s in frame.iter_mut() {
+                    // Hard-bound runaway finite peaks before scaling so even 1e30 stays safely under -24 dBFS.
+                    *s = s.clamp(-1.0, 1.0) * g;
+                }
+            }
+        }
+        tripped_now
+    }
 }
 
 /// Sources the device mixes at once (playback, live notes, a preview and the stopped ones still fading out).
@@ -182,12 +261,22 @@ struct Mix {
     sum: Vec<f32>,
     /// Channels in a frame: 2 × the output pairs (2 unless an ASIO driver opened more; `set_width`).
     width: usize,
+    /// Live speaker safety guard (NaN/Inf scrubber + runaway-level trip-switch).
+    guard: ListeningGuard,
 }
 
 impl Mix {
     fn new(inbox: Arc<Queue>, outbox: Arc<Queue>) -> Mix {
         crate::audio_log::init();
-        Mix { sources: Vec::with_capacity(MAX_SOURCES), inbox, outbox, one: Vec::with_capacity(2 * MAX_FRAMES), sum: Vec::with_capacity(2 * MAX_FRAMES), width: 2 }
+        Mix {
+            sources: Vec::with_capacity(MAX_SOURCES),
+            inbox,
+            outbox,
+            one: Vec::with_capacity(2 * MAX_FRAMES),
+            sum: Vec::with_capacity(2 * MAX_FRAMES),
+            width: 2,
+            guard: ListeningGuard::new(),
+        }
     }
 
     /// Plays `pairs` output pairs (before the device starts: the room is made now, not in the callback).
@@ -234,6 +323,7 @@ impl Mix {
             }
             i += 1;
         }
+        self.guard.process(&mut self.sum, w);
         crate::audio_log::push(&self.sum, w);
         &self.sum
     }
@@ -1225,5 +1315,37 @@ mod tests {
         let want = format!("Couldn't open {name} in exclusive mode: Windows' sound settings don't allow it for this device; using shared mode");
         assert_eq!(o.info.instead.as_deref(), Some(want.as_str()));
         assert_eq!(o.note.as_deref(), Some(want.as_str()), "told once");
+    }
+
+    #[test]
+    fn listening_guard_is_transparent_for_normal_audio_and_catches_faults() {
+        let mut g = ListeningGuard::new();
+        // Normal audio passes through bit-for-bit untouched.
+        let orig = [0.25f32, -0.5, 0.99, -1.0, 1.4, -1.2];
+        let mut buf = orig;
+        assert!(!g.process(&mut buf, 2));
+        assert_eq!(buf, orig);
+
+        // NaN and Inf are scrubbed to 0.0 and trip the guard.
+        let before = guard_trips();
+        let mut fault = [f32::NAN, f32::INFINITY, 0.5, -0.5];
+        assert!(g.process(&mut fault, 2));
+        assert!(guard_trips() > before);
+        assert!(fault.iter().all(|x| x.is_finite()));
+        assert_eq!(fault[0], 0.0);
+        assert_eq!(fault[1], 0.0);
+        assert!(fault[2].abs() <= ListeningGuard::FLOOR + 1e-6);
+
+        // Runaway finite feedback stays bounded to FLOOR.
+        let mut blast = [1e6f32, -1e6, 50.0, -50.0];
+        g.process(&mut blast, 2);
+        assert!(blast.iter().all(|x| x.is_finite() && x.abs() <= ListeningGuard::FLOOR + 1e-6));
+
+        // After enough safe frames, the guard recovers back to transparent 1.0 gain.
+        let mut silence = vec![0.1f32; (ListeningGuard::HOLD_FRAMES as usize + 3000) * 2];
+        g.process(&mut silence, 2);
+        let mut after = [0.5f32, -0.5];
+        g.process(&mut after, 2);
+        assert_eq!(after, [0.5, -0.5]);
     }
 }
