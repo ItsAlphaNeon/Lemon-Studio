@@ -41,6 +41,9 @@ pub const TRACK_LOCKS: u8 = 201;
 pub const NOTE_LOCKS: u8 = 202;
 /// `LMex` event: what the project uses that a Lemon Studio without it cannot play, by name (os-app `lemon_state`).
 pub const FEATURES: u8 = 203;
+/// `LMex` event: stable object ids (`os_model::Id`) for channels, patterns, mixer tracks, arrangements, clips, slots,
+/// notes, controls, markers, playlist tracks and automation points so references survive closing and reopening.
+pub const OBJECT_IDS: u8 = 204;
 
 /// Whether `file` is a `.lemon` file (its first chunk is `LMhd`).
 pub fn is_lemon(file: &FlpFile) -> bool {

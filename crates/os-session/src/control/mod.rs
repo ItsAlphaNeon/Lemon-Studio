@@ -702,3 +702,195 @@ pub fn discard(s: &mut crate::session::Session, n: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Core permission gate: verifies a client's `Level` before any state-changing operation (used by JSON-RPC, scripts,
+/// and future mods alike so permissions are enforced in the core, not only in adapters).
+pub fn require_level(level: Level, need: Level, by: &By) -> Result<(), String> {
+    if level >= need {
+        Ok(())
+    } else {
+        Err(format!("{} may only {:?} (needs {:?})", by.label(), level, need).to_lowercase())
+    }
+}
+
+/// Applies `commands` only when `level` allows `Level::Edit`.
+pub fn apply_checked_in(s: &mut crate::session::Session, by: &By, level: Level, name: Option<&str>, commands: Vec<Command>) -> Result<Vec<serde_json::Value>, String> {
+    require_level(level, Level::Edit, by)?;
+    apply_in(s, by, name, commands)
+}
+
+/// Proposes `commands` only when `level` allows `Level::Propose`.
+pub fn propose_checked_in(s: &mut crate::session::Session, by: &By, level: Level, name: &str, commands: Vec<Command>, selected: usize) -> Result<(u64, Vec<query::Change>), String> {
+    require_level(level, Level::Propose, by)?;
+    propose_in(s, by, name, commands, selected)
+}
+
+/// All public command operations, grouped by domain, for self-describing clients (`describe`).
+pub const COMMAND_OPS: &[(&str, &str)] = &[
+    // Project
+    ("set_tempo", "project"),
+    ("set_swing", "project"),
+    ("set_main_volume", "project"),
+    ("set_main_pitch", "project"),
+    ("set_time_signature", "project"),
+    ("set_info", "project"),
+    ("set_project", "project"),
+    // Channels
+    ("add_channel", "channel"),
+    ("add_audio_clip", "channel"),
+    ("set_auto_crossfades", "channel"),
+    ("clone_channel", "channel"),
+    ("replace_instrument", "channel"),
+    ("delete_channel", "channel"),
+    ("move_channel", "channel"),
+    ("set_channel", "channel"),
+    ("load_sample", "channel"),
+    ("load_channel_state", "channel"),
+    ("set_misc", "channel"),
+    ("set_start_value", "channel"),
+    ("set_clip_lfo", "channel"),
+    ("set_midi_out", "channel"),
+    // Mixer
+    ("add_track", "mixer"),
+    ("delete_track", "mixer"),
+    ("set_track", "mixer"),
+    ("reset_track", "mixer"),
+    ("remove_tracks", "mixer"),
+    ("move_track", "mixer"),
+    ("load_track_state", "mixer"),
+    ("set_auto_bypass", "mixer"),
+    ("set_send", "mixer"),
+    ("set_eq", "mixer"),
+    ("add_effect", "mixer"),
+    ("remove_effect", "mixer"),
+    ("move_effect", "mixer"),
+    ("set_slot", "mixer"),
+    // Patterns & notes
+    ("add_pattern", "pattern"),
+    ("copy_pattern", "pattern"),
+    ("shift_patterns", "pattern"),
+    ("move_pattern", "pattern"),
+    ("clone_pattern", "pattern"),
+    ("transpose_pattern", "pattern"),
+    ("split_pattern", "pattern"),
+    ("set_pattern_signature", "pattern"),
+    ("set_pattern_markers", "pattern"),
+    ("delete_pattern", "pattern"),
+    ("set_pattern", "pattern"),
+    ("set_notes", "pattern"),
+    ("add_notes", "pattern"),
+    ("set_step", "pattern"),
+    ("set_controls", "pattern"),
+    ("set_loops", "pattern"),
+    ("set_groups", "pattern"),
+    // Playlist & arrangements
+    ("add_clip", "playlist"),
+    ("delete_clip", "playlist"),
+    ("set_clip", "playlist"),
+    ("set_playlist_track", "playlist"),
+    ("set_points", "playlist"),
+    ("add_arrangement", "playlist"),
+    ("delete_arrangement", "playlist"),
+    ("set_arrangement", "playlist"),
+    ("set_clips", "playlist"),
+    ("set_markers", "playlist"),
+    ("add_marker", "playlist"),
+    ("set_marker", "playlist"),
+    ("delete_marker", "playlist"),
+    ("move_content", "playlist"),
+    ("swap_playlist_tracks", "playlist"),
+    ("insert_playlist_track", "playlist"),
+    ("delete_playlist_track", "playlist"),
+    ("reset_playlist_track", "playlist"),
+    // Containers
+    ("set_member", "container"),
+    ("wrap_effects", "container"),
+    ("wrap_instrument", "container"),
+    ("move_member", "container"),
+    ("remove_member", "container"),
+    ("add_member", "container"),
+    ("replace_member", "container"),
+    // Plugins
+    ("set_param", "plugin"),
+    ("set_plugin_state", "plugin"),
+];
+
+/// Self-describing manifest of the control plane: protocol version, permission levels, JSON-RPC methods, and supported
+/// command ops, so assistants, scripts, and editions can discover capabilities dynamically.
+pub fn describe() -> serde_json::Value {
+    let methods = [
+        ("hello", "read", "Identify client and check protocol version and permission level"),
+        ("describe", "read", "Return protocol version, levels, RPC methods, and command operations"),
+        ("state", "read", "Read the current project state with stable object ids"),
+        ("notes", "read", "Read a pattern's notes"),
+        ("plugins", "read", "List available instruments and effects"),
+        ("params", "read", "List parameters (ranges, units, values) for a plugin owner id"),
+        ("history", "read", "Read the undo/redo history"),
+        ("events", "read", "Read control-plane events since a sequence number"),
+        ("proposals", "read", "List pending proposals"),
+        ("apply", "edit", "Apply one or more commands as a single undoable transaction"),
+        ("begin", "edit", "Start a streaming edit gesture (one combined undo step)"),
+        ("end", "edit", "Finish a streaming edit gesture"),
+        ("propose", "propose", "Dry-run commands and queue a proposal for user approval"),
+        ("accept", "edit", "Accept and apply a queued proposal"),
+        ("discard", "edit", "Discard a queued proposal"),
+        ("undo", "edit", "Undo the newest step"),
+        ("redo", "edit", "Redo the next undone step"),
+        ("midi_target", "edit", "Select the live MIDI target channel in headless sessions"),
+        ("save", "edit", "Save the project (asks the user when running with a window)"),
+    ];
+    serde_json::json!({
+        "app": "Lemon Studio",
+        "version": crate::version::VERSION,
+        "protocol": rpc::PROTOCOL,
+        "levels": ["read", "propose", "edit"],
+        "methods": methods.iter().map(|(name, level, summary)| serde_json::json!({
+            "name": name,
+            "level": level,
+            "summary": summary,
+        })).collect::<Vec<_>>(),
+        "commands": COMMAND_OPS.iter().map(|(op, group)| serde_json::json!({
+            "op": op,
+            "group": group,
+            "level": "edit",
+        })).collect::<Vec<_>>(),
+    })
+}
+
+#[cfg(test)]
+mod permission_and_describe_tests {
+    use super::*;
+
+    #[test]
+    fn describe_lists_unique_methods_and_commands() {
+        let d = describe();
+        assert_eq!(d["protocol"], serde_json::json!(rpc::PROTOCOL));
+        let methods = d["methods"].as_array().unwrap();
+        let mut seen_m = std::collections::HashSet::new();
+        for m in methods {
+            let name = m["name"].as_str().unwrap();
+            assert!(seen_m.insert(name), "duplicate method {name}");
+        }
+        assert!(seen_m.contains("describe") && seen_m.contains("apply") && seen_m.contains("propose"));
+        let cmds = d["commands"].as_array().unwrap();
+        let mut seen_c = std::collections::HashSet::new();
+        for c in cmds {
+            let op = c["op"].as_str().unwrap();
+            assert!(seen_c.insert(op), "duplicate command op {op}");
+        }
+        assert!(seen_c.contains("set_tempo") && seen_c.contains("set_param") && seen_c.contains("set_plugin_state"));
+    }
+
+    #[test]
+    fn core_permission_gate_blocks_insufficient_levels() {
+        let st = crate::settings_file::SettingsStore::memory();
+        let mut s = crate::session::Session::new(crate::projects::default_project(&st), crate::transport::Transport::new(None), st);
+        let by = By::Client("assistant".into());
+        let cmd = vec![Command::SetTempo { bpm: 140.0 }];
+        assert!(apply_checked_in(&mut s, &by, Level::Read, None, cmd.clone()).is_err());
+        assert!(apply_checked_in(&mut s, &by, Level::Propose, None, cmd.clone()).is_err());
+        assert!(propose_checked_in(&mut s, &by, Level::Read, "faster", cmd.clone(), 0).is_err());
+        assert!(propose_checked_in(&mut s, &by, Level::Propose, "faster", cmd.clone(), 0).is_ok());
+        assert!(apply_checked_in(&mut s, &by, Level::Edit, None, cmd).is_ok());
+        assert!((s.tempo() - 140.0).abs() < 1e-6);
+    }
+}
