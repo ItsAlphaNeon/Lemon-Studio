@@ -76,8 +76,6 @@ os-theme = { path = "../os-theme" }
 os-ui = { path = "../os-ui" }
 os-clap = { path = "../os-clap" }
 os-host.workspace = true
-os-vst3.workspace = true
-os-vst2.workspace = true
 os-paths.workspace = true
 os-smf.workspace = true
 lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked", "editor"] }
@@ -118,11 +116,6 @@ jpeg-decoder = { version = "0.3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-# Export encoders (`export::encode`): FLAC (pure Rust), MP3 (LAME, built from source) and Ogg Vorbis (libvorbis, built
-# from source).
-flacenc = "0.5"
-mp3lame-encoder = "0.3"
-vorbis_rs = "0.5"
 zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

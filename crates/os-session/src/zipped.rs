@@ -55,18 +55,42 @@ fn is_project(p: &Path) -> bool {
 /// A file in the zip: its index, its path inside the zip, its size.
 type Entry = (usize, PathBuf, u64);
 
+/// Upper bounds on an untrusted zip project archive: entry count and total extracted bytes (2 GiB).
+const MAX_ENTRIES: usize = 10_000;
+const MAX_UNZIP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// Unzips `zip` into a folder beside it named after it (`unzip_into`), else under `fallback`; returns the project file:
 /// the one nearest the top of the zip (then by name). Names that would leave the folder are skipped.
 pub fn unzip(zip: &Path, fallback: Option<&Path>, done: &AtomicU64, total: &AtomicU64) -> Result<PathBuf, String> {
+    unzip_with_limits(zip, fallback, done, total, MAX_ENTRIES, MAX_UNZIP_BYTES)
+}
+
+fn unzip_with_limits(
+    zip: &Path,
+    fallback: Option<&Path>,
+    done: &AtomicU64,
+    total: &AtomicU64,
+    max_entries: usize,
+    max_bytes: u64,
+) -> Result<PathBuf, String> {
     let mut a = zip::ZipArchive::new(io::BufReader::new(File::open(zip).map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
+    if a.len() > max_entries {
+        return Err(format!("the zip holds too many files (more than {max_entries})"));
+    }
     let mut entries: Vec<Entry> = Vec::new();
+    let mut declared_total: u64 = 0;
     for i in 0..a.len() {
         let f = a.by_index_raw(i).map_err(|e| e.to_string())?;
         if f.is_dir() {
             continue;
         }
         if let Some(rel) = f.enclosed_name() {
-            entries.push((i, rel, f.size()));
+            let size = f.size();
+            declared_total = declared_total.checked_add(size).ok_or_else(|| "the zip is too large to unzip".to_string())?;
+            if declared_total > max_bytes {
+                return Err("the zip is too large to unzip".to_string());
+            }
+            entries.push((i, rel, size));
         }
     }
     let project = entries
@@ -75,14 +99,14 @@ pub fn unzip(zip: &Path, fallback: Option<&Path>, done: &AtomicU64, total: &Atom
         .min_by_key(|e| (e.1.components().count(), e.1.to_string_lossy().to_lowercase()))
         .map(|e| e.1.clone())
         .ok_or_else(|| "it holds no FLP project".to_string())?;
-    total.store(entries.iter().map(|e| e.2).sum(), Ordering::Relaxed);
+    total.store(declared_total, Ordering::Relaxed);
     let stem = zip.file_stem().map_or_else(|| "Project".to_string(), |s| s.to_string_lossy().into_owned());
     let beside = zip.parent().map(|d| if d.as_os_str().is_empty() { Path::new(".") } else { d });
     let mut first_error = None;
     for base in beside.into_iter().chain(fallback) {
         let Some(dest) = folder_for(base, &stem, &entries, &project) else { continue };
         done.store(0, Ordering::Relaxed);
-        match unzip_into(&mut a, &entries, &dest, done) {
+        match unzip_into(&mut a, &entries, &dest, done, max_bytes) {
             Ok(()) => return Ok(dest.join(&project)),
             Err(e) => {
                 first_error.get_or_insert(e);
@@ -107,12 +131,23 @@ fn folder_for(base: &Path, stem: &str, entries: &[Entry], project: &Path) -> Opt
 
 /// Writes the zip's files into `dest`; a file already there with the same size is kept. Each file is written beside
 /// its place, then moved in, so a stopped unzip leaves no part file under a real name.
-fn unzip_into<R: Read + io::Seek>(a: &mut zip::ZipArchive<R>, entries: &[Entry], dest: &Path, done: &AtomicU64) -> Result<(), String> {
+fn unzip_into<R: Read + io::Seek>(
+    a: &mut zip::ZipArchive<R>,
+    entries: &[Entry],
+    dest: &Path,
+    done: &AtomicU64,
+    max_bytes: u64,
+) -> Result<(), String> {
     let err = |p: &Path, e: &dyn std::fmt::Display| format!("{}: {e}", p.display());
     std::fs::create_dir_all(dest).map_err(|e| err(dest, &e))?;
+    let mut extracted: u64 = 0;
     for (i, rel, size) in entries {
         let out = dest.join(rel);
         if std::fs::metadata(&out).is_ok_and(|m| m.is_file() && m.len() == *size) {
+            extracted = extracted.checked_add(*size).ok_or_else(|| err(&out, &"unzipped data exceeds size limit"))?;
+            if extracted > max_bytes {
+                return Err(err(&out, &"unzipped data exceeds size limit"));
+            }
             done.fetch_add(*size, Ordering::Relaxed);
             continue;
         }
@@ -122,11 +157,17 @@ fn unzip_into<R: Read + io::Seek>(a: &mut zip::ZipArchive<R>, entries: &[Entry],
         let mut part = out.clone().into_os_string();
         part.push(".part");
         let part = PathBuf::from(part);
+        let remaining = max_bytes.saturating_sub(extracted);
         let mut f = a.by_index(*i).map_err(|e| err(rel, &e))?;
-        let written = File::create(&part).and_then(|w| copy(&mut f, io::BufWriter::new(w), done)).and_then(|()| std::fs::rename(&part, &out));
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&part);
-            return Err(err(&out, &e));
+        let written = File::create(&part)
+            .and_then(|w| copy_limited(&mut f, io::BufWriter::new(w), done, remaining))
+            .and_then(|n| std::fs::rename(&part, &out).map(|()| n));
+        match written {
+            Ok(n) => extracted = extracted.saturating_add(n),
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(err(&out, &e));
+            }
         }
     }
     Ok(())
@@ -146,6 +187,30 @@ fn copy(r: &mut impl Read, mut w: impl Write, done: &AtomicU64) -> io::Result<()
         done.fetch_add(n as u64, Ordering::Relaxed);
     }
     w.flush()
+}
+
+/// Copies up to `limit` bytes from `r` into `w` using `Read::take(limit + 1)`, failing if the stream yields more bytes
+/// than `limit` (protects against zip bombs and spoofed uncompressed-size headers).
+fn copy_limited(r: &mut impl Read, mut w: impl Write, done: &AtomicU64, limit: u64) -> io::Result<u64> {
+    let mut limited = r.take(limit.saturating_add(1));
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut copied: u64 = 0;
+    loop {
+        let n = match limited.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        copied = copied.saturating_add(n as u64);
+        if copied > limit {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "unzipped data exceeds size limit"));
+        }
+        w.write_all(&buf[..n])?;
+        done.fetch_add(n as u64, Ordering::Relaxed);
+    }
+    w.flush()?;
+    Ok(copied)
 }
 
 // --- Writing a zip ---
@@ -293,4 +358,47 @@ mod tests {
         assert_eq!(p.free_name("Snare.wav"), "Snare.wav");
     }
 
+    /// Rejects archives with too many entries, huge declared sizes, or spoofed headers whose actual decompressed
+    /// payload exceeds the extraction budget.
+    #[test]
+    fn rejects_zip_bombs_and_spoofed_headers() {
+        let d = temp("bomb");
+        let (done, total) = (AtomicU64::new(0), AtomicU64::new(0));
+
+        // 1. Entry count cap.
+        let many = d.join("many.zip");
+        make_zip(&many, &[("Song.flp", b"s"), ("a.wav", b"a"), ("b.wav", b"b"), ("c.wav", b"c")]);
+        assert!(unzip_with_limits(&many, None, &done, &total, 3, 1024).is_err());
+
+        // 2. Declared size cap.
+        let big = d.join("big.zip");
+        let payload = vec![0u8; 4096];
+        make_zip(&big, &[("Song.flp", b"s"), ("Big.wav", &payload)]);
+        assert!(unzip_with_limits(&big, None, &done, &total, 10, 1024).is_err());
+
+        // 3. Spoofed uncompressed-size header (header claims 10 bytes, actual deflate stream yields 4096 bytes).
+        let spoofed = d.join("spoofed.zip");
+        let mut raw = std::fs::read(&big).unwrap();
+        let needle = 4096u32.to_le_bytes();
+        let fake = 10u32.to_le_bytes();
+        let mut patched = 0usize;
+        for w in 0..raw.len().saturating_sub(4) {
+            if raw[w..w + 4] == needle {
+                raw[w..w + 4].copy_from_slice(&fake);
+                patched += 1;
+            }
+        }
+        assert!(patched >= 2, "patched local and central header uncompressed sizes");
+        std::fs::write(&spoofed, &raw).unwrap();
+        assert!(unzip_with_limits(&spoofed, None, &done, &total, 10, 1024).is_err());
+        assert!(!d.join("spoofed/Big.wav").exists(), "oversized file was not finalized");
+        assert!(!d.join("spoofed/Big.wav.part").exists(), "partial bomb file was cleaned up");
+
+        // 4. Direct stream enforcement via Read::take(limit + 1).
+        let mut out = Vec::new();
+        let err = copy_limited(&mut io::Cursor::new(&payload), &mut out, &done, 1024).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(out.len() <= 1024);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

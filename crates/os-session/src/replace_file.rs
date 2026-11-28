@@ -8,6 +8,9 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
 
 /// Puts `bytes` in place of the file at `path` (or creates it). A symlink stays a link: the file it points to is
 /// replaced. The old file's permissions carry over.
@@ -18,6 +21,7 @@ pub fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
+        drop(f);
         if let Ok(m) = std::fs::metadata(&target) {
             std::fs::set_permissions(&tmp, m.permissions())?;
         }
@@ -39,7 +43,8 @@ pub fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// project's extension, so neither the browser nor a file dialog lists it.
 fn beside(target: &Path) -> PathBuf {
     let name = target.file_name().map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
-    target.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+    let seq = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
+    target.with_file_name(format!(".{name}.{}.{seq}.tmp", std::process::id()))
 }
 
 #[cfg(test)]
@@ -96,6 +101,27 @@ mod tests {
         assert!(link.is_symlink(), "still a link");
         assert_eq!(std::fs::read(&real).unwrap(), b"new");
         assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o640);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Concurrent saves to the same path use distinct temp files and never collide.
+    #[test]
+    fn concurrent_replaces_do_not_collide() {
+        let d = dir("concurrent");
+        let p = d.join("Song.lemon");
+        assert_ne!(beside(&p), beside(&p), "distinct temp names per save");
+        std::thread::scope(|s| {
+            for t in 0..8usize {
+                let p = p.clone();
+                s.spawn(move || {
+                    for i in 0..10usize {
+                        replace(&p, format!("thread-{t}-iter-{i}").as_bytes()).unwrap();
+                    }
+                });
+            }
+        });
+        assert!(p.is_file());
+        assert!(!std::fs::read_dir(&d).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
         let _ = std::fs::remove_dir_all(d);
     }
 }

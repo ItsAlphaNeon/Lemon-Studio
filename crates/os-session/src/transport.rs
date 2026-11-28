@@ -488,8 +488,8 @@ enum Cmd {
     Update,
     /// A channel's pitch knob moved live (`Transport::channel_pitch`): row, cents.
     ChannelPitch(usize, i32),
-    /// Levels changed, and nothing else (`Transport::update`).
-    LiveEdits(Vec<os_engine::LiveEdit>),
+    /// Levels changed, and nothing else (`Transport::update`), tagged with the `Update` revision diffed against.
+    LiveEdits(u64, Vec<os_engine::LiveEdit>),
     Preview(Box<Project>),
     /// Play a project's playlist once on the preview stream (clip preview).
     PreviewSong(Box<Project>),
@@ -586,11 +586,44 @@ pub fn headless() {
     HEADLESS.store(true, Ordering::Release);
 }
 
+/// What `Transport::update` last sent: the project (with its live edits) and the monotonic revision of the full
+/// `Cmd::Update` it was based on.
+#[derive(Default)]
+struct Sent {
+    rev: u64,
+    project: Option<Project>,
+}
+
+/// Queues `project` for the audio thread: in-band `Cmd::LiveEdits` tagged with the current full-update revision when
+/// only live-editable levels changed, else a coalesced full `Cmd::Update` in `latest` at the next revision.
+fn enqueue_update(sent: &Mutex<Sent>, latest: &Mutex<Option<(u64, Project)>>, tx: &Sender<Cmd>, project: &Project) {
+    if let Ok(mut sent) = sent.lock() {
+        if let Some(edits) = sent.project.as_mut().and_then(|s| os_engine::live_edits(s, project)) {
+            let _ = tx.send(Cmd::LiveEdits(sent.rev, edits));
+            return;
+        }
+        sent.rev += 1;
+        sent.project = Some(project.clone());
+        // Edits can come faster than engines are built: keep only the newest, tagged with its revision so earlier
+        // in-band `Cmd::LiveEdits` cannot overwrite it after `latest` jumps ahead.
+        if let Ok(mut slot) = latest.lock() {
+            *slot = Some((sent.rev, project.clone()));
+        }
+        let _ = tx.send(Cmd::Update);
+        return;
+    }
+    if let Ok(mut slot) = latest.lock() {
+        let rev = slot.as_ref().map_or(1, |(r, _)| r + 1);
+        *slot = Some((rev, project.clone()));
+    }
+    let _ = tx.send(Cmd::Update);
+}
+
 pub struct Transport {
     tx: Sender<Cmd>,
-    latest: Arc<Mutex<Option<Project>>>,
+    latest: Arc<Mutex<Option<(u64, Project)>>>,
     /// The project `update` last sent, with its edits; `None` once a playback starts from a project of its own.
-    sent: Mutex<Option<Project>>,
+    sent: Mutex<Sent>,
     /// How many times `update` was called (tests: an idle tick hands playback nothing).
     updates: std::sync::atomic::AtomicU64,
     instruments: Instruments,
@@ -620,7 +653,7 @@ impl Transport {
                 }
             })
             .expect("spawn audio thread");
-        Transport { tx, latest, sent: Mutex::new(None), updates: Default::default(), instruments, shared, thread: Some(thread), settings: Default::default() }
+        Transport { tx, latest, sent: Mutex::default(), updates: Default::default(), instruments, shared, thread: Some(thread), settings: Default::default() }
     }
 
     /// Hosted generator plugins by rack row; playing engines pick them up at once.
@@ -805,7 +838,7 @@ impl Transport {
     /// What plays next may not be what `update` last sent: its next project goes whole.
     fn forget_sent(&self) {
         if let Ok(mut sent) = self.sent.lock() {
-            *sent = None;
+            sent.project = None;
         }
     }
 
@@ -818,7 +851,7 @@ impl Transport {
     /// Tests: the project the engine was last given whole, with the live edits since (the equivalence harness).
     #[cfg(any(test, feature = "test-util"))]
     pub fn sent_for_tests(&self) -> Option<Project> {
-        self.sent.lock().ok().and_then(|s| s.clone())
+        self.sent.lock().ok().and_then(|s| s.project.clone())
     }
 
     /// Tests: how many times the engine was handed the project (`update`).
@@ -829,25 +862,14 @@ impl Transport {
 
     /// Whether playback holds `project` as it is (what `update` last sent, with its edits).
     pub fn holds(&self, project: &Project) -> bool {
-        self.sent.lock().is_ok_and(|s| s.as_ref() == Some(project))
+        self.sent.lock().is_ok_and(|s| s.project.as_ref() == Some(project))
     }
 
     pub fn update(&self, project: &Project) {
         self.updates.fetch_add(1, Ordering::Relaxed);
         // Levels alone reach the playing engines in place: a new engine at every move of a knob takes milliseconds of
         // building each time (up to some 70 in a large project). What was last sent says what changed.
-        if let Ok(mut sent) = self.sent.lock() {
-            if let Some(edits) = sent.as_mut().and_then(|s| os_engine::live_edits(s, project)) {
-                let _ = self.tx.send(Cmd::LiveEdits(edits));
-                return;
-            }
-            *sent = Some(project.clone());
-        }
-        // Edits can come faster than engines are built: keep only the newest.
-        if let Ok(mut slot) = self.latest.lock() {
-            *slot = Some(project.clone());
-        }
-        let _ = self.tx.send(Cmd::Update);
+        enqueue_update(&self.sent, &self.latest, &self.tx, project);
     }
 
     /// Play pattern 1 of `project` once (a one-note preview project), on the previews' stream.
@@ -1720,7 +1742,9 @@ enum Role {
 /// time, the next one after the resets it asked for (`Stream::swap`).
 struct Audio {
     shared: Arc<Shared>,
-    latest: Arc<Mutex<Option<Project>>>,
+    latest: Arc<Mutex<Option<(u64, Project)>>>,
+    /// Revision of the most recent full `Cmd::Update` applied here; earlier `Cmd::LiveEdits` are stale and ignored.
+    applied_rev: u64,
     inst: Instruments,
     library: SampleLibrary,
     /// The stream that plays: playback, live notes, tails, the instruments while an editor is open.
@@ -1759,7 +1783,7 @@ struct Audio {
     device: OutputDevice,
 }
 
-fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option<Project>>>, inst: Instruments, library: SampleLibrary) {
+fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option<(u64, Project)>>>, inst: Instruments, library: SampleLibrary) {
     #[cfg(any(test, feature = "test-util"))]
     let device = OutputDevice::counted(shared.device_opens.clone());
     #[cfg(not(any(test, feature = "test-util")))]
@@ -1767,6 +1791,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     let mut a = Audio {
         shared,
         latest,
+        applied_rev: 0,
         inst,
         library,
         main: None,
@@ -2062,7 +2087,10 @@ impl Audio {
             // The output is closed by Auto close: previews and live notes find no stream and open none.
             // So is a device that failed, until it opens again.
             Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(..) if self.closed || self.lost.is_some() => {}
-            Cmd::LiveEdits(edits) => {
+            Cmd::LiveEdits(rev, edits) => {
+                if rev < self.applied_rev {
+                    return;
+                }
                 if let Some(s) = &self.main {
                     s.with(|e| edits.iter().for_each(|&x| e.apply_edit(x)));
                 }
@@ -2097,7 +2125,8 @@ impl Audio {
                 }
             }
             Cmd::Update => {
-                if let Some(project) = self.latest.lock().ok().and_then(|mut l| l.take()) {
+                if let Some((rev, project)) = self.latest.lock().ok().and_then(|mut l| l.take()) {
+                    self.applied_rev = rev;
                     if let Role::Song(p) | Role::Ringing(p, _) = &mut self.role {
                         p.project = project.clone();
                     }
@@ -4595,5 +4624,67 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(calls.load(Ordering::Relaxed), c1, "no longer processed");
         assert_eq!(t.streams(), 1, "the stream stays, silent");
+    }
+
+    /// A coalesced full `Cmd::Update` (P3) jumps ahead of an earlier `Cmd::LiveEdits` (e2) in `latest`: the stale
+    /// live edits from before P3 must be ignored rather than clobbering P3, while later live edits (e4) still apply.
+    #[test]
+    fn coalesced_update_is_not_clobbered_by_stale_live_edits() {
+        let (tx, rx) = mpsc::channel();
+        let sent = Mutex::default();
+        let latest = Arc::new(Mutex::new(None));
+        let mut audio = Audio {
+            shared: Arc::new(Shared::default()),
+            latest: latest.clone(),
+            applied_rev: 0,
+            inst: Arc::new(Mutex::new(Hosts::default())),
+            library: SampleLibrary::default(),
+            main: None,
+            pre: None,
+            preview_until: None,
+            role: Role::Idle,
+            parked: None,
+            live_project: None,
+            pend: 0,
+            dirty: false,
+            listen: false,
+            listen_retry: false,
+            closed: false,
+            closing: None,
+            held: None,
+            rewind_at: None,
+            lost: None,
+            open_asio: None,
+            device: OutputDevice::default(),
+        };
+
+        let mut p1 = crate::projects::test_project();
+        p1.channels[0].volume = 0.5;
+        let mut p2 = p1.clone();
+        p2.channels[0].volume = 0.2; // live-editable level change -> Cmd::LiveEdits(rev=1, e2)
+        let mut p3 = p1.clone();
+        p3.tempo = Some(160.0); // structural change -> full Cmd::Update(rev=2) overwriting `latest`
+        p3.channels[0].volume = 0.9;
+
+        // Queue all three before the audio thread drains any commands (exact interleaving that raced).
+        enqueue_update(&sent, &latest, &tx, &p1);
+        enqueue_update(&sent, &latest, &tx, &p2);
+        enqueue_update(&sent, &latest, &tx, &p3);
+
+        while let Ok(cmd) = rx.try_recv() {
+            audio.command(cmd);
+        }
+        let got = audio.live_project.as_ref().expect("P3 loaded");
+        assert_eq!(got.tempo, Some(160.0));
+        assert_eq!(got.channels[0].volume, 0.9, "P3 must not be clobbered by stale LiveEdits from P2");
+
+        // Subsequent live edits based on P3 (rev=2) still apply normally.
+        let mut p4 = p3.clone();
+        p4.channels[0].volume = 0.75;
+        enqueue_update(&sent, &latest, &tx, &p4);
+        while let Ok(cmd) = rx.try_recv() {
+            audio.command(cmd);
+        }
+        assert_eq!(audio.live_project.as_ref().unwrap().channels[0].volume, 0.75);
     }
 }

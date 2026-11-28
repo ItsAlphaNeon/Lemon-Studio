@@ -31,11 +31,18 @@ typedef struct {
 /* The module this file is linked into (the program). */
 static HMODULE own_module(void)
 {
-    static HMODULE own;
-    if (!own)
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR)&own_module, &own);
-    return own;
+    static void *volatile own;
+    void *m = InterlockedCompareExchangePointer(&own, NULL, NULL);
+    if (!m) {
+        HMODULE found = NULL;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)&own_module, &found) &&
+            found) {
+            InterlockedCompareExchangePointer(&own, (void *)found, NULL);
+            m = (void *)found;
+        }
+    }
+    return (HMODULE)m;
 }
 
 /* A runtime error carries its error object as the second exception parameter; the object's first field after its

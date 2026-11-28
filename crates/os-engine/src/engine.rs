@@ -1206,8 +1206,10 @@ pub struct Engine {
     /// `None`: a note, which ends with a note off; the note or clip that started it, `None` for a live note), live
     /// notes waiting for the next tick (channel, key, velocity; negative = note off), this tick's events.
     inst_offs: Vec<(u64, usize, u8, Option<u32>, Option<Origin>)>,
-    /// Audio clips with fades or gain playing on instrument channels.
+    /// Audio clips with fades or gain playing on instrument channels, and a read-only channel index mirror for
+    /// multicore dispatch without aliasing active `&mut InstClip`s.
     inst_shapes: Vec<InstClip>,
+    inst_shape_channels: Vec<usize>,
     /// The name the next audio clip voice on an instrument gets (`Instrument::voice_start`).
     next_voice: u32,
     /// Live notes for instrument channels waiting for the next tick (channel, key, velocity or -1 for an end, MIDI
@@ -1224,6 +1226,7 @@ pub struct Engine {
     /// instrument (spec: audio/note-rules.md).
     inst_notes: Vec<(usize, u32, notes::Note)>,
     note_voices: Vec<notes::Voices>,
+    note_rules: Vec<notes::Rules>,
     /// Per instrument channel: the frames of the ticks its instrument missed (still busy after `BUSY_WAIT`) and the
     /// notes it missed (channel, note); both are made up when it is reached again, so it stays in time with the song.
     inst_owed: Vec<usize>,
@@ -1777,6 +1780,7 @@ impl Engine {
             io: None,
             inst_offs: Vec::with_capacity(64),
             inst_shapes: Vec::new(),
+            inst_shape_channels: Vec::new(),
             next_voice: 0,
             inst_live: Vec::with_capacity(64),
             inst_later: Vec::new(),
@@ -1785,6 +1789,7 @@ impl Engine {
             inst_tuning: Vec::new(),
             inst_notes: Vec::with_capacity(64),
             note_voices: vec![notes::Voices::default(); project.channels.len()],
+            note_rules: Vec::with_capacity(project.channels.len()),
             inst_owed: Vec::new(),
             inst_missed: Vec::new(),
             busy_until: None,
@@ -3725,7 +3730,10 @@ impl Engine {
                 // choked on the song's last tick if it still sounds then ("The end of the song"), and when it is looped
                 // or the song ends otherwise, as every clip is. Notes end with a note off.
                 let inst = self.channels[t.channel].instrument.0.as_ref();
-                let ends = t.stop > 0.0 && inst.and_then(|i| i.lock().ok()).is_some_and(|i| i.voice_ends());
+                let ends = t.stop > 0.0
+                    && inst
+                        .and_then(|i| lock_busy(i, &mut self.busy_until, self.busy_wait, self.exporting))
+                        .is_some_and(|i| i.voice_ends());
                 match t.cut {
                     Some(_) if ends => {
                         let song = !self.looping && !self.live_only && self.end_tick > t.tick;
@@ -3842,9 +3850,10 @@ impl Engine {
             });
         }
         self.inst_events.sort_by_key(|e| e.off);
-        let rules: Vec<notes::Rules> = self.channels.iter().map(|c| c.rules).collect();
+        self.note_rules.clear();
+        self.note_rules.extend(self.channels.iter().map(|c| c.rules));
         self.note_voices.resize(self.channels.len(), notes::Voices::default());
-        notes::apply(&self.inst_events, &rules, &mut self.note_voices, n as u32, &mut self.inst_notes);
+        notes::apply(&self.inst_events, &self.note_rules, &mut self.note_voices, n as u32, &mut self.inst_notes);
         let held = !self.inst_offs.is_empty()
             || self.sounding.iter().any(|&(c, _, end)| end == u64::MAX && self.channels.get(c).is_some_and(|ch| ch.instrument.0.is_some()));
         if held || !self.inst_events.is_empty() {
@@ -3866,6 +3875,8 @@ impl Engine {
         if self.inst_tuning.len() < c {
             self.inst_tuning.resize(c, InstTuning::default());
         }
+        self.inst_shape_channels.clear();
+        self.inst_shape_channels.extend(self.inst_shapes.iter().map(|s| s.channel));
         let cx = InstCx {
             n,
             rate: self.rate,
@@ -3877,7 +3888,7 @@ impl Engine {
             missed: &self.inst_missed,
             midi: &self.inst_midi,
             params: &self.params,
-            shapes: multicore::Shapes::of(&mut self.inst_shapes),
+            shapes: multicore::Shapes::of(&mut self.inst_shapes, &self.inst_shape_channels),
             held: &self.inst_held,
             auto_bypass: auto_bypass::enabled(),
         };
@@ -4523,7 +4534,7 @@ struct InstCx<'a> {
     missed: &'a [(usize, notes::Note)],
     midi: &'a [(usize, [u8; 3])],
     params: &'a param_auto::ParamAuto,
-    shapes: multicore::Shapes,
+    shapes: multicore::Shapes<'a>,
     /// Per channel: a note held or due to end (`Engine::inst_held`); the program's Auto-bypass when silent setting.
     held: &'a [bool],
     auto_bypass: bool,
@@ -4580,8 +4591,7 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
         && cx.params.channel_ticks(c).next().is_none()
         && cx.params.channel_span(c, 0, n).next().is_none()
         && fines.shift == ch.hosted_shift()
-        // SAFETY: only this channel's turn touches its clips.
-        && unsafe { cx.shapes.of_channel(c) }.next().is_none()
+        && !cx.shapes.has_channel(c)
         && !inst.active();
     if quiet_in && out.quiet.skip(true, Some(auto_bypass::hold_frames(auto_bypass::HOSTED_HOLD, cx.rate, out.delay))) {
         out.active = false;
