@@ -81,6 +81,56 @@ impl Ids {
         self.next_part += 1;
         id
     }
+
+    /// Advances `next` and `next_part` past every id already present in `p` (after restoring saved ids from a `.lemon`
+    /// file) so newly created objects never collide with restored ones.
+    pub fn advance_past(&mut self, p: &Project) {
+        let mut bump = |id: Id| {
+            if id.0 == 0 {
+                return;
+            }
+            if id.0 < PARTS {
+                self.next = self.next.max(id.0.saturating_add(1));
+            } else {
+                self.next_part = self.next_part.max(id.0.saturating_add(1));
+            }
+        };
+        for c in &p.channels {
+            bump(c.id);
+        }
+        for q in &p.patterns {
+            bump(q.id);
+            for n in &q.notes {
+                bump(n.id);
+            }
+            for c in &q.controls {
+                bump(c.id);
+            }
+        }
+        for m in &p.mixer {
+            bump(m.id);
+            for s in m.slots.iter().flatten() {
+                bump(s.id);
+            }
+        }
+        for a in &p.arrangements {
+            bump(a.id);
+            for c in &a.clips {
+                bump(c.id);
+            }
+            for mk in &a.markers {
+                bump(mk.id);
+            }
+            for t in &a.tracks {
+                bump(t.id);
+            }
+        }
+        for au in &p.automations {
+            for pt in &au.points {
+                bump(pt.id);
+            }
+        }
+    }
 }
 
 /// Gives ids to one kind's things (`ids` in place order, `at` their places): a thing without one gets a new id, and of
